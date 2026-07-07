@@ -3,9 +3,13 @@
 // 1. Bayer demosaic (bilinear)
 // 2. White balance (per-channel multiply)
 // 3. Camera RGB -> sRGB linear (3x3 matrix)
-// 4. Exposure module (ported 1:1 from darktable/ansel's exposure.c)
-// 5. Minimal display tonemap (Reinhard roll-off)
-// 6. sRGB OETF (linear -> gamma-encoded)
+// 4. Highlight desaturation (soft-desaturates pixels above the sensor's
+//    clip point, BEFORE exposure -- see comment on desaturate_highlights()
+//    below for why the exposure slider must never move this threshold)
+// 5. Exposure module (ported 1:1 from darktable/ansel's exposure.c)
+// 6. Minimal display tonemap (luminance-based Reinhard roll-off, chroma-
+//    preserving -- see comment on tonemap() below)
+// 7. sRGB OETF (linear -> gamma-encoded)
 
 struct Params {
     black: f32,
@@ -122,6 +126,42 @@ fn cam_to_srgb(rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
+// highlights.c's reconstruction runs on the CPU pre-demosaic, in raw sensor
+// space, per-channel -- it can only work with the ratio between the R/G/B
+// photosites actually available near a clipped pixel. When a highlight is
+// only partially recoverable (e.g. one channel clipped with no good
+// same-color neighbor to borrow a ratio from -- darktable's own docs call
+// this out explicitly as the case that produces a residual color cast),
+// some real chroma survives all the way through WB and the camera matrix.
+//
+// This MUST run here, on the signal right after cam_to_srgb and BEFORE
+// apply_exposure -- i.e. keyed to the sensor's actual clip point (1.0,
+// since raw_loader.rs already normalizes white to 1.0 per channel), not to
+// the exposure-adjusted display brightness. Exposure is a user-facing
+// creative slider; whether a pixel is "clipped" can never depend on it,
+// or the desaturation threshold silently moves every time the user drags
+// exposure:
+//   - pull exposure down -> genuinely-clipped pixels get scaled below
+//     whatever threshold you check post-exposure, so their leftover chroma
+//     survives uncorrected (pink dots reappear)
+//   - push exposure up -> ordinary bright-but-unclipped pixels get pushed
+//     past that threshold by the exposure multiply alone and get
+//     incorrectly flattened to gray (loses real color that was never
+//     actually clipped)
+// Checking clip status before exposure is applied avoids both failure
+// modes: the threshold is anchored to the sensor, not to the slider.
+fn desaturate_highlights(rgb: vec3<f32>) -> vec3<f32> {
+    let x = max(rgb, vec3<f32>(0.0));
+    let luma = dot(x, vec3<f32>(0.2126, 0.7152, 0.0722));
+    // How far above sensor white (1.0, pre-exposure) the brightest channel
+    // sits drives how strongly we pull this pixel back toward neutral.
+    // Ramps from 0 (no desaturation, at or below white) to fully neutral
+    // by 2x white.
+    let peak = max(max(x.r, x.g), x.b);
+    let desat_amount = clamp(peak - 1.0, 0.0, 1.0);
+    return mix(x, vec3<f32>(luma), desat_amount);
+}
+
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
     let white = exp2(-params.exposure);
     let scale = 1.0 / (white - params.black);
@@ -130,9 +170,30 @@ fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
 
 // ---- Display tonemap + OETF ---------------------------------------------
 
+// BUG (root cause of pink/magenta highlights): the previous version ran
+// Reinhard (`x/(x+1)`) on R, G, and B *independently*. That curve is
+// nonlinear, so it compresses three different input values by three
+// different ratios. highlights.c's reconstruction (LCH / inpaint mode)
+// legitimately leaves some residual color in a recovered highlight -- e.g.
+// R=2.2, G=1.3, B=1.9 above white after WB + the camera matrix, for a
+// highlight that should read as bright near-white/desaturated. Tonemapping
+// each channel on its own hue-shifts that toward magenta: the same failure
+// mode darktable/filmic's docs and engineering notes describe when RGB
+// channels are tonemapped separately instead of preserving chrominance
+// (see darktable's "chroma preservation" in filmic rgb). The channel
+// closest to 1.0 (here G) gets compressed the least in absolute terms
+// relative to its distance from the curve's knee, while R and B -- further
+// out -- get pulled down disproportionately less *relative to each other*,
+// widening the R/B vs G gap instead of preserving it.
+//
+// Fix: compress *luminance* through the curve, then apply the resulting
+// scale factor equally to all three channels. This preserves whatever hue
+// highlights.c reconstructed (right or wrong) instead of amplifying it.
 fn tonemap(rgb: vec3<f32>) -> vec3<f32> {
     let x = max(rgb, vec3<f32>(0.0));
-    return x / (x + vec3<f32>(1.0)) * 1.06;
+    let luma = max(dot(x, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-6);
+    let luma_mapped = luma / (luma + 1.0) * 1.06;
+    return x * (luma_mapped / luma);
 }
 
 fn srgb_oetf(c: vec3<f32>) -> vec3<f32> {
@@ -153,6 +214,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rgb = demosaic(x, y);
     rgb = apply_wb(rgb);
     rgb = cam_to_srgb(rgb);
+    rgb = desaturate_highlights(rgb);
     rgb = apply_exposure(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
     rgb = tonemap(rgb);
