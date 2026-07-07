@@ -1,0 +1,29 @@
+[package]
+name = "auraw"
+version = "0.1.0"
+edition = "2021"
+authors = ["Duecki <dueckis@dueckis.de>"]
+description = "A GPU-first RAW image editor in Rust"
+
+[dependencies]
+# eframe pulls in a matching version of wgpu/egui-wgpu internally.
+# IMPORTANT: do NOT add a separate top-level wgpu = "..." dependency here.
+# Always reach wgpu types via eframe::wgpu::...
+eframe = { version = "0.35", features = ["wgpu", "default_fonts", "wayland", "x11"] }
+rawler = "0.7"
+bytemuck = { version = "1.16", features = ["derive"] }
+rayon = "1.10"
+log = "0.4"
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.15"
+anyhow = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
