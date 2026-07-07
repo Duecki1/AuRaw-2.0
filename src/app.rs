@@ -34,13 +34,11 @@ impl AurawApp {
     }
 
     /// Open a file dialog, decode the chosen RAW, and (re)build the GPU pipeline.
-    /// Open a file dialog, decode the chosen RAW, and (re)build the GPU pipeline.
     pub fn open_file_dialog(&mut self, frame: &eframe::Frame) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter(
                 "RAW images",
                 &[
-                    // Add both cases so they show up on Linux & macOS
                     "cr2", "CR2", 
                     "cr3", "CR3", 
                     "nef", "NEF", 
@@ -88,7 +86,16 @@ impl AurawApp {
             renderer.free_texture(&old.egui_texture_id);
         }
 
-        match RawGpuPipeline::new(device, queue, &mut renderer, &raw) {
+        let params = GpuParams::new(
+            &self.exposure,
+            raw.wb_coeffs,
+            raw.cam_to_srgb,
+            raw.width,
+            raw.height,
+            raw.cfa_pattern,
+        );
+
+        match RawGpuPipeline::new(device, queue, &mut renderer, &raw, &params) {
             Ok(pipeline) => {
                 self.status = format!(
                     "{} {} — {}x{}",
@@ -133,7 +140,7 @@ impl AurawApp {
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Handle top menu / open button
-        egui::Panel::top("top_bar").show(ui, |ui| { // <-- CHANGED from .show_inside
+        egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open RAW…").clicked() {
                     self.open_file_dialog(frame);
@@ -147,8 +154,8 @@ impl eframe::App for AurawApp {
         egui::Panel::right("sidebar")
             .resizable(true)
             .default_size(280.0) 
-            .show(ui, |ui| { // <-- CHANGED from .show_inside
-                Sidebar::show(ui, self); // <-- CHANGED from sidebar::show
+            .show(ui, |ui| {
+                Sidebar::show(ui, self);
             });
 
         // Central preview area
