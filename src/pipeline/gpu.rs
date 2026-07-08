@@ -1,10 +1,10 @@
 //! Owns all wgpu resources for the raw processing pipeline and streams the
-//! result directly into egui via `egui_wgpu::CallbackTrait`.
+//! result directly into egui via `egui_wgpu::CallbackTrait`. [1, 2]
 //!
 //! Data flow, all on GPU:
 //!   raw_tex (R32Float, uploaded once per image)
-//!     -> rcd_demosaic.wgsl: 5-pass RCD demosaic (runs once in new())
-//!     -> rgb_b_tex (Rgba32Float, cached demosaic result)
+//!     -> rcd_demosaic.wgsl: 8-pass RCD demosaic (runs once in new())
+//!     -> rgb_a_texture (Rgba32Float, cached demosaic result)
 //!     -> pipeline.wgsl: WB, color matrix, exposure, tonemap, OETF
 //!     -> out_tex (Rgba8Unorm, rewritten every time params change)
 //!     -> sampled directly by egui's renderer
@@ -34,12 +34,16 @@ pub struct RawGpuPipeline {
     green_bg: wgpu::BindGroup,
     rb_bgl: wgpu::BindGroupLayout,
     rb_bg: wgpu::BindGroup,
+    rb_green_bg: wgpu::BindGroup,
 
     vh_pipeline: wgpu::ComputePipeline,
     lpf_pipeline: wgpu::ComputePipeline,
     green_pipeline: wgpu::ComputePipeline,
     pq_pipeline: wgpu::ComputePipeline,
-    rb_pipeline: wgpu::ComputePipeline,
+    rb_rb_pipeline: wgpu::ComputePipeline,
+    rb_green_pipeline: wgpu::ComputePipeline,
+    color_smooth_pipeline: wgpu::ComputePipeline,
+    chroma_refine_pipeline: wgpu::ComputePipeline,
 
     // --- Intermediate / output textures ---
     vh_dir_texture: wgpu::Texture,
@@ -155,8 +159,10 @@ impl RawGpuPipeline {
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
+
+        // Pass 8 outputs back into rgb_a_texture, so demosaiced_texture_view references rgb_a.
         let demosaiced_texture_view =
-            rgb_b_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            rgb_a_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("auraw::uniform_buffer"),
@@ -303,8 +309,17 @@ impl RawGpuPipeline {
             ],
         });
 
+        let rb_green_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("auraw::demosaic_rb_green_bg"),
+            layout: &rb_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&rgb_b_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&rgb_a_view) },
+            ],
+        });
+
         // ============================================================
-        // 4. Demosaic shader + 5 pipelines
+        // 4. Demosaic shader + 8 pipelines
         // ============================================================
         let demosaic_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("auraw::demosaic_shader"),
@@ -325,7 +340,6 @@ impl RawGpuPipeline {
 
         let pl_rb = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("auraw::demosaic_rb_pl"),
-            // RB fill uses group 0 and group 2, so group 1 is None (empty)
             bind_group_layouts: &[Some(&common_bgl), None, Some(&rb_bgl)],
             immediate_size: 0,
         });
@@ -345,7 +359,10 @@ impl RawGpuPipeline {
         let lpf_pipeline = mk_pipeline("lpf", &pl_common);
         let green_pipeline = mk_pipeline("green_fill", &pl_green);
         let pq_pipeline = mk_pipeline("pq_discrimination", &pl_common);
-        let rb_pipeline = mk_pipeline("rb_fill", &pl_rb);
+        let rb_rb_pipeline = mk_pipeline("rb_at_rb_sites", &pl_rb);
+        let rb_green_pipeline = mk_pipeline("rb_at_green_sites", &pl_rb);
+        let color_smooth_pipeline = mk_pipeline("color_smooth", &pl_rb);
+        let chroma_refine_pipeline = mk_pipeline("chroma_refine", &pl_rb);
 
         // ============================================================
         // 5. Per-frame pipeline (now reads demosaiced_tex, not raw_tex)
@@ -453,11 +470,15 @@ impl RawGpuPipeline {
             green_bg,
             rb_bgl,
             rb_bg,
+            rb_green_bg,
             vh_pipeline,
             lpf_pipeline,
             green_pipeline,
             pq_pipeline,
-            rb_pipeline,
+            rb_rb_pipeline,
+            rb_green_pipeline,
+            color_smooth_pipeline,
+            chroma_refine_pipeline,
             vh_dir_texture,
             lpf_texture,
             pq_dir_texture,
@@ -480,11 +501,10 @@ impl RawGpuPipeline {
         Ok(pipeline)
     }
 
-    /// Dispatch all 5 RCD demosaic passes. Called once in `new()` right
+    /// Dispatch all 8 RCD demosaic passes. Called once in `new()` right
     /// after the raw texture is uploaded. The result lives in
-    /// `rgb_b_texture` for the lifetime of this pipeline and is never
-    /// recomputed (WB/exposure/tonemap re-run on every `recompute()` but
-    /// they read the cached demosaic, not the raw CFA).
+    /// `rgb_a_texture` (via Pass 8) and is cached for the lifetime of the
+    /// pipeline.
     pub fn demosaic(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw::demosaic_encoder"),
@@ -498,34 +518,56 @@ impl RawGpuPipeline {
             let wg_x = self.width.div_ceil(8);
             let wg_y = self.height.div_ceil(8);
 
+            // Pass 1: VH discrimination (Group 0)
             pass.set_pipeline(&self.vh_pipeline);
             pass.set_bind_group(0, &self.common_bg, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
 
+            // Pass 2: LPF (Group 0)
             pass.set_pipeline(&self.lpf_pipeline);
             pass.set_bind_group(0, &self.common_bg, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
 
+            // Pass 3: Green fill (Group 0 + Group 1 -> writes to rgb_a)
             pass.set_pipeline(&self.green_pipeline);
             pass.set_bind_group(0, &self.common_bg, &[]);
             pass.set_bind_group(1, &self.green_bg, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
 
+            // Pass 4: PQ discrimination (Group 0)
             pass.set_pipeline(&self.pq_pipeline);
             pass.set_bind_group(0, &self.common_bg, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
 
-            pass.set_pipeline(&self.rb_pipeline);
+            // Pass 5: R/B at R/B sites (Group 0 + Group 2 -> reads rgb_a, writes rgb_b)
+            pass.set_pipeline(&self.rb_rb_pipeline);
             pass.set_bind_group(0, &self.common_bg, &[]);
-            pass.set_bind_group(1, None, &[]);
             pass.set_bind_group(2, &self.rb_bg, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+
+            // Pass 6: R/B at green sites (Group 0 + Group 2 -> reads rgb_b, writes rgb_a)
+            pass.set_pipeline(&self.rb_green_pipeline);
+            pass.set_bind_group(0, &self.common_bg, &[]);
+            pass.set_bind_group(2, &self.rb_green_bg, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+
+            // Pass 7: Color smoothing (Group 0 + Group 2 -> reads rgb_a, writes rgb_b)
+            pass.set_pipeline(&self.color_smooth_pipeline);
+            pass.set_bind_group(0, &self.common_bg, &[]);
+            pass.set_bind_group(2, &self.rb_bg, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+
+            // Pass 8: Residual Chroma Refinement (Group 0 + Group 2 -> reads rgb_b, writes rgb_a)
+            pass.set_pipeline(&self.chroma_refine_pipeline);
+            pass.set_bind_group(0, &self.common_bg, &[]);
+            pass.set_bind_group(2, &self.rb_green_bg, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         queue.submit(Some(encoder.finish()));
     }
 
     /// Push new parameters and dispatch the per-frame compute shader.
-    /// Reads the cached demosaic from rgb_b_texture; only WB / color
+    /// Reads the cached demosaic from rgb_a_texture; only WB / color
     /// matrix / exposure / tonemap / OETF re-run.
     pub fn recompute(&self, queue: &wgpu::Queue, device: &wgpu::Device, params: &GpuParams) {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(params));
