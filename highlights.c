@@ -12,7 +12,6 @@
 
 typedef float dt_aligned_pixel_t[4] __attribute__((aligned(16)));
 
-// Unified Region of Interest structure matching darktable
 typedef struct dt_iop_roi_t {
   int x;
   int y;
@@ -21,11 +20,9 @@ typedef struct dt_iop_roi_t {
   float scale;
 } dt_iop_roi_t;
 
-// Standard Bayer CFA color lookup macro
 #define FC(row, col, filters) \
   (filters >> ((((row) & 1) << 1) + ((col) & 1)) * 2 & 3)
 
-// Standard X-Trans CFA color lookup macro
 #define FCxtrans(row, col, roi, xtrans) \
   (xtrans[((row) + (roi)->y) % 6][((col) + (roi)->x) % 6])
 
@@ -34,7 +31,6 @@ typedef struct dt_iop_roi_t {
 #define SQRT3 1.7320508075688772935274463415058723669f
 #define SQRT12 3.4641016151377545870548926830117447339f
 
-// --- ANSEL MATH ENGINE: INPAINT / COLOR RECONSTRUCTION (Mode 2) ---
 
 static inline float interp_pix_xtrans(const int ratio_next, const ssize_t offset_next,
                                       const float clip0, const float clip_next,
@@ -178,7 +174,6 @@ static inline void interpolate_color(const void *const ivoid, void *const ovoid,
   }
 }
 
-// --- ANSEL MATH ENGINE: RECONSTRUCT IN LCH (Mode 1) ---
 
 static void process_lch_bayer(const void *const ivoid, void *const ovoid,
                               const dt_iop_roi_t *const roi_out, const float clip, unsigned int filters) {
@@ -321,27 +316,23 @@ static void process_lch_xtrans(const void *const ivoid, void *const ovoid,
   }
 }
 
-// --- ANSEL MATH ENGINE: CLIP HIGHLIGHTS (Mode 0) ---
-
 static void process_clip(const void *const ivoid, void *const ovoid,
                          const dt_iop_roi_t *const roi_out, const float clip, int filters) {
   const float *const in = (const float *const)ivoid;
   float *const out = (float *const)ovoid;
 
-  if(filters) { // raw bayer/xtrans mosaic
+  if(filters) {
     #pragma omp parallel for simd
     for(size_t k = 0; k < (size_t)roi_out->width * roi_out->height; k++) {
       out[k] = MIN(clip, in[k]);
     }
-  } else { // non-raw image channels
+  } else {
     #pragma omp parallel for simd
     for(size_t k = 0; k < (size_t)3 * roi_out->width * roi_out->height; k++) {
       out[k] = MIN(clip, in[k]);
     }
   }
 }
-
-// --- THE SURGICAL MASTER ENTRY POINT ---
 
 void auraw_process_highlights(
     const float *const in,
@@ -356,11 +347,8 @@ void auraw_process_highlights(
     float clip_threshold,
     const float processed_maximum[4]
 ) {
-  // Construct Local Region of Interest Structs expected by original Ansel functions
   dt_iop_roi_t roi_in = { .x = roi_x, .y = roi_y, .width = width, .height = height, .scale = 1.0f };
   dt_iop_roi_t roi_out = roi_in;
-
-  // Calculate the global clipping ceiling
   const float clip = clip_threshold * fminf(processed_maximum[0], fminf(processed_maximum[1], processed_maximum[2]));
 
   if(!filters) {
