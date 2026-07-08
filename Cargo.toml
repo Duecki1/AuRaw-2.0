@@ -14,10 +14,12 @@ env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rfd = "0.15"
 anyhow = "1.0"
-rawloader = "0.37.1"
 
 # THIS SECTION IS REQUIRED FOR build.rs:
 [build-dependencies]
+bindgen = "0.70"
+cc = "1.2.66"
+pkg-config = "0.3"
 
 [profile.release]
 opt-level = 3
