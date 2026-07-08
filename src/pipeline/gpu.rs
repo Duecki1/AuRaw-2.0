@@ -1,62 +1,128 @@
-//! Owns all wgpu resources for the raw processing pipeline and streams the
-//! result directly into egui via `egui_wgpu::CallbackTrait`.
-//!
-//! Data flow, all on GPU:
-//!   raw_tex (R32Float, uploaded once per image)
-//!     -> compute shader (pipeline.wgsl): demosaic, WB, color matrix, exposure
-//!     -> out_tex (Rgba8Unorm, storage texture, rewritten every time params change)
-//!     -> sampled directly by egui's renderer as a normal texture (registered
-//!        via `egui_wgpu::Renderer::register_native_texture`)
-//!
-//! There is no `Queue::write_texture` readback, no `image` crate buffer, no
-//! CPU-side pixel loop anywhere in the live-preview path. `image`/`bytemuck`
-//! in Cargo.toml are only used for export/thumbnailing, not for preview.
-
-use crate::pipeline::exposure::GpuParams;
-use crate::pipeline::raw_loader::LoadedRaw;
+use crate::pipeline::{ExposureParams, LoadedRaw};
 use anyhow::{anyhow, Result};
-use eframe::egui;
-use eframe::egui_wgpu;
-use eframe::wgpu;
+use bytemuck::{Pod, Zeroable};
+use eframe::{egui, egui_wgpu, wgpu};
+use wgpu::util::DeviceExt;
 
-/// Everything needed to render the current raw image at the current
-/// exposure settings. Lives for as long as an image is open.
+const SHADER_SOURCE: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/demosaic.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/highlights.wgsl"),
+    "\n",
+    include_str!("../shaders/basic_adjustments.wgsl"),
+    "\n",
+    include_str!("../shaders/tonemap.wgsl"),
+    "\n",
+    include_str!("../shaders/pipeline.wgsl"),
+);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GpuParams {
+    black: f32,
+    exposure: f32,
+    hlcompr: f32,
+    hlcomprthresh: f32,
+    contrast: f32,
+    middle_grey: f32,
+    brightness: f32,
+    saturation: f32,
+    vibrance: f32,
+    clip: f32,
+    filmic_white: f32,
+    filmic_black: f32,
+    wb: [f32; 4],
+    cam_to_srgb_0: [f32; 4],
+    cam_to_srgb_1: [f32; 4],
+    cam_to_srgb_2: [f32; 4],
+    black_levels: [f32; 4],
+    white_levels: [f32; 4],
+    width: u32,
+    height: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+impl GpuParams {
+    pub fn new(exposure: &ExposureParams, raw: &LoadedRaw) -> Self {
+        Self {
+            black: exposure.black,
+            exposure: exposure.exposure,
+            hlcompr: exposure.hlcompr,
+            hlcomprthresh: exposure.hlcomprthresh,
+            contrast: exposure.contrast,
+            middle_grey: exposure.middle_grey,
+            brightness: exposure.brightness,
+            saturation: exposure.saturation,
+            vibrance: exposure.vibrance,
+            clip: exposure.clip,
+            filmic_white: exposure.filmic_white,
+            filmic_black: exposure.filmic_black,
+            wb: raw.wb_coeffs,
+            cam_to_srgb_0: raw.cam_to_srgb[0],
+            cam_to_srgb_1: raw.cam_to_srgb[1],
+            cam_to_srgb_2: raw.cam_to_srgb[2],
+            black_levels: raw.black_levels,
+            white_levels: raw.white_levels,
+            width: raw.width,
+            height: raw.height,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
 pub struct RawGpuPipeline {
-    compute_pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-
-    raw_texture: wgpu::Texture,
-    raw_texture_view: wgpu::TextureView,
-
-    out_texture: wgpu::Texture,
-    out_texture_view: wgpu::TextureView,
-
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-
+    pub egui_texture_id: egui::TextureId,
     pub width: u32,
     pub height: u32,
-
-    /// egui texture id for the output, so `ui.image()` can display it directly.
-    pub egui_texture_id: egui::TextureId,
+    params_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    compute_pipeline: wgpu::ComputePipeline,
+    _raw_texture: wgpu::Texture,
+    _color_texture: wgpu::Texture,
+    _out_texture: wgpu::Texture,
+    _out_view: wgpu::TextureView,
 }
 
 impl RawGpuPipeline {
-    /// Build the pipeline and upload raw sensor data. Call once per opened image.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: &mut egui_wgpu::Renderer,
         raw: &LoadedRaw,
+        params: &GpuParams,
     ) -> Result<Self> {
-        let shader_src = include_str!("../shaders/pipeline.wgsl");
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("auraw::pipeline_shader"),
-            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+        validate_raw(raw)?;
+
+        let raw_texture = create_raw_texture(device, queue, raw);
+        let color_texture = create_color_texture(device, queue, raw);
+        let out_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw output texture"),
+            size: texture_size(raw.width, raw.height),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+        });
+        let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("auraw params"),
+            contents: bytemuck::bytes_of(params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("auraw::bind_group_layout"),
+            label: Some("auraw raw pipeline bind group layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -68,18 +134,10 @@ impl RawGpuPipeline {
                     },
                     count: None,
                 },
+                texture_entry(1, wgpu::TextureSampleType::Uint),
+                texture_entry(2, wgpu::TextureSampleType::Uint),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
+                    binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
@@ -91,167 +149,191 @@ impl RawGpuPipeline {
             ],
         });
 
-      let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("auraw::pipeline_layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0, // <-- ADD THIS FIELD
-        });
-
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("auraw::compute_pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
-
-        // --- raw sensor texture (uploaded once) ---
-        let raw_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw::raw_texture"),
-            size: wgpu::Extent3d {
-                width: raw.width,
-                height: raw.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &raw_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&raw.raw_pixels),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(raw.width * 4),
-                rows_per_image: Some(raw.height),
-            },
-            wgpu::Extent3d {
-                width: raw.width,
-                height: raw.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let raw_texture_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // --- output texture (rewritten on every param change) ---
-        let out_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw::out_texture"),
-            size: wgpu::Extent3d {
-                width: raw.width,
-                height: raw.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let out_texture_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("auraw::uniform_buffer"),
-            size: std::mem::size_of::<GpuParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
+        let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("auraw::bind_group"),
+            label: Some("auraw raw pipeline bind group"),
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_texture_view),
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&out_texture_view),
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&out_view),
                 },
             ],
         });
 
-        // Register the output texture with egui so ui.image() can draw it
-        // straight from GPU memory — this is the "no CPU" hookup.
-        let egui_texture_id = renderer.register_native_texture(
-            device,
-            &out_texture_view,
-            wgpu::FilterMode::Linear,
-        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("auraw raw pipeline shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("auraw raw pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("auraw raw pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
-        Ok(Self {
-            compute_pipeline,
-            bind_group_layout,
-            raw_texture,
-            raw_texture_view,
-            out_texture,
-            out_texture_view,
-            uniform_buffer,
-            bind_group,
+        let egui_texture_id =
+            renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear);
+
+        let pipeline = Self {
+            egui_texture_id,
             width: raw.width,
             height: raw.height,
-            egui_texture_id,
-        })
+            params_buffer,
+            bind_group,
+            compute_pipeline,
+            _raw_texture: raw_texture,
+            _color_texture: color_texture,
+            _out_texture: out_texture,
+            _out_view: out_view,
+        };
+        pipeline.recompute(queue, device, params);
+        Ok(pipeline)
     }
 
-    /// Push new parameters and dispatch the compute shader. Call this
-    /// whenever a slider moves — it re-runs the whole demosaic+exposure
-    /// pass on GPU. At preview resolutions this is comfortably sub-frame.
     pub fn recompute(&self, queue: &wgpu::Queue, device: &wgpu::Device, params: &GpuParams) {
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(params));
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw::recompute_encoder"),
+            label: Some("auraw recompute encoder"),
         });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("auraw::compute_pass"),
+                label: Some("auraw recompute pass"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.compute_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            let wg_x = self.width.div_ceil(8);
-            let wg_y = self.height.div_ceil(8);
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
+            pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
         }
         queue.submit(Some(encoder.finish()));
     }
+}
 
-    /// Re-register the output texture with egui, e.g. after a device loss.
-    /// Not needed in normal operation — kept for completeness.
-    #[allow(dead_code)]
-    pub fn reregister(&mut self, device: &wgpu::Device, renderer: &mut egui_wgpu::Renderer) {
-        renderer.free_texture(&self.egui_texture_id);
-        self.egui_texture_id = renderer.register_native_texture(
-            device,
-            &self.out_texture_view,
-            wgpu::FilterMode::Linear,
-        );
+fn validate_raw(raw: &LoadedRaw) -> Result<()> {
+    let pixels = raw
+        .width
+        .checked_mul(raw.height)
+        .ok_or_else(|| anyhow!("raw dimensions overflow"))? as usize;
+    if raw.raw_pixels.len() != pixels {
+        return Err(anyhow!(
+            "raw pixel count mismatch: got {}, expected {}",
+            raw.raw_pixels.len(),
+            pixels
+        ));
+    }
+    if raw.color_indices.len() != pixels {
+        return Err(anyhow!(
+            "CFA index count mismatch: got {}, expected {}",
+            raw.color_indices.len(),
+            pixels
+        ));
+    }
+    Ok(())
+}
+
+fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
     }
 }
 
-/// Helper to fetch the wgpu device/queue/renderer out of eframe's
-/// `RenderState`. Centralized here so callers don't repeat the unwrap logic.
-pub fn wgpu_handles_from_frame<'a>(
-    frame: &'a eframe::Frame,
-) -> Result<(&'a wgpu::Device, &'a wgpu::Queue)> {
-    let state = frame
-        .wgpu_render_state()
-        .ok_or_else(|| anyhow!("eframe is not running with the wgpu backend"))?;
-    Ok((&state.device, &state.queue))
+fn create_raw_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raw: &LoadedRaw,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("auraw raw mosaic"),
+        size: texture_size(raw.width, raw.height),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R16Uint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[wgpu::TextureFormat::R16Uint],
+    });
+    queue.write_texture(
+        copy_texture(&texture),
+        bytemuck::cast_slice(&raw.raw_pixels),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(raw.width * 2),
+            rows_per_image: Some(raw.height),
+        },
+        texture_size(raw.width, raw.height),
+    );
+    texture
+}
+
+fn create_color_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raw: &LoadedRaw,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("auraw CFA color indices"),
+        size: texture_size(raw.width, raw.height),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Uint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[wgpu::TextureFormat::R8Uint],
+    });
+    queue.write_texture(
+        copy_texture(&texture),
+        &raw.color_indices,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(raw.width),
+            rows_per_image: Some(raw.height),
+        },
+        texture_size(raw.width, raw.height),
+    );
+    texture
+}
+
+fn copy_texture(texture: &wgpu::Texture) -> wgpu::TexelCopyTextureInfo<'_> {
+    wgpu::TexelCopyTextureInfo {
+        texture,
+        mip_level: 0,
+        origin: wgpu::Origin3d::ZERO,
+        aspect: wgpu::TextureAspect::All,
+    }
+}
+
+fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    }
 }
