@@ -1,44 +1,33 @@
+// highlights.wgsl
+
 fn reconstruct_sensor_highlights(rgb: vec3<f32>) -> vec3<f32> {
     let peak = max(max(rgb.r, rgb.g), rgb.b);
-    let floor_value = min(min(rgb.r, rgb.g), rgb.b);
-    let spread = clamp((peak - floor_value) / max(peak, 1e-6), 0.0, 1.0);
+    let floor_val = min(min(rgb.r, rgb.g), rgb.b);
+    let spread = clamp((peak - floor_val) / max(peak, 1e-6), 0.0, 1.0);
     let blend = smoothstep(0.88, 1.12, peak) * smoothstep(0.10, 0.55, spread);
 
-    let neutral = vec3<f32>(peak);
-    return mix(rgb, neutral, blend);
-}
-
-fn reconstruct_display_highlights(rgb: vec3<f32>) -> vec3<f32> {
-    let peak = max(max(rgb.r, rgb.g), rgb.b);
-    let lum = safe_luma(max(rgb, vec3<f32>(0.0)));
-
-    // *** FIX: threshold must be in scene-referred space, not [0,1] display. ***
-    // After exposure, normal values can be 0.18–4.0+. The old threshold of
-    // 0.92 caught upper midtones and desaturated them.
-    let threshold = 1.5 + params.clip * 0.5;
-    let blend = smoothstep(threshold, threshold * 2.0, peak);
-    return mix(rgb, vec3<f32>(lum), blend * 0.75);
-}
-
-fn compress_highlights(rgb: vec3<f32>) -> vec3<f32> {
-    if params.hlcompr <= 0.0 {
+    if blend <= 0.0 {
         return rgb;
     }
 
-    let lum = safe_luma(rgb);
+    var result = rgb;
+    let r = rgb.r;
+    let g = rgb.g;
+    let b = rgb.b;
 
-    // *** FIX: old threshold was 0.15 (15% gray), compressing most of the
-    // image. New threshold starts at 75% gray, adjustable upward. ***
-    let shoulder = 0.75 + params.hlcomprthresh / 400.0;
-    let amount = max(params.hlcompr / 100.0, 0.001);
-
-    // Reinhard-style soft knee: smooth, monotonic, asymptotic.
-    // The old log formula had a problematic `range = 1 - shoulder` term
-    // that went negative when shoulder > 1.
-    var compressed = lum;
-    if lum > shoulder {
-        let excess = lum - shoulder;
-        compressed = shoulder + excess / (1.0 + excess * amount / shoulder);
+    // Identify which channel is the clipped peak and estimate it
+    // from the other two using color-difference extrapolation.
+    if r >= peak - 1e-6 && g < r {
+        // R is clipped: R_est = G + (G - B) -> preserves warm hue
+        result.r = g + (g - b);
+    } else if b >= peak - 1e-6 && g < b {
+        // B is clipped: B_est = G + (G - R) -> preserves cool hue
+        result.b = g + (g - r);
+    } else if g >= peak - 1e-6 && r < g {
+        // G is clipped (rare in Bayer): G_est = (R + B) / 2
+        result.g = (r + b) * 0.5;
     }
-    return rgb * (compressed / lum);
+
+    result = max(result, vec3<f32>(0.0));
+    return mix(rgb, result, blend);
 }
