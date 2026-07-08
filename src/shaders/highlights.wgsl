@@ -4,7 +4,13 @@ fn reconstruct_sensor_highlights(rgb: vec3<f32>) -> vec3<f32> {
     let spread = clamp((peak - floor_value) / max(peak, 1e-6), 0.0, 1.0);
     let blend = smoothstep(0.88, 1.12, peak) * smoothstep(0.10, 0.55, spread);
 
-    let neutral = vec3<f32>((rgb.r + rgb.g + rgb.b) / 3.0);
+    // Blend toward the channel peak rather than an unweighted r+g+b average.
+    // This is still camera-native RGB (pre color-matrix), where channel
+    // magnitudes reflect sensor gain, not perceptual luminance. Averaging
+    // unweighted here pushes highlights toward the wrong hue once the
+    // camera->sRGB matrix runs afterward. Using max() reconstructs toward
+    // a clipped-but-neutral white point instead, avoiding the color cast.
+    let neutral = vec3<f32>(peak);
     return mix(rgb, neutral, blend);
 }
 
@@ -32,4 +38,3 @@ fn compress_highlights(rgb: vec3<f32>) -> vec3<f32> {
     );
     return rgb * (compressed / lum);
 }
-
