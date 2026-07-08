@@ -1,5 +1,4 @@
-use anyhow::{anyhow, Context, Result};
-use rawloader::{RawImage, RawImageData};
+use anyhow::{anyhow, Result};
 use std::path::Path;
 
 #[derive(Clone, Debug)]
@@ -16,133 +15,310 @@ pub struct LoadedRaw {
     pub white_levels: [f32; 4],
 }
 
+#[cfg(not(libraw_available))]
+pub fn load_raw_file(_path: &Path) -> Result<LoadedRaw> {
+    Err(anyhow!(
+        "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
+    ))
+}
+
+#[cfg(libraw_available)]
 pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
-    let image = rawloader::decode_file(path)
-        .with_context(|| format!("rawloader could not decode {}", path.display()))?;
-
-    let raw_pixels = raw_pixels(&image)?;
-    let color_indices = color_indices(&image)?;
-    let wb_coeffs = white_balance(&image);
-    let cam_to_srgb = cam_to_srgb(&image);
-
-    Ok(LoadedRaw {
-        width: image.width as u32,
-        height: image.height as u32,
-        camera_make: if image.clean_make.is_empty() {
-            image.make.clone()
-        } else {
-            image.clean_make.clone()
-        },
-        camera_model: if image.clean_model.is_empty() {
-            image.model.clone()
-        } else {
-            image.clean_model.clone()
-        },
-        raw_pixels,
-        color_indices,
-        wb_coeffs,
-        cam_to_srgb,
-        black_levels: image.blacklevels.map(|v| v as f32),
-        white_levels: image
-            .whitelevels
-            .map(|v| if v == 0 { 65535.0 } else { v as f32 }),
-    })
+    libraw_loader::load_raw_file(path)
 }
 
-fn raw_pixels(image: &RawImage) -> Result<Vec<u16>> {
-    if image.cpp != 1 {
-        return Err(anyhow!(
-            "unsupported raw layout: expected a single-channel CFA image, got {} components",
-            image.cpp
-        ));
+#[cfg(libraw_available)]
+mod libraw_loader {
+    use super::LoadedRaw;
+    use anyhow::{anyhow, Context, Result};
+    use std::ffi::{CStr, CString};
+    use std::os::raw::c_char;
+    use std::path::Path;
+    use std::ptr;
+    use std::slice;
+
+    #[allow(
+        dead_code,
+        non_camel_case_types,
+        non_snake_case,
+        non_upper_case_globals
+    )]
+    mod ffi {
+        include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
     }
 
-    match &image.data {
-        RawImageData::Integer(data) => Ok(data.clone()),
-        RawImageData::Float(data) => {
-            let max_value = data
-                .iter()
-                .copied()
-                .filter(|v| v.is_finite())
-                .fold(0.0_f32, f32::max)
-                .max(1.0);
+    pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .context("RAW path contains an interior NUL byte")?;
+        let ctx = LibRawContext::new()?;
 
-            Ok(data
-                .iter()
-                .map(|v| ((v / max_value).clamp(0.0, 1.0) * 65535.0).round() as u16)
-                .collect())
+        check_libraw(
+            unsafe { ffi::libraw_open_file(ctx.raw, path.as_ptr()) },
+            "open RAW file",
+        )?;
+        check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
+
+        unsafe { loaded_raw_from_context(&ctx) }
+    }
+
+    struct LibRawContext {
+        raw: *mut ffi::libraw_data_t,
+    }
+
+    impl LibRawContext {
+        fn new() -> Result<Self> {
+            let raw = unsafe { ffi::libraw_init(0) };
+            if raw.is_null() {
+                Err(anyhow!("libraw_init returned null"))
+            } else {
+                Ok(Self { raw })
+            }
         }
     }
-}
 
-fn color_indices(image: &RawImage) -> Result<Vec<u8>> {
-    let pixels = image
-        .width
-        .checked_mul(image.height)
-        .ok_or_else(|| anyhow!("raw dimensions overflow"))?;
-
-    if !image.cfa.is_valid() {
-        return Err(anyhow!(
-            "unsupported raw layout: missing CFA for single-channel image"
-        ));
-    }
-
-    let mut indices = Vec::with_capacity(pixels);
-    for y in 0..image.height {
-        for x in 0..image.width {
-            indices.push(image.cfa.color_at(y, x).min(3) as u8);
+    impl Drop for LibRawContext {
+        fn drop(&mut self) {
+            unsafe {
+                ffi::libraw_close(self.raw);
+            }
         }
     }
-    Ok(indices)
-}
 
-fn white_balance(image: &RawImage) -> [f32; 4] {
-    let mut wb = image.wb_coeffs;
-    if wb[..3].iter().any(|v| !v.is_finite() || *v <= 0.0) {
-        wb = image.neutralwb();
+    unsafe fn loaded_raw_from_context(ctx: &LibRawContext) -> Result<LoadedRaw> {
+        let raw = &*ctx.raw;
+        let rawdata = &raw.rawdata;
+        let sizes = &rawdata.sizes;
+        let color = &rawdata.color;
+        let iparams = &rawdata.iparams;
+
+        if rawdata.raw_image.is_null() {
+            return Err(anyhow!(
+                "LibRaw did not expose a single-channel raw_image buffer"
+            ));
+        }
+
+        let width = sizes.raw_width as u32;
+        let height = sizes.raw_height as u32;
+        if width == 0 || height == 0 {
+            return Err(anyhow!("LibRaw reported empty RAW dimensions"));
+        }
+
+        let raw_pixels =
+            copy_raw_pixels(rawdata.raw_image, width, height, sizes.raw_pitch as usize)?;
+        let color_indices = color_indices(ctx.raw, width, height)?;
+        let wb_coeffs = white_balance(color.cam_mul);
+        let cam_to_srgb = cam_to_srgb(color.cam_xyz);
+        let black_levels = black_levels(color.black, &color.cblack);
+        let white_levels = white_levels(color.maximum);
+
+        Ok(LoadedRaw {
+            width,
+            height,
+            camera_make: c_array_to_string(&iparams.make),
+            camera_model: c_array_to_string(&iparams.model),
+            raw_pixels,
+            color_indices,
+            wb_coeffs,
+            cam_to_srgb,
+            black_levels,
+            white_levels,
+        })
     }
 
-    let green = if wb[1].is_finite() && wb[1] > 0.0 {
-        wb[1]
-    } else {
-        1.0
-    };
+    unsafe fn copy_raw_pixels(
+        raw_image: *const u16,
+        width: u32,
+        height: u32,
+        raw_pitch: usize,
+    ) -> Result<Vec<u16>> {
+        let width = width as usize;
+        let height = height as usize;
+        let row_bytes = width
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| anyhow!("RAW row size overflow"))?;
+        let pitch = if raw_pitch == 0 { row_bytes } else { raw_pitch };
 
-    for v in &mut wb {
-        *v = if v.is_finite() && *v > 0.0 {
-            *v / green
+        let mut out = vec![0; width * height];
+        if pitch == row_bytes {
+            let src = slice::from_raw_parts(raw_image, width * height);
+            out.copy_from_slice(src);
+        } else {
+            for y in 0..height {
+                let row_ptr = (raw_image as *const u8).add(y * pitch) as *const u16;
+                let src = slice::from_raw_parts(row_ptr, width);
+                out[y * width..(y + 1) * width].copy_from_slice(src);
+            }
+        }
+
+        Ok(out)
+    }
+
+    unsafe fn color_indices(
+        raw: *mut ffi::libraw_data_t,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        let pixels = width
+            .checked_mul(height)
+            .ok_or_else(|| anyhow!("RAW dimensions overflow"))? as usize;
+        let mut out = Vec::with_capacity(pixels);
+
+        for y in 0..height {
+            for x in 0..width {
+                let color = ffi::libraw_COLOR(raw, y as i32, x as i32);
+                out.push(color.clamp(0, 2) as u8);
+            }
+        }
+
+        Ok(out)
+    }
+
+    fn white_balance(mut wb: [f32; 4]) -> [f32; 4] {
+        let green = if wb[1].is_finite() && wb[1] > 0.0 {
+            wb[1]
         } else {
             1.0
         };
+
+        for v in &mut wb {
+            *v = if v.is_finite() && *v > 0.0 {
+                *v / green
+            } else {
+                1.0
+            };
+        }
+
+        wb
     }
 
-    wb
-}
+    fn black_levels(black: u32, cblack: &[u32]) -> [f32; 4] {
+        let mut out = [black as f32; 4];
+        for (index, value) in out.iter_mut().enumerate() {
+            *value += cblack.get(index).copied().unwrap_or(0) as f32;
+        }
+        out
+    }
 
-fn cam_to_srgb(image: &RawImage) -> [[f32; 4]; 3] {
-    let cam_to_xyz = image.cam_to_xyz_normalized();
-    let xyz_to_srgb = [
-        [3.2404542, -1.5371385, -0.4985314],
-        [-0.9692660, 1.8760108, 0.0415560],
-        [0.0556434, -0.2040259, 1.0572252],
-    ];
+    fn white_levels(maximum: u32) -> [f32; 4] {
+        let white = if maximum == 0 {
+            65535.0
+        } else {
+            maximum as f32
+        };
+        [white; 4]
+    }
 
-    let mut out = [[0.0; 4]; 3];
-    for row in 0..3 {
-        for col in 0..4 {
-            out[row][col] = xyz_to_srgb[row][0] * cam_to_xyz[0][col]
-                + xyz_to_srgb[row][1] * cam_to_xyz[1][col]
-                + xyz_to_srgb[row][2] * cam_to_xyz[2][col];
+    fn cam_to_srgb(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
+        let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
+        let xyz_to_srgb = [
+            [3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660, 1.8760108, 0.0415560],
+            [0.0556434, -0.2040259, 1.0572252],
+        ];
+
+        let mut out = [[0.0; 4]; 3];
+        for row in 0..3 {
+            for col in 0..4 {
+                out[row][col] = xyz_to_srgb[row][0] * cam_to_xyz[0][col]
+                    + xyz_to_srgb[row][1] * cam_to_xyz[1][col]
+                    + xyz_to_srgb[row][2] * cam_to_xyz[2][col];
+            }
+        }
+
+        if out.iter().flatten().any(|v| !v.is_finite()) || out.iter().flatten().all(|v| *v == 0.0) {
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ]
+        } else {
+            out
         }
     }
 
-    if out.iter().flatten().any(|v| !v.is_finite()) || out.iter().flatten().all(|v| *v == 0.0) {
-        [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ]
-    } else {
+    fn normalized_pseudoinverse(mut xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
+        for row in &mut xyz_to_cam {
+            let sum = row.iter().sum::<f32>();
+            if sum != 0.0 {
+                for value in row {
+                    *value /= sum;
+                }
+            }
+        }
+
+        pseudoinverse(xyz_to_cam)
+    }
+
+    fn pseudoinverse(input: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
+        let mut temp = [[0.0; 6]; 3];
+
+        for i in 0..3 {
+            for j in 0..6 {
+                temp[i][j] = if j == i + 3 { 1.0 } else { 0.0 };
+            }
+            for j in 0..3 {
+                for row in &input {
+                    temp[i][j] += row[i] * row[j];
+                }
+            }
+        }
+
+        for i in 0..3 {
+            let pivot = temp[i][i];
+            if pivot.abs() < 1e-12 {
+                return [[0.0; 4]; 3];
+            }
+            for j in 0..6 {
+                temp[i][j] /= pivot;
+            }
+            for k in 0..3 {
+                if k == i {
+                    continue;
+                }
+                let scale = temp[k][i];
+                for j in 0..6 {
+                    temp[k][j] -= temp[i][j] * scale;
+                }
+            }
+        }
+
+        let mut out = [[0.0; 4]; 3];
+        for col in 0..4 {
+            for row in 0..3 {
+                for k in 0..3 {
+                    out[row][col] += temp[row][k + 3] * input[col][k];
+                }
+            }
+        }
         out
+    }
+
+    fn c_array_to_string(value: &[c_char]) -> String {
+        let ptr = value.as_ptr();
+        if ptr.is_null() {
+            return String::new();
+        }
+
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .trim()
+            .to_owned()
+    }
+
+    fn check_libraw(err: i32, action: &str) -> Result<()> {
+        if err == 0 {
+            return Ok(());
+        }
+
+        let message = unsafe {
+            let ptr = ffi::libraw_strerror(err);
+            if ptr.is_null() {
+                "unknown LibRaw error".into()
+            } else {
+                CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            }
+        };
+
+        Err(anyhow!("LibRaw failed to {action}: {message} ({err})"))
     }
 }
