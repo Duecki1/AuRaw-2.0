@@ -34,8 +34,6 @@ mod libraw_loader {
     use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
     use std::path::Path;
-    use std::ptr;
-    use std::slice;
 
     #[allow(
         dead_code,
@@ -119,7 +117,8 @@ mod libraw_loader {
             ));
         }
 
-        let raw_pixels = copy_raw_pixels(
+        let (width, height, raw_pixels, color_indices) = copy_active_pixels(
+            ctx.raw,
             rawdata.raw_image,
             raw_width,
             raw_height,
@@ -128,11 +127,12 @@ mod libraw_loader {
             width,
             height,
             sizes.raw_pitch as usize,
+            sizes.flip,
+            iparams,
         )?;
-        let color_indices = color_indices(ctx.raw, crop_x, crop_y, width, height)?;
         let wb_coeffs = white_balance(color.cam_mul);
         let cam_to_srgb = cam_to_srgb(color.cam_xyz);
-        let black_levels = black_levels(color.black, &color.cblack);
+        let black_levels = black_levels(color.black, &color.cblack, iparams);
         let white_levels = white_levels(color.maximum);
 
         Ok(LoadedRaw {
@@ -149,7 +149,8 @@ mod libraw_loader {
         })
     }
 
-    unsafe fn copy_raw_pixels(
+    unsafe fn copy_active_pixels(
+        raw: *mut ffi::libraw_data_t,
         raw_image: *const u16,
         raw_width: u32,
         raw_height: u32,
@@ -158,7 +159,9 @@ mod libraw_loader {
         width: u32,
         height: u32,
         raw_pitch: usize,
-    ) -> Result<Vec<u16>> {
+        flip: i32,
+        iparams: &ffi::libraw_iparams_t,
+    ) -> Result<(u32, u32, Vec<u16>, Vec<u8>)> {
         let raw_width = raw_width as usize;
         let raw_height = raw_height as usize;
         let crop_x = crop_x as usize;
@@ -174,37 +177,54 @@ mod libraw_loader {
             return Err(anyhow!("active RAW crop exceeds decoded RAW buffer"));
         }
 
-        let mut out = vec![0; width * height];
-        for y in 0..height {
-            let raw_y = crop_y + y;
-            let row_ptr = (raw_image as *const u8).add(raw_y * pitch) as *const u16;
-            let src = slice::from_raw_parts(row_ptr.add(crop_x), width);
-            out[y * width..(y + 1) * width].copy_from_slice(src);
-        }
+        let (out_width, out_height) = match flip {
+            5 | 6 => (height, width),
+            _ => (width, height),
+        };
+        let mut pixels = vec![0; out_width * out_height];
+        let mut colors = Vec::with_capacity(out_width * out_height);
 
-        Ok(out)
-    }
+        for y in 0..out_height {
+            for x in 0..out_width {
+                let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
+                let raw_x = crop_x + src_x;
+                let raw_y = crop_y + src_y;
+                let row_ptr = (raw_image as *const u8).add(raw_y * pitch) as *const u16;
+                pixels[y * out_width + x] = *row_ptr.add(raw_x);
 
-    unsafe fn color_indices(
-        raw: *mut ffi::libraw_data_t,
-        crop_x: u32,
-        crop_y: u32,
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>> {
-        let pixels = width
-            .checked_mul(height)
-            .ok_or_else(|| anyhow!("RAW dimensions overflow"))? as usize;
-        let mut out = Vec::with_capacity(pixels);
-
-        for y in 0..height {
-            for x in 0..width {
-                let color = ffi::libraw_COLOR(raw, (crop_y + y) as i32, (crop_x + x) as i32);
-                out.push(color.clamp(0, 2) as u8);
+                let libraw_color = ffi::libraw_COLOR(raw, raw_y as i32, raw_x as i32);
+                colors.push(rgb_channel_for_libraw_color(iparams, libraw_color));
             }
         }
 
-        Ok(out)
+        Ok((out_width as u32, out_height as u32, pixels, colors))
+    }
+
+    fn oriented_source_pos(
+        x: usize,
+        y: usize,
+        width: u32,
+        height: u32,
+        flip: i32,
+    ) -> (usize, usize) {
+        let width = width as usize;
+        let height = height as usize;
+        match flip {
+            3 => (width - 1 - x, height - 1 - y),
+            5 => (width - 1 - y, x),
+            6 => (y, height - 1 - x),
+            _ => (x, y),
+        }
+    }
+
+    fn rgb_channel_for_libraw_color(iparams: &ffi::libraw_iparams_t, color: i32) -> u8 {
+        let index = color.clamp(0, 3) as usize;
+        match iparams.cdesc[index] as u8 as char {
+            'R' | 'r' => 0,
+            'G' | 'g' => 1,
+            'B' | 'b' => 2,
+            _ => color.clamp(0, 2) as u8,
+        }
     }
 
     fn white_balance(mut wb: [f32; 4]) -> [f32; 4] {
@@ -225,10 +245,21 @@ mod libraw_loader {
         wb
     }
 
-    fn black_levels(black: u32, cblack: &[u32]) -> [f32; 4] {
+    fn black_levels(black: u32, cblack: &[u32], iparams: &ffi::libraw_iparams_t) -> [f32; 4] {
+        let mut sums = [0.0; 4];
+        let mut counts = [0.0; 4];
+
+        for index in 0..4 {
+            let channel = rgb_channel_for_libraw_color(iparams, index as i32) as usize;
+            sums[channel] += black as f32 + cblack.get(index).copied().unwrap_or(0) as f32;
+            counts[channel] += 1.0;
+        }
+
         let mut out = [black as f32; 4];
-        for (index, value) in out.iter_mut().enumerate() {
-            *value += cblack.get(index).copied().unwrap_or(0) as f32;
+        for channel in 0..3 {
+            if counts[channel] > 0.0 {
+                out[channel] = sums[channel] / counts[channel];
+            }
         }
         out
     }
