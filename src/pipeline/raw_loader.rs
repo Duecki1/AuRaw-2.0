@@ -1,13 +1,3 @@
-//! Loads a RAW file via system LibRaw and prepares it for GPU upload.
-//!
-//! We deliberately do the *absolute minimum* on the CPU:
-//!   - decode (LibRaw handles compressed formats — ARW, CR2, CR3, NEF, etc.)
-//!   - normalize sensor data to a 0.0..1.0 f32 buffer (black/white level only)
-//!   - extract white balance coefficients + camera->XYZ matrix
-//!   - decode the CFA pattern from LibRaw's `filters` field
-//!
-//! Demosaic, white balance multiply, color matrix, and exposure all happen
-//! on the GPU in pipeline.wgsl.
 
 use anyhow::{anyhow, Result};
 use std::ffi::{CStr, CString};
