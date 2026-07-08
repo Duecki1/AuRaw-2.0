@@ -4,8 +4,6 @@ use std::path::Path;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-include!(concat!(env!("OUT_DIR"), "/highlights_bindings.rs"));
-
 pub struct LoadedRaw {
     pub raw_pixels: Vec<f32>,
     pub width: u32,
@@ -111,6 +109,7 @@ fn decode_cfa_pattern(filters: u32) -> u32 {
         }
     }
 }
+
 fn libraw_fc(filters: u32, x: u32, y: u32) -> usize {
     let x = x as i32;
     let y = y as i32;
@@ -119,7 +118,6 @@ fn libraw_fc(filters: u32, x: u32, y: u32) -> usize {
 
 pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
     log::info!("LibRaw: opening {}", path.display());
-
 
     let handle = unsafe { libraw_init(0) };
     if handle.is_null() {
@@ -181,7 +179,7 @@ pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
     let norm_scale_fallback = if maximum > base_black { 1.0 / (maximum - base_black) } else { 1.0 };
 
     let filters = imgdata.idata.filters;
-    let mut raw_pixels: Vec<f32> = (0..height)
+    let raw_pixels: Vec<f32> = (0..height)
         .flat_map(|y| {
             let ry = (y + top_margin) as usize;
             (0..width).map(move |x| {
@@ -189,7 +187,11 @@ pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
                 let idx = ry * raw_width as usize + rx;
                 let v = unsafe { *raw_ptr.add(idx) } as f32;
 
-                let c = libraw_fc(filters, x, y);
+                let c = if filters == 9 {
+                    (imgdata.idata.xtrans[ry % 6][rx % 6] as u8) as usize
+                } else {
+                    libraw_fc(filters, x, y)
+                };
                 let black = if cblack[c] > 0.0 { cblack[c] } else { base_black };
                 let scale = if cblack[c] > 0.0 { norm_scale[c] } else { norm_scale_fallback };
                 
@@ -197,29 +199,6 @@ pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
             })
         })
         .collect();
-    {
-        let mut reconstructed = vec![0.0f32; raw_pixels.len()];
-        let processed_maximum: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-        let clip_threshold = 0.987f32;
-        let xtrans_dummy = [[0u8; 6]; 6];
-
-        unsafe {
-            auraw_process_highlights(
-                raw_pixels.as_ptr(),
-                reconstructed.as_mut_ptr(),
-                width as i32,
-                height as i32,
-                0,
-                0,
-                filters as i32,
-                xtrans_dummy.as_ptr(),
-                auraw_highlights_mode::AURAW_HIGHLIGHTS_INPAINT as i32,
-                clip_threshold,
-                processed_maximum.as_ptr(),
-            );
-        }
-        raw_pixels = reconstructed;
-    }
 
     let cam_mul = imgdata.color.cam_mul;
     let g1 = if cam_mul[1] > 0.0 && cam_mul[1].is_finite() { cam_mul[1] } else { 1.0 };
