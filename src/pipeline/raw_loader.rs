@@ -200,15 +200,13 @@ mod libraw_loader {
         Ok((out_width as u32, out_height as u32, pixels, colors))
     }
 
-    fn oriented_source_pos(
+   fn oriented_source_pos(
         x: usize,
         y: usize,
-        width: u32,
-        height: u32,
+        width: usize,
+        height: usize,
         flip: i32,
     ) -> (usize, usize) {
-        let width = width as usize;
-        let height = height as usize;
         match flip {
             3 => (width - 1 - x, height - 1 - y),
             5 => (width - 1 - y, x),

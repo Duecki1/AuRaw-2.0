@@ -35,10 +35,14 @@ fn normalized_raw_at(pos: vec2<i32>) -> f32 {
     }
 
     let local = sum / count;
-    if center > max(local * 3.0, local + 0.08) {
+    // Only reject genuinely isolated hot/dead pixels (sensor defects), not
+    // real high-frequency scene detail. The old thresholds fired on normal
+    // edges/texture and desynced R/G/B detail per-channel, producing a
+    // checkerboard/moire pattern across the whole image.
+    if center > local * 6.0 + 0.25 {
         return local;
     }
-    if local > 0.03 && center < local * 0.15 {
+    if local > 0.08 && center < local * 0.05 {
         return local;
     }
     return center;
@@ -65,4 +69,3 @@ fn resolve_average(v: vec2<f32>, fallback: f32) -> f32 {
     }
     return fallback;
 }
-
