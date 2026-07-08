@@ -4,6 +4,24 @@ use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
 use wgpu::util::DeviceExt;
 
+const SHADER_SOURCE: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/demosaic.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/highlights.wgsl"),
+    "\n",
+    include_str!("../shaders/basic_adjustments.wgsl"),
+    "\n",
+    include_str!("../shaders/tonemap.wgsl"),
+    "\n",
+    include_str!("../shaders/pipeline.wgsl"),
+);
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuParams {
@@ -158,7 +176,7 @@ impl RawGpuPipeline {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("auraw raw pipeline shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/pipeline.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("auraw raw pipeline layout"),

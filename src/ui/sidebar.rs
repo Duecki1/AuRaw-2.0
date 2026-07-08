@@ -1,5 +1,5 @@
 use crate::app::AurawApp;
-use eframe::egui::{Slider, Ui};
+use eframe::egui::{self, Slider, Ui};
 
 pub struct Sidebar;
 
@@ -7,102 +7,51 @@ impl Sidebar {
     pub fn show(ui: &mut Ui, app: &mut AurawApp) {
         ui.heading("Adjustments");
 
-        if ui.button("Reset").clicked() {
-            app.exposure = Default::default();
-            app.dirty = true;
+        macro_rules! slider {
+            ($ui:ident, $field:ident, $range:expr, $text:expr) => {
+                if $ui
+                    .add(Slider::new(&mut app.exposure.$field, $range).text($text))
+                    .changed()
+                {
+                    app.dirty = true;
+                }
+            };
         }
 
-        ui.separator();
-        ui.label("Basic adjustments");
+        egui::CollapsingHeader::new("Light")
+            .default_open(true)
+            .show(ui, |ui| {
+                slider!(ui, exposure, -18.0..=18.0, "Exposure");
+                slider!(ui, contrast, -1.0..=5.0, "Contrast");
+                slider!(ui, hlcompr, 0.0..=100.0, "Highlights");
+                slider!(ui, hlcomprthresh, 0.0..=100.0, "Highlight Range");
+                slider!(ui, black, -1.0..=1.0, "Blacks");
+                slider!(ui, brightness, -4.0..=4.0, "Brightness");
+            });
 
-        if ui
-            .add(Slider::new(&mut app.exposure.exposure, -18.0..=18.0).text("Exposure"))
-            .changed()
-        {
-            app.dirty = true;
-        }
+        egui::CollapsingHeader::new("Color")
+            .default_open(true)
+            .show(ui, |ui| {
+                slider!(ui, vibrance, -1.0..=1.0, "Vibrance");
+                slider!(ui, saturation, -1.0..=1.0, "Saturation");
+            });
 
-        if ui
-            .add(Slider::new(&mut app.exposure.black, -1.0..=1.0).text("Black Level"))
-            .changed()
-        {
-            app.dirty = true;
-        }
+        egui::CollapsingHeader::new("Tone Mapping")
+            .default_open(true)
+            .show(ui, |ui| {
+                slider!(ui, middle_grey, 5.0..=100.0, "Middle Grey");
+                slider!(ui, filmic_white, 0.1..=16.0, "White EV");
+                slider!(ui, filmic_black, -16.0..=-0.1, "Black EV");
+            });
 
-        if ui
-            .add(Slider::new(&mut app.exposure.hlcompr, 0.0..=100.0).text("Highlight Compression"))
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        if ui
-            .add(
-                Slider::new(&mut app.exposure.hlcomprthresh, 0.0..=100.0)
-                    .text("Highlight Threshold"),
-            )
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        if ui
-            .add(Slider::new(&mut app.exposure.brightness, -4.0..=4.0).text("Brightness"))
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        if ui
-            .add(Slider::new(&mut app.exposure.contrast, -1.0..=5.0).text("Contrast"))
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        if ui
-            .add(Slider::new(&mut app.exposure.middle_grey, 5.0..=100.0).text("Middle Grey"))
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        if ui
-            .add(Slider::new(&mut app.exposure.saturation, -1.0..=1.0).text("Saturation"))
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        if ui
-            .add(Slider::new(&mut app.exposure.vibrance, -1.0..=1.0).text("Vibrance"))
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        if ui
-            .add(Slider::new(&mut app.exposure.clip, -1.0..=1.0).text("Clip"))
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        ui.separator();
-        ui.label("Filmic");
-
-        if ui
-            .add(Slider::new(&mut app.exposure.filmic_white, 0.1..=16.0).text("White EV"))
-            .changed()
-        {
-            app.dirty = true;
-        }
-
-        if ui
-            .add(Slider::new(&mut app.exposure.filmic_black, -16.0..=-0.1).text("Black EV"))
-            .changed()
-        {
-            app.dirty = true;
-        }
+        egui::CollapsingHeader::new("Raw")
+            .default_open(false)
+            .show(ui, |ui| {
+                slider!(ui, clip, -1.0..=1.0, "Clip Point");
+                if ui.button("Reset adjustments").clicked() {
+                    app.exposure = Default::default();
+                    app.dirty = true;
+                }
+            });
     }
 }
