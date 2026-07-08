@@ -97,15 +97,39 @@ mod libraw_loader {
             ));
         }
 
-        let width = sizes.raw_width as u32;
-        let height = sizes.raw_height as u32;
+        let raw_width = sizes.raw_width as u32;
+        let raw_height = sizes.raw_height as u32;
+        let crop_x = sizes.left_margin as u32;
+        let crop_y = sizes.top_margin as u32;
+        let width = sizes.width as u32;
+        let height = sizes.height as u32;
         if width == 0 || height == 0 {
             return Err(anyhow!("LibRaw reported empty RAW dimensions"));
         }
 
-        let raw_pixels =
-            copy_raw_pixels(rawdata.raw_image, width, height, sizes.raw_pitch as usize)?;
-        let color_indices = color_indices(ctx.raw, width, height)?;
+        if crop_x + width > raw_width || crop_y + height > raw_height {
+            return Err(anyhow!(
+                "LibRaw crop is outside RAW bounds: crop {}x{} at {},{} in {}x{}",
+                width,
+                height,
+                crop_x,
+                crop_y,
+                raw_width,
+                raw_height
+            ));
+        }
+
+        let raw_pixels = copy_raw_pixels(
+            rawdata.raw_image,
+            raw_width,
+            raw_height,
+            crop_x,
+            crop_y,
+            width,
+            height,
+            sizes.raw_pitch as usize,
+        )?;
+        let color_indices = color_indices(ctx.raw, crop_x, crop_y, width, height)?;
         let wb_coeffs = white_balance(color.cam_mul);
         let cam_to_srgb = cam_to_srgb(color.cam_xyz);
         let black_levels = black_levels(color.black, &color.cblack);
@@ -127,27 +151,35 @@ mod libraw_loader {
 
     unsafe fn copy_raw_pixels(
         raw_image: *const u16,
+        raw_width: u32,
+        raw_height: u32,
+        crop_x: u32,
+        crop_y: u32,
         width: u32,
         height: u32,
         raw_pitch: usize,
     ) -> Result<Vec<u16>> {
+        let raw_width = raw_width as usize;
+        let raw_height = raw_height as usize;
+        let crop_x = crop_x as usize;
+        let crop_y = crop_y as usize;
         let width = width as usize;
         let height = height as usize;
-        let row_bytes = width
+        let row_bytes = raw_width
             .checked_mul(std::mem::size_of::<u16>())
             .ok_or_else(|| anyhow!("RAW row size overflow"))?;
         let pitch = if raw_pitch == 0 { row_bytes } else { raw_pitch };
 
+        if crop_y + height > raw_height || crop_x + width > raw_width {
+            return Err(anyhow!("active RAW crop exceeds decoded RAW buffer"));
+        }
+
         let mut out = vec![0; width * height];
-        if pitch == row_bytes {
-            let src = slice::from_raw_parts(raw_image, width * height);
-            out.copy_from_slice(src);
-        } else {
-            for y in 0..height {
-                let row_ptr = (raw_image as *const u8).add(y * pitch) as *const u16;
-                let src = slice::from_raw_parts(row_ptr, width);
-                out[y * width..(y + 1) * width].copy_from_slice(src);
-            }
+        for y in 0..height {
+            let raw_y = crop_y + y;
+            let row_ptr = (raw_image as *const u8).add(raw_y * pitch) as *const u16;
+            let src = slice::from_raw_parts(row_ptr.add(crop_x), width);
+            out[y * width..(y + 1) * width].copy_from_slice(src);
         }
 
         Ok(out)
@@ -155,6 +187,8 @@ mod libraw_loader {
 
     unsafe fn color_indices(
         raw: *mut ffi::libraw_data_t,
+        crop_x: u32,
+        crop_y: u32,
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
@@ -165,7 +199,7 @@ mod libraw_loader {
 
         for y in 0..height {
             for x in 0..width {
-                let color = ffi::libraw_COLOR(raw, y as i32, x as i32);
+                let color = ffi::libraw_COLOR(raw, (crop_y + y) as i32, (crop_x + x) as i32);
                 out.push(color.clamp(0, 2) as u8);
             }
         }

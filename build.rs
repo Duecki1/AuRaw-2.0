@@ -1,5 +1,16 @@
 fn main() {
-    println!("cargo:rerun-if-changed=src/shaders/pipeline.wgsl");
+    for shader in [
+        "src/shaders/common.wgsl",
+        "src/shaders/raw_sampling.wgsl",
+        "src/shaders/demosaic.wgsl",
+        "src/shaders/color.wgsl",
+        "src/shaders/highlights.wgsl",
+        "src/shaders/basic_adjustments.wgsl",
+        "src/shaders/tonemap.wgsl",
+        "src/shaders/pipeline.wgsl",
+    ] {
+        println!("cargo:rerun-if-changed={shader}");
+    }
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=LIBRAW_NO_PKG_CONFIG");
     println!("cargo:rustc-check-cfg=cfg(libraw_available)");
