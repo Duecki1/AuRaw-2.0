@@ -272,32 +272,46 @@ mod libraw_loader {
     }
 
     fn cam_to_srgb(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
-        let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
-        let xyz_to_srgb = [
-            [3.2404542, -1.5371385, -0.4985314],
-            [-0.9692660, 1.8760108, 0.0415560],
-            [0.0556434, -0.2040259, 1.0572252],
-        ];
+    let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
+    let xyz_to_srgb = [
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ];
 
-        let mut out = [[0.0; 4]; 3];
-        for row in 0..3 {
-            for col in 0..4 {
-                out[row][col] = xyz_to_srgb[row][0] * cam_to_xyz[0][col]
-                    + xyz_to_srgb[row][1] * cam_to_xyz[1][col]
-                    + xyz_to_srgb[row][2] * cam_to_xyz[2][col];
-            }
-        }
-
-        if out.iter().flatten().any(|v| !v.is_finite()) || out.iter().flatten().all(|v| *v == 0.0) {
-            [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-            ]
-        } else {
-            out
+    let mut out = [[0.0; 4]; 3];
+    for row in 0..3 {
+        for col in 0..4 {
+            out[row][col] = xyz_to_srgb[row][0] * cam_to_xyz[0][col]
+                + xyz_to_srgb[row][1] * cam_to_xyz[1][col]
+                + xyz_to_srgb[row][2] * cam_to_xyz[2][col];
         }
     }
+
+    // *** FIX: Merge G2 (column 3) into G1 (column 1). ***
+    // After demosaic we have a single green value per pixel that represents
+    // BOTH G1 and G2 (they measure the same physical green light). The
+    // forward transform is:
+    //   XYZ = R*c0 + G*c1 + B*c2 + G*c3 = R*c0 + G*(c1+c3) + B*c2
+    // so the green column must be the SUM of the two green columns.
+    // Without this merge, green is under-weighted by ~50%, causing
+    // magenta color casts across the entire image.
+    for row in 0..3 {
+        out[row][1] += out[row][3];
+    }
+
+    if out.iter().flatten().any(|v| !v.is_finite())
+        || out.iter().flatten().all(|v| *v == 0.0)
+    {
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ]
+    } else {
+        out
+    }
+}
 
     fn normalized_pseudoinverse(mut xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
         for row in &mut xyz_to_cam {

@@ -4,12 +4,6 @@ fn reconstruct_sensor_highlights(rgb: vec3<f32>) -> vec3<f32> {
     let spread = clamp((peak - floor_value) / max(peak, 1e-6), 0.0, 1.0);
     let blend = smoothstep(0.88, 1.12, peak) * smoothstep(0.10, 0.55, spread);
 
-    // Blend toward the channel peak rather than an unweighted r+g+b average.
-    // This is still camera-native RGB (pre color-matrix), where channel
-    // magnitudes reflect sensor gain, not perceptual luminance. Averaging
-    // unweighted here pushes highlights toward the wrong hue once the
-    // camera->sRGB matrix runs afterward. Using max() reconstructs toward
-    // a clipped-but-neutral white point instead, avoiding the color cast.
     let neutral = vec3<f32>(peak);
     return mix(rgb, neutral, blend);
 }
@@ -17,8 +11,12 @@ fn reconstruct_sensor_highlights(rgb: vec3<f32>) -> vec3<f32> {
 fn reconstruct_display_highlights(rgb: vec3<f32>) -> vec3<f32> {
     let peak = max(max(rgb.r, rgb.g), rgb.b);
     let lum = safe_luma(max(rgb, vec3<f32>(0.0)));
-    let threshold = 0.92 + params.clip * 0.04;
-    let blend = smoothstep(threshold, 1.30, peak);
+
+    // *** FIX: threshold must be in scene-referred space, not [0,1] display. ***
+    // After exposure, normal values can be 0.18–4.0+. The old threshold of
+    // 0.92 caught upper midtones and desaturated them.
+    let threshold = 1.5 + params.clip * 0.5;
+    let blend = smoothstep(threshold, threshold * 2.0, peak);
     return mix(rgb, vec3<f32>(lum), blend * 0.75);
 }
 
@@ -28,13 +26,19 @@ fn compress_highlights(rgb: vec3<f32>) -> vec3<f32> {
     }
 
     let lum = safe_luma(rgb);
-    let shoulder = params.hlcomprthresh / 800.0 + 0.15;
-    let range = max(1.0 - shoulder, 1e-3);
-    let amount = params.hlcompr / 60.0;
-    let compressed = select(
-        lum,
-        shoulder + range * log(1.0 + (lum - shoulder) * amount / range) / log(1.0 + amount),
-        lum > shoulder
-    );
+
+    // *** FIX: old threshold was 0.15 (15% gray), compressing most of the
+    // image. New threshold starts at 75% gray, adjustable upward. ***
+    let shoulder = 0.75 + params.hlcomprthresh / 400.0;
+    let amount = max(params.hlcompr / 100.0, 0.001);
+
+    // Reinhard-style soft knee: smooth, monotonic, asymptotic.
+    // The old log formula had a problematic `range = 1 - shoulder` term
+    // that went negative when shoulder > 1.
+    var compressed = lum;
+    if lum > shoulder {
+        let excess = lum - shoulder;
+        compressed = shoulder + excess / (1.0 + excess * amount / shoulder);
+    }
     return rgb * (compressed / lum);
 }
