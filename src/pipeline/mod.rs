@@ -1,7 +1,7 @@
-pub mod exposure;
-pub mod raw_loader;
-pub mod gpu;
+mod basicadj;
+mod gpu;
+mod raw_loader;
 
-pub use exposure::{ExposureParams, GpuParams};
+pub use basicadj::ExposureParams;
+pub use gpu::{GpuParams, RawGpuPipeline};
 pub use raw_loader::{load_raw_file, LoadedRaw};
-pub use gpu::RawGpuPipeline;
