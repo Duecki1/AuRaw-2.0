@@ -186,11 +186,14 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var camera_rgb = vec3<f32>(r_val, g0, b_val);
 
-    // Passes through cleanly if final_clip is 0.0
-    camera_rgb = apply_wb(camera_rgb);
-    camera_rgb = reconstruct_sensor_highlights(camera_rgb, final_clip);
+camera_rgb = apply_wb(camera_rgb);
 
-    var rgb = cam_to_working(camera_rgb);
+camera_rgb = reconstruct_sensor_highlights(
+    camera_rgb,
+    final_clip
+);
+
+var rgb = cam_to_working(camera_rgb);
     rgb = map_negative_gamut(rgb);
 
     rgb = apply_exposure(rgb);
