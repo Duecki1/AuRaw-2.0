@@ -62,6 +62,73 @@ fn highlight_still_clipped(rgb: vec3<f32>, clip_mask: f32) -> bool {
         || (b_clipped && sensor_rgb.b >= clip);
 }
 
+fn ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<i32> {
+    if abs(amount) < 1e-6 {
+        return clamp_pos(pos);
+    }
+
+    let extent = vec2<f32>(f32(params.width - 1u), f32(params.height - 1u));
+    let center = 0.5 * extent;
+    let p = vec2<f32>(pos);
+    let rel = p - center;
+    let norm = rel / max(center, vec2<f32>(1.0));
+    let r2 = dot(norm, norm);
+    let scale = 1.0 + amount * 0.001 * r2;
+    return clamp_pos(vec2<i32>(round(center + rel * scale)));
+}
+
+fn reconstructed_channel_at(pos: vec2<i32>, channel: u32) -> f32 {
+    let p = clamp_pos(pos);
+    let g = textureLoad(tex2_read, p, 0).x;
+    let diffs = smoothed_chroma_diffs(p);
+    return select(g + diffs.x, g + diffs.y, channel == 2u);
+}
+
+fn apply_lateral_ca(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    let r_pos = ca_warped_pos(pos, params.ca_red);
+    let b_pos = ca_warped_pos(pos, params.ca_blue);
+    return vec3<f32>(
+        reconstructed_channel_at(r_pos, 0u),
+        rgb.g,
+        reconstructed_channel_at(b_pos, 2u),
+    );
+}
+
+fn apply_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    let strength = clamp(params.chroma_denoise, 0.0, 1.0);
+    if strength <= 1e-6 {
+        return rgb;
+    }
+
+    let center_g = max(rgb.g, 0.0);
+    let center_chroma = vec2<f32>(rgb.r - rgb.g, rgb.b - rgb.g);
+    var sum = vec2<f32>(0.0);
+    var sum_w = 0.0;
+
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            let p = clamp_pos(pos + vec2<i32>(dx, dy));
+            let g = textureLoad(tex2_read, p, 0).x;
+            let diffs = smoothed_chroma_diffs(p);
+            let dist = f32(dx * dx + dy * dy);
+            let spatial_w = 1.0 / (1.0 + dist);
+            let range_w = 1.0 / (1.0 + 32.0 * abs(center_g - g));
+            let w = spatial_w * range_w;
+            sum += diffs * w;
+            sum_w += w;
+        }
+    }
+
+    if sum_w <= 0.0 {
+        return rgb;
+    }
+
+    let shadow = 1.0 - smoothstep(0.04, 0.35, center_g);
+    let effective = strength * mix(0.35, 1.0, shadow);
+    let denoised_chroma = mix(center_chroma, sum / sum_w, effective);
+    return vec3<f32>(rgb.g + denoised_chroma.x, rgb.g, rgb.g + denoised_chroma.y);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
@@ -168,7 +235,9 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b_clip = select(0.0, clip, cc == 2u);
     let final_clip = r_clip * 1.0 + g_clip * 10.0 + b_clip * 100.0;
 
-    var camera_rgb = reconstruct_sensor_highlights(vec3<f32>(r_val, g0, b_val), final_clip);
+    var camera_rgb = apply_lateral_ca(pos, vec3<f32>(r_val, g0, b_val));
+    camera_rgb = apply_chroma_denoise(pos, camera_rgb);
+    camera_rgb = reconstruct_sensor_highlights(camera_rgb, final_clip);
 
     if final_clip > 0.0 && highlight_still_clipped(camera_rgb, final_clip) {
         var sum_w = 0.0;

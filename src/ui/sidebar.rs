@@ -41,6 +41,7 @@ impl Sidebar {
             .show(ui, |ui| {
                 slider!(ui, vibrance, -1.0..=1.0, "Vibrance", 2);
                 slider!(ui, saturation, -1.0..=1.0, "Saturation", 2);
+                slider!(ui, chroma_denoise, 0.0..=1.0, "Chroma Denoise", 2);
             });
 
         egui::CollapsingHeader::new("Tone Mapping")
@@ -55,6 +56,8 @@ impl Sidebar {
             .default_open(false)
             .show(ui, |ui| {
                 slider!(ui, clip, -1.0..=1.0, "Clip Point", 2);
+                slider!(ui, ca_red, -2.0..=2.0, "Red CA", 2);
+                slider!(ui, ca_blue, -2.0..=2.0, "Blue CA", 2);
                 if ui.button("Reset adjustments").clicked() {
                     app.exposure = Default::default();
                     app.dirty = true;
