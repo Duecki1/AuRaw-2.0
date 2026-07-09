@@ -5,9 +5,11 @@ const INV_SQRT12: f32 = 0.28867513459481287; // 1 / (2*sqrt(3))
 
 fn reconstruct_sensor_highlights(rgb: vec3<f32>, clip_mask: f32) -> vec3<f32> {
     // Decode clip mask (1 = R, 10 = G, 100 = B)
-    let r_clipped = (clip_mask % 10.0) >= 1.0;
-    let g_clipped = ((clip_mask / 10.0) % 10.0) >= 1.0;
-    let b_clipped = (clip_mask / 100.0) >= 1.0;
+    let mask = floor(clip_mask + 0.5);
+    let r_clipped = mask - 10.0 * floor(mask / 10.0) >= 1.0;
+    let g_digit = floor(mask / 10.0) - 10.0 * floor(mask / 100.0);
+    let g_clipped = g_digit >= 1.0;
+    let b_clipped = floor(mask / 100.0) >= 1.0;
 
     if (!r_clipped && !g_clipped && !b_clipped) {
         return rgb;
