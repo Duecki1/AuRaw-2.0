@@ -43,7 +43,16 @@ fn compress_display_gamut(rgb: vec3<f32>) -> vec3<f32> {
     let lum = clamp(safe_luma(x), 0.0, 1.0);
     let boundary = vec3<f32>(lum);
     let scale = clamp((1.0 - lum) / max(peak - lum, 1e-6), 0.0, 1.0);
-    return mix(boundary, x, scale);
+    let neutral_compressed = mix(boundary, x, scale);
+
+    // Saturated emissive colors should remain colored as they enter display
+    // gamut. The neutral compression is reserved for low-chroma highlights,
+    // where preserving luminance is more important than preserving hue.
+    let chroma = length(x - boundary);
+    let saturation = chroma / max(peak, 1e-6);
+    let hue_preserved = min(x, vec3<f32>(1.0));
+    let preserve_hue = smoothstep(0.08, 0.35, saturation);
+    return mix(neutral_compressed, hue_preserved, preserve_hue);
 }
 
 fn display_render(rgb: vec3<f32>) -> vec3<f32> {

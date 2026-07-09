@@ -24,14 +24,6 @@ fn reconstruct_sensor_highlights(rgb: vec3<f32>, clip_mask: f32) -> vec3<f32> {
     let sensor_rgb = rgb / max(wb, vec3<f32>(1e-8));
     let clip = sensor_clip_level();
 
-    let clipped_count =
-        select(0.0, 1.0, r_clipped) +
-        select(0.0, 1.0, g_clipped) +
-        select(0.0, 1.0, b_clipped);
-    let near_clip = smoothstep(vec3<f32>(0.94 * clip), vec3<f32>(clip), sensor_rgb);
-    let near_count = near_clip.r + near_clip.g + near_clip.b;
-    let unreliable_chroma = smoothstep(1.25, 2.0, max(clipped_count, near_count));
-
     // Work in the WB-applied camera space. Neutral in this space remains neutral
     // after the camera-to-working matrix, while sensor-space neutral would be
     // tinted by reapplying WB gains.
@@ -39,22 +31,38 @@ fn reconstruct_sensor_highlights(rgb: vec3<f32>, clip_mask: f32) -> vec3<f32> {
 
     var C = SQRT3 * (rgb.r - rgb.g);
     var H = 2.0 * rgb.b - rgb.r - rgb.g;
+    let chroma = sqrt(C * C + H * H);
+    let saturation = chroma / max(L, 1e-6);
+    let low_saturation = 1.0 - smoothstep(0.08, 0.30, saturation);
+
+    let clipped_count =
+        select(0.0, 1.0, r_clipped) +
+        select(0.0, 1.0, g_clipped) +
+        select(0.0, 1.0, b_clipped);
+    let near_clip = smoothstep(vec3<f32>(0.975 * clip), vec3<f32>(clip), sensor_rgb);
+    let near_count = near_clip.r + near_clip.g + near_clip.b;
+    let multi_clipped = smoothstep(1.25, 2.0, clipped_count);
+    let all_near_clip = smoothstep(2.35, 3.0, near_count);
+
+    // Clipping alone is not enough evidence to erase chroma: saturated lamps can
+    // legitimately clip one or two channels. Neutralize mainly low-saturation
+    // multi-channel clips, where the remaining hue is usually demosaic or clip noise.
+    let unreliable_chroma = max(multi_clipped, all_near_clip) * low_saturation;
 
     let safe_rgb = min(rgb, clip * wb);
     let Cc = SQRT3 * (safe_rgb.r - safe_rgb.g);
     let Hc = 2.0 * safe_rgb.b - safe_rgb.r - safe_rgb.g;
 
-    let denom = C * C + H * H;
+    let denom = chroma * chroma;
 
     if (denom > 1e-12) {
-        let chroma = sqrt(denom);
         let safe_chroma = sqrt(Cc * Cc + Hc * Hc);
 
         // Never increase chroma.
         let ratio = min(1.0, safe_chroma / chroma);
 
-        C *= ratio * (1.0 - unreliable_chroma);
-        H *= ratio * (1.0 - unreliable_chroma);
+        C *= ratio;
+        H *= ratio;
     }
 
     // Inverse transform
