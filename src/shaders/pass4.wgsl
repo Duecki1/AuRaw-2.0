@@ -37,35 +37,62 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         let s2 = pos + vec2<i32>(0, 2);
         let w2 = pos + vec2<i32>(-2, 0);
         let e2 = pos + vec2<i32>(2, 0);
+        let n3 = pos + vec2<i32>(0, -3);
+        let s3 = pos + vec2<i32>(0, 3);
+        let w3 = pos + vec2<i32>(-3, 0);
+        let e3 = pos + vec2<i32>(3, 0);
 
+        let g_n  = textureLoad(tex2_read, clamp_pos(n), 0).x;
+        let g_s  = textureLoad(tex2_read, clamp_pos(s), 0).x;
+        let g_w  = textureLoad(tex2_read, clamp_pos(w), 0).x;
+        let g_e  = textureLoad(tex2_read, clamp_pos(e), 0).x;
         let g_n2 = textureLoad(tex2_read, clamp_pos(n2), 0).x;
         let g_s2 = textureLoad(tex2_read, clamp_pos(s2), 0).x;
         let g_w2 = textureLoad(tex2_read, clamp_pos(w2), 0).x;
         let g_e2 = textureLoad(tex2_read, clamp_pos(e2), 0).x;
-        
+
+        let g_n3 = textureLoad(tex2_read, clamp_pos(n3), 0).x;
+        let g_s3 = textureLoad(tex2_read, clamp_pos(s3), 0).x;
+        let g_w3 = textureLoad(tex2_read, clamp_pos(w3), 0).x;
+        let g_e3 = textureLoad(tex2_read, clamp_pos(e3), 0).x;
+
         let n1 = eps + abs(g0 - g_n2);
         let s1 = eps + abs(g0 - g_s2);
         let w1 = eps + abs(g0 - g_w2);
         let e1 = eps + abs(g0 - g_e2);
 
         for (var c = 0u; c <= 2u; c = c + 2u) {
-            let val_n = textureLoad(tex3_read, clamp_pos(n), 0);
-            let val_s = textureLoad(tex3_read, clamp_pos(s), 0);
-            let val_w = textureLoad(tex3_read, clamp_pos(w), 0);
-            let val_e = textureLoad(tex3_read, clamp_pos(e), 0);
-            
-            let c_n = select(val_n.x, val_n.y, c == 2u);
-            let c_s = select(val_s.x, val_s.y, c == 2u);
-            let c_w = select(val_w.x, val_w.y, c == 2u);
-            let c_e = select(val_e.x, val_e.y, c == 2u);
+            let val_n  = textureLoad(tex3_read, clamp_pos(n), 0);
+            let val_s  = textureLoad(tex3_read, clamp_pos(s), 0);
+            let val_w  = textureLoad(tex3_read, clamp_pos(w), 0);
+            let val_e  = textureLoad(tex3_read, clamp_pos(e), 0);
+            let val_n3 = textureLoad(tex3_read, clamp_pos(n3), 0);
+            let val_s3 = textureLoad(tex3_read, clamp_pos(s3), 0);
+            let val_w3 = textureLoad(tex3_read, clamp_pos(w3), 0);
+            let val_e3 = textureLoad(tex3_read, clamp_pos(e3), 0);
 
-            let sn_abs = abs(c_n - c_s);
-            let ew_abs = abs(c_w - c_e);
+            let c_n  = select(val_n.x,  val_n.y,  c == 2u);
+            let c_s  = select(val_s.x,  val_s.y,  c == 2u);
+            let c_w  = select(val_w.x,  val_w.y,  c == 2u);
+            let c_e  = select(val_e.x,  val_e.y,  c == 2u);
+            let c_n3 = select(val_n3.x, val_n3.y, c == 2u);
+            let c_s3 = select(val_s3.x, val_s3.y, c == 2u);
+            let c_w3 = select(val_w3.x, val_w3.y, c == 2u);
+            let c_e3 = select(val_e3.x, val_e3.y, c == 2u);
 
-            let n_grad = n1 + sn_abs;
-            let s_grad = s1 + sn_abs;
-            let w_grad = w1 + ew_abs;
-            let e_grad = e1 + ew_abs;
+            // reconstruct absolute (non-differenced) channel values
+            let rgb_n  = g_n  + c_n;
+            let rgb_s  = g_s  + c_s;
+            let rgb_w  = g_w  + c_w;
+            let rgb_e  = g_e  + c_e;
+
+            let sn_abs = abs(rgb_n - rgb_s);
+            let ew_abs = abs(rgb_w - rgb_e);
+
+            let n_grad = n1 + sn_abs + abs(rgb_n - (g_n3 + c_n3));
+            let s_grad = s1 + sn_abs + abs(rgb_s - (g_s3 + c_s3));
+            let w_grad = w1 + ew_abs + abs(rgb_w - (g_w3 + c_w3));
+            let e_grad = e1 + ew_abs + abs(rgb_e - (g_e3 + c_e3));
 
             let v_est = (n_grad * c_s + s_grad * c_n) / (n_grad + s_grad);
             let h_est = (e_grad * c_w + w_grad * c_e) / (e_grad + w_grad);
@@ -79,8 +106,7 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b_val = g0 + diffB;
 
     var camera_rgb = vec3<f32>(r_val, g0, b_val);
-    
-    // Fix: Properly assign clip masks based on actual color at `pos`
+
     let r_clip = select(0.0, clip, cc == 0u);
     let g_clip = select(0.0, clip, cc == 1u);
     let b_clip = select(0.0, clip, cc == 2u);
