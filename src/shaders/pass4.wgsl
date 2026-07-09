@@ -13,6 +13,20 @@ fn chroma_filter_weight(dx: i32, dy: i32) -> f32 {
     return 1.0;
 }
 
+fn suppress_highlight_chroma(pos: vec2<i32>, diffs: vec2<f32>) -> vec2<f32> {
+    let p = clamp_pos(pos);
+    let g = textureLoad(tex2_read, p, 0).x;
+    let rgb = vec3<f32>(g + diffs.x, g, g + diffs.y);
+    let sensor_rgb = rgb / max(params.wb.xyz, vec3<f32>(1e-8));
+    let clip = sensor_clip_level();
+    let sensor_peak = max(max(sensor_rgb.r, sensor_rgb.g), sensor_rgb.b);
+    let clip_mask = textureLoad(tex2_read, p, 0).w;
+    let near_clip = smoothstep(0.88 * clip, clip, sensor_peak);
+    let clipped = select(0.0, 1.0, clip_mask > 0.5);
+    let suppress = max(near_clip, clipped);
+    return diffs * (1.0 - suppress);
+}
+
 fn smoothed_chroma_diffs(pos: vec2<i32>) -> vec2<f32> {
     let center = clamp_pos(pos);
     let g_center = textureLoad(tex2_read, center, 0).x;
@@ -40,11 +54,11 @@ fn smoothed_chroma_diffs(pos: vec2<i32>) -> vec2<f32> {
         }
     }
 
+    var diffs = textureLoad(tex3_read, center, 0).xy;
     if sum_w > 0.0 {
-        return sum / sum_w;
+        diffs = sum / sum_w;
     }
-
-    return textureLoad(tex3_read, center, 0).xy;
+    return suppress_highlight_chroma(center, diffs);
 }
 
 fn highlight_still_clipped(rgb: vec3<f32>, clip_mask: f32) -> bool {
