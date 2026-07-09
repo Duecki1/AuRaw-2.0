@@ -9,7 +9,6 @@ pub struct AurawApp {
     pub gpu_pipeline: Option<RawGpuPipeline>,
     pub exposure: ExposureParams,
 
-    /// Set whenever a param changes; cleared once we've dispatched a recompute.
     pub dirty: bool,
 
     pub status: String,
@@ -33,7 +32,6 @@ impl AurawApp {
         Self::default()
     }
 
-    /// Open a file dialog, decode the chosen RAW, and (re)build the GPU pipeline.
     pub fn open_file_dialog(&mut self, frame: &eframe::Frame) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter(
@@ -72,8 +70,6 @@ impl AurawApp {
         let queue = &render_state.queue;
         let mut renderer = render_state.renderer.write();
 
-        // Drop the old pipeline first so its egui texture id is freed before
-        // we register a new one.
         if let Some(old) = self.gpu_pipeline.take() {
             renderer.free_texture(&old.egui_texture_id);
         }
@@ -117,7 +113,6 @@ impl AurawApp {
 
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // Handle top menu / open button
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open RAW…").clicked() {
@@ -128,7 +123,6 @@ impl eframe::App for AurawApp {
             });
         });
 
-        // Right-hand sidebar with the exposure controls
         egui::Panel::right("sidebar")
             .resizable(true)
             .default_size(280.0)
@@ -136,7 +130,6 @@ impl eframe::App for AurawApp {
                 Sidebar::show(ui, self);
             });
 
-        // Central preview area
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(pipeline) = &self.gpu_pipeline {
                 let avail = ui.available_size();
@@ -165,11 +158,8 @@ impl eframe::App for AurawApp {
             }
         });
 
-        // Recompute AFTER ui code so any slider drags this frame are picked up
-        // immediately, before the frame is presented.
         self.recompute_if_dirty(frame);
 
-        // Keep redrawing while a slider is being dragged
         if self.dirty {
             ui.ctx().request_repaint();
         }

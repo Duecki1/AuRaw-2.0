@@ -11,7 +11,7 @@ pub struct LoadedRaw {
     pub raw_pixels: Vec<u16>,
     pub color_indices: Vec<u8>,
     pub wb_coeffs: [f32; 4],
-    pub cam_to_srgb: [[f32; 4]; 3], // Field name kept for struct compatibility
+    pub cam_to_srgb: [[f32; 4]; 3],
     pub black_levels: [f32; 4],
     pub white_levels: [f32; 4],
 }
@@ -132,7 +132,7 @@ mod libraw_loader {
             iparams,
         )?;
         let wb_coeffs = white_balance(color.cam_mul);
-        let cam_to_srgb = cam_to_working(color.cam_xyz); // <-- FIXED THIS LINE
+        let cam_to_srgb = camera_to_working_matrix(color, wb_coeffs);
         let black_levels = black_levels(color.black, &color.cblack, iparams);
         let white_levels = white_levels(color.maximum);
 
@@ -272,13 +272,9 @@ mod libraw_loader {
         [white; 4]
     }
 
-    /// Camera → linear Rec2020 working space.
-    /// Rec2020 has a wider gamut than sRGB, producing fewer negative channels
-    /// and preserving more color information during processing.
     fn cam_to_working(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
         let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
 
-        // XYZ → linear Rec2020 (ITU-R BT.2020)
         let xyz_to_rec2020 = [
             [ 1.7166512, -0.3556708, -0.2533663],
             [-0.6666844,  1.6164812,  0.0157685],
@@ -294,9 +290,6 @@ mod libraw_loader {
             }
         }
 
-        // Merge G2 (column 3) into G1 (column 1).
-        // After demosaic, the single green value represents both G1 and G2.
-        // Forward transform: XYZ = R*c0 + G*c1 + B*c2 + G*c3 = R*c0 + G*(c1+c3) + B*c2
         for row in 0..3 {
             out[row][1] += out[row][3];
         }
@@ -311,6 +304,130 @@ mod libraw_loader {
             ]
         } else {
             out
+        }
+    }
+
+    fn camera_to_working_matrix(
+        color: &ffi::libraw_colordata_t,
+        wb_coeffs: [f32; 4],
+    ) -> [[f32; 4]; 3] {
+        if let Some(xyz_to_cam) = interpolated_dng_xyz_to_cam(color, wb_coeffs) {
+            cam_to_working(xyz_to_cam)
+        } else {
+            cam_to_working(color.cam_xyz)
+        }
+    }
+
+    fn interpolated_dng_xyz_to_cam(
+        color: &ffi::libraw_colordata_t,
+        wb_coeffs: [f32; 4],
+    ) -> Option<[[f32; 3]; 4]> {
+        let matrix0 = calibrated_dng_xyz_to_cam(&color.dng_color[0])?;
+        let matrix1 = calibrated_dng_xyz_to_cam(&color.dng_color[1])?;
+        let cct0 = calibration_illuminant_cct(color.dng_color[0].illuminant)?;
+        let cct1 = calibration_illuminant_cct(color.dng_color[1].illuminant)?;
+        let scene_cct = estimate_scene_cct(color, wb_coeffs)?;
+
+        let mired0 = 1_000_000.0 / cct0;
+        let mired1 = 1_000_000.0 / cct1;
+        let mired = 1_000_000.0 / scene_cct;
+        let denom = mired1 - mired0;
+        if denom.abs() < 1e-6 {
+            return None;
+        }
+
+        let t = ((mired - mired0) / denom).clamp(0.0, 1.0);
+        let mut out = [[0.0; 3]; 4];
+        for row in 0..4 {
+            for col in 0..3 {
+                out[row][col] = matrix0[row][col] * (1.0 - t) + matrix1[row][col] * t;
+            }
+        }
+        Some(out)
+    }
+
+    fn calibrated_dng_xyz_to_cam(dng: &ffi::libraw_dng_color_t) -> Option<[[f32; 3]; 4]> {
+        if !matrix4x3_is_valid(dng.colormatrix) {
+            return None;
+        }
+
+        let calibration = identity_fallback_4x4(dng.calibration);
+        let mut out = [[0.0; 3]; 4];
+        for row in 0..4 {
+            for col in 0..3 {
+                for k in 0..4 {
+                    out[row][col] += calibration[row][k] * dng.colormatrix[k][col];
+                }
+            }
+        }
+
+        if matrix4x3_is_valid(out) {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    fn identity_fallback_4x4(matrix: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+        if matrix
+            .iter()
+            .flatten()
+            .any(|v| v.is_finite() && v.abs() > 1e-8)
+        {
+            matrix
+        } else {
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        }
+    }
+
+    fn matrix4x3_is_valid(matrix: [[f32; 3]; 4]) -> bool {
+        matrix.iter().flatten().all(|v| v.is_finite())
+            && matrix.iter().flatten().any(|v| v.abs() > 1e-8)
+    }
+
+    fn estimate_scene_cct(color: &ffi::libraw_colordata_t, wb_coeffs: [f32; 4]) -> Option<f32> {
+        let mut best_cct = 0.0;
+        let mut best_error = f32::INFINITY;
+
+        for row in color.WBCT_Coeffs {
+            let cct = row[0];
+            if !cct.is_finite() || cct <= 0.0 {
+                continue;
+            }
+
+            let candidate = white_balance([row[1], row[2], row[3], row[4]]);
+            let error = (candidate[0].ln() - wb_coeffs[0].ln()).abs()
+                + (candidate[2].ln() - wb_coeffs[2].ln()).abs();
+
+            if error < best_error {
+                best_error = error;
+                best_cct = cct;
+            }
+        }
+
+        if best_cct > 0.0 {
+            Some(best_cct.clamp(1500.0, 50000.0))
+        } else {
+            None
+        }
+    }
+
+    fn calibration_illuminant_cct(illuminant: u16) -> Option<f32> {
+        match illuminant {
+            17 => Some(2856.0),
+            18 => Some(4874.0),
+            19 => Some(6774.0),
+            20 => Some(5503.0),
+            21 => Some(6504.0),
+            22 => Some(7504.0),
+            23 => Some(5003.0),
+            24 => Some(3200.0),
+            _ => None,
         }
     }
 
