@@ -47,7 +47,6 @@ fn pass1_vh_lpf(@builtin(global_invocation_id) gid: vec3<u32>) {
         let ne = raw_cfa_at(pos + vec2<i32>(1, -1));
         let sw = raw_cfa_at(pos + vec2<i32>(-1, 1));
         let se = raw_cfa_at(pos + vec2<i32>(1, 1));
-        // Normalized to sum to 1.0
         lpf = 1.0 * c + 0.5 * (n + s + w + e) + 0.25 * (nw + ne + sw + se);
     }
 

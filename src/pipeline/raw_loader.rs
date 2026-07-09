@@ -11,7 +11,7 @@ pub struct LoadedRaw {
     pub raw_pixels: Vec<u16>,
     pub color_indices: Vec<u8>,
     pub wb_coeffs: [f32; 4],
-    pub cam_to_srgb: [[f32; 4]; 3], // Field name kept for struct compatibility
+    pub cam_to_srgb: [[f32; 4]; 3],
     pub black_levels: [f32; 4],
     pub white_levels: [f32; 4],
 }
@@ -272,13 +272,9 @@ mod libraw_loader {
         [white; 4]
     }
 
-    /// Camera → linear Rec2020 working space.
-    /// Rec2020 has a wider gamut than sRGB, producing fewer negative channels
-    /// and preserving more color information during processing.
     fn cam_to_working(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
         let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
 
-        // XYZ → linear Rec2020 (ITU-R BT.2020)
         let xyz_to_rec2020 = [
             [ 1.7166512, -0.3556708, -0.2533663],
             [-0.6666844,  1.6164812,  0.0157685],
@@ -294,9 +290,6 @@ mod libraw_loader {
             }
         }
 
-        // Merge G2 (column 3) into G1 (column 1).
-        // After demosaic, the single green value represents both G1 and G2.
-        // Forward transform: XYZ = R*c0 + G*c1 + B*c2 + G*c3 = R*c0 + G*(c1+c3) + B*c2
         for row in 0..3 {
             out[row][1] += out[row][3];
         }
@@ -426,14 +419,14 @@ mod libraw_loader {
 
     fn calibration_illuminant_cct(illuminant: u16) -> Option<f32> {
         match illuminant {
-            17 => Some(2856.0),  // Standard Light A
-            18 => Some(4874.0),  // Standard Light B
-            19 => Some(6774.0),  // Standard Light C
-            20 => Some(5503.0),  // D55
-            21 => Some(6504.0),  // D65
-            22 => Some(7504.0),  // D75
-            23 => Some(5003.0),  // D50
-            24 => Some(3200.0),  // ISO Studio Tungsten
+            17 => Some(2856.0),
+            18 => Some(4874.0),
+            19 => Some(6774.0),
+            20 => Some(5503.0),
+            21 => Some(6504.0),
+            22 => Some(7504.0),
+            23 => Some(5003.0),
+            24 => Some(3200.0),
             _ => None,
         }
     }

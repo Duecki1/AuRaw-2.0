@@ -1,11 +1,8 @@
-// color.wgsl
-
 fn apply_wb(rgb: vec3<f32>) -> vec3<f32> {
     return rgb * params.wb.rgb;
 }
 
 fn cam_to_working(rgb: vec3<f32>) -> vec3<f32> {
-    // Camera → linear Rec2020 (wide-gamut working space)
     let r = dot(params.cam_to_srgb_0.xyz, rgb);
     let g = dot(params.cam_to_srgb_1.xyz, rgb);
     let b = dot(params.cam_to_srgb_2.xyz, rgb);

@@ -1,5 +1,3 @@
-// basic_adjustments.wgsl
-
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
     let white = exp2(-params.exposure);
     let scale = 1.0 / max(white - params.black, 1e-4);
@@ -69,9 +67,8 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
     let vibrance_boost = params.vibrance * vibrance_factor;
     let total_boost = max(0.0, 1.0 + params.saturation + vibrance_boost);
 
-    // Skin-tone protection: detect skin-like RGB ordering and reduce boosts.
-    let r_above_g = step(rgb.g, rgb.r);   // 1.0 if R ≥ G
-    let g_above_b = step(rgb.b, rgb.g);   // 1.0 if G ≥ B
+    let r_above_g = step(rgb.g, rgb.r); 
+    let g_above_b = step(rgb.b, rgb.g); 
     let is_skin_like = r_above_g * g_above_b;
     let skin_protection = mix(1.0, 0.6, is_skin_like);
 
