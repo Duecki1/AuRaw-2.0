@@ -26,7 +26,7 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         let vh_sw = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1, 1)), 0).x;
         let vh_se = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(1, 1)), 0).x;
         let vh_n = 0.25 * (vh_nw + vh_ne + vh_sw + vh_se);
-        let vh_disc = select(vh_n, vh_c, abs(0.5 - vh_c) < abs(0.5 - vh_n));
+        let vh_disc = select(vh_c, vh_n, abs(0.5 - vh_c) < abs(0.5 - vh_n));
 
         let eps = 1e-5;
         let n  = pos + vec2<i32>(0, -1);

@@ -67,7 +67,7 @@ fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pq_sw = textureLoad(tex2_read, clamp_pos(sw), 0).z;
         let pq_se = textureLoad(tex2_read, clamp_pos(se), 0).z;
         let pq_n = 0.25 * (pq_nw + pq_ne + pq_sw + pq_se);
-        let pq_disc = select(pq_n, pq_c, abs(0.5 - pq_c) < abs(0.5 - pq_n));
+        let pq_disc = select(pq_c, pq_n, abs(0.5 - pq_c) < abs(0.5 - pq_n));
 
         diffB = mix(p_est, q_est, pq_disc);
         
@@ -125,7 +125,7 @@ fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pq_sw = textureLoad(tex2_read, clamp_pos(sw), 0).z;
         let pq_se = textureLoad(tex2_read, clamp_pos(se), 0).z;
         let pq_n = 0.25 * (pq_nw + pq_ne + pq_sw + pq_se);
-        let pq_disc = select(pq_n, pq_c, abs(0.5 - pq_c) < abs(0.5 - pq_n));
+        let pq_disc = select(pq_c, pq_n, abs(0.5 - pq_c) < abs(0.5 - pq_n));
 
         diffR = mix(p_est, q_est, pq_disc);
     }
