@@ -1,6 +1,11 @@
-fn interpolate_green(pos: vec2<i32>) -> f32 {
+// demosaic.wgsl
+
+// Returns vec2(value, is_clipped)
+fn interpolate_green_at(pos: vec2<i32>) -> vec2<f32> {
     if color_at(pos) == 1u {
-        return normalized_raw_at(pos);
+        let v = normalized_raw_at(pos);
+        let c = select(0.0, 1.0, is_raw_clipped(pos));
+        return vec2<f32>(v, c);
     }
 
     let left = sample_if_color(pos + vec2<i32>(-1, 0), 1u);
@@ -13,77 +18,115 @@ fn interpolate_green(pos: vec2<i32>) -> f32 {
     let v_sum = top.x + bottom.x;
     let v_count = top.y + bottom.y;
 
-    // *** FIX: use gradient-based edge direction, not sample count. ***
-    // The old code used average4() on all four neighbors (isotropic),
-    // which causes zippering on edges. Now we pick the smoother
-    // direction (lower gradient) like PPG/Malvar.
+    var value = 0.0;
+    var clipped = 0.0;
+
     if h_count > 0.0 && v_count > 0.0 {
         let h_grad = abs(left.x - right.x);
         let v_grad = abs(top.x - bottom.x);
         if h_grad <= v_grad {
-            return h_sum / h_count;
+            value = h_sum / h_count;
+            clipped = max(left.z, right.z);
+        } else {
+            value = v_sum / v_count;
+            clipped = max(top.z, bottom.z);
         }
-        return v_sum / v_count;
+    } else if h_count > 0.0 {
+        value = h_sum / h_count;
+        clipped = max(left.z, right.z);
+    } else if v_count > 0.0 {
+        value = v_sum / v_count;
+        clipped = max(top.z, bottom.z);
+    } else {
+        value = normalized_raw_at(pos);
+        clipped = select(0.0, 1.0, is_raw_clipped(pos));
     }
-    if h_count > 0.0 {
-        return h_sum / h_count;
-    }
-    if v_count > 0.0 {
-        return v_sum / v_count;
-    }
-    return normalized_raw_at(pos);
+
+    return vec2<f32>(value, clipped);
 }
 
-fn interpolate_red_or_blue(pos: vec2<i32>, channel: u32) -> f32 {
+// Returns vec2(value, is_clipped)
+fn interpolate_red_or_blue(pos: vec2<i32>, channel: u32) -> vec2<f32> {
     let center_color = color_at(pos);
+    let green_center = interpolate_green_at(pos);
+    
     if center_color == channel {
-        return normalized_raw_at(pos);
+        let v = normalized_raw_at(pos);
+        let c = select(0.0, 1.0, is_raw_clipped(pos));
+        return vec2<f32>(v, c);
     }
 
-    let fallback = normalized_raw_at(pos);
+    var sum_diff = 0.0;
+    var count = 0.0;
+    var clipped = 0.0;
+
     if center_color == 1u {
         let left = sample_if_color(pos + vec2<i32>(-1, 0), channel);
         let right = sample_if_color(pos + vec2<i32>(1, 0), channel);
         let top = sample_if_color(pos + vec2<i32>(0, -1), channel);
         let bottom = sample_if_color(pos + vec2<i32>(0, 1), channel);
 
-        let h_sum = left.x + right.x;
-        let h_count = left.y + right.y;
-        let v_sum = top.x + bottom.x;
-        let v_count = top.y + bottom.y;
+        if left.y > 0.0 {
+            sum_diff += left.x - interpolate_green_at(pos + vec2<i32>(-1, 0)).x;
+            count += 1.0;
+            clipped = max(clipped, left.z);
+        }
+        if right.y > 0.0 {
+            sum_diff += right.x - interpolate_green_at(pos + vec2<i32>(1, 0)).x;
+            count += 1.0;
+            clipped = max(clipped, right.z);
+        }
+        if top.y > 0.0 {
+            sum_diff += top.x - interpolate_green_at(pos + vec2<i32>(0, -1)).x;
+            count += 1.0;
+            clipped = max(clipped, top.z);
+        }
+        if bottom.y > 0.0 {
+            sum_diff += bottom.x - interpolate_green_at(pos + vec2<i32>(0, 1)).x;
+            count += 1.0;
+            clipped = max(clipped, bottom.z);
+        }
+    } else {
+        let d1 = sample_if_color(pos + vec2<i32>(-1, -1), channel);
+        let d2 = sample_if_color(pos + vec2<i32>(1, -1), channel);
+        let d3 = sample_if_color(pos + vec2<i32>(-1, 1), channel);
+        let d4 = sample_if_color(pos + vec2<i32>(1, 1), channel);
 
-        // *** FIX: gradient-based edge direction (was sample-count based). ***
-        if h_count > 0.0 && v_count > 0.0 {
-            let h_grad = abs(left.x - right.x);
-            let v_grad = abs(top.x - bottom.x);
-            if h_grad <= v_grad {
-                return h_sum / h_count;
-            }
-            return v_sum / v_count;
+        if d1.y > 0.0 {
+            sum_diff += d1.x - interpolate_green_at(pos + vec2<i32>(-1, -1)).x;
+            count += 1.0;
+            clipped = max(clipped, d1.z);
         }
-        if h_count > 0.0 {
-            return h_sum / h_count;
+        if d2.y > 0.0 {
+            sum_diff += d2.x - interpolate_green_at(pos + vec2<i32>(1, -1)).x;
+            count += 1.0;
+            clipped = max(clipped, d2.z);
         }
-        if v_count > 0.0 {
-            return v_sum / v_count;
+        if d3.y > 0.0 {
+            sum_diff += d3.x - interpolate_green_at(pos + vec2<i32>(-1, 1)).x;
+            count += 1.0;
+            clipped = max(clipped, d3.z);
         }
-        return fallback;
+        if d4.y > 0.0 {
+            sum_diff += d4.x - interpolate_green_at(pos + vec2<i32>(1, 1)).x;
+            count += 1.0;
+            clipped = max(clipped, d4.z);
+        }
     }
 
-    // On opposite-color pixel: diagonal average
-    let diagonal = average4(
-        sample_if_color(pos + vec2<i32>(-1, -1), channel),
-        sample_if_color(pos + vec2<i32>(1, -1), channel),
-        sample_if_color(pos + vec2<i32>(-1, 1), channel),
-        sample_if_color(pos + vec2<i32>(1, 1), channel),
-    );
-    return resolve_average(diagonal, fallback);
+    if count > 0.0 {
+        return vec2<f32>(green_center.x + sum_diff / count, max(green_center.y, clipped));
+    }
+    return vec2<f32>(green_center.x, green_center.y);
 }
 
-fn demosaic(pos: vec2<i32>) -> vec3<f32> {
-    return vec3<f32>(
-        interpolate_red_or_blue(pos, 0u),
-        interpolate_green(pos),
-        interpolate_red_or_blue(pos, 2u),
-    );
+// Returns vec4(rgb, clip_mask)
+fn demosaic(pos: vec2<i32>) -> vec4<f32> {
+    let r = interpolate_red_or_blue(pos, 0u);
+    let g = interpolate_green_at(pos);
+    let b = interpolate_red_or_blue(pos, 2u);
+    
+    // Pack clip mask: 1=R, 10=G, 100=B
+    let mask = r.y * 1.0 + g.y * 10.0 + b.y * 100.0;
+    return vec4<f32>(r.x, g.x, b.x, mask);
 }

@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
@@ -10,7 +11,7 @@ pub struct LoadedRaw {
     pub raw_pixels: Vec<u16>,
     pub color_indices: Vec<u8>,
     pub wb_coeffs: [f32; 4],
-    pub cam_to_srgb: [[f32; 4]; 3],
+    pub cam_to_srgb: [[f32; 4]; 3], // Field name kept for struct compatibility
     pub black_levels: [f32; 4],
     pub white_levels: [f32; 4],
 }
@@ -131,7 +132,7 @@ mod libraw_loader {
             iparams,
         )?;
         let wb_coeffs = white_balance(color.cam_mul);
-        let cam_to_srgb = cam_to_srgb(color.cam_xyz);
+        let cam_to_srgb = cam_to_working(color.cam_xyz); // <-- FIXED THIS LINE
         let black_levels = black_levels(color.black, &color.cblack, iparams);
         let white_levels = white_levels(color.maximum);
 
@@ -200,7 +201,7 @@ mod libraw_loader {
         Ok((out_width as u32, out_height as u32, pixels, colors))
     }
 
-   fn oriented_source_pos(
+    fn oriented_source_pos(
         x: usize,
         y: usize,
         width: usize,
@@ -271,47 +272,47 @@ mod libraw_loader {
         [white; 4]
     }
 
-    fn cam_to_srgb(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
-    let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
-    let xyz_to_srgb = [
-        [3.2404542, -1.5371385, -0.4985314],
-        [-0.9692660, 1.8760108, 0.0415560],
-        [0.0556434, -0.2040259, 1.0572252],
-    ];
+    /// Camera → linear Rec2020 working space.
+    /// Rec2020 has a wider gamut than sRGB, producing fewer negative channels
+    /// and preserving more color information during processing.
+    fn cam_to_working(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
+        let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
 
-    let mut out = [[0.0; 4]; 3];
-    for row in 0..3 {
-        for col in 0..4 {
-            out[row][col] = xyz_to_srgb[row][0] * cam_to_xyz[0][col]
-                + xyz_to_srgb[row][1] * cam_to_xyz[1][col]
-                + xyz_to_srgb[row][2] * cam_to_xyz[2][col];
+        // XYZ → linear Rec2020 (ITU-R BT.2020)
+        let xyz_to_rec2020 = [
+            [ 1.7166512, -0.3556708, -0.2533663],
+            [-0.6666844,  1.6164812,  0.0157685],
+            [ 0.0176399, -0.0428107,  0.9425388],
+        ];
+
+        let mut out = [[0.0; 4]; 3];
+        for row in 0..3 {
+            for col in 0..4 {
+                out[row][col] = xyz_to_rec2020[row][0] * cam_to_xyz[0][col]
+                    + xyz_to_rec2020[row][1] * cam_to_xyz[1][col]
+                    + xyz_to_rec2020[row][2] * cam_to_xyz[2][col];
+            }
+        }
+
+        // Merge G2 (column 3) into G1 (column 1).
+        // After demosaic, the single green value represents both G1 and G2.
+        // Forward transform: XYZ = R*c0 + G*c1 + B*c2 + G*c3 = R*c0 + G*(c1+c3) + B*c2
+        for row in 0..3 {
+            out[row][1] += out[row][3];
+        }
+
+        if out.iter().flatten().any(|v| !v.is_finite())
+            || out.iter().flatten().all(|v| *v == 0.0)
+        {
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ]
+        } else {
+            out
         }
     }
-
-    // *** FIX: Merge G2 (column 3) into G1 (column 1). ***
-    // After demosaic we have a single green value per pixel that represents
-    // BOTH G1 and G2 (they measure the same physical green light). The
-    // forward transform is:
-    //   XYZ = R*c0 + G*c1 + B*c2 + G*c3 = R*c0 + G*(c1+c3) + B*c2
-    // so the green column must be the SUM of the two green columns.
-    // Without this merge, green is under-weighted by ~50%, causing
-    // magenta color casts across the entire image.
-    for row in 0..3 {
-        out[row][1] += out[row][3];
-    }
-
-    if out.iter().flatten().any(|v| !v.is_finite())
-        || out.iter().flatten().all(|v| *v == 0.0)
-    {
-        [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ]
-    } else {
-        out
-    }
-}
 
     fn normalized_pseudoinverse(mut xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
         for row in &mut xyz_to_cam {
