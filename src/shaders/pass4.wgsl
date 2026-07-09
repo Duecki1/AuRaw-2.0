@@ -62,11 +62,7 @@ fn highlight_still_clipped(rgb: vec3<f32>, clip_mask: f32) -> bool {
         || (b_clipped && sensor_rgb.b >= clip);
 }
 
-fn ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<i32> {
-    if abs(amount) < 1e-6 {
-        return clamp_pos(pos);
-    }
-
+fn ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
     let extent = vec2<f32>(f32(params.width - 1u), f32(params.height - 1u));
     let center = 0.5 * extent;
     let p = vec2<f32>(pos);
@@ -74,7 +70,7 @@ fn ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<i32> {
     let norm = rel / max(center, vec2<f32>(1.0));
     let r2 = dot(norm, norm);
     let scale = 1.0 + amount * 0.001 * r2;
-    return clamp_pos(vec2<i32>(round(center + rel * scale)));
+    return clamp(center + rel * scale, vec2<f32>(0.0), extent);
 }
 
 fn reconstructed_channel_at(pos: vec2<i32>, channel: u32) -> f32 {
@@ -84,13 +80,29 @@ fn reconstructed_channel_at(pos: vec2<i32>, channel: u32) -> f32 {
     return select(g + diffs.x, g + diffs.y, channel == 2u);
 }
 
+fn reconstructed_channel_bilinear(pos: vec2<f32>, channel: u32) -> f32 {
+    let pf = floor(pos);
+    let p0 = vec2<i32>(i32(pf.x), i32(pf.y));
+    let p1 = p0 + vec2<i32>(1, 1);
+    let f = fract(pos);
+
+    let v00 = reconstructed_channel_at(p0, channel);
+    let v10 = reconstructed_channel_at(vec2<i32>(p1.x, p0.y), channel);
+    let v01 = reconstructed_channel_at(vec2<i32>(p0.x, p1.y), channel);
+    let v11 = reconstructed_channel_at(p1, channel);
+
+    return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+}
+
 fn apply_lateral_ca(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let r_pos = ca_warped_pos(pos, params.ca_red);
-    let b_pos = ca_warped_pos(pos, params.ca_blue);
+    let use_r = abs(params.ca_red) >= 1e-6;
+    let use_b = abs(params.ca_blue) >= 1e-6;
+    let r = select(rgb.r, reconstructed_channel_bilinear(ca_warped_pos(pos, params.ca_red), 0u), use_r);
+    let b = select(rgb.b, reconstructed_channel_bilinear(ca_warped_pos(pos, params.ca_blue), 2u), use_b);
     return vec3<f32>(
-        reconstructed_channel_at(r_pos, 0u),
+        r,
         rgb.g,
-        reconstructed_channel_at(b_pos, 2u),
+        b,
     );
 }
 
@@ -127,6 +139,27 @@ fn apply_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let effective = strength * mix(0.35, 1.0, shadow);
     let denoised_chroma = mix(center_chroma, sum / sum_w, effective);
     return vec3<f32>(rgb.g + denoised_chroma.x, rgb.g, rgb.g + denoised_chroma.y);
+}
+
+fn refine_green_with_chroma(pos: vec2<i32>, cc: u32, clip: f32, g0: f32, diffR: f32, diffB: f32) -> f32 {
+    if cc == 1u || clip > 0.5 {
+        return g0;
+    }
+
+    let raw = raw_cfa_at(pos);
+    let chroma = select(diffR, diffB, cc == 2u);
+    let candidate = raw - chroma;
+
+    let g_n = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(0, -1)), 0).x;
+    let g_s = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(0, 1)), 0).x;
+    let g_w = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(-1, 0)), 0).x;
+    let g_e = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(1, 0)), 0).x;
+    let lo = min(min(g_n, g_s), min(g_w, g_e));
+    let hi = max(max(g_n, g_s), max(g_w, g_e));
+    let range = max(hi - lo, 1e-4);
+    let bounded = clamp(candidate, lo - 0.25 * range - 0.02, hi + 0.25 * range + 0.02);
+
+    return mix(g0, bounded, 0.65);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -227,15 +260,16 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    let r_val = g0 + diffR;
-    let b_val = g0 + diffB;
+    let g_refined = refine_green_with_chroma(pos, cc, clip, g0, diffR, diffB);
+    let r_val = g_refined + diffR;
+    let b_val = g_refined + diffB;
 
     let r_clip = select(0.0, clip, cc == 0u);
     let g_clip = select(0.0, clip, cc == 1u);
     let b_clip = select(0.0, clip, cc == 2u);
     let final_clip = r_clip * 1.0 + g_clip * 10.0 + b_clip * 100.0;
 
-    var camera_rgb = apply_lateral_ca(pos, vec3<f32>(r_val, g0, b_val));
+    var camera_rgb = apply_lateral_ca(pos, vec3<f32>(r_val, g_refined, b_val));
     camera_rgb = apply_chroma_denoise(pos, camera_rgb);
     camera_rgb = reconstruct_sensor_highlights(camera_rgb, final_clip);
 
