@@ -21,9 +21,13 @@ fn suppress_highlight_chroma(pos: vec2<i32>, diffs: vec2<f32>) -> vec2<f32> {
     let clip = sensor_clip_level();
     let sensor_peak = max(max(sensor_rgb.r, sensor_rgb.g), sensor_rgb.b);
     let clip_mask = textureLoad(tex2_read, p, 0).w;
-    let near_clip = smoothstep(0.88 * clip, clip, sensor_peak);
+    let peak = max(max(rgb.r, rgb.g), rgb.b);
+    let chroma = length(diffs);
+    let saturation = chroma / max(peak, 1e-6);
+    let low_saturation = 1.0 - smoothstep(0.06, 0.28, saturation);
+    let near_clip = smoothstep(0.95 * clip, clip, sensor_peak);
     let clipped = select(0.0, 1.0, clip_mask > 0.5);
-    let suppress = max(near_clip, clipped);
+    let suppress = max(near_clip, clipped) * low_saturation;
     return diffs * (1.0 - suppress);
 }
 
