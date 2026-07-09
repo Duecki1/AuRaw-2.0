@@ -1,5 +1,16 @@
+// raw_sampling.wgsl
+
 fn color_at(pos: vec2<i32>) -> u32 {
     return textureLoad(color_tex, clamp_pos(pos), 0).r;
+}
+
+fn is_raw_clipped(pos: vec2<i32>) -> bool {
+    let p = clamp_pos(pos);
+    let color = min(color_at(p), 3u);
+    let raw = f32(textureLoad(raw_tex, p, 0).r);
+    let white = params.white_levels[color];
+    // Treat as clipped if it hits the sensor white level
+    return raw >= white - 1.0;
 }
 
 fn raw_value_at(pos: vec2<i32>) -> f32 {
@@ -8,6 +19,7 @@ fn raw_value_at(pos: vec2<i32>) -> f32 {
     let raw = f32(textureLoad(raw_tex, p, 0).r);
     let black = params.black_levels[color];
     let white = max(params.white_levels[color], black + 1.0);
+    // Preserve headroom above 1.0 for highlight reconstruction
     return clamp((raw - black) / (white - black), 0.0, 4.0);
 }
 
@@ -17,8 +29,8 @@ fn normalized_raw_at(pos: vec2<i32>) -> f32 {
     var sum = 0.0;
     var count = 0.0;
 
-    for(var dy = -2; dy <= 2; dy = dy + 1) {
-        for(var dx = -2; dx <= 2; dx = dx + 1) {
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
             if dx == 0 && dy == 0 {
                 continue;
             }
@@ -35,10 +47,6 @@ fn normalized_raw_at(pos: vec2<i32>) -> f32 {
     }
 
     let local = sum / count;
-    // Only reject genuinely isolated hot/dead pixels (sensor defects), not
-    // real high-frequency scene detail. The old thresholds fired on normal
-    // edges/texture and desynced R/G/B detail per-channel, producing a
-    // checkerboard/moire pattern across the whole image.
     if center > local * 6.0 + 0.25 {
         return local;
     }
@@ -48,24 +56,12 @@ fn normalized_raw_at(pos: vec2<i32>) -> f32 {
     return center;
 }
 
-fn sample_if_color(pos: vec2<i32>, channel: u32) -> vec2<f32> {
+// Returns vec3(value, is_valid, is_clipped)
+fn sample_if_color(pos: vec2<i32>, channel: u32) -> vec3<f32> {
     if color_at(pos) == channel {
-        return vec2<f32>(normalized_raw_at(pos), 1.0);
+        let v = normalized_raw_at(pos);
+        let c = select(0.0, 1.0, is_raw_clipped(pos));
+        return vec3<f32>(v, 1.0, c);
     }
-    return vec2<f32>(0.0, 0.0);
-}
-
-fn average2(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(a.x + b.x, a.y + b.y);
-}
-
-fn average4(a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, d: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(a.x + b.x + c.x + d.x, a.y + b.y + c.y + d.y);
-}
-
-fn resolve_average(v: vec2<f32>, fallback: f32) -> f32 {
-    if v.y > 0.0 {
-        return v.x / v.y;
-    }
-    return fallback;
+    return vec3<f32>(0.0, 0.0, 0.0);
 }
