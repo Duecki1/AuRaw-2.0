@@ -55,7 +55,7 @@ fn highlight_still_clipped(rgb: vec3<f32>, clip_mask: f32) -> bool {
     let b_clipped = floor(mask / 100.0) >= 1.0;
     let wb = params.wb.xyz;
     let sensor_rgb = rgb / max(wb, vec3<f32>(1e-8));
-    let clip = 0.995 * params.clip;
+    let clip = sensor_clip_level();
 
     return (r_clipped && sensor_rgb.r >= clip)
         || (g_clipped && sensor_rgb.g >= clip)
