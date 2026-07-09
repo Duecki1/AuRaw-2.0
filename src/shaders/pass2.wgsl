@@ -84,11 +84,13 @@ fn pass2_green_pq(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sw2 = raw_cfa_at(p + vec2<i32>(-2, 2));
             let sw3 = raw_cfa_at(p + vec2<i32>(-3, 3));
 
-            if (dx + dy) % 2 == 0 {
+            let is_p_diag = (dx == dy);   // NW(-1,-1), center(0,0), SE(1,1)
+            let is_q_diag = (dx == -dy);  // NE(1,-1), center(0,0), SW(-1,1)
+            if is_p_diag {
                 let val_p = nw3 - nw1 - se1 + se3 - 3.0 * (nw2 + se2) + 6.0 * c;
                 p_stat += val_p * val_p;
             }
-            if (dx - dy) % 2 == 0 {
+            if is_q_diag {
                 let val_q = ne3 - ne1 - sw1 + sw3 - 3.0 * (ne2 + sw2) + 6.0 * c;
                 q_stat += val_q * val_q;
             }
