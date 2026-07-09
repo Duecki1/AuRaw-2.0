@@ -4,6 +4,15 @@ fn color_at(pos: vec2<i32>) -> u32 {
     return textureLoad(color_tex, clamp_pos(pos), 0).r;
 }
 
+fn is_raw_clipped(pos: vec2<i32>) -> bool {
+    let p = clamp_pos(pos);
+    let color = min(color_at(p), 3u);
+    let raw = f32(textureLoad(raw_tex, p, 0).r);
+    let white = params.white_levels[color];
+    // Treat as clipped if it hits the sensor white level
+    return raw >= white - 1.0;
+}
+
 fn raw_value_at(pos: vec2<i32>) -> f32 {
     let p = clamp_pos(pos);
     let color = min(color_at(p), 3u);
@@ -38,7 +47,6 @@ fn normalized_raw_at(pos: vec2<i32>) -> f32 {
     }
 
     let local = sum / count;
-    // Dead/hot pixel suppression
     if center > local * 6.0 + 0.25 {
         return local;
     }
@@ -48,9 +56,12 @@ fn normalized_raw_at(pos: vec2<i32>) -> f32 {
     return center;
 }
 
-fn sample_if_color(pos: vec2<i32>, channel: u32) -> vec2<f32> {
+// Returns vec3(value, is_valid, is_clipped)
+fn sample_if_color(pos: vec2<i32>, channel: u32) -> vec3<f32> {
     if color_at(pos) == channel {
-        return vec2<f32>(normalized_raw_at(pos), 1.0);
+        let v = normalized_raw_at(pos);
+        let c = select(0.0, 1.0, is_raw_clipped(pos));
+        return vec3<f32>(v, 1.0, c);
     }
-    return vec2<f32>(0.0, 0.0);
+    return vec3<f32>(0.0, 0.0, 0.0);
 }

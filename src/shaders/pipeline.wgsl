@@ -9,13 +9,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
     // 1. Demosaic with color-difference interpolation
-    var camera_rgb = demosaic(pos);
+    let demosaiced = demosaic(pos);
+    var camera_rgb = demosaiced.xyz;
+    let clip_mask = demosaiced.w;
 
     // 2. White balance (in camera raw space, before color transform)
     camera_rgb = apply_wb(camera_rgb);
 
-    // 3. Highlight reconstruction (ratio-based, preserves hue)
-    camera_rgb = reconstruct_sensor_highlights(camera_rgb);
+    // 3. Highlight reconstruction (uses true RAW clipping mask)
+    camera_rgb = reconstruct_sensor_highlights(camera_rgb, clip_mask);
 
     // 4. Camera → linear Rec2020 working space
     var rgb = cam_to_working(camera_rgb);
