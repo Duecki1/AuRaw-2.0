@@ -33,6 +33,19 @@ fn filmic_tonemap(rgb: vec3<f32>) -> vec3<f32> {
     return x * (mapped_lum / lum);
 }
 
+fn compress_display_gamut(rgb: vec3<f32>) -> vec3<f32> {
+    let x = max(rgb, vec3<f32>(0.0));
+    let peak = max(max(x.r, x.g), x.b);
+    if peak <= 1.0 {
+        return x;
+    }
+
+    let lum = clamp(safe_luma(x), 0.0, 1.0);
+    let boundary = vec3<f32>(lum);
+    let scale = clamp((1.0 - lum) / max(peak - lum, 1e-6), 0.0, 1.0);
+    return mix(boundary, x, scale);
+}
+
 fn display_render(rgb: vec3<f32>) -> vec3<f32> {
     // Filmic tonemap in Rec2020 working space (scene → display)
     let mapped = filmic_tonemap(rgb);
@@ -40,11 +53,11 @@ fn display_render(rgb: vec3<f32>) -> vec3<f32> {
     // Convert linear Rec2020 → linear sRGB for output
     let srgb_linear = REC2020_TO_SRGB * mapped;
 
-    // Clamp out-of-sRGB-gamut values (Rec2020 is wider than sRGB)
-    let clamped = max(srgb_linear, vec3<f32>(0.0));
+    // Compress out-of-sRGB-gamut highlights toward the display boundary.
+    let display_linear = compress_display_gamut(srgb_linear);
 
     // sRGB OETF (linear → encoded)
-    let encoded = srgb_oetf(clamped);
+    let encoded = srgb_oetf(display_linear);
 
     return clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0));
 }
