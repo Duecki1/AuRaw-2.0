@@ -188,7 +188,6 @@ fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
     if cc == 0u { // Red site: has R, needs B
         diffR = raw_cfa_at(pos) - g0;
         
-        let c = 2u; // Compute Blue
         let eps = 1e-5;
         let nw = pos + vec2<i32>(-1, -1);
         let ne = pos + vec2<i32>(1, -1);
@@ -247,7 +246,6 @@ fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if cc == 2u { // Blue site: has B, needs R
         diffB = raw_cfa_at(pos) - g0;
         
-        let c = 0u; // Compute Red
         let eps = 1e-5;
         let nw = pos + vec2<i32>(-1, -1);
         let ne = pos + vec2<i32>(1, -1);
@@ -329,7 +327,7 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         diffR = diffs.x;
         diffB = diffs.y;
     } else {
-        // Green site: interpolate diffR and diffB cardinaly
+        // Green site: interpolate diffR and diffB cardinally
         let vh_c = textureLoad(tex1_read, pos, 0).x;
         let vh_nw = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1, -1)), 0).x;
         let vh_ne = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(1, -1)), 0).x;
@@ -370,15 +368,10 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
             let c_w = select(val_w.x, val_w.y, c == 2u);
             let c_e = select(val_e.x, val_e.y, c == 2u);
 
-            let g_n = textureLoad(tex2_read, clamp_pos(n), 0).x;
-            let g_s = textureLoad(tex2_read, clamp_pos(s), 0).x;
-            let g_w = textureLoad(tex2_read, clamp_pos(w), 0).x;
-            let g_e = textureLoad(tex2_read, clamp_pos(e), 0).x;
-
             let sn_abs = abs(c_n - c_s);
             let ew_abs = abs(c_w - c_e);
 
-            let n_grad = n1 + sn_abs; // Simplified gradients for chroma
+            let n_grad = n1 + sn_abs;
             let s_grad = s1 + sn_abs;
             let w_grad = w1 + ew_abs;
             let e_grad = e1 + ew_abs;
@@ -395,9 +388,12 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b_val = g0 + diffB;
 
     var camera_rgb = vec3<f32>(r_val, g0, b_val);
-    let r_clip = select(0.0, 1.0, is_raw_clipped(pos));
-    let b_clip = select(0.0, 1.0, is_raw_clipped(pos));
-    let final_clip = clip * 10.0 + r_clip * 1.0 + b_clip * 100.0;
+    
+    // Fix: Properly assign clip masks based on actual color at `pos`
+    let r_clip = select(0.0, clip, cc == 0u);
+    let g_clip = select(0.0, clip, cc == 1u);
+    let b_clip = select(0.0, clip, cc == 2u);
+    let final_clip = r_clip * 1.0 + g_clip * 10.0 + b_clip * 100.0;
 
     camera_rgb = apply_wb(camera_rgb);
     camera_rgb = reconstruct_sensor_highlights(camera_rgb, final_clip);
