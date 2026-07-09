@@ -1,5 +1,3 @@
-// raw_sampling.wgsl
-
 fn color_at(pos: vec2<i32>) -> u32 {
     return textureLoad(color_tex, clamp_pos(pos), 0).r;
 }
@@ -9,7 +7,6 @@ fn is_raw_clipped(pos: vec2<i32>) -> bool {
     let color = min(color_at(p), 3u);
     let raw = f32(textureLoad(raw_tex, p, 0).r);
     let white = params.white_levels[color];
-    // Treat as clipped if it hits the sensor white level
     return raw >= white - 1.0;
 }
 
@@ -19,8 +16,18 @@ fn raw_value_at(pos: vec2<i32>) -> f32 {
     let raw = f32(textureLoad(raw_tex, p, 0).r);
     let black = params.black_levels[color];
     let white = max(params.white_levels[color], black + 1.0);
-    // Preserve headroom above 1.0 for highlight reconstruction
-    return clamp((raw - black) / (white - black), 0.0, 4.0);
+    let wb = params.wb[color];
+    return clamp((raw - black) / (white - black), 0.0, 4.0) * wb;
+}
+
+fn raw_cfa_at(pos: vec2<i32>) -> f32 {
+    let p = clamp_pos(pos);
+    let color = min(color_at(p), 3u);
+    let raw = f32(textureLoad(raw_tex, p, 0).r);
+    let black = params.black_levels[color];
+    let white = max(params.white_levels[color], black + 1.0);
+    let wb = params.wb[color];
+    return clamp((raw - black) / (white - black), 0.0, 4.0) * wb;
 }
 
 fn normalized_raw_at(pos: vec2<i32>) -> f32 {
@@ -56,7 +63,6 @@ fn normalized_raw_at(pos: vec2<i32>) -> f32 {
     return center;
 }
 
-// Returns vec3(value, is_valid, is_clipped)
 fn sample_if_color(pos: vec2<i32>, channel: u32) -> vec3<f32> {
     if color_at(pos) == channel {
         let v = normalized_raw_at(pos);

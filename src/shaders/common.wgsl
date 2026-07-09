@@ -1,21 +1,21 @@
-// common.wgsl
-
 struct Params {
     black: f32,
     exposure: f32,
-    hlcompr: f32,          // retained for ABI; unused
-    hlcomprthresh: f32,    // retained for ABI; unused
+    hlcompr: f32,
+    hlcomprthresh: f32,
     contrast: f32,
     middle_grey: f32,
-    brightness: f32,       // retained for ABI; unused
+    brightness: f32,
     saturation: f32,
     vibrance: f32,
     clip: f32,
     filmic_white: f32,
     filmic_black: f32,
+    chroma_denoise: f32,
+    ca_red: f32,
+    ca_blue: f32,
+    _pad_adjustments: f32,
     wb: vec4<f32>,
-    // Note: named cam_to_srgb to match your existing Rust struct memory layout,
-    // but actually contains the Camera -> Rec2020 matrix.
     cam_to_srgb_0: vec4<f32>,
     cam_to_srgb_1: vec4<f32>,
     cam_to_srgb_2: vec4<f32>,
@@ -30,11 +30,9 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var raw_tex: texture_2d<u32>;
 @group(0) @binding(2) var color_tex: texture_2d<u32>;
-@group(0) @binding(3) var out_tex: texture_storage_2d<rgba8unorm, write>;
 
 const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 
-// Linear Rec2020 → linear sRGB (column-major for mat3x3)
 const REC2020_TO_SRGB: mat3x3<f32> = mat3x3<f32>(
     vec3<f32>( 1.5489,  0.0955, -0.0701),
     vec3<f32>(-0.4830,  0.9123,  0.0597),
