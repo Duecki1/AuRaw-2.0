@@ -5,7 +5,6 @@ mod ui;
 use app::AurawApp;
 
 fn main() -> eframe::Result {
-    // Initialize env_logger to output debug logs to standard output
     env_logger::init();
 
     let options = eframe::NativeOptions {

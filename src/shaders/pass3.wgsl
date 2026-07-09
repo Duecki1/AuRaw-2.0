@@ -130,6 +130,5 @@ fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
         diffR = mix(p_est, q_est, pq_disc);
     }
 
-    // Pass 3 stores chroma differences
     textureStore(tex3_write, pos, vec4<f32>(diffR, diffB, 0.0, clip));
 }
