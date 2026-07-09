@@ -1,40 +1,39 @@
-// pipeline.wgsl
-
 @compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn pass3_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height {
         return;
     }
 
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
-    // 1. Demosaic with color-difference interpolation
-    let demosaiced = demosaic(pos);
-    var camera_rgb = demosaiced.xyz;
-    let clip_mask = demosaiced.w;
+    let g_val = textureLoad(green_tex_read, pos, 0);
+    let g = g_val.x;
+    let clipG = g_val.w;
+    
+    let chroma = textureLoad(chroma_tex_read, pos, 0);
+    let diffR = chroma.x;
+    let diffB = chroma.y;
+    let clipR = chroma.z;
+    let clipB = chroma.w;
+    
+    let r = g + diffR;
+    let b = g + diffB;
+    
+    let clip_mask = clipG * 10.0 + clipR * 1.0 + clipB * 100.0;
+    
+    var camera_rgb = vec3<f32>(r, g, b);
 
-    // 2. White balance (in camera raw space, before color transform)
     camera_rgb = apply_wb(camera_rgb);
-
-    // 3. Highlight reconstruction (uses true RAW clipping mask)
     camera_rgb = reconstruct_sensor_highlights(camera_rgb, clip_mask);
 
-    // 4. Camera → linear Rec2020 working space
     var rgb = cam_to_working(camera_rgb);
-
-    // 5. Negative gamut mapping (handle out-of-gamut from camera transform)
     rgb = map_negative_gamut(rgb);
 
-    // 6. Exposure (scene-referred)
     rgb = apply_exposure(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
 
-    // 7. Contrast (luma-based, preserves hue)
     rgb = apply_contrast(rgb);
-
-    // 8. Saturation / vibrance (perceptual, skin-tone protected)
     rgb = apply_saturation_vibrance(rgb);
 
-    // 9. Filmic tonemap + Rec2020→sRGB + sRGB OETF
     textureStore(out_tex, pos, vec4<f32>(display_render(rgb), 1.0));
 }
