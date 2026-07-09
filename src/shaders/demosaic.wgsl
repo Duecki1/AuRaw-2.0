@@ -3,8 +3,8 @@
 // True 4-pass RCD (Ratio of Color Differences) demosaicing.
 // Pass 1: VH_Dir (vertical/horizontal discrimination) and Low-Pass Filter
 // Pass 2: Green channel reconstruction + PQ_Dir (diagonal discrimination)
-// Pass 3: Red/Blue at opposite color sites (R at B, B at R)
-// Pass 4: Red/Blue at Green sites + output pipeline
+// Pass 3: Chroma differences (R-G and B-G) at R/B sites
+// Pass 4: R/B at Green sites + output pipeline
 
 // ---------------------------------------------------------------------------
 //  Pass 1 — VH_Dir and LPF
@@ -47,7 +47,7 @@ fn pass1_vh_lpf(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let vh_dir = max(1e-10, v_stat) / (max(1e-10, v_stat) + max(1e-10, h_stat));
 
-    // 2. LPF (only for R/B sites)
+    // 2. LPF (only for R/B sites) - Normalized to sum to 1.0
     var lpf = 0.0;
     if cc != 1u {
         let c  = raw_cfa_at(pos);
@@ -59,7 +59,8 @@ fn pass1_vh_lpf(@builtin(global_invocation_id) gid: vec3<u32>) {
         let ne = raw_cfa_at(pos + vec2<i32>(1, -1));
         let sw = raw_cfa_at(pos + vec2<i32>(-1, 1));
         let se = raw_cfa_at(pos + vec2<i32>(1, 1));
-        lpf = c + 0.5 * (n + s + w + e) + 0.25 * (nw + ne + sw + se);
+        // Center: 0.25, Cardinals: 0.125 (x4), Diagonals: 0.0625 (x4) -> Sum = 1.0
+        lpf = 0.25 * c + 0.125 * (n + s + w + e) + 0.0625 * (nw + ne + sw + se);
     }
 
     textureStore(tex1_write, pos, vec4<f32>(vh_dir, lpf, 0.0, 0.0));
@@ -169,7 +170,7 @@ fn pass2_green_pq(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------------------
-//  Pass 3 — R/B at B/R sites
+//  Pass 3 — Chroma Differences (R-G, B-G) at R/B sites
 // ---------------------------------------------------------------------------
 
 @compute @workgroup_size(8, 8, 1)
@@ -181,73 +182,130 @@ fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let g0 = textureLoad(tex2_read, pos, 0).x;
     let clip = textureLoad(tex2_read, pos, 0).w;
 
-    if cc == 1u {
-        textureStore(tex3_write, pos, vec4<f32>(0.0, g0, 0.0, clip));
-        return;
+    var diffR = 0.0;
+    var diffB = 0.0;
+
+    if cc == 0u { // Red site: has R, needs B
+        diffR = raw_cfa_at(pos) - g0;
+        
+        let c = 2u; // Compute Blue
+        let eps = 1e-5;
+        let nw = pos + vec2<i32>(-1, -1);
+        let ne = pos + vec2<i32>(1, -1);
+        let sw = pos + vec2<i32>(-1, 1);
+        let se = pos + vec2<i32>(1, 1);
+        let nw2 = pos + vec2<i32>(-2, -2);
+        let ne2 = pos + vec2<i32>(2, -2);
+        let sw2 = pos + vec2<i32>(-2, 2);
+        let se2 = pos + vec2<i32>(2, 2);
+        let nw3 = pos + vec2<i32>(-3, -3);
+        let ne3 = pos + vec2<i32>(3, -3);
+        let sw3 = pos + vec2<i32>(-3, 3);
+        let se3 = pos + vec2<i32>(3, 3);
+
+        let raw_c_nw = raw_cfa_at(nw);
+        let raw_c_ne = raw_cfa_at(ne);
+        let raw_c_sw = raw_cfa_at(sw);
+        let raw_c_se = raw_cfa_at(se);
+        let raw_c_nw3 = raw_cfa_at(nw3);
+        let raw_c_ne3 = raw_cfa_at(ne3);
+        let raw_c_sw3 = raw_cfa_at(sw3);
+        let raw_c_se3 = raw_cfa_at(se3);
+
+        let g_nw = textureLoad(tex2_read, clamp_pos(nw), 0).x;
+        let g_ne = textureLoad(tex2_read, clamp_pos(ne), 0).x;
+        let g_sw = textureLoad(tex2_read, clamp_pos(sw), 0).x;
+        let g_se = textureLoad(tex2_read, clamp_pos(se), 0).x;
+        let g_nw2 = textureLoad(tex2_read, clamp_pos(nw2), 0).x;
+        let g_ne2 = textureLoad(tex2_read, clamp_pos(ne2), 0).x;
+        let g_sw2 = textureLoad(tex2_read, clamp_pos(sw2), 0).x;
+        let g_se2 = textureLoad(tex2_read, clamp_pos(se2), 0).x;
+
+        let nw_grad = eps + abs(raw_c_nw - raw_c_se) + abs(raw_c_nw - raw_c_nw3) + abs(g0 - g_nw2);
+        let ne_grad = eps + abs(raw_c_ne - raw_c_sw) + abs(raw_c_ne - raw_c_ne3) + abs(g0 - g_ne2);
+        let sw_grad = eps + abs(raw_c_ne - raw_c_sw) + abs(raw_c_sw - raw_c_sw3) + abs(g0 - g_sw2);
+        let se_grad = eps + abs(raw_c_nw - raw_c_se) + abs(raw_c_se - raw_c_se3) + abs(g0 - g_se2);
+
+        let nw_est = raw_c_nw - g_nw;
+        let ne_est = raw_c_ne - g_ne;
+        let sw_est = raw_c_sw - g_sw;
+        let se_est = raw_c_se - g_se;
+
+        let p_est = (nw_grad * se_est + se_grad * nw_est) / (nw_grad + se_grad);
+        let q_est = (ne_grad * sw_est + sw_grad * ne_est) / (ne_grad + sw_grad);
+
+        let pq_c = textureLoad(tex2_read, pos, 0).z;
+        let pq_nw = textureLoad(tex2_read, clamp_pos(nw), 0).z;
+        let pq_ne = textureLoad(tex2_read, clamp_pos(ne), 0).z;
+        let pq_sw = textureLoad(tex2_read, clamp_pos(sw), 0).z;
+        let pq_se = textureLoad(tex2_read, clamp_pos(se), 0).z;
+        let pq_n = 0.25 * (pq_nw + pq_ne + pq_sw + pq_se);
+        let pq_disc = select(pq_n, pq_c, abs(0.5 - pq_c) < abs(0.5 - pq_n));
+
+        diffB = mix(p_est, q_est, pq_disc);
+        
+    } else if cc == 2u { // Blue site: has B, needs R
+        diffB = raw_cfa_at(pos) - g0;
+        
+        let c = 0u; // Compute Red
+        let eps = 1e-5;
+        let nw = pos + vec2<i32>(-1, -1);
+        let ne = pos + vec2<i32>(1, -1);
+        let sw = pos + vec2<i32>(-1, 1);
+        let se = pos + vec2<i32>(1, 1);
+        let nw2 = pos + vec2<i32>(-2, -2);
+        let ne2 = pos + vec2<i32>(2, -2);
+        let sw2 = pos + vec2<i32>(-2, 2);
+        let se2 = pos + vec2<i32>(2, 2);
+        let nw3 = pos + vec2<i32>(-3, -3);
+        let ne3 = pos + vec2<i32>(3, -3);
+        let sw3 = pos + vec2<i32>(-3, 3);
+        let se3 = pos + vec2<i32>(3, 3);
+
+        let raw_c_nw = raw_cfa_at(nw);
+        let raw_c_ne = raw_cfa_at(ne);
+        let raw_c_sw = raw_cfa_at(sw);
+        let raw_c_se = raw_cfa_at(se);
+        let raw_c_nw3 = raw_cfa_at(nw3);
+        let raw_c_ne3 = raw_cfa_at(ne3);
+        let raw_c_sw3 = raw_cfa_at(sw3);
+        let raw_c_se3 = raw_cfa_at(se3);
+
+        let g_nw = textureLoad(tex2_read, clamp_pos(nw), 0).x;
+        let g_ne = textureLoad(tex2_read, clamp_pos(ne), 0).x;
+        let g_sw = textureLoad(tex2_read, clamp_pos(sw), 0).x;
+        let g_se = textureLoad(tex2_read, clamp_pos(se), 0).x;
+        let g_nw2 = textureLoad(tex2_read, clamp_pos(nw2), 0).x;
+        let g_ne2 = textureLoad(tex2_read, clamp_pos(ne2), 0).x;
+        let g_sw2 = textureLoad(tex2_read, clamp_pos(sw2), 0).x;
+        let g_se2 = textureLoad(tex2_read, clamp_pos(se2), 0).x;
+
+        let nw_grad = eps + abs(raw_c_nw - raw_c_se) + abs(raw_c_nw - raw_c_nw3) + abs(g0 - g_nw2);
+        let ne_grad = eps + abs(raw_c_ne - raw_c_sw) + abs(raw_c_ne - raw_c_ne3) + abs(g0 - g_ne2);
+        let sw_grad = eps + abs(raw_c_ne - raw_c_sw) + abs(raw_c_sw - raw_c_sw3) + abs(g0 - g_sw2);
+        let se_grad = eps + abs(raw_c_nw - raw_c_se) + abs(raw_c_se - raw_c_se3) + abs(g0 - g_se2);
+
+        let nw_est = raw_c_nw - g_nw;
+        let ne_est = raw_c_ne - g_ne;
+        let sw_est = raw_c_sw - g_sw;
+        let se_est = raw_c_se - g_se;
+
+        let p_est = (nw_grad * se_est + se_grad * nw_est) / (nw_grad + se_grad);
+        let q_est = (ne_grad * sw_est + sw_grad * ne_est) / (ne_grad + sw_grad);
+
+        let pq_c = textureLoad(tex2_read, pos, 0).z;
+        let pq_nw = textureLoad(tex2_read, clamp_pos(nw), 0).z;
+        let pq_ne = textureLoad(tex2_read, clamp_pos(ne), 0).z;
+        let pq_sw = textureLoad(tex2_read, clamp_pos(sw), 0).z;
+        let pq_se = textureLoad(tex2_read, clamp_pos(se), 0).z;
+        let pq_n = 0.25 * (pq_nw + pq_ne + pq_sw + pq_se);
+        let pq_disc = select(pq_n, pq_c, abs(0.5 - pq_c) < abs(0.5 - pq_n));
+
+        diffR = mix(p_est, q_est, pq_disc);
     }
 
-    let c = 2 - cc; // if R (0), compute B (2). if B (2), compute R (0).
-    let eps = 1e-5;
-
-    let nw = pos + vec2<i32>(-1, -1);
-    let ne = pos + vec2<i32>(1, -1);
-    let sw = pos + vec2<i32>(-1, 1);
-    let se = pos + vec2<i32>(1, 1);
-    let nw2 = pos + vec2<i32>(-2, -2);
-    let ne2 = pos + vec2<i32>(2, -2);
-    let sw2 = pos + vec2<i32>(-2, 2);
-    let se2 = pos + vec2<i32>(2, 2);
-    let nw3 = pos + vec2<i32>(-3, -3);
-    let ne3 = pos + vec2<i32>(3, -3);
-    let sw3 = pos + vec2<i32>(-3, 3);
-    let se3 = pos + vec2<i32>(3, 3);
-
-    let raw_c_nw = raw_cfa_at(nw);
-    let raw_c_ne = raw_cfa_at(ne);
-    let raw_c_sw = raw_cfa_at(sw);
-    let raw_c_se = raw_cfa_at(se);
-    let raw_c_nw3 = raw_cfa_at(nw3);
-    let raw_c_ne3 = raw_cfa_at(ne3);
-    let raw_c_sw3 = raw_cfa_at(sw3);
-    let raw_c_se3 = raw_cfa_at(se3);
-
-    let g_nw = textureLoad(tex2_read, clamp_pos(nw), 0).x;
-    let g_ne = textureLoad(tex2_read, clamp_pos(ne), 0).x;
-    let g_sw = textureLoad(tex2_read, clamp_pos(sw), 0).x;
-    let g_se = textureLoad(tex2_read, clamp_pos(se), 0).x;
-    let g_nw2 = textureLoad(tex2_read, clamp_pos(nw2), 0).x;
-    let g_ne2 = textureLoad(tex2_read, clamp_pos(ne2), 0).x;
-    let g_sw2 = textureLoad(tex2_read, clamp_pos(sw2), 0).x;
-    let g_se2 = textureLoad(tex2_read, clamp_pos(se2), 0).x;
-
-    let nw_grad = eps + abs(raw_c_nw - raw_c_se) + abs(raw_c_nw - raw_c_nw3) + abs(g0 - g_nw2);
-    let ne_grad = eps + abs(raw_c_ne - raw_c_sw) + abs(raw_c_ne - raw_c_ne3) + abs(g0 - g_ne2);
-    let sw_grad = eps + abs(raw_c_ne - raw_c_sw) + abs(raw_c_sw - raw_c_sw3) + abs(g0 - g_sw2);
-    let se_grad = eps + abs(raw_c_nw - raw_c_se) + abs(raw_c_se - raw_c_se3) + abs(g0 - g_se2);
-
-    let nw_est = raw_c_nw - g_nw;
-    let ne_est = raw_c_ne - g_ne;
-    let sw_est = raw_c_sw - g_sw;
-    let se_est = raw_c_se - g_se;
-
-    let p_est = (nw_grad * se_est + se_grad * nw_est) / (nw_grad + se_grad);
-    let q_est = (ne_grad * sw_est + sw_grad * ne_est) / (ne_grad + sw_grad);
-
-    let pq_c = textureLoad(tex2_read, pos, 0).z;
-    let pq_nw = textureLoad(tex2_read, clamp_pos(nw), 0).z;
-    let pq_ne = textureLoad(tex2_read, clamp_pos(ne), 0).z;
-    let pq_sw = textureLoad(tex2_read, clamp_pos(sw), 0).z;
-    let pq_se = textureLoad(tex2_read, clamp_pos(se), 0).z;
-    let pq_n = 0.25 * (pq_nw + pq_ne + pq_sw + pq_se);
-    let pq_disc = select(pq_n, pq_c, abs(0.5 - pq_c) < abs(0.5 - pq_n));
-
-    let val = g0 + mix(p_est, q_est, pq_disc);
-
-    if cc == 0u { // Red site, computed Blue
-        textureStore(tex3_write, pos, vec4<f32>(0.0, g0, val, clip));
-    } else { // Blue site, computed Red
-        textureStore(tex3_write, pos, vec4<f32>(val, g0, 0.0, clip));
-    }
+    // Pass 3 stores chroma differences, not absolute RGB!
+    textureStore(tex3_write, pos, vec4<f32>(diffR, diffB, 0.0, clip));
 }
 
 // ---------------------------------------------------------------------------
@@ -263,16 +321,15 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     let g0 = textureLoad(tex2_read, pos, 0).x;
     let clip = textureLoad(tex2_read, pos, 0).w;
 
-    var r_val = 0.0;
-    var b_val = 0.0;
+    var diffR = 0.0;
+    var diffB = 0.0;
 
-    if cc == 0u {
-        r_val = raw_cfa_at(pos);
-        b_val = textureLoad(tex3_read, pos, 0).z;
-    } else if cc == 2u {
-        r_val = textureLoad(tex3_read, pos, 0).x;
-        b_val = raw_cfa_at(pos);
+    if cc == 0u || cc == 2u {
+        let diffs = textureLoad(tex3_read, pos, 0);
+        diffR = diffs.x;
+        diffB = diffs.y;
     } else {
+        // Green site: interpolate diffR and diffB cardinaly
         let vh_c = textureLoad(tex1_read, pos, 0).x;
         let vh_nw = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1, -1)), 0).x;
         let vh_ne = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(1, -1)), 0).x;
@@ -290,10 +347,6 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         let s2 = pos + vec2<i32>(0, 2);
         let w2 = pos + vec2<i32>(-2, 0);
         let e2 = pos + vec2<i32>(2, 0);
-        let n3 = pos + vec2<i32>(0, -3);
-        let s3 = pos + vec2<i32>(0, 3);
-        let w3 = pos + vec2<i32>(-3, 0);
-        let e3 = pos + vec2<i32>(3, 0);
 
         let g_n2 = textureLoad(tex2_read, clamp_pos(n2), 0).x;
         let g_s2 = textureLoad(tex2_read, clamp_pos(s2), 0).x;
@@ -310,19 +363,12 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
             let val_s = textureLoad(tex3_read, clamp_pos(s), 0);
             let val_w = textureLoad(tex3_read, clamp_pos(w), 0);
             let val_e = textureLoad(tex3_read, clamp_pos(e), 0);
-            let val_n3 = textureLoad(tex3_read, clamp_pos(n3), 0);
-            let val_s3 = textureLoad(tex3_read, clamp_pos(s3), 0);
-            let val_w3 = textureLoad(tex3_read, clamp_pos(w3), 0);
-            let val_e3 = textureLoad(tex3_read, clamp_pos(e3), 0);
-
-            let c_n = select(val_n.x, val_n.z, c == 2u);
-            let c_s = select(val_s.x, val_s.z, c == 2u);
-            let c_w = select(val_w.x, val_w.z, c == 2u);
-            let c_e = select(val_e.x, val_e.z, c == 2u);
-            let c_n3 = select(val_n3.x, val_n3.z, c == 2u);
-            let c_s3 = select(val_s3.x, val_s3.z, c == 2u);
-            let c_w3 = select(val_w3.x, val_w3.z, c == 2u);
-            let c_e3 = select(val_e3.x, val_e3.z, c == 2u);
+            
+            // Pass 3 stores diffs in .x (R-G) and .y (B-G)
+            let c_n = select(val_n.x, val_n.y, c == 2u);
+            let c_s = select(val_s.x, val_s.y, c == 2u);
+            let c_w = select(val_w.x, val_w.y, c == 2u);
+            let c_e = select(val_e.x, val_e.y, c == 2u);
 
             let g_n = textureLoad(tex2_read, clamp_pos(n), 0).x;
             let g_s = textureLoad(tex2_read, clamp_pos(s), 0).x;
@@ -332,23 +378,21 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sn_abs = abs(c_n - c_s);
             let ew_abs = abs(c_w - c_e);
 
-            let n_grad = n1 + sn_abs + abs(c_n - c_n3);
-            let s_grad = s1 + sn_abs + abs(c_s - c_s3);
-            let w_grad = w1 + ew_abs + abs(c_w - c_w3);
-            let e_grad = e1 + ew_abs + abs(c_e - c_e3);
+            let n_grad = n1 + sn_abs; // Simplified gradients for chroma
+            let s_grad = s1 + sn_abs;
+            let w_grad = w1 + ew_abs;
+            let e_grad = e1 + ew_abs;
 
-            let n_est = c_n - g_n;
-            let s_est = c_s - g_s;
-            let w_est = c_w - g_w;
-            let e_est = c_e - g_e;
+            let v_est = (n_grad * c_s + s_grad * c_n) / (n_grad + s_grad);
+            let h_est = (e_grad * c_w + w_grad * c_e) / (e_grad + w_grad);
 
-            let v_est = (n_grad * s_est + s_grad * n_est) / (n_grad + s_grad);
-            let h_est = (e_grad * w_est + w_grad * e_est) / (e_grad + w_grad);
-
-            let val = g0 + mix(v_est, h_est, vh_disc);
-            if c == 0u { r_val = val; } else { b_val = val; }
+            let val = mix(v_est, h_est, vh_disc);
+            if c == 0u { diffR = val; } else { diffB = val; }
         }
     }
+
+    let r_val = g0 + diffR;
+    let b_val = g0 + diffB;
 
     var camera_rgb = vec3<f32>(r_val, g0, b_val);
     let r_clip = select(0.0, 1.0, is_raw_clipped(pos));
