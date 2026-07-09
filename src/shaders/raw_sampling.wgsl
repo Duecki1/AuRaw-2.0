@@ -1,5 +1,3 @@
-// raw_sampling.wgsl
-
 fn color_at(pos: vec2<i32>) -> u32 {
     return textureLoad(color_tex, clamp_pos(pos), 0).r;
 }
@@ -20,6 +18,16 @@ fn raw_value_at(pos: vec2<i32>) -> f32 {
     let black = params.black_levels[color];
     let white = max(params.white_levels[color], black + 1.0);
     // Preserve headroom above 1.0 for highlight reconstruction
+    return clamp((raw - black) / (white - black), 0.0, 4.0);
+}
+
+// Fast raw fetch without 5x5 outlier rejection for high-pass filters
+fn raw_cfa_at(pos: vec2<i32>) -> f32 {
+    let p = clamp_pos(pos);
+    let color = min(color_at(p), 3u);
+    let raw = f32(textureLoad(raw_tex, p, 0).r);
+    let black = params.black_levels[color];
+    let white = max(params.white_levels[color], black + 1.0);
     return clamp((raw - black) / (white - black), 0.0, 4.0);
 }
 
