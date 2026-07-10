@@ -50,3 +50,5 @@ fn clamp_pos(pos: vec2<i32>) -> vec2<i32> {
 fn safe_luma(rgb: vec3<f32>) -> f32 {
     return max(dot(rgb, LUMA), 1e-6);
 }
+
+

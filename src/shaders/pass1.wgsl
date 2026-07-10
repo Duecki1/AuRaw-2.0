@@ -52,3 +52,5 @@ fn pass1_vh_lpf(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(tex1_write, pos, vec4<f32>(vh_dir, lpf, 0.0, 0.0));
 }
+
+

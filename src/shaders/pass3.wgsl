@@ -132,3 +132,5 @@ fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(tex3_write, pos, vec4<f32>(diffR, diffB, 0.0, clip));
 }
+
+

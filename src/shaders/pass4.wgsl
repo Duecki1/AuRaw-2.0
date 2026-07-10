@@ -314,10 +314,30 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         if sum_w > 0.0 {
-            camera_rgb = reconstruct_sensor_highlights(
-                vec3<f32>(sum_r, sum_g, sum_b) / sum_w,
-                final_clip,
-            );
+            // Ansel Inpaint Opposed (Local approximation)
+            let mean_r = sum_r / sum_w;
+            let mean_g = sum_g / sum_w;
+            let mean_b = sum_b / sum_w;
+
+            var rec = camera_rgb;
+            
+            let mask = floor(final_clip + 0.5);
+            let r_clipped = mask - 10.0 * floor(mask / 10.0) >= 1.0;
+            let g_digit = floor(mask / 10.0) - 10.0 * floor(mask / 100.0);
+            let g_clipped = g_digit >= 1.0;
+            let b_clipped = floor(mask / 100.0) >= 1.0;
+
+            if r_clipped && mean_g > 1e-6 && mean_b > 1e-6 {
+                rec.r = mean_r + (camera_rgb.g - mean_g) * (mean_r / mean_g) + (camera_rgb.b - mean_b) * (mean_r / mean_b);
+            }
+            if g_clipped && mean_r > 1e-6 && mean_b > 1e-6 {
+                rec.g = mean_g + (camera_rgb.r - mean_r) * (mean_g / mean_r) + (camera_rgb.b - mean_b) * (mean_g / mean_b);
+            }
+            if b_clipped && mean_r > 1e-6 && mean_g > 1e-6 {
+                rec.b = mean_b + (camera_rgb.r - mean_r) * (mean_b / mean_r) + (camera_rgb.g - mean_g) * (mean_b / mean_g);
+            }
+            
+            camera_rgb = max(rec, vec3<f32>(0.0));
         }
     }
 
@@ -332,3 +352,5 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(out_tex, pos, vec4<f32>(display_render(rgb), 1.0));
 }
+
+
