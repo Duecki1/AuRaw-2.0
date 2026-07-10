@@ -27,3 +27,5 @@ fn srgb_oetf(c: vec3<f32>) -> vec3<f32> {
     let cutoff = step(vec3<f32>(0.0031308), x);
     return mix(lo, hi, cutoff);
 }
+
+
