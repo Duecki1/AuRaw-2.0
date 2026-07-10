@@ -79,3 +79,5 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
 
     return SRGB_TO_REC2020 * oklab_to_linear_srgb(lab);
 }
+
+

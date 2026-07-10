@@ -71,3 +71,5 @@ fn sample_if_color(pos: vec2<i32>, channel: u32) -> vec3<f32> {
     }
     return vec3<f32>(0.0, 0.0, 0.0);
 }
+
+
