@@ -1,4 +1,3 @@
-@group(0) @binding(4) var tex1_read: texture_2d<f32>;
 @group(0) @binding(6) var tex2_read: texture_2d<f32>;
 @group(0) @binding(8) var tex3_read: texture_2d<f32>;
 @group(0) @binding(9) var out_tex: texture_storage_2d<rgba8unorm, write>;
@@ -177,11 +176,11 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         diffR = diffs.x;
         diffB = diffs.y;
     } else {
-        let vh_c = textureLoad(tex1_read, pos, 0).x;
-        let vh_nw = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1, -1)), 0).x;
-        let vh_ne = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(1, -1)), 0).x;
-        let vh_sw = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1, 1)), 0).x;
-        let vh_se = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(1, 1)), 0).x;
+        let vh_c = textureLoad(tex2_read, pos, 0).y;
+        let vh_nw = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(-1, -1)), 0).y;
+        let vh_ne = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(1, -1)), 0).y;
+        let vh_sw = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(-1, 1)), 0).y;
+        let vh_se = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(1, 1)), 0).y;
         let vh_n = 0.25 * (vh_nw + vh_ne + vh_sw + vh_se);
         let vh_disc = select(vh_c, vh_n, abs(0.5 - vh_c) < abs(0.5 - vh_n));
 
@@ -278,7 +277,7 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         var sum_b = 0.0;
         var samples = 0;
 
-        let vh_c = textureLoad(tex1_read, pos, 0).x;
+        let vh_c = textureLoad(tex2_read, pos, 0).y;
         let lum0 = g0;
 
         var radius = 1;
@@ -298,7 +297,7 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     let dist = f32(dx * dx + dy * dy);
                     let w_dist = 1.0 / (1.0 + dist);
-                    let vh_n = textureLoad(tex1_read, np, 0).x;
+                    let vh_n = textureLoad(tex2_read, np, 0).y;
                     let w_edge = 1.0 - abs(vh_c - vh_n);
                     let w_lum = 1.0 / (1.0 + abs(lum0 - g_n));
                     let weight = w_dist * w_edge * w_lum;
@@ -352,5 +351,3 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(out_tex, pos, vec4<f32>(display_render(rgb), 1.0));
 }
-
-

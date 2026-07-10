@@ -1,25 +1,11 @@
-mod app;
-mod pipeline;
-mod ui;
-
-use app::AurawApp;
-
+#[cfg(not(target_os = "android"))]
 fn main() -> eframe::Result {
-    env_logger::init();
-
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
-            .with_min_inner_size([800.0, 600.0]),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "AuRaw",
-        options,
-        Box::new(|cc| Ok(Box::new(AurawApp::new(cc)))),
-    )
+    auraw::run_desktop()
 }
+
+// Android loads the library entry point from src/lib.rs.
+#[cfg(target_os = "android")]
+fn main() {}
 
 #[cfg(test)]
 mod tests {

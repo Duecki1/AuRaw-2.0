@@ -98,7 +98,9 @@ fn pass2_green_pq(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     pq_dir = max(1e-10, p_stat) / (max(1e-10, p_stat) + max(1e-10, q_stat));
 
-    textureStore(tex2_write, pos, vec4<f32>(g_out, 0.0, pq_dir, clip));
+    // Preserve pass 1's direction value so its texture can be reused as the
+    // pass 3 output. This saves one full-resolution RGBA16F allocation.
+    let vh_dir = textureLoad(tex1_read, pos, 0).x;
+    textureStore(tex2_write, pos, vec4<f32>(g_out, vh_dir, pq_dir, clip));
 }
-
 
