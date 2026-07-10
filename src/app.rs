@@ -12,10 +12,16 @@ pub struct AurawApp {
     pub dirty: bool,
 
     pub status: String,
+
+    #[cfg(target_os = "android")]
+    android_app: android_activity::AndroidApp,
+    #[cfg(target_os = "android")]
+    picker_pending: bool,
 }
 
-impl Default for AurawApp {
-    fn default() -> Self {
+impl AurawApp {
+    #[cfg(not(target_os = "android"))]
+    fn empty() -> Self {
         Self {
             current_path: None,
             loaded_raw: None,
@@ -25,13 +31,31 @@ impl Default for AurawApp {
             status: "Open a RAW file to get started.".to_owned(),
         }
     }
-}
 
-impl AurawApp {
+    #[cfg(not(target_os = "android"))]
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Self::default()
+        Self::empty()
     }
 
+    #[cfg(target_os = "android")]
+    pub fn new_android(
+        cc: &eframe::CreationContext<'_>,
+        android_app: android_activity::AndroidApp,
+    ) -> Self {
+        crate::android::install_context(&cc.egui_ctx);
+        Self {
+            current_path: None,
+            loaded_raw: None,
+            gpu_pipeline: None,
+            exposure: ExposureParams::default(),
+            dirty: false,
+            status: "Open a RAW file to get started.".to_owned(),
+            android_app,
+            picker_pending: false,
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn open_file_dialog(&mut self, frame: &eframe::Frame) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter(
@@ -49,13 +73,45 @@ impl AurawApp {
         self.open_path(path, frame);
     }
 
-    pub fn open_path(&mut self, path: PathBuf, frame: &eframe::Frame) {
-        self.status = format!("Decoding {}…", path.display());
+    #[cfg(target_os = "android")]
+    pub fn open_file_dialog(&mut self, _frame: &eframe::Frame) {
+        if self.picker_pending {
+            return;
+        }
+        match crate::android::open_raw_document(&self.android_app) {
+            Ok(()) => {
+                self.picker_pending = true;
+                self.status = "Choose a RAW file…".to_owned();
+            }
+            Err(error) => self.status = error,
+        }
+    }
 
-        let raw = match load_raw_file(&path) {
+    pub fn open_path(&mut self, path: PathBuf, frame: &eframe::Frame) {
+        let label = path.display().to_string();
+        self.open_path_labeled(path, label, false, frame);
+    }
+
+    fn open_path_labeled(
+        &mut self,
+        path: PathBuf,
+        label: String,
+        delete_after_decode: bool,
+        frame: &eframe::Frame,
+    ) {
+        self.status = format!("Decoding {label}…");
+
+        let decoded = load_raw_file(&path);
+        if delete_after_decode {
+            if let Err(error) = std::fs::remove_file(&path) {
+                log::warn!("could not remove imported Android RAW cache file: {error}");
+            }
+        }
+
+        let raw = match decoded {
             Ok(r) => r,
             Err(e) => {
-                self.status = format!("Failed to decode {}: {e:#}", path.display());
+                self.status = format!("Failed to decode {label}: {e:#}");
                 log::error!("{e:#}");
                 return;
             }
@@ -84,12 +140,30 @@ impl AurawApp {
                 );
                 self.gpu_pipeline = Some(pipeline);
                 self.loaded_raw = Some(raw);
-                self.current_path = Some(path);
+                self.current_path = (!delete_after_decode).then_some(path);
                 self.dirty = true;
             }
             Err(e) => {
                 self.status = format!("GPU pipeline setup failed: {e:#}");
                 log::error!("{e:#}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn poll_android_picker(&mut self, frame: &eframe::Frame) {
+        while let Some(result) = crate::android::take_picker_result() {
+            self.picker_pending = false;
+            match result {
+                crate::android::PickerResult::Picked(document) => {
+                    self.open_path_labeled(document.path, document.display_name, true, frame)
+                }
+                crate::android::PickerResult::Cancelled => {
+                    self.status = "No RAW file selected.".to_owned();
+                }
+                crate::android::PickerResult::Failed(error) => {
+                    self.status = format!("Could not import the selected file: {error}");
+                }
             }
         }
     }
@@ -113,6 +187,9 @@ impl AurawApp {
 
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(target_os = "android")]
+        self.poll_android_picker(frame);
+
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open RAW…").clicked() {
@@ -123,11 +200,20 @@ impl eframe::App for AurawApp {
             });
         });
 
+        #[cfg(not(target_os = "android"))]
         egui::Panel::right("sidebar")
             .resizable(true)
             .default_size(280.0)
             .show(ui, |ui| {
                 Sidebar::show(ui, self);
+            });
+
+        #[cfg(target_os = "android")]
+        egui::Panel::bottom("sidebar")
+            .resizable(true)
+            .default_size(280.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| Sidebar::show(ui, self));
             });
 
         egui::CentralPanel::default().show(ui, |ui| {

@@ -147,7 +147,6 @@ pub struct RawGpuPipeline {
     _color_texture: wgpu::Texture,
     _tex1: wgpu::Texture,
     _tex2: wgpu::Texture,
-    _tex3: wgpu::Texture,
     _out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
 }
@@ -199,21 +198,9 @@ impl RawGpuPipeline {
             view_formats: &[wgpu::TextureFormat::Rgba16Float],
         });
 
-        let tex3 = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw tex3"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::Rgba16Float],
-        });
-
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let tex1_view = tex1.create_view(&wgpu::TextureViewDescriptor::default());
         let tex2_view = tex2.create_view(&wgpu::TextureViewDescriptor::default());
-        let tex3_view = tex3.create_view(&wgpu::TextureViewDescriptor::default());
         let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -235,7 +222,11 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
-                storage_texture_entry(3, wgpu::TextureFormat::Rgba16Float, wgpu::StorageTextureAccess::WriteOnly),
+                storage_texture_entry(
+                    3,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
             ],
         });
 
@@ -246,7 +237,11 @@ impl RawGpuPipeline {
                 common_entries[1].clone(),
                 common_entries[2].clone(),
                 texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(5, wgpu::TextureFormat::Rgba16Float, wgpu::StorageTextureAccess::WriteOnly),
+                storage_texture_entry(
+                    5,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
             ],
         });
 
@@ -257,7 +252,11 @@ impl RawGpuPipeline {
                 common_entries[1].clone(),
                 common_entries[2].clone(),
                 texture_entry(6, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(7, wgpu::TextureFormat::Rgba16Float, wgpu::StorageTextureAccess::WriteOnly),
+                storage_texture_entry(
+                    7,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
             ],
         });
 
@@ -267,10 +266,13 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
-                texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(6, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(9, wgpu::TextureFormat::Rgba8Unorm, wgpu::StorageTextureAccess::WriteOnly),
+                storage_texture_entry(
+                    9,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
             ],
         });
 
@@ -278,10 +280,22 @@ impl RawGpuPipeline {
             label: Some("bg1"),
             layout: &bgl1,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&raw_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&tex1_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
             ],
         });
 
@@ -289,11 +303,26 @@ impl RawGpuPipeline {
             label: Some("bg2"),
             layout: &bgl2,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&raw_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&tex1_view) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&tex2_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
             ],
         });
 
@@ -301,11 +330,26 @@ impl RawGpuPipeline {
             label: Some("bg3"),
             layout: &bgl3,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&raw_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color_view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&tex2_view) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&tex3_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
             ],
         });
 
@@ -313,41 +357,71 @@ impl RawGpuPipeline {
             label: Some("bg4"),
             layout: &bgl4,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&raw_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&tex1_view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&tex2_view) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&tex3_view) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&out_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&out_view),
+                },
             ],
         });
 
-        let make_pipeline = |source: &str, entry: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::ComputePipeline {
-            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(entry),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            });
-            let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(&format!("pll_{}", entry)),
-                bind_group_layouts: &[Some(bgl)],
-                immediate_size: 0,
-            });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pll),
-                module: &shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
-        };
+        let make_pipeline =
+            |source: &str, entry: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::ComputePipeline {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(entry),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+                let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some(&format!("pll_{}", entry)),
+                    bind_group_layouts: &[Some(bgl)],
+                    immediate_size: 0,
+                });
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pll),
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            };
 
         let passes = [
-            Pass { pipeline: make_pipeline(SHADER_P1, "pass1_vh_lpf", &bgl1), bind_group: bg1 },
-            Pass { pipeline: make_pipeline(SHADER_P2, "pass2_green_pq", &bgl2), bind_group: bg2 },
-            Pass { pipeline: make_pipeline(SHADER_P3, "pass3_rb_opposite", &bgl3), bind_group: bg3 },
-            Pass { pipeline: make_pipeline(SHADER_P4, "pass4_rb_green_output", &bgl4), bind_group: bg4 },
+            Pass {
+                pipeline: make_pipeline(SHADER_P1, "pass1_vh_lpf", &bgl1),
+                bind_group: bg1,
+            },
+            Pass {
+                pipeline: make_pipeline(SHADER_P2, "pass2_green_pq", &bgl2),
+                bind_group: bg2,
+            },
+            Pass {
+                pipeline: make_pipeline(SHADER_P3, "pass3_rb_opposite", &bgl3),
+                bind_group: bg3,
+            },
+            Pass {
+                pipeline: make_pipeline(SHADER_P4, "pass4_rb_green_output", &bgl4),
+                bind_group: bg4,
+            },
         ];
 
         let egui_texture_id =
@@ -363,7 +437,6 @@ impl RawGpuPipeline {
             _color_texture: color_texture,
             _tex1: tex1,
             _tex2: tex2,
-            _tex3: tex3,
             _out_texture: out_texture,
             _out_view: out_view,
         };
@@ -377,20 +450,20 @@ impl RawGpuPipeline {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw recompute encoder"),
         });
-        
+
         let wg_x = self.width.div_ceil(8);
         let wg_y = self.height.div_ceil(8);
 
         for i in 0..4 {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(&format!("auraw pass {}", i+1)),
+                label: Some(&format!("auraw pass {}", i + 1)),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.passes[i].pipeline);
             pass.set_bind_group(0, &self.passes[i].bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
-        
+
         queue.submit(Some(encoder.finish()));
     }
 }
@@ -408,7 +481,11 @@ fn buffer_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn storage_texture_entry(binding: u32, format: wgpu::TextureFormat, access: wgpu::StorageTextureAccess) -> wgpu::BindGroupLayoutEntry {
+fn storage_texture_entry(
+    binding: u32,
+    format: wgpu::TextureFormat,
+    access: wgpu::StorageTextureAccess,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -526,5 +603,29 @@ fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
         width,
         height,
         depth_or_array_layers: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SHADER_P1, SHADER_P2, SHADER_P3, SHADER_P4};
+
+    #[test]
+    fn compute_shaders_parse_and_validate() {
+        for (name, source) in [
+            ("pass 1", SHADER_P1),
+            ("pass 2", SHADER_P2),
+            ("pass 3", SHADER_P3),
+            ("pass 4", SHADER_P4),
+        ] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name} did not parse: {error}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
+        }
     }
 }
