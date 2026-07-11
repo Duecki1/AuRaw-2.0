@@ -4,18 +4,15 @@ use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::layout::ScreenLayout;
 use eframe::egui::{self, Ui};
 
-pub struct Sidebar;
+pub struct GeneralTab;
 
-impl Sidebar {
-    const SCROLLBAR_GUTTER: f32 = 18.0;
-
-    pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
-        // Keep interactive content clear of overlay scrollbars on every platform.
-        let content_width = (ui.available_width() - Self::SCROLLBAR_GUTTER).max(220.0);
-        ui.set_width(content_width);
-        ui.set_max_width(content_width);
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
-
+impl GeneralTab {
+    pub fn show(
+        ui: &mut Ui,
+        app: &mut AurawApp,
+        layout: ScreenLayout,
+        touch_safe: bool,
+    ) {
         ui.horizontal(|ui| {
             ui.heading("Adjustments");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -37,17 +34,17 @@ impl Sidebar {
 
         if use_columns {
             ui.columns(2, |columns| {
-                changed |= Self::show_basic(&mut columns[0], &mut app.exposure);
-                changed |= Self::show_hsl(&mut columns[0], &mut app.exposure);
+                changed |= Self::show_basic(&mut columns[0], &mut app.exposure, touch_safe);
+                changed |= Self::show_hsl(&mut columns[0], &mut app.exposure, touch_safe);
 
-                changed |= Self::show_presence(&mut columns[1], &mut app.exposure);
-                changed |= Self::show_raw(&mut columns[1], &mut app.exposure);
+                changed |= Self::show_presence(&mut columns[1], &mut app.exposure, touch_safe);
+                changed |= Self::show_raw(&mut columns[1], &mut app.exposure, touch_safe);
             });
         } else {
-            changed |= Self::show_basic(ui, &mut app.exposure);
-            changed |= Self::show_presence(ui, &mut app.exposure);
-            changed |= Self::show_hsl(ui, &mut app.exposure);
-            changed |= Self::show_raw(ui, &mut app.exposure);
+            changed |= Self::show_basic(ui, &mut app.exposure, touch_safe);
+            changed |= Self::show_presence(ui, &mut app.exposure, touch_safe);
+            changed |= Self::show_hsl(ui, &mut app.exposure, touch_safe);
+            changed |= Self::show_raw(ui, &mut app.exposure, touch_safe);
         }
 
         if changed {
@@ -55,7 +52,7 @@ impl Sidebar {
         }
     }
 
-    fn show_basic(ui: &mut Ui, exposure: &mut ExposureParams) -> bool {
+    fn show_basic(ui: &mut Ui, exposure: &mut ExposureParams, touch_safe: bool) -> bool {
         let mut changed = false;
         egui::CollapsingHeader::new("Basic (Tone & Exposure)")
             .default_open(true)
@@ -68,6 +65,7 @@ impl Sidebar {
                     2,
                     0.05,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -77,6 +75,7 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -86,6 +85,7 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -95,6 +95,7 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -104,6 +105,7 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -113,12 +115,13 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
             });
         changed
     }
 
-    fn show_presence(ui: &mut Ui, exposure: &mut ExposureParams) -> bool {
+    fn show_presence(ui: &mut Ui, exposure: &mut ExposureParams, touch_safe: bool) -> bool {
         let mut changed = false;
         egui::CollapsingHeader::new("Presence")
             .default_open(true)
@@ -131,6 +134,7 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -140,6 +144,7 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -149,6 +154,7 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -158,6 +164,7 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -167,12 +174,13 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                    touch_safe,
                 );
             });
         changed
     }
 
-    fn show_hsl(ui: &mut Ui, exposure: &mut ExposureParams) -> bool {
+    fn show_hsl(ui: &mut Ui, exposure: &mut ExposureParams, touch_safe: bool) -> bool {
         const COLORS: [&str; 8] = [
             "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
         ];
@@ -192,6 +200,7 @@ impl Sidebar {
                             0,
                             1.0,
                             None,
+                            touch_safe,
                         );
                         changed |= adjustment_slider(
                             ui,
@@ -201,6 +210,7 @@ impl Sidebar {
                             0,
                             1.0,
                             None,
+                            touch_safe,
                         );
                         changed |= adjustment_slider(
                             ui,
@@ -210,6 +220,7 @@ impl Sidebar {
                             0,
                             1.0,
                             None,
+                            touch_safe,
                         );
                     });
 
@@ -221,7 +232,7 @@ impl Sidebar {
         changed
     }
 
-    fn show_raw(ui: &mut Ui, exposure: &mut ExposureParams) -> bool {
+    fn show_raw(ui: &mut Ui, exposure: &mut ExposureParams, touch_safe: bool) -> bool {
         let mut changed = false;
         egui::CollapsingHeader::new("Raw")
             .default_open(false)
@@ -234,6 +245,7 @@ impl Sidebar {
                     3,
                     0.01,
                     None,
+                    touch_safe,
                 );
                 let previous_mode = exposure.demosaic_mode;
                 egui::ComboBox::from_label("Demosaic")
@@ -265,6 +277,7 @@ impl Sidebar {
                     2,
                     0.01,
                     None,
+                    touch_safe,
                 );
                 if exposure.demosaic_mode == DemosaicMode::FrequencyDomainChroma {
                     changed |= adjustment_slider(
@@ -275,6 +288,7 @@ impl Sidebar {
                         2,
                         0.01,
                         None,
+                        touch_safe,
                     );
                 }
                 if exposure.demosaic_mode == DemosaicMode::Dual {
@@ -286,6 +300,7 @@ impl Sidebar {
                         1,
                         1.0,
                         None,
+                        touch_safe,
                     );
                 }
                 changed |= adjustment_slider(
@@ -296,6 +311,7 @@ impl Sidebar {
                     2,
                     0.01,
                     None,
+                    touch_safe,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -305,6 +321,7 @@ impl Sidebar {
                     2,
                     0.01,
                     None,
+                    touch_safe,
                 );
             });
         changed

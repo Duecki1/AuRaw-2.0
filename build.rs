@@ -6,12 +6,22 @@ fn main() {
         "src/shaders/raw_sampling.wgsl",
         "src/shaders/color.wgsl",
         "src/shaders/highlights.wgsl",
+        "src/shaders/highlight_lch_pass.wgsl",
         "src/shaders/basic_adjustments.wgsl",
         "src/shaders/tonemap.wgsl",
+        "src/shaders/adjustments.wgsl",
         "src/shaders/pass1.wgsl",
         "src/shaders/pass2.wgsl",
         "src/shaders/pass3.wgsl",
         "src/shaders/pass4.wgsl",
+        "src/shaders/xtrans_pass1.wgsl",
+        "src/shaders/xtrans_pass2.wgsl",
+        "src/shaders/xtrans_pass3.wgsl",
+        "src/shaders/xtrans_candidate_common.wgsl",
+        "src/shaders/xtrans_pass4.wgsl",
+        "src/shaders/xtrans_pass5.wgsl",
+        "src/shaders/xtrans_pass6.wgsl",
+        "src/shaders/xtrans_pass7.wgsl",
     ] {
         println!("cargo:rerun-if-changed={shader}");
     }

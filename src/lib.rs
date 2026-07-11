@@ -39,7 +39,7 @@ pub fn run_desktop() -> eframe::Result {
     let mut options = native_options();
     options.viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 720.0])
-        .with_min_inner_size([800.0, 600.0]);
+        .with_min_inner_size([480.0, 480.0]);
 
     eframe::run_native(
         "AuRaw",
