@@ -1,0 +1,4 @@
+numpy==2.3.5
+PyYAML==6.0.3
+tifffile==2026.5.15
+Pillow==12.2.0
