@@ -32,8 +32,6 @@ public final class AuRawActivity extends NativeActivity {
     private void launchRawDocumentPicker() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        // RAW MIME types are inconsistent between camera vendors and document
-        // providers, so extension filtering here would hide valid files.
         intent.setType("*/*");
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivityForResult(intent, OPEN_RAW_DOCUMENT);
