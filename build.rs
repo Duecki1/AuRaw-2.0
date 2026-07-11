@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     for shader in [
         "src/shaders/common.wgsl",
+        "src/shaders/profile.wgsl",
         "src/shaders/raw_sampling.wgsl",
         "src/shaders/color.wgsl",
         "src/shaders/highlights.wgsl",

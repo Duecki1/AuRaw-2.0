@@ -1,4 +1,6 @@
-use crate::pipeline::{CfaKind, ExposureParams, LoadedRaw};
+use crate::pipeline::{
+    CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, RenderingIntent,
+};
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
@@ -176,6 +178,8 @@ const SHADER_TONE_ANALYSIS: &str = concat!(
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
+    include_str!("../shaders/profile.wgsl"),
+    "\n",
     include_str!("../shaders/basic_adjustments.wgsl"),
     "\n",
     include_str!("../shaders/tone_common.wgsl"),
@@ -187,6 +191,8 @@ const SHADER_ADJUSTMENTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
     include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/profile.wgsl"),
     "\n",
     include_str!("../shaders/basic_adjustments.wgsl"),
     "\n",
@@ -237,10 +243,16 @@ pub struct GpuParams {
     height: u32,
     _pad0: u32,
     _pad1: u32,
+    profile_hue_sat: [u32; 4],
+    profile_look: [u32; 4],
+    profile_tone: [u32; 4],
+    output_lut: [u32; 4],
+    profile_flags: [u32; 4],
 }
 
 impl GpuParams {
     pub fn new(exposure: &ExposureParams, raw: &LoadedRaw) -> Self {
+        let profile_layout = raw.camera_profile.gpu_layout();
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
@@ -287,6 +299,11 @@ impl GpuParams {
             height: raw.height,
             _pad0: 0,
             _pad1: 0,
+            profile_hue_sat: profile_layout.hue_sat,
+            profile_look: profile_layout.look,
+            profile_tone: profile_layout.tone,
+            output_lut: profile_layout.output,
+            profile_flags: profile_layout.flags,
         }
     }
 }
@@ -317,6 +334,8 @@ pub struct RawGpuPipeline {
     _tone_stats_buffer: wgpu::Buffer,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
+    profile_buffer: wgpu::Buffer,
+    output_lut_offset_bytes: u64,
     _out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
 }
@@ -441,6 +460,16 @@ impl RawGpuPipeline {
         let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let black_view = black_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let default_output_transform = IccOutputTransform::srgb();
+        let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
+        let output_lut_offset_bytes = u64::from(profile_gpu_data.layout.output[3])
+            * std::mem::size_of::<[f32; 4]>() as u64;
+        let profile_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("auraw DCP and ICC profile LUTs"),
+            contents: bytemuck::cast_slice(&profile_gpu_data.words),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("auraw params"),
@@ -653,6 +682,7 @@ impl RawGpuPipeline {
                     buffer_entry(0),
                     texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_buffer_entry(15, false),
+                    storage_buffer_entry(20, true),
                     storage_texture_entry(
                         18,
                         tone_format,
@@ -699,6 +729,7 @@ impl RawGpuPipeline {
                 ),
                 storage_buffer_entry(16, true),
                 texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_buffer_entry(20, true),
             ],
         });
 
@@ -1063,6 +1094,10 @@ impl RawGpuPipeline {
                     resource: tone_histogram_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: profile_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
                 },
@@ -1153,6 +1188,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 17,
                     resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: profile_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1447,11 +1486,56 @@ impl RawGpuPipeline {
             _tone_stats_buffer: tone_stats_buffer,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
+            profile_buffer,
+            output_lut_offset_bytes,
             _out_texture: out_texture,
             _out_view: out_view,
         };
         pipeline.recompute(queue, device, params);
         Ok(pipeline)
+    }
+
+    /// Updates the preview/display transform from an RGB ICC matrix-shaper
+    /// profile without rebuilding compute pipelines or bind groups.
+    pub fn set_display_icc_profile(
+        &self,
+        queue: &wgpu::Queue,
+        profile_bytes: &[u8],
+        intent: RenderingIntent,
+    ) -> Result<()> {
+        let transform = IccOutputTransform::from_icc(profile_bytes, intent)?;
+        self.write_output_transform(queue, &transform)
+    }
+
+    /// Alias for export-oriented callers that use the same managed output
+    /// transform as the live preview.
+    pub fn set_output_icc_profile(
+        &self,
+        queue: &wgpu::Queue,
+        profile_bytes: &[u8],
+        intent: RenderingIntent,
+    ) -> Result<()> {
+        self.set_display_icc_profile(queue, profile_bytes, intent)
+    }
+
+    pub fn reset_display_to_srgb(&self, queue: &wgpu::Queue) -> Result<()> {
+        self.write_output_transform(queue, &IccOutputTransform::srgb())
+    }
+
+    pub fn write_output_transform(
+        &self,
+        queue: &wgpu::Queue,
+        transform: &IccOutputTransform,
+    ) -> Result<()> {
+        if transform.size() != crate::pipeline::color_profile::OUTPUT_LUT_EDGE {
+            return Err(anyhow!("output ICC LUT edge does not match the GPU profile layout"));
+        }
+        queue.write_buffer(
+            &self.profile_buffer,
+            self.output_lut_offset_bytes,
+            bytemuck::cast_slice(transform.entries()),
+        );
+        Ok(())
     }
 
     pub fn recompute(&self, queue: &wgpu::Queue, device: &wgpu::Device, params: &GpuParams) {
@@ -1965,11 +2049,13 @@ mod tests {
         // followed by nine adjustment vec4s, six camera/raw
         // vec4s, then dimensions/padding. This catches accidental
         // Rust/WGSL field drift before it turns sliders into random values.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 320);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 400);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 96);
         assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 208);
         assert_eq!(std::mem::offset_of!(super::GpuParams, width), 304);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 320);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 384);
     }
 
     fn adaptive_tone_curve_cpu(
@@ -2187,6 +2273,7 @@ mod tests {
                 black_levels: [0.0; 4],
                 black_levels_per_pixel: vec![0.0; (width * height) as usize],
                 white_levels: [4095.0; 4],
+                camera_profile: Default::default(),
             };
             let params = super::GpuParams::new(&ExposureParams::default(), &raw);
 

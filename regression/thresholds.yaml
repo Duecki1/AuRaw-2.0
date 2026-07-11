@@ -1,0 +1,52 @@
+schema: 1
+
+# Metrics are upper bounds. Start conservative, then tighten from observed
+# distributions across at least three machines per backend.
+defaults:
+  rmse: 0.008
+  delta_e00_mean: 1.0
+  delta_e00_p95: 3.0
+  edge_rmse_rel: 0.12
+  edge_angle_p95_deg: 12.0
+  zippering_p95: 0.10
+  false_color_p95: 4.0
+  noise_sigma_rel: 0.25
+  noise_bias_max: 0.003
+
+tags:
+  difficult-frequency:
+    edge_rmse_rel: 0.10
+    zippering_p95: 0.07
+    false_color_p95: 3.0
+  saturated-highlight:
+    highlight_delta_e00_p95: 5.0
+    highlight_max_abs: 0.025
+  high-iso:
+    noise_sigma_rel: 0.18
+    noise_bias_max: 0.004
+  underexposed:
+    noise_sigma_rel: 0.22
+    noise_bias_max: 0.002
+  bayer:
+    zippering_p95: 0.08
+  xtrans:
+    false_color_p95: 3.5
+
+backends:
+  cpu:
+    max_abs: 0.020
+  gpu:
+    max_abs: 0.025
+
+# Direct CPU/GPU parity limits. These are intentionally much tighter than the
+# reference-export limits because both paths should implement the same math.
+cpu_gpu:
+  rmse: 0.0005
+  max_abs: 0.004
+  delta_e00_mean: 0.08
+  delta_e00_p95: 0.25
+  edge_rmse_rel: 0.015
+  zippering_p95: 0.012
+  false_color_p95: 0.30
+  noise_sigma_rel: 0.03
+  noise_bias_max: 0.0002

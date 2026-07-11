@@ -1,7 +1,7 @@
 #[cfg(target_os = "android")]
 mod android;
 mod app;
-mod pipeline;
+pub mod pipeline;
 mod ui;
 
 pub use app::AurawApp;

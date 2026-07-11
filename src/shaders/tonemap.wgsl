@@ -184,9 +184,9 @@ fn compress_display_gamut(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn display_render(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
+    // The adaptive tone map produces display-referred linear Rec.2020. The
+    // final 3D LUT is generated from the selected ICC display/output profile,
+    // including its transfer curves and rendering intent.
     let mapped = scene_to_display(rgb, pos);
-    let srgb_linear = REC2020_TO_SRGB * mapped;
-    let display_linear = compress_display_gamut(srgb_linear);
-    let encoded = srgb_oetf(display_linear);
-    return clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0));
+    return apply_output_lut(mapped);
 }
