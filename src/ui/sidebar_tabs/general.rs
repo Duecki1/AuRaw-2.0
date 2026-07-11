@@ -1,5 +1,5 @@
 use crate::app::AurawApp;
-use crate::pipeline::ExposureParams;
+use crate::pipeline::{DemosaicMode, ExposureParams};
 use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::layout::ScreenLayout;
 use eframe::egui::{self, Ui};
@@ -247,6 +247,28 @@ impl GeneralTab {
                     None,
                     touch_safe,
                 );
+                let previous_mode = exposure.demosaic_mode;
+                egui::ComboBox::from_label("Demosaic")
+                    .selected_text(exposure.demosaic_mode.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut exposure.demosaic_mode,
+                            DemosaicMode::Reference,
+                            DemosaicMode::Reference.label(),
+                        );
+                        ui.selectable_value(
+                            &mut exposure.demosaic_mode,
+                            DemosaicMode::FrequencyDomainChroma,
+                            DemosaicMode::FrequencyDomainChroma.label(),
+                        );
+                        ui.selectable_value(
+                            &mut exposure.demosaic_mode,
+                            DemosaicMode::Dual,
+                            DemosaicMode::Dual.label(),
+                        );
+                    });
+                changed |= previous_mode != exposure.demosaic_mode;
+
                 changed |= adjustment_slider(
                     ui,
                     "Chroma Denoise",
@@ -257,6 +279,30 @@ impl GeneralTab {
                     None,
                     touch_safe,
                 );
+                if exposure.demosaic_mode == DemosaicMode::FrequencyDomainChroma {
+                    changed |= adjustment_slider(
+                        ui,
+                        "Frequency Chroma",
+                        &mut exposure.frequency_chroma,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        None,
+                        touch_safe,
+                    );
+                }
+                if exposure.demosaic_mode == DemosaicMode::Dual {
+                    changed |= adjustment_slider(
+                        ui,
+                        "Dual Detail Threshold",
+                        &mut exposure.dual_threshold,
+                        0.0..=100.0,
+                        1,
+                        1.0,
+                        None,
+                        touch_safe,
+                    );
+                }
                 changed |= adjustment_slider(
                     ui,
                     "Red CA",

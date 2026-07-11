@@ -138,7 +138,37 @@ const SHADER_XTRANS_P4: &str = concat!(
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
+    include_str!("../shaders/xtrans_candidate_common.wgsl"),
+    "\n",
     include_str!("../shaders/xtrans_pass4.wgsl")
+);
+
+const SHADER_XTRANS_P5: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/xtrans_pass5.wgsl")
+);
+
+const SHADER_XTRANS_P6: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/xtrans_candidate_common.wgsl"),
+    "\n",
+    include_str!("../shaders/xtrans_pass6.wgsl")
+);
+
+const SHADER_XTRANS_P7: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/xtrans_pass7.wgsl")
 );
 
 const SHADER_TONE_ANALYSIS: &str = concat!(
@@ -184,10 +214,10 @@ pub struct GpuParams {
     highlight_reconstruction: f32,
     tone_analysis_scale: f32,
     tone_guide_radius: f32,
-    _tone_reserved_2: f32,
-    _tone_reserved_3: f32,
-    _tone_reserved_4: f32,
-    _tone_reserved_5: f32,
+    demosaic_mode: f32,
+    dual_threshold: f32,
+    frequency_chroma: f32,
+    _demosaic_reserved: f32,
     basic_tone: [f32; 4],
     presence: [f32; 4],
     highlight_options: [f32; 4],
@@ -224,10 +254,10 @@ impl GpuParams {
             highlight_reconstruction: exposure.highlight_reconstruction,
             tone_analysis_scale: tone_analysis_scale() as f32,
             tone_guide_radius: if cfg!(target_os = "android") { 3.0 } else { 5.0 },
-            _tone_reserved_2: 0.0,
-            _tone_reserved_3: 0.0,
-            _tone_reserved_4: 0.0,
-            _tone_reserved_5: 0.0,
+            demosaic_mode: exposure.demosaic_mode.shader_value(),
+            dual_threshold: exposure.dual_threshold.clamp(0.0, 100.0),
+            frequency_chroma: exposure.frequency_chroma.clamp(0.0, 1.0),
+            _demosaic_reserved: 9.0,
             basic_tone: [
                 exposure.highlights,
                 exposure.shadows,
@@ -527,6 +557,95 @@ impl RawGpuPipeline {
             ],
         });
 
+        // X-Trans Markesteijn-3 uses the two highlight work textures as
+        // derivative scratch after highlight reconstruction has finalized.
+        // This retains the reference eight-direction homogeneity stages without
+        // allocating eight full-resolution RGB candidate images.
+        let bgl_xtrans_derivatives =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl X-Trans derivatives"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        20,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                    storage_texture_entry(
+                        21,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            });
+
+        let bgl_xtrans_homogeneity =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl X-Trans homogeneity"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(20, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(21, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        24,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                    storage_texture_entry(
+                        25,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            });
+
+        let bgl_xtrans_accumulate =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl X-Trans accumulate"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(25, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        26,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            });
+
+        let bgl_xtrans_finish =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl X-Trans finish"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        10,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            });
+
         let bgl_tone_prepare =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl tone prepare"),
@@ -767,6 +886,166 @@ impl RawGpuPipeline {
             ],
         });
 
+        let bg_xtrans_derivatives = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg X-Trans derivatives"),
+            layout: &bgl_xtrans_derivatives,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: wgpu::BindingResource::TextureView(&highlight_work_b_view),
+                },
+            ],
+        });
+
+        let bg_xtrans_homogeneity = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg X-Trans homogeneity"),
+            layout: &bgl_xtrans_homogeneity,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: wgpu::BindingResource::TextureView(&highlight_work_b_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 25,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+            ],
+        });
+
+        let bg_xtrans_accumulate = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg X-Trans accumulate"),
+            layout: &bgl_xtrans_accumulate,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 25,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 26,
+                    resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
+                },
+            ],
+        });
+
+        let bg_xtrans_finish = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg X-Trans finish"),
+            layout: &bgl_xtrans_finish,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 26,
+                    resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+            ],
+        });
+
         let bg_tone_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg tone prepare"),
             layout: &bgl_tone_prepare,
@@ -890,6 +1169,9 @@ impl RawGpuPipeline {
         let xtrans_p2 = work_shader_source(SHADER_XTRANS_P2, demosaic_format);
         let xtrans_p3 = work_shader_source(SHADER_XTRANS_P3, demosaic_format);
         let xtrans_p4 = work_shader_source(SHADER_XTRANS_P4, demosaic_format);
+        let xtrans_p5 = work_shader_source(SHADER_XTRANS_P5, demosaic_format);
+        let xtrans_p6 = work_shader_source(SHADER_XTRANS_P6, demosaic_format);
+        let xtrans_p7 = work_shader_source(SHADER_XTRANS_P7, demosaic_format);
 
         let make_pipeline =
             |source: &str, entry: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::ComputePipeline {
@@ -913,7 +1195,7 @@ impl RawGpuPipeline {
             };
 
         let mut passes = Vec::with_capacity(
-            1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 4 + 4 + 1,
+            1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 8 + 5,
         );
 
         // Prepare writes the initial RGB estimate and reliability into A.
@@ -975,9 +1257,9 @@ impl RawGpuPipeline {
         });
 
         // Select the demosaic family from LibRaw's CFA classification.
-        // Bayer uses the four-stage ratio-corrected path. Fuji X-Trans uses a
-        // dedicated 6x6-pattern-aware seed/green/chroma/output sequence and
-        // never enters code that assumes a 2x2 Bayer lattice.
+        // Bayer uses the four-stage ratio-corrected reference path. Fuji
+        // X-Trans seeds an RGB image, performs three green/chroma refinement
+        // passes, then selects among eight homogeneity-guided candidates.
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
                 Pass {
@@ -1026,7 +1308,25 @@ impl RawGpuPipeline {
                 Pass {
                     pipeline: make_pipeline(
                         xtrans_p2.as_ref(),
-                        "xtrans_refine_green",
+                        "xtrans_markesteijn_pass1",
+                        &bgl2,
+                    ),
+                    bind_group: bg2.clone(),
+                    workgroups: image_workgroups,
+                },
+                Pass {
+                    pipeline: make_pipeline(
+                        xtrans_p3.as_ref(),
+                        "xtrans_markesteijn_pass2",
+                        &bgl3,
+                    ),
+                    bind_group: bg3,
+                    workgroups: image_workgroups,
+                },
+                Pass {
+                    pipeline: make_pipeline(
+                        xtrans_p2.as_ref(),
+                        "xtrans_markesteijn_pass3",
                         &bgl2,
                     ),
                     bind_group: bg2,
@@ -1034,16 +1334,38 @@ impl RawGpuPipeline {
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        xtrans_p3.as_ref(),
-                        "xtrans_refine_chroma",
-                        &bgl3,
+                        xtrans_p4.as_ref(),
+                        "xtrans_markesteijn_derivatives",
+                        &bgl_xtrans_derivatives,
                     ),
-                    bind_group: bg3,
+                    bind_group: bg_xtrans_derivatives,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p4.as_ref(), "xtrans_output", &bgl4),
-                    bind_group: bg4,
+                    pipeline: make_pipeline(
+                        xtrans_p5.as_ref(),
+                        "xtrans_markesteijn_homogeneity",
+                        &bgl_xtrans_homogeneity,
+                    ),
+                    bind_group: bg_xtrans_homogeneity,
+                    workgroups: image_workgroups,
+                },
+                Pass {
+                    pipeline: make_pipeline(
+                        xtrans_p6.as_ref(),
+                        "xtrans_markesteijn_accumulate",
+                        &bgl_xtrans_accumulate,
+                    ),
+                    bind_group: bg_xtrans_accumulate,
+                    workgroups: image_workgroups,
+                },
+                Pass {
+                    pipeline: make_pipeline(
+                        xtrans_p7.as_ref(),
+                        "xtrans_demosaic_finish",
+                        &bgl_xtrans_finish,
+                    ),
+                    bind_group: bg_xtrans_finish,
                     workgroups: image_workgroups,
                 },
             ]),
@@ -1478,7 +1800,8 @@ mod tests {
         HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1,
         SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
         SHADER_HIGHLIGHTS, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1, SHADER_XTRANS_P2,
-        SHADER_XTRANS_P3, SHADER_XTRANS_P4,
+        SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5, SHADER_XTRANS_P6,
+        SHADER_XTRANS_P7,
     };
 
     #[test]
@@ -1492,7 +1815,10 @@ mod tests {
             ("X-Trans pass 1", SHADER_XTRANS_P1),
             ("X-Trans pass 2", SHADER_XTRANS_P2),
             ("X-Trans pass 3", SHADER_XTRANS_P3),
-            ("X-Trans pass 4", SHADER_XTRANS_P4),
+            ("X-Trans derivatives", SHADER_XTRANS_P4),
+            ("X-Trans homogeneity", SHADER_XTRANS_P5),
+            ("X-Trans accumulation", SHADER_XTRANS_P6),
+            ("X-Trans finish", SHADER_XTRANS_P7),
             ("adaptive tone analysis", SHADER_TONE_ANALYSIS),
             ("Lightroom adjustments", SHADER_ADJUSTMENTS),
         ] {
@@ -1572,6 +1898,25 @@ mod tests {
     }
 
     #[test]
+    fn demosaic_reference_invariants_are_present() {
+        assert!(SHADER_BAYER_RCD_P4.contains("const RCD_MARGIN: i32 = 9"));
+        assert!(SHADER_BAYER_RCD_P4.contains("ppg_rgb_at"));
+        assert!(SHADER_BAYER_RCD_P2.contains("green = mix(vertical.x, horizontal.x, vh)"));
+        assert!(SHADER_BAYER_RCD_P3.contains("return mix(p_est, q_est, pq)"));
+
+        assert!(SHADER_XTRANS_P6.contains("index < 8u"));
+        assert!(SHADER_XTRANS_P5.contains("minimum * 8.0"));
+        assert!(SHADER_XTRANS_P6.contains("mark_homo_sum5"));
+        assert!(SHADER_XTRANS_P6.contains("index + 4u"));
+        assert!(SHADER_XTRANS_P6.contains("MARKESTEIJN3_MARGIN"));
+
+        assert!(SHADER_BAYER_RCD_P4.contains("for (var dy = -6; dy <= 6"));
+        assert!(SHADER_XTRANS_P7.contains("for (var dy = -6; dy <= 6"));
+        assert!(SHADER_BAYER_RCD_P4.contains("detail /= 256.0"));
+        assert!(SHADER_XTRANS_P7.contains("detail /= 256.0"));
+    }
+
+    #[test]
     fn demosaic_shaders_expose_every_dispatched_entry_point() {
         for (source, expected) in [
             (SHADER_BAYER_RCD_P1, "bayer_rcd_directional"),
@@ -1579,9 +1924,13 @@ mod tests {
             (SHADER_BAYER_RCD_P3, "bayer_rcd_chroma"),
             (SHADER_BAYER_RCD_P4, "bayer_rcd_output"),
             (SHADER_XTRANS_P1, "xtrans_seed"),
-            (SHADER_XTRANS_P2, "xtrans_refine_green"),
-            (SHADER_XTRANS_P3, "xtrans_refine_chroma"),
-            (SHADER_XTRANS_P4, "xtrans_output"),
+            (SHADER_XTRANS_P2, "xtrans_markesteijn_pass1"),
+            (SHADER_XTRANS_P2, "xtrans_markesteijn_pass3"),
+            (SHADER_XTRANS_P3, "xtrans_markesteijn_pass2"),
+            (SHADER_XTRANS_P4, "xtrans_markesteijn_derivatives"),
+            (SHADER_XTRANS_P5, "xtrans_markesteijn_homogeneity"),
+            (SHADER_XTRANS_P6, "xtrans_markesteijn_accumulate"),
+            (SHADER_XTRANS_P7, "xtrans_demosaic_finish"),
         ] {
             let module =
                 naga::front::wgsl::parse_str(source).expect("demosaic shader did not parse");
@@ -1612,8 +1961,8 @@ mod tests {
 
     #[test]
     fn gpu_params_follow_the_wgsl_uniform_layout() {
-        // Twelve active scalar values plus four reserved floats keep the stable
-        // 64-byte prefix, followed by nine adjustment vec4s, six camera/raw
+        // Sixteen active scalar values keep the stable 64-byte prefix,
+        // followed by nine adjustment vec4s, six camera/raw
         // vec4s, then dimensions/padding. This catches accidental
         // Rust/WGSL field drift before it turns sliders into random values.
         assert_eq!(std::mem::size_of::<super::GpuParams>(), 320);

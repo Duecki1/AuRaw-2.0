@@ -1,256 +1,357 @@
-// Bayer RCD stage 4: missing chroma at green sites, refinement and output.
+// Bayer RCD stage 4. The 9-pixel exterior is deliberately produced by PPG,
+// matching darktable's RCD margin policy; RCD samples never rely on clamped
+// coordinates. The same reference result feeds optional FDC and dual modes.
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(9) var tex3_read: texture_2d<f32>;
 @group(0) @binding(10) var scene_write: texture_storage_2d<rgba16float, write>;
 
-fn chroma_filter_weight(dx: i32, dy: i32) -> f32 {
-    if dx == 0 && dy == 0 {
-        return 4.0;
-    }
-    if dx == 0 || dy == 0 {
-        return 2.0;
-    }
-    return 1.0;
+const RCD_MARGIN: i32 = 9;
+
+fn demosaic_in_bounds(pos: vec2<i32>) -> bool {
+    return pos.x >= 0 && pos.y >= 0
+        && pos.x < i32(params.width) && pos.y < i32(params.height);
 }
 
-fn smoothed_chroma_diffs(pos: vec2<i32>) -> vec2<f32> {
-    let center = clamp_pos(pos);
-    let g_center = textureLoad(tex2_read, center, 0).x;
-    var sum = vec2<f32>(0.0);
-    var sum_w = 0.0;
+fn rcd_has_reference_margin(pos: vec2<i32>) -> bool {
+    return pos.x >= RCD_MARGIN && pos.y >= RCD_MARGIN
+        && pos.x < i32(params.width) - RCD_MARGIN
+        && pos.y < i32(params.height) - RCD_MARGIN;
+}
 
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let p = clamp_pos(pos + vec2<i32>(dx, dy));
-            let cc = color_at(p);
+fn green_plane_at(pos: vec2<i32>) -> f32 {
+    return textureLoad(tex2_read, clamp_pos(pos), 0).x;
+}
 
-            if cc == 1u {
-                continue;
+// PPG fallback used for the complete exterior margin and for small images.
+// It preserves measured samples and only clamps where the border algorithm
+// itself requires unavailable sensor samples.
+fn ppg_green_at(pos: vec2<i32>) -> f32 {
+    let p = clamp_pos(pos);
+    if color_at(p) == 1u { return raw_cfa_at(p); }
+
+    let c = raw_cfa_at(p);
+    let gm = raw_cfa_at(p + vec2<i32>(-1, 0));
+    let gp = raw_cfa_at(p + vec2<i32>( 1, 0));
+    let gv_m = raw_cfa_at(p + vec2<i32>(0, -1));
+    let gv_p = raw_cfa_at(p + vec2<i32>(0,  1));
+    let cm2 = raw_cfa_at(p + vec2<i32>(-2, 0));
+    let cp2 = raw_cfa_at(p + vec2<i32>( 2, 0));
+    let cv_m2 = raw_cfa_at(p + vec2<i32>(0, -2));
+    let cv_p2 = raw_cfa_at(p + vec2<i32>(0,  2));
+
+    let dh = abs(cm2 - cp2) + abs(gm - gp);
+    let dv = abs(cv_m2 - cv_p2) + abs(gv_m - gv_p);
+    let gh = 0.5 * (gm + gp) + 0.25 * (2.0 * c - cm2 - cp2);
+    let gv = 0.5 * (gv_m + gv_p) + 0.25 * (2.0 * c - cv_m2 - cv_p2);
+    var g = select(gv, gh, dh < dv);
+    if abs(dh - dv) < 1e-6 { g = 0.5 * (gh + gv); }
+    let lo = min(min(gm, gp), min(gv_m, gv_p));
+    let hi = max(max(gm, gp), max(gv_m, gv_p));
+    return clamp(g, lo, hi);
+}
+
+fn ppg_difference_pair(pos: vec2<i32>, channel: u32, axis: vec2<i32>) -> f32 {
+    let a = clamp_pos(pos - axis);
+    let b = clamp_pos(pos + axis);
+    var sum = 0.0;
+    var count = 0.0;
+    if color_at(a) == channel {
+        sum += raw_cfa_at(a) - ppg_green_at(a);
+        count += 1.0;
+    }
+    if color_at(b) == channel {
+        sum += raw_cfa_at(b) - ppg_green_at(b);
+        count += 1.0;
+    }
+    return sum / max(count, 1.0);
+}
+
+fn ppg_rgb_at(pos: vec2<i32>) -> vec3<f32> {
+    let p = clamp_pos(pos);
+    let cc = color_at(p);
+    let g = ppg_green_at(p);
+    var r = g;
+    var b = g;
+    if cc == 0u {
+        r = raw_cfa_at(p);
+        var d = 0.0;
+        for (var sy = -1; sy <= 1; sy = sy + 2) {
+            for (var sx = -1; sx <= 1; sx = sx + 2) {
+                let q = clamp_pos(p + vec2<i32>(sx, sy));
+                d += raw_cfa_at(q) - ppg_green_at(q);
             }
+        }
+        b = g + 0.25 * d;
+    } else if cc == 2u {
+        b = raw_cfa_at(p);
+        var d = 0.0;
+        for (var sy = -1; sy <= 1; sy = sy + 2) {
+            for (var sx = -1; sx <= 1; sx = sx + 2) {
+                let q = clamp_pos(p + vec2<i32>(sx, sy));
+                d += raw_cfa_at(q) - ppg_green_at(q);
+            }
+        }
+        r = g + 0.25 * d;
+    } else {
+        let horizontal = vec2<i32>(1, 0);
+        let vertical = vec2<i32>(0, 1);
+        if color_at(clamp_pos(p + horizontal)) == 0u {
+            r = g + ppg_difference_pair(p, 0u, horizontal);
+            b = g + ppg_difference_pair(p, 2u, vertical);
+        } else {
+            r = g + ppg_difference_pair(p, 0u, vertical);
+            b = g + ppg_difference_pair(p, 2u, horizontal);
+        }
+    }
+    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+}
 
-            let diffs = textureLoad(tex3_read, p, 0).xy;
-            let g = textureLoad(tex2_read, p, 0).x;
-            let spatial_w = chroma_filter_weight(dx, dy);
-            let edge_w = 1.0 / (1.0 + 8.0 * abs(g_center - g));
-            let w = spatial_w * edge_w;
+fn rcd_green_channel(pos: vec2<i32>, channel: u32) -> f32 {
+    let eps = 1e-5;
+    let g0 = green_plane_at(pos);
+    let n = pos + vec2<i32>(0, -1);
+    let s = pos + vec2<i32>(0,  1);
+    let w = pos + vec2<i32>(-1, 0);
+    let e = pos + vec2<i32>( 1, 0);
+    let n2 = pos + vec2<i32>(0, -2);
+    let s2 = pos + vec2<i32>(0,  2);
+    let w2 = pos + vec2<i32>(-2, 0);
+    let e2 = pos + vec2<i32>( 2, 0);
+    let n3 = pos + vec2<i32>(0, -3);
+    let s3 = pos + vec2<i32>(0,  3);
+    let w3 = pos + vec2<i32>(-3, 0);
+    let e3 = pos + vec2<i32>( 3, 0);
 
-            sum += diffs * w;
-            sum_w += w;
+    let rn = textureLoad(tex3_read, n, 0).rgb;
+    let rs = textureLoad(tex3_read, s, 0).rgb;
+    let rw = textureLoad(tex3_read, w, 0).rgb;
+    let re = textureLoad(tex3_read, e, 0).rgb;
+    let rn3 = textureLoad(tex3_read, n3, 0).rgb;
+    let rs3 = textureLoad(tex3_read, s3, 0).rgb;
+    let rw3 = textureLoad(tex3_read, w3, 0).rgb;
+    let re3 = textureLoad(tex3_read, e3, 0).rgb;
+    let cn = select(rn.r, rn.b, channel == 2u);
+    let cs = select(rs.r, rs.b, channel == 2u);
+    let cw = select(rw.r, rw.b, channel == 2u);
+    let ce = select(re.r, re.b, channel == 2u);
+    let cn3 = select(rn3.r, rn3.b, channel == 2u);
+    let cs3 = select(rs3.r, rs3.b, channel == 2u);
+    let cw3 = select(rw3.r, rw3.b, channel == 2u);
+    let ce3 = select(re3.r, re3.b, channel == 2u);
+
+    let sn_abs = abs(cn - cs);
+    let ew_abs = abs(cw - ce);
+    let n_grad = eps + abs(g0 - green_plane_at(n2)) + sn_abs + abs(cn - cn3);
+    let s_grad = eps + abs(g0 - green_plane_at(s2)) + sn_abs + abs(cs - cs3);
+    let w_grad = eps + abs(g0 - green_plane_at(w2)) + ew_abs + abs(cw - cw3);
+    let e_grad = eps + abs(g0 - green_plane_at(e2)) + ew_abs + abs(ce - ce3);
+    let n_est = cn - green_plane_at(n);
+    let s_est = cs - green_plane_at(s);
+    let w_est = cw - green_plane_at(w);
+    let e_est = ce - green_plane_at(e);
+    let v_est = (n_grad * s_est + s_grad * n_est) / (n_grad + s_grad);
+    let h_est = (e_grad * w_est + w_grad * e_est) / (e_grad + w_grad);
+
+    let vh_center = textureLoad(tex2_read, pos, 0).y;
+    let vh_neighbours = 0.25 * (
+        textureLoad(tex2_read, pos + vec2<i32>(-1, -1), 0).y
+      + textureLoad(tex2_read, pos + vec2<i32>( 1, -1), 0).y
+      + textureLoad(tex2_read, pos + vec2<i32>(-1,  1), 0).y
+      + textureLoad(tex2_read, pos + vec2<i32>( 1,  1), 0).y
+    );
+    let vh = clamp(select(vh_center, vh_neighbours,
+        abs(0.5 - vh_center) < abs(0.5 - vh_neighbours)), 0.0, 1.0);
+    return g0 + mix(v_est, h_est, vh);
+}
+
+fn rcd_reference_at(pos: vec2<i32>) -> vec3<f32> {
+    if !rcd_has_reference_margin(pos) { return ppg_rgb_at(pos); }
+    let cc = color_at(pos);
+    if cc != 1u { return textureLoad(tex3_read, pos, 0).rgb; }
+    let g = green_plane_at(pos);
+    let r = rcd_green_channel(pos, 0u);
+    let b = rcd_green_channel(pos, 2u);
+    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+}
+
+fn bayer_uv(rgb: vec3<f32>) -> vec2<f32> {
+    let y = dot(rgb, vec3<f32>(0.2627, 0.6780, 0.0593));
+    return vec2<f32>(0.56433 * (rgb.b - y), 0.67815 * (rgb.r - y));
+}
+
+fn bayer_from_yuv(y: f32, uv: vec2<f32>) -> vec3<f32> {
+    let b = y + uv.x / 0.56433;
+    let r = y + uv.y / 0.67815;
+    let g = (y - 0.2627 * r - 0.0593 * b) / 0.6780;
+    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+}
+
+fn bayer_phase2(offset: i32) -> f32 {
+    return select(1.0, -1.0, (abs(offset) & 1) == 1);
+}
+
+fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
+    let center_uv = bayer_uv(center);
+    var carrier_x = vec2<f32>(0.0);
+    var carrier_y = vec2<f32>(0.0);
+    var carrier_xy = vec2<f32>(0.0);
+    var carrier_weight = 0.0;
+
+    // Analyze the three Bayer chroma carriers over a 13x13 apodized window.
+    // Removing only coherent Nyquist-period chroma protects real low-frequency
+    // colour while suppressing zippering and maze aliases.
+    for (var dy = -6; dy <= 6; dy = dy + 1) {
+        let wy = f32(7 - abs(dy));
+        let py = bayer_phase2(dy);
+        for (var dx = -6; dx <= 6; dx = dx + 1) {
+            let weight = wy * f32(7 - abs(dx));
+            let px = bayer_phase2(dx);
+            let uv = bayer_uv(rcd_reference_at(pos + vec2<i32>(dx, dy)));
+            let delta = uv - center_uv;
+            carrier_x += weight * px * delta;
+            carrier_y += weight * py * delta;
+            carrier_xy += weight * px * py * delta;
+            carrier_weight += weight;
         }
     }
 
-    if sum_w > 0.0 {
-        return sum / sum_w;
-    }
-    return textureLoad(tex3_read, center, 0).xy;
+    let carrier_alias = (carrier_x + carrier_y + carrier_xy)
+        / max(3.0 * carrier_weight, 1e-6);
+    let n = rcd_reference_at(pos + vec2<i32>(0, -1));
+    let s = rcd_reference_at(pos + vec2<i32>(0,  1));
+    let w = rcd_reference_at(pos + vec2<i32>(-1, 0));
+    let e = rcd_reference_at(pos + vec2<i32>( 1, 0));
+    let center_y = dot(center, vec3<f32>(0.2627, 0.6780, 0.0593));
+    let luma_high = abs(4.0 * center_y
+        - dot(n + s + w + e, vec3<f32>(0.2627, 0.6780, 0.0593)));
+    let spectral_energy = max(length(carrier_alias) - 0.25 * luma_high, 0.0);
+    let reject = smoothstep(0.0015, 0.030, spectral_energy)
+        * clamp(params.frequency_chroma, 0.0, 1.0);
+    return bayer_from_yuv(center_y, center_uv - reject * carrier_alias);
 }
 
-fn ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
+fn low_detail_rgb_at(pos: vec2<i32>) -> vec3<f32> {
+    // VNG-style low-detail reconstruction: measured samples are accumulated
+    // per channel with a green-edge range weight, then colour-smoothed.
+    let center_g = ppg_green_at(pos);
+    var sum = vec3<f32>(0.0);
+    var weights = vec3<f32>(0.0);
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            let q = pos + vec2<i32>(dx, dy);
+            if !demosaic_in_bounds(q) { continue; }
+            let channel = color_at(q);
+            let spatial = 1.0 / (1.0 + f32(dx * dx + dy * dy));
+            let range = 1.0 / (1.0 + 16.0 * abs(ppg_green_at(q) - center_g));
+            let weight = spatial * range;
+            if channel == 0u { sum.r += raw_cfa_at(q) * weight; weights.r += weight; }
+            if channel == 1u { sum.g += raw_cfa_at(q) * weight; weights.g += weight; }
+            if channel == 2u { sum.b += raw_cfa_at(q) * weight; weights.b += weight; }
+        }
+    }
+    return max(sum / max(weights, vec3<f32>(1e-6)), vec3<f32>(0.0));
+}
+
+fn reference_luma_at(pos: vec2<i32>) -> f32 {
+    return dot(rcd_reference_at(clamp_pos(pos)), vec3<f32>(0.25, 0.50, 0.25));
+}
+
+fn scharr_detail_at(pos: vec2<i32>) -> f32 {
+    let nw = reference_luma_at(pos + vec2<i32>(-1, -1));
+    let n  = reference_luma_at(pos + vec2<i32>( 0, -1));
+    let ne = reference_luma_at(pos + vec2<i32>( 1, -1));
+    let w  = reference_luma_at(pos + vec2<i32>(-1,  0));
+    let e  = reference_luma_at(pos + vec2<i32>( 1,  0));
+    let sw = reference_luma_at(pos + vec2<i32>(-1,  1));
+    let s  = reference_luma_at(pos + vec2<i32>( 0,  1));
+    let se = reference_luma_at(pos + vec2<i32>( 1,  1));
+    let gx = 3.0 * (ne - nw) + 10.0 * (e - w) + 3.0 * (se - sw);
+    let gy = 3.0 * (sw - nw) + 10.0 * (s - n) + 3.0 * (se - ne);
+    return sqrt(gx * gx + gy * gy) / 32.0;
+}
+
+fn gaussian5_weight(offset: i32) -> f32 {
+    let a = abs(offset);
+    if a == 0 { return 6.0; }
+    if a == 1 { return 4.0; }
+    return 1.0;
+}
+
+fn dual_high_weight(pos: vec2<i32>) -> f32 {
+    var detail = 0.0;
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        let wy = gaussian5_weight(dy);
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            detail += wy * gaussian5_weight(dx)
+                * scharr_detail_at(clamp_pos(pos + vec2<i32>(dx, dy)));
+        }
+    }
+    detail /= 256.0;
+    let threshold = 0.005 * pow(max(params.dual_threshold, 0.0), 1.1);
+    if threshold <= 1e-7 { return 1.0; }
+    return smoothstep(threshold, max(4.0 * threshold, threshold + 1e-5), detail);
+}
+
+fn warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
     let extent = vec2<f32>(f32(params.width - 1u), f32(params.height - 1u));
     let center = 0.5 * extent;
-    let p = vec2<f32>(pos);
-    let rel = p - center;
+    let rel = vec2<f32>(pos) - center;
     let norm = rel / max(center, vec2<f32>(1.0));
-    let r2 = dot(norm, norm);
-    let scale = 1.0 + amount * 0.001 * r2;
+    let scale = 1.0 + amount * 0.001 * dot(norm, norm);
     return clamp(center + rel * scale, vec2<f32>(0.0), extent);
 }
 
-fn reconstructed_channel_at(pos: vec2<i32>, channel: u32) -> f32 {
-    let p = clamp_pos(pos);
-    let g = textureLoad(tex2_read, p, 0).x;
-    let diffs = smoothed_chroma_diffs(p);
-    return select(g + diffs.x, g + diffs.y, channel == 2u);
-}
-
-fn reconstructed_channel_bilinear(pos: vec2<f32>, channel: u32) -> f32 {
-    let pf = floor(pos);
-    let p0 = vec2<i32>(i32(pf.x), i32(pf.y));
+fn reference_bilinear(pos: vec2<f32>) -> vec3<f32> {
+    let base = floor(pos);
+    let p0 = vec2<i32>(i32(base.x), i32(base.y));
     let p1 = p0 + vec2<i32>(1, 1);
     let f = fract(pos);
-
-    let v00 = reconstructed_channel_at(p0, channel);
-    let v10 = reconstructed_channel_at(vec2<i32>(p1.x, p0.y), channel);
-    let v01 = reconstructed_channel_at(vec2<i32>(p0.x, p1.y), channel);
-    let v11 = reconstructed_channel_at(p1, channel);
-
-    return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+    let a = rcd_reference_at(clamp_pos(p0));
+    let b = rcd_reference_at(clamp_pos(vec2<i32>(p1.x, p0.y)));
+    let c = rcd_reference_at(clamp_pos(vec2<i32>(p0.x, p1.y)));
+    let d = rcd_reference_at(clamp_pos(p1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-fn apply_lateral_ca(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let use_r = abs(params.ca_red) >= 1e-6;
-    let use_b = abs(params.ca_blue) >= 1e-6;
-    let r = select(rgb.r, reconstructed_channel_bilinear(ca_warped_pos(pos, params.ca_red), 0u), use_r);
-    let b = select(rgb.b, reconstructed_channel_bilinear(ca_warped_pos(pos, params.ca_blue), 2u), use_b);
-    return vec3<f32>(
-        r,
-        rgb.g,
-        b,
-    );
+fn apply_ca(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    var out = rgb;
+    if abs(params.ca_red) > 1e-6 { out.r = reference_bilinear(warped_pos(pos, params.ca_red)).r; }
+    if abs(params.ca_blue) > 1e-6 { out.b = reference_bilinear(warped_pos(pos, params.ca_blue)).b; }
+    return out;
 }
 
 fn apply_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let strength = clamp(params.chroma_denoise, 0.0, 1.0);
-    if strength <= 1e-6 {
-        return rgb;
-    }
-
-    let center_g = max(rgb.g, 0.0);
-    let center_chroma = vec2<f32>(rgb.r - rgb.g, rgb.b - rgb.g);
+    if strength <= 1e-6 { return rgb; }
     var sum = vec2<f32>(0.0);
-    var sum_w = 0.0;
-
+    var weight_sum = 0.0;
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
-            let p = clamp_pos(pos + vec2<i32>(dx, dy));
-            let g = textureLoad(tex2_read, p, 0).x;
-            let diffs = smoothed_chroma_diffs(p);
-            let dist = f32(dx * dx + dy * dy);
-            let spatial_w = 1.0 / (1.0 + dist);
-            let range_w = 1.0 / (1.0 + 32.0 * abs(center_g - g));
-            let w = spatial_w * range_w;
-            sum += diffs * w;
-            sum_w += w;
+            let sample = rcd_reference_at(clamp_pos(pos + vec2<i32>(dx, dy)));
+            let spatial = 1.0 / (1.0 + f32(dx * dx + dy * dy));
+            let range = 1.0 / (1.0 + 24.0 * abs(sample.g - rgb.g));
+            let weight = spatial * range;
+            sum += vec2<f32>(sample.r - sample.g, sample.b - sample.g) * weight;
+            weight_sum += weight;
         }
     }
-
-    if sum_w <= 0.0 {
-        return rgb;
-    }
-
-    let shadow = 1.0 - smoothstep(0.04, 0.35, center_g);
-    let effective = strength * mix(0.35, 1.0, shadow);
-    let denoised_chroma = mix(center_chroma, sum / sum_w, effective);
-    return vec3<f32>(rgb.g + denoised_chroma.x, rgb.g, rgb.g + denoised_chroma.y);
-}
-
-fn refine_green_with_chroma(pos: vec2<i32>, cc: u32, clip: f32, g0: f32, diffR: f32, diffB: f32) -> f32 {
-    if cc == 1u || clip > 0.5 {
-        return g0;
-    }
-
-    let raw = raw_cfa_at(pos);
-    let chroma = select(diffR, diffB, cc == 2u);
-    let candidate = raw - chroma;
-
-    let g_n = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(0, -1)), 0).x;
-    let g_s = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(0, 1)), 0).x;
-    let g_w = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(-1, 0)), 0).x;
-    let g_e = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(1, 0)), 0).x;
-    let lo = min(min(g_n, g_s), min(g_w, g_e));
-    let hi = max(max(g_n, g_s), max(g_w, g_e));
-    let range = max(hi - lo, 1e-4);
-    let bounded = clamp(candidate, lo - 0.25 * range - 0.02, hi + 0.25 * range + 0.02);
-
-    return mix(g0, bounded, 0.65);
+    let center = vec2<f32>(rgb.r - rgb.g, rgb.b - rgb.g);
+    let chroma = mix(center, sum / max(weight_sum, 1e-6), strength);
+    return max(vec3<f32>(rgb.g + chroma.x, rgb.g, rgb.g + chroma.y), vec3<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn bayer_rcd_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    let cc = color_at(pos);
-
-    let g0 = textureLoad(tex2_read, pos, 0).x;
-    let clip = textureLoad(tex2_read, pos, 0).w;
-
-    var diffR = 0.0;
-    var diffB = 0.0;
-
-    if cc == 0u || cc == 2u {
-        let diffs = smoothed_chroma_diffs(pos);
-        diffR = diffs.x;
-        diffB = diffs.y;
-    } else {
-        let vh_c = textureLoad(tex2_read, pos, 0).y;
-        let vh_nw = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(-1, -1)), 0).y;
-        let vh_ne = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(1, -1)), 0).y;
-        let vh_sw = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(-1, 1)), 0).y;
-        let vh_se = textureLoad(tex2_read, clamp_pos(pos + vec2<i32>(1, 1)), 0).y;
-        let vh_n = 0.25 * (vh_nw + vh_ne + vh_sw + vh_se);
-        let vh_disc = select(vh_c, vh_n, abs(0.5 - vh_c) < abs(0.5 - vh_n));
-
-        let eps = 1e-5;
-        let n  = pos + vec2<i32>(0, -1);
-        let s  = pos + vec2<i32>(0, 1);
-        let w  = pos + vec2<i32>(-1, 0);
-        let e  = pos + vec2<i32>(1, 0);
-        let n2 = pos + vec2<i32>(0, -2);
-        let s2 = pos + vec2<i32>(0, 2);
-        let w2 = pos + vec2<i32>(-2, 0);
-        let e2 = pos + vec2<i32>(2, 0);
-        let n3 = pos + vec2<i32>(0, -3);
-        let s3 = pos + vec2<i32>(0, 3);
-        let w3 = pos + vec2<i32>(-3, 0);
-        let e3 = pos + vec2<i32>(3, 0);
-
-        let g_n  = textureLoad(tex2_read, clamp_pos(n), 0).x;
-        let g_s  = textureLoad(tex2_read, clamp_pos(s), 0).x;
-        let g_w  = textureLoad(tex2_read, clamp_pos(w), 0).x;
-        let g_e  = textureLoad(tex2_read, clamp_pos(e), 0).x;
-        let g_n2 = textureLoad(tex2_read, clamp_pos(n2), 0).x;
-        let g_s2 = textureLoad(tex2_read, clamp_pos(s2), 0).x;
-        let g_w2 = textureLoad(tex2_read, clamp_pos(w2), 0).x;
-        let g_e2 = textureLoad(tex2_read, clamp_pos(e2), 0).x;
-
-        let g_n3 = textureLoad(tex2_read, clamp_pos(n3), 0).x;
-        let g_s3 = textureLoad(tex2_read, clamp_pos(s3), 0).x;
-        let g_w3 = textureLoad(tex2_read, clamp_pos(w3), 0).x;
-        let g_e3 = textureLoad(tex2_read, clamp_pos(e3), 0).x;
-
-        let n1 = eps + abs(g0 - g_n2);
-        let s1 = eps + abs(g0 - g_s2);
-        let w1 = eps + abs(g0 - g_w2);
-        let e1 = eps + abs(g0 - g_e2);
-
-        let val_n  = smoothed_chroma_diffs(n);
-        let val_s  = smoothed_chroma_diffs(s);
-        let val_w  = smoothed_chroma_diffs(w);
-        let val_e  = smoothed_chroma_diffs(e);
-        let val_n3 = smoothed_chroma_diffs(n3);
-        let val_s3 = smoothed_chroma_diffs(s3);
-        let val_w3 = smoothed_chroma_diffs(w3);
-        let val_e3 = smoothed_chroma_diffs(e3);
-
-        for (var c = 0u; c <= 2u; c = c + 2u) {
-            let c_n  = select(val_n.x,  val_n.y,  c == 2u);
-            let c_s  = select(val_s.x,  val_s.y,  c == 2u);
-            let c_w  = select(val_w.x,  val_w.y,  c == 2u);
-            let c_e  = select(val_e.x,  val_e.y,  c == 2u);
-            let c_n3 = select(val_n3.x, val_n3.y, c == 2u);
-            let c_s3 = select(val_s3.x, val_s3.y, c == 2u);
-            let c_w3 = select(val_w3.x, val_w3.y, c == 2u);
-            let c_e3 = select(val_e3.x, val_e3.y, c == 2u);
-
-            let rgb_n  = g_n  + c_n;
-            let rgb_s  = g_s  + c_s;
-            let rgb_w  = g_w  + c_w;
-            let rgb_e  = g_e  + c_e;
-
-            let sn_abs = abs(rgb_n - rgb_s);
-            let ew_abs = abs(rgb_w - rgb_e);
-
-            let n_grad = n1 + sn_abs + abs(rgb_n - (g_n3 + c_n3));
-            let s_grad = s1 + sn_abs + abs(rgb_s - (g_s3 + c_s3));
-            let w_grad = w1 + ew_abs + abs(rgb_w - (g_w3 + c_w3));
-            let e_grad = e1 + ew_abs + abs(rgb_e - (g_e3 + c_e3));
-
-            let v_est = (n_grad * c_s + s_grad * c_n) / (n_grad + s_grad);
-            let h_est = (e_grad * c_w + w_grad * c_e) / (e_grad + w_grad);
-
-            let val = mix(v_est, h_est, vh_disc);
-            if c == 0u { diffR = val; } else { diffB = val; }
-        }
+    let reference = rcd_reference_at(pos);
+    var camera_rgb = reference;
+    if params.demosaic_mode >= 1.5 {
+        camera_rgb = mix(low_detail_rgb_at(pos), reference, dual_high_weight(pos));
+    } else if params.demosaic_mode >= 0.5 {
+        camera_rgb = frequency_chroma_at(pos, reference);
     }
-
-    let g_refined = refine_green_with_chroma(pos, cc, clip, g0, diffR, diffB);
-    let r_val = g_refined + diffR;
-    let b_val = g_refined + diffB;
-
-    // Highlight reconstruction already happened on the raw CFA texture before
-    // this demosaic.  Reconstructing a second time from RGB here was the old
-    // source of coloured halos and grey patches around clipped highlights.
-    var camera_rgb = apply_lateral_ca(pos, vec3<f32>(r_val, g_refined, b_val));
+    camera_rgb = apply_ca(pos, camera_rgb);
     camera_rgb = apply_chroma_denoise(pos, camera_rgb);
     textureStore(scene_write, pos, vec4<f32>(max(camera_rgb, vec3<f32>(0.0)), 1.0));
 }

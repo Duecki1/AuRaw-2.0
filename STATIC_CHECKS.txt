@@ -10,3 +10,14 @@ PASS: Black-texture binding inventory — binding 19 declared and connected to s
 PASS: LoadedRaw initialization coverage — loader and synthetic GPU constructor both provide the black map
 
 Summary: 10 passed, 0 failed
+
+Demosaic reference invariant checks:
+PASS: Bayer RCD PPG exterior and 9-pixel reference margin
+PASS: RCD VH/PQ interpolation orientation matches darktable interpolatef
+PASS: Markesteijn-3 17-pixel margin, eight directions, 3x3/5x5 homogeneity, quenching, cutoff
+PASS: Bayer/X-Trans 13x13 frequency-domain chroma support
+PASS: Bayer/X-Trans radius-2 Gaussian Scharr dual mask
+PASS: All eight X-Trans GPU entry points are scheduled
+PASS: Demosaic mode uniforms are aligned between Rust and WGSL
+
+Summary: 26 demosaic checks passed, 0 failed

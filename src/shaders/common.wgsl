@@ -1,8 +1,8 @@
 struct Params {
     // Keep the scalar block at exactly 16 floats so the vec4 fields below
     // retain the same 16-byte alignment in Rust and WGSL uniforms. Two former
-    // reserved slots now configure reduced-resolution adaptive tone analysis;
-    // four slots remain reserved so the stable 64-byte prefix does not move.
+    // reserved slots now configure reduced-resolution adaptive tone analysis
+    // and demosaic finishing while the stable 64-byte prefix does not move.
     black_point: f32,
     exposure: f32,
     contrast: f32,
@@ -15,10 +15,10 @@ struct Params {
     highlight_reconstruction: f32,
     tone_analysis_scale: f32,
     tone_guide_radius: f32,
-    _tone_reserved_2: f32,
-    _tone_reserved_3: f32,
-    _tone_reserved_4: f32,
-    _tone_reserved_5: f32,
+    demosaic_mode: f32,
+    dual_threshold: f32,
+    frequency_chroma: f32,
+    _demosaic_reserved: f32,
     // Highlights, shadows, whites, blacks. Values use the Lightroom-style
     // -100..100 UI domain and parameterize the adaptive scene-to-display map.
     basic_tone: vec4<f32>,
