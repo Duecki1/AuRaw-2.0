@@ -64,9 +64,7 @@ fn configure_android_libraw() {
         root.join("lib").display()
     );
     println!("cargo:rustc-link-lib=static=raw");
-    // LibRaw is C++. The static NDK runtime makes libauraw.so self-contained,
-    // so Gradle does not also need to package libc++_shared.so.
-    println!("cargo:rustc-link-lib=static=c++_static");
+    println!("cargo:rustc-link-lib=c++_shared");
     println!("cargo:rustc-link-lib=z");
     println!("cargo:rustc-link-lib=m");
     println!("cargo:rustc-link-lib=log");
@@ -101,7 +99,7 @@ fn find_libraw_header(include_paths: &[PathBuf]) -> Option<PathBuf> {
 }
 
 fn generate_bindings(header: &Path, include_paths: &[PathBuf]) {
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .header(header.to_string_lossy())
         .clang_args(
             include_paths
@@ -112,7 +110,14 @@ fn generate_bindings(header: &Path, include_paths: &[PathBuf]) {
         .allowlist_type("libraw_.*")
         .allowlist_var("LIBRAW_.*")
         .layout_tests(false)
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        let api = std::env::var("AURAW_MIN_SDK").unwrap_or_else(|_| "26".to_owned());
+        builder = builder.clang_arg(format!("-D__ANDROID_MIN_SDK_VERSION__={api}"));
+    }
+
+    let bindings = builder
         .generate()
         .expect("Unable to generate LibRaw bindings");
 

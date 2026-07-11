@@ -45,8 +45,6 @@ pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
     vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
-        // AndroidApp owns this global reference. as_cast_raw borrows it without
-        // arranging for JNI to delete it when the Rust wrapper is dropped.
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
         env.call_method(
             activity,
@@ -59,8 +57,6 @@ pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
     .map_err(|error| format!("could not open Android's file picker: {error:#}"))
 }
 
-/// Called by AuRawActivity after it has copied the selected SAF document to
-/// app-private cache storage. LibRaw can then use its normal file API safely.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePicked<'local>(
     mut unowned_env: EnvUnowned<'local>,

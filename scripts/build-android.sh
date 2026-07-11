@@ -4,6 +4,18 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ABI=${1:-arm64-v8a}
 PROFILE=${2:-release}
+API=${ANDROID_API_LEVEL:-26}
+
+case "$ABI" in
+    arm64-v8a) CLANG_TARGET="aarch64-linux-android$API" ;;
+    armeabi-v7a) CLANG_TARGET="armv7a-linux-androideabi$API" ;;
+    x86) CLANG_TARGET="i686-linux-android$API" ;;
+    x86_64) CLANG_TARGET="x86_64-linux-android$API" ;;
+    *)
+        echo "Unsupported ABI '$ABI' (use arm64-v8a, armeabi-v7a, x86, or x86_64)" >&2
+        exit 2
+        ;;
+esac
 
 NDK=${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}
 if [ -z "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}" ] \
@@ -28,7 +40,7 @@ if [ -z "$NDK_HOST" ] || [ ! -d "$NDK_HOST/sysroot" ]; then
     echo "The selected NDK has no LLVM sysroot: $NDK" >&2
     exit 1
 fi
-export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$NDK_HOST/sysroot ${BINDGEN_EXTRA_CLANG_ARGS:-}"
+export BINDGEN_EXTRA_CLANG_ARGS="--target=$CLANG_TARGET --sysroot=$NDK_HOST/sysroot ${BINDGEN_EXTRA_CLANG_ARGS:-}"
 
 if [ -z "${LIBCLANG_PATH:-}" ]; then
     for candidate in "$NDK_HOST/lib64" "$NDK_HOST/lib"; do
