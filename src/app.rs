@@ -20,6 +20,21 @@ pub struct AurawApp {
 }
 
 impl AurawApp {
+    fn install_lightroom_visuals(ctx: &egui::Context) {
+        // Start from egui's robust dark palette, then make the editor panels a
+        // little calmer and denser for a Lightroom-like darkroom layout.
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = egui::Color32::from_rgb(30, 32, 35);
+        visuals.faint_bg_color = egui::Color32::from_rgb(42, 45, 49);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 22);
+        ctx.set_visuals(visuals);
+
+        let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
+        style.spacing.slider_width = 170.0;
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        ctx.set_style_of(egui::Theme::Dark, style);
+    }
+
     #[cfg(not(target_os = "android"))]
     fn empty() -> Self {
         Self {
@@ -33,7 +48,8 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::install_lightroom_visuals(&cc.egui_ctx);
         Self::empty()
     }
 
@@ -43,6 +59,7 @@ impl AurawApp {
         android_app: android_activity::AndroidApp,
     ) -> Self {
         crate::android::install_context(&cc.egui_ctx);
+        Self::install_lightroom_visuals(&cc.egui_ctx);
         Self {
             current_path: None,
             loaded_raw: None,
@@ -203,9 +220,11 @@ impl eframe::App for AurawApp {
         #[cfg(not(target_os = "android"))]
         egui::Panel::right("sidebar")
             .resizable(true)
-            .default_size(280.0)
+            .default_size(320.0)
             .show(ui, |ui| {
-                Sidebar::show(ui, self);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| Sidebar::show(ui, self));
             });
 
         #[cfg(target_os = "android")]

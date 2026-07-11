@@ -1,5 +1,5 @@
-@group(0) @binding(6) var tex2_read: texture_2d<f32>;
-@group(0) @binding(7) var tex3_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(7) var tex2_read: texture_2d<f32>;
+@group(0) @binding(8) var tex3_write: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(8, 8, 1)
 fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -132,5 +132,4 @@ fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(tex3_write, pos, vec4<f32>(diffR, diffB, 0.0, clip));
 }
-
 

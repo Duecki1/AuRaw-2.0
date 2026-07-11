@@ -4,18 +4,20 @@ use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
 use wgpu::util::DeviceExt;
 
+const SHADER_HIGHLIGHTS: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/highlights.wgsl"),
+    "\n",
+    include_str!("../shaders/highlight_lch_pass.wgsl")
+);
+
 const SHADER_P1: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
     include_str!("../shaders/raw_sampling.wgsl"),
     "\n",
     include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/highlights.wgsl"),
-    "\n",
-    include_str!("../shaders/basic_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/tonemap.wgsl"),
     "\n",
     include_str!("../shaders/pass1.wgsl")
 );
@@ -27,12 +29,6 @@ const SHADER_P2: &str = concat!(
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
-    include_str!("../shaders/highlights.wgsl"),
-    "\n",
-    include_str!("../shaders/basic_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/tonemap.wgsl"),
-    "\n",
     include_str!("../shaders/pass2.wgsl")
 );
 
@@ -42,12 +38,6 @@ const SHADER_P3: &str = concat!(
     include_str!("../shaders/raw_sampling.wgsl"),
     "\n",
     include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/highlights.wgsl"),
-    "\n",
-    include_str!("../shaders/basic_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/tonemap.wgsl"),
     "\n",
     include_str!("../shaders/pass3.wgsl")
 );
@@ -59,19 +49,27 @@ const SHADER_P4: &str = concat!(
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
-    include_str!("../shaders/highlights.wgsl"),
+    include_str!("../shaders/pass4.wgsl")
+);
+
+const SHADER_ADJUSTMENTS: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
     "\n",
     include_str!("../shaders/basic_adjustments.wgsl"),
     "\n",
     include_str!("../shaders/tonemap.wgsl"),
     "\n",
-    include_str!("../shaders/pass4.wgsl")
+    include_str!("../shaders/adjustments.wgsl")
 );
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuParams {
-    black: f32,
+    // Must stay byte-for-byte aligned with shaders/common.wgsl. The first 16
+    // floats intentionally form one 64-byte scalar block before vec4 fields.
+    black_point: f32,
     exposure: f32,
     hlcompr: f32,
     hlcomprthresh: f32,
@@ -80,13 +78,21 @@ pub struct GpuParams {
     brightness: f32,
     saturation: f32,
     vibrance: f32,
-    clip: f32,
+    highlight_clip: f32,
     filmic_white: f32,
     filmic_black: f32,
     chroma_denoise: f32,
     ca_red: f32,
     ca_blue: f32,
-    _pad_adjustments: f32,
+    highlight_reconstruction: f32,
+    basic_tone: [f32; 4],
+    presence: [f32; 4],
+    hsl_hue_0: [f32; 4],
+    hsl_hue_1: [f32; 4],
+    hsl_saturation_0: [f32; 4],
+    hsl_saturation_1: [f32; 4],
+    hsl_luminance_0: [f32; 4],
+    hsl_luminance_1: [f32; 4],
     wb: [f32; 4],
     cam_to_srgb_0: [f32; 4],
     cam_to_srgb_1: [f32; 4],
@@ -102,7 +108,7 @@ pub struct GpuParams {
 impl GpuParams {
     pub fn new(exposure: &ExposureParams, raw: &LoadedRaw) -> Self {
         Self {
-            black: exposure.black,
+            black_point: exposure.black_point,
             exposure: exposure.exposure,
             hlcompr: exposure.hlcompr,
             hlcomprthresh: exposure.hlcomprthresh,
@@ -111,13 +117,26 @@ impl GpuParams {
             brightness: exposure.brightness,
             saturation: exposure.saturation,
             vibrance: exposure.vibrance,
-            clip: exposure.clip,
+            highlight_clip: exposure.highlight_clip,
             filmic_white: exposure.filmic_white,
             filmic_black: exposure.filmic_black,
             chroma_denoise: exposure.chroma_denoise,
             ca_red: exposure.ca_red,
             ca_blue: exposure.ca_blue,
-            _pad_adjustments: 0.0,
+            highlight_reconstruction: exposure.highlight_reconstruction,
+            basic_tone: [
+                exposure.highlights,
+                exposure.shadows,
+                exposure.whites,
+                exposure.blacks,
+            ],
+            presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
+            hsl_hue_0: exposure.hsl_hue[..4].try_into().unwrap(),
+            hsl_hue_1: exposure.hsl_hue[4..].try_into().unwrap(),
+            hsl_saturation_0: exposure.hsl_saturation[..4].try_into().unwrap(),
+            hsl_saturation_1: exposure.hsl_saturation[4..].try_into().unwrap(),
+            hsl_luminance_0: exposure.hsl_luminance[..4].try_into().unwrap(),
+            hsl_luminance_1: exposure.hsl_luminance[4..].try_into().unwrap(),
             wb: raw.wb_coeffs,
             cam_to_srgb_0: raw.cam_to_srgb[0],
             cam_to_srgb_1: raw.cam_to_srgb[1],
@@ -142,11 +161,13 @@ pub struct RawGpuPipeline {
     pub width: u32,
     pub height: u32,
     params_buffer: wgpu::Buffer,
-    passes: [Pass; 4],
+    passes: [Pass; 6],
     _raw_texture: wgpu::Texture,
     _color_texture: wgpu::Texture,
+    _reconstructed_raw_texture: wgpu::Texture,
     _tex1: wgpu::Texture,
     _tex2: wgpu::Texture,
+    _scene_texture: wgpu::Texture,
     _out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
 }
@@ -164,6 +185,34 @@ impl RawGpuPipeline {
         let raw_texture = create_raw_texture(device, queue, raw);
         let color_texture = create_color_texture(device, queue, raw);
         let size = texture_size(raw.width, raw.height);
+
+        // This is the raw-CFA output of the Ansel LCh reconstruction pass. It
+        // is deliberately separate from the demosaic scratch textures so all
+        // downstream samples see the same recovered sensor data.
+        let reconstructed_raw_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw reconstructed raw CFA"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[wgpu::TextureFormat::Rgba16Float],
+        });
+
+        // Preserve a scene-linear camera-RGB result between demosaic and the
+        // display pass. This is what lets local Lightroom controls read true
+        // RGB neighbourhoods instead of raw Bayer samples.
+        let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw scene-linear camera RGB"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[wgpu::TextureFormat::Rgba16Float],
+        });
 
         let out_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw output texture"),
@@ -199,6 +248,9 @@ impl RawGpuPipeline {
         });
 
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let reconstructed_raw_view =
+            reconstructed_raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let tex1_view = tex1.create_view(&wgpu::TextureViewDescriptor::default());
         let tex2_view = tex2.create_view(&wgpu::TextureViewDescriptor::default());
         let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -216,8 +268,8 @@ impl RawGpuPipeline {
             texture_entry(2, wgpu::TextureSampleType::Uint),
         ];
 
-        let bgl1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl1"),
+        let bgl_highlights = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bgl highlights"),
             entries: &[
                 common_entries[0].clone(),
                 common_entries[1].clone(),
@@ -230,15 +282,31 @@ impl RawGpuPipeline {
             ],
         });
 
+        let bgl1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bgl1"),
+            entries: &[
+                common_entries[0].clone(),
+                common_entries[1].clone(),
+                common_entries[2].clone(),
+                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_texture_entry(
+                    4,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
+            ],
+        });
+
         let bgl2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl2"),
             entries: &[
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
-                texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
-                    5,
+                    6,
                     wgpu::TextureFormat::Rgba16Float,
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
@@ -251,9 +319,10 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
-                texture_entry(6, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
-                    7,
+                    8,
                     wgpu::TextureFormat::Rgba16Float,
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
@@ -266,13 +335,52 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
-                texture_entry(6, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
-                    9,
+                    10,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
+            ],
+        });
+
+        let bgl5 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bgl adjustments"),
+            entries: &[
+                common_entries[0].clone(),
+                common_entries[1].clone(),
+                common_entries[2].clone(),
+                texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_texture_entry(
+                    12,
                     wgpu::TextureFormat::Rgba8Unorm,
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
+            ],
+        });
+
+        let bg_highlights = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg highlights"),
+            layout: &bgl_highlights,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
             ],
         });
 
@@ -294,6 +402,10 @@ impl RawGpuPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
             ],
@@ -316,11 +428,15 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&color_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
                     resource: wgpu::BindingResource::TextureView(&tex2_view),
                 },
             ],
@@ -343,11 +459,15 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&color_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
                     resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
             ],
@@ -370,15 +490,46 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&color_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 6,
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
                     resource: wgpu::BindingResource::TextureView(&tex2_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 8,
+                    binding: 9,
                     resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 9,
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+            ],
+        });
+
+        let bg5 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg adjustments"),
+            layout: &bgl5,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
                     resource: wgpu::BindingResource::TextureView(&out_view),
                 },
             ],
@@ -407,6 +558,14 @@ impl RawGpuPipeline {
 
         let passes = [
             Pass {
+                pipeline: make_pipeline(
+                    SHADER_HIGHLIGHTS,
+                    "highlight_lch_reconstruct",
+                    &bgl_highlights,
+                ),
+                bind_group: bg_highlights,
+            },
+            Pass {
                 pipeline: make_pipeline(SHADER_P1, "pass1_vh_lpf", &bgl1),
                 bind_group: bg1,
             },
@@ -422,6 +581,10 @@ impl RawGpuPipeline {
                 pipeline: make_pipeline(SHADER_P4, "pass4_rb_green_output", &bgl4),
                 bind_group: bg4,
             },
+            Pass {
+                pipeline: make_pipeline(SHADER_ADJUSTMENTS, "apply_lightroom_adjustments", &bgl5),
+                bind_group: bg5,
+            },
         ];
 
         let egui_texture_id =
@@ -435,8 +598,10 @@ impl RawGpuPipeline {
             passes,
             _raw_texture: raw_texture,
             _color_texture: color_texture,
+            _reconstructed_raw_texture: reconstructed_raw_texture,
             _tex1: tex1,
             _tex2: tex2,
+            _scene_texture: scene_texture,
             _out_texture: out_texture,
             _out_view: out_view,
         };
@@ -454,7 +619,7 @@ impl RawGpuPipeline {
         let wg_x = self.width.div_ceil(8);
         let wg_y = self.height.div_ceil(8);
 
-        for i in 0..4 {
+        for i in 0..self.passes.len() {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(&format!("auraw pass {}", i + 1)),
                 timestamp_writes: None,
@@ -608,15 +773,19 @@ fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
 
 #[cfg(test)]
 mod tests {
-    use super::{SHADER_P1, SHADER_P2, SHADER_P3, SHADER_P4};
+    use super::{
+        SHADER_ADJUSTMENTS, SHADER_HIGHLIGHTS, SHADER_P1, SHADER_P2, SHADER_P3, SHADER_P4,
+    };
 
     #[test]
     fn compute_shaders_parse_and_validate() {
         for (name, source) in [
+            ("highlight reconstruction", SHADER_HIGHLIGHTS),
             ("pass 1", SHADER_P1),
             ("pass 2", SHADER_P2),
             ("pass 3", SHADER_P3),
             ("pass 4", SHADER_P4),
+            ("Lightroom adjustments", SHADER_ADJUSTMENTS),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name} did not parse: {error}"));
@@ -627,5 +796,82 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
         }
+    }
+
+    #[test]
+    fn gpu_params_follow_the_wgsl_uniform_layout() {
+        // 16 scalar floats, eight vec4 fields (basic/presence/HSL), six
+        // remaining camera/raw vec4s, then dimensions/padding. This catches accidental
+        // Rust/WGSL field drift before it turns sliders into random values.
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 304);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 192);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 288);
+    }
+
+    #[test]
+    fn gpu_pipeline_creates_with_real_bind_group_layouts_when_an_adapter_exists() {
+        use super::{ExposureParams, LoadedRaw, RawGpuPipeline};
+        use eframe::{egui_wgpu, wgpu};
+
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            // Headless CI runners are allowed to lack a usable GPU. The
+            // parser/validator test above still covers all WGSL in that case.
+            return;
+        };
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("auraw shader-layout test device"),
+                ..Default::default()
+            }))
+        else {
+            return;
+        };
+
+        let width = 8;
+        let height = 8;
+        let color_indices = (0..height)
+            .flat_map(|y| {
+                (0..width).map(move |x| match (x % 2, y % 2) {
+                    (0, 0) => 0,
+                    (1, 1) => 2,
+                    _ => 1,
+                })
+            })
+            .collect();
+        let raw = LoadedRaw {
+            width,
+            height,
+            camera_make: "test".to_owned(),
+            camera_model: "test".to_owned(),
+            raw_pixels: vec![2048; (width * height) as usize],
+            color_indices,
+            wb_coeffs: [1.0; 4],
+            cam_to_srgb: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            black_levels: [0.0; 4],
+            white_levels: [4095.0; 4],
+        };
+        let params = super::GpuParams::new(&ExposureParams::default(), &raw);
+        let mut renderer =
+            egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, Default::default());
+
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = RawGpuPipeline::new(&device, &queue, &mut renderer, &raw, &params);
+        let validation_error = pollster::block_on(validation_scope.pop());
+
+        if let Err(error) = pipeline {
+            panic!("GPU pipeline creation failed: {error:#}");
+        }
+        assert!(
+            validation_error.is_none(),
+            "wgpu layout/shader validation failed: {validation_error:?}"
+        );
     }
 }

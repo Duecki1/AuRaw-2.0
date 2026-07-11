@@ -1,5 +1,5 @@
-@group(0) @binding(4) var tex1_read: texture_2d<f32>;
-@group(0) @binding(5) var tex2_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var tex1_read: texture_2d<f32>;
+@group(0) @binding(6) var tex2_write: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(8, 8, 1)
 fn pass2_green_pq(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -101,4 +101,3 @@ fn pass2_green_pq(@builtin(global_invocation_id) gid: vec3<u32>) {
     let vh_dir = textureLoad(tex1_read, pos, 0).x;
     textureStore(tex2_write, pos, vec4<f32>(g_out, vh_dir, pq_dir, clip));
 }
-
