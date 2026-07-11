@@ -22,9 +22,21 @@ fn raw_sensor_at(pos: vec2<i32>) -> f32 {
     let p = clamp_pos(pos);
     let channel = cfa_channel_at(p);
     let raw = f32(textureLoad(raw_tex, p, 0).r);
-    let black = params.black_levels[channel];
-    let white = max(params.white_levels[channel], black + 1.0);
-    return clamp((raw - black) / (white - black), 0.0, 4.0);
+    let metadata_black = params.black_levels[channel];
+    let white = max(params.white_levels[channel], metadata_black + 1.0);
+    let sensor_range = max(white - metadata_black, 1.0);
+
+    // black_point is a normalized sensor-domain calibration offset. Apply it
+    // independently to every CFA plane before white balance and demosaic.
+    // Limit the correction to a sane calibration range and keep at least one
+    // code value between calibrated black and white.
+    let black_offset = clamp(params.black_point, -0.25, 0.25) * sensor_range;
+    let calibrated_black = clamp(
+        metadata_black + black_offset,
+        0.0,
+        white - 1.0,
+    );
+    return clamp((raw - calibrated_black) / (white - calibrated_black), 0.0, 4.0);
 }
 
 fn raw_camera_at(pos: vec2<i32>) -> f32 {

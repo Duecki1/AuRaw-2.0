@@ -14,13 +14,11 @@ struct ToneHistogram {
 
 fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(tone_scene_tex, clamp_pos(pos), 0).xyz;
-    let working = max(map_negative_gamut(cam_to_working(camera_rgb)), vec3<f32>(0.0));
 
-    // Apply the technical black-point normalization but deliberately omit the
-    // creative exposure multiplier. This keeps image statistics stable while
-    // the user moves Exposure.
-    let scale = 1.0 / max(1.0 - params.black_point, 1e-4);
-    return max((working - vec3<f32>(params.black_point)) * scale, vec3<f32>(0.0));
+    // Sensor black calibration has already happened per CFA plane. Deliberately
+    // omit only the creative exposure multiplier so the histogram remains
+    // stable while the user moves Exposure.
+    return max(map_negative_gamut(cam_to_working(camera_rgb)), vec3<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -40,6 +38,7 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var log_sum = 0.0;
     var count = 0.0;
+    var brightest_ev = TONE_EV_MIN;
     var y = cell_min.y;
     loop {
         if y >= min(cell_max.y, source_size.y) { break; }
@@ -47,17 +46,30 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
         loop {
             if x >= min(cell_max.x, source_size.x) { break; }
             let rgb = tone_unexposed_working_at(vec2<i32>(i32(x), i32(y)));
-            let ev = log2(safe_luma(rgb) / SCENE_MIDDLE_GREY);
-            log_sum = log_sum + clamp(ev, TONE_EV_MIN, TONE_EV_MAX);
+            let ev = clamp(
+                log2(safe_luma(rgb) / SCENE_MIDDLE_GREY),
+                TONE_EV_MIN,
+                TONE_EV_MAX,
+            );
+            log_sum = log_sum + ev;
+            brightest_ev = max(brightest_ev, ev);
             count = count + 1.0;
+
+            // Histogram every source pixel rather than the cell average. This
+            // preserves small specular highlights and makes the 99.5th
+            // percentile independent of the reduced guide resolution.
+            atomicAdd(&tone_histogram.bins[tone_ev_to_bin(ev)], 1u);
             x = x + 1u;
         }
         y = y + 1u;
     }
 
     let average_ev = log_sum / max(count, 1.0);
-    textureStore(tone_guide_write, vec2<i32>(gid.xy), vec4<f32>(average_ev, 0.0, 0.0, 1.0));
-    atomicAdd(&tone_histogram.bins[tone_ev_to_bin(average_ev)], 1u);
+
+    // The local guide should remain stable for broad tonal masks, but retain a
+    // bounded trace of a sub-cell highlight instead of averaging it away.
+    let guide_ev = max(average_ev, brightest_ev - 1.5);
+    textureStore(tone_guide_write, vec2<i32>(gid.xy), vec4<f32>(guide_ev, 0.0, 0.0, 1.0));
 }
 
 fn tone_bilateral_guide(pos: vec2<i32>, axis: vec2<i32>) -> f32 {

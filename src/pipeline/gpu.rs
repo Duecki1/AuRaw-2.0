@@ -30,6 +30,37 @@ const HIGHLIGHT_GUIDED_ENTRY_POINTS: [&str; 11] = [
     "highlight_guided_1_d",
 ];
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProcessingQuality {
+    /// Half-float image intermediates for lower memory use and faster previews.
+    Preview,
+    /// Full-float demosaic, scene, and highlight-reconstruction intermediates.
+    #[default]
+    High,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HighlightWorkSlot {
+    A,
+    B,
+}
+
+fn highlight_stage_slots(index: usize) -> (HighlightWorkSlot, HighlightWorkSlot) {
+    if index % 2 == 0 {
+        (HighlightWorkSlot::A, HighlightWorkSlot::B)
+    } else {
+        (HighlightWorkSlot::B, HighlightWorkSlot::A)
+    }
+}
+
+fn highlight_final_read_slot(stage_count: usize) -> HighlightWorkSlot {
+    if stage_count % 2 == 0 {
+        HighlightWorkSlot::A
+    } else {
+        HighlightWorkSlot::B
+    }
+}
+
 const SHADER_BAYER_RCD_P1: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
@@ -242,6 +273,7 @@ pub struct RawGpuPipeline {
     pub height: u32,
     params_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
+    tone_prepare_pass_index: usize,
     passes: Vec<Pass>,
     _raw_texture: wgpu::Texture,
     _color_texture: wgpu::Texture,
@@ -266,12 +298,32 @@ impl RawGpuPipeline {
         raw: &LoadedRaw,
         params: &GpuParams,
     ) -> Result<Self> {
+        Self::new_with_quality(
+            device,
+            queue,
+            renderer,
+            raw,
+            params,
+            default_processing_quality(),
+        )
+    }
+
+    pub fn new_with_quality(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut egui_wgpu::Renderer,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+    ) -> Result<Self> {
         validate_raw(raw)?;
 
         let raw_texture = create_raw_texture(device, queue, raw);
         let color_texture = create_color_texture(device, queue, raw);
         let size = texture_size(raw.width, raw.height);
-        let demosaic_format = demosaic_work_format();
+        let work_format = processing_work_format(quality);
+        let demosaic_format = work_format;
+        let highlight_work_format = work_format;
         let tone_scale = tone_analysis_scale();
         let tone_size = texture_size(raw.width.div_ceil(tone_scale), raw.height.div_ceil(tone_scale));
         let tone_format = tone_guide_format();
@@ -295,8 +347,18 @@ impl RawGpuPipeline {
 
         // Ping-pong storage for the guided highlight passes. Each dispatch reads
         // one texture through binding 13 and writes the other through binding 14.
-        let highlight_work_a = create_float_work_texture(device, size, "auraw highlight work A");
-        let highlight_work_b = create_float_work_texture(device, size, "auraw highlight work B");
+        let highlight_work_a = create_float_work_texture(
+            device,
+            size,
+            highlight_work_format,
+            "auraw highlight work A",
+        );
+        let highlight_work_b = create_float_work_texture(
+            device,
+            size,
+            highlight_work_format,
+            "auraw highlight work B",
+        );
 
         // Preserve a scene-linear camera-RGB result between demosaic and the
         // display pass. This is what lets local Lightroom controls read true
@@ -386,7 +448,7 @@ impl RawGpuPipeline {
                 texture_entry(13, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
                     14,
-                    wgpu::TextureFormat::Rgba16Float,
+                    highlight_work_format,
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
             ],
@@ -782,18 +844,18 @@ impl RawGpuPipeline {
             ],
         });
 
-        // Desktop builds use 32-bit float demosaic scratch/output. Android
-        // retains 16-bit float storage to control memory and device-feature
-        // requirements. The WGSL storage declaration must match the selected
-        // texture format, so desktop variants are generated once at startup.
-        let bayer_rcd_p1 = demosaic_shader_source(SHADER_BAYER_RCD_P1);
-        let bayer_rcd_p2 = demosaic_shader_source(SHADER_BAYER_RCD_P2);
-        let bayer_rcd_p3 = demosaic_shader_source(SHADER_BAYER_RCD_P3);
-        let bayer_rcd_p4 = demosaic_shader_source(SHADER_BAYER_RCD_P4);
-        let xtrans_p1 = demosaic_shader_source(SHADER_XTRANS_P1);
-        let xtrans_p2 = demosaic_shader_source(SHADER_XTRANS_P2);
-        let xtrans_p3 = demosaic_shader_source(SHADER_XTRANS_P3);
-        let xtrans_p4 = demosaic_shader_source(SHADER_XTRANS_P4);
+        // Storage texture declarations are format-specific in WGSL. Generate
+        // the full-float variants once when High quality is selected. This now
+        // covers highlight reconstruction as well as demosaic/scene buffers.
+        let highlight_shader = work_shader_source(SHADER_HIGHLIGHTS, highlight_work_format);
+        let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format);
+        let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format);
+        let bayer_rcd_p3 = work_shader_source(SHADER_BAYER_RCD_P3, demosaic_format);
+        let bayer_rcd_p4 = work_shader_source(SHADER_BAYER_RCD_P4, demosaic_format);
+        let xtrans_p1 = work_shader_source(SHADER_XTRANS_P1, demosaic_format);
+        let xtrans_p2 = work_shader_source(SHADER_XTRANS_P2, demosaic_format);
+        let xtrans_p3 = work_shader_source(SHADER_XTRANS_P3, demosaic_format);
+        let xtrans_p4 = work_shader_source(SHADER_XTRANS_P4, demosaic_format);
 
         let make_pipeline =
             |source: &str, entry: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::ComputePipeline {
@@ -822,7 +884,7 @@ impl RawGpuPipeline {
 
         // Prepare writes the initial RGB estimate and reliability into A.
         passes.push(Pass {
-            pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_prepare", &bgl_highlights),
+            pipeline: make_pipeline(highlight_shader.as_ref(), "highlight_prepare", &bgl_highlights),
             bind_group: make_highlight_bind_group(
                 "bg highlight prepare",
                 &highlight_work_b_view,
@@ -835,30 +897,41 @@ impl RawGpuPipeline {
         // Quality levels are handled inside each entry point, so all stages
         // are dispatched and disabled ones copy read -> write unchanged.
         for (index, entry) in HIGHLIGHT_GUIDED_ENTRY_POINTS.iter().enumerate() {
-            let (read_view, write_view) = if index % 2 == 0 {
-                (&highlight_work_a_view, &highlight_work_b_view)
-            } else {
-                (&highlight_work_b_view, &highlight_work_a_view)
+            let (read_slot, write_slot) = highlight_stage_slots(index);
+            debug_assert_ne!(read_slot, write_slot);
+            let read_view = match read_slot {
+                HighlightWorkSlot::A => &highlight_work_a_view,
+                HighlightWorkSlot::B => &highlight_work_b_view,
+            };
+            let write_view = match write_slot {
+                HighlightWorkSlot::A => &highlight_work_a_view,
+                HighlightWorkSlot::B => &highlight_work_b_view,
             };
             let label = format!("bg {entry}");
             passes.push(Pass {
-                pipeline: make_pipeline(SHADER_HIGHLIGHTS, entry, &bgl_highlights),
+                pipeline: make_pipeline(highlight_shader.as_ref(), entry, &bgl_highlights),
                 bind_group: make_highlight_bind_group(&label, read_view, write_view),
                 workgroups: image_workgroups,
             });
         }
 
-        // Prepare leaves the data in A. An odd number of guided stages leaves
-        // the final result in B; compute this from the table so future stage
-        // additions cannot silently select the wrong texture.
-        let (final_read_view, final_write_view) =
-            if HIGHLIGHT_GUIDED_ENTRY_POINTS.len() % 2 == 0 {
-                (&highlight_work_a_view, &highlight_work_b_view)
-            } else {
-                (&highlight_work_b_view, &highlight_work_a_view)
-            };
+        // Prepare leaves the data in A. The final source is derived from the
+        // same parity helper used by the stage planner and covered by tests.
+        let final_read_slot = highlight_final_read_slot(HIGHLIGHT_GUIDED_ENTRY_POINTS.len());
+        let final_write_slot = match final_read_slot {
+            HighlightWorkSlot::A => HighlightWorkSlot::B,
+            HighlightWorkSlot::B => HighlightWorkSlot::A,
+        };
+        let final_read_view = match final_read_slot {
+            HighlightWorkSlot::A => &highlight_work_a_view,
+            HighlightWorkSlot::B => &highlight_work_b_view,
+        };
+        let final_write_view = match final_write_slot {
+            HighlightWorkSlot::A => &highlight_work_a_view,
+            HighlightWorkSlot::B => &highlight_work_b_view,
+        };
         passes.push(Pass {
-            pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_finalize", &bgl_highlights),
+            pipeline: make_pipeline(highlight_shader.as_ref(), "highlight_finalize", &bgl_highlights),
             bind_group: make_highlight_bind_group(
                 "bg highlight finalize",
                 final_read_view,
@@ -944,6 +1017,8 @@ impl RawGpuPipeline {
 
         // Analyze the unexposed scene at reduced resolution. The guide is
         // bilateral and the histogram reduction emits robust tonal anchors.
+        // recompute() clears the histogram immediately before this pass.
+        let tone_prepare_pass_index = passes.len();
         passes.extend([
             Pass {
                 pipeline: make_pipeline(
@@ -1002,6 +1077,7 @@ impl RawGpuPipeline {
             height: raw.height,
             params_buffer,
             tone_histogram_buffer,
+            tone_prepare_pass_index,
             passes,
             _raw_texture: raw_texture,
             _color_texture: color_texture,
@@ -1028,9 +1104,14 @@ impl RawGpuPipeline {
             label: Some("auraw recompute encoder"),
         });
 
-        encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
-
         for i in 0..self.passes.len() {
+            if i == self.tone_prepare_pass_index {
+                // tone_guide_prepare atomically accumulates all source pixels.
+                // Clearing in the same command encoder immediately before that
+                // dispatch guarantees every analysis starts from zero.
+                encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
+            }
+
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(&format!("auraw pass {}", i + 1)),
                 timestamp_writes: None,
@@ -1055,19 +1136,28 @@ fn tone_guide_format() -> wgpu::TextureFormat {
     wgpu::TextureFormat::R32Float
 }
 
-fn demosaic_work_format() -> wgpu::TextureFormat {
+fn default_processing_quality() -> ProcessingQuality {
     if cfg!(target_os = "android") {
-        wgpu::TextureFormat::Rgba16Float
+        ProcessingQuality::Preview
     } else {
-        wgpu::TextureFormat::Rgba32Float
+        ProcessingQuality::High
     }
 }
 
-fn demosaic_shader_source(source: &str) -> Cow<'_, str> {
-    if cfg!(target_os = "android") {
-        Cow::Borrowed(source)
-    } else {
-        Cow::Owned(source.replace("rgba16float", "rgba32float"))
+fn processing_work_format(quality: ProcessingQuality) -> wgpu::TextureFormat {
+    match quality {
+        ProcessingQuality::Preview => wgpu::TextureFormat::Rgba16Float,
+        ProcessingQuality::High => wgpu::TextureFormat::Rgba32Float,
+    }
+}
+
+fn work_shader_source(source: &str, format: wgpu::TextureFormat) -> Cow<'_, str> {
+    match format {
+        wgpu::TextureFormat::Rgba16Float => Cow::Borrowed(source),
+        wgpu::TextureFormat::Rgba32Float => {
+            Cow::Owned(source.replace("rgba16float", "rgba32float"))
+        }
+        _ => unreachable!("unsupported AuRaw work texture format: {format:?}"),
     }
 }
 
@@ -1110,6 +1200,7 @@ fn create_tone_guide_texture(
 fn create_float_work_texture(
     device: &wgpu::Device,
     size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
     label: &'static str,
 ) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
@@ -1118,9 +1209,9 @@ fn create_float_work_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba16Float,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-        view_formats: &[wgpu::TextureFormat::Rgba16Float],
+        view_formats: &[format],
     })
 }
 
@@ -1278,6 +1369,8 @@ fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
 #[cfg(test)]
 mod tests {
     use super::{
+        highlight_final_read_slot, highlight_stage_slots, processing_work_format,
+        work_shader_source, HighlightWorkSlot, ProcessingQuality,
         HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1,
         SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
         SHADER_HIGHLIGHTS, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1, SHADER_XTRANS_P2,
@@ -1308,6 +1401,53 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
         }
+    }
+
+    #[test]
+    fn high_quality_shader_variants_parse_and_use_full_float_storage() {
+        for (name, source) in [
+            (
+                "32-bit highlight reconstruction",
+                work_shader_source(
+                    SHADER_HIGHLIGHTS,
+                    processing_work_format(ProcessingQuality::High),
+                ),
+            ),
+            (
+                "32-bit Bayer pass 1",
+                work_shader_source(
+                    SHADER_BAYER_RCD_P1,
+                    processing_work_format(ProcessingQuality::High),
+                ),
+            ),
+        ] {
+            assert!(!source.contains("rgba16float"));
+            assert!(source.contains("rgba32float"));
+            let module = naga::front::wgsl::parse_str(source.as_ref())
+                .unwrap_or_else(|error| panic!("{name} did not parse: {error}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
+        }
+    }
+
+    #[test]
+    fn highlight_ping_pong_plan_is_contiguous_and_finishes_on_expected_slot() {
+        let mut current = HighlightWorkSlot::A;
+        for index in 0..HIGHLIGHT_GUIDED_ENTRY_POINTS.len() {
+            let (read, write) = highlight_stage_slots(index);
+            assert_eq!(read, current, "stage {index} reads the wrong work texture");
+            assert_ne!(read, write, "stage {index} aliases its input and output");
+            current = write;
+        }
+        assert_eq!(
+            current,
+            highlight_final_read_slot(HIGHLIGHT_GUIDED_ENTRY_POINTS.len())
+        );
+        assert_eq!(current, HighlightWorkSlot::B);
     }
 
     #[test]
@@ -1390,6 +1530,7 @@ mod tests {
         percentiles: [f32; 5],
     ) -> f32 {
         const MIDDLE: f32 = 0.1842;
+        const SHOULDER_START: f32 = 0.94;
 
         fn bias(value: f32, shape: f32) -> f32 {
             let x = value.clamp(0.0, 1.0);
@@ -1436,16 +1577,25 @@ mod tests {
         let shadow_shape = (middle_slope * middle_position / MIDDLE
             * 2.0f32.powf(-0.70 * shadows.clamp(-1.0, 1.0)))
         .clamp(0.04, 96.0);
-        let highlight_shape = ((1.0 - MIDDLE)
+        let highlight_shape = ((SHOULDER_START - MIDDLE)
             / (middle_slope * (1.0 - middle_position)).max(1e-4)
             * 2.0f32.powf(-0.70 * highlights.clamp(-1.0, 1.0)))
         .clamp(0.04, 96.0);
+
+        if adjusted_ev > white_ev {
+            let shoulder_length = (3.0
+                - 0.5 * whites.clamp(-1.0, 1.0)
+                - 0.5 * highlights.clamp(-1.0, 1.0))
+                .clamp(2.0, 4.0);
+            let normalized = (adjusted_ev - white_ev) / shoulder_length;
+            return 1.0 - (1.0 - SHOULDER_START) * 2.0f32.powf(-4.0 * normalized);
+        }
 
         if position <= middle_position {
             MIDDLE * bias(position / middle_position.max(1e-5), shadow_shape)
         } else {
             MIDDLE
-                + (1.0 - MIDDLE)
+                + (SHOULDER_START - MIDDLE)
                     * bias(
                         (position - middle_position)
                             / (1.0 - middle_position).max(1e-5),
@@ -1505,6 +1655,17 @@ mod tests {
             percentiles,
         );
         assert!((middle - 0.1842).abs() < 1e-5);
+    }
+
+    #[test]
+    fn highlight_shoulder_preserves_headroom_without_a_white_plateau() {
+        let percentiles = [-7.5f32, -5.0, -1.2, 2.1, 3.7];
+        let a = adaptive_tone_curve_cpu(5.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
+        let b = adaptive_tone_curve_cpu(6.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
+        let c = adaptive_tone_curve_cpu(8.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
+
+        assert!(a < b && b < c, "highlight shoulder contains a plateau: {a}, {b}, {c}");
+        assert!(c < 1.0, "highlight shoulder must approach white asymptotically");
     }
 
     #[test]

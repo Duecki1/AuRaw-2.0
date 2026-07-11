@@ -52,11 +52,23 @@ impl AurawApp {
         ctx.set_visuals(visuals);
 
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
-        style.spacing.slider_width = 180.0;
-        style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-        style.spacing.button_padding = egui::vec2(8.0, 3.0);
-        style.spacing.interact_size.y = 22.0;
-        style.spacing.indent = 14.0;
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::proportional(13.0),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::proportional(12.5),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            egui::FontId::proportional(11.5),
+        );
+        style.spacing.slider_width = 220.0;
+        style.spacing.item_spacing = egui::vec2(7.0, 4.0);
+        style.spacing.button_padding = egui::vec2(9.0, 4.0);
+        style.spacing.interact_size.y = 24.0;
+        style.spacing.indent = 12.0;
         ctx.set_style_of(egui::Theme::Dark, style);
     }
 
@@ -277,6 +289,7 @@ impl eframe::App for AurawApp {
                 ScreenLayout::Horizontal => {
                     egui::Panel::right("develop_sidebar_right")
                         .resizable(true)
+                        .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
                         .default_size(sidebar_size)
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical()
@@ -287,6 +300,7 @@ impl eframe::App for AurawApp {
                 ScreenLayout::Vertical => {
                     egui::Panel::bottom("develop_sidebar_bottom")
                         .resizable(true)
+                        .min_size(ScreenLayout::MIN_VERTICAL_SIDEBAR_HEIGHT)
                         .default_size(sidebar_size)
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical()
