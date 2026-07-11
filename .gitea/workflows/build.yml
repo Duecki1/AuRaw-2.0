@@ -2,13 +2,12 @@ name: Build AuRaw
 
 on:
   push:
-    branches:
-      - main
   pull_request:
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
   DEBIAN_FRONTEND: noninteractive
 
 jobs:
@@ -60,8 +59,22 @@ jobs:
         run: |
           set -euxo pipefail
 
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
+          download() {
+            local url="$1"
+            local output="$2"
+            rm -f "$output"
+            curl --http1.1 \
+              --fail --location --show-error \
+              --retry 8 --retry-all-errors --retry-delay 3 \
+              --connect-timeout 30 \
+              "$url" -o "$output"
+          }
+
+          download \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
+            /tmp/rustup-init
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain stable
           source "$HOME/.cargo/env"
 
           LIBCLANG_SO="$(find /usr/lib -path '*/llvm-*/lib/libclang.so*' -print -quit 2>/dev/null || true)"
@@ -69,21 +82,40 @@ jobs:
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
+          pkg-config --modversion libraw
           cargo build --release --locked
           strip target/release/auraw
+
+          ldd target/release/auraw | tee /tmp/auraw-ldd.txt
+          grep -Eq 'libraw(_r)?\.so' /tmp/auraw-ldd.txt
 
       - name: Package AppImage
         shell: bash
         run: |
           set -euxo pipefail
 
+          download() {
+            local url="$1"
+            local output="$2"
+            rm -f "$output"
+            curl --http1.1 \
+              --fail --location --show-error \
+              --retry 8 --retry-all-errors --retry-delay 3 \
+              --connect-timeout 30 \
+              "$url" -o "$output"
+          }
+
           VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           test -n "$VERSION"
 
-          rm -rf AppDir dist packaging
+          LIBRAW_SO="$(ldd target/release/auraw | awk '/libraw(_r)?\.so/{print $3; exit}')"
+          test -f "$LIBRAW_SO"
+          echo "Bundling LibRaw from $LIBRAW_SO"
+
+          rm -rf AppDir dist packaging squashfs-root
           mkdir -p dist packaging
 
-          cat > packaging/auraw.desktop <<'EOF'
+          cat > packaging/auraw.desktop <<'DESKTOP'
           [Desktop Entry]
           Type=Application
           Name=AuRaw
@@ -92,9 +124,8 @@ jobs:
           Icon=auraw
           Categories=Graphics;Photography;
           Terminal=false
-          EOF
+          DESKTOP
 
-          # Generate a dependency-free 256x256 PNG icon for AppImage metadata.
           python3 - <<'PY'
           import struct
           import zlib
@@ -104,7 +135,6 @@ jobs:
           for y in range(height):
               row = bytearray()
               for x in range(width):
-                  # Warm background with a simple dark aperture/A mark.
                   r, g, b, a = 232, 126, 42, 255
                   if 52 <= x <= 204 and 44 <= y <= 212:
                       left = abs(x - 93) <= max(5, (y - 55) // 7)
@@ -134,9 +164,9 @@ jobs:
               handle.write(png)
           PY
 
-          curl -fL \
+          download \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
-            -o linuxdeploy-x86_64.AppImage
+            linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage
 
           export APPIMAGE_EXTRACT_AND_RUN=1
@@ -144,16 +174,22 @@ jobs:
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --executable "$PWD/target/release/auraw" \
+            --library "$LIBRAW_SO" \
             --desktop-file "$PWD/packaging/auraw.desktop" \
             --icon-file "$PWD/packaging/auraw.png" \
             --output appimage
 
+          test -n "$(find AppDir -name 'libraw*.so*' -print -quit)"
+
           mv "$LDAI_OUTPUT" dist/
           chmod +x "dist/$LDAI_OUTPUT"
           file "dist/$LDAI_OUTPUT"
+
           unset APPIMAGE_EXTRACT_AND_RUN
           "dist/$LDAI_OUTPUT" --appimage-extract >/dev/null
+          test -n "$(find squashfs-root -name 'libraw*.so*' -print -quit)"
           rm -rf squashfs-root
+
           sha256sum "dist/$LDAI_OUTPUT" > "dist/$LDAI_OUTPUT.sha256"
 
       - name: Upload AppImage
@@ -207,30 +243,59 @@ jobs:
         run: |
           set -euxo pipefail
 
-          ANDROID_SDK_ROOT="$HOME/android-sdk"
+          download() {
+            local url="$1"
+            local output="$2"
+            rm -f "$output"
+            curl --http1.1 \
+              --fail --location --show-error \
+              --retry 8 --retry-all-errors --retry-delay 3 \
+              --connect-timeout 30 \
+              "$url" -o "$output"
+          }
+
+          install_sdk_packages() {
+            local attempt
+            for attempt in 1 2 3 4; do
+              if sdkmanager \
+                "platform-tools" \
+                "platforms;android-35" \
+                "build-tools;35.0.0" \
+                "ndk;$ANDROID_NDK_VERSION"; then
+                return 0
+              fi
+              echo "sdkmanager failed on attempt $attempt; retrying..." >&2
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+
+          ANDROID_HOME="$HOME/android-sdk"
+          ANDROID_SDK_ROOT="$ANDROID_HOME"
           ANDROID_NDK_VERSION="28.0.13004108"
           GRADLE_VERSION="8.11.1"
-          export ANDROID_SDK_ROOT ANDROID_HOME="$ANDROID_SDK_ROOT"
+          export ANDROID_HOME ANDROID_SDK_ROOT ANDROID_NDK_VERSION
 
-          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-          curl -fL \
+          rm -rf /tmp/android-command-line-tools
+          mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-command-line-tools
+          download \
             https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip \
-            -o /tmp/android-command-line-tools.zip
+            /tmp/android-command-line-tools.zip
           unzip -q /tmp/android-command-line-tools.zip -d /tmp/android-command-line-tools
+          rm -rf "$ANDROID_HOME/cmdline-tools/latest"
           mv /tmp/android-command-line-tools/cmdline-tools \
-            "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+            "$ANDROID_HOME/cmdline-tools/latest"
 
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;$ANDROID_NDK_VERSION"
-          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+          install_sdk_packages
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
 
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
+          download \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
+            /tmp/rustup-init
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain stable
           source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android
           cargo install cargo-ndk --version 4.1.2 --locked
@@ -240,9 +305,10 @@ jobs:
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          curl -fL \
+          download \
             "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-            -o /tmp/gradle.zip
+            /tmp/gradle.zip
+          rm -rf "$HOME/gradle-${GRADLE_VERSION}"
           unzip -q /tmp/gradle.zip -d "$HOME"
           export PATH="$HOME/gradle-${GRADLE_VERSION}/bin:$PATH"
 
@@ -252,7 +318,8 @@ jobs:
             --stacktrace \
             -p android \
             assembleDebug \
-            -PaurawAbi=arm64-v8a
+            -PaurawAbi=arm64-v8a \
+            -PaurawRustProfile=debug
 
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
@@ -264,6 +331,6 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v3
         with:
-          name: auraw-android-debug-apk
+          name: auraw-android-debug-arm64-v8a
           path: dist/*
           if-no-files-found: error

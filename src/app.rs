@@ -259,6 +259,13 @@ impl AurawApp {
         self.exposure.highlight_iterations = previous.highlight_iterations;
         self.exposure.highlight_color_adaptation = previous.highlight_color_adaptation;
 
+        // Demosaic selection is likewise a raw-processing preference rather
+        // than a Develop adjustment. Resetting exposure/tone controls must not
+        // silently change the reconstruction algorithm.
+        self.exposure.demosaic_mode = previous.demosaic_mode;
+        self.exposure.dual_threshold = previous.dual_threshold;
+        self.exposure.frequency_chroma = previous.frequency_chroma;
+
         self.mark_pipeline_dirty();
     }
 

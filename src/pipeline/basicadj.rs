@@ -1,4 +1,35 @@
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DemosaicMode {
+    /// Reference high-detail demosaic: RCD for Bayer and Markesteijn 3-pass
+    /// for Fuji X-Trans.
+    #[default]
+    Reference,
+    /// Apply frequency-domain chroma suppression to the reference result.
+    FrequencyDomainChroma,
+    /// Blend the high-detail result with a low-detail VNG-style result using
+    /// a Scharr/detail mask, following darktable's dual-demosaic behaviour.
+    Dual,
+}
+
+impl DemosaicMode {
+    pub(crate) const fn shader_value(self) -> f32 {
+        match self {
+            Self::Reference => 0.0,
+            Self::FrequencyDomainChroma => 1.0,
+            Self::Dual => 2.0,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Reference => "Reference (RCD / Markesteijn 3-pass)",
+            Self::FrequencyDomainChroma => "Frequency-domain chroma",
+            Self::Dual => "Dual demosaic",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HighlightReconstructionMethod {
     Off,
     Lch,
@@ -30,6 +61,12 @@ pub struct ExposureParams {
     pub saturation: f32,
     pub vibrance: f32,
     pub chroma_denoise: f32,
+    /// Demosaic finishing mode. The reference algorithm is always run first.
+    pub demosaic_mode: DemosaicMode,
+    /// Detail threshold in darktable-compatible 0..100 units for dual mode.
+    pub dual_threshold: f32,
+    /// Strength of the frequency-domain chroma suppression stage.
+    pub frequency_chroma: f32,
     pub ca_red: f32,
     pub ca_blue: f32,
     /// Reconstruction algorithm. The guided method ports Ansel's
@@ -72,6 +109,9 @@ impl Default for ExposureParams {
             saturation: 0.0,
             vibrance: 0.0,
             chroma_denoise: 0.0,
+            demosaic_mode: DemosaicMode::Reference,
+            dual_threshold: 20.0,
+            frequency_chroma: 1.0,
             ca_red: 0.0,
             ca_blue: 0.0,
             highlight_method: HighlightReconstructionMethod::Guided,
@@ -90,5 +130,25 @@ impl Default for ExposureParams {
             hsl_saturation: [0.0; 8],
             hsl_luminance: [0.0; 8],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DemosaicMode, ExposureParams};
+
+    #[test]
+    fn reference_demosaic_is_the_default() {
+        let params = ExposureParams::default();
+        assert_eq!(params.demosaic_mode, DemosaicMode::Reference);
+        assert_eq!(params.dual_threshold, 20.0);
+        assert_eq!(params.frequency_chroma, 1.0);
+    }
+
+    #[test]
+    fn demosaic_modes_have_stable_shader_values() {
+        assert_eq!(DemosaicMode::Reference.shader_value(), 0.0);
+        assert_eq!(DemosaicMode::FrequencyDomainChroma.shader_value(), 1.0);
+        assert_eq!(DemosaicMode::Dual.shader_value(), 2.0);
     }
 }

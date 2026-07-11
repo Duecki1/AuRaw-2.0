@@ -1,128 +1,143 @@
-// Ratio-corrected green refinement for the irregular X-Trans lattice.
-@group(0) @binding(5) var xtrans_seed_read: texture_2d<f32>;
-@group(0) @binding(6) var xtrans_green_write: texture_storage_2d<rgba16float, write>;
+// Markesteijn X-Trans passes 1 and 3. Pass 1 performs bounded high-order green
+// interpolation at red/blue sites. Pass 3 refines missing red/blue components
+// as directional color differences. The ping-pong layout intentionally keeps
+// these operations separate from the homogeneity-selection stage.
+@group(0) @binding(5) var markesteijn_read_13: texture_2d<f32>;
+@group(0) @binding(6) var markesteijn_write_13: texture_storage_2d<rgba16float, write>;
 
-struct XTransGreenEstimate {
-    value: f32,
-    gradient: f32,
-    valid: f32,
+fn mark13_load(pos: vec2<i32>) -> vec3<f32> {
+    return textureLoad(markesteijn_read_13, clamp_pos(pos), 0).rgb;
 }
 
-fn xtrans2_in_bounds(pos: vec2<i32>) -> bool {
-    return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(params.width) && pos.y < i32(params.height);
+fn mark13_component(rgb: vec3<f32>, channel: u32) -> f32 {
+    if channel == 0u { return rgb.r; }
+    if channel == 1u { return rgb.g; }
+    return rgb.b;
 }
 
-// Find the nearest photosite carrying the center's measured red/blue channel.
-// The returned vector is (measured channel, interpolated green, distance).
-fn xtrans_green_neighbour(
-    pos: vec2<i32>,
-    channel: u32,
-    direction: vec2<i32>,
-) -> vec3<f32> {
-    for (var step = 1; step <= 6; step = step + 1) {
-        let sample_pos = pos + direction * step;
-        if !xtrans2_in_bounds(sample_pos) { continue; }
-        if color_at(sample_pos) == channel {
-            let seed = textureLoad(xtrans_seed_read, sample_pos, 0);
-            return vec3<f32>(raw_cfa_at(sample_pos), seed.g, f32(step));
+fn mark13_set(rgb: vec3<f32>, channel: u32, value: f32) -> vec3<f32> {
+    var out = rgb;
+    if channel == 0u { out.r = value; }
+    if channel == 1u { out.g = value; }
+    if channel == 2u { out.b = value; }
+    return out;
+}
+
+fn mark13_green_bounds(pos: vec2<i32>) -> vec2<f32> {
+    var lo = 1e20;
+    var hi = -1e20;
+    for (var dy = -3; dy <= 3; dy = dy + 1) {
+        for (var dx = -3; dx <= 3; dx = dx + 1) {
+            let q = pos + vec2<i32>(dx, dy);
+            if q.x < 0 || q.y < 0 || q.x >= i32(params.width) || q.y >= i32(params.height) {
+                continue;
+            }
+            if color_at(q) == 1u {
+                let value = raw_cfa_at(q);
+                lo = min(lo, value);
+                hi = max(hi, value);
+            }
         }
     }
-    return vec3<f32>(0.0, 0.0, -1.0);
+    if hi < lo { return vec2<f32>(0.0, 1e20); }
+    return vec2<f32>(lo, hi);
 }
 
-fn xtrans_green_direction(
-    pos: vec2<i32>,
-    channel: u32,
-    axis: vec2<i32>,
-) -> XTransGreenEstimate {
-    let negative = xtrans_green_neighbour(pos, channel, -axis);
-    let positive = xtrans_green_neighbour(pos, channel, axis);
-    if negative.z <= 0.0 || positive.z <= 0.0 {
-        return XTransGreenEstimate(0.0, 1e6, 0.0);
-    }
+fn mark13_green_axis(pos: vec2<i32>, axis: vec2<i32>, measured_channel: u32) -> vec2<f32> {
+    let center = mark13_load(pos);
+    let m1 = mark13_load(pos - axis);
+    let p1 = mark13_load(pos + axis);
+    let m2 = mark13_load(pos - 2 * axis);
+    let p2 = mark13_load(pos + 2 * axis);
 
-    let measured_center = max(raw_cfa_at(pos), 1e-6);
-    let distance = negative.z + positive.z;
-    let base_green = (negative.y * positive.z + positive.y * negative.z)
-        / max(distance, 1e-6);
-
-    // Ratio correction limits the colour overshoot that ordinary difference
-    // interpolation creates at hard edges. The clamp prevents unstable ratios
-    // in near-black data while leaving normal scene ratios untouched.
-    let neighbour_signal = max(negative.x + positive.x, 1e-6);
-    let correction = clamp(2.0 * measured_center / neighbour_signal, 0.25, 4.0);
-    let candidate = base_green * correction;
-    let chroma_negative = negative.x - negative.y;
-    let chroma_positive = positive.x - positive.y;
-    let gradient = abs(negative.x - positive.x)
-        + abs(negative.y - positive.y)
-        + 0.5 * abs(chroma_negative - chroma_positive);
-    return XTransGreenEstimate(candidate, gradient, 1.0);
+    // High-order coefficients are the constants used by Markesteijn's initial
+    // green interpolation. The color-channel correction keeps the estimate
+    // anchored to the measured red/blue sample.
+    let base = 0.6796875 * (m1.g + p1.g) - 0.1796875 * (m2.g + p2.g);
+    let c0 = mark13_component(center, measured_channel);
+    let cm = mark13_component(m2, measured_channel);
+    let cp = mark13_component(p2, measured_channel);
+    let estimate = base + 0.12890625 * (2.0 * c0 - cm - cp);
+    let gradient = 1e-5
+        + abs(m1.g - p1.g)
+        + abs(m2.g - p2.g)
+        + abs((mark13_component(m1, measured_channel) - m1.g)
+            - (mark13_component(p1, measured_channel) - p1.g));
+    return vec2<f32>(estimate, gradient);
 }
 
-fn xtrans_accumulate_green(
-    estimate: XTransGreenEstimate,
-    weighted_sum: ptr<function, f32>,
-    weight_sum: ptr<function, f32>,
-    lower: ptr<function, f32>,
-    upper: ptr<function, f32>,
-) {
-    if estimate.valid <= 0.0 { return; }
-    let weight = 1.0 / (1e-5 + estimate.gradient * estimate.gradient);
-    *weighted_sum = *weighted_sum + estimate.value * weight;
-    *weight_sum = *weight_sum + weight;
-    *lower = min(*lower, estimate.value);
-    *upper = max(*upper, estimate.value);
+fn mark13_pass1(pos: vec2<i32>) -> vec3<f32> {
+    let center = mark13_load(pos);
+    let measured_channel = color_at(pos);
+    if measured_channel == 1u { return center; }
+
+    let h = mark13_green_axis(pos, vec2<i32>(1, 0), measured_channel);
+    let v = mark13_green_axis(pos, vec2<i32>(0, 1), measured_channel);
+    let p = mark13_green_axis(pos, vec2<i32>(1, 1), measured_channel);
+    let q = mark13_green_axis(pos, vec2<i32>(1, -1), measured_channel);
+    let wh = 1.0 / (h.y * h.y);
+    let wv = 1.0 / (v.y * v.y);
+    let wp = 1.0 / (p.y * p.y);
+    let wq = 1.0 / (q.y * q.y);
+    let bounds = mark13_green_bounds(pos);
+    let green = clamp(
+        (h.x * wh + v.x * wv + p.x * wp + q.x * wq) / max(wh + wv + wp + wq, 1e-8),
+        bounds.x,
+        bounds.y,
+    );
+    var out = center;
+    out.g = max(green, 0.0);
+    out = mark13_set(out, measured_channel, raw_cfa_at(pos));
+    return out;
 }
 
-fn xtrans_refined_green(pos: vec2<i32>, seed: vec4<f32>) -> vec2<f32> {
-    let channel = color_at(pos);
-    if channel == 1u {
-        return vec2<f32>(raw_cfa_at(pos), 1.0);
-    }
+fn mark13_color_axis(pos: vec2<i32>, axis: vec2<i32>, channel: u32) -> vec2<f32> {
+    let center = mark13_load(pos);
+    let m1 = mark13_load(pos - axis);
+    let p1 = mark13_load(pos + axis);
+    let m2 = mark13_load(pos - 2 * axis);
+    let p2 = mark13_load(pos + 2 * axis);
+    let dm = mark13_component(m1, channel) - m1.g;
+    let dp = mark13_component(p1, channel) - p1.g;
+    let gm = 1e-5 + abs(center.g - m2.g) + abs(m1.g - p1.g)
+        + abs(dm - (mark13_component(m2, channel) - m2.g));
+    let gp = 1e-5 + abs(center.g - p2.g) + abs(m1.g - p1.g)
+        + abs(dp - (mark13_component(p2, channel) - p2.g));
+    return vec2<f32>((gm * dp + gp * dm) / (gm + gp), gm + gp);
+}
 
-    var weighted_sum = 0.0;
-    var weight_sum = 0.0;
-    var lower = 1e20;
-    var upper = -1e20;
-    xtrans_accumulate_green(
-        xtrans_green_direction(pos, channel, vec2<i32>(1, 0)),
-        &weighted_sum, &weight_sum, &lower, &upper,
-    );
-    xtrans_accumulate_green(
-        xtrans_green_direction(pos, channel, vec2<i32>(0, 1)),
-        &weighted_sum, &weight_sum, &lower, &upper,
-    );
-    xtrans_accumulate_green(
-        xtrans_green_direction(pos, channel, vec2<i32>(1, 1)),
-        &weighted_sum, &weight_sum, &lower, &upper,
-    );
-    xtrans_accumulate_green(
-        xtrans_green_direction(pos, channel, vec2<i32>(1, -1)),
-        &weighted_sum, &weight_sum, &lower, &upper,
-    );
+fn mark13_refine_channel(pos: vec2<i32>, channel: u32) -> f32 {
+    let h = mark13_color_axis(pos, vec2<i32>(1, 0), channel);
+    let v = mark13_color_axis(pos, vec2<i32>(0, 1), channel);
+    let p = mark13_color_axis(pos, vec2<i32>(1, 1), channel);
+    let q = mark13_color_axis(pos, vec2<i32>(1, -1), channel);
+    let wh = 1.0 / (h.y * h.y);
+    let wv = 1.0 / (v.y * v.y);
+    let wp = 1.0 / (p.y * p.y);
+    let wq = 1.0 / (q.y * q.y);
+    return (h.x * wh + v.x * wv + p.x * wp + q.x * wq) / max(wh + wv + wp + wq, 1e-8);
+}
 
-    if weight_sum <= 0.0 {
-        return vec2<f32>(seed.g, 0.0);
-    }
-
-    let candidate = weighted_sum / weight_sum;
-    let range = max(upper - lower, 1e-4);
-    let bounded = clamp(candidate, lower - 0.20 * range, upper + 0.20 * range);
-    let edge_confidence = clamp(weight_sum / (weight_sum + 2.0), 0.0, 1.0);
-    return vec2<f32>(max(mix(seed.g, bounded, 0.85), 0.0), edge_confidence);
+fn mark13_pass3(pos: vec2<i32>) -> vec3<f32> {
+    let center = mark13_load(pos);
+    let measured_channel = color_at(pos);
+    var out = center;
+    if measured_channel != 0u { out.r = center.g + mark13_refine_channel(pos, 0u); }
+    if measured_channel != 2u { out.b = center.g + mark13_refine_channel(pos, 2u); }
+    out = mark13_set(out, measured_channel, raw_cfa_at(pos));
+    return max(out, vec3<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn xtrans_refine_green(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn xtrans_markesteijn_pass1(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    let seed = textureLoad(xtrans_seed_read, pos, 0);
-    let green = xtrans_refined_green(pos, seed);
-    textureStore(
-        xtrans_green_write,
-        pos,
-        vec4<f32>(seed.r, green.x, seed.b, green.y),
-    );
+    textureStore(markesteijn_write_13, pos, vec4<f32>(mark13_pass1(pos), 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn xtrans_markesteijn_pass3(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    textureStore(markesteijn_write_13, pos, vec4<f32>(mark13_pass3(pos), 1.0));
 }

@@ -1,72 +1,96 @@
-// Reconstruct red/blue from colour differences guided by the refined green
-// plane. Sampling only measured photosites avoids recursively amplifying seed
-// errors and is important for X-Trans' irregular red/blue spacing.
-@group(0) @binding(7) var xtrans_green_read: texture_2d<f32>;
-@group(0) @binding(8) var xtrans_rgb_write: texture_storage_2d<rgba16float, write>;
+// Markesteijn X-Trans pass 2: recalculate green from the closer interpolated
+// values created by pass 1, then refresh missing chroma around that green.
+@group(0) @binding(7) var markesteijn_read_2: texture_2d<f32>;
+@group(0) @binding(8) var markesteijn_write_2: texture_storage_2d<rgba16float, write>;
 
-fn xtrans3_in_bounds(pos: vec2<i32>) -> bool {
-    return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(params.width) && pos.y < i32(params.height);
+fn mark2_load(pos: vec2<i32>) -> vec3<f32> {
+    return textureLoad(markesteijn_read_2, clamp_pos(pos), 0).rgb;
 }
 
-fn xtrans_interpolate_difference(pos: vec2<i32>, channel: u32) -> f32 {
-    let center_green = textureLoad(xtrans_green_read, pos, 0).g;
+fn mark2_component(rgb: vec3<f32>, channel: u32) -> f32 {
+    if channel == 0u { return rgb.r; }
+    if channel == 1u { return rgb.g; }
+    return rgb.b;
+}
+
+fn mark2_set(rgb: vec3<f32>, channel: u32, value: f32) -> vec3<f32> {
+    var out = rgb;
+    if channel == 0u { out.r = value; }
+    if channel == 1u { out.g = value; }
+    if channel == 2u { out.b = value; }
+    return out;
+}
+
+fn mark2_recalculate_axis(pos: vec2<i32>, direction: vec2<i32>, channel: u32) -> vec2<f32> {
+    let center = mark2_load(pos);
+    let near = mark2_load(pos + direction);
+    let far = mark2_load(pos - 2 * direction);
+    // Direct translation of the reference recalc relation:
+    // (G[-2d] + 2G[d] - C[-2d] - 2C[d] + 3C[0]) / 3.
+    let estimate = (
+        far.g + 2.0 * near.g
+        - mark2_component(far, channel)
+        - 2.0 * mark2_component(near, channel)
+        + 3.0 * mark2_component(center, channel)
+    ) / 3.0;
+    let gradient = 1e-5 + abs(near.g - far.g)
+        + abs((mark2_component(near, channel) - near.g)
+            - (mark2_component(far, channel) - far.g));
+    return vec2<f32>(estimate, gradient);
+}
+
+fn mark2_recalculate_green(pos: vec2<i32>, channel: u32) -> f32 {
     var sum = 0.0;
     var weight_sum = 0.0;
-    var lower = 1e20;
-    var upper = -1e20;
+    for (var d = 0u; d < 8u; d = d + 1u) {
+        var direction = vec2<i32>(1, 0);
+        switch d {
+            case 0u: { direction = vec2<i32>( 1,  0); }
+            case 1u: { direction = vec2<i32>(-1,  0); }
+            case 2u: { direction = vec2<i32>( 0,  1); }
+            case 3u: { direction = vec2<i32>( 0, -1); }
+            case 4u: { direction = vec2<i32>( 1,  1); }
+            case 5u: { direction = vec2<i32>(-1, -1); }
+            case 6u: { direction = vec2<i32>( 1, -1); }
+            default: { direction = vec2<i32>(-1,  1); }
+        }
+        let estimate = mark2_recalculate_axis(pos, direction, channel);
+        let weight = 1.0 / (estimate.y * estimate.y);
+        sum += estimate.x * weight;
+        weight_sum += weight;
+    }
+    return sum / max(weight_sum, 1e-8);
+}
 
-    // A 7x7 footprint spans the useful local geometry of the 6x6 X-Trans
-    // pattern while remaining practical for an interactive GPU preview.
-    for (var dy = -3; dy <= 3; dy = dy + 1) {
-        for (var dx = -3; dx <= 3; dx = dx + 1) {
+fn mark2_chroma(pos: vec2<i32>, channel: u32) -> f32 {
+    let center = mark2_load(pos);
+    var sum = 0.0;
+    var weight_sum = 0.0;
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
             if dx == 0 && dy == 0 { continue; }
-            let sample_pos = pos + vec2<i32>(dx, dy);
-            if !xtrans3_in_bounds(sample_pos) { continue; }
-            if color_at(sample_pos) != channel { continue; }
-
-            let sample_green = textureLoad(xtrans_green_read, sample_pos, 0).g;
-            let difference = raw_cfa_at(sample_pos) - sample_green;
-            let distance_squared = f32(dx * dx + dy * dy);
-            let spatial_weight = 1.0 / max(distance_squared, 1.0);
-            let edge_weight = 1.0 / (1.0 + 24.0 * abs(sample_green - center_green));
-            let weight = spatial_weight * edge_weight * edge_weight;
-            sum = sum + difference * weight;
-            weight_sum = weight_sum + weight;
-            lower = min(lower, difference);
-            upper = max(upper, difference);
+            let sample = mark2_load(pos + vec2<i32>(dx, dy));
+            let spatial = 1.0 / (1.0 + f32(dx * dx + dy * dy));
+            let range = 1.0 / (1e-4 + abs(sample.g - center.g));
+            let weight = spatial * min(range, 64.0);
+            sum += (mark2_component(sample, channel) - sample.g) * weight;
+            weight_sum += weight;
         }
     }
-
-    if weight_sum <= 0.0 {
-        let seed = textureLoad(xtrans_green_read, pos, 0);
-        return select(seed.r - seed.g, seed.b - seed.g, channel == 2u);
-    }
-
-    let estimate = sum / weight_sum;
-    let range = max(upper - lower, 1e-4);
-    return clamp(estimate, lower - 0.15 * range, upper + 0.15 * range);
+    return center.g + sum / max(weight_sum, 1e-8);
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn xtrans_refine_chroma(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn xtrans_markesteijn_pass2(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    let channel = color_at(pos);
-    let base = textureLoad(xtrans_green_read, pos, 0);
-    let green = base.g;
-
-    let red_difference = xtrans_interpolate_difference(pos, 0u);
-    let blue_difference = xtrans_interpolate_difference(pos, 2u);
-    var red = green + red_difference;
-    var blue = green + blue_difference;
-
-    if channel == 0u { red = raw_cfa_at(pos); }
-    if channel == 2u { blue = raw_cfa_at(pos); }
-
-    textureStore(
-        xtrans_rgb_write,
-        pos,
-        vec4<f32>(max(red, 0.0), max(green, 0.0), max(blue, 0.0), base.a),
-    );
+    let measured_channel = color_at(pos);
+    var out = mark2_load(pos);
+    if measured_channel != 1u {
+        out.g = max(mark2_recalculate_green(pos, measured_channel), 0.0);
+    }
+    if measured_channel != 0u { out.r = mark2_chroma(pos, 0u); }
+    if measured_channel != 2u { out.b = mark2_chroma(pos, 2u); }
+    out = mark2_set(out, measured_channel, raw_cfa_at(pos));
+    textureStore(markesteijn_write_2, pos, vec4<f32>(max(out, vec3<f32>(0.0)), 1.0));
 }
