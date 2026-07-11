@@ -12,9 +12,6 @@ fn native_options() -> eframe::NativeOptions {
         ..Default::default()
     };
 
-    // RAW files routinely exceed eframe's default 8192-pixel texture limit.
-    // Ask for the adapter's actual 2D limit while retaining portable defaults
-    // for every other limit. This is especially important for phone cameras.
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
         setup.device_descriptor = std::sync::Arc::new(|adapter| {
             let adapter_limits = adapter.limits();

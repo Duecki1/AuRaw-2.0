@@ -3,7 +3,6 @@ fn main() -> eframe::Result {
     auraw::run_desktop()
 }
 
-// Android loads the library entry point from src/lib.rs.
 #[cfg(target_os = "android")]
 fn main() {}
 
