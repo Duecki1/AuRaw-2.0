@@ -87,6 +87,7 @@ pub struct GpuParams {
     highlight_reconstruction: f32,
     basic_tone: [f32; 4],
     presence: [f32; 4],
+    highlight_options: [f32; 4],
     hsl_hue_0: [f32; 4],
     hsl_hue_1: [f32; 4],
     hsl_saturation_0: [f32; 4],
@@ -131,6 +132,12 @@ impl GpuParams {
                 exposure.blacks,
             ],
             presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
+            highlight_options: [
+                exposure.highlight_method.shader_value(),
+                exposure.highlight_iterations.clamp(1, 4) as f32,
+                exposure.highlight_color_adaptation.clamp(0.0, 1.0),
+                0.0,
+            ],
             hsl_hue_0: exposure.hsl_hue[..4].try_into().unwrap(),
             hsl_hue_1: exposure.hsl_hue[4..].try_into().unwrap(),
             hsl_saturation_0: exposure.hsl_saturation[..4].try_into().unwrap(),
@@ -800,13 +807,14 @@ mod tests {
 
     #[test]
     fn gpu_params_follow_the_wgsl_uniform_layout() {
-        // 16 scalar floats, eight vec4 fields (basic/presence/HSL), six
+        // 16 scalar floats, nine vec4 fields (basic/presence/highlight/HSL), six
         // remaining camera/raw vec4s, then dimensions/padding. This catches accidental
         // Rust/WGSL field drift before it turns sliders into random values.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 304);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 320);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 192);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 288);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 96);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 208);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 304);
     }
 
     #[test]

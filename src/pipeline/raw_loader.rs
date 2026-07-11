@@ -36,6 +36,17 @@ mod libraw_loader {
     use std::os::raw::c_char;
     use std::path::Path;
 
+    // Rec.2020 and the camera profiles used here are D65-referred. Normalizing
+    // XYZ -> camera rows against equal-energy XYZ (1, 1, 1) makes an otherwise
+    // neutral camera value warm. These coordinates make camera neutral map to
+    // the Rec.2020 neutral axis instead.
+    const D65_XYZ: [f32; 3] = [0.9504559, 1.0, 1.0890578];
+    const XYZ_TO_REC2020: [[f32; 3]; 3] = [
+        [1.7166512, -0.3556708, -0.2533663],
+        [-0.6666844, 1.6164812, 0.0157685],
+        [0.0176399, -0.0427706, 0.9421031],
+    ];
+
     #[allow(
         dead_code,
         non_camel_case_types,
@@ -134,7 +145,7 @@ mod libraw_loader {
         let wb_coeffs = white_balance(color.cam_mul);
         let cam_to_srgb = camera_to_working_matrix(color, wb_coeffs);
         let black_levels = black_levels(color.black, &color.cblack, iparams);
-        let white_levels = white_levels(color.maximum);
+        let white_levels = white_levels(color.maximum, color.linear_max);
 
         Ok(LoadedRaw {
             width,
@@ -263,11 +274,20 @@ mod libraw_loader {
         out
     }
 
-    fn white_levels(maximum: u32) -> [f32; 4] {
-        let white = if maximum == 0 {
+    fn white_levels(maximum: u32, linear_max: [u32; 4]) -> [f32; 4] {
+        // Match Ansel's LibRaw loader: linear_max is the usable sensor white
+        // level (not necessarily the container's integer maximum). CR3 files
+        // commonly rely on this field, and using the larger fallback delays
+        // highlight detection until after colour has already been lost.
+        let reported_white = if linear_max[0] != 0 {
+            linear_max[0]
+        } else {
+            maximum
+        };
+        let white = if reported_white == 0 {
             65535.0
         } else {
-            maximum as f32
+            reported_white as f32
         };
         [white; 4]
     }
@@ -275,18 +295,12 @@ mod libraw_loader {
     fn cam_to_working(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
         let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
 
-        let xyz_to_rec2020 = [
-            [1.7166512, -0.3556708, -0.2533663],
-            [-0.6666844, 1.6164812, 0.0157685],
-            [0.0176399, -0.0428107, 0.9425388],
-        ];
-
         let mut out = [[0.0; 4]; 3];
         for row in 0..3 {
             for col in 0..4 {
-                out[row][col] = xyz_to_rec2020[row][0] * cam_to_xyz[0][col]
-                    + xyz_to_rec2020[row][1] * cam_to_xyz[1][col]
-                    + xyz_to_rec2020[row][2] * cam_to_xyz[2][col];
+                out[row][col] = XYZ_TO_REC2020[row][0] * cam_to_xyz[0][col]
+                    + XYZ_TO_REC2020[row][1] * cam_to_xyz[1][col]
+                    + XYZ_TO_REC2020[row][2] * cam_to_xyz[2][col];
             }
         }
 
@@ -431,10 +445,15 @@ mod libraw_loader {
 
     fn normalized_pseudoinverse(mut xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
         for row in &mut xyz_to_cam {
-            let sum = row.iter().sum::<f32>();
-            if sum != 0.0 {
+            // Match Ansel/dcraw's normalization of XYZ -> camera after the
+            // sRGB/XYZ D65 matrix has been applied: each camera row must
+            // produce one for the D65 white point, not for equal-energy XYZ.
+            let white_response = row[0] * D65_XYZ[0]
+                + row[1] * D65_XYZ[1]
+                + row[2] * D65_XYZ[2];
+            if white_response.is_finite() && white_response.abs() > 1e-12 {
                 for value in row {
-                    *value /= sum;
+                    *value /= white_response;
                 }
             }
         }
@@ -513,5 +532,31 @@ mod libraw_loader {
         };
 
         Err(anyhow!("LibRaw failed to {action}: {message} ({err})"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::cam_to_working;
+
+        #[test]
+        fn camera_neutral_maps_to_rec2020_neutral() {
+            // Identity is a useful synthetic XYZ -> camera profile: the old
+            // row-sum normalization mapped camera (1, 1, 1) to equal-energy
+            // XYZ and therefore to a visibly warm Rec.2020 value.
+            let matrix = cam_to_working([
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0],
+            ]);
+
+            for (channel, row) in matrix.iter().enumerate() {
+                let mapped_neutral = row[0] + row[1] + row[2];
+                assert!(
+                    (mapped_neutral - 1.0).abs() < 1e-5,
+                    "camera neutral mapped to {mapped_neutral} in working channel {channel}"
+                );
+            }
+        }
     }
 }
