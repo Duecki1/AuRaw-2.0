@@ -21,6 +21,10 @@ pub struct LoadedRaw {
     pub wb_coeffs: [f32; 4],
     pub cam_to_srgb: [[f32; 4]; 3],
     pub black_levels: [f32; 4],
+    /// Effective LibRaw black level for every oriented active-area photosite.
+    /// This includes the shared level, per-CFA-plane offsets, and an optional
+    /// repeating row/column pattern from `cblack[4..]`.
+    pub black_levels_per_pixel: Vec<f32>,
     pub white_levels: [f32; 4],
 }
 
@@ -124,8 +128,32 @@ mod libraw_loader {
         if width == 0 || height == 0 {
             return Err(anyhow!("LibRaw reported empty RAW dimensions"));
         }
+        if !sizes.pixel_aspect.is_finite() || sizes.pixel_aspect <= 0.0 {
+            return Err(anyhow!(
+                "LibRaw reported invalid pixel aspect ratio {}",
+                sizes.pixel_aspect
+            ));
+        }
+        if (sizes.pixel_aspect - 1.0).abs() > 1e-6 {
+            return Err(anyhow!(
+                "non-square RAW pixels (aspect {}) require a geometry-resampling stage that AuRaw does not implement yet",
+                sizes.pixel_aspect
+            ));
+        }
+        if !matches!(sizes.flip, 0 | 3 | 5 | 6) {
+            return Err(anyhow!(
+                "unsupported LibRaw orientation code {}; expected 0, 3, 5, or 6",
+                sizes.flip
+            ));
+        }
 
-        if crop_x + width > raw_width || crop_y + height > raw_height {
+        let crop_right = crop_x
+            .checked_add(width)
+            .ok_or_else(|| anyhow!("LibRaw horizontal crop overflow"))?;
+        let crop_bottom = crop_y
+            .checked_add(height)
+            .ok_or_else(|| anyhow!("LibRaw vertical crop overflow"))?;
+        if crop_right > raw_width || crop_bottom > raw_height {
             return Err(anyhow!(
                 "LibRaw crop is outside RAW bounds: crop {}x{} at {},{} in {}x{}",
                 width,
@@ -139,8 +167,9 @@ mod libraw_loader {
 
         let cfa_kind = cfa_kind_from_filters(iparams.filters)?;
         let cdesc = cdesc4(iparams);
-        let cfa_map = canonical_cfa_map(cdesc);
-        let (width, height, raw_pixels, color_indices) = copy_active_pixels(
+        let cfa_map = canonical_cfa_map(cdesc)?;
+        let physical_black_levels = black_levels(color.black, &color.cblack);
+        let (width, height, raw_pixels, color_indices, black_levels_per_pixel) = copy_active_pixels(
             ctx.raw,
             rawdata.raw_image,
             raw_width,
@@ -151,14 +180,19 @@ mod libraw_loader {
             height,
             sizes.raw_pitch as usize,
             sizes.flip,
+            cdesc,
             cfa_map,
+            color.black,
+            &color.cblack,
         )?;
         let physical_wb = white_balance(color.cam_mul, cdesc);
         let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
-        let cam_to_srgb = camera_to_working_matrix(color, physical_wb, cdesc);
-        let black_levels = canonicalize_f32x4(black_levels(color.black, &color.cblack), cfa_map);
-        let white_levels =
-            canonicalize_f32x4(white_levels(color.maximum, color.linear_max), cfa_map);
+        let cam_to_srgb = camera_to_working_matrix(color, physical_wb, cdesc)?;
+        let black_levels = canonicalize_f32x4(physical_black_levels, cfa_map);
+        let white_levels = canonicalize_f32x4(
+            white_levels(color.maximum, color.linear_max, physical_black_levels),
+            cfa_map,
+        );
 
         Ok(LoadedRaw {
             width,
@@ -171,6 +205,7 @@ mod libraw_loader {
             wb_coeffs,
             cam_to_srgb,
             black_levels,
+            black_levels_per_pixel,
             white_levels,
         })
     }
@@ -186,8 +221,11 @@ mod libraw_loader {
         height: u32,
         raw_pitch: usize,
         flip: i32,
+        cdesc: [u8; 4],
         cfa_map: [u8; 4],
-    ) -> Result<(u32, u32, Vec<u16>, Vec<u8>)> {
+        shared_black: u32,
+        cblack: &[u32],
+    ) -> Result<(u32, u32, Vec<u16>, Vec<u8>, Vec<f32>)> {
         let raw_width = raw_width as usize;
         let raw_height = raw_height as usize;
         let crop_x = crop_x as usize;
@@ -198,8 +236,22 @@ mod libraw_loader {
             .checked_mul(std::mem::size_of::<u16>())
             .ok_or_else(|| anyhow!("RAW row size overflow"))?;
         let pitch = if raw_pitch == 0 { row_bytes } else { raw_pitch };
+        if pitch < row_bytes {
+            return Err(anyhow!(
+                "LibRaw raw_pitch ({pitch}) is smaller than one decoded row ({row_bytes})"
+            ));
+        }
+        if pitch % std::mem::align_of::<u16>() != 0 {
+            return Err(anyhow!("LibRaw raw_pitch ({pitch}) is not u16-aligned"));
+        }
 
-        if crop_y + height > raw_height || crop_x + width > raw_width {
+        let crop_right = crop_x
+            .checked_add(width)
+            .ok_or_else(|| anyhow!("active RAW horizontal crop overflow"))?;
+        let crop_bottom = crop_y
+            .checked_add(height)
+            .ok_or_else(|| anyhow!("active RAW vertical crop overflow"))?;
+        if crop_bottom > raw_height || crop_right > raw_width {
             return Err(anyhow!("active RAW crop exceeds decoded RAW buffer"));
         }
 
@@ -207,26 +259,56 @@ mod libraw_loader {
             5 | 6 => (height, width),
             _ => (width, height),
         };
-        let mut pixels = vec![0; out_width * out_height];
-        let mut colors = Vec::with_capacity(out_width * out_height);
+        let output_len = out_width
+            .checked_mul(out_height)
+            .ok_or_else(|| anyhow!("oriented RAW dimensions overflow"))?;
+        let mut pixels = vec![0; output_len];
+        let mut colors = Vec::with_capacity(output_len);
+        let mut black_map = Vec::with_capacity(output_len);
 
         for y in 0..out_height {
             for x in 0..out_width {
                 let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
                 let raw_x = crop_x + src_x;
                 let raw_y = crop_y + src_y;
-                let row_ptr = (raw_image as *const u8).add(raw_y * pitch) as *const u16;
+                let row_offset = raw_y
+                    .checked_mul(pitch)
+                    .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
+                let row_ptr = (raw_image as *const u8).add(row_offset) as *const u16;
                 pixels[y * out_width + x] = *row_ptr.add(raw_x);
 
                 let libraw_color = ffi::libraw_COLOR(raw, raw_y as i32, raw_x as i32);
+                if !(0..=3).contains(&libraw_color) {
+                    return Err(anyhow!(
+                        "LibRaw returned invalid CFA channel {libraw_color} at {raw_x},{raw_y}"
+                    ));
+                }
+                if cdesc[libraw_color as usize] == 0 {
+                    return Err(anyhow!(
+                        "LibRaw used undescribed CFA channel {libraw_color} at {raw_x},{raw_y}"
+                    ));
+                }
                 // Preserve four independent CFA planes, but canonicalize
                 // them to R, G1, B, G2 so the GPU can keep G1/G2 calibration
                 // separate without carrying a second channel-map uniform.
-                colors.push(cfa_map[libraw_color.clamp(0, 3) as usize]);
+                colors.push(cfa_map[libraw_color as usize]);
+                black_map.push(effective_black_level(
+                    shared_black,
+                    cblack,
+                    libraw_color as usize,
+                    src_x,
+                    src_y,
+                ));
             }
         }
 
-        Ok((out_width as u32, out_height as u32, pixels, colors))
+        Ok((
+            out_width as u32,
+            out_height as u32,
+            pixels,
+            colors,
+            black_map,
+        ))
     }
 
     fn oriented_source_pos(
@@ -271,24 +353,45 @@ mod libraw_loader {
         }
     }
 
-    fn canonical_cfa_map(cdesc: [u8; 4]) -> [u8; 4] {
-        let mut map = [0u8, 1u8, 2u8, 3u8];
+    fn canonical_cfa_map(cdesc: [u8; 4]) -> Result<[u8; 4]> {
+        let mut map = [3u8; 4];
+        let mut red_count = 0u8;
         let mut green_count = 0u8;
+        let mut blue_count = 0u8;
 
         for index in 0..4 {
             map[index] = match cdesc[index] as char {
-                'R' | 'r' => 0,
-                'B' | 'b' => 2,
+                'R' | 'r' => {
+                    red_count = red_count.saturating_add(1);
+                    0
+                }
+                'B' | 'b' => {
+                    blue_count = blue_count.saturating_add(1);
+                    2
+                }
                 'G' | 'g' => {
                     let canonical = if green_count == 0 { 1 } else { 3 };
                     green_count = green_count.saturating_add(1);
                     canonical
                 }
-                _ => index as u8,
+                '\0' => 3,
+                other => {
+                    return Err(anyhow!(
+                        "unsupported non-RGB CFA descriptor {other:?} in {:?}",
+                        cdesc.map(char::from)
+                    ));
+                }
             };
         }
 
-        map
+        if red_count != 1 || blue_count != 1 || !(1..=2).contains(&green_count) {
+            return Err(anyhow!(
+                "unsupported RGB CFA descriptor {:?}; expected one red, one blue, and one or two green planes",
+                cdesc.map(char::from)
+            ));
+        }
+
+        Ok(map)
     }
 
     fn canonicalize_f32x4(values: [f32; 4], cfa_map: [u8; 4]) -> [f32; 4] {
@@ -299,15 +402,15 @@ mod libraw_loader {
         out
     }
 
-    fn logical_rgb_channel(cdesc: [u8; 4], cfa_channel: usize) -> usize {
+    fn logical_rgb_channel(cdesc: [u8; 4], cfa_channel: usize) -> Option<usize> {
         match cdesc[cfa_channel.min(3)] as char {
-            'R' | 'r' => 0,
-            'G' | 'g' => 1,
-            'B' | 'b' => 2,
-            // AuRaw's current demosaic is RGB-only. Keep a deterministic
-            // fallback for unusual descriptors instead of indexing outside
-            // the three-channel scene buffer.
-            _ => cfa_channel.min(2),
+            'R' | 'r' => Some(0),
+            'G' | 'g' => Some(1),
+            'B' | 'b' => Some(2),
+            // A NUL descriptor marks an unused physical profile row. Do not
+            // fold it into a real RGB channel, even if malformed metadata left
+            // non-zero coefficients there.
+            _ => None,
         }
     }
 
@@ -350,24 +453,63 @@ mod libraw_loader {
         out
     }
 
-    fn white_levels(maximum: u32, linear_max: [u32; 4]) -> [f32; 4] {
-        // Preserve LibRaw's per-CFA-plane usable saturation levels. Some
-        // formats only populate one entry, so use the first reported plane as
-        // the fallback before falling back to the container maximum.
-        let shared_fallback = linear_max
-            .iter()
-            .copied()
-            .find(|value| *value != 0)
-            .or_else(|| (maximum != 0).then_some(maximum))
+    fn effective_black_level(
+        black: u32,
+        cblack: &[u32],
+        channel: usize,
+        active_x: usize,
+        active_y: usize,
+    ) -> f32 {
+        let channel_offset = cblack.get(channel.min(3)).copied().unwrap_or(0);
+        let pattern_offset = black_pattern_dimensions(cblack)
+            .and_then(|(rows, cols)| {
+                let pattern_index = (active_y % rows)
+                    .checked_mul(cols)?
+                    .checked_add(active_x % cols)?
+                    .checked_add(6)?;
+                cblack.get(pattern_index).copied()
+            })
+            .unwrap_or(0);
+
+        black
+            .saturating_add(channel_offset)
+            .saturating_add(pattern_offset) as f32
+    }
+
+    fn black_pattern_dimensions(cblack: &[u32]) -> Option<(usize, usize)> {
+        let rows = usize::try_from(*cblack.get(4)?).ok()?;
+        let cols = usize::try_from(*cblack.get(5)?).ok()?;
+        if rows == 0 || cols == 0 {
+            return None;
+        }
+        let values = rows.checked_mul(cols)?;
+        let end = 6usize.checked_add(values)?;
+        (end <= cblack.len()).then_some((rows, cols))
+    }
+
+    fn white_levels(
+        maximum: u32,
+        linear_max: [u32; 4],
+        black_levels: [f32; 4],
+    ) -> [f32; 4] {
+        // `maximum` is LibRaw's decoded white/saturation level. `linear_max`
+        // is an optional per-plane vendor "specular white" / linearity limit
+        // and is known to be invalid in some files. Use it only when it forms
+        // a sane range and does not exceed a reported shared maximum.
+        let shared_fallback = (maximum != 0)
+            .then_some(maximum)
+            .or_else(|| linear_max.iter().copied().find(|value| *value != 0))
             .unwrap_or(65535);
 
-        let mut out = [0.0; 4];
+        let mut out = [shared_fallback as f32; 4];
         for index in 0..4 {
-            out[index] = if linear_max[index] != 0 {
-                linear_max[index] as f32
-            } else {
-                shared_fallback as f32
-            };
+            let candidate = linear_max[index];
+            let candidate_is_sane = candidate != 0
+                && candidate as f32 > black_levels[index] + 1.0
+                && (maximum == 0 || candidate <= maximum);
+            if candidate_is_sane {
+                out[index] = candidate as f32;
+            }
         }
         out
     }
@@ -389,33 +531,36 @@ mod libraw_loader {
         // cdesc only after each CFA plane has been normalized independently.
         let mut out = [[0.0; 4]; 3];
         for physical_col in 0..4 {
-            let rgb_col = logical_rgb_channel(cdesc, physical_col);
+            let Some(rgb_col) = logical_rgb_channel(cdesc, physical_col) else {
+                continue;
+            };
             for row in 0..3 {
                 out[row][rgb_col] += physical[row][physical_col];
             }
         }
 
-        if out.iter().flatten().any(|v| !v.is_finite()) || out.iter().flatten().all(|v| *v == 0.0) {
-            [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-            ]
-        } else {
-            out
-        }
+        out
     }
 
     fn camera_to_working_matrix(
         color: &ffi::libraw_colordata_t,
         wb_coeffs: [f32; 4],
         cdesc: [u8; 4],
-    ) -> [[f32; 4]; 3] {
-        if let Some(xyz_to_cam) = interpolated_dng_xyz_to_cam(color, wb_coeffs, cdesc) {
+    ) -> Result<[[f32; 4]; 3]> {
+        let matrix = if let Some(xyz_to_cam) = interpolated_dng_xyz_to_cam(color, wb_coeffs, cdesc) {
             cam_to_working(xyz_to_cam, cdesc)
         } else {
             cam_to_working(color.cam_xyz, cdesc)
+        };
+
+        if matrix.iter().flatten().any(|value| !value.is_finite())
+            || matrix.iter().flatten().all(|value| value.abs() <= 1e-12)
+        {
+            return Err(anyhow!(
+                "LibRaw did not provide an invertible camera colour matrix; refusing to treat camera RGB as the working colour space"
+            ));
         }
+        Ok(matrix)
     }
 
     fn interpolated_dng_xyz_to_cam(
@@ -553,26 +698,40 @@ mod libraw_loader {
     }
 
     fn pseudoinverse(input: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
-        let mut temp = [[0.0; 6]; 3];
+        // Form (A^T A | I) in f64. Camera matrices are small, but doing the
+        // inversion in f32 makes near-dependent profile columns needlessly
+        // fragile and can silently force the identity colour fallback.
+        let mut temp = [[0.0f64; 6]; 3];
 
         for i in 0..3 {
-            for j in 0..6 {
-                temp[i][j] = if j == i + 3 { 1.0 } else { 0.0 };
-            }
+            temp[i][i + 3] = 1.0;
             for j in 0..3 {
                 for row in &input {
-                    temp[i][j] += row[i] * row[j];
+                    temp[i][j] += f64::from(row[i]) * f64::from(row[j]);
                 }
             }
         }
 
         for i in 0..3 {
-            let pivot = temp[i][i];
-            if pivot.abs() < 1e-12 {
+            let mut pivot_row = i;
+            let mut pivot_abs = temp[i][i].abs();
+            for (row, values) in temp.iter().enumerate().skip(i + 1) {
+                let candidate = values[i].abs();
+                if candidate > pivot_abs {
+                    pivot_abs = candidate;
+                    pivot_row = row;
+                }
+            }
+            if !pivot_abs.is_finite() || pivot_abs < 1e-14 {
                 return [[0.0; 4]; 3];
             }
-            for j in 0..6 {
-                temp[i][j] /= pivot;
+            if pivot_row != i {
+                temp.swap(i, pivot_row);
+            }
+
+            let pivot = temp[i][i];
+            for value in &mut temp[i] {
+                *value /= pivot;
             }
             for k in 0..3 {
                 if k == i {
@@ -588,24 +747,29 @@ mod libraw_loader {
         let mut out = [[0.0; 4]; 3];
         for col in 0..4 {
             for row in 0..3 {
-                for k in 0..3 {
-                    out[row][col] += temp[row][k + 3] * input[col][k];
+                let value = (0..3)
+                    .map(|k| temp[row][k + 3] * f64::from(input[col][k]))
+                    .sum::<f64>();
+                if !value.is_finite() {
+                    return [[0.0; 4]; 3];
                 }
+                out[row][col] = value as f32;
             }
         }
         out
     }
 
     fn c_array_to_string(value: &[c_char]) -> String {
-        let ptr = value.as_ptr();
-        if ptr.is_null() {
-            return String::new();
-        }
-
-        unsafe { CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .trim()
-            .to_owned()
+        // Fixed-size LibRaw arrays are normally NUL terminated, but treating
+        // them as an unbounded C string is undefined behaviour when malformed
+        // metadata fills the entire array. Keep conversion inside the slice.
+        let bytes: Vec<u8> = value
+            .iter()
+            .copied()
+            .take_while(|value| *value != 0)
+            .map(|value| value as u8)
+            .collect();
+        String::from_utf8_lossy(&bytes).trim().to_owned()
     }
 
     fn check_libraw(err: i32, action: &str) -> Result<()> {
@@ -629,7 +793,8 @@ mod libraw_loader {
     mod tests {
         use super::{
             black_levels, cam_to_working, canonical_cfa_map, canonicalize_f32x4,
-            cfa_kind_from_filters, white_balance, white_levels, CfaKind,
+            cfa_kind_from_filters, effective_black_level, oriented_source_pos, white_balance,
+            white_levels, CfaKind,
         };
 
         const RGBG: [u8; 4] = *b"RGBG";
@@ -640,6 +805,15 @@ mod libraw_loader {
             assert_eq!(cfa_kind_from_filters(0x9494_9494).unwrap(), CfaKind::Bayer);
             assert!(cfa_kind_from_filters(0).is_err());
             assert!(cfa_kind_from_filters(1).is_err());
+        }
+
+        #[test]
+        fn documented_libraw_rotations_map_output_to_source_coordinates() {
+            // Source is 3x2. A 90-degree output is 2x3.
+            assert_eq!(oriented_source_pos(0, 0, 3, 2, 5), (2, 0));
+            assert_eq!(oriented_source_pos(1, 2, 3, 2, 5), (0, 1));
+            assert_eq!(oriented_source_pos(0, 0, 3, 2, 6), (0, 1));
+            assert_eq!(oriented_source_pos(1, 2, 3, 2, 6), (2, 0));
         }
 
         #[test]
@@ -668,7 +842,7 @@ mod libraw_loader {
 
         #[test]
         fn cfa_planes_are_canonicalized_without_merging_greens() {
-            let map = canonical_cfa_map(*b"GRGB");
+            let map = canonical_cfa_map(*b"GRGB").unwrap();
             assert_eq!(map, [1, 0, 3, 2]);
             assert_eq!(
                 canonicalize_f32x4([10.0, 20.0, 30.0, 40.0], map),
@@ -677,12 +851,40 @@ mod libraw_loader {
         }
 
         #[test]
+        fn non_rgb_cfa_is_rejected_instead_of_silently_miscolored() {
+            assert!(canonical_cfa_map(*b"GMCY").is_err());
+            assert!(canonical_cfa_map(*b"RGBG").is_ok());
+        }
+
+        #[test]
         fn calibration_keeps_both_green_planes_distinct() {
             assert_eq!(black_levels(64, &[1, 2, 3, 4]), [65.0, 66.0, 67.0, 68.0]);
             assert_eq!(
-                white_levels(4095, [4000, 4010, 4020, 4030]),
+                white_levels(4095, [4000, 4010, 4020, 4030], [64.0; 4]),
                 [4000.0, 4010.0, 4020.0, 4030.0]
             );
+        }
+
+        #[test]
+        fn invalid_linear_max_falls_back_to_decoded_white_level() {
+            assert_eq!(
+                white_levels(4095, [10, 4000, 5000, 0], [64.0; 4]),
+                [4095.0, 4000.0, 4095.0, 4095.0]
+            );
+        }
+
+        #[test]
+        fn repeating_black_pattern_uses_active_area_coordinates() {
+            // Two rows by three columns, after the four per-plane offsets.
+            let cblack = [1, 2, 3, 4, 2, 3, 10, 20, 30, 40, 50, 60];
+            assert_eq!(effective_black_level(64, &cblack, 2, 0, 0), 77.0);
+            assert_eq!(effective_black_level(64, &cblack, 2, 4, 3), 117.0);
+        }
+
+        #[test]
+        fn malformed_black_pattern_is_ignored_without_out_of_bounds_access() {
+            let cblack = [1, 2, 3, 4, 99, 99];
+            assert_eq!(effective_black_level(64, &cblack, 1, 500, 500), 66.0);
         }
 
         #[test]

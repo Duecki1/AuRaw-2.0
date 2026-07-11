@@ -48,6 +48,10 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var raw_tex: texture_2d<u32>;
 @group(0) @binding(2) var color_tex: texture_2d<u32>;
+// LibRaw can provide a repeating row/column black pattern in addition to the
+// four CFA-plane offsets. Keeping the effective value per photosite avoids
+// fixed-pattern residuals before white balance and demosaic.
+@group(0) @binding(19) var black_tex: texture_2d<f32>;
 
 // Scene processing uses linear Rec.2020, so its luminance coefficients must be
 // used for every colour-preserving tonal operation.
