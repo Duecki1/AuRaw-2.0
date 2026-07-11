@@ -6,91 +6,217 @@ fn store_highlight_work(pos: vec2<i32>, value: vec4<f32>) {
     textureStore(highlight_work_write, pos, value);
 }
 
+fn highlight_intensity(rgb: vec3<f32>) -> f32 {
+    // The data is still in white-balanced camera RGB, not Rec.2020, so use an
+    // equal-energy intensity rather than the display-space LUMA coefficients.
+    return max((rgb.r + rgb.g + rgb.b) / 3.0, 1e-6);
+}
+
+fn highlight_chroma_ratio(rgb: vec3<f32>) -> vec3<f32> {
+    return max(rgb, vec3<f32>(0.0)) / highlight_intensity(rgb);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn highlight_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let sample = highlight_interpolate_and_mask(pos);
-    let confidence = max(sample.clipped.r, max(sample.clipped.g, sample.clipped.b));
-    store_highlight_work(pos, vec4<f32>(sample.rgb, confidence));
+
+    // Alpha is reliability, not a clipping flag. A pixel with one surviving
+    // channel remains partially useful, while a fully clipped RGB estimate
+    // starts at zero and must be filled from its boundary.
+    let clipped_fraction = clamp(
+        (sample.clipped.r + sample.clipped.g + sample.clipped.b) / 3.0,
+        0.0,
+        1.0,
+    );
+    let reliability = 1.0 - clipped_fraction;
+    store_highlight_work(pos, vec4<f32>(sample.rgb, reliability));
 }
 
-fn diffuse_highlight_at(pos: vec2<i32>, radius: i32, pass_index: f32) -> vec4<f32> {
+fn reconstruct_highlight_at(
+    pos: vec2<i32>,
+    radius: i32,
+    minimum_quality: f32,
+    gradient_gain: f32,
+) -> vec4<f32> {
     let center = textureLoad(highlight_work_read, clamp_pos(pos), 0);
     let guided = params.highlight_options.x >= 1.5;
-    let pass_enabled = pass_index <= clamp(params.highlight_options.y, 1.0, 4.0);
-    if !guided || !pass_enabled || center.w <= 1e-5 {
+    let quality = clamp(params.highlight_options.y, 1.0, 4.0);
+    let strength = clamp(params.highlight_reconstruction, 0.0, 1.0);
+
+    if !guided || quality < minimum_quality || strength <= 1e-5 {
+        return center;
+    }
+
+    let center_reliability = clamp(center.w, 0.0, 1.0);
+    if center_reliability >= 0.9995 {
+        // Reliable source pixels are Dirichlet boundary conditions. Never
+        // diffuse into them, otherwise edges outside the clipped region blur.
         return center;
     }
 
     let center_rgb = max(center.rgb, vec3<f32>(0.0));
-    let center_norm = max(length(center_rgb), 1e-6);
-    var chroma_sum = vec3<f32>(0.0);
-    var sum_weight = 0.0;
-    var confidence_sum = 0.0;
+    let center_log_intensity = log(highlight_intensity(center_rgb));
+    var rgb_sum = vec3<f32>(0.0);
+    var reliability_sum = 0.0;
+    var weight_sum = 0.0;
 
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
             if dx == 0 && dy == 0 { continue; }
-            let p = clamp_pos(pos + vec2<i32>(dx * radius, dy * radius));
-            let sample = textureLoad(highlight_work_read, p, 0);
-            let sample_rgb = max(sample.rgb, vec3<f32>(0.0));
-            let sample_norm = max(length(sample_rgb), 1e-6);
-            let spatial = 1.0 / (1.0 + f32(dx * dx + dy * dy));
-            let reliability = 0.02 + 0.98 * (1.0 - clamp(sample.w, 0.0, 1.0));
-            let range = 1.0 / (1.0 + 2.0 * abs(sample_norm - center_norm));
-            let weight = spatial * reliability * range;
-            chroma_sum = chroma_sum + (sample_rgb / sample_norm) * weight;
-            confidence_sum = confidence_sum + clamp(sample.w, 0.0, 1.0) * weight;
-            sum_weight = sum_weight + weight;
+
+            let offset = vec2<i32>(dx * radius, dy * radius);
+            let neighbour_pos = clamp_pos(pos + offset);
+            let outward_pos = clamp_pos(pos + offset * 2);
+            let neighbour = textureLoad(highlight_work_read, neighbour_pos, 0);
+            let outward = textureLoad(highlight_work_read, outward_pos, 0);
+            let neighbour_reliability = clamp(neighbour.w, 0.0, 1.0);
+
+            if neighbour_reliability <= 1e-5 { continue; }
+
+            let neighbour_rgb = max(neighbour.rgb, vec3<f32>(0.0));
+            let outward_rgb = max(outward.rgb, vec3<f32>(0.0));
+            let neighbour_log_intensity = log(highlight_intensity(neighbour_rgb));
+            let outward_reliability = clamp(outward.w, 0.0, 1.0);
+            let measured_outward_log_intensity = log(highlight_intensity(outward_rgb));
+            // Do not derive a gradient from an unknown second sample. Falling
+            // back to the neighbour itself yields a zero-gradient continuation.
+            let outward_log_intensity = mix(
+                neighbour_log_intensity,
+                measured_outward_log_intensity,
+                outward_reliability,
+            );
+
+            // Extend the reliable outside-to-boundary log-luminance gradient
+            // one step into the clipped component. This transports structure,
+            // rather than preserving the clipped plateau's original magnitude.
+            let log_gradient = clamp(
+                neighbour_log_intensity - outward_log_intensity,
+                -0.35,
+                0.35,
+            );
+            let candidate_log_intensity = clamp(
+                neighbour_log_intensity + gradient_gain * log_gradient,
+                center_log_intensity - 1.5,
+                center_log_intensity + 1.5,
+            );
+            let candidate_intensity = exp(candidate_log_intensity);
+
+            let propagated_chroma = highlight_chroma_ratio(neighbour_rgb);
+            let colour_reliability = clamp(
+                neighbour_reliability
+                    * (0.35 + 0.65 * outward_reliability)
+                    * params.highlight_options.z,
+                0.0,
+                1.0,
+            );
+            let chroma = mix(vec3<f32>(1.0), propagated_chroma, colour_reliability);
+            let candidate_rgb = max(chroma * candidate_intensity, vec3<f32>(0.0));
+
+            let distance_squared = f32(dx * dx + dy * dy);
+            let spatial_weight = 1.0 / (1.0 + distance_squared);
+            let range_weight = 1.0
+                / (1.0 + 0.35 * abs(neighbour_log_intensity - center_log_intensity));
+            let gradient_weight = 1.0 / (1.0 + 1.5 * abs(log_gradient));
+            let reliability_weight = neighbour_reliability * neighbour_reliability;
+            let weight = spatial_weight * range_weight * gradient_weight * reliability_weight;
+
+            rgb_sum = rgb_sum + candidate_rgb * weight;
+            reliability_sum = reliability_sum + neighbour_reliability * weight;
+            weight_sum = weight_sum + weight;
         }
     }
 
-    if sum_weight <= 1e-8 || dot(chroma_sum, chroma_sum) <= 1e-12 {
+    if weight_sum <= 1e-8 {
         return center;
     }
 
-    let neighbour_chroma = normalize(chroma_sum / sum_weight);
-    let neighbour_confidence = clamp(confidence_sum / sum_weight, 0.0, 1.0);
-    let next_confidence = clamp(center.w * neighbour_confidence, 0.0, 1.0);
-    let neutral_chroma = vec3<f32>(INV_SQRT3);
-    // Deep inside a fully clipped patch, cautiously converge toward neutral;
-    // near a reliable boundary, retain the colour propagated from that edge.
-    let colour_reliability = 1.0 - neighbour_confidence;
-    let colour_amount = clamp(params.highlight_options.z, 0.0, 1.0) * colour_reliability;
-    let recovered_chroma = normalize(mix(neutral_chroma, neighbour_chroma, colour_amount));
-    let recovered = recovered_chroma * center_norm;
-    let progress = clamp(0.20 + (1.0 - next_confidence), 0.0, 1.0);
-    let rgb = mix(center_rgb, recovered, progress);
-    return vec4<f32>(rgb, next_confidence);
+    let candidate = rgb_sum / weight_sum;
+    let propagated_reliability = clamp(
+        (reliability_sum / weight_sum) * 0.985,
+        0.0,
+        1.0,
+    );
+    let missing = 1.0 - center_reliability;
+    let update_amount = clamp(missing * (0.35 + 0.65 * strength), 0.0, 1.0);
+    let reconstructed = mix(center_rgb, candidate, update_amount);
+    let next_reliability = max(center_reliability, propagated_reliability);
+
+    return vec4<f32>(max(reconstructed, vec3<f32>(0.0)), next_reliability);
+}
+
+fn run_highlight_guided_pass(
+    gid: vec3<u32>,
+    radius: i32,
+    minimum_quality: f32,
+    gradient_gain: f32,
+) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    store_highlight_work(
+        pos,
+        reconstruct_highlight_at(pos, radius, minimum_quality, gradient_gain),
+    );
+}
+
+// Quality 1: radius 2 -> 1 (2 passes)
+// Quality 2: adds radius 4 and another radius-1 refinement (4 passes)
+// Quality 3: adds radius 8 and radius 2/1 refinements (7 passes)
+// Quality 4: adds radius 16 and a second multiscale refinement cycle (11 passes)
+@compute @workgroup_size(8, 8, 1)
+fn highlight_guided_16_a(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 16, 4.0, 0.45);
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn highlight_diffuse_1(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
-    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    store_highlight_work(pos, diffuse_highlight_at(pos, 1, 1.0));
+fn highlight_guided_8_a(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 8, 3.0, 0.50);
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn highlight_diffuse_2(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
-    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    store_highlight_work(pos, diffuse_highlight_at(pos, 2, 2.0));
+fn highlight_guided_4_a(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 4, 2.0, 0.55);
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn highlight_diffuse_4(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
-    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    store_highlight_work(pos, diffuse_highlight_at(pos, 4, 3.0));
+fn highlight_guided_2_a(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 2, 1.0, 0.60);
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn highlight_diffuse_8(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
-    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    store_highlight_work(pos, diffuse_highlight_at(pos, 8, 4.0));
+fn highlight_guided_1_a(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 1, 1.0, 0.65);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn highlight_guided_4_b(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 4, 4.0, 0.45);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn highlight_guided_2_b(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 2, 3.0, 0.50);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn highlight_guided_1_b(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 1, 2.0, 0.55);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn highlight_guided_2_c(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 2, 4.0, 0.45);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn highlight_guided_1_c(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 1, 3.0, 0.50);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn highlight_guided_1_d(@builtin(global_invocation_id) gid: vec3<u32>) {
+    run_highlight_guided_pass(gid, 1, 4.0, 0.45);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -100,16 +226,32 @@ fn highlight_finalize(@builtin(global_invocation_id) gid: vec3<u32>) {
     let channel = highlight_color_at(pos);
     let original = highlight_raw_camera_at(pos);
     let method = params.highlight_options.x;
+    let strength = clamp(params.highlight_reconstruction, 0.0, 1.0);
     var output = original;
 
     if method >= 0.5 && method < 1.5 {
         output = ansel_lch_reconstructed_cfa_at(pos);
-    } else if method >= 1.5 {
+    } else if method >= 1.5 && strength > 1e-5 {
         let guided_rgb = max(textureLoad(highlight_work_read, pos, 0).rgb, vec3<f32>(0.0));
         let guided = guided_rgb[channel];
-        let blend = guided_clipping_mask(pos) * clamp(params.highlight_reconstruction, 0.0, 1.0);
-        output = mix(original, guided, blend);
+        let clip_amount = guided_cfa_clip_amount(pos);
+
+        if guided_cfa_is_clipped(pos) {
+            // Once a photosite is known to be clipped, its measured value is
+            // invalid. Replace it completely instead of blending the plateau
+            // back into the reconstruction. The strength slider already
+            // controls how strongly the multiscale solver changes its seed.
+            output = guided;
+        } else if clip_amount > 0.0 {
+            // A narrow pre-clip feather avoids a hard seam without modifying
+            // ordinary valid highlights.
+            output = mix(original, guided, clip_amount * strength);
+        }
     }
 
-    textureStore(reconstructed_raw_write, pos, vec4<f32>(max(output, 0.0), 0.0, 0.0, 1.0));
+    textureStore(
+        reconstructed_raw_write,
+        pos,
+        vec4<f32>(max(output, 0.0), 0.0, 0.0, 1.0),
+    );
 }
