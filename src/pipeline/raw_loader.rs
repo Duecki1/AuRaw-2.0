@@ -276,9 +276,9 @@ mod libraw_loader {
         let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
 
         let xyz_to_rec2020 = [
-            [ 1.7166512, -0.3556708, -0.2533663],
-            [-0.6666844,  1.6164812,  0.0157685],
-            [ 0.0176399, -0.0428107,  0.9425388],
+            [1.7166512, -0.3556708, -0.2533663],
+            [-0.6666844, 1.6164812, 0.0157685],
+            [0.0176399, -0.0428107, 0.9425388],
         ];
 
         let mut out = [[0.0; 4]; 3];
@@ -294,9 +294,7 @@ mod libraw_loader {
             out[row][1] += out[row][3];
         }
 
-        if out.iter().flatten().any(|v| !v.is_finite())
-            || out.iter().flatten().all(|v| *v == 0.0)
-        {
+        if out.iter().flatten().any(|v| !v.is_finite()) || out.iter().flatten().all(|v| *v == 0.0) {
             [
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 1.0, 0.0, 0.0],

@@ -5,21 +5,35 @@ edition = "2021"
 authors = ["Duecki <dueckis@dueckis.de>"]
 description = "A GPU-first RAW image editor in Rust"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-eframe = { version = "0.35", features = ["wgpu", "default_fonts", "wayland", "x11"] }
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts"] }
 bytemuck = { version = "1.16", features = ["derive"] }
 rayon = "1.10"
 log = "0.4"
-env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-rfd = "0.15"
 anyhow = "1.0"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }
+env_logger = "0.11"
+rfd = "0.15"
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "android-native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+jni = "0.22"
 
 # THIS SECTION IS REQUIRED FOR build.rs:
 [build-dependencies]
 bindgen = "0.70"
-cc = "1.2.66"
 pkg-config = "0.3"
+
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }
 
 [profile.release]
 opt-level = 3
