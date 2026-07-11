@@ -22,7 +22,7 @@ impl Sidebar {
         }
 
         ui.horizontal(|ui| {
-            ui.label("Lightroom-style controls");
+            ui.label("Scene-referred controls");
             if ui.button("Reset all").clicked() {
                 app.reset_develop_adjustments();
             }
@@ -80,45 +80,6 @@ impl Sidebar {
                         ui.separator();
                     }
                 }
-            });
-
-        egui::CollapsingHeader::new("Advanced (Ansel)")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label("Ansel basic controls");
-                slider!(
-                    ui,
-                    app.exposure.hlcompr,
-                    0.0..=500.0,
-                    "Highlight Compression",
-                    0
-                );
-                slider!(
-                    ui,
-                    app.exposure.hlcomprthresh,
-                    0.0..=100.0,
-                    "Compression Threshold",
-                    0
-                );
-                slider!(ui, app.exposure.brightness, -4.0..=4.0, "Brightness", 2);
-                slider!(ui, app.exposure.middle_grey, 5.0..=90.0, "Middle Grey %", 1);
-
-                ui.separator();
-                ui.label("Filmic tone mapping");
-                slider!(
-                    ui,
-                    app.exposure.filmic_white,
-                    0.1..=10.0,
-                    "White Point (EV)",
-                    1
-                );
-                slider!(
-                    ui,
-                    app.exposure.filmic_black,
-                    -10.0..=-0.1,
-                    "Black Point (EV)",
-                    1
-                );
             });
 
         egui::CollapsingHeader::new("Raw")

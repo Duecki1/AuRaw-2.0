@@ -21,12 +21,10 @@ pub struct ExposureParams {
     /// Sensor-space black-point calibration. This is deliberately separate from
     /// the creative `blacks` control in the Basic panel.
     pub black_point: f32,
+    /// Scene-linear exposure in stops, applied before local/color processing.
     pub exposure: f32,
-    pub hlcompr: f32,
-    pub hlcomprthresh: f32,
+    /// Midtone slope of the single scene-to-display curve.
     pub contrast: f32,
-    pub middle_grey: f32,
-    pub brightness: f32,
     pub saturation: f32,
     pub vibrance: f32,
     pub chroma_denoise: f32,
@@ -38,7 +36,7 @@ pub struct ExposureParams {
     /// Raw highlight-clipping threshold used by reconstruction. This scales
     /// Ansel's shared post-white-balance clipping level.
     pub highlight_clip: f32,
-    /// Raw highlight-reconstruction blend/strength.
+    /// Raw highlight-reconstruction strength.
     pub highlight_reconstruction: f32,
     /// Number of progressively wider guided chroma-propagation passes.
     pub highlight_iterations: u32,
@@ -46,8 +44,9 @@ pub struct ExposureParams {
     /// converging toward a neutral specular highlight.
     pub highlight_color_adaptation: f32,
 
-    // Lightroom-style tonal and local-contrast controls. These intentionally
-    // use the familiar -100..100 UI scale rather than raw pipeline units.
+    // Lightroom-style tonal and local-contrast controls. Highlights, shadows,
+    // whites, blacks and contrast all feed one monotonic scene-to-display
+    // curve; there is no second filmic/basic-adjustments tone mapper.
     pub highlights: f32,
     pub shadows: f32,
     pub whites: f32,
@@ -60,9 +59,6 @@ pub struct ExposureParams {
     pub hsl_hue: [f32; 8],
     pub hsl_saturation: [f32; 8],
     pub hsl_luminance: [f32; 8],
-
-    pub filmic_white: f32,
-    pub filmic_black: f32,
 }
 
 impl Default for ExposureParams {
@@ -70,11 +66,7 @@ impl Default for ExposureParams {
         Self {
             black_point: 0.0,
             exposure: 0.0,
-            hlcompr: 0.0,
-            hlcomprthresh: 0.0,
             contrast: 0.0,
-            middle_grey: 18.42,
-            brightness: 0.0,
             saturation: 0.0,
             vibrance: 0.0,
             chroma_denoise: 0.0,
@@ -95,8 +87,6 @@ impl Default for ExposureParams {
             hsl_hue: [0.0; 8],
             hsl_saturation: [0.0; 8],
             hsl_luminance: [0.0; 8],
-            filmic_white: 4.0,
-            filmic_black: -8.0,
         }
     }
 }
