@@ -1,4 +1,4 @@
-@group(0) @binding(3) var tex1_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var tex1_write: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(8, 8, 1)
 fn pass1_vh_lpf(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -52,5 +52,4 @@ fn pass1_vh_lpf(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(tex1_write, pos, vec4<f32>(vh_dir, lpf, 0.0, 0.0));
 }
-
 

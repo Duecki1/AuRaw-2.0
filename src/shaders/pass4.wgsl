@@ -1,6 +1,6 @@
-@group(0) @binding(6) var tex2_read: texture_2d<f32>;
-@group(0) @binding(8) var tex3_read: texture_2d<f32>;
-@group(0) @binding(9) var out_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(7) var tex2_read: texture_2d<f32>;
+@group(0) @binding(9) var tex3_read: texture_2d<f32>;
+@group(0) @binding(10) var scene_write: texture_storage_2d<rgba16float, write>;
 
 fn chroma_filter_weight(dx: i32, dy: i32) -> f32 {
     if dx == 0 && dy == 0 {
@@ -42,21 +42,6 @@ fn smoothed_chroma_diffs(pos: vec2<i32>) -> vec2<f32> {
         return sum / sum_w;
     }
     return textureLoad(tex3_read, center, 0).xy;
-}
-
-fn highlight_still_clipped(rgb: vec3<f32>, clip_mask: f32) -> bool {
-    let mask = floor(clip_mask + 0.5);
-    let r_clipped = mask - 10.0 * floor(mask / 10.0) >= 1.0;
-    let g_digit = floor(mask / 10.0) - 10.0 * floor(mask / 100.0);
-    let g_clipped = g_digit >= 1.0;
-    let b_clipped = floor(mask / 100.0) >= 1.0;
-    let wb = params.wb.xyz;
-    let sensor_rgb = rgb / max(wb, vec3<f32>(1e-8));
-    let clip = sensor_clip_level();
-
-    return (r_clipped && sensor_rgb.r >= clip)
-        || (g_clipped && sensor_rgb.g >= clip)
-        || (b_clipped && sensor_rgb.b >= clip);
 }
 
 fn ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
@@ -261,92 +246,10 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     let r_val = g_refined + diffR;
     let b_val = g_refined + diffB;
 
-    let r_clip = select(0.0, clip, cc == 0u);
-    let g_clip = select(0.0, clip, cc == 1u);
-    let b_clip = select(0.0, clip, cc == 2u);
-    let final_clip = r_clip * 1.0 + g_clip * 10.0 + b_clip * 100.0;
-
+    // Highlight reconstruction already happened on the raw CFA texture before
+    // this demosaic.  Reconstructing a second time from RGB here was the old
+    // source of coloured halos and grey patches around clipped highlights.
     var camera_rgb = apply_lateral_ca(pos, vec3<f32>(r_val, g_refined, b_val));
     camera_rgb = apply_chroma_denoise(pos, camera_rgb);
-    camera_rgb = reconstruct_sensor_highlights(camera_rgb, final_clip);
-
-    if final_clip > 0.0 && highlight_still_clipped(camera_rgb, final_clip) {
-        var sum_w = 0.0;
-        var sum_r = 0.0;
-        var sum_g = 0.0;
-        var sum_b = 0.0;
-        var samples = 0;
-
-        let vh_c = textureLoad(tex2_read, pos, 0).y;
-        let lum0 = g0;
-
-        var radius = 1;
-        while (samples < 8 && radius <= 8) {
-            for (var dy = -radius; dy <= radius; dy = dy + 1) {
-                for (var dx = -radius; dx <= radius; dx = dx + 1) {
-                    if max(abs(dx), abs(dy)) != radius { continue; }
-
-                    let np = clamp_pos(pos + vec2<i32>(dx, dy));
-                    let n_clip = textureLoad(tex2_read, np, 0).w;
-                    if n_clip > 0.5 { continue; }
-
-                    let g_n = textureLoad(tex2_read, np, 0).x;
-                    let diffs = smoothed_chroma_diffs(np);
-                    let r_n = g_n + diffs.x;
-                    let b_n = g_n + diffs.y;
-
-                    let dist = f32(dx * dx + dy * dy);
-                    let w_dist = 1.0 / (1.0 + dist);
-                    let vh_n = textureLoad(tex2_read, np, 0).y;
-                    let w_edge = 1.0 - abs(vh_c - vh_n);
-                    let w_lum = 1.0 / (1.0 + abs(lum0 - g_n));
-                    let weight = w_dist * w_edge * w_lum;
-
-                    sum_w += weight;
-                    sum_r += r_n * weight;
-                    sum_g += g_n * weight;
-                    sum_b += b_n * weight;
-                    samples = samples + 1;
-                }
-            }
-            radius = radius + 1;
-        }
-
-        if sum_w > 0.0 {
-            let mean_r = sum_r / sum_w;
-            let mean_g = sum_g / sum_w;
-            let mean_b = sum_b / sum_w;
-
-            var rec = camera_rgb;
-            
-            let mask = floor(final_clip + 0.5);
-            let r_clipped = mask - 10.0 * floor(mask / 10.0) >= 1.0;
-            let g_digit = floor(mask / 10.0) - 10.0 * floor(mask / 100.0);
-            let g_clipped = g_digit >= 1.0;
-            let b_clipped = floor(mask / 100.0) >= 1.0;
-
-            if r_clipped && mean_g > 1e-6 && mean_b > 1e-6 {
-                rec.r = mean_r + (camera_rgb.g - mean_g) * (mean_r / mean_g) + (camera_rgb.b - mean_b) * (mean_r / mean_b);
-            }
-            if g_clipped && mean_r > 1e-6 && mean_b > 1e-6 {
-                rec.g = mean_g + (camera_rgb.r - mean_r) * (mean_g / mean_r) + (camera_rgb.b - mean_b) * (mean_g / mean_b);
-            }
-            if b_clipped && mean_r > 1e-6 && mean_g > 1e-6 {
-                rec.b = mean_b + (camera_rgb.r - mean_r) * (mean_b / mean_r) + (camera_rgb.g - mean_g) * (mean_b / mean_g);
-            }
-            
-            camera_rgb = max(rec, vec3<f32>(0.0));
-        }
-    }
-
-    var rgb = cam_to_working(camera_rgb);
-    rgb = map_negative_gamut(rgb);
-
-    rgb = apply_exposure(rgb);
-    rgb = max(rgb, vec3<f32>(0.0));
-
-    rgb = apply_contrast(rgb);
-    rgb = apply_saturation_vibrance(rgb);
-
-    textureStore(out_tex, pos, vec4<f32>(display_render(rgb), 1.0));
+    textureStore(scene_write, pos, vec4<f32>(max(camera_rgb, vec3<f32>(0.0)), 1.0));
 }

@@ -1,5 +1,7 @@
 struct Params {
-    black: f32,
+    // Keep the scalar block at exactly 16 floats so the vec4 fields below
+    // retain the same 16-byte alignment in Rust and WGSL uniforms.
+    black_point: f32,
     exposure: f32,
     hlcompr: f32,
     hlcomprthresh: f32,
@@ -8,13 +10,25 @@ struct Params {
     brightness: f32,
     saturation: f32,
     vibrance: f32,
-    clip: f32,
+    highlight_clip: f32,
     filmic_white: f32,
     filmic_black: f32,
     chroma_denoise: f32,
     ca_red: f32,
     ca_blue: f32,
-    _pad_adjustments: f32,
+    highlight_reconstruction: f32,
+    // Highlights, shadows, whites, blacks. Values use the Lightroom-style
+    // -100..100 UI domain and are converted to scene-linear stops in WGSL.
+    basic_tone: vec4<f32>,
+    // Texture, clarity, dehaze, reserved.
+    presence: vec4<f32>,
+    // Red, orange, yellow, green / aqua, blue, purple, magenta.
+    hsl_hue_0: vec4<f32>,
+    hsl_hue_1: vec4<f32>,
+    hsl_saturation_0: vec4<f32>,
+    hsl_saturation_1: vec4<f32>,
+    hsl_luminance_0: vec4<f32>,
+    hsl_luminance_1: vec4<f32>,
     wb: vec4<f32>,
     cam_to_srgb_0: vec4<f32>,
     cam_to_srgb_1: vec4<f32>,
@@ -50,5 +64,4 @@ fn clamp_pos(pos: vec2<i32>) -> vec2<i32> {
 fn safe_luma(rgb: vec3<f32>) -> f32 {
     return max(dot(rgb, LUMA), 1e-6);
 }
-
 

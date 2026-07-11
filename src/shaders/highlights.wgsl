@@ -1,67 +1,119 @@
-fn sensor_clip_level() -> f32 {
-    return 0.995 * max(1.0 + params.clip, 0.05);
+// Fast pre-demosaic highlight reconstruction.
+//
+// This is the Bayer LCh method from Ansel's highlight-reconstruction module,
+// expressed in WGSL.  It deliberately runs on the white-balanced CFA mosaic:
+// reconstructing after demosaic cannot recover the lost sensor channel and is
+// the source of the magenta/grey artifacts the old shader produced.
+
+const ANSEL_SQRT3: f32 = 1.7320508075688772;
+const ANSEL_SQRT12: f32 = 3.4641016151377544;
+
+fn highlight_color_at(pos: vec2<i32>) -> u32 {
+    return textureLoad(color_tex, clamp_pos(pos), 0).r;
 }
 
-fn reconstruct_sensor_highlights(rgb: vec3<f32>, clip_mask: f32) -> vec3<f32> {
-    let wb = params.wb.xyz;
-    let sensor_rgb = rgb / max(wb, vec3<f32>(1e-8));
-    let clip = sensor_clip_level();
-    let near_clip3 = smoothstep(vec3<f32>(0.90 * clip), vec3<f32>(clip), sensor_rgb);
-
-    let mask = floor(clip_mask + 0.5);
-    let r_clipped = mask - 10.0 * floor(mask / 10.0) >= 1.0;
-    let g_digit = floor(mask / 10.0) - 10.0 * floor(mask / 100.0);
-    let g_clipped = g_digit >= 1.0;
-    let b_clipped = floor(mask / 100.0) >= 1.0;
-
-    let near_clip = max(near_clip3, vec3<f32>(
-        select(0.0, 1.0, r_clipped),
-        select(0.0, 1.0, g_clipped),
-        select(0.0, 1.0, b_clipped),
-    ));
-    let near_count = near_clip.r + near_clip.g + near_clip.b;
-
-    if (near_count < 1e-4) {
-        return rgb;
-    }
-
-    let Y = dot(rgb, LUMA);
-    let Cb = dot(rgb, vec3<f32>(-0.114572, -0.385428, 0.5));
-    let Cr = dot(rgb, vec3<f32>(0.5, -0.454153, -0.045847));
-    
-    let chroma = sqrt(Cb * Cb + Cr * Cr);
-    let saturation = chroma / max(Y, 1e-6);
-    let low_saturation = 1.0 - smoothstep(0.08, 0.30, saturation);
-
-    let multi_near = smoothstep(1.25, 2.0, near_count);
-    let all_near = smoothstep(2.35, 3.0, near_count);
-    let strength = max(multi_near, all_near) * low_saturation;
-
-    let safe_rgb = min(rgb, clip * wb);
-    let safe_Cb = dot(safe_rgb, vec3<f32>(-0.114572, -0.385428, 0.5));
-    let safe_Cr = dot(safe_rgb, vec3<f32>(0.5, -0.454153, -0.045847));
-
-    let denom = chroma * chroma;
-    var new_Cb = Cb;
-    var new_Cr = Cr;
-
-    if (denom > 1e-12) {
-        let safe_chroma = sqrt(safe_Cb * safe_Cb + safe_Cr * safe_Cr);
-        let ratio = min(1.0, safe_chroma / chroma);
-        new_Cb *= ratio;
-        new_Cr *= ratio;
-    }
-
-    let r_out = Y + 1.5748 * new_Cr;
-    let g_out = Y - 0.1873 * new_Cb - 0.4681 * new_Cr;
-    let b_out = Y + 1.8556 * new_Cb;
-
-    let chroma_limited = vec3<f32>(r_out, g_out, b_out);
-    let neutral = vec3<f32>(Y);
-    let reconstructed = mix(chroma_limited, neutral, strength);
-
-    let blend = clamp(near_count / 3.0, 0.0, 1.0);
-    return max(mix(rgb, reconstructed, blend), vec3<f32>(0.0));
+fn highlight_wb_for_channel(channel: u32) -> f32 {
+    if channel == 0u { return params.wb.r; }
+    if channel == 1u { return params.wb.g; }
+    return params.wb.b;
 }
 
+fn highlight_raw_camera_at(pos: vec2<i32>) -> f32 {
+    let p = clamp_pos(pos);
+    let channel = highlight_color_at(p);
+    let raw = f32(textureLoad(raw_tex, p, 0).r);
+    let black = params.black_levels[channel];
+    let white = max(params.white_levels[channel], black + 1.0);
+    let sensor = clamp((raw - black) / (white - black), 0.0, 4.0);
+    return sensor * highlight_wb_for_channel(channel);
+}
 
+fn highlight_clip_for(channel: u32) -> f32 {
+    return max(params.highlight_clip, 0.01) * highlight_wb_for_channel(channel);
+}
+
+fn lch_reconstructed_cfa_at(pos: vec2<i32>) -> f32 {
+    let center = clamp_pos(pos);
+    let center_color = highlight_color_at(center);
+    let original = highlight_raw_camera_at(center);
+
+    // A 2×2 support is the exact fast Bayer route used by Ansel.  It is
+    // intentionally disabled at the edge and for non-Bayer CFA blocks; those
+    // samples remain untouched rather than inventing colour.
+    if center.x >= i32(params.width) - 1 || center.y >= i32(params.height) - 1 {
+        return original;
+    }
+
+    var r = 0.0;
+    var b = 0.0;
+    var g_min = 1e20;
+    var g_max = -1e20;
+    var have_r = false;
+    var have_b = false;
+    var greens = 0u;
+
+    for (var dy = 0; dy <= 1; dy = dy + 1) {
+        for (var dx = 0; dx <= 1; dx = dx + 1) {
+            let p = center + vec2<i32>(dx, dy);
+            let channel = highlight_color_at(p);
+            let value = highlight_raw_camera_at(p);
+            if channel == 0u {
+                r = value;
+                have_r = true;
+            } else if channel == 1u {
+                g_min = min(g_min, value);
+                g_max = max(g_max, value);
+                greens = greens + 1u;
+            } else if channel == 2u {
+                b = value;
+                have_b = true;
+            }
+        }
+    }
+
+    if !have_r || !have_b || greens < 2u {
+        return original;
+    }
+
+    let clipped = r > highlight_clip_for(0u)
+        || g_max > highlight_clip_for(1u)
+        || b > highlight_clip_for(2u);
+    if !clipped || params.highlight_reconstruction <= 1e-6 {
+        return original;
+    }
+
+    // Ansel's LCh-like transform works from the un-clipped lightness and
+    // reduces only chroma using the clipped reference values.  Keeping L
+    // preserves highlight texture instead of turning broad clipped areas grey.
+    let ro = min(r, highlight_clip_for(0u));
+    let go = min(g_min, highlight_clip_for(1u));
+    let bo = min(b, highlight_clip_for(2u));
+
+    let lightness = (r + g_max + b) / 3.0;
+    var chroma = ANSEL_SQRT3 * (r - g_max);
+    var hue_axis = 2.0 * b - g_max - r;
+    let clipped_chroma = ANSEL_SQRT3 * (ro - go);
+    let clipped_hue_axis = 2.0 * bo - go - ro;
+    let denominator = chroma * chroma + hue_axis * hue_axis;
+
+    if denominator > 1e-12 {
+        let numerator = max(
+            clipped_chroma * clipped_chroma + clipped_hue_axis * clipped_hue_axis,
+            0.0,
+        );
+        let ratio = clamp(sqrt(numerator / denominator), 0.0, 1.0);
+        chroma = chroma * ratio;
+        hue_axis = hue_axis * ratio;
+    }
+
+    let recovered_r = lightness - hue_axis / 6.0 + chroma / ANSEL_SQRT12;
+    let recovered_g = lightness - hue_axis / 6.0 - chroma / ANSEL_SQRT12;
+    let recovered_b = lightness + hue_axis / 3.0;
+    let recovered = select(
+        select(recovered_r, recovered_g, center_color == 1u),
+        recovered_b,
+        center_color == 2u,
+    );
+
+    return mix(original, max(recovered, 0.0), clamp(params.highlight_reconstruction, 0.0, 1.0));
+}

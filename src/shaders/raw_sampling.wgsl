@@ -1,75 +1,41 @@
+// The reconstructed texture is written by the pre-demosaic highlight pass.
+// It already contains black-level-normalized, white-balanced camera samples.
+@group(0) @binding(3) var reconstructed_raw_tex: texture_2d<f32>;
+
 fn color_at(pos: vec2<i32>) -> u32 {
     return textureLoad(color_tex, clamp_pos(pos), 0).r;
 }
 
-fn is_raw_clipped(pos: vec2<i32>) -> bool {
-    let p = clamp_pos(pos);
-    let color = min(color_at(p), 3u);
-    let raw = f32(textureLoad(raw_tex, p, 0).r);
-    let white = params.white_levels[color];
-    return raw >= white - 1.0;
+fn wb_for_channel(channel: u32) -> f32 {
+    if channel == 0u { return params.wb.r; }
+    if channel == 1u { return params.wb.g; }
+    return params.wb.b;
 }
 
-fn raw_value_at(pos: vec2<i32>) -> f32 {
+fn raw_sensor_at(pos: vec2<i32>) -> f32 {
     let p = clamp_pos(pos);
-    let color = min(color_at(p), 3u);
+    let color = color_at(p);
     let raw = f32(textureLoad(raw_tex, p, 0).r);
     let black = params.black_levels[color];
     let white = max(params.white_levels[color], black + 1.0);
-    let wb = params.wb[color];
-    return clamp((raw - black) / (white - black), 0.0, 4.0) * wb;
+    return clamp((raw - black) / (white - black), 0.0, 4.0);
+}
+
+fn raw_camera_at(pos: vec2<i32>) -> f32 {
+    let p = clamp_pos(pos);
+    return raw_sensor_at(p) * wb_for_channel(color_at(p));
+}
+
+fn highlight_clip_for_channel(channel: u32) -> f32 {
+    return max(params.highlight_clip, 0.01) * wb_for_channel(channel);
+}
+
+fn is_raw_clipped(pos: vec2<i32>) -> bool {
+    let p = clamp_pos(pos);
+    let color = color_at(p);
+    return raw_camera_at(p) >= highlight_clip_for_channel(color);
 }
 
 fn raw_cfa_at(pos: vec2<i32>) -> f32 {
-    let p = clamp_pos(pos);
-    let color = min(color_at(p), 3u);
-    let raw = f32(textureLoad(raw_tex, p, 0).r);
-    let black = params.black_levels[color];
-    let white = max(params.white_levels[color], black + 1.0);
-    let wb = params.wb[color];
-    return clamp((raw - black) / (white - black), 0.0, 4.0) * wb;
+    return textureLoad(reconstructed_raw_tex, clamp_pos(pos), 0).x;
 }
-
-fn normalized_raw_at(pos: vec2<i32>) -> f32 {
-    let center_color = color_at(pos);
-    let center = raw_value_at(pos);
-    var sum = 0.0;
-    var count = 0.0;
-
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let p = pos + vec2<i32>(dx, dy);
-            if color_at(p) == center_color {
-                sum = sum + raw_value_at(p);
-                count = count + 1.0;
-            }
-        }
-    }
-
-    if count < 2.0 {
-        return center;
-    }
-
-    let local = sum / count;
-    if center > local * 6.0 + 0.25 {
-        return local;
-    }
-    if local > 0.08 && center < local * 0.05 {
-        return local;
-    }
-    return center;
-}
-
-fn sample_if_color(pos: vec2<i32>, channel: u32) -> vec3<f32> {
-    if color_at(pos) == channel {
-        let v = normalized_raw_at(pos);
-        let c = select(0.0, 1.0, is_raw_clipped(pos));
-        return vec3<f32>(v, 1.0, c);
-    }
-    return vec3<f32>(0.0, 0.0, 0.0);
-}
-
-
