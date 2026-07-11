@@ -189,8 +189,16 @@ mod libraw_loader {
         let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
         let cam_to_srgb = camera_to_working_matrix(color, physical_wb, cdesc)?;
         let black_levels = canonicalize_f32x4(physical_black_levels, cfa_map);
+        // LibRaw changed `linear_max` from `long[4]` in the 0.21 series
+        // to `unsigned[4]` in newer releases. Bindgen therefore exposes it
+        // as either `[i64; 4]` or `[u32; 4]`, depending on the installed
+        // headers. Normalize both representations and reject negative or
+        // otherwise out-of-range metadata values.
+        let linear_max = color
+            .linear_max
+            .map(|value| u32::try_from(value).unwrap_or(0));
         let white_levels = canonicalize_f32x4(
-            white_levels(color.maximum, color.linear_max, physical_black_levels),
+            white_levels(color.maximum, linear_max, physical_black_levels),
             cfa_map,
         );
 
