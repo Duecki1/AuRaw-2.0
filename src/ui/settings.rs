@@ -1,23 +1,24 @@
 use crate::app::AurawApp;
 use crate::pipeline::HighlightReconstructionMethod;
-use eframe::egui::{ComboBox, Slider, Ui};
+use crate::ui::components::adjustment_slider::adjustment_slider;
+use eframe::egui::{ComboBox, Ui};
 
 pub struct Settings;
 
 impl Settings {
     pub fn show(ui: &mut Ui, app: &mut AurawApp) {
         ui.heading("Settings");
-        ui.add_space(8.0);
+        ui.add_space(4.0);
 
         let mut changed = false;
 
         ui.group(|ui| {
-            ui.set_max_width(640.0);
+            ui.set_max_width(720.0);
             ui.heading("Highlight reconstruction");
             ui.label(
                 "Reconstruct clipped sensor channels before demosaicing to avoid pink or grey highlights.",
             );
-            ui.add_space(6.0);
+            ui.add_space(4.0);
 
             ComboBox::from_label("Method")
                 .selected_text(match app.exposure.highlight_method {
@@ -51,54 +52,52 @@ impl Settings {
 
             let enabled = app.exposure.highlight_method != HighlightReconstructionMethod::Off;
             ui.add_enabled_ui(enabled, |ui| {
-                changed |= ui
-                    .add(
-                        Slider::new(&mut app.exposure.highlight_clip, 0.5..=2.0)
-                            .text("Clip threshold")
-                            .fixed_decimals(2),
-                    )
-                    .on_hover_text(
-                        "Sensor-relative level at which a channel is treated as clipped.",
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        Slider::new(&mut app.exposure.highlight_reconstruction, 0.0..=1.0)
-                            .text("Reconstruction strength")
-                            .fixed_decimals(2),
-                    )
-                    .on_hover_text("Blend between the original and reconstructed highlight.")
-                    .changed();
+                changed |= adjustment_slider(
+                    ui,
+                    "Clip threshold",
+                    &mut app.exposure.highlight_clip,
+                    0.5..=2.0,
+                    2,
+                    0.01,
+                    Some("Sensor-relative level at which a channel is treated as clipped."),
+                );
+                changed |= adjustment_slider(
+                    ui,
+                    "Reconstruction strength",
+                    &mut app.exposure.highlight_reconstruction,
+                    0.0..=1.0,
+                    2,
+                    0.01,
+                    Some("Blend between the original and reconstructed highlight."),
+                );
 
                 if app.exposure.highlight_method == HighlightReconstructionMethod::Guided {
                     ui.separator();
                     ui.strong("Guided reconstruction");
-                    changed |= ui
-                        .add(
-                            Slider::new(&mut app.exposure.highlight_iterations, 1..=4)
-                                .text("Iterations"),
-                        )
-                        .on_hover_text(
+                    changed |= adjustment_slider(
+                        ui,
+                        "Iterations",
+                        &mut app.exposure.highlight_iterations,
+                        1..=4,
+                        0,
+                        1.0,
+                        Some(
                             "More iterations propagate surrounding color farther into clipped regions.",
-                        )
-                        .changed();
-                    changed |= ui
-                        .add(
-                            Slider::new(
-                                &mut app.exposure.highlight_color_adaptation,
-                                0.0..=1.0,
-                            )
-                            .text("Color adaptation")
-                            .fixed_decimals(2),
-                        )
-                        .on_hover_text(
-                            "Controls how strongly reconstructed highlights follow nearby color.",
-                        )
-                        .changed();
+                        ),
+                    );
+                    changed |= adjustment_slider(
+                        ui,
+                        "Color adaptation",
+                        &mut app.exposure.highlight_color_adaptation,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Controls how strongly reconstructed highlights follow nearby color."),
+                    );
                 }
             });
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             if ui.button("Restore reconstruction defaults").clicked() {
                 app.reset_highlight_reconstruction_settings();
             }
