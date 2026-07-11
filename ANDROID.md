@@ -15,8 +15,8 @@ the application entry point and the system file-picker bridge.
 Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
 
 ```sh
-export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/28.0.13004108"
+export ANDROID_SDK_ROOT="/home/duecki/Android/Sdk"
+export ANDROID_NDK_HOME="/home/duecki/Android/Sdk/ndk/27.0.12077973"
 rustup target add aarch64-linux-android
 cargo install cargo-ndk
 ```

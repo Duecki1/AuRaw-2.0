@@ -1,104 +1,88 @@
-@group(0) @binding(4) var tex1_read: texture_2d<f32>;
-@group(0) @binding(5) var tex2_write: texture_storage_2d<rgba16float, write>;
+// Bayer RCD stage 2. This follows darktable's ratio-corrected green stage:
+// directional HPF discrimination, low-pass ratios, then diagonal P/Q HPFs.
+@group(0) @binding(5) var tex1_read: texture_2d<f32>;
+@group(0) @binding(6) var tex2_write: texture_storage_2d<rgba16float, write>;
+
+fn rcd_axis_hpf(pos: vec2<i32>, axis: vec2<i32>) -> f32 {
+    let c = raw_cfa_at(pos);
+    return raw_cfa_at(pos - 3 * axis)
+        - raw_cfa_at(pos - axis)
+        - raw_cfa_at(pos + axis)
+        + raw_cfa_at(pos + 3 * axis)
+        - 3.0 * (raw_cfa_at(pos - 2 * axis) + raw_cfa_at(pos + 2 * axis))
+        + 6.0 * c;
+}
+
+fn rcd_green_candidate(pos: vec2<i32>, axis: vec2<i32>, lpfi: f32) -> vec2<f32> {
+    let eps = 1e-5;
+    let c = raw_cfa_at(pos);
+    let m1 = raw_cfa_at(pos - axis);
+    let p1 = raw_cfa_at(pos + axis);
+    let m2 = raw_cfa_at(pos - 2 * axis);
+    let p2 = raw_cfa_at(pos + 2 * axis);
+    let m3 = raw_cfa_at(pos - 3 * axis);
+    let p3 = raw_cfa_at(pos + 3 * axis);
+    let m4 = raw_cfa_at(pos - 4 * axis);
+    let p4 = raw_cfa_at(pos + 4 * axis);
+
+    let grad_m = eps + abs(m1 - p1) + abs(c - m2) + abs(m1 - m3) + abs(m2 - m4);
+    let grad_p = eps + abs(m1 - p1) + abs(c - p2) + abs(p1 - p3) + abs(p2 - p4);
+    let lpf_m = textureLoad(tex1_read, clamp_pos(pos - 2 * axis), 0).y;
+    let lpf_p = textureLoad(tex1_read, clamp_pos(pos + 2 * axis), 0).y;
+    let est_m = m1 * (2.0 * lpfi) / (eps + lpfi + lpf_m);
+    let est_p = p1 * (2.0 * lpfi) / (eps + lpfi + lpf_p);
+    let estimate = (grad_m * est_p + grad_p * est_m) / (grad_m + grad_p);
+    return vec2<f32>(estimate, grad_m + grad_p);
+}
+
+fn rcd_diagonal_stat(pos: vec2<i32>, axis: vec2<i32>) -> f32 {
+    // darktable sums three squared high-pass responses on each diagonal.
+    let a = rcd_axis_hpf(pos - axis, axis);
+    let b = rcd_axis_hpf(pos, axis);
+    let c = rcd_axis_hpf(pos + axis, axis);
+    return a * a + b * b + c * c;
+}
 
 @compute @workgroup_size(8, 8, 1)
-fn pass2_green_pq(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn bayer_rcd_green(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let cc = color_at(pos);
+    var green = raw_cfa_at(pos);
 
-    var g_out = 0.0;
-    var pq_dir = 0.0;
-    var clip = select(0.0, 1.0, is_raw_clipped(pos));
-
-    if cc == 1u {
-        g_out = raw_cfa_at(pos);
-    } else {
+    if cc != 1u {
         let lpfi = textureLoad(tex1_read, pos, 0).y;
+        let vertical = rcd_green_candidate(pos, vec2<i32>(0, 1), lpfi);
+        let horizontal = rcd_green_candidate(pos, vec2<i32>(1, 0), lpfi);
 
-        let c   = raw_cfa_at(pos);
-        let n   = raw_cfa_at(pos + vec2<i32>(0, -1));
-        let s   = raw_cfa_at(pos + vec2<i32>(0, 1));
-        let w   = raw_cfa_at(pos + vec2<i32>(-1, 0));
-        let e   = raw_cfa_at(pos + vec2<i32>(1, 0));
-        let n2  = raw_cfa_at(pos + vec2<i32>(0, -2));
-        let s2  = raw_cfa_at(pos + vec2<i32>(0, 2));
-        let w2  = raw_cfa_at(pos + vec2<i32>(-2, 0));
-        let e2  = raw_cfa_at(pos + vec2<i32>(2, 0));
-        let n3  = raw_cfa_at(pos + vec2<i32>(0, -3));
-        let s3  = raw_cfa_at(pos + vec2<i32>(0, 3));
-        let w3  = raw_cfa_at(pos + vec2<i32>(-3, 0));
-        let e3  = raw_cfa_at(pos + vec2<i32>(3, 0));
-        let n4  = raw_cfa_at(pos + vec2<i32>(0, -4));
-        let s4  = raw_cfa_at(pos + vec2<i32>(0, 4));
-        let w4  = raw_cfa_at(pos + vec2<i32>(-4, 0));
-        let e4  = raw_cfa_at(pos + vec2<i32>(4, 0));
+        let vh_center = textureLoad(tex1_read, pos, 0).x;
+        let vh_neighbours = 0.25 * (
+            textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1, -1)), 0).x
+          + textureLoad(tex1_read, clamp_pos(pos + vec2<i32>( 1, -1)), 0).x
+          + textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1,  1)), 0).x
+          + textureLoad(tex1_read, clamp_pos(pos + vec2<i32>( 1,  1)), 0).x
+        );
+        // Use the more decisive discriminator, as in the reference code.
+        let vh = select(vh_center, vh_neighbours,
+            abs(0.5 - vh_center) < abs(0.5 - vh_neighbours));
+        green = mix(vertical.x, horizontal.x, vh);
 
-        let eps = 1e-5;
-        let n_grad = eps + abs(n - s) + abs(c - n2) + abs(n - n3) + abs(n2 - n4);
-        let s_grad = eps + abs(n - s) + abs(c - s2) + abs(s - s3) + abs(s2 - s4);
-        let w_grad = eps + abs(w - e) + abs(c - w2) + abs(w - w3) + abs(w2 - w4);
-        let e_grad = eps + abs(w - e) + abs(c - e2) + abs(e - e3) + abs(e2 - e4);
-
-        let lpf_n = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(0, -2)), 0).y;
-        let lpf_s = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(0, 2)), 0).y;
-        let lpf_w = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-2, 0)), 0).y;
-        let lpf_e = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(2, 0)), 0).y;
-
-        let n_est = n * (lpfi + lpfi) / (eps + lpfi + lpf_n);
-        let s_est = s * (lpfi + lpfi) / (eps + lpfi + lpf_s);
-        let w_est = w * (lpfi + lpfi) / (eps + lpfi + lpf_w);
-        let e_est = e * (lpfi + lpfi) / (eps + lpfi + lpf_e);
-
-        let v_est = (s_grad * n_est + n_grad * s_est) / (n_grad + s_grad);
-        let h_est = (w_grad * e_est + e_grad * w_est) / (e_grad + w_grad);
-
-        let vh_c = textureLoad(tex1_read, pos, 0).x;
-        let vh_nw = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1, -1)), 0).x;
-        let vh_ne = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(1, -1)), 0).x;
-        let vh_sw = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(-1, 1)), 0).x;
-        let vh_se = textureLoad(tex1_read, clamp_pos(pos + vec2<i32>(1, 1)), 0).x;
-        let vh_n = 0.25 * (vh_nw + vh_ne + vh_sw + vh_se);
-        let vh_disc = select(vh_c, vh_n, abs(0.5 - vh_c) < abs(0.5 - vh_n));
-
-        g_out = mix(v_est, h_est, vh_disc);
+        // Keep the ratio correction bounded by the immediate measured greens.
+        let lo = min(
+            min(raw_cfa_at(pos + vec2<i32>(-1, 0)), raw_cfa_at(pos + vec2<i32>(1, 0))),
+            min(raw_cfa_at(pos + vec2<i32>(0, -1)), raw_cfa_at(pos + vec2<i32>(0, 1)))
+        );
+        let hi = max(
+            max(raw_cfa_at(pos + vec2<i32>(-1, 0)), raw_cfa_at(pos + vec2<i32>(1, 0))),
+            max(raw_cfa_at(pos + vec2<i32>(0, -1)), raw_cfa_at(pos + vec2<i32>(0, 1)))
+        );
+        green = clamp(green, lo - 0.25 * max(hi - lo, 1e-5), hi + 0.25 * max(hi - lo, 1e-5));
     }
 
-    var p_stat = 0.0;
-    var q_stat = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let p = pos + vec2<i32>(dx, dy);
-            let c  = raw_cfa_at(p);
-            let nw1 = raw_cfa_at(p + vec2<i32>(-1, -1));
-            let nw2 = raw_cfa_at(p + vec2<i32>(-2, -2));
-            let nw3 = raw_cfa_at(p + vec2<i32>(-3, -3));
-            let se1 = raw_cfa_at(p + vec2<i32>(1, 1));
-            let se2 = raw_cfa_at(p + vec2<i32>(2, 2));
-            let se3 = raw_cfa_at(p + vec2<i32>(3, 3));
-            
-            let ne1 = raw_cfa_at(p + vec2<i32>(1, -1));
-            let ne2 = raw_cfa_at(p + vec2<i32>(2, -2));
-            let ne3 = raw_cfa_at(p + vec2<i32>(3, -3));
-            let sw1 = raw_cfa_at(p + vec2<i32>(-1, 1));
-            let sw2 = raw_cfa_at(p + vec2<i32>(-2, 2));
-            let sw3 = raw_cfa_at(p + vec2<i32>(-3, 3));
-
-            let is_p_diag = (dx == dy);
-            let is_q_diag = (dx == -dy);
-            if is_p_diag {
-                let val_p = nw3 - nw1 - se1 + se3 - 3.0 * (nw2 + se2) + 6.0 * c;
-                p_stat += val_p * val_p;
-            }
-            if is_q_diag {
-                let val_q = ne3 - ne1 - sw1 + sw3 - 3.0 * (ne2 + sw2) + 6.0 * c;
-                q_stat += val_q * val_q;
-            }
-        }
-    }
-    pq_dir = max(1e-10, p_stat) / (max(1e-10, p_stat) + max(1e-10, q_stat));
-
+    let p_stat = max(1e-10, rcd_diagonal_stat(pos, vec2<i32>(1, 1)));
+    let q_stat = max(1e-10, rcd_diagonal_stat(pos, vec2<i32>(1, -1)));
+    let pq_dir = p_stat / (p_stat + q_stat);
     let vh_dir = textureLoad(tex1_read, pos, 0).x;
-    textureStore(tex2_write, pos, vec4<f32>(g_out, vh_dir, pq_dir, clip));
+    let clip = select(0.0, 1.0, is_raw_clipped(pos));
+    textureStore(tex2_write, pos, vec4<f32>(max(green, 0.0), vh_dir, pq_dir, clip));
 }
-

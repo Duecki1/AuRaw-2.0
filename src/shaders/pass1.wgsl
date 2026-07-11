@@ -1,7 +1,9 @@
-@group(0) @binding(3) var tex1_write: texture_storage_2d<rgba16float, write>;
+// Bayer RCD stage 1: chromatic-aberration-invariant directional statistics
+// and the stable 1-2-1 / 2-4-2 / 1-2-1 low-pass guide.
+@group(0) @binding(4) var tex1_write: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(8, 8, 1)
-fn pass1_vh_lpf(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn bayer_rcd_directional(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let cc = color_at(pos);
@@ -52,5 +54,4 @@ fn pass1_vh_lpf(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(tex1_write, pos, vec4<f32>(vh_dir, lpf, 0.0, 0.0));
 }
-
 

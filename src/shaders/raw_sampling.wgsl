@@ -1,75 +1,68 @@
+// The reconstructed texture is written by the pre-demosaic highlight pass.
+// It already contains black-level-normalized, white-balanced camera samples.
+@group(0) @binding(3) var reconstructed_raw_tex: texture_2d<f32>;
+
+// The loader canonicalizes physical CFA planes to R, G1, B, G2. Keep G1
+// and G2 distinct for black/white/WB calibration, but expose a collapsed RGB
+// logical RGB color to both Bayer and X-Trans demosaic code.
+fn cfa_channel_at(pos: vec2<i32>) -> u32 {
+    return min(textureLoad(color_tex, clamp_pos(pos), 0).r, 3u);
+}
+
 fn color_at(pos: vec2<i32>) -> u32 {
-    return textureLoad(color_tex, clamp_pos(pos), 0).r;
+    let channel = cfa_channel_at(pos);
+    return select(channel, 1u, channel == 3u);
+}
+
+fn wb_for_cfa_channel(channel: u32) -> f32 {
+    return params.wb[min(channel, 3u)];
+}
+
+fn raw_sensor_at(pos: vec2<i32>) -> f32 {
+    let p = clamp_pos(pos);
+    let channel = cfa_channel_at(p);
+    let raw = f32(textureLoad(raw_tex, p, 0).r);
+    let metadata_black = textureLoad(black_tex, p, 0).x;
+    let white = max(params.white_levels[channel], metadata_black + 1.0);
+    let sensor_range = max(white - metadata_black, 1.0);
+
+    // black_point is a normalized sensor-domain calibration offset. Apply it
+    // independently to every CFA plane before white balance and demosaic.
+    // Limit the correction to a sane calibration range and keep at least one
+    // code value between calibrated black and white.
+    let black_offset = clamp(params.black_point, -0.25, 0.25) * sensor_range;
+    let calibrated_black = clamp(
+        metadata_black + black_offset,
+        0.0,
+        white - 1.0,
+    );
+    return clamp((raw - calibrated_black) / (white - calibrated_black), 0.0, 4.0);
+}
+
+fn raw_camera_at(pos: vec2<i32>) -> f32 {
+    let p = clamp_pos(pos);
+    return raw_sensor_at(p) * wb_for_cfa_channel(cfa_channel_at(p));
+}
+
+fn shared_highlight_clip() -> f32 {
+    // The common post-WB threshold must include both green photosite planes.
+    let min_wb = min(
+        min(params.wb.r, params.wb.g),
+        min(params.wb.b, params.wb.a),
+    );
+    return 0.995 * max(params.highlight_clip, 0.01) * max(min_wb, 1e-6);
 }
 
 fn is_raw_clipped(pos: vec2<i32>) -> bool {
     let p = clamp_pos(pos);
-    let color = min(color_at(p), 3u);
-    let raw = f32(textureLoad(raw_tex, p, 0).r);
-    let white = params.white_levels[color];
-    return raw >= white - 1.0;
-}
-
-fn raw_value_at(pos: vec2<i32>) -> f32 {
-    let p = clamp_pos(pos);
-    let color = min(color_at(p), 3u);
-    let raw = f32(textureLoad(raw_tex, p, 0).r);
-    let black = params.black_levels[color];
-    let white = max(params.white_levels[color], black + 1.0);
-    let wb = params.wb[color];
-    return clamp((raw - black) / (white - black), 0.0, 4.0) * wb;
+    if params.highlight_options.x >= 1.5 {
+        // Guided reconstruction keeps a per-sensor-plane clipping mask before
+        // white balance.
+        return raw_sensor_at(p) >= 0.995 * max(params.highlight_clip, 0.01);
+    }
+    return raw_camera_at(p) >= shared_highlight_clip();
 }
 
 fn raw_cfa_at(pos: vec2<i32>) -> f32 {
-    let p = clamp_pos(pos);
-    let color = min(color_at(p), 3u);
-    let raw = f32(textureLoad(raw_tex, p, 0).r);
-    let black = params.black_levels[color];
-    let white = max(params.white_levels[color], black + 1.0);
-    let wb = params.wb[color];
-    return clamp((raw - black) / (white - black), 0.0, 4.0) * wb;
+    return textureLoad(reconstructed_raw_tex, clamp_pos(pos), 0).x;
 }
-
-fn normalized_raw_at(pos: vec2<i32>) -> f32 {
-    let center_color = color_at(pos);
-    let center = raw_value_at(pos);
-    var sum = 0.0;
-    var count = 0.0;
-
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let p = pos + vec2<i32>(dx, dy);
-            if color_at(p) == center_color {
-                sum = sum + raw_value_at(p);
-                count = count + 1.0;
-            }
-        }
-    }
-
-    if count < 2.0 {
-        return center;
-    }
-
-    let local = sum / count;
-    if center > local * 6.0 + 0.25 {
-        return local;
-    }
-    if local > 0.08 && center < local * 0.05 {
-        return local;
-    }
-    return center;
-}
-
-fn sample_if_color(pos: vec2<i32>, channel: u32) -> vec3<f32> {
-    if color_at(pos) == channel {
-        let v = normalized_raw_at(pos);
-        let c = select(0.0, 1.0, is_raw_clipped(pos));
-        return vec3<f32>(v, 1.0, c);
-    }
-    return vec3<f32>(0.0, 0.0, 0.0);
-}
-
-

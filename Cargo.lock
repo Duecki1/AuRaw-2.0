@@ -531,6 +531,7 @@ dependencies = [
  "log",
  "naga",
  "pkg-config",
+ "pollster",
  "rayon",
  "rfd",
 ]
