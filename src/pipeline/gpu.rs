@@ -168,10 +168,12 @@ pub struct RawGpuPipeline {
     pub width: u32,
     pub height: u32,
     params_buffer: wgpu::Buffer,
-    passes: [Pass; 6],
+    passes: Vec<Pass>,
     _raw_texture: wgpu::Texture,
     _color_texture: wgpu::Texture,
     _reconstructed_raw_texture: wgpu::Texture,
+    _highlight_work_a: wgpu::Texture,
+    _highlight_work_b: wgpu::Texture,
     _tex1: wgpu::Texture,
     _tex2: wgpu::Texture,
     _scene_texture: wgpu::Texture,
@@ -202,10 +204,15 @@ impl RawGpuPipeline {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::Rgba16Float],
+            view_formats: &[wgpu::TextureFormat::R32Float],
         });
+
+        // Ping-pong storage for the guided highlight passes. Each dispatch reads
+        // one texture through binding 13 and writes the other through binding 14.
+        let highlight_work_a = create_float_work_texture(device, size, "auraw highlight work A");
+        let highlight_work_b = create_float_work_texture(device, size, "auraw highlight work B");
 
         // Preserve a scene-linear camera-RGB result between demosaic and the
         // display pass. This is what lets local Lightroom controls read true
@@ -257,6 +264,10 @@ impl RawGpuPipeline {
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let reconstructed_raw_view =
             reconstructed_raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let highlight_work_a_view =
+            highlight_work_a.create_view(&wgpu::TextureViewDescriptor::default());
+        let highlight_work_b_view =
+            highlight_work_b.create_view(&wgpu::TextureViewDescriptor::default());
         let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let tex1_view = tex1.create_view(&wgpu::TextureViewDescriptor::default());
         let tex2_view = tex2.create_view(&wgpu::TextureViewDescriptor::default());
@@ -283,6 +294,12 @@ impl RawGpuPipeline {
                 common_entries[2].clone(),
                 storage_texture_entry(
                     3,
+                    wgpu::TextureFormat::R32Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
+                texture_entry(13, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_texture_entry(
+                    14,
                     wgpu::TextureFormat::Rgba16Float,
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
@@ -368,28 +385,76 @@ impl RawGpuPipeline {
             ],
         });
 
-        let bg_highlights = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg highlights"),
-            layout: &bgl_highlights,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-            ],
-        });
+        let make_highlight_bind_group =
+            |label: &'static str,
+             read_view: &wgpu::TextureView,
+             write_view: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_highlights,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: params_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&raw_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&color_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 13,
+                            resource: wgpu::BindingResource::TextureView(read_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 14,
+                            resource: wgpu::BindingResource::TextureView(write_view),
+                        },
+                    ],
+                })
+            };
+
+        // The prepare pass writes A. Four diffusion passes then ping-pong
+        // A -> B -> A -> B -> A. Finalize always reads A, even when some
+        // diffusion stages are disabled by the iteration uniform, because a
+        // disabled stage copies its input to its output.
+        let bg_highlight_prepare = make_highlight_bind_group(
+            "bg highlight prepare",
+            &highlight_work_b_view,
+            &highlight_work_a_view,
+        );
+        let bg_highlight_diffuse_1 = make_highlight_bind_group(
+            "bg highlight diffuse 1",
+            &highlight_work_a_view,
+            &highlight_work_b_view,
+        );
+        let bg_highlight_diffuse_2 = make_highlight_bind_group(
+            "bg highlight diffuse 2",
+            &highlight_work_b_view,
+            &highlight_work_a_view,
+        );
+        let bg_highlight_diffuse_4 = make_highlight_bind_group(
+            "bg highlight diffuse 4",
+            &highlight_work_a_view,
+            &highlight_work_b_view,
+        );
+        let bg_highlight_diffuse_8 = make_highlight_bind_group(
+            "bg highlight diffuse 8",
+            &highlight_work_b_view,
+            &highlight_work_a_view,
+        );
+        let bg_highlight_finalize = make_highlight_bind_group(
+            "bg highlight finalize",
+            &highlight_work_a_view,
+            &highlight_work_b_view,
+        );
 
         let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg1"),
@@ -563,14 +628,30 @@ impl RawGpuPipeline {
                 })
             };
 
-        let passes = [
+        let passes = vec![
             Pass {
-                pipeline: make_pipeline(
-                    SHADER_HIGHLIGHTS,
-                    "highlight_lch_reconstruct",
-                    &bgl_highlights,
-                ),
-                bind_group: bg_highlights,
+                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_prepare", &bgl_highlights),
+                bind_group: bg_highlight_prepare,
+            },
+            Pass {
+                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_diffuse_1", &bgl_highlights),
+                bind_group: bg_highlight_diffuse_1,
+            },
+            Pass {
+                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_diffuse_2", &bgl_highlights),
+                bind_group: bg_highlight_diffuse_2,
+            },
+            Pass {
+                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_diffuse_4", &bgl_highlights),
+                bind_group: bg_highlight_diffuse_4,
+            },
+            Pass {
+                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_diffuse_8", &bgl_highlights),
+                bind_group: bg_highlight_diffuse_8,
+            },
+            Pass {
+                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_finalize", &bgl_highlights),
+                bind_group: bg_highlight_finalize,
             },
             Pass {
                 pipeline: make_pipeline(SHADER_P1, "pass1_vh_lpf", &bgl1),
@@ -606,6 +687,8 @@ impl RawGpuPipeline {
             _raw_texture: raw_texture,
             _color_texture: color_texture,
             _reconstructed_raw_texture: reconstructed_raw_texture,
+            _highlight_work_a: highlight_work_a,
+            _highlight_work_b: highlight_work_b,
             _tex1: tex1,
             _tex2: tex2,
             _scene_texture: scene_texture,
@@ -638,6 +721,23 @@ impl RawGpuPipeline {
 
         queue.submit(Some(encoder.finish()));
     }
+}
+
+fn create_float_work_texture(
+    device: &wgpu::Device,
+    size: wgpu::Extent3d,
+    label: &'static str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        view_formats: &[wgpu::TextureFormat::Rgba16Float],
+    })
 }
 
 fn buffer_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -802,6 +902,26 @@ mod tests {
             )
             .validate(&module)
             .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
+        }
+    }
+
+    #[test]
+    fn highlight_shader_exposes_every_dispatched_entry_point() {
+        let module = naga::front::wgsl::parse_str(SHADER_HIGHLIGHTS)
+            .expect("highlight shader did not parse");
+
+        for expected in [
+            "highlight_prepare",
+            "highlight_diffuse_1",
+            "highlight_diffuse_2",
+            "highlight_diffuse_4",
+            "highlight_diffuse_8",
+            "highlight_finalize",
+        ] {
+            assert!(
+                module.entry_points.iter().any(|entry| entry.name == expected),
+                "highlight shader is missing entry point {expected}"
+            );
         }
     }
 

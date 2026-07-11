@@ -12,19 +12,22 @@ struct HighlightSample {
     clipped: vec3<f32>,
 }
 
-fn highlight_color_at(pos: vec2<i32>) -> u32 {
-    return textureLoad(color_tex, clamp_pos(pos), 0).r;
+fn highlight_cfa_channel_at(pos: vec2<i32>) -> u32 {
+    return min(textureLoad(color_tex, clamp_pos(pos), 0).r, 3u);
 }
 
-fn highlight_wb_for_channel(channel: u32) -> f32 {
-    if channel == 0u { return params.wb.r; }
-    if channel == 1u { return params.wb.g; }
-    return params.wb.b;
+fn highlight_color_at(pos: vec2<i32>) -> u32 {
+    let channel = highlight_cfa_channel_at(pos);
+    return select(channel, 1u, channel == 3u);
+}
+
+fn highlight_wb_for_cfa_channel(channel: u32) -> f32 {
+    return params.wb[min(channel, 3u)];
 }
 
 fn highlight_raw_sensor_at(pos: vec2<i32>) -> f32 {
     let p = clamp_pos(pos);
-    let channel = highlight_color_at(p);
+    let channel = highlight_cfa_channel_at(p);
     let raw = f32(textureLoad(raw_tex, p, 0).r);
     let black = params.black_levels[channel];
     let white = max(params.white_levels[channel], black + 1.0);
@@ -33,14 +36,18 @@ fn highlight_raw_sensor_at(pos: vec2<i32>) -> f32 {
 
 fn highlight_raw_camera_at(pos: vec2<i32>) -> f32 {
     let p = clamp_pos(pos);
-    return highlight_raw_sensor_at(p) * highlight_wb_for_channel(highlight_color_at(p));
+    return highlight_raw_sensor_at(p)
+        * highlight_wb_for_cfa_channel(highlight_cfa_channel_at(p));
 }
 
 fn ansel_lch_common_clip() -> f32 {
     // Ansel publishes the WB multipliers as processed channel maxima and uses
     // their minimum as ONE common post-WB threshold. Using clip*WB[channel]
     // here is incorrect: exact sensor saturation then never crosses the test.
-    let min_wb = min(params.wb.r, min(params.wb.g, params.wb.b));
+    let min_wb = min(
+        min(params.wb.r, params.wb.g),
+        min(params.wb.b, params.wb.a),
+    );
     return max(params.highlight_clip, 0.01) * max(min_wb, 1e-6);
 }
 
@@ -149,11 +156,11 @@ fn highlight_interpolate_and_mask(pos: vec2<i32>) -> HighlightSample {
     for (var channel = 0u; channel < 3u; channel = channel + 1u) {
         if center_color == channel {
             let sensor = highlight_raw_sensor_at(center);
-            rgb[channel] = sensor * highlight_wb_for_channel(channel);
+            rgb[channel] = highlight_raw_camera_at(center);
             clipped[channel] = select(0.0, 1.0, sensor >= sensor_clip);
         } else {
             var best_distance = 1000;
-            var sum = 0.0;
+            var sum_camera = 0.0;
             var count = 0.0;
             var used_clipped = false;
             for (var dy = -2; dy <= 2; dy = dy + 1) {
@@ -163,20 +170,24 @@ fn highlight_interpolate_and_mask(pos: vec2<i32>) -> HighlightSample {
                     if highlight_color_at(sample_pos) != channel { continue; }
                     let distance = dx * dx + dy * dy;
                     let sensor = highlight_raw_sensor_at(sample_pos);
+                    let camera = highlight_raw_camera_at(sample_pos);
                     if distance < best_distance {
                         best_distance = distance;
-                        sum = sensor;
+                        sum_camera = camera;
                         count = 1.0;
                         used_clipped = sensor >= sensor_clip;
                     } else if distance == best_distance {
-                        sum = sum + sensor;
+                        sum_camera = sum_camera + camera;
                         count = count + 1.0;
                         used_clipped = used_clipped || sensor >= sensor_clip;
                     }
                 }
             }
-            let sensor = select(highlight_raw_sensor_at(center), sum / max(count, 1.0), count > 0.0);
-            rgb[channel] = sensor * highlight_wb_for_channel(channel);
+            rgb[channel] = select(
+                highlight_raw_camera_at(center),
+                sum_camera / max(count, 1.0),
+                count > 0.0,
+            );
             clipped[channel] = select(0.0, 1.0, used_clipped);
         }
     }
