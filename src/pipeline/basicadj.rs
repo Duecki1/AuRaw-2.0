@@ -18,8 +18,10 @@ impl HighlightReconstructionMethod {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ExposureParams {
-    /// Sensor-space black-point calibration. This is deliberately separate from
-    /// the creative `blacks` control in the Basic panel.
+    /// Additional normalized sensor-space black-point correction. It is applied
+    /// per CFA plane before white balance and demosaic, and is deliberately
+    /// separate from the creative `blacks` control in the Basic panel.
+    /// Values are clamped to +/-0.25 of the metadata-calibrated sensor range.
     pub black_point: f32,
     /// Scene-linear exposure in stops, applied before local/color processing.
     pub exposure: f32,

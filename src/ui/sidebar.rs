@@ -7,13 +7,14 @@ use eframe::egui::{self, Ui};
 pub struct Sidebar;
 
 impl Sidebar {
-    const SCROLLBAR_GUTTER: f32 = 14.0;
+    const SCROLLBAR_GUTTER: f32 = 18.0;
 
     pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
         // Keep interactive content clear of overlay scrollbars on every platform.
-        let content_width = (ui.available_width() - Self::SCROLLBAR_GUTTER).max(180.0);
+        let content_width = (ui.available_width() - Self::SCROLLBAR_GUTTER).max(220.0);
+        ui.set_width(content_width);
         ui.set_max_width(content_width);
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
 
         ui.horizontal(|ui| {
             ui.heading("Adjustments");
@@ -25,7 +26,7 @@ impl Sidebar {
         });
         ui.label(
             egui::RichText::new("Scene-referred controls")
-                .small()
+                .size(11.5)
                 .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(2.0);

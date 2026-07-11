@@ -5,10 +5,22 @@
 @group(0) @binding(16) var<storage, read> tone_stats: ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
 
+const DISPLAY_SHOULDER_START: f32 = 0.94;
+
 fn schlick_bias(value: f32, shape: f32) -> f32 {
     let x = clamp(value, 0.0, 1.0);
     let a = clamp(shape, 0.04, 96.0);
     return x / max(a + (1.0 - a) * x, 1e-6);
+}
+
+fn highlight_shoulder(adjusted_ev: f32, white_ev: f32, length_ev: f32) -> f32 {
+    let distance = max(adjusted_ev - white_ev, 0.0);
+    let normalized = distance / max(length_ev, 1e-4);
+
+    // Four exponential half-lives fit inside the requested shoulder length.
+    // white_ev is now the shoulder start, not a clipping boundary. Exact
+    // display white is approached asymptotically instead of becoming a plateau.
+    return 1.0 - (1.0 - DISPLAY_SHOULDER_START) * exp2(-4.0 * normalized);
 }
 
 fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
@@ -121,12 +133,23 @@ fn scene_to_display_luminance(scene_luminance: f32, local_ev: f32) -> f32 {
         96.0,
     );
     let highlight_shape = clamp(
-        (1.0 - DISPLAY_MIDDLE_GREY)
+        (DISPLAY_SHOULDER_START - DISPLAY_MIDDLE_GREY)
             / max(middle_slope * (1.0 - middle_position), 1e-4)
             * exp2(-0.70 * highlights),
         0.04,
         96.0,
     );
+
+    if adjusted_ev > white_ev {
+        // Positive Whites/Highlights make the shoulder a little firmer, while
+        // negative values preserve up to four stops of highlight latitude.
+        let shoulder_length_ev = clamp(
+            3.0 - 0.5 * whites - 0.5 * highlights,
+            2.0,
+            4.0,
+        );
+        return highlight_shoulder(adjusted_ev, white_ev, shoulder_length_ev);
+    }
 
     if position <= middle_position {
         let local = position / max(middle_position, 1e-5);
@@ -135,7 +158,8 @@ fn scene_to_display_luminance(scene_luminance: f32, local_ev: f32) -> f32 {
 
     let local = (position - middle_position) / max(1.0 - middle_position, 1e-5);
     return DISPLAY_MIDDLE_GREY
-        + (1.0 - DISPLAY_MIDDLE_GREY) * schlick_bias(local, highlight_shape);
+        + (DISPLAY_SHOULDER_START - DISPLAY_MIDDLE_GREY)
+            * schlick_bias(local, highlight_shape);
 }
 
 fn scene_to_display(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
