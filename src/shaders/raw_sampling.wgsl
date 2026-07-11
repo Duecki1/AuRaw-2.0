@@ -4,7 +4,7 @@
 
 // The loader canonicalizes physical CFA planes to R, G1, B, G2. Keep G1
 // and G2 distinct for black/white/WB calibration, but expose a collapsed RGB
-// color to the Bayer demosaic code.
+// logical RGB color to both Bayer and X-Trans demosaic code.
 fn cfa_channel_at(pos: vec2<i32>) -> u32 {
     return min(textureLoad(color_tex, clamp_pos(pos), 0).r, 3u);
 }

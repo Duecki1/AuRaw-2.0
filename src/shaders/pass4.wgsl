@@ -1,3 +1,4 @@
+// Bayer RCD stage 4: missing chroma at green sites, refinement and output.
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(9) var tex3_read: texture_2d<f32>;
 @group(0) @binding(10) var scene_write: texture_storage_2d<rgba16float, write>;
@@ -145,7 +146,7 @@ fn refine_green_with_chroma(pos: vec2<i32>, cc: u32, clip: f32, g0: f32, diffR: 
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn bayer_rcd_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let cc = color_at(pos);

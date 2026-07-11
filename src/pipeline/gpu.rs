@@ -1,7 +1,8 @@
-use crate::pipeline::{ExposureParams, LoadedRaw};
+use crate::pipeline::{CfaKind, ExposureParams, LoadedRaw};
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
+use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
 const SHADER_HIGHLIGHTS: &str = concat!(
@@ -12,7 +13,24 @@ const SHADER_HIGHLIGHTS: &str = concat!(
     include_str!("../shaders/highlight_lch_pass.wgsl")
 );
 
-const SHADER_P1: &str = concat!(
+// Ordered coarse-to-fine multiscale reconstruction stages. The quality value
+// in highlight_options.y enables a subset inside the shader, while disabled
+// stages still copy their input so ping-pong parity remains deterministic.
+const HIGHLIGHT_GUIDED_ENTRY_POINTS: [&str; 11] = [
+    "highlight_guided_16_a",
+    "highlight_guided_8_a",
+    "highlight_guided_4_a",
+    "highlight_guided_2_a",
+    "highlight_guided_1_a",
+    "highlight_guided_4_b",
+    "highlight_guided_2_b",
+    "highlight_guided_1_b",
+    "highlight_guided_2_c",
+    "highlight_guided_1_c",
+    "highlight_guided_1_d",
+];
+
+const SHADER_BAYER_RCD_P1: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
     include_str!("../shaders/raw_sampling.wgsl"),
@@ -22,7 +40,7 @@ const SHADER_P1: &str = concat!(
     include_str!("../shaders/pass1.wgsl")
 );
 
-const SHADER_P2: &str = concat!(
+const SHADER_BAYER_RCD_P2: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
     include_str!("../shaders/raw_sampling.wgsl"),
@@ -32,7 +50,7 @@ const SHADER_P2: &str = concat!(
     include_str!("../shaders/pass2.wgsl")
 );
 
-const SHADER_P3: &str = concat!(
+const SHADER_BAYER_RCD_P3: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
     include_str!("../shaders/raw_sampling.wgsl"),
@@ -42,7 +60,7 @@ const SHADER_P3: &str = concat!(
     include_str!("../shaders/pass3.wgsl")
 );
 
-const SHADER_P4: &str = concat!(
+const SHADER_BAYER_RCD_P4: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
     include_str!("../shaders/raw_sampling.wgsl"),
@@ -50,6 +68,46 @@ const SHADER_P4: &str = concat!(
     include_str!("../shaders/color.wgsl"),
     "\n",
     include_str!("../shaders/pass4.wgsl")
+);
+
+const SHADER_XTRANS_P1: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/xtrans_pass1.wgsl")
+);
+
+const SHADER_XTRANS_P2: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/xtrans_pass2.wgsl")
+);
+
+const SHADER_XTRANS_P3: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/xtrans_pass3.wgsl")
+);
+
+const SHADER_XTRANS_P4: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/xtrans_pass4.wgsl")
 );
 
 const SHADER_ADJUSTMENTS: &str = concat!(
@@ -194,6 +252,7 @@ impl RawGpuPipeline {
         let raw_texture = create_raw_texture(device, queue, raw);
         let color_texture = create_color_texture(device, queue, raw);
         let size = texture_size(raw.width, raw.height);
+        let demosaic_format = demosaic_work_format();
 
         // This is the raw-CFA output of the Ansel LCh reconstruction pass. It
         // is deliberately separate from the demosaic scratch textures so all
@@ -217,16 +276,12 @@ impl RawGpuPipeline {
         // Preserve a scene-linear camera-RGB result between demosaic and the
         // display pass. This is what lets local Lightroom controls read true
         // RGB neighbourhoods instead of raw Bayer samples.
-        let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw scene-linear camera RGB"),
+        let scene_texture = create_demosaic_texture(
+            device,
             size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::Rgba16Float],
-        });
+            demosaic_format,
+            "auraw scene-linear camera RGB",
+        );
 
         let out_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw output texture"),
@@ -239,27 +294,8 @@ impl RawGpuPipeline {
             view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         });
 
-        let tex1 = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw tex1"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::Rgba16Float],
-        });
-
-        let tex2 = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw tex2"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::Rgba16Float],
-        });
+        let tex1 = create_demosaic_texture(device, size, demosaic_format, "auraw tex1");
+        let tex2 = create_demosaic_texture(device, size, demosaic_format, "auraw tex2");
 
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let reconstructed_raw_view =
@@ -313,11 +349,7 @@ impl RawGpuPipeline {
                 common_entries[1].clone(),
                 common_entries[2].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    4,
-                    wgpu::TextureFormat::Rgba16Float,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
+                storage_texture_entry(4, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -329,11 +361,7 @@ impl RawGpuPipeline {
                 common_entries[2].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    6,
-                    wgpu::TextureFormat::Rgba16Float,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
+                storage_texture_entry(6, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -345,11 +373,7 @@ impl RawGpuPipeline {
                 common_entries[2].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    8,
-                    wgpu::TextureFormat::Rgba16Float,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
+                storage_texture_entry(8, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -362,11 +386,7 @@ impl RawGpuPipeline {
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    10,
-                    wgpu::TextureFormat::Rgba16Float,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
+                storage_texture_entry(10, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -386,9 +406,7 @@ impl RawGpuPipeline {
         });
 
         let make_highlight_bind_group =
-            |label: &'static str,
-             read_view: &wgpu::TextureView,
-             write_view: &wgpu::TextureView| {
+            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(label),
                     layout: &bgl_highlights,
@@ -421,40 +439,9 @@ impl RawGpuPipeline {
                 })
             };
 
-        // The prepare pass writes A. Four diffusion passes then ping-pong
-        // A -> B -> A -> B -> A. Finalize always reads A, even when some
-        // diffusion stages are disabled by the iteration uniform, because a
-        // disabled stage copies its input to its output.
-        let bg_highlight_prepare = make_highlight_bind_group(
-            "bg highlight prepare",
-            &highlight_work_b_view,
-            &highlight_work_a_view,
-        );
-        let bg_highlight_diffuse_1 = make_highlight_bind_group(
-            "bg highlight diffuse 1",
-            &highlight_work_a_view,
-            &highlight_work_b_view,
-        );
-        let bg_highlight_diffuse_2 = make_highlight_bind_group(
-            "bg highlight diffuse 2",
-            &highlight_work_b_view,
-            &highlight_work_a_view,
-        );
-        let bg_highlight_diffuse_4 = make_highlight_bind_group(
-            "bg highlight diffuse 4",
-            &highlight_work_a_view,
-            &highlight_work_b_view,
-        );
-        let bg_highlight_diffuse_8 = make_highlight_bind_group(
-            "bg highlight diffuse 8",
-            &highlight_work_b_view,
-            &highlight_work_a_view,
-        );
-        let bg_highlight_finalize = make_highlight_bind_group(
-            "bg highlight finalize",
-            &highlight_work_a_view,
-            &highlight_work_b_view,
-        );
+        // Bind groups for the guided stages are created below together with
+        // their pipelines. Every stage alternates A/B, and a disabled quality
+        // stage performs an identity copy in WGSL to preserve the parity.
 
         let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg1"),
@@ -607,6 +594,19 @@ impl RawGpuPipeline {
             ],
         });
 
+        // Desktop builds use 32-bit float demosaic scratch/output. Android
+        // retains 16-bit float storage to control memory and device-feature
+        // requirements. The WGSL storage declaration must match the selected
+        // texture format, so desktop variants are generated once at startup.
+        let bayer_rcd_p1 = demosaic_shader_source(SHADER_BAYER_RCD_P1);
+        let bayer_rcd_p2 = demosaic_shader_source(SHADER_BAYER_RCD_P2);
+        let bayer_rcd_p3 = demosaic_shader_source(SHADER_BAYER_RCD_P3);
+        let bayer_rcd_p4 = demosaic_shader_source(SHADER_BAYER_RCD_P4);
+        let xtrans_p1 = demosaic_shader_source(SHADER_XTRANS_P1);
+        let xtrans_p2 = demosaic_shader_source(SHADER_XTRANS_P2);
+        let xtrans_p3 = demosaic_shader_source(SHADER_XTRANS_P3);
+        let xtrans_p4 = demosaic_shader_source(SHADER_XTRANS_P4);
+
         let make_pipeline =
             |source: &str, entry: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::ComputePipeline {
                 let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -628,52 +628,98 @@ impl RawGpuPipeline {
                 })
             };
 
-        let passes = vec![
-            Pass {
-                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_prepare", &bgl_highlights),
-                bind_group: bg_highlight_prepare,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_diffuse_1", &bgl_highlights),
-                bind_group: bg_highlight_diffuse_1,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_diffuse_2", &bgl_highlights),
-                bind_group: bg_highlight_diffuse_2,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_diffuse_4", &bgl_highlights),
-                bind_group: bg_highlight_diffuse_4,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_diffuse_8", &bgl_highlights),
-                bind_group: bg_highlight_diffuse_8,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_finalize", &bgl_highlights),
-                bind_group: bg_highlight_finalize,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_P1, "pass1_vh_lpf", &bgl1),
-                bind_group: bg1,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_P2, "pass2_green_pq", &bgl2),
-                bind_group: bg2,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_P3, "pass3_rb_opposite", &bgl3),
-                bind_group: bg3,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_P4, "pass4_rb_green_output", &bgl4),
-                bind_group: bg4,
-            },
-            Pass {
-                pipeline: make_pipeline(SHADER_ADJUSTMENTS, "apply_lightroom_adjustments", &bgl5),
-                bind_group: bg5,
-            },
-        ];
+        let mut passes = Vec::with_capacity(1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 5);
+
+        // Prepare writes the initial RGB estimate and reliability into A.
+        passes.push(Pass {
+            pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_prepare", &bgl_highlights),
+            bind_group: make_highlight_bind_group(
+                "bg highlight prepare",
+                &highlight_work_b_view,
+                &highlight_work_a_view,
+            ),
+        });
+
+        // The multiscale solver ping-pongs through every declared stage.
+        // Quality levels are handled inside each entry point, so all stages
+        // are dispatched and disabled ones copy read -> write unchanged.
+        for (index, entry) in HIGHLIGHT_GUIDED_ENTRY_POINTS.iter().enumerate() {
+            let (read_view, write_view) = if index % 2 == 0 {
+                (&highlight_work_a_view, &highlight_work_b_view)
+            } else {
+                (&highlight_work_b_view, &highlight_work_a_view)
+            };
+            let label = format!("bg {entry}");
+            passes.push(Pass {
+                pipeline: make_pipeline(SHADER_HIGHLIGHTS, entry, &bgl_highlights),
+                bind_group: make_highlight_bind_group(&label, read_view, write_view),
+            });
+        }
+
+        // Prepare leaves the data in A. An odd number of guided stages leaves
+        // the final result in B; compute this from the table so future stage
+        // additions cannot silently select the wrong texture.
+        let (final_read_view, final_write_view) = if HIGHLIGHT_GUIDED_ENTRY_POINTS.len() % 2 == 0 {
+            (&highlight_work_a_view, &highlight_work_b_view)
+        } else {
+            (&highlight_work_b_view, &highlight_work_a_view)
+        };
+        passes.push(Pass {
+            pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_finalize", &bgl_highlights),
+            bind_group: make_highlight_bind_group(
+                "bg highlight finalize",
+                final_read_view,
+                final_write_view,
+            ),
+        });
+
+        // Select the demosaic family from LibRaw's CFA classification.
+        // Bayer uses the four-stage ratio-corrected path. Fuji X-Trans uses a
+        // dedicated 6x6-pattern-aware seed/green/chroma/output sequence and
+        // never enters code that assumes a 2x2 Bayer lattice.
+        match raw.cfa_kind {
+            CfaKind::Bayer => passes.extend([
+                Pass {
+                    pipeline: make_pipeline(bayer_rcd_p1.as_ref(), "bayer_rcd_directional", &bgl1),
+                    bind_group: bg1,
+                },
+                Pass {
+                    pipeline: make_pipeline(bayer_rcd_p2.as_ref(), "bayer_rcd_green", &bgl2),
+                    bind_group: bg2,
+                },
+                Pass {
+                    pipeline: make_pipeline(bayer_rcd_p3.as_ref(), "bayer_rcd_chroma", &bgl3),
+                    bind_group: bg3,
+                },
+                Pass {
+                    pipeline: make_pipeline(bayer_rcd_p4.as_ref(), "bayer_rcd_output", &bgl4),
+                    bind_group: bg4,
+                },
+            ]),
+            CfaKind::XTrans => passes.extend([
+                Pass {
+                    pipeline: make_pipeline(xtrans_p1.as_ref(), "xtrans_seed", &bgl1),
+                    bind_group: bg1,
+                },
+                Pass {
+                    pipeline: make_pipeline(xtrans_p2.as_ref(), "xtrans_refine_green", &bgl2),
+                    bind_group: bg2,
+                },
+                Pass {
+                    pipeline: make_pipeline(xtrans_p3.as_ref(), "xtrans_refine_chroma", &bgl3),
+                    bind_group: bg3,
+                },
+                Pass {
+                    pipeline: make_pipeline(xtrans_p4.as_ref(), "xtrans_output", &bgl4),
+                    bind_group: bg4,
+                },
+            ]),
+        }
+
+        passes.push(Pass {
+            pipeline: make_pipeline(SHADER_ADJUSTMENTS, "apply_lightroom_adjustments", &bgl5),
+            bind_group: bg5,
+        });
 
         let egui_texture_id =
             renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear);
@@ -721,6 +767,40 @@ impl RawGpuPipeline {
 
         queue.submit(Some(encoder.finish()));
     }
+}
+
+fn demosaic_work_format() -> wgpu::TextureFormat {
+    if cfg!(target_os = "android") {
+        wgpu::TextureFormat::Rgba16Float
+    } else {
+        wgpu::TextureFormat::Rgba32Float
+    }
+}
+
+fn demosaic_shader_source(source: &str) -> Cow<'_, str> {
+    if cfg!(target_os = "android") {
+        Cow::Borrowed(source)
+    } else {
+        Cow::Owned(source.replace("rgba16float", "rgba32float"))
+    }
+}
+
+fn create_demosaic_texture(
+    device: &wgpu::Device,
+    size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
+    label: &'static str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        view_formats: &[format],
+    })
 }
 
 fn create_float_work_texture(
@@ -881,17 +961,23 @@ fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
 #[cfg(test)]
 mod tests {
     use super::{
-        SHADER_ADJUSTMENTS, SHADER_HIGHLIGHTS, SHADER_P1, SHADER_P2, SHADER_P3, SHADER_P4,
+        HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1,
+        SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4, SHADER_HIGHLIGHTS,
+        SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4,
     };
 
     #[test]
     fn compute_shaders_parse_and_validate() {
         for (name, source) in [
             ("highlight reconstruction", SHADER_HIGHLIGHTS),
-            ("pass 1", SHADER_P1),
-            ("pass 2", SHADER_P2),
-            ("pass 3", SHADER_P3),
-            ("pass 4", SHADER_P4),
+            ("Bayer RCD pass 1", SHADER_BAYER_RCD_P1),
+            ("Bayer RCD pass 2", SHADER_BAYER_RCD_P2),
+            ("Bayer RCD pass 3", SHADER_BAYER_RCD_P3),
+            ("Bayer RCD pass 4", SHADER_BAYER_RCD_P4),
+            ("X-Trans pass 1", SHADER_XTRANS_P1),
+            ("X-Trans pass 2", SHADER_XTRANS_P2),
+            ("X-Trans pass 3", SHADER_XTRANS_P3),
+            ("X-Trans pass 4", SHADER_XTRANS_P4),
             ("Lightroom adjustments", SHADER_ADJUSTMENTS),
         ] {
             let module = naga::front::wgsl::parse_str(source)
@@ -910,17 +996,41 @@ mod tests {
         let module = naga::front::wgsl::parse_str(SHADER_HIGHLIGHTS)
             .expect("highlight shader did not parse");
 
-        for expected in [
-            "highlight_prepare",
-            "highlight_diffuse_1",
-            "highlight_diffuse_2",
-            "highlight_diffuse_4",
-            "highlight_diffuse_8",
-            "highlight_finalize",
-        ] {
+        let expected_entry_points = std::iter::once("highlight_prepare")
+            .chain(HIGHLIGHT_GUIDED_ENTRY_POINTS.iter().copied())
+            .chain(std::iter::once("highlight_finalize"));
+
+        for expected in expected_entry_points {
             assert!(
-                module.entry_points.iter().any(|entry| entry.name == expected),
+                module
+                    .entry_points
+                    .iter()
+                    .any(|entry| entry.name == expected),
                 "highlight shader is missing entry point {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn demosaic_shaders_expose_every_dispatched_entry_point() {
+        for (source, expected) in [
+            (SHADER_BAYER_RCD_P1, "bayer_rcd_directional"),
+            (SHADER_BAYER_RCD_P2, "bayer_rcd_green"),
+            (SHADER_BAYER_RCD_P3, "bayer_rcd_chroma"),
+            (SHADER_BAYER_RCD_P4, "bayer_rcd_output"),
+            (SHADER_XTRANS_P1, "xtrans_seed"),
+            (SHADER_XTRANS_P2, "xtrans_refine_green"),
+            (SHADER_XTRANS_P3, "xtrans_refine_chroma"),
+            (SHADER_XTRANS_P4, "xtrans_output"),
+        ] {
+            let module =
+                naga::front::wgsl::parse_str(source).expect("demosaic shader did not parse");
+            assert!(
+                module
+                    .entry_points
+                    .iter()
+                    .any(|entry| entry.name == expected),
+                "demosaic shader is missing entry point {expected}"
             );
         }
     }
@@ -932,14 +1042,17 @@ mod tests {
         // Rust/WGSL field drift before it turns sliders into random values.
         assert_eq!(std::mem::size_of::<super::GpuParams>(), 320);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 96);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, highlight_options),
+            96
+        );
         assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 208);
         assert_eq!(std::mem::offset_of!(super::GpuParams, width), 304);
     }
 
     #[test]
     fn gpu_pipeline_creates_with_real_bind_group_layouts_when_an_adapter_exists() {
-        use super::{ExposureParams, LoadedRaw, RawGpuPipeline};
+        use super::{CfaKind, ExposureParams, LoadedRaw, RawGpuPipeline};
         use eframe::{egui_wgpu, wgpu};
 
         let instance = wgpu::Instance::default();
@@ -959,47 +1072,63 @@ mod tests {
             return;
         };
 
-        let width = 8;
-        let height = 8;
-        let color_indices = (0..height)
-            .flat_map(|y| {
-                (0..width).map(move |x| match (x % 2, y % 2) {
-                    (0, 0) => 0,
-                    (1, 1) => 2,
-                    _ => 1,
-                })
-            })
-            .collect();
-        let raw = LoadedRaw {
-            width,
-            height,
-            camera_make: "test".to_owned(),
-            camera_model: "test".to_owned(),
-            raw_pixels: vec![2048; (width * height) as usize],
-            color_indices,
-            wb_coeffs: [1.0; 4],
-            cam_to_srgb: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-            ],
-            black_levels: [0.0; 4],
-            white_levels: [4095.0; 4],
-        };
-        let params = super::GpuParams::new(&ExposureParams::default(), &raw);
+        let width = 12;
+        let height = 12;
+        let xtrans_pattern: [[u8; 6]; 6] = [
+            [1, 2, 1, 1, 0, 1],
+            [0, 1, 0, 2, 1, 2],
+            [1, 2, 1, 1, 0, 1],
+            [1, 0, 1, 1, 2, 1],
+            [2, 1, 2, 0, 1, 0],
+            [1, 0, 1, 1, 2, 1],
+        ];
         let mut renderer =
             egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, Default::default());
 
-        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let pipeline = RawGpuPipeline::new(&device, &queue, &mut renderer, &raw, &params);
-        let validation_error = pollster::block_on(validation_scope.pop());
+        for cfa_kind in [CfaKind::Bayer, CfaKind::XTrans] {
+            let color_indices = (0..height)
+                .flat_map(|y| {
+                    (0..width).map(move |x| match cfa_kind {
+                        CfaKind::Bayer => match (x % 2, y % 2) {
+                            (0, 0) => 0,
+                            (1, 1) => 2,
+                            _ => 1,
+                        },
+                        CfaKind::XTrans => xtrans_pattern[(y % 6) as usize][(x % 6) as usize],
+                    })
+                })
+                .collect();
 
-        if let Err(error) = pipeline {
-            panic!("GPU pipeline creation failed: {error:#}");
+            let raw = LoadedRaw {
+                width,
+                height,
+                camera_make: "test".to_owned(),
+                camera_model: "test".to_owned(),
+                cfa_kind,
+                raw_pixels: vec![2048; (width * height) as usize],
+                color_indices,
+                wb_coeffs: [1.0; 4],
+                cam_to_srgb: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                ],
+                black_levels: [0.0; 4],
+                white_levels: [4095.0; 4],
+            };
+            let params = super::GpuParams::new(&ExposureParams::default(), &raw);
+
+            let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let pipeline = RawGpuPipeline::new(&device, &queue, &mut renderer, &raw, &params);
+            let validation_error = pollster::block_on(validation_scope.pop());
+
+            if let Err(error) = pipeline {
+                panic!("{cfa_kind:?} GPU pipeline creation failed: {error:#}");
+            }
+            assert!(
+                validation_error.is_none(),
+                "{cfa_kind:?} wgpu layout/shader validation failed: {validation_error:?}"
+            );
         }
-        assert!(
-            validation_error.is_none(),
-            "wgpu layout/shader validation failed: {validation_error:?}"
-        );
     }
 }

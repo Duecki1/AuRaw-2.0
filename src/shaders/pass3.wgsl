@@ -1,8 +1,9 @@
+// Bayer RCD stage 3: opposite red/blue colour-difference interpolation.
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(8) var tex3_write: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(8, 8, 1)
-fn pass3_rb_opposite(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn bayer_rcd_chroma(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let cc = color_at(pos);

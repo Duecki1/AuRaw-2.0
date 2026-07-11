@@ -143,9 +143,11 @@ fn ansel_lch_reconstructed_cfa_at(pos: vec2<i32>) -> f32 {
     );
 }
 
-// Pattern-driven bilinear interpolation and clipping mask. For Bayer, choosing
-// all nearest photosites is the same cross/row/diagonal support Ansel uses. The
-// search radius also makes the guided route usable on X-Trans mosaics.
+
+// Build an initial camera-RGB estimate and a per-channel clipping mask.
+// Missing channels prefer the nearest *unclipped* CFA samples. The old path
+// selected the nearest samples first and only then noticed that they were
+// clipped, which seeded large saturated regions with invalid colour.
 fn highlight_interpolate_and_mask(pos: vec2<i32>) -> HighlightSample {
     let center = clamp_pos(pos);
     let center_color = highlight_color_at(center);
@@ -159,51 +161,78 @@ fn highlight_interpolate_and_mask(pos: vec2<i32>) -> HighlightSample {
             rgb[channel] = highlight_raw_camera_at(center);
             clipped[channel] = select(0.0, 1.0, sensor >= sensor_clip);
         } else {
-            var best_distance = 1000;
-            var sum_camera = 0.0;
-            var count = 0.0;
-            var used_clipped = false;
-            for (var dy = -2; dy <= 2; dy = dy + 1) {
-                for (var dx = -2; dx <= 2; dx = dx + 1) {
+            var best_valid_distance = 100000;
+            var valid_sum = 0.0;
+            var valid_count = 0.0;
+
+            var best_any_distance = 100000;
+            var any_sum = 0.0;
+            var any_count = 0.0;
+
+            // Radius four covers the nearest same-colour sites for Bayer and
+            // gives unusual mosaics a useful fallback without a CFA-specific
+            // interpolation table.
+            for (var dy = -4; dy <= 4; dy = dy + 1) {
+                for (var dx = -4; dx <= 4; dx = dx + 1) {
                     if dx == 0 && dy == 0 { continue; }
                     let sample_pos = clamp_pos(center + vec2<i32>(dx, dy));
                     if highlight_color_at(sample_pos) != channel { continue; }
+
                     let distance = dx * dx + dy * dy;
                     let sensor = highlight_raw_sensor_at(sample_pos);
                     let camera = highlight_raw_camera_at(sample_pos);
-                    if distance < best_distance {
-                        best_distance = distance;
-                        sum_camera = camera;
-                        count = 1.0;
-                        used_clipped = sensor >= sensor_clip;
-                    } else if distance == best_distance {
-                        sum_camera = sum_camera + camera;
-                        count = count + 1.0;
-                        used_clipped = used_clipped || sensor >= sensor_clip;
+
+                    if distance < best_any_distance {
+                        best_any_distance = distance;
+                        any_sum = camera;
+                        any_count = 1.0;
+                    } else if distance == best_any_distance {
+                        any_sum = any_sum + camera;
+                        any_count = any_count + 1.0;
+                    }
+
+                    if sensor < sensor_clip {
+                        if distance < best_valid_distance {
+                            best_valid_distance = distance;
+                            valid_sum = camera;
+                            valid_count = 1.0;
+                        } else if distance == best_valid_distance {
+                            valid_sum = valid_sum + camera;
+                            valid_count = valid_count + 1.0;
+                        }
                     }
                 }
             }
-            rgb[channel] = select(
-                highlight_raw_camera_at(center),
-                sum_camera / max(count, 1.0),
-                count > 0.0,
-            );
-            clipped[channel] = select(0.0, 1.0, used_clipped);
+
+            if valid_count > 0.0 {
+                rgb[channel] = valid_sum / valid_count;
+                clipped[channel] = 0.0;
+            } else if any_count > 0.0 {
+                // There is no trustworthy sample of this colour in the search
+                // footprint. Keep a finite seed for the multiscale solver, but
+                // mark the channel as unknown so its reliability starts at zero.
+                rgb[channel] = any_sum / any_count;
+                clipped[channel] = 1.0;
+            } else {
+                rgb[channel] = highlight_raw_camera_at(center);
+                clipped[channel] = 1.0;
+            }
         }
     }
 
-    return HighlightSample(rgb, clipped);
+    return HighlightSample(max(rgb, vec3<f32>(0.0)), clipped);
 }
 
-fn guided_clipping_mask(pos: vec2<i32>) -> f32 {
-    let sensor_clip = guided_sensor_clip();
-    var mask = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let clipped = highlight_raw_sensor_at(pos + vec2<i32>(dx, dy)) >= sensor_clip;
-            mask = mask + select(0.0, 1.0, clipped);
-        }
-    }
-    // A feathered support avoids zippering at the clipped/unclipped boundary.
-    return smoothstep(0.0, 0.45, mask / 9.0);
+fn guided_cfa_clip_amount(pos: vec2<i32>) -> f32 {
+    let threshold = guided_sensor_clip();
+    let feather = max(threshold * 0.006, 1e-5);
+    return smoothstep(
+        max(threshold - feather, 0.0),
+        threshold,
+        highlight_raw_sensor_at(pos),
+    );
+}
+
+fn guided_cfa_is_clipped(pos: vec2<i32>) -> bool {
+    return highlight_raw_sensor_at(pos) >= guided_sensor_clip();
 }

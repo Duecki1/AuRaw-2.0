@@ -2,12 +2,20 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CfaKind {
+    #[default]
+    Bayer,
+    XTrans,
+}
+
 #[derive(Clone, Debug)]
 pub struct LoadedRaw {
     pub width: u32,
     pub height: u32,
     pub camera_make: String,
     pub camera_model: String,
+    pub cfa_kind: CfaKind,
     pub raw_pixels: Vec<u16>,
     pub color_indices: Vec<u8>,
     pub wb_coeffs: [f32; 4],
@@ -30,7 +38,7 @@ pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
 
 #[cfg(libraw_available)]
 mod libraw_loader {
-    use super::LoadedRaw;
+    use super::{CfaKind, LoadedRaw};
     use anyhow::{anyhow, Context, Result};
     use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
@@ -129,6 +137,7 @@ mod libraw_loader {
             ));
         }
 
+        let cfa_kind = cfa_kind_from_filters(iparams.filters)?;
         let cdesc = cdesc4(iparams);
         let cfa_map = canonical_cfa_map(cdesc);
         let (width, height, raw_pixels, color_indices) = copy_active_pixels(
@@ -147,20 +156,16 @@ mod libraw_loader {
         let physical_wb = white_balance(color.cam_mul, cdesc);
         let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
         let cam_to_srgb = camera_to_working_matrix(color, physical_wb, cdesc);
-        let black_levels = canonicalize_f32x4(
-            black_levels(color.black, &color.cblack),
-            cfa_map,
-        );
-        let white_levels = canonicalize_f32x4(
-            white_levels(color.maximum, color.linear_max),
-            cfa_map,
-        );
+        let black_levels = canonicalize_f32x4(black_levels(color.black, &color.cblack), cfa_map);
+        let white_levels =
+            canonicalize_f32x4(white_levels(color.maximum, color.linear_max), cfa_map);
 
         Ok(LoadedRaw {
             width,
             height,
             camera_make: c_array_to_string(&iparams.make),
             camera_model: c_array_to_string(&iparams.model),
+            cfa_kind,
             raw_pixels,
             color_indices,
             wb_coeffs,
@@ -246,6 +251,24 @@ mod libraw_loader {
             iparams.cdesc[2] as u8,
             iparams.cdesc[3] as u8,
         ]
+    }
+
+    fn cfa_kind_from_filters(filters: u32) -> Result<CfaKind> {
+        match filters {
+            // LibRaw reserves 9 for the Fuji 6x6 X-Trans matrix.
+            9 => Ok(CfaKind::XTrans),
+            // Ordinary Bayer masks use the packed 32-bit representation.
+            value if value >= 1000 => Ok(CfaKind::Bayer),
+            0 => Err(anyhow!(
+                "full-colour/linear RAW input is not supported by the CFA GPU pipeline"
+            )),
+            1 => Err(anyhow!(
+                "Leaf CatchLight 16x16 CFA is not supported by the current demosaic paths"
+            )),
+            value => Err(anyhow!(
+                "unsupported LibRaw CFA filter code {value}; expected Bayer or Fuji X-Trans"
+            )),
+        }
     }
 
     fn canonical_cfa_map(cdesc: [u8; 4]) -> [u8; 4] {
@@ -518,9 +541,7 @@ mod libraw_loader {
             // Match Ansel/dcraw's normalization of XYZ -> camera after the
             // sRGB/XYZ D65 matrix has been applied: each camera row must
             // produce one for the D65 white point, not for equal-energy XYZ.
-            let white_response = row[0] * D65_XYZ[0]
-                + row[1] * D65_XYZ[1]
-                + row[2] * D65_XYZ[2];
+            let white_response = row[0] * D65_XYZ[0] + row[1] * D65_XYZ[1] + row[2] * D65_XYZ[2];
             if white_response.is_finite() && white_response.abs() > 1e-12 {
                 for value in row {
                     *value /= white_response;
@@ -608,10 +629,18 @@ mod libraw_loader {
     mod tests {
         use super::{
             black_levels, cam_to_working, canonical_cfa_map, canonicalize_f32x4,
-            white_balance, white_levels,
+            cfa_kind_from_filters, white_balance, white_levels, CfaKind,
         };
 
         const RGBG: [u8; 4] = *b"RGBG";
+
+        #[test]
+        fn libraw_filter_codes_select_the_demosaic_family() {
+            assert_eq!(cfa_kind_from_filters(9).unwrap(), CfaKind::XTrans);
+            assert_eq!(cfa_kind_from_filters(0x9494_9494).unwrap(), CfaKind::Bayer);
+            assert!(cfa_kind_from_filters(0).is_err());
+            assert!(cfa_kind_from_filters(1).is_err());
+        }
 
         #[test]
         fn camera_neutral_maps_to_rec2020_neutral() {
@@ -649,10 +678,7 @@ mod libraw_loader {
 
         #[test]
         fn calibration_keeps_both_green_planes_distinct() {
-            assert_eq!(
-                black_levels(64, &[1, 2, 3, 4]),
-                [65.0, 66.0, 67.0, 68.0]
-            );
+            assert_eq!(black_levels(64, &[1, 2, 3, 4]), [65.0, 66.0, 67.0, 68.0]);
             assert_eq!(
                 white_levels(4095, [4000, 4010, 4020, 4030]),
                 [4000.0, 4010.0, 4020.0, 4030.0]
