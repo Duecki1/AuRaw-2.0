@@ -16,6 +16,18 @@ target
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
 
+# Android/Gradle and downloaded native build products
+.gradle/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/jniLibs/
+android/native/build/
+android/native/libraw/
+android/native/src/
+local.properties
+android/local.properties
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
