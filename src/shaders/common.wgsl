@@ -1,24 +1,26 @@
 struct Params {
     // Keep the scalar block at exactly 16 floats so the vec4 fields below
-    // retain the same 16-byte alignment in Rust and WGSL uniforms.
+    // retain the same 16-byte alignment in Rust and WGSL uniforms. Legacy
+    // basic-adjustments/filmic controls were removed; the reserved slots keep
+    // the stable 64-byte prefix without carrying dead UI parameters.
     black_point: f32,
     exposure: f32,
-    hlcompr: f32,
-    hlcomprthresh: f32,
     contrast: f32,
-    middle_grey: f32,
-    brightness: f32,
     saturation: f32,
     vibrance: f32,
     highlight_clip: f32,
-    filmic_white: f32,
-    filmic_black: f32,
     chroma_denoise: f32,
     ca_red: f32,
     ca_blue: f32,
     highlight_reconstruction: f32,
+    _tone_reserved_0: f32,
+    _tone_reserved_1: f32,
+    _tone_reserved_2: f32,
+    _tone_reserved_3: f32,
+    _tone_reserved_4: f32,
+    _tone_reserved_5: f32,
     // Highlights, shadows, whites, blacks. Values use the Lightroom-style
-    // -100..100 UI domain and are converted to scene-linear stops in WGSL.
+    // -100..100 UI domain and parameterize the one scene-to-display curve.
     basic_tone: vec4<f32>,
     // Texture, clarity, dehaze, reserved.
     presence: vec4<f32>,

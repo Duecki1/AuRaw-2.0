@@ -1,6 +1,6 @@
-// Post-demosaic, scene-linear Lightroom-style controls.  Keeping this in its
-// own pass lets local controls sample neighbouring *RGB* pixels rather than
-// trying to apply texture/clarity to the CFA mosaic.
+// Post-demosaic scene-linear controls. Keeping this in its own pass lets
+// local operations sample neighbouring RGB pixels. Global tone controls are
+// evaluated once, at the end, by display_render().
 
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
@@ -33,24 +33,6 @@ fn blur_luminance(pos: vec2<i32>, radius: i32) -> f32 {
         }
     }
     return sum / max(sum_w, 1e-6);
-}
-
-fn apply_basic_tone(rgb: vec3<f32>) -> vec3<f32> {
-    let lum = safe_luma(max(rgb, vec3<f32>(0.0)));
-    let ev = log2(max(lum, 1e-6) / 0.1842);
-
-    // Soft, overlapping scene-linear zones. They retain neutral midtones and
-    // avoid the hard banding/colour shift of a per-channel curve.
-    let blacks_weight = 1.0 - smoothstep(-4.5, -2.25, ev);
-    let shadows_weight = smoothstep(-4.5, -2.25, ev) * (1.0 - smoothstep(-0.25, 1.5, ev));
-    let highlights_weight = smoothstep(0.0, 1.75, ev) * (1.0 - smoothstep(3.75, 5.5, ev));
-    let whites_weight = smoothstep(3.25, 5.5, ev);
-
-    let stops = (params.basic_tone.w / 100.0) * 1.5 * blacks_weight
-        + (params.basic_tone.y / 100.0) * 2.0 * shadows_weight
-        + (params.basic_tone.x / 100.0) * 2.0 * highlights_weight
-        + (params.basic_tone.z / 100.0) * 1.5 * whites_weight;
-    return rgb * exp2(stops);
 }
 
 fn apply_texture_and_clarity(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
@@ -194,10 +176,6 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rgb = scene_working_at(pos);
     rgb = apply_exposure(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
-    rgb = apply_ansel_highlight_compression(rgb);
-    rgb = apply_basic_tone(rgb);
-    rgb = apply_brightness(rgb);
-    rgb = apply_contrast(rgb);
     rgb = apply_texture_and_clarity(pos, rgb);
     rgb = apply_dehaze(pos, rgb);
     rgb = apply_saturation_vibrance(rgb);

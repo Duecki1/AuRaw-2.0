@@ -129,20 +129,20 @@ pub struct GpuParams {
     // floats intentionally form one 64-byte scalar block before vec4 fields.
     black_point: f32,
     exposure: f32,
-    hlcompr: f32,
-    hlcomprthresh: f32,
     contrast: f32,
-    middle_grey: f32,
-    brightness: f32,
     saturation: f32,
     vibrance: f32,
     highlight_clip: f32,
-    filmic_white: f32,
-    filmic_black: f32,
     chroma_denoise: f32,
     ca_red: f32,
     ca_blue: f32,
     highlight_reconstruction: f32,
+    _tone_reserved_0: f32,
+    _tone_reserved_1: f32,
+    _tone_reserved_2: f32,
+    _tone_reserved_3: f32,
+    _tone_reserved_4: f32,
+    _tone_reserved_5: f32,
     basic_tone: [f32; 4],
     presence: [f32; 4],
     highlight_options: [f32; 4],
@@ -169,20 +169,20 @@ impl GpuParams {
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
-            hlcompr: exposure.hlcompr,
-            hlcomprthresh: exposure.hlcomprthresh,
             contrast: exposure.contrast,
-            middle_grey: exposure.middle_grey,
-            brightness: exposure.brightness,
             saturation: exposure.saturation,
             vibrance: exposure.vibrance,
             highlight_clip: exposure.highlight_clip,
-            filmic_white: exposure.filmic_white,
-            filmic_black: exposure.filmic_black,
             chroma_denoise: exposure.chroma_denoise,
             ca_red: exposure.ca_red,
             ca_blue: exposure.ca_blue,
             highlight_reconstruction: exposure.highlight_reconstruction,
+            _tone_reserved_0: 0.0,
+            _tone_reserved_1: 0.0,
+            _tone_reserved_2: 0.0,
+            _tone_reserved_3: 0.0,
+            _tone_reserved_4: 0.0,
+            _tone_reserved_5: 0.0,
             basic_tone: [
                 exposure.highlights,
                 exposure.shadows,
@@ -1037,8 +1037,9 @@ mod tests {
 
     #[test]
     fn gpu_params_follow_the_wgsl_uniform_layout() {
-        // 16 scalar floats, nine vec4 fields (basic/presence/highlight/HSL), six
-        // remaining camera/raw vec4s, then dimensions/padding. This catches accidental
+        // Ten active scalar values plus six reserved floats keep the stable
+        // 64-byte prefix, followed by nine adjustment vec4s, six camera/raw
+        // vec4s, then dimensions/padding. This catches accidental
         // Rust/WGSL field drift before it turns sliders into random values.
         assert_eq!(std::mem::size_of::<super::GpuParams>(), 320);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
@@ -1048,6 +1049,83 @@ mod tests {
         );
         assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 208);
         assert_eq!(std::mem::offset_of!(super::GpuParams, width), 304);
+    }
+
+    fn tone_curve_cpu(
+        scene_ev: f32,
+        contrast: f32,
+        highlights: f32,
+        shadows: f32,
+        whites: f32,
+        blacks: f32,
+    ) -> f32 {
+        const MIDDLE: f32 = 0.1842;
+
+        fn bias(value: f32, shape: f32) -> f32 {
+            let x = value.clamp(0.0, 1.0);
+            let a = shape.clamp(0.05, 64.0);
+            x / (a + (1.0 - a) * x).max(1e-6)
+        }
+
+        let black_ev = -8.0 - 2.0 * blacks.clamp(-1.0, 1.0);
+        let white_ev = 4.0 - 1.5 * whites.clamp(-1.0, 1.0);
+        let range_ev = (white_ev - black_ev).max(1.0);
+        let position = ((scene_ev - black_ev) / range_ev).clamp(0.0, 1.0);
+        let middle_position = (-black_ev / range_ev).clamp(0.05, 0.95);
+        let middle_slope = 2.0f32.powf(contrast.clamp(-1.0, 1.0));
+        let shadow_shape = (middle_slope * middle_position / MIDDLE
+            * 2.0f32.powf(-1.25 * shadows.clamp(-1.0, 1.0)))
+        .clamp(0.05, 64.0);
+        let highlight_shape = ((1.0 - MIDDLE) / (middle_slope * (1.0 - middle_position)).max(1e-4)
+            * 2.0f32.powf(-1.25 * highlights.clamp(-1.0, 1.0)))
+        .clamp(0.05, 64.0);
+
+        if position <= middle_position {
+            return MIDDLE * bias(position / middle_position.max(1e-5), shadow_shape);
+        }
+
+        MIDDLE
+            + (1.0 - MIDDLE)
+                * bias(
+                    (position - middle_position) / (1.0 - middle_position).max(1e-5),
+                    highlight_shape,
+                )
+    }
+
+    #[test]
+    fn unified_tone_curve_is_monotonic_at_slider_extremes() {
+        let controls = [-1.0f32, 0.0, 1.0];
+
+        for &contrast in &controls {
+            for &highlights in &controls {
+                for &shadows in &controls {
+                    for &whites in &controls {
+                        for &blacks in &controls {
+                            let mut previous = -1.0f32;
+                            for sample in 0..=480 {
+                                let scene_ev = -12.0 + sample as f32 * 0.05;
+                                let mapped = tone_curve_cpu(
+                                    scene_ev, contrast, highlights, shadows, whites, blacks,
+                                );
+                                assert!(mapped.is_finite());
+                                assert!((-1e-6..=1.0 + 1e-6).contains(&mapped));
+                                assert!(
+                                    mapped + 1e-6 >= previous,
+                                    "tone curve decreased at {scene_ev} EV for controls \
+                                     c={contrast}, h={highlights}, s={shadows}, \
+                                     w={whites}, b={blacks}: {previous} -> {mapped}"
+                                );
+                                previous = mapped;
+                            }
+
+                            let middle =
+                                tone_curve_cpu(0.0, contrast, highlights, shadows, whites, blacks);
+                            assert!((middle - 0.1842).abs() < 1e-5);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
