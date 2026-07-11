@@ -277,6 +277,7 @@ pub struct RawGpuPipeline {
     passes: Vec<Pass>,
     _raw_texture: wgpu::Texture,
     _color_texture: wgpu::Texture,
+    _black_texture: wgpu::Texture,
     _reconstructed_raw_texture: wgpu::Texture,
     _highlight_work_a: wgpu::Texture,
     _highlight_work_b: wgpu::Texture,
@@ -320,6 +321,7 @@ impl RawGpuPipeline {
 
         let raw_texture = create_raw_texture(device, queue, raw);
         let color_texture = create_color_texture(device, queue, raw);
+        let black_texture = create_black_texture(device, queue, raw);
         let size = texture_size(raw.width, raw.height);
         let work_format = processing_work_format(quality);
         let demosaic_format = work_format;
@@ -408,6 +410,7 @@ impl RawGpuPipeline {
             tone_guide_b.create_view(&wgpu::TextureViewDescriptor::default());
         let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let black_view = black_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("auraw params"),
@@ -432,6 +435,7 @@ impl RawGpuPipeline {
             buffer_entry(0),
             texture_entry(1, wgpu::TextureSampleType::Uint),
             texture_entry(2, wgpu::TextureSampleType::Uint),
+            texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
         ];
 
         let bgl_highlights = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -440,6 +444,7 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
+                common_entries[3].clone(),
                 storage_texture_entry(
                     3,
                     wgpu::TextureFormat::R32Float,
@@ -460,6 +465,7 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
+                common_entries[3].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
                     4,
@@ -475,6 +481,7 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
+                common_entries[3].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
@@ -491,6 +498,7 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
+                common_entries[3].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
@@ -507,6 +515,7 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
+                common_entries[3].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
@@ -562,6 +571,7 @@ impl RawGpuPipeline {
                 common_entries[0].clone(),
                 common_entries[1].clone(),
                 common_entries[2].clone(),
+                common_entries[3].clone(),
                 texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
                     12,
@@ -592,6 +602,10 @@ impl RawGpuPipeline {
                         wgpu::BindGroupEntry {
                             binding: 2,
                             resource: wgpu::BindingResource::TextureView(&color_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 19,
+                            resource: wgpu::BindingResource::TextureView(&black_view),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
@@ -630,6 +644,10 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&color_view),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
                 },
@@ -655,6 +673,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -688,6 +710,10 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&color_view),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
                 },
@@ -717,6 +743,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -824,6 +854,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
@@ -1081,6 +1115,7 @@ impl RawGpuPipeline {
             passes,
             _raw_texture: raw_texture,
             _color_texture: color_texture,
+            _black_texture: black_texture,
             _reconstructed_raw_texture: reconstructed_raw_texture,
             _highlight_work_a: highlight_work_a,
             _highlight_work_b: highlight_work_b,
@@ -1259,6 +1294,9 @@ fn storage_texture_entry(
 }
 
 fn validate_raw(raw: &LoadedRaw) -> Result<()> {
+    if raw.width == 0 || raw.height == 0 {
+        return Err(anyhow!("raw dimensions must be non-zero"));
+    }
     let pixels = raw
         .width
         .checked_mul(raw.height)
@@ -1276,6 +1314,44 @@ fn validate_raw(raw: &LoadedRaw) -> Result<()> {
             raw.color_indices.len(),
             pixels
         ));
+    }
+    if raw.black_levels_per_pixel.len() != pixels {
+        return Err(anyhow!(
+            "black-level map count mismatch: got {}, expected {}",
+            raw.black_levels_per_pixel.len(),
+            pixels
+        ));
+    }
+    if raw.color_indices.iter().any(|channel| *channel > 3) {
+        return Err(anyhow!("CFA index map contains a channel above 3"));
+    }
+    if raw.wb_coeffs.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+        return Err(anyhow!("white-balance coefficients must be finite and positive"));
+    }
+    if raw.cam_to_srgb.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(anyhow!("camera-to-working matrix contains a non-finite value"));
+    }
+    if raw.cam_to_srgb.iter().flatten().all(|value| value.abs() <= 1e-12) {
+        return Err(anyhow!("camera-to-working matrix is empty"));
+    }
+    if raw.black_levels.iter().any(|value| !value.is_finite())
+        || raw.white_levels.iter().any(|value| !value.is_finite())
+    {
+        return Err(anyhow!("black/white calibration contains a non-finite value"));
+    }
+
+    for (index, (&black, &channel)) in raw
+        .black_levels_per_pixel
+        .iter()
+        .zip(&raw.color_indices)
+        .enumerate()
+    {
+        let white = raw.white_levels[channel as usize];
+        if !black.is_finite() || white <= black {
+            return Err(anyhow!(
+                "invalid black/white range at pixel {index}: black={black}, white={white}"
+            ));
+        }
     }
     Ok(())
 }
@@ -1314,6 +1390,34 @@ fn create_raw_texture(
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(raw.width * 2),
+            rows_per_image: Some(raw.height),
+        },
+        texture_size(raw.width, raw.height),
+    );
+    texture
+}
+
+fn create_black_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raw: &LoadedRaw,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("auraw per-pixel black levels"),
+        size: texture_size(raw.width, raw.height),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[wgpu::TextureFormat::R32Float],
+    });
+    queue.write_texture(
+        copy_texture(&texture),
+        bytemuck::cast_slice(&raw.black_levels_per_pixel),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(raw.width * 4),
             rows_per_image: Some(raw.height),
         },
         texture_size(raw.width, raw.height),
@@ -1732,6 +1836,7 @@ mod tests {
                     [0.0, 0.0, 1.0, 0.0],
                 ],
                 black_levels: [0.0; 4],
+                black_levels_per_pixel: vec![0.0; (width * height) as usize],
                 white_levels: [4095.0; 4],
             };
             let params = super::GpuParams::new(&ExposureParams::default(), &raw);

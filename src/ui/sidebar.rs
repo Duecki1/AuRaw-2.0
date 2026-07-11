@@ -230,7 +230,7 @@ impl Sidebar {
                     ui,
                     "Raw Black Point",
                     &mut exposure.black_point,
-                    -1.0..=1.0,
+                    -0.25..=0.25,
                     3,
                     0.01,
                     None,

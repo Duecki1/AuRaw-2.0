@@ -29,7 +29,7 @@ fn highlight_raw_sensor_at(pos: vec2<i32>) -> f32 {
     let p = clamp_pos(pos);
     let channel = highlight_cfa_channel_at(p);
     let raw = f32(textureLoad(raw_tex, p, 0).r);
-    let metadata_black = params.black_levels[channel];
+    let metadata_black = textureLoad(black_tex, p, 0).x;
     let white = max(params.white_levels[channel], metadata_black + 1.0);
     let sensor_range = max(white - metadata_black, 1.0);
 

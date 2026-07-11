@@ -1,0 +1,12 @@
+PASS: No NUL bytes — all Rust/WGSL sources
+PASS: Balanced source delimiters — 40 Rust/WGSL files
+PASS: Repeating black-pattern indexing — 2x3 pattern, active-area coordinates
+PASS: Malformed black pattern fallback — per-plane offset retained, no pattern OOB
+PASS: Orientation coordinate mapping — LibRaw flip 5/6
+PASS: White-level sanity fallback — invalid low/high linear_max values rejected
+PASS: Pseudoinverse reference check — full-rank 4x3 profile
+PASS: Black-point UI/shader range consistency — -0.25..0.25 in both UI paths and both sensor shaders
+PASS: Black-texture binding inventory — binding 19 declared and connected to six bind groups
+PASS: LoadedRaw initialization coverage — loader and synthetic GPU constructor both provide the black map
+
+Summary: 10 passed, 0 failed
