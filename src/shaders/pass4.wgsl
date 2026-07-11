@@ -313,7 +313,6 @@ fn pass4_rb_green_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         if sum_w > 0.0 {
-            // Ansel Inpaint Opposed (Local approximation)
             let mean_r = sum_r / sum_w;
             let mean_g = sum_g / sum_w;
             let mean_b = sum_b / sum_w;

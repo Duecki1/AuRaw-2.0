@@ -25,7 +25,6 @@ fn reconstruct_sensor_highlights(rgb: vec3<f32>, clip_mask: f32) -> vec3<f32> {
         return rgb;
     }
 
-    // Ansel LCH (YCbCr Rec709) based highlight recreation
     let Y = dot(rgb, LUMA);
     let Cb = dot(rgb, vec3<f32>(-0.114572, -0.385428, 0.5));
     let Cr = dot(rgb, vec3<f32>(0.5, -0.454153, -0.045847));
