@@ -26,14 +26,23 @@ fn raw_camera_at(pos: vec2<i32>) -> f32 {
     return raw_sensor_at(p) * wb_for_channel(color_at(p));
 }
 
-fn highlight_clip_for_channel(channel: u32) -> f32 {
-    return max(params.highlight_clip, 0.01) * wb_for_channel(channel);
+fn shared_highlight_clip() -> f32 {
+    // Ansel's LCh path uses one post-white-balance threshold based on the
+    // smallest processed channel maximum. A per-channel threshold leaves the
+    // saturated red/blue CFA values untouched and produces magenta highlights.
+    let min_wb = min(params.wb.r, min(params.wb.g, params.wb.b));
+    return 0.995 * max(params.highlight_clip, 0.01) * max(min_wb, 1e-6);
 }
 
 fn is_raw_clipped(pos: vec2<i32>) -> bool {
     let p = clamp_pos(pos);
     let color = color_at(p);
-    return raw_camera_at(p) >= highlight_clip_for_channel(color);
+    if params.highlight_options.x >= 1.5 {
+        // Guided reconstruction keeps Ansel's per-sensor-channel clipping
+        // mask, expressed before white balance.
+        return raw_sensor_at(p) >= 0.995 * max(params.highlight_clip, 0.01);
+    }
+    return raw_camera_at(p) >= shared_highlight_clip();
 }
 
 fn raw_cfa_at(pos: vec2<i32>) -> f32 {

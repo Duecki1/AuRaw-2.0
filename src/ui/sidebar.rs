@@ -24,8 +24,7 @@ impl Sidebar {
         ui.horizontal(|ui| {
             ui.label("Lightroom-style controls");
             if ui.button("Reset all").clicked() {
-                app.exposure = Default::default();
-                changed = true;
+                app.reset_develop_adjustments();
             }
         });
         ui.separator();
@@ -86,23 +85,6 @@ impl Sidebar {
         egui::CollapsingHeader::new("Advanced (Ansel)")
             .default_open(false)
             .show(ui, |ui| {
-                ui.label("Ansel LCh reconstruction (pre-demosaic)");
-                slider!(
-                    ui,
-                    app.exposure.highlight_clip,
-                    0.5..=2.0,
-                    "Clip Threshold",
-                    2
-                );
-                slider!(
-                    ui,
-                    app.exposure.highlight_reconstruction,
-                    0.0..=1.0,
-                    "Reconstruction Strength",
-                    2
-                );
-
-                ui.separator();
                 ui.label("Ansel basic controls");
                 slider!(
                     ui,
@@ -161,7 +143,7 @@ impl Sidebar {
             });
 
         if changed {
-            app.dirty = true;
+            app.mark_pipeline_dirty();
         }
     }
 }

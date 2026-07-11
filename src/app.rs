@@ -1,13 +1,23 @@
 use crate::pipeline::{load_raw_file, ExposureParams, GpuParams, LoadedRaw, RawGpuPipeline};
+use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
 use eframe::egui;
 use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppTab {
+    Library,
+    #[default]
+    Develop,
+    Settings,
+}
 
 pub struct AurawApp {
     pub current_path: Option<PathBuf>,
     pub loaded_raw: Option<LoadedRaw>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
     pub exposure: ExposureParams,
+    pub active_tab: AppTab,
 
     pub dirty: bool,
 
@@ -42,6 +52,7 @@ impl AurawApp {
             loaded_raw: None,
             gpu_pipeline: None,
             exposure: ExposureParams::default(),
+            active_tab: AppTab::default(),
             dirty: false,
             status: "Open a RAW file to get started.".to_owned(),
         }
@@ -65,6 +76,7 @@ impl AurawApp {
             loaded_raw: None,
             gpu_pipeline: None,
             exposure: ExposureParams::default(),
+            active_tab: AppTab::default(),
             dirty: false,
             status: "Open a RAW file to get started.".to_owned(),
             android_app,
@@ -190,6 +202,7 @@ impl AurawApp {
             return;
         }
         let (Some(raw), Some(pipeline)) = (&self.loaded_raw, &self.gpu_pipeline) else {
+            self.dirty = false;
             return;
         };
         let Some(render_state) = frame.wgpu_render_state() else {
@@ -200,6 +213,93 @@ impl AurawApp {
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
         self.dirty = false;
     }
+
+    pub(crate) fn mark_pipeline_dirty(&mut self) {
+        if self.gpu_pipeline.is_some() {
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn reset_develop_adjustments(&mut self) {
+        let previous = self.exposure;
+        self.exposure = ExposureParams::default();
+
+        // Highlight reconstruction is an application-level processing preference,
+        // not one of the Lightroom-style Develop adjustments.
+        self.exposure.highlight_method = previous.highlight_method;
+        self.exposure.highlight_clip = previous.highlight_clip;
+        self.exposure.highlight_reconstruction = previous.highlight_reconstruction;
+        self.exposure.highlight_iterations = previous.highlight_iterations;
+        self.exposure.highlight_color_adaptation = previous.highlight_color_adaptation;
+
+        self.mark_pipeline_dirty();
+    }
+
+    pub(crate) fn reset_highlight_reconstruction_settings(&mut self) {
+        let defaults = ExposureParams::default();
+        self.exposure.highlight_method = defaults.highlight_method;
+        self.exposure.highlight_clip = defaults.highlight_clip;
+        self.exposure.highlight_reconstruction = defaults.highlight_reconstruction;
+        self.exposure.highlight_iterations = defaults.highlight_iterations;
+        self.exposure.highlight_color_adaptation = defaults.highlight_color_adaptation;
+        self.mark_pipeline_dirty();
+    }
+
+    fn show_top_bar(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.active_tab, AppTab::Library, "Library");
+            ui.selectable_value(&mut self.active_tab, AppTab::Develop, "Develop");
+            ui.selectable_value(&mut self.active_tab, AppTab::Settings, "Settings");
+        });
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Open RAW…").clicked() {
+                self.open_file_dialog(frame);
+            }
+            ui.separator();
+            ui.label(&self.status);
+        });
+    }
+
+    fn show_library(ui: &mut egui::Ui) {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading("Library");
+                ui.label("Library management is coming soon.");
+                ui.add_space(4.0);
+                ui.label("Use Open RAW… above, then switch to Develop to edit an image.");
+            });
+        });
+    }
+
+    fn show_develop(&self, ui: &mut egui::Ui) {
+        if let Some(pipeline) = &self.gpu_pipeline {
+            let avail = ui.available_size();
+            let img_aspect = pipeline.width as f32 / pipeline.height as f32;
+            let avail_aspect = avail.x / avail.y;
+
+            let size = if avail_aspect > img_aspect {
+                egui::vec2(avail.y * img_aspect, avail.y)
+            } else {
+                egui::vec2(avail.x, avail.x / img_aspect)
+            };
+
+            ui.centered_and_justified(|ui| {
+                ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        pipeline.egui_texture_id,
+                        size,
+                    ))
+                    .fit_to_exact_size(size),
+                );
+            });
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.label("No image open. Use \"Open RAW…\" above.");
+            });
+        }
+    }
 }
 
 impl eframe::App for AurawApp {
@@ -207,59 +307,37 @@ impl eframe::App for AurawApp {
         #[cfg(target_os = "android")]
         self.poll_android_picker(frame);
 
-        egui::Panel::top("top_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Open RAW…").clicked() {
-                    self.open_file_dialog(frame);
-                }
-                ui.separator();
-                ui.label(&self.status);
-            });
-        });
+        egui::Panel::top("top_bar").show(ui, |ui| self.show_top_bar(ui, frame));
 
         #[cfg(not(target_os = "android"))]
-        egui::Panel::right("sidebar")
-            .resizable(true)
-            .default_size(320.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| Sidebar::show(ui, self));
-            });
+        if self.active_tab == AppTab::Develop {
+            egui::Panel::right("sidebar")
+                .resizable(true)
+                .default_size(320.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| Sidebar::show(ui, self));
+                });
+        }
 
         #[cfg(target_os = "android")]
-        egui::Panel::bottom("sidebar")
-            .resizable(true)
-            .default_size(280.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| Sidebar::show(ui, self));
-            });
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(pipeline) = &self.gpu_pipeline {
-                let avail = ui.available_size();
-                let img_aspect = pipeline.width as f32 / pipeline.height as f32;
-                let avail_aspect = avail.x / avail.y;
-
-                let size = if avail_aspect > img_aspect {
-                    egui::vec2(avail.y * img_aspect, avail.y)
-                } else {
-                    egui::vec2(avail.x, avail.x / img_aspect)
-                };
-
-                ui.centered_and_justified(|ui| {
-                    ui.add(
-                        egui::Image::new(egui::load::SizedTexture::new(
-                            pipeline.egui_texture_id,
-                            size,
-                        ))
-                        .fit_to_exact_size(size),
-                    );
+        if self.active_tab == AppTab::Develop {
+            egui::Panel::bottom("sidebar")
+                .resizable(true)
+                .default_size(280.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| Sidebar::show(ui, self));
                 });
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No image open. Use \"Open RAW…\" above.");
-                });
+        }
+
+        egui::CentralPanel::default().show(ui, |ui| match self.active_tab {
+            AppTab::Library => Self::show_library(ui),
+            AppTab::Develop => self.show_develop(ui),
+            AppTab::Settings => {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| Settings::show(ui, self));
             }
         });
 

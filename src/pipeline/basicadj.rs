@@ -1,3 +1,21 @@
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HighlightReconstructionMethod {
+    Off,
+    Lch,
+    #[default]
+    Guided,
+}
+
+impl HighlightReconstructionMethod {
+    pub(crate) const fn shader_value(self) -> f32 {
+        match self {
+            Self::Off => 0.0,
+            Self::Lch => 1.0,
+            Self::Guided => 2.0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ExposureParams {
     /// Sensor-space black-point calibration. This is deliberately separate from
@@ -14,10 +32,19 @@ pub struct ExposureParams {
     pub chroma_denoise: f32,
     pub ca_red: f32,
     pub ca_blue: f32,
-    /// Raw highlight-clipping threshold used by reconstruction.
+    /// Reconstruction algorithm. The guided method ports Ansel's
+    /// interpolate/mask/remosaic design and is the high-quality default.
+    pub highlight_method: HighlightReconstructionMethod,
+    /// Raw highlight-clipping threshold used by reconstruction. This scales
+    /// Ansel's shared post-white-balance clipping level.
     pub highlight_clip: f32,
     /// Raw highlight-reconstruction blend/strength.
     pub highlight_reconstruction: f32,
+    /// Number of progressively wider guided chroma-propagation passes.
+    pub highlight_iterations: u32,
+    /// How strongly surrounding highlight colour is retained instead of
+    /// converging toward a neutral specular highlight.
+    pub highlight_color_adaptation: f32,
 
     // Lightroom-style tonal and local-contrast controls. These intentionally
     // use the familiar -100..100 UI scale rather than raw pipeline units.
@@ -53,8 +80,11 @@ impl Default for ExposureParams {
             chroma_denoise: 0.0,
             ca_red: 0.0,
             ca_blue: 0.0,
+            highlight_method: HighlightReconstructionMethod::Guided,
             highlight_clip: 1.0,
             highlight_reconstruction: 1.0,
+            highlight_iterations: 3,
+            highlight_color_adaptation: 0.75,
             highlights: 0.0,
             shadows: 0.0,
             whites: 0.0,
