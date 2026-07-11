@@ -129,6 +129,8 @@ mod libraw_loader {
             ));
         }
 
+        let cdesc = cdesc4(iparams);
+        let cfa_map = canonical_cfa_map(cdesc);
         let (width, height, raw_pixels, color_indices) = copy_active_pixels(
             ctx.raw,
             rawdata.raw_image,
@@ -140,12 +142,19 @@ mod libraw_loader {
             height,
             sizes.raw_pitch as usize,
             sizes.flip,
-            iparams,
+            cfa_map,
         )?;
-        let wb_coeffs = white_balance(color.cam_mul);
-        let cam_to_srgb = camera_to_working_matrix(color, wb_coeffs);
-        let black_levels = black_levels(color.black, &color.cblack, iparams);
-        let white_levels = white_levels(color.maximum, color.linear_max);
+        let physical_wb = white_balance(color.cam_mul, cdesc);
+        let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
+        let cam_to_srgb = camera_to_working_matrix(color, physical_wb, cdesc);
+        let black_levels = canonicalize_f32x4(
+            black_levels(color.black, &color.cblack),
+            cfa_map,
+        );
+        let white_levels = canonicalize_f32x4(
+            white_levels(color.maximum, color.linear_max),
+            cfa_map,
+        );
 
         Ok(LoadedRaw {
             width,
@@ -172,7 +181,7 @@ mod libraw_loader {
         height: u32,
         raw_pitch: usize,
         flip: i32,
-        iparams: &ffi::libraw_iparams_t,
+        cfa_map: [u8; 4],
     ) -> Result<(u32, u32, Vec<u16>, Vec<u8>)> {
         let raw_width = raw_width as usize;
         let raw_height = raw_height as usize;
@@ -205,7 +214,10 @@ mod libraw_loader {
                 pixels[y * out_width + x] = *row_ptr.add(raw_x);
 
                 let libraw_color = ffi::libraw_COLOR(raw, raw_y as i32, raw_x as i32);
-                colors.push(rgb_channel_for_libraw_color(iparams, libraw_color));
+                // Preserve four independent CFA planes, but canonicalize
+                // them to R, G1, B, G2 so the GPU can keep G1/G2 calibration
+                // separate without carrying a second channel-map uniform.
+                colors.push(cfa_map[libraw_color.clamp(0, 3) as usize]);
             }
         }
 
@@ -227,26 +239,78 @@ mod libraw_loader {
         }
     }
 
-    fn rgb_channel_for_libraw_color(iparams: &ffi::libraw_iparams_t, color: i32) -> u8 {
-        let index = color.clamp(0, 3) as usize;
-        match iparams.cdesc[index] as u8 as char {
+    fn cdesc4(iparams: &ffi::libraw_iparams_t) -> [u8; 4] {
+        [
+            iparams.cdesc[0] as u8,
+            iparams.cdesc[1] as u8,
+            iparams.cdesc[2] as u8,
+            iparams.cdesc[3] as u8,
+        ]
+    }
+
+    fn canonical_cfa_map(cdesc: [u8; 4]) -> [u8; 4] {
+        let mut map = [0u8, 1u8, 2u8, 3u8];
+        let mut green_count = 0u8;
+
+        for index in 0..4 {
+            map[index] = match cdesc[index] as char {
+                'R' | 'r' => 0,
+                'B' | 'b' => 2,
+                'G' | 'g' => {
+                    let canonical = if green_count == 0 { 1 } else { 3 };
+                    green_count = green_count.saturating_add(1);
+                    canonical
+                }
+                _ => index as u8,
+            };
+        }
+
+        map
+    }
+
+    fn canonicalize_f32x4(values: [f32; 4], cfa_map: [u8; 4]) -> [f32; 4] {
+        let mut out = [0.0; 4];
+        for physical in 0..4 {
+            out[cfa_map[physical] as usize] = values[physical];
+        }
+        out
+    }
+
+    fn logical_rgb_channel(cdesc: [u8; 4], cfa_channel: usize) -> usize {
+        match cdesc[cfa_channel.min(3)] as char {
             'R' | 'r' => 0,
             'G' | 'g' => 1,
             'B' | 'b' => 2,
-            _ => color.clamp(0, 2) as u8,
+            // AuRaw's current demosaic is RGB-only. Keep a deterministic
+            // fallback for unusual descriptors instead of indexing outside
+            // the three-channel scene buffer.
+            _ => cfa_channel.min(2),
         }
     }
 
-    fn white_balance(mut wb: [f32; 4]) -> [f32; 4] {
-        let green = if wb[1].is_finite() && wb[1] > 0.0 {
+    fn white_balance(mut wb: [f32; 4], cdesc: [u8; 4]) -> [f32; 4] {
+        let mut green_sum = 0.0;
+        let mut green_count = 0.0;
+
+        for index in 0..4 {
+            let is_green = matches!(cdesc[index] as char, 'G' | 'g');
+            if is_green && wb[index].is_finite() && wb[index] > 0.0 {
+                green_sum += wb[index];
+                green_count += 1.0;
+            }
+        }
+
+        let green_reference = if green_count > 0.0 {
+            green_sum / green_count
+        } else if wb[1].is_finite() && wb[1] > 0.0 {
             wb[1]
         } else {
             1.0
         };
 
-        for v in &mut wb {
-            *v = if v.is_finite() && *v > 0.0 {
-                *v / green
+        for value in &mut wb {
+            *value = if value.is_finite() && *value > 0.0 {
+                *value / green_reference
             } else {
                 1.0
             };
@@ -255,57 +319,57 @@ mod libraw_loader {
         wb
     }
 
-    fn black_levels(black: u32, cblack: &[u32], iparams: &ffi::libraw_iparams_t) -> [f32; 4] {
-        let mut sums = [0.0; 4];
-        let mut counts = [0.0; 4];
-
-        for index in 0..4 {
-            let channel = rgb_channel_for_libraw_color(iparams, index as i32) as usize;
-            sums[channel] += black as f32 + cblack.get(index).copied().unwrap_or(0) as f32;
-            counts[channel] += 1.0;
-        }
-
+    fn black_levels(black: u32, cblack: &[u32]) -> [f32; 4] {
         let mut out = [black as f32; 4];
-        for channel in 0..3 {
-            if counts[channel] > 0.0 {
-                out[channel] = sums[channel] / counts[channel];
-            }
+        for (index, value) in out.iter_mut().enumerate() {
+            *value += cblack.get(index).copied().unwrap_or(0) as f32;
         }
         out
     }
 
     fn white_levels(maximum: u32, linear_max: [u32; 4]) -> [f32; 4] {
-        // Match Ansel's LibRaw loader: linear_max is the usable sensor white
-        // level (not necessarily the container's integer maximum). CR3 files
-        // commonly rely on this field, and using the larger fallback delays
-        // highlight detection until after colour has already been lost.
-        let reported_white = if linear_max[0] != 0 {
-            linear_max[0]
-        } else {
-            maximum
-        };
-        let white = if reported_white == 0 {
-            65535.0
-        } else {
-            reported_white as f32
-        };
-        [white; 4]
+        // Preserve LibRaw's per-CFA-plane usable saturation levels. Some
+        // formats only populate one entry, so use the first reported plane as
+        // the fallback before falling back to the container maximum.
+        let shared_fallback = linear_max
+            .iter()
+            .copied()
+            .find(|value| *value != 0)
+            .or_else(|| (maximum != 0).then_some(maximum))
+            .unwrap_or(65535);
+
+        let mut out = [0.0; 4];
+        for index in 0..4 {
+            out[index] = if linear_max[index] != 0 {
+                linear_max[index] as f32
+            } else {
+                shared_fallback as f32
+            };
+        }
+        out
     }
 
-    fn cam_to_working(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
+    fn cam_to_working(xyz_to_cam: [[f32; 3]; 4], cdesc: [u8; 4]) -> [[f32; 4]; 3] {
         let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
 
-        let mut out = [[0.0; 4]; 3];
+        let mut physical = [[0.0; 4]; 3];
         for row in 0..3 {
             for col in 0..4 {
-                out[row][col] = XYZ_TO_REC2020[row][0] * cam_to_xyz[0][col]
+                physical[row][col] = XYZ_TO_REC2020[row][0] * cam_to_xyz[0][col]
                     + XYZ_TO_REC2020[row][1] * cam_to_xyz[1][col]
                     + XYZ_TO_REC2020[row][2] * cam_to_xyz[2][col];
             }
         }
 
-        for row in 0..3 {
-            out[row][1] += out[row][3];
+        // The demosaic output is RGB, but camera profiles can contain four
+        // physical planes (normally R, G1, B, G2). Fold profile columns by
+        // cdesc only after each CFA plane has been normalized independently.
+        let mut out = [[0.0; 4]; 3];
+        for physical_col in 0..4 {
+            let rgb_col = logical_rgb_channel(cdesc, physical_col);
+            for row in 0..3 {
+                out[row][rgb_col] += physical[row][physical_col];
+            }
         }
 
         if out.iter().flatten().any(|v| !v.is_finite()) || out.iter().flatten().all(|v| *v == 0.0) {
@@ -322,23 +386,25 @@ mod libraw_loader {
     fn camera_to_working_matrix(
         color: &ffi::libraw_colordata_t,
         wb_coeffs: [f32; 4],
+        cdesc: [u8; 4],
     ) -> [[f32; 4]; 3] {
-        if let Some(xyz_to_cam) = interpolated_dng_xyz_to_cam(color, wb_coeffs) {
-            cam_to_working(xyz_to_cam)
+        if let Some(xyz_to_cam) = interpolated_dng_xyz_to_cam(color, wb_coeffs, cdesc) {
+            cam_to_working(xyz_to_cam, cdesc)
         } else {
-            cam_to_working(color.cam_xyz)
+            cam_to_working(color.cam_xyz, cdesc)
         }
     }
 
     fn interpolated_dng_xyz_to_cam(
         color: &ffi::libraw_colordata_t,
         wb_coeffs: [f32; 4],
+        cdesc: [u8; 4],
     ) -> Option<[[f32; 3]; 4]> {
         let matrix0 = calibrated_dng_xyz_to_cam(&color.dng_color[0])?;
         let matrix1 = calibrated_dng_xyz_to_cam(&color.dng_color[1])?;
         let cct0 = calibration_illuminant_cct(color.dng_color[0].illuminant)?;
         let cct1 = calibration_illuminant_cct(color.dng_color[1].illuminant)?;
-        let scene_cct = estimate_scene_cct(color, wb_coeffs)?;
+        let scene_cct = estimate_scene_cct(color, wb_coeffs, cdesc)?;
 
         let mired0 = 1_000_000.0 / cct0;
         let mired1 = 1_000_000.0 / cct1;
@@ -402,7 +468,11 @@ mod libraw_loader {
             && matrix.iter().flatten().any(|v| v.abs() > 1e-8)
     }
 
-    fn estimate_scene_cct(color: &ffi::libraw_colordata_t, wb_coeffs: [f32; 4]) -> Option<f32> {
+    fn estimate_scene_cct(
+        color: &ffi::libraw_colordata_t,
+        wb_coeffs: [f32; 4],
+        cdesc: [u8; 4],
+    ) -> Option<f32> {
         let mut best_cct = 0.0;
         let mut best_error = f32::INFINITY;
 
@@ -412,7 +482,7 @@ mod libraw_loader {
                 continue;
             }
 
-            let candidate = white_balance([row[1], row[2], row[3], row[4]]);
+            let candidate = white_balance([row[1], row[2], row[3], row[4]], cdesc);
             let error = (candidate[0].ln() - wb_coeffs[0].ln()).abs()
                 + (candidate[2].ln() - wb_coeffs[2].ln()).abs();
 
@@ -536,19 +606,27 @@ mod libraw_loader {
 
     #[cfg(test)]
     mod tests {
-        use super::cam_to_working;
+        use super::{
+            black_levels, cam_to_working, canonical_cfa_map, canonicalize_f32x4,
+            white_balance, white_levels,
+        };
+
+        const RGBG: [u8; 4] = *b"RGBG";
 
         #[test]
         fn camera_neutral_maps_to_rec2020_neutral() {
             // Identity is a useful synthetic XYZ -> camera profile: the old
             // row-sum normalization mapped camera (1, 1, 1) to equal-energy
             // XYZ and therefore to a visibly warm Rec.2020 value.
-            let matrix = cam_to_working([
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 0.0],
-            ]);
+            let matrix = cam_to_working(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 0.0],
+                ],
+                RGBG,
+            );
 
             for (channel, row) in matrix.iter().enumerate() {
                 let mapped_neutral = row[0] + row[1] + row[2];
@@ -557,6 +635,36 @@ mod libraw_loader {
                     "camera neutral mapped to {mapped_neutral} in working channel {channel}"
                 );
             }
+        }
+
+        #[test]
+        fn cfa_planes_are_canonicalized_without_merging_greens() {
+            let map = canonical_cfa_map(*b"GRGB");
+            assert_eq!(map, [1, 0, 3, 2]);
+            assert_eq!(
+                canonicalize_f32x4([10.0, 20.0, 30.0, 40.0], map),
+                [20.0, 10.0, 40.0, 30.0]
+            );
+        }
+
+        #[test]
+        fn calibration_keeps_both_green_planes_distinct() {
+            assert_eq!(
+                black_levels(64, &[1, 2, 3, 4]),
+                [65.0, 66.0, 67.0, 68.0]
+            );
+            assert_eq!(
+                white_levels(4095, [4000, 4010, 4020, 4030]),
+                [4000.0, 4010.0, 4020.0, 4030.0]
+            );
+        }
+
+        #[test]
+        fn white_balance_uses_the_average_green_reference() {
+            let wb = white_balance([2.0, 1.0, 1.5, 1.2], RGBG);
+            let green_mean = 0.5 * (wb[1] + wb[3]);
+            assert!((green_mean - 1.0).abs() < 1e-6);
+            assert!((wb[1] - wb[3]).abs() > 1e-3);
         }
     }
 }

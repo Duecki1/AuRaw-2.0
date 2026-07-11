@@ -1,4 +1,4 @@
-@group(0) @binding(3) var reconstructed_raw_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var reconstructed_raw_write: texture_storage_2d<r32float, write>;
 @group(0) @binding(13) var highlight_work_read: texture_2d<f32>;
 @group(0) @binding(14) var highlight_work_write: texture_storage_2d<rgba16float, write>;
 
