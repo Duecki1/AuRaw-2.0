@@ -1,6 +1,10 @@
 use crate::pipeline::{load_raw_file, ExposureParams, GpuParams, LoadedRaw, RawGpuPipeline};
+use crate::ui::layout::ScreenLayout;
+use crate::ui::library::Library;
+use crate::ui::preview::Preview;
 use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
+use crate::ui::top_bar::TopBar;
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -34,14 +38,25 @@ impl AurawApp {
         // Start from egui's robust dark palette, then make the editor panels a
         // little calmer and denser for a Lightroom-like darkroom layout.
         let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(30, 32, 35);
-        visuals.faint_bg_color = egui::Color32::from_rgb(42, 45, 49);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 22);
+        let accent = egui::Color32::from_rgb(56, 139, 253);
+
+        visuals.panel_fill = egui::Color32::from_rgb(24, 26, 29);
+        visuals.window_fill = egui::Color32::from_rgb(27, 29, 33);
+        visuals.faint_bg_color = egui::Color32::from_rgb(35, 38, 43);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(16, 18, 20);
+        visuals.selection.bg_fill = accent;
+        visuals.hyperlink_color = accent;
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(42, 45, 50);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(54, 58, 65);
+        visuals.widgets.active.bg_fill = accent;
         ctx.set_visuals(visuals);
 
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
-        style.spacing.slider_width = 170.0;
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.slider_width = 180.0;
+        style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+        style.spacing.button_padding = egui::vec2(8.0, 3.0);
+        style.spacing.interact_size.y = 22.0;
+        style.spacing.indent = 14.0;
         ctx.set_style_of(egui::Theme::Dark, style);
     }
 
@@ -244,62 +259,6 @@ impl AurawApp {
         self.exposure.highlight_color_adaptation = defaults.highlight_color_adaptation;
         self.mark_pipeline_dirty();
     }
-
-    fn show_top_bar(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.active_tab, AppTab::Library, "Library");
-            ui.selectable_value(&mut self.active_tab, AppTab::Develop, "Develop");
-            ui.selectable_value(&mut self.active_tab, AppTab::Settings, "Settings");
-        });
-
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Open RAW…").clicked() {
-                self.open_file_dialog(frame);
-            }
-            ui.separator();
-            ui.label(&self.status);
-        });
-    }
-
-    fn show_library(ui: &mut egui::Ui) {
-        ui.centered_and_justified(|ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading("Library");
-                ui.label("Library management is coming soon.");
-                ui.add_space(4.0);
-                ui.label("Use Open RAW… above, then switch to Develop to edit an image.");
-            });
-        });
-    }
-
-    fn show_develop(&self, ui: &mut egui::Ui) {
-        if let Some(pipeline) = &self.gpu_pipeline {
-            let avail = ui.available_size();
-            let img_aspect = pipeline.width as f32 / pipeline.height as f32;
-            let avail_aspect = avail.x / avail.y;
-
-            let size = if avail_aspect > img_aspect {
-                egui::vec2(avail.y * img_aspect, avail.y)
-            } else {
-                egui::vec2(avail.x, avail.x / img_aspect)
-            };
-
-            ui.centered_and_justified(|ui| {
-                ui.add(
-                    egui::Image::new(egui::load::SizedTexture::new(
-                        pipeline.egui_texture_id,
-                        size,
-                    ))
-                    .fit_to_exact_size(size),
-                );
-            });
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.label("No image open. Use \"Open RAW…\" above.");
-            });
-        }
-    }
 }
 
 impl eframe::App for AurawApp {
@@ -307,33 +266,40 @@ impl eframe::App for AurawApp {
         #[cfg(target_os = "android")]
         self.poll_android_picker(frame);
 
-        egui::Panel::top("top_bar").show(ui, |ui| self.show_top_bar(ui, frame));
+        let viewport_size = ui.max_rect().size();
+        let layout = ScreenLayout::from_size(viewport_size);
+        let sidebar_size = layout.sidebar_default_size(viewport_size);
 
-        #[cfg(not(target_os = "android"))]
-        if self.active_tab == AppTab::Develop {
-            egui::Panel::right("sidebar")
-                .resizable(true)
-                .default_size(320.0)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| Sidebar::show(ui, self));
-                });
-        }
+        egui::Panel::top("top_bar").show(ui, |ui| TopBar::show(ui, self, frame));
 
-        #[cfg(target_os = "android")]
         if self.active_tab == AppTab::Develop {
-            egui::Panel::bottom("sidebar")
-                .resizable(true)
-                .default_size(280.0)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| Sidebar::show(ui, self));
-                });
+            match layout {
+                ScreenLayout::Horizontal => {
+                    egui::Panel::right("develop_sidebar_right")
+                        .resizable(true)
+                        .default_size(sidebar_size)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| Sidebar::show(ui, self, layout));
+                        });
+                }
+                ScreenLayout::Vertical => {
+                    egui::Panel::bottom("develop_sidebar_bottom")
+                        .resizable(true)
+                        .default_size(sidebar_size)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| Sidebar::show(ui, self, layout));
+                        });
+                }
+            }
         }
 
         egui::CentralPanel::default().show(ui, |ui| match self.active_tab {
-            AppTab::Library => Self::show_library(ui),
-            AppTab::Develop => self.show_develop(ui),
+            AppTab::Library => Library::show(ui),
+            AppTab::Develop => Preview::show(ui, self),
             AppTab::Settings => {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])

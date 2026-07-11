@@ -181,5 +181,5 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_saturation_vibrance(rgb);
     rgb = apply_hsl_mixer(rgb);
 
-    textureStore(out_tex, pos, vec4<f32>(display_render(max(rgb, vec3<f32>(0.0))), 1.0));
+    textureStore(out_tex, pos, vec4<f32>(display_render(max(rgb, vec3<f32>(0.0)), pos), 1.0));
 }

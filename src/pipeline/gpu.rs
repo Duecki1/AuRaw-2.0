@@ -110,12 +110,26 @@ const SHADER_XTRANS_P4: &str = concat!(
     include_str!("../shaders/xtrans_pass4.wgsl")
 );
 
+const SHADER_TONE_ANALYSIS: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/basic_adjustments.wgsl"),
+    "\n",
+    include_str!("../shaders/tone_common.wgsl"),
+    "\n",
+    include_str!("../shaders/tone_analysis.wgsl")
+);
+
 const SHADER_ADJUSTMENTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
     include_str!("../shaders/basic_adjustments.wgsl"),
+    "\n",
+    include_str!("../shaders/tone_common.wgsl"),
     "\n",
     include_str!("../shaders/tonemap.wgsl"),
     "\n",
@@ -137,8 +151,8 @@ pub struct GpuParams {
     ca_red: f32,
     ca_blue: f32,
     highlight_reconstruction: f32,
-    _tone_reserved_0: f32,
-    _tone_reserved_1: f32,
+    tone_analysis_scale: f32,
+    tone_guide_radius: f32,
     _tone_reserved_2: f32,
     _tone_reserved_3: f32,
     _tone_reserved_4: f32,
@@ -177,8 +191,8 @@ impl GpuParams {
             ca_red: exposure.ca_red,
             ca_blue: exposure.ca_blue,
             highlight_reconstruction: exposure.highlight_reconstruction,
-            _tone_reserved_0: 0.0,
-            _tone_reserved_1: 0.0,
+            tone_analysis_scale: tone_analysis_scale() as f32,
+            tone_guide_radius: if cfg!(target_os = "android") { 3.0 } else { 5.0 },
             _tone_reserved_2: 0.0,
             _tone_reserved_3: 0.0,
             _tone_reserved_4: 0.0,
@@ -219,6 +233,7 @@ impl GpuParams {
 struct Pass {
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
+    workgroups: [u32; 3],
 }
 
 pub struct RawGpuPipeline {
@@ -226,6 +241,7 @@ pub struct RawGpuPipeline {
     pub width: u32,
     pub height: u32,
     params_buffer: wgpu::Buffer,
+    tone_histogram_buffer: wgpu::Buffer,
     passes: Vec<Pass>,
     _raw_texture: wgpu::Texture,
     _color_texture: wgpu::Texture,
@@ -235,6 +251,9 @@ pub struct RawGpuPipeline {
     _tex1: wgpu::Texture,
     _tex2: wgpu::Texture,
     _scene_texture: wgpu::Texture,
+    _tone_stats_buffer: wgpu::Buffer,
+    _tone_guide_a: wgpu::Texture,
+    _tone_guide_b: wgpu::Texture,
     _out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
 }
@@ -253,6 +272,12 @@ impl RawGpuPipeline {
         let color_texture = create_color_texture(device, queue, raw);
         let size = texture_size(raw.width, raw.height);
         let demosaic_format = demosaic_work_format();
+        let tone_scale = tone_analysis_scale();
+        let tone_size = texture_size(raw.width.div_ceil(tone_scale), raw.height.div_ceil(tone_scale));
+        let tone_format = tone_guide_format();
+        let image_workgroups = [raw.width.div_ceil(8), raw.height.div_ceil(8), 1];
+        let tone_workgroups = [tone_size.width.div_ceil(8), tone_size.height.div_ceil(8), 1];
+        let single_workgroup = [1, 1, 1];
 
         // This is the raw-CFA output of the Ansel LCh reconstruction pass. It
         // is deliberately separate from the demosaic scratch textures so all
@@ -276,12 +301,8 @@ impl RawGpuPipeline {
         // Preserve a scene-linear camera-RGB result between demosaic and the
         // display pass. This is what lets local Lightroom controls read true
         // RGB neighbourhoods instead of raw Bayer samples.
-        let scene_texture = create_demosaic_texture(
-            device,
-            size,
-            demosaic_format,
-            "auraw scene-linear camera RGB",
-        );
+        let scene_texture =
+            create_demosaic_texture(device, size, demosaic_format, "auraw scene-linear camera RGB");
 
         let out_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw output texture"),
@@ -296,6 +317,18 @@ impl RawGpuPipeline {
 
         let tex1 = create_demosaic_texture(device, size, demosaic_format, "auraw tex1");
         let tex2 = create_demosaic_texture(device, size, demosaic_format, "auraw tex2");
+        let tone_guide_a = create_tone_guide_texture(
+            device,
+            tone_size,
+            tone_format,
+            "auraw adaptive tone guide A",
+        );
+        let tone_guide_b = create_tone_guide_texture(
+            device,
+            tone_size,
+            tone_format,
+            "auraw adaptive tone guide B",
+        );
 
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let reconstructed_raw_view =
@@ -307,6 +340,10 @@ impl RawGpuPipeline {
         let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let tex1_view = tex1.create_view(&wgpu::TextureViewDescriptor::default());
         let tex2_view = tex2.create_view(&wgpu::TextureViewDescriptor::default());
+        let tone_guide_a_view =
+            tone_guide_a.create_view(&wgpu::TextureViewDescriptor::default());
+        let tone_guide_b_view =
+            tone_guide_b.create_view(&wgpu::TextureViewDescriptor::default());
         let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -314,6 +351,19 @@ impl RawGpuPipeline {
             label: Some("auraw params"),
             contents: bytemuck::bytes_of(params),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let tone_histogram_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auraw tone histogram"),
+            size: 256 * std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let tone_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auraw tone statistics"),
+            size: 2 * std::mem::size_of::<[f32; 4]>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
         });
 
         let common_entries = [
@@ -349,7 +399,11 @@ impl RawGpuPipeline {
                 common_entries[1].clone(),
                 common_entries[2].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(4, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
+                storage_texture_entry(
+                    4,
+                    demosaic_format,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
             ],
         });
 
@@ -361,7 +415,11 @@ impl RawGpuPipeline {
                 common_entries[2].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(6, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
+                storage_texture_entry(
+                    6,
+                    demosaic_format,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
             ],
         });
 
@@ -373,7 +431,11 @@ impl RawGpuPipeline {
                 common_entries[2].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(8, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
+                storage_texture_entry(
+                    8,
+                    demosaic_format,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
             ],
         });
 
@@ -386,9 +448,51 @@ impl RawGpuPipeline {
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(10, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
+                storage_texture_entry(
+                    10,
+                    demosaic_format,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
             ],
         });
+
+        let bgl_tone_prepare =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl tone prepare"),
+                entries: &[
+                    buffer_entry(0),
+                    texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_buffer_entry(15, false),
+                    storage_texture_entry(
+                        18,
+                        tone_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            });
+
+        let bgl_tone_blur =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl tone guide blur"),
+                entries: &[
+                    buffer_entry(0),
+                    texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        18,
+                        tone_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            });
+
+        let bgl_tone_reduce =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl tone histogram reduction"),
+                entries: &[
+                    storage_buffer_entry(15, false),
+                    storage_buffer_entry(16, false),
+                ],
+            });
 
         let bgl5 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl adjustments"),
@@ -402,11 +506,15 @@ impl RawGpuPipeline {
                     wgpu::TextureFormat::Rgba8Unorm,
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
+                storage_buffer_entry(16, true),
+                texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
 
         let make_highlight_bind_group =
-            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
+            |label: &str,
+             read_view: &wgpu::TextureView,
+             write_view: &wgpu::TextureView| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(label),
                     layout: &bgl_highlights,
@@ -567,6 +675,78 @@ impl RawGpuPipeline {
             ],
         });
 
+        let bg_tone_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg tone prepare"),
+            layout: &bgl_tone_prepare,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: tone_histogram_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
+                },
+            ],
+        });
+
+        let make_tone_blur_bind_group =
+            |label: &str,
+             read_view: &wgpu::TextureView,
+             write_view: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_tone_blur,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: params_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 17,
+                            resource: wgpu::BindingResource::TextureView(read_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 18,
+                            resource: wgpu::BindingResource::TextureView(write_view),
+                        },
+                    ],
+                })
+            };
+        let bg_tone_horizontal = make_tone_blur_bind_group(
+            "bg tone guide horizontal",
+            &tone_guide_a_view,
+            &tone_guide_b_view,
+        );
+        let bg_tone_vertical = make_tone_blur_bind_group(
+            "bg tone guide vertical",
+            &tone_guide_b_view,
+            &tone_guide_a_view,
+        );
+
+        let bg_tone_reduce = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg tone histogram reduction"),
+            layout: &bgl_tone_reduce,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: tone_histogram_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: tone_stats_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
         let bg5 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg adjustments"),
             layout: &bgl5,
@@ -590,6 +770,14 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 12,
                     resource: wgpu::BindingResource::TextureView(&out_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: tone_stats_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
                 },
             ],
         });
@@ -628,7 +816,9 @@ impl RawGpuPipeline {
                 })
             };
 
-        let mut passes = Vec::with_capacity(1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 5);
+        let mut passes = Vec::with_capacity(
+            1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 4 + 4 + 1,
+        );
 
         // Prepare writes the initial RGB estimate and reliability into A.
         passes.push(Pass {
@@ -638,6 +828,7 @@ impl RawGpuPipeline {
                 &highlight_work_b_view,
                 &highlight_work_a_view,
             ),
+            workgroups: image_workgroups,
         });
 
         // The multiscale solver ping-pongs through every declared stage.
@@ -653,17 +844,19 @@ impl RawGpuPipeline {
             passes.push(Pass {
                 pipeline: make_pipeline(SHADER_HIGHLIGHTS, entry, &bgl_highlights),
                 bind_group: make_highlight_bind_group(&label, read_view, write_view),
+                workgroups: image_workgroups,
             });
         }
 
         // Prepare leaves the data in A. An odd number of guided stages leaves
         // the final result in B; compute this from the table so future stage
         // additions cannot silently select the wrong texture.
-        let (final_read_view, final_write_view) = if HIGHLIGHT_GUIDED_ENTRY_POINTS.len() % 2 == 0 {
-            (&highlight_work_a_view, &highlight_work_b_view)
-        } else {
-            (&highlight_work_b_view, &highlight_work_a_view)
-        };
+        let (final_read_view, final_write_view) =
+            if HIGHLIGHT_GUIDED_ENTRY_POINTS.len() % 2 == 0 {
+                (&highlight_work_a_view, &highlight_work_b_view)
+            } else {
+                (&highlight_work_b_view, &highlight_work_a_view)
+            };
         passes.push(Pass {
             pipeline: make_pipeline(SHADER_HIGHLIGHTS, "highlight_finalize", &bgl_highlights),
             bind_group: make_highlight_bind_group(
@@ -671,6 +864,7 @@ impl RawGpuPipeline {
                 final_read_view,
                 final_write_view,
             ),
+            workgroups: image_workgroups,
         });
 
         // Select the demosaic family from LibRaw's CFA classification.
@@ -680,45 +874,123 @@ impl RawGpuPipeline {
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p1.as_ref(), "bayer_rcd_directional", &bgl1),
+                    pipeline: make_pipeline(
+                        bayer_rcd_p1.as_ref(),
+                        "bayer_rcd_directional",
+                        &bgl1,
+                    ),
                     bind_group: bg1,
+                    workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p2.as_ref(), "bayer_rcd_green", &bgl2),
+                    pipeline: make_pipeline(
+                        bayer_rcd_p2.as_ref(),
+                        "bayer_rcd_green",
+                        &bgl2,
+                    ),
                     bind_group: bg2,
+                    workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p3.as_ref(), "bayer_rcd_chroma", &bgl3),
+                    pipeline: make_pipeline(
+                        bayer_rcd_p3.as_ref(),
+                        "bayer_rcd_chroma",
+                        &bgl3,
+                    ),
                     bind_group: bg3,
+                    workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p4.as_ref(), "bayer_rcd_output", &bgl4),
+                    pipeline: make_pipeline(
+                        bayer_rcd_p4.as_ref(),
+                        "bayer_rcd_output",
+                        &bgl4,
+                    ),
                     bind_group: bg4,
+                    workgroups: image_workgroups,
                 },
             ]),
             CfaKind::XTrans => passes.extend([
                 Pass {
                     pipeline: make_pipeline(xtrans_p1.as_ref(), "xtrans_seed", &bgl1),
                     bind_group: bg1,
+                    workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p2.as_ref(), "xtrans_refine_green", &bgl2),
+                    pipeline: make_pipeline(
+                        xtrans_p2.as_ref(),
+                        "xtrans_refine_green",
+                        &bgl2,
+                    ),
                     bind_group: bg2,
+                    workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p3.as_ref(), "xtrans_refine_chroma", &bgl3),
+                    pipeline: make_pipeline(
+                        xtrans_p3.as_ref(),
+                        "xtrans_refine_chroma",
+                        &bgl3,
+                    ),
                     bind_group: bg3,
+                    workgroups: image_workgroups,
                 },
                 Pass {
                     pipeline: make_pipeline(xtrans_p4.as_ref(), "xtrans_output", &bgl4),
                     bind_group: bg4,
+                    workgroups: image_workgroups,
                 },
             ]),
         }
 
+        // Analyze the unexposed scene at reduced resolution. The guide is
+        // bilateral and the histogram reduction emits robust tonal anchors.
+        passes.extend([
+            Pass {
+                pipeline: make_pipeline(
+                    SHADER_TONE_ANALYSIS,
+                    "tone_guide_prepare",
+                    &bgl_tone_prepare,
+                ),
+                bind_group: bg_tone_prepare,
+                workgroups: tone_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    SHADER_TONE_ANALYSIS,
+                    "tone_guide_horizontal",
+                    &bgl_tone_blur,
+                ),
+                bind_group: bg_tone_horizontal,
+                workgroups: tone_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    SHADER_TONE_ANALYSIS,
+                    "tone_guide_vertical",
+                    &bgl_tone_blur,
+                ),
+                bind_group: bg_tone_vertical,
+                workgroups: tone_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    SHADER_TONE_ANALYSIS,
+                    "tone_reduce_histogram",
+                    &bgl_tone_reduce,
+                ),
+                bind_group: bg_tone_reduce,
+                workgroups: single_workgroup,
+            },
+        ]);
+
         passes.push(Pass {
-            pipeline: make_pipeline(SHADER_ADJUSTMENTS, "apply_lightroom_adjustments", &bgl5),
+            pipeline: make_pipeline(
+                SHADER_ADJUSTMENTS,
+                "apply_lightroom_adjustments",
+                &bgl5,
+            ),
             bind_group: bg5,
+            workgroups: image_workgroups,
         });
 
         let egui_texture_id =
@@ -729,6 +1001,7 @@ impl RawGpuPipeline {
             width: raw.width,
             height: raw.height,
             params_buffer,
+            tone_histogram_buffer,
             passes,
             _raw_texture: raw_texture,
             _color_texture: color_texture,
@@ -738,6 +1011,9 @@ impl RawGpuPipeline {
             _tex1: tex1,
             _tex2: tex2,
             _scene_texture: scene_texture,
+            _tone_stats_buffer: tone_stats_buffer,
+            _tone_guide_a: tone_guide_a,
+            _tone_guide_b: tone_guide_b,
             _out_texture: out_texture,
             _out_view: out_view,
         };
@@ -752,8 +1028,7 @@ impl RawGpuPipeline {
             label: Some("auraw recompute encoder"),
         });
 
-        let wg_x = self.width.div_ceil(8);
-        let wg_y = self.height.div_ceil(8);
+        encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
 
         for i in 0..self.passes.len() {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -762,11 +1037,22 @@ impl RawGpuPipeline {
             });
             pass.set_pipeline(&self.passes[i].pipeline);
             pass.set_bind_group(0, &self.passes[i].bind_group, &[]);
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
+            let workgroups = self.passes[i].workgroups;
+            pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
 
         queue.submit(Some(encoder.finish()));
     }
+}
+
+fn tone_analysis_scale() -> u32 {
+    if cfg!(target_os = "android") { 8 } else { 4 }
+}
+
+fn tone_guide_format() -> wgpu::TextureFormat {
+    // The guide is reduced-resolution, so R32Float costs little even on
+    // Android and avoids optional R16Float storage-texture support.
+    wgpu::TextureFormat::R32Float
 }
 
 fn demosaic_work_format() -> wgpu::TextureFormat {
@@ -786,6 +1072,24 @@ fn demosaic_shader_source(source: &str) -> Cow<'_, str> {
 }
 
 fn create_demosaic_texture(
+    device: &wgpu::Device,
+    size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
+    label: &'static str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        view_formats: &[format],
+    })
+}
+
+fn create_tone_guide_texture(
     device: &wgpu::Device,
     size: wgpu::Extent3d,
     format: wgpu::TextureFormat,
@@ -826,6 +1130,19 @@ fn buffer_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn storage_buffer_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
             has_dynamic_offset: false,
             min_binding_size: None,
         },
@@ -962,8 +1279,9 @@ fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
 mod tests {
     use super::{
         HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1,
-        SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4, SHADER_HIGHLIGHTS,
-        SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4,
+        SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
+        SHADER_HIGHLIGHTS, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1, SHADER_XTRANS_P2,
+        SHADER_XTRANS_P3, SHADER_XTRANS_P4,
     };
 
     #[test]
@@ -978,6 +1296,7 @@ mod tests {
             ("X-Trans pass 2", SHADER_XTRANS_P2),
             ("X-Trans pass 3", SHADER_XTRANS_P3),
             ("X-Trans pass 4", SHADER_XTRANS_P4),
+            ("adaptive tone analysis", SHADER_TONE_ANALYSIS),
             ("Lightroom adjustments", SHADER_ADJUSTMENTS),
         ] {
             let module = naga::front::wgsl::parse_str(source)
@@ -1002,10 +1321,7 @@ mod tests {
 
         for expected in expected_entry_points {
             assert!(
-                module
-                    .entry_points
-                    .iter()
-                    .any(|entry| entry.name == expected),
+                module.entry_points.iter().any(|entry| entry.name == expected),
                 "highlight shader is missing entry point {expected}"
             );
         }
@@ -1026,106 +1342,169 @@ mod tests {
             let module =
                 naga::front::wgsl::parse_str(source).expect("demosaic shader did not parse");
             assert!(
-                module
-                    .entry_points
-                    .iter()
-                    .any(|entry| entry.name == expected),
+                module.entry_points.iter().any(|entry| entry.name == expected),
                 "demosaic shader is missing entry point {expected}"
             );
         }
     }
 
     #[test]
+    fn tone_analysis_shader_exposes_every_dispatched_entry_point() {
+        let module = naga::front::wgsl::parse_str(SHADER_TONE_ANALYSIS)
+            .expect("adaptive tone-analysis shader did not parse");
+
+        for expected in [
+            "tone_guide_prepare",
+            "tone_guide_horizontal",
+            "tone_guide_vertical",
+            "tone_reduce_histogram",
+        ] {
+            assert!(
+                module.entry_points.iter().any(|entry| entry.name == expected),
+                "tone-analysis shader is missing entry point {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn gpu_params_follow_the_wgsl_uniform_layout() {
-        // Ten active scalar values plus six reserved floats keep the stable
+        // Twelve active scalar values plus four reserved floats keep the stable
         // 64-byte prefix, followed by nine adjustment vec4s, six camera/raw
         // vec4s, then dimensions/padding. This catches accidental
         // Rust/WGSL field drift before it turns sliders into random values.
         assert_eq!(std::mem::size_of::<super::GpuParams>(), 320);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, highlight_options),
-            96
-        );
+        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 96);
         assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 208);
         assert_eq!(std::mem::offset_of!(super::GpuParams, width), 304);
     }
 
-    fn tone_curve_cpu(
+    fn adaptive_tone_curve_cpu(
         scene_ev: f32,
+        local_ev: f32,
         contrast: f32,
         highlights: f32,
         shadows: f32,
         whites: f32,
         blacks: f32,
+        percentiles: [f32; 5],
     ) -> f32 {
         const MIDDLE: f32 = 0.1842;
 
         fn bias(value: f32, shape: f32) -> f32 {
             let x = value.clamp(0.0, 1.0);
-            let a = shape.clamp(0.05, 64.0);
+            let a = shape.clamp(0.04, 96.0);
             x / (a + (1.0 - a) * x).max(1e-6)
         }
 
-        let black_ev = -8.0 - 2.0 * blacks.clamp(-1.0, 1.0);
-        let white_ev = 4.0 - 1.5 * whites.clamp(-1.0, 1.0);
-        let range_ev = (white_ev - black_ev).max(1.0);
-        let position = ((scene_ev - black_ev) / range_ev).clamp(0.0, 1.0);
-        let middle_position = (-black_ev / range_ev).clamp(0.05, 0.95);
-        let middle_slope = 2.0f32.powf(contrast.clamp(-1.0, 1.0));
-        let shadow_shape = (middle_slope * middle_position / MIDDLE
-            * 2.0f32.powf(-1.25 * shadows.clamp(-1.0, 1.0)))
-        .clamp(0.05, 64.0);
-        let highlight_shape = ((1.0 - MIDDLE) / (middle_slope * (1.0 - middle_position)).max(1e-4)
-            * 2.0f32.powf(-1.25 * highlights.clamp(-1.0, 1.0)))
-        .clamp(0.05, 64.0);
-
-        if position <= middle_position {
-            return MIDDLE * bias(position / middle_position.max(1e-5), shadow_shape);
+        fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+            let width = (edge1 - edge0).max(1e-4);
+            let x = ((value - edge0) / width).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
         }
 
-        MIDDLE
-            + (1.0 - MIDDLE)
-                * bias(
-                    (position - middle_position) / (1.0 - middle_position).max(1e-5),
-                    highlight_shape,
-                )
+        let robust_black = (percentiles[0] - 0.25).min(percentiles[1] - 0.80);
+        let robust_white = (percentiles[4] + 0.25).max(percentiles[3] + 0.80);
+        let mut base_black = -8.0 * 0.28 + robust_black.clamp(-12.0, -2.0) * 0.72;
+        let mut base_white = 4.0 * 0.28 + robust_white.clamp(1.5, 9.0) * 0.72;
+        if base_white - base_black < 5.5 {
+            let center = percentiles[2].clamp(-1.5, 1.5);
+            base_black = center - 5.5 * 0.58;
+            base_white = center + 5.5 * 0.42;
+        }
+
+        let black_mask = 1.0
+            - smoothstep(percentiles[0] - 0.45, percentiles[1] + 0.30, local_ev);
+        let shadow_mask = 1.0
+            - smoothstep(percentiles[1] - 0.60, percentiles[2] + 0.45, local_ev);
+        let highlight_mask =
+            smoothstep(percentiles[2] - 0.45, percentiles[3] + 0.60, local_ev);
+        let white_mask =
+            smoothstep(percentiles[3] - 0.30, percentiles[4] + 0.45, local_ev);
+
+        let black_ev = base_black - 2.75 * blacks.clamp(-1.0, 1.0);
+        let white_ev = base_white - 2.25 * whites.clamp(-1.0, 1.0);
+        let range_ev = (white_ev - black_ev).max(3.5);
+        let adjusted_ev = scene_ev
+            + 0.60 * blacks * black_mask
+            + 1.35 * shadows * shadow_mask
+            + 1.20 * highlights * highlight_mask
+            + 0.60 * whites * white_mask;
+        let position = ((adjusted_ev - black_ev) / range_ev).clamp(0.0, 1.0);
+        let middle_position = (-black_ev / range_ev).clamp(0.04, 0.96);
+        let middle_slope = 2.0f32.powf(1.55 * contrast.clamp(-1.0, 1.0));
+        let shadow_shape = (middle_slope * middle_position / MIDDLE
+            * 2.0f32.powf(-0.70 * shadows.clamp(-1.0, 1.0)))
+        .clamp(0.04, 96.0);
+        let highlight_shape = ((1.0 - MIDDLE)
+            / (middle_slope * (1.0 - middle_position)).max(1e-4)
+            * 2.0f32.powf(-0.70 * highlights.clamp(-1.0, 1.0)))
+        .clamp(0.04, 96.0);
+
+        if position <= middle_position {
+            MIDDLE * bias(position / middle_position.max(1e-5), shadow_shape)
+        } else {
+            MIDDLE
+                + (1.0 - MIDDLE)
+                    * bias(
+                        (position - middle_position)
+                            / (1.0 - middle_position).max(1e-5),
+                        highlight_shape,
+                    )
+        }
     }
 
     #[test]
-    fn unified_tone_curve_is_monotonic_at_slider_extremes() {
+    fn adaptive_tone_curve_is_monotonic_at_slider_extremes() {
         let controls = [-1.0f32, 0.0, 1.0];
+        let local_evs = [-9.0f32, -5.0, -1.0, 2.0, 5.0];
+        let percentiles = [-7.5f32, -5.0, -1.2, 2.1, 3.7];
 
-        for &contrast in &controls {
-            for &highlights in &controls {
-                for &shadows in &controls {
-                    for &whites in &controls {
-                        for &blacks in &controls {
-                            let mut previous = -1.0f32;
-                            for sample in 0..=480 {
-                                let scene_ev = -12.0 + sample as f32 * 0.05;
-                                let mapped = tone_curve_cpu(
-                                    scene_ev, contrast, highlights, shadows, whites, blacks,
-                                );
-                                assert!(mapped.is_finite());
-                                assert!((-1e-6..=1.0 + 1e-6).contains(&mapped));
-                                assert!(
-                                    mapped + 1e-6 >= previous,
-                                    "tone curve decreased at {scene_ev} EV for controls \
-                                     c={contrast}, h={highlights}, s={shadows}, \
-                                     w={whites}, b={blacks}: {previous} -> {mapped}"
-                                );
-                                previous = mapped;
+        for &local_ev in &local_evs {
+            for &contrast in &controls {
+                for &highlights in &controls {
+                    for &shadows in &controls {
+                        for &whites in &controls {
+                            for &blacks in &controls {
+                                let mut previous = -1.0f32;
+                                for sample in 0..=480 {
+                                    let scene_ev = -12.0 + sample as f32 * 0.05;
+                                    let mapped = adaptive_tone_curve_cpu(
+                                        scene_ev,
+                                        local_ev,
+                                        contrast,
+                                        highlights,
+                                        shadows,
+                                        whites,
+                                        blacks,
+                                        percentiles,
+                                    );
+                                    assert!(mapped.is_finite());
+                                    assert!((-1e-6..=1.0 + 1e-6).contains(&mapped));
+                                    assert!(
+                                        mapped + 1e-6 >= previous,
+                                        "adaptive tone curve decreased at {scene_ev} EV, local={local_ev},                                          c={contrast}, h={highlights}, s={shadows},                                          w={whites}, b={blacks}: {previous} -> {mapped}"
+                                    );
+                                    previous = mapped;
+                                }
                             }
-
-                            let middle =
-                                tone_curve_cpu(0.0, contrast, highlights, shadows, whites, blacks);
-                            assert!((middle - 0.1842).abs() < 1e-5);
                         }
                     }
                 }
             }
         }
+
+        let middle = adaptive_tone_curve_cpu(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            percentiles,
+        );
+        assert!((middle - 0.1842).abs() < 1e-5);
     }
 
     #[test]
