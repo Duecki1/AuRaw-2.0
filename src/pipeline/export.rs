@@ -78,12 +78,16 @@ fn export_tiled_png(
     events: &mpsc::Sender<ExportEvent>,
 ) -> Result<()> {
     let global_params = GpuParams::new(exposure, preview_raw);
+    // Export must not derive its global curve from a half-float analysis
+    // pipeline. The source is only the bounded preview proxy, so RGBA32F has
+    // modest memory cost while keeping desktop preview and export statistics
+    // consistent.
     let global_tone_source = RawGpuPipeline::new_headless_with_quality(
         device,
         queue,
         preview_raw,
         &global_params,
-        ProcessingQuality::Preview,
+        ProcessingQuality::High,
     )
     .context("create global tone-analysis pipeline")?;
     global_tone_source.dispatch_stage(queue, device, &global_params, ProcessingStage::Raw);

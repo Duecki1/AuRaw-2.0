@@ -1,0 +1,37 @@
+schema: 1
+color_space: linear-rec2020-d65
+raw_root: raw
+
+# These compact DNGs are generated from the same deterministic scene by
+# regression/generate_synthetic_corpus.py. They are CC0 fixtures owned by the
+# AuRaw project and intentionally exercise both supported CFA families.
+scenes:
+  - id: synthetic-bayer-multitarget
+    raw: synthetic-bayer.dng
+    sha256: 12f4547c67f567d6c5c25790c3cab740bd0f4ef7754b875475bc20008f624c28
+    cfa: bayer
+    tags: [difficult-frequency, high-iso, saturated-highlight, underexposed]
+    source: AuRaw deterministic synthetic DNG fixture v1
+    license: CC0-1.0
+    redistributable: true
+    rois:
+      - {name: neutral-slanted-edge, kind: edge, rect: [24, 24, 88, 96]}
+      - {name: neutral-edge-color, kind: neutral, rect: [24, 24, 88, 96]}
+      - {name: textile-crossing, kind: frequency, rect: [136, 24, 104, 96]}
+      - {name: underexposed-flat-noise, kind: noise, rect: [24, 144, 88, 88]}
+      - {name: colored-and-neutral-clipping, kind: highlight, rect: [128, 136, 112, 104]}
+
+  - id: synthetic-xtrans-multitarget
+    raw: synthetic-xtrans.dng
+    sha256: db957a966e972974b8f9457f5a5823c433ee762e9443ba5caf560611edb7e581
+    cfa: xtrans
+    tags: [difficult-frequency, high-iso, saturated-highlight, underexposed]
+    source: AuRaw deterministic synthetic DNG fixture v1
+    license: CC0-1.0
+    redistributable: true
+    rois:
+      - {name: neutral-slanted-edge, kind: edge, rect: [24, 24, 88, 96]}
+      - {name: neutral-edge-color, kind: neutral, rect: [24, 24, 88, 96]}
+      - {name: textile-crossing, kind: frequency, rect: [136, 24, 104, 96]}
+      - {name: underexposed-flat-noise, kind: noise, rect: [24, 144, 88, 88]}
+      - {name: colored-and-neutral-clipping, kind: highlight, rect: [128, 136, 112, 104]}

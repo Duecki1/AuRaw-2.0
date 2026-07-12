@@ -7,6 +7,8 @@ defaults:
   delta_e00_mean: 1.0
   delta_e00_p95: 3.0
   edge_rmse_rel: 0.12
+  edge_response_p95_rel: 0.18
+  edge_response_gain_error: 0.10
   edge_angle_p95_deg: 12.0
   zippering_p95: 0.10
   false_color_p95: 4.0
@@ -16,11 +18,16 @@ defaults:
 tags:
   difficult-frequency:
     edge_rmse_rel: 0.10
+    edge_response_p95_rel: 0.15
+    edge_response_gain_error: 0.08
     zippering_p95: 0.07
     false_color_p95: 3.0
   saturated-highlight:
     highlight_delta_e00_p95: 5.0
     highlight_max_abs: 0.025
+    highlight_luma_rmse_rel: 0.06
+    highlight_peak_rel_error: 0.08
+    highlight_clipped_fraction_delta: 0.08
   high-iso:
     noise_sigma_rel: 0.18
     noise_bias_max: 0.004
@@ -46,7 +53,12 @@ cpu_gpu:
   delta_e00_mean: 0.08
   delta_e00_p95: 0.25
   edge_rmse_rel: 0.015
+  edge_response_p95_rel: 0.025
+  edge_response_gain_error: 0.012
   zippering_p95: 0.012
   false_color_p95: 0.30
   noise_sigma_rel: 0.03
   noise_bias_max: 0.0002
+  highlight_luma_rmse_rel: 0.004
+  highlight_peak_rel_error: 0.006
+  highlight_clipped_fraction_delta: 0.01

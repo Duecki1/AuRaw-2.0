@@ -34,12 +34,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             libclang-dev \
+            libraw-dev \
+            mesa-vulkan-drivers \
             libwayland-dev \
             libx11-dev \
             libx11-xcb-dev \
             libxcb1-dev \
             libxkbcommon-dev \
             libxkbcommon-x11-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-regression.txt
+
+      - name: Install image-regression dependencies
+        run: python3 -m pip install --requirement requirements-regression.txt
+
+      - name: Validate regression corpus and reference pins
+        run: |
+          python3 scripts/image_regression.py validate-corpus \
+            --manifest regression/corpus.yaml --verify-files
+          python3 scripts/image_regression.py validate-reference-engines \
+            --config regression/reference-engines.yaml
+          python3 -m unittest discover -s tests -v
 
       - name: Install pinned Rust toolchain
         run: |
@@ -64,6 +83,16 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --locked --all-targets
+
+      - name: Smoke-test deterministic GPU regression renderer
+        env:
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/xdg-runtime
+          WGPU_BACKEND: vulkan
+        run: |
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          cargo build --locked --bin auraw-regression-render
+          scripts/smoke-regression-renderer.sh
 
       - name: Build Linux release from committed source
         run: scripts/build-linux.sh

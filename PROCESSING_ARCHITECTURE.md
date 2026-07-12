@@ -5,7 +5,7 @@
 1. RAW decode runs on the `auraw-decode-preview` worker.
 2. The decoded sensor data is retained at full resolution in `Arc<LoadedRaw>`.
 3. A CFA-aware proxy is generated with a maximum edge of 2048 px on desktop or 1280 px on Android.
-4. The worker creates and submits the initial preview GPU pipeline at preview quality.
+4. The worker creates and submits the initial preview GPU pipeline at high quality (RGBA32F) on desktop and preview quality (RGBA16F) on Android.
 5. The UI thread only registers the completed output texture with egui.
 
 The preview pipeline keeps persistent GPU resources for three dependency stages:

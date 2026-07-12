@@ -22,6 +22,7 @@ anyhow = "1.0"
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }
 env_logger = "0.11"
 rfd = "0.15"
+pollster = "0.4"
 
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "android-native-activity"] }
@@ -36,7 +37,6 @@ pkg-config = "0.3"
 
 [dev-dependencies]
 naga = { version = "29", features = ["wgsl-in"] }
-pollster = "0.4"
 
 [profile.release]
 opt-level = 3

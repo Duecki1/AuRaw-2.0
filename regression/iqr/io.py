@@ -80,7 +80,11 @@ def load_linear_image(
                 raise ValueError(f"{source} is not an AuRaw linear intermediate")
             rgb = np.asarray(data["rgb"], dtype=np.float32)
             raw_metadata = data["metadata_json"]
-            metadata = json.loads(str(raw_metadata.item()))
+            if raw_metadata.dtype == np.uint8:
+                metadata_text = np.asarray(raw_metadata, dtype=np.uint8).tobytes().decode("utf-8")
+            else:
+                metadata_text = str(raw_metadata.item())
+            metadata = json.loads(metadata_text)
             mask = (
                 np.asarray(data["valid_mask"], dtype=bool)
                 if "valid_mask" in data

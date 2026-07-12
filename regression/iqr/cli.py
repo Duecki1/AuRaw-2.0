@@ -22,6 +22,14 @@ from .manifest import (
 )
 from .metrics import compare_images
 from .report import SceneResult, evaluate_thresholds, write_html, write_json, write_junit
+from .reference import (
+    ReferenceEngine,
+    get_reference_engine,
+    load_reference_engines,
+    reference_metadata,
+    run_version_command,
+    validate_reference_engines,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--manifest", type=Path, required=True)
     validate.add_argument("--verify-files", action="store_true")
     validate.add_argument("--allow-incomplete-coverage", action="store_true")
+
+    validate_references = sub.add_parser(
+        "validate-reference-engines",
+        help="validate pinned reference versions and processing-history hashes",
+    )
+    validate_references.add_argument("--config", type=Path, required=True)
+    validate_references.add_argument("--verify-binaries", action="store_true")
 
     normalize = sub.add_parser("normalize", help="convert an export/readback into canonical NPZ")
     normalize.add_argument("input", type=Path)
@@ -54,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_corpus.add_argument("--transfer", choices=["linear", "srgb"], default="linear")
     normalize_corpus.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
     normalize_corpus.add_argument("--scene", action="append", default=[])
+    normalize_corpus.add_argument("--reference-engines", type=Path)
+    normalize_corpus.add_argument("--reference-engine", choices=["darktable", "ansel"])
 
     compare = sub.add_parser("compare", help="compare a backend against pinned references")
     compare.add_argument("--manifest", type=Path, required=True)
@@ -61,7 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--reference-root", type=Path, required=True)
     compare.add_argument("--candidate-root", type=Path, required=True)
     compare.add_argument("--backend", choices=["cpu", "gpu"], required=True)
-    compare.add_argument("--reference-engine", default="darktable")
+    compare.add_argument("--reference-engine", choices=["darktable", "ansel"], default="darktable")
+    compare.add_argument("--reference-engines", type=Path, required=True)
     compare.add_argument("--border", type=int, default=18)
     compare.add_argument("--report-dir", type=Path, required=True)
     compare.add_argument("--scene", action="append", default=[])
@@ -90,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--extension", default=".npz")
     render.add_argument("--repeat", type=int, default=1)
     render.add_argument("--version-command")
+    render.add_argument(
+        "--reference-engines",
+        type=Path,
+        help="pin file required for darktable/Ansel renders",
+    )
     render.add_argument("--scene", action="append", default=[])
 
     return parser
@@ -100,6 +123,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "validate-corpus":
             return _validate_corpus(args)
+        if args.command == "validate-reference-engines":
+            return _validate_reference_engines(args)
         if args.command == "normalize":
             return _normalize(args)
         if args.command == "normalize-corpus":
@@ -134,6 +159,21 @@ def _validate_corpus(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_reference_engines(args: argparse.Namespace) -> int:
+    config = load_reference_engines(args.config)
+    errors = validate_reference_engines(config, verify_binaries=args.verify_binaries)
+    if errors:
+        for error in errors:
+            print(f"FAIL: {error}")
+        return 1
+    for name, engine in sorted(config.engines.items()):
+        print(
+            f"PASS: {name} {engine.version}; history "
+            f"{engine.history.name} ({engine.history_sha256})"
+        )
+    return 0
+
+
 def _normalize(args: argparse.Namespace) -> int:
     metadata = _parse_metadata(args.metadata)
     loaded = load_linear_image(
@@ -154,6 +194,16 @@ def _normalize_corpus(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest)
     selected = set(args.scene)
     metadata = _parse_metadata(args.metadata)
+    if bool(args.reference_engines) != bool(args.reference_engine):
+        raise ValueError(
+            "--reference-engines and --reference-engine must be provided together"
+        )
+    if args.reference_engines:
+        pins = load_reference_engines(args.reference_engines)
+        errors = validate_reference_engines(pins, verify_binaries=False)
+        if errors:
+            raise ValueError("invalid reference-engine pins: " + "; ".join(errors))
+        metadata.update(reference_metadata(get_reference_engine(pins, args.reference_engine)))
     extension = args.extension if args.extension.startswith(".") else "." + args.extension
     count = 0
     for scene in manifest.scenes:
@@ -186,6 +236,11 @@ def _normalize_corpus(args: argparse.Namespace) -> int:
 
 def _compare(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest)
+    pins = load_reference_engines(args.reference_engines)
+    pin_errors = validate_reference_engines(pins, verify_binaries=False)
+    if pin_errors:
+        raise ValueError("invalid reference-engine pins: " + "; ".join(pin_errors))
+    reference_engine = get_reference_engine(pins, args.reference_engine)
     errors = validate_manifest(manifest, require_coverage=False)
     if errors:
         raise ValueError("invalid manifest: " + "; ".join(errors))
@@ -198,6 +253,7 @@ def _compare(args: argparse.Namespace) -> int:
         reference_path = args.reference_root / f"{scene.scene_id}.npz"
         candidate_path = args.candidate_root / f"{scene.scene_id}.npz"
         reference = load_linear_image(reference_path, color_space=manifest.color_space)
+        _require_pinned_reference_metadata(reference.metadata, reference_engine)
         candidate = load_linear_image(candidate_path, color_space=manifest.color_space)
         metrics = compare_images(reference, candidate, rois=scene.rois, border=args.border)
         thresholds = thresholds_for_scene(scene, threshold_config, args.backend)
@@ -219,7 +275,7 @@ def _compare(args: argparse.Namespace) -> int:
         raise ValueError("no enabled scenes selected")
     metadata = {
         "backend": args.backend,
-        "reference_engine": args.reference_engine,
+        **reference_metadata(reference_engine),
         "manifest": str(args.manifest),
         "thresholds": str(args.thresholds),
         "border": args.border,
@@ -308,16 +364,35 @@ def _cpu_gpu(args: argparse.Namespace) -> int:
 def _render(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest)
     selected = set(args.scene)
-    version = ""
+    pin_metadata: dict[str, object] = {}
+    history = ""
+    version_command: tuple[str, ...] | None = None
+    expected_version_fragment = ""
+
+    if args.backend in {"darktable", "ansel"}:
+        if args.reference_engines is None:
+            raise ValueError(
+                "--reference-engines is required for darktable and Ansel renders"
+            )
+        pins = load_reference_engines(args.reference_engines)
+        errors = validate_reference_engines(pins, verify_binaries=False)
+        if errors:
+            raise ValueError("invalid reference-engine pins: " + "; ".join(errors))
+        engine = get_reference_engine(pins, args.backend)
+        pin_metadata = reference_metadata(engine)
+        history = str(engine.history)
+        version_command = engine.version_command
+        expected_version_fragment = engine.version_output_contains
+
     if args.version_command:
-        completed = subprocess.run(
-            shlex.split(args.version_command),
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+        version_command = tuple(shlex.split(args.version_command))
+    version = run_version_command(version_command) if version_command else ""
+    if expected_version_fragment and expected_version_fragment not in version:
+        raise ValueError(
+            f"{args.backend} version output does not contain pinned fragment "
+            f"{expected_version_fragment!r}: {version!r}"
         )
-        version = completed.stdout.strip()
+
     environment = os.environ.copy()
     environment.setdefault("LC_ALL", "C")
     environment.setdefault("TZ", "UTC")
@@ -341,6 +416,7 @@ def _render(args: argparse.Namespace) -> int:
                 scene=shlex.quote(scene.scene_id),
                 backend=shlex.quote(args.backend),
                 repeat=repeat + 1,
+                history=shlex.quote(history),
             )
             started = time.monotonic()
             subprocess.run(command, shell=True, check=True, env=environment)
@@ -357,6 +433,8 @@ def _render(args: argparse.Namespace) -> int:
                 }
             )
             print(f"rendered {scene.scene_id} repeat {repeat + 1} -> {output}")
+    if not metadata_rows:
+        raise ValueError("no enabled scenes selected")
     manifest_out = args.output_root / "render-manifest.json"
     manifest_out.parent.mkdir(parents=True, exist_ok=True)
     manifest_out.write_text(
@@ -366,6 +444,7 @@ def _render(args: argparse.Namespace) -> int:
                 "backend": args.backend,
                 "renderer_version": version,
                 "command_template": args.command_template,
+                **pin_metadata,
                 "environment": {
                     key: environment[key]
                     for key in (
@@ -387,6 +466,18 @@ def _render(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     return 0
+
+
+def _require_pinned_reference_metadata(
+    metadata: dict[str, object], engine: ReferenceEngine
+) -> None:
+    expected = reference_metadata(engine)
+    for key in expected:
+        if metadata.get(key) != expected[key]:
+            raise ValueError(
+                f"reference metadata {key!r} is {metadata.get(key)!r}, "
+                f"expected pinned value {expected[key]!r}"
+            )
 
 
 def _write_reports(report_dir: Path, results: list[SceneResult], metadata: dict[str, object]) -> None:

@@ -14,8 +14,9 @@ sys.path.insert(0, str(ROOT / "regression"))
 
 from iqr.io import LinearImage, load_linear_image, save_linear_image  # noqa: E402
 from iqr.manifest import load_manifest, validate_manifest  # noqa: E402
-from iqr.metrics import Roi, compare_images, delta_e_ciede2000  # noqa: E402
+from iqr.metrics import Roi, compare_images, convolve2d, delta_e_ciede2000  # noqa: E402
 from iqr.report import evaluate_thresholds  # noqa: E402
+from iqr.reference import load_reference_engines, validate_reference_engines  # noqa: E402
 
 
 class LinearIntermediateTests(unittest.TestCase):
@@ -33,6 +34,25 @@ class LinearIntermediateTests(unittest.TestCase):
         self.assertTrue(np.array_equal(loaded.valid_mask, mask))
         self.assertEqual(loaded.metadata["scene"], "roundtrip")
         self.assertEqual(loaded.metadata["transfer"], "linear")
+
+    def test_loads_rust_uint8_metadata_member(self) -> None:
+        metadata = {
+            "schema": 1,
+            "color_space": "linear-rec2020-d65",
+            "transfer": "linear",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rust.npz"
+            np.savez(
+                path,
+                rgb=np.zeros((2, 3, 3), dtype=np.float32),
+                metadata_json=np.frombuffer(
+                    json.dumps(metadata).encode("utf-8"), dtype=np.uint8
+                ),
+            )
+            loaded = load_linear_image(path, color_space="linear-rec2020-d65")
+        self.assertEqual(loaded.rgb.shape, (2, 3, 3))
+        self.assertEqual(loaded.metadata["schema"], 1)
 
     def test_rejects_camera_rgb_for_delta_e(self) -> None:
         image = LinearImage(np.zeros((40, 40, 3), dtype=np.float32), "camera-rgb")
@@ -62,6 +82,8 @@ class MetricTests(unittest.TestCase):
             "delta_e00_mean",
             "delta_e00_p95",
             "edge_rmse_rel",
+            "edge_response_p95_rel",
+            "edge_response_gain_error",
             "zippering_p95",
             "false_color_p95",
             "noise_sigma_rel",
@@ -90,6 +112,44 @@ class MetricTests(unittest.TestCase):
             metrics, {"zippering_p95": 0.01, "false_color_p95": 0.5}
         )
         self.assertEqual(len(failures), 2)
+
+    def test_edge_response_loss_is_detected(self) -> None:
+        reference = synthetic_linear_image()
+        box = np.full((3, 3), 1.0 / 9.0, dtype=np.float64)
+        blurred = np.stack(
+            [convolve2d(reference.rgb[..., channel], box) for channel in range(3)],
+            axis=-1,
+        ).astype(np.float32)
+        candidate = LinearImage(blurred, reference.color_space)
+        metrics = compare_images(
+            reference,
+            candidate,
+            rois=[Roi("edge", 36, 4, 28, 88)],
+            border=2,
+        )
+        self.assertGreater(metrics["edge_response_p95_rel"], 0.05)
+        self.assertGreater(metrics["edge_response_gain_error"], 0.02)
+
+    def test_highlight_retention_metrics_detect_clipping_change(self) -> None:
+        reference_rgb = synthetic_linear_image().rgb.copy()
+        reference_rgb[64:90, 64:90, 0] = 1.8
+        reference_rgb[64:90, 64:90, 1] = 1.2
+        reference_rgb[64:90, 64:90, 2] = 0.7
+        reference = LinearImage(reference_rgb, "linear-rec2020-d65")
+        candidate_rgb = reference_rgb.copy()
+        candidate_rgb[64:90, 64:90, :] = np.minimum(
+            candidate_rgb[64:90, 64:90, :], 1.0
+        )
+        candidate = LinearImage(candidate_rgb, reference.color_space)
+        metrics = compare_images(
+            reference,
+            candidate,
+            rois=[Roi("highlight", 64, 64, 26, 26)],
+            border=2,
+        )
+        self.assertGreater(metrics["highlight_luma_rmse_rel"], 0.05)
+        self.assertGreater(metrics["highlight_peak_rel_error"], 0.05)
+        self.assertGreater(metrics["highlight_clipped_fraction_delta"], 0.05)
 
     def test_noise_change_is_detected_in_flat_roi(self) -> None:
         reference = synthetic_linear_image(noise=0.002)
@@ -143,6 +203,36 @@ scenes:
             raw.write_bytes(b"changed")
             errors = validate_manifest(manifest, verify_files=True)
             self.assertTrue(any("SHA-256 mismatch" in error for error in errors))
+
+
+class ReferenceEngineTests(unittest.TestCase):
+    def test_checked_in_history_hashes_are_valid(self) -> None:
+        config = load_reference_engines(ROOT / "regression/reference-engines.yaml")
+        self.assertEqual(validate_reference_engines(config), [])
+
+    def test_history_hash_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "history.yaml"
+            history.write_text("schema: 1\n", encoding="utf-8")
+            config_path = root / "engines.yaml"
+            config_path.write_text(
+                """schema: 1
+engines:
+  test:
+    version: 1.0
+    source_revision: abc
+    source_sha256: null
+    version_command: [test, --version]
+    version_output_contains: 1.0
+    history: history.yaml
+    history_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+""",
+                encoding="utf-8",
+            )
+            config = load_reference_engines(config_path)
+            errors = validate_reference_engines(config)
+        self.assertTrue(any("processing-history SHA-256 mismatch" in error for error in errors))
 
 
 def synthetic_linear_image(noise: float = 0.0) -> LinearImage:

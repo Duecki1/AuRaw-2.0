@@ -155,9 +155,14 @@ def compare_images(
     if not np.any(edge_mask):
         edge_mask = valid
     edge_scale = max(float(np.sqrt(np.mean(np.square(ref_edge[edge_mask])))), 1e-8)
-    edge_rmse_rel = float(
-        np.sqrt(np.mean(np.square(cand_edge[edge_mask] - ref_edge[edge_mask]))) / edge_scale
+    edge_difference = cand_edge[edge_mask] - ref_edge[edge_mask]
+    edge_rmse_rel = float(np.sqrt(np.mean(np.square(edge_difference))) / edge_scale)
+    edge_response_p95_rel = float(
+        np.percentile(np.abs(edge_difference), 95.0)
+        / max(float(np.percentile(ref_edge[edge_mask], 95.0)), 1e-8)
     )
+    edge_response_ratio = cand_edge[edge_mask] / np.maximum(ref_edge[edge_mask], 1e-8)
+    edge_response_gain_error = float(abs(np.median(edge_response_ratio) - 1.0))
     dot = ref_gx * cand_gx + ref_gy * cand_gy
     denom = np.maximum(ref_edge * cand_edge, 1e-12)
     angle = np.degrees(np.arccos(np.clip(dot / denom, -1.0, 1.0)))
@@ -195,6 +200,8 @@ def compare_images(
         "delta_e00_p95": float(np.percentile(delta_e[general_mask], 95.0)),
         "delta_e00_max": float(np.max(delta_e[general_mask])),
         "edge_rmse_rel": edge_rmse_rel,
+        "edge_response_p95_rel": edge_response_p95_rel,
+        "edge_response_gain_error": edge_response_gain_error,
         "edge_angle_p95_deg": float(np.percentile(angle[edge_mask], 95.0)),
         "zippering_p95": float(np.percentile(zipper_response[edge_mask] / zipper_scale, 95.0)),
         "false_color_p95": float(np.percentile(chroma_delta_lab[neutral_edge_mask], 95.0)),
@@ -210,6 +217,34 @@ def compare_images(
             np.percentile(delta_e[highlight_roi_mask], 95.0)
         )
         metrics["highlight_max_abs"] = float(np.max(abs_residual[highlight_roi_mask]))
+        highlight_ref_y = ref_y[highlight_roi_mask]
+        highlight_cand_y = cand_y[highlight_roi_mask]
+        highlight_luma_scale = max(
+            float(np.sqrt(np.mean(np.square(highlight_ref_y)))), 1e-8
+        )
+        metrics["highlight_luma_rmse_rel"] = float(
+            np.sqrt(np.mean(np.square(highlight_cand_y - highlight_ref_y)))
+            / highlight_luma_scale
+        )
+        reference_peak = float(np.percentile(highlight_ref_y, 99.0))
+        candidate_peak = float(np.percentile(highlight_cand_y, 99.0))
+        metrics["highlight_peak_rel_error"] = float(
+            abs(candidate_peak - reference_peak) / max(abs(reference_peak), 1e-8)
+        )
+        reference_highlight_rgb = ref[highlight_roi_mask]
+        candidate_highlight_rgb = cand[highlight_roi_mask]
+        clip_threshold = max(
+            float(np.percentile(reference_highlight_rgb, 99.0)) * 0.99, 1e-8
+        )
+        reference_clipped_fraction = float(
+            np.mean(reference_highlight_rgb >= clip_threshold)
+        )
+        candidate_clipped_fraction = float(
+            np.mean(candidate_highlight_rgb >= clip_threshold)
+        )
+        metrics["highlight_clipped_fraction_delta"] = abs(
+            candidate_clipped_fraction - reference_clipped_fraction
+        )
     return metrics
 
 

@@ -101,7 +101,7 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     fn empty(ctx: &egui::Context) -> Self {
-        let exposure = ExposureParams::default();
+        let exposure = ExposureParams::scene_referred_default();
         Self {
             current_path: None,
             loaded_raw: None,
@@ -135,7 +135,7 @@ impl AurawApp {
     ) -> Self {
         crate::android::install_context(&cc.egui_ctx);
         Self::install_lightroom_visuals(&cc.egui_ctx);
-        let exposure = ExposureParams::default();
+        let exposure = ExposureParams::scene_referred_default();
         Self {
             current_path: None,
             loaded_raw: None,
@@ -196,6 +196,24 @@ impl AurawApp {
         self.open_path_labeled(path, label, false, frame);
     }
 
+    fn new_image_exposure(&self) -> ExposureParams {
+        let previous = self.exposure;
+        let mut exposure = ExposureParams::scene_referred_default();
+
+        // These controls are application-level reconstruction preferences.
+        // Creative and per-image calibration controls must not leak from the
+        // previously opened photograph into a new RAW.
+        exposure.highlight_method = previous.highlight_method;
+        exposure.highlight_clip = previous.highlight_clip;
+        exposure.highlight_reconstruction = previous.highlight_reconstruction;
+        exposure.highlight_iterations = previous.highlight_iterations;
+        exposure.highlight_color_adaptation = previous.highlight_color_adaptation;
+        exposure.demosaic_mode = previous.demosaic_mode;
+        exposure.dual_threshold = previous.dual_threshold;
+        exposure.frequency_chroma = previous.frequency_chroma;
+        exposure
+    }
+
     fn open_path_labeled(
         &mut self,
         path: PathBuf,
@@ -211,7 +229,10 @@ impl AurawApp {
 
         let device = render_state.device.clone();
         let queue = render_state.queue.clone();
-        let initial_exposure = self.exposure;
+        let initial_exposure = self.new_image_exposure();
+        self.exposure = initial_exposure;
+        self.target_exposure = initial_exposure;
+        self.pending_stage = None;
         let source_path = (!delete_after_decode).then_some(path.clone());
         let repaint = self.egui_ctx.clone();
         let (sender, receiver) = mpsc::channel();
@@ -240,12 +261,20 @@ impl AurawApp {
                         Arc::new(build_proxy(&full_raw, preview_spec))
                     };
                     let params = GpuParams::new(&initial_exposure, &preview_raw);
+                    // Desktop has enough bandwidth for the 32-bit working
+                    // path. Keep the half-float preview only on Android, where
+                    // memory pressure is materially higher.
+                    let preview_quality = if cfg!(target_os = "android") {
+                        ProcessingQuality::Preview
+                    } else {
+                        ProcessingQuality::High
+                    };
                     let pipeline = RawGpuPipeline::new_headless_with_quality(
                         &device,
                         &queue,
                         &preview_raw,
                         &params,
-                        ProcessingQuality::Preview,
+                        preview_quality,
                     )
                     .map_err(|error| format!("GPU preview setup failed: {error:#}"))?;
                     pipeline.recompute(&queue, &device, &params);
@@ -520,7 +549,7 @@ impl AurawApp {
 
     pub(crate) fn reset_develop_adjustments(&mut self) {
         let previous = self.exposure;
-        self.exposure = ExposureParams::default();
+        self.exposure = ExposureParams::scene_referred_default();
 
         // Highlight reconstruction is an application-level processing preference,
         // not one of the Lightroom-style Develop adjustments.

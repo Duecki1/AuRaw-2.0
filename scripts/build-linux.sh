@@ -17,10 +17,12 @@ unset CARGO_BUILD_TARGET CARGO_ENCODED_RUSTFLAGS RUSTFLAGS RUSTDOCFLAGS
 
 cargo build --locked --release --manifest-path "$ROOT/Cargo.toml"
 test -f "$ROOT/target/release/auraw"
+test -f "$ROOT/target/release/auraw-regression-render"
 
 if ! FINAL_REVISION=$("$ROOT/scripts/verify-source-revision.sh") \
     || [ "$FINAL_REVISION" != "$REVISION" ]; then
-    rm -f "$ROOT/target/release/auraw"
+    rm -f "$ROOT/target/release/auraw" \
+        "$ROOT/target/release/auraw-regression-render"
     echo "source changed during the build; discarded the Linux binary" >&2
     exit 1
 fi

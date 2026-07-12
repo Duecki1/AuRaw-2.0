@@ -6,6 +6,10 @@
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
 
 const DISPLAY_SHOULDER_START: f32 = 0.94;
+// Match the modern darktable sigmoid rendition at the neutral UI setting.
+// The user Contrast slider scales around this photographic baseline rather
+// than around a mathematically flat 1.0 slope.
+const DEFAULT_MIDDLE_GREY_CONTRAST: f32 = 1.5;
 
 fn schlick_bias(value: f32, shape: f32) -> f32 {
     let x = clamp(value, 0.0, 1.0);
@@ -125,7 +129,7 @@ fn scene_to_display_luminance(scene_luminance: f32, local_ev: f32) -> f32 {
 
     // Stronger than the old one-stop full-range mapping so a Lightroom-style
     // +/-100 Contrast control has an obvious but bounded effect.
-    let middle_slope = exp2(1.55 * contrast);
+    let middle_slope = DEFAULT_MIDDLE_GREY_CONTRAST * exp2(1.55 * contrast);
     let shadow_shape = clamp(
         middle_slope * middle_position / DISPLAY_MIDDLE_GREY
             * exp2(-0.70 * shadows),
@@ -188,5 +192,9 @@ fn display_render(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     // final 3D LUT is generated from the selected ICC display/output profile,
     // including its transfer curves and rendering intent.
     let mapped = scene_to_display(rgb, pos);
-    return apply_output_lut(mapped);
+    // The ICC cube is defined only on [0, 1]^3. Softly compress display-linear
+    // channel excursions first; clamping the LUT coordinates directly creates
+    // hard hue shifts in saturated highlights.
+    let gamut_mapped = compress_display_gamut(mapped);
+    return apply_output_lut(gamut_mapped);
 }
