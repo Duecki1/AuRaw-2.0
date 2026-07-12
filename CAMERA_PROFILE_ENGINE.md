@@ -12,7 +12,7 @@ AuRaw now keeps camera characterization, creative DCP stages, and display/output
 6. The DCP LookTable and profile tone curve run before the adaptive scene-to-display transform.
 7. A replaceable 33³ ICC output LUT converts display-referred linear Rec.2020 to encoded device RGB.
 
-Adaptive tone analysis uses the same HueSat/default-exposure input as final rendering, while deliberately ignoring the user's live Exposure slider so histogram bounds remain stable.
+Adaptive tone analysis includes the fixed HueSat map, DNG default exposure, LookTable, and profile tone curve used by final rendering, while deliberately ignoring the user's live Exposure slider so histogram bounds remain stable.
 
 ## Public API
 

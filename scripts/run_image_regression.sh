@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="${AURAW_REGRESSION_MANIFEST:-$ROOT/regression/corpus.yaml}"
 THRESHOLDS="${AURAW_REGRESSION_THRESHOLDS:-$ROOT/regression/thresholds.yaml}"
+REFERENCE_ENGINES="${AURAW_REFERENCE_ENGINES:-$ROOT/regression/reference-engines.yaml}"
 REFERENCE_ENGINE="${AURAW_REFERENCE_ENGINE:-darktable}"
 REFERENCE_ROOT="${AURAW_REFERENCE_ROOT:-$ROOT/regression/references/$REFERENCE_ENGINE}"
 OUTPUT_ROOT="${AURAW_REGRESSION_OUTPUT_ROOT:-$ROOT/regression/candidates}"
@@ -13,6 +14,8 @@ REPORT_ROOT="${AURAW_REGRESSION_REPORT_ROOT:-$ROOT/regression/reports}"
 
 python3 "$ROOT/scripts/image_regression.py" validate-corpus \
   --manifest "$MANIFEST" --verify-files
+python3 "$ROOT/scripts/image_regression.py" validate-reference-engines \
+  --config "$REFERENCE_ENGINES"
 
 python3 "$ROOT/scripts/image_regression.py" render \
   --manifest "$MANIFEST" --backend cpu \
@@ -42,6 +45,7 @@ for backend in cpu gpu; do
     --reference-root "$REFERENCE_ROOT" \
     --candidate-root "$OUTPUT_ROOT/$backend/run-1" \
     --backend "$backend" --reference-engine "$REFERENCE_ENGINE" \
+    --reference-engines "$REFERENCE_ENGINES" \
     --report-dir "$REPORT_ROOT/$backend-vs-$REFERENCE_ENGINE"
 done
 

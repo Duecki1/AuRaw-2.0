@@ -2,6 +2,7 @@
 mod android;
 mod app;
 pub mod pipeline;
+pub mod regression;
 mod ui;
 
 pub use app::AurawApp;

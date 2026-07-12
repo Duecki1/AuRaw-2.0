@@ -100,6 +100,20 @@ pub struct ExposureParams {
     pub hsl_luminance: [f32; 8],
 }
 
+/// Exposure lift used for a newly opened image in the modern scene-referred
+/// workflow. `Default` remains a neutral processing state so regression and
+/// API callers can explicitly request an unmodified linear rendering.
+pub const DEFAULT_SCENE_EXPOSURE_EV: f32 = 0.7;
+
+impl ExposureParams {
+    pub fn scene_referred_default() -> Self {
+        Self {
+            exposure: DEFAULT_SCENE_EXPOSURE_EV,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for ExposureParams {
     fn default() -> Self {
         Self {
@@ -135,7 +149,7 @@ impl Default for ExposureParams {
 
 #[cfg(test)]
 mod tests {
-    use super::{DemosaicMode, ExposureParams};
+    use super::{DemosaicMode, ExposureParams, DEFAULT_SCENE_EXPOSURE_EV};
 
     #[test]
     fn reference_demosaic_is_the_default() {
@@ -143,6 +157,20 @@ mod tests {
         assert_eq!(params.demosaic_mode, DemosaicMode::Reference);
         assert_eq!(params.dual_threshold, 20.0);
         assert_eq!(params.frequency_chroma, 1.0);
+    }
+
+    #[test]
+    fn neutral_default_and_initial_rendition_are_distinct() {
+        let neutral = ExposureParams::default();
+        assert_eq!(neutral.exposure, 0.0);
+        assert_eq!(neutral.black_point, 0.0);
+
+        let rendition = ExposureParams::scene_referred_default();
+        assert_eq!(rendition.exposure, DEFAULT_SCENE_EXPOSURE_EV);
+        assert_eq!(rendition.black_point, 0.0);
+        assert_eq!(rendition.contrast, 0.0);
+        assert_eq!(rendition.saturation, 0.0);
+        assert_eq!(rendition.vibrance, 0.0);
     }
 
     #[test]

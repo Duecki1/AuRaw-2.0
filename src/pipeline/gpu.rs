@@ -187,6 +187,16 @@ const SHADER_TONE_ANALYSIS: &str = concat!(
     include_str!("../shaders/tone_analysis.wgsl")
 );
 
+const SHADER_REGRESSION_SCENE: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/profile.wgsl"),
+    "\n",
+    include_str!("../shaders/regression_scene.wgsl")
+);
+
 const SHADER_ADJUSTMENTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
@@ -352,7 +362,8 @@ pub struct RawGpuPipeline {
     _highlight_work_b: wgpu::Texture,
     _tex1: wgpu::Texture,
     _tex2: wgpu::Texture,
-    _scene_texture: wgpu::Texture,
+    scene_texture: wgpu::Texture,
+    scene_format: wgpu::TextureFormat,
     tone_stats_buffer: wgpu::Buffer,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
@@ -1538,7 +1549,8 @@ impl RawGpuPipeline {
             _highlight_work_b: highlight_work_b,
             _tex1: tex1,
             _tex2: tex2,
-            _scene_texture: scene_texture,
+            scene_texture,
+            scene_format: demosaic_format,
             tone_stats_buffer,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
@@ -1817,6 +1829,177 @@ impl RawGpuPipeline {
         Ok(rgba)
     }
 
+    /// Reads the internal demosaiced scene texture as tightly packed RGB32F.
+    /// The raw stage must have been submitted before this call. Regression
+    /// renders use `ProcessingQuality::High`, because half-float preview
+    /// intermediates are intentionally rejected rather than silently widened.
+    pub fn read_scene_texture_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Vec<f32>> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "scene texture readback requires ProcessingQuality::High (RGBA32Float), got {:?}",
+                self.scene_format
+            ));
+        }
+        read_rgba32_texture_rgb_blocking(
+            device,
+            queue,
+            &self.scene_texture,
+            self.width,
+            self.height,
+            "auraw scene texture readback",
+        )
+    }
+
+    /// Runs the raw stage and converts its camera-RGB scene texture into the
+    /// canonical scene-linear Rec.2020 representation used by the regression
+    /// harness. This deliberately stops before creative look/tone modules and
+    /// before the display transform.
+    pub fn render_regression_scene_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: &GpuParams,
+    ) -> Result<Vec<f32>> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "regression scene rendering requires ProcessingQuality::High (RGBA32Float)"
+            ));
+        }
+
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let size = texture_size(self.width, self.height);
+        let working_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw regression scene-linear Rec.2020"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[wgpu::TextureFormat::Rgba32Float],
+        });
+        let working_view = working_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_view = self
+            .scene_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let raw_view = self.raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_view = self
+            .color_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let black_view = self
+            .black_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("auraw regression scene layout"),
+            entries: &[
+                buffer_entry(0),
+                texture_entry(1, wgpu::TextureSampleType::Uint),
+                texture_entry(2, wgpu::TextureSampleType::Uint),
+                texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_texture_entry(
+                    12,
+                    wgpu::TextureFormat::Rgba32Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
+                storage_buffer_entry(20, true),
+            ],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("auraw regression scene bind group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&working_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: self.profile_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("auraw regression scene shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_REGRESSION_SCENE.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("auraw regression scene pipeline layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("auraw regression scene pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("write_regression_scene"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let (readback, padded_bytes_per_row) = create_rgba32_readback_buffer(
+            device,
+            self.width,
+            self.height,
+            "auraw regression readback",
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw regression scene encoder"),
+        });
+        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("auraw regression scene conversion"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+        }
+        encode_rgba32_texture_copy(
+            &mut encoder,
+            &working_texture,
+            &readback,
+            self.width,
+            self.height,
+            padded_bytes_per_row,
+        );
+        let submission = queue.submit(Some(encoder.finish()));
+        map_rgba32_readback_rgb(
+            device,
+            &readback,
+            submission,
+            self.width,
+            self.height,
+            padded_bytes_per_row,
+        )
+    }
+
     fn encode_pass_range(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1834,6 +2017,128 @@ impl RawGpuPipeline {
             pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
     }
+}
+
+fn read_rgba32_texture_rgb_blocking(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    label: &'static str,
+) -> Result<Vec<f32>> {
+    let (readback, padded_bytes_per_row) =
+        create_rgba32_readback_buffer(device, width, height, label);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some(label),
+    });
+    encode_rgba32_texture_copy(
+        &mut encoder,
+        texture,
+        &readback,
+        width,
+        height,
+        padded_bytes_per_row,
+    );
+    let submission = queue.submit(Some(encoder.finish()));
+    map_rgba32_readback_rgb(
+        device,
+        &readback,
+        submission,
+        width,
+        height,
+        padded_bytes_per_row,
+    )
+}
+
+fn create_rgba32_readback_buffer(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    label: &'static str,
+) -> (wgpu::Buffer, u32) {
+    let unpadded_bytes_per_row = width * 16;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: u64::from(padded_bytes_per_row) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    (buffer, padded_bytes_per_row)
+}
+
+fn encode_rgba32_texture_copy(
+    encoder: &mut wgpu::CommandEncoder,
+    texture: &wgpu::Texture,
+    readback: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+) {
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        texture_size(width, height),
+    );
+}
+
+fn map_rgba32_readback_rgb(
+    device: &wgpu::Device,
+    readback: &wgpu::Buffer,
+    submission: wgpu::SubmissionIndex,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+) -> Result<Vec<f32>> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    readback.map_async(wgpu::MapMode::Read, .., move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .map_err(|error| anyhow!("GPU poll failed during scene readback: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| anyhow!("GPU scene readback callback was dropped"))?
+        .map_err(|error| anyhow!("GPU scene readback mapping failed: {error}"))?;
+
+    let mapped = readback.get_mapped_range(..);
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for row in 0..height as usize {
+        let row_start = row * padded_bytes_per_row as usize;
+        for column in 0..width as usize {
+            let pixel_start = row_start + column * 16;
+            for channel in 0..3 {
+                let offset = pixel_start + channel * 4;
+                let bytes: [u8; 4] = mapped[offset..offset + 4]
+                    .try_into()
+                    .expect("RGBA32Float texel is four aligned f32 values");
+                rgb.push(f32::from_le_bytes(bytes));
+            }
+        }
+    }
+    drop(mapped);
+    readback.unmap();
+    if rgb.iter().any(|value| !value.is_finite()) {
+        return Err(anyhow!("scene texture readback contains NaN or infinity"));
+    }
+    Ok(rgb)
 }
 
 fn tone_analysis_scale() -> u32 {
@@ -1884,7 +2189,9 @@ fn create_demosaic_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[format],
     })
 }
@@ -2152,9 +2459,9 @@ mod tests {
         work_shader_source, HighlightWorkSlot, ProcessingQuality,
         HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1,
         SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
-        SHADER_HIGHLIGHTS, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1, SHADER_XTRANS_P2,
-        SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5, SHADER_XTRANS_P6,
-        SHADER_XTRANS_P7,
+        SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
+        SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4,
+        SHADER_XTRANS_P5, SHADER_XTRANS_P6, SHADER_XTRANS_P7,
     };
 
     #[test]
@@ -2173,6 +2480,7 @@ mod tests {
             ("X-Trans accumulation", SHADER_XTRANS_P6),
             ("X-Trans finish", SHADER_XTRANS_P7),
             ("adaptive tone analysis", SHADER_TONE_ANALYSIS),
+            ("regression scene export", SHADER_REGRESSION_SCENE),
             ("Lightroom adjustments", SHADER_ADJUSTMENTS),
         ] {
             let module = naga::front::wgsl::parse_str(source)
@@ -2479,9 +2787,11 @@ mod tests {
     }
 
     #[test]
-    fn gpu_pipeline_creates_with_real_bind_group_layouts_when_an_adapter_exists() {
-        use super::{CfaKind, ExposureParams, LoadedRaw, RawGpuPipeline};
-        use eframe::{egui_wgpu, wgpu};
+    fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
+        use super::{
+            CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline,
+        };
+        use eframe::wgpu;
 
         let instance = wgpu::Instance::default();
         let Ok(adapter) =
@@ -2510,8 +2820,6 @@ mod tests {
             [2, 1, 2, 0, 1, 0],
             [1, 0, 1, 1, 2, 1],
         ];
-        let mut renderer =
-            egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, Default::default());
 
         for cfa_kind in [CfaKind::Bayer, CfaKind::XTrans] {
             let color_indices = (0..height)
@@ -2522,7 +2830,9 @@ mod tests {
                             (1, 1) => 2,
                             _ => 1,
                         },
-                        CfaKind::XTrans => xtrans_pattern[(y % 6) as usize][(x % 6) as usize],
+                        CfaKind::XTrans => {
+                            xtrans_pattern[(y % 6) as usize][(x % 6) as usize]
+                        }
                     })
                 })
                 .collect();
@@ -2549,16 +2859,44 @@ mod tests {
             let params = super::GpuParams::new(&ExposureParams::default(), &raw);
 
             let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let pipeline = RawGpuPipeline::new(&device, &queue, &mut renderer, &raw, &params);
+            let pipeline = RawGpuPipeline::new_headless_with_quality(
+                &device,
+                &queue,
+                &raw,
+                &params,
+                ProcessingQuality::High,
+            );
             let validation_error = pollster::block_on(validation_scope.pop());
-
-            if let Err(error) = pipeline {
-                panic!("{cfa_kind:?} GPU pipeline creation failed: {error:#}");
-            }
+            let pipeline = pipeline.unwrap_or_else(|error| {
+                panic!("{cfa_kind:?} GPU pipeline creation failed: {error:#}")
+            });
             assert!(
                 validation_error.is_none(),
                 "{cfa_kind:?} wgpu layout/shader validation failed: {validation_error:?}"
             );
+
+            let regression_validation_scope =
+                device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let regression = pipeline.render_regression_scene_blocking(&device, &queue, &params);
+            let regression_validation_error =
+                pollster::block_on(regression_validation_scope.pop());
+            let regression = regression.unwrap_or_else(|error| {
+                panic!("{cfa_kind:?} regression scene render failed: {error:#}")
+            });
+            assert!(
+                regression_validation_error.is_none(),
+                "{cfa_kind:?} regression shader validation failed: {regression_validation_error:?}"
+            );
+            assert_eq!(regression.len(), (width * height * 3) as usize);
+            assert!(regression.iter().all(|value| value.is_finite()));
+
+            let camera_scene = pipeline
+                .read_scene_texture_blocking(&device, &queue)
+                .unwrap_or_else(|error| {
+                    panic!("{cfa_kind:?} scene texture readback failed: {error:#}")
+                });
+            assert_eq!(camera_scene.len(), (width * height * 3) as usize);
+            assert!(camera_scene.iter().all(|value| value.is_finite()));
         }
     }
 }

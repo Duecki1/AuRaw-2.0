@@ -273,13 +273,27 @@ def main() -> int:
     )
     c.require_in_order(
         tone_analysis,
-        ["apply_profile_hue_sat(working)", "exp2(profile_exposure_ev)"],
-        "adaptive histogram includes HueSat and DNG default exposure",
+        [
+            "apply_profile_hue_sat(working)",
+            "exp2(profile_exposure_ev)",
+            "apply_profile_look(exposed)",
+            "apply_profile_tone_curve(looked)",
+        ],
+        "adaptive histogram includes all fixed DCP rendering stages",
+    )
+    c.check(
+        "const DEFAULT_MIDDLE_GREY_CONTRAST: f32 = 1.5" in tonemap
+        and "DEFAULT_MIDDLE_GREY_CONTRAST * exp2(1.55 * contrast)" in tonemap,
+        "neutral display transform uses the 1.5 photographic contrast baseline",
     )
     c.require_in_order(
         tonemap,
-        ["scene_to_display(rgb, pos)", "apply_output_lut(mapped)"],
-        "ICC LUT runs after scene-to-display tone mapping",
+        [
+            "scene_to_display(rgb, pos)",
+            "compress_display_gamut(mapped)",
+            "apply_output_lut(gamut_mapped)",
+        ],
+        "display gamut is compressed before the bounded ICC LUT",
     )
 
     c.check('signature == *b"IIRC" || signature == *b"MMCR"' in rust_profile, "standalone DCP camera-profile header is recognized")

@@ -16,13 +16,17 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(tone_scene_tex, clamp_pos(pos), 0).xyz;
 
     // Sensor black calibration has already happened per CFA plane. Include
-    // the selected camera profile and DNG default exposure so adaptive scene
-    // bounds match the rendered image, but deliberately omit only the user's
-    // creative Exposure control so the histogram remains stable while it moves.
+    // every fixed camera-profile rendering stage and DNG default exposure so
+    // the adaptive bounds describe the same signal that reaches the display
+    // transform. Deliberately omit only the user's creative Exposure control,
+    // keeping the histogram stable while that slider moves.
     let working = map_negative_gamut(cam_to_working(camera_rgb));
-    let profiled = map_negative_gamut(apply_profile_hue_sat(working));
+    let hue_sat = map_negative_gamut(apply_profile_hue_sat(working));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
-    return max(profiled * exp2(profile_exposure_ev), vec3<f32>(0.0));
+    let exposed = hue_sat * exp2(profile_exposure_ev);
+    let looked = apply_profile_look(exposed);
+    let curved = apply_profile_tone_curve(looked);
+    return max(curved, vec3<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)

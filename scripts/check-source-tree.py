@@ -48,6 +48,10 @@ def declares(module_file: Path, name: str) -> bool:
 for module in sorted(SRC.rglob("*.rs")):
     if module.name in {"lib.rs", "main.rs", "mod.rs"}:
         continue
+    # Files directly under src/bin are Cargo auto-discovered binary roots,
+    # not modules that require a containing mod.rs declaration.
+    if module.parent == SRC / "bin":
+        continue
     owner = SRC / "lib.rs" if module.parent == SRC else module.parent / "mod.rs"
     if not declares(owner, module.stem):
         errors.append(f"stale Rust module not declared by {owner.relative_to(ROOT)}: {module.relative_to(ROOT)}")
