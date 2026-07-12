@@ -1,3 +1,4 @@
+use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, ProcessingStage, RenderingIntent,
 };
@@ -220,7 +221,7 @@ pub struct GpuParams {
     // floats intentionally form one 64-byte scalar block before vec4 fields.
     black_point: f32,
     exposure: f32,
-    contrast: f32,
+    sigmoid_contrast: f32,
     saturation: f32,
     vibrance: f32,
     highlight_clip: f32,
@@ -235,6 +236,8 @@ pub struct GpuParams {
     frequency_chroma: f32,
     _demosaic_reserved: f32,
     basic_tone: [f32; 4],
+    sigmoid_curve: [f32; 4],
+    sigmoid_power: [f32; 4],
     presence: [f32; 4],
     highlight_options: [f32; 4],
     hsl_hue_0: [f32; 4],
@@ -278,10 +281,11 @@ impl GpuParams {
         full_height: u32,
     ) -> Self {
         let profile_layout = raw.camera_profile.gpu_layout();
+        let sigmoid = sigmoid_coefficients(exposure.sigmoid);
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
-            contrast: exposure.contrast,
+            sigmoid_contrast: exposure.sigmoid.contrast,
             saturation: exposure.saturation,
             vibrance: exposure.vibrance,
             highlight_clip: exposure.highlight_clip,
@@ -300,6 +304,18 @@ impl GpuParams {
                 exposure.shadows,
                 exposure.whites,
                 exposure.blacks,
+            ],
+            sigmoid_curve: [
+                sigmoid.white_target,
+                sigmoid.black_target,
+                sigmoid.paper_exposure,
+                sigmoid.film_fog,
+            ],
+            sigmoid_power: [
+                sigmoid.film_power,
+                sigmoid.paper_power,
+                sigmoid.hue_preservation,
+                sigmoid.color_processing,
             ],
             presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
             highlight_options: [
@@ -2622,168 +2638,28 @@ mod tests {
 
     #[test]
     fn gpu_params_follow_the_wgsl_uniform_layout() {
-        // Sixteen active scalar values keep the stable 64-byte prefix,
-        // followed by nine adjustment vec4s, six camera/raw
-        // vec4s, then dimensions/padding. This catches accidental
-        // Rust/WGSL field drift before it turns sliders into random values.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 416);
+        // Sixteen scalar values keep the stable 64-byte prefix. The two
+        // darktable sigmoid vec4s follow the local-tone controls, then the
+        // remaining adjustment, camera/raw, dimension and profile blocks.
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 448);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 96);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 208);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 304);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 312);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 320);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 336);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 400);
-    }
-
-    fn adaptive_tone_curve_cpu(
-        scene_ev: f32,
-        local_ev: f32,
-        contrast: f32,
-        highlights: f32,
-        shadows: f32,
-        whites: f32,
-        blacks: f32,
-        percentiles: [f32; 5],
-    ) -> f32 {
-        const MIDDLE: f32 = 0.1842;
-        const SHOULDER_START: f32 = 0.94;
-
-        fn bias(value: f32, shape: f32) -> f32 {
-            let x = value.clamp(0.0, 1.0);
-            let a = shape.clamp(0.04, 96.0);
-            x / (a + (1.0 - a) * x).max(1e-6)
-        }
-
-        fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
-            let width = (edge1 - edge0).max(1e-4);
-            let x = ((value - edge0) / width).clamp(0.0, 1.0);
-            x * x * (3.0 - 2.0 * x)
-        }
-
-        let robust_black = (percentiles[0] - 0.25).min(percentiles[1] - 0.80);
-        let robust_white = (percentiles[4] + 0.25).max(percentiles[3] + 0.80);
-        let mut base_black = -8.0 * 0.28 + robust_black.clamp(-12.0, -2.0) * 0.72;
-        let mut base_white = 4.0 * 0.28 + robust_white.clamp(1.5, 9.0) * 0.72;
-        if base_white - base_black < 5.5 {
-            let center = percentiles[2].clamp(-1.5, 1.5);
-            base_black = center - 5.5 * 0.58;
-            base_white = center + 5.5 * 0.42;
-        }
-
-        let black_mask = 1.0
-            - smoothstep(percentiles[0] - 0.45, percentiles[1] + 0.30, local_ev);
-        let shadow_mask = 1.0
-            - smoothstep(percentiles[1] - 0.60, percentiles[2] + 0.45, local_ev);
-        let highlight_mask =
-            smoothstep(percentiles[2] - 0.45, percentiles[3] + 0.60, local_ev);
-        let white_mask =
-            smoothstep(percentiles[3] - 0.30, percentiles[4] + 0.45, local_ev);
-
-        let black_ev = base_black - 2.75 * blacks.clamp(-1.0, 1.0);
-        let white_ev = base_white - 2.25 * whites.clamp(-1.0, 1.0);
-        let range_ev = (white_ev - black_ev).max(3.5);
-        let adjusted_ev = scene_ev
-            + 0.60 * blacks * black_mask
-            + 1.35 * shadows * shadow_mask
-            + 1.20 * highlights * highlight_mask
-            + 0.60 * whites * white_mask;
-        let position = ((adjusted_ev - black_ev) / range_ev).clamp(0.0, 1.0);
-        let middle_position = (-black_ev / range_ev).clamp(0.04, 0.96);
-        let middle_slope = 2.0f32.powf(1.55 * contrast.clamp(-1.0, 1.0));
-        let shadow_shape = (middle_slope * middle_position / MIDDLE
-            * 2.0f32.powf(-0.70 * shadows.clamp(-1.0, 1.0)))
-        .clamp(0.04, 96.0);
-        let highlight_shape = ((SHOULDER_START - MIDDLE)
-            / (middle_slope * (1.0 - middle_position)).max(1e-4)
-            * 2.0f32.powf(-0.70 * highlights.clamp(-1.0, 1.0)))
-        .clamp(0.04, 96.0);
-
-        if adjusted_ev > white_ev {
-            let shoulder_length = (3.0
-                - 0.5 * whites.clamp(-1.0, 1.0)
-                - 0.5 * highlights.clamp(-1.0, 1.0))
-                .clamp(2.0, 4.0);
-            let normalized = (adjusted_ev - white_ev) / shoulder_length;
-            return 1.0 - (1.0 - SHOULDER_START) * 2.0f32.powf(-4.0 * normalized);
-        }
-
-        if position <= middle_position {
-            MIDDLE * bias(position / middle_position.max(1e-5), shadow_shape)
-        } else {
-            MIDDLE
-                + (SHOULDER_START - MIDDLE)
-                    * bias(
-                        (position - middle_position)
-                            / (1.0 - middle_position).max(1e-5),
-                        highlight_shape,
-                    )
-        }
+        assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 128);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 240);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 336);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 344);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 352);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 368);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 432);
     }
 
     #[test]
-    fn adaptive_tone_curve_is_monotonic_at_slider_extremes() {
-        let controls = [-1.0f32, 0.0, 1.0];
-        let local_evs = [-9.0f32, -5.0, -1.0, 2.0, 5.0];
-        let percentiles = [-7.5f32, -5.0, -1.2, 2.1, 3.7];
-
-        for &local_ev in &local_evs {
-            for &contrast in &controls {
-                for &highlights in &controls {
-                    for &shadows in &controls {
-                        for &whites in &controls {
-                            for &blacks in &controls {
-                                let mut previous = -1.0f32;
-                                for sample in 0..=480 {
-                                    let scene_ev = -12.0 + sample as f32 * 0.05;
-                                    let mapped = adaptive_tone_curve_cpu(
-                                        scene_ev,
-                                        local_ev,
-                                        contrast,
-                                        highlights,
-                                        shadows,
-                                        whites,
-                                        blacks,
-                                        percentiles,
-                                    );
-                                    assert!(mapped.is_finite());
-                                    assert!((-1e-6..=1.0 + 1e-6).contains(&mapped));
-                                    assert!(
-                                        mapped + 1e-6 >= previous,
-                                        "adaptive tone curve decreased at {scene_ev} EV, local={local_ev},                                          c={contrast}, h={highlights}, s={shadows},                                          w={whites}, b={blacks}: {previous} -> {mapped}"
-                                    );
-                                    previous = mapped;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let middle = adaptive_tone_curve_cpu(
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            percentiles,
-        );
-        assert!((middle - 0.1842).abs() < 1e-5);
-    }
-
-    #[test]
-    fn highlight_shoulder_preserves_headroom_without_a_white_plateau() {
-        let percentiles = [-7.5f32, -5.0, -1.2, 2.1, 3.7];
-        let a = adaptive_tone_curve_cpu(5.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
-        let b = adaptive_tone_curve_cpu(6.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
-        let c = adaptive_tone_curve_cpu(8.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
-
-        assert!(a < b && b < c, "highlight shoulder contains a plateau: {a}, {b}, {c}");
-        assert!(c < 1.0, "highlight shoulder must approach white asymptotically");
+    fn adjustments_shader_contains_darktable_sigmoid_paths() {
+        assert!(SHADER_ADJUSTMENTS.contains("generalized_loglogistic_sigmoid"));
+        assert!(SHADER_ADJUSTMENTS.contains("preserve_hue_and_energy"));
+        assert!(SHADER_ADJUSTMENTS.contains("sigmoid_rgb_ratio"));
+        assert!(SHADER_ADJUSTMENTS.contains("hyperbolic_chroma"));
     }
 
     #[test]

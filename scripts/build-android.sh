@@ -74,7 +74,7 @@ command -v cargo-ndk >/dev/null 2>&1 || {
     echo "cargo-ndk $EXPECTED_CARGO_NDK_VERSION is required. Install it with: cargo install cargo-ndk --version $EXPECTED_CARGO_NDK_VERSION --locked" >&2
     exit 1
 }
-CARGO_NDK_VERSION=$(cargo ndk --version 2>/dev/null | sed -n 's/^cargo-ndk //p')
+CARGO_NDK_VERSION=$(cargo-ndk --version 2>/dev/null | sed -n 's/^cargo-ndk //p')
 if [ "$CARGO_NDK_VERSION" != "$EXPECTED_CARGO_NDK_VERSION" ]; then
     echo "cargo-ndk $EXPECTED_CARGO_NDK_VERSION is required, found ${CARGO_NDK_VERSION:-unknown}" >&2
     exit 1

@@ -1,5 +1,5 @@
 use crate::app::AurawApp;
-use crate::pipeline::{DemosaicMode, ExposureParams};
+use crate::pipeline::{DemosaicMode, ExposureParams, SigmoidColorProcessing};
 use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::layout::ScreenLayout;
 use eframe::egui::{self, Ui};
@@ -69,15 +69,74 @@ impl Sidebar {
                     0.05,
                     None,
                 );
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("darktable sigmoid 5.6").strong());
                 changed |= adjustment_slider(
                     ui,
                     "Contrast",
-                    &mut exposure.contrast,
-                    -100.0..=100.0,
-                    0,
+                    &mut exposure.sigmoid.contrast,
+                    0.1..=10.0,
+                    3,
+                    0.01,
+                    None,
+                );
+                changed |= adjustment_slider(
+                    ui,
+                    "Skew",
+                    &mut exposure.sigmoid.skew,
+                    -1.0..=1.0,
+                    3,
+                    0.01,
+                    None,
+                );
+                changed |= adjustment_slider(
+                    ui,
+                    "Target white (%)",
+                    &mut exposure.sigmoid.display_white_target,
+                    20.0..=1600.0,
+                    1,
                     1.0,
                     None,
                 );
+                changed |= adjustment_slider(
+                    ui,
+                    "Target black (%)",
+                    &mut exposure.sigmoid.display_black_target,
+                    0.0..=15.0,
+                    4,
+                    0.0001,
+                    None,
+                );
+
+                let old_method = exposure.sigmoid.color_processing;
+                egui::ComboBox::from_label("Color processing")
+                    .selected_text(exposure.sigmoid.color_processing.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut exposure.sigmoid.color_processing,
+                            SigmoidColorProcessing::PerChannel,
+                            SigmoidColorProcessing::PerChannel.label(),
+                        );
+                        ui.selectable_value(
+                            &mut exposure.sigmoid.color_processing,
+                            SigmoidColorProcessing::RgbRatio,
+                            SigmoidColorProcessing::RgbRatio.label(),
+                        );
+                    });
+                changed |= old_method != exposure.sigmoid.color_processing;
+
+                if exposure.sigmoid.color_processing == SigmoidColorProcessing::PerChannel {
+                    changed |= adjustment_slider(
+                        ui,
+                        "Preserve hue (%)",
+                        &mut exposure.sigmoid.hue_preservation,
+                        0.0..=100.0,
+                        1,
+                        1.0,
+                        None,
+                    );
+                }
+                ui.separator();
                 changed |= adjustment_slider(
                     ui,
                     "Highlights",

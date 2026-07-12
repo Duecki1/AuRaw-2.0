@@ -16,8 +16,10 @@
 [PASS] profile buffer is visible to tone analysis and final adjustments
 [PASS] profile buffer is bound in both GPU paths
 [PASS] render order is HueSat -> default exposure -> controls -> LookTable -> profile curve -> display transform
-[PASS] adaptive histogram includes HueSat and DNG default exposure
-[PASS] ICC LUT runs after scene-to-display tone mapping
+[PASS] adaptive histogram includes all fixed DCP rendering stages
+[PASS] darktable sigmoid defaults and generalized log-logistic coefficients are present
+[PASS] darktable sigmoid runs before the bounded ICC LUT
+[PASS] both darktable sigmoid color-processing paths are present
 [PASS] standalone DCP camera-profile header is recognized
 [PASS] TIFF reader accepts DCP magic 0x4352
 [PASS] three- and four-plane DCP matrices are accepted
@@ -57,4 +59,4 @@
 [PASS] GPU ICC LUT indexing matches CPU R-fastest packing
 [PASS] CPU ICC LUT indexing matches GPU packing
 
-58/58 camera-profile checks passed
+60/60 camera-profile checks passed

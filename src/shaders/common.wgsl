@@ -5,7 +5,7 @@ struct Params {
     // and demosaic finishing while the stable 64-byte prefix does not move.
     black_point: f32,
     exposure: f32,
-    contrast: f32,
+    sigmoid_contrast: f32,
     saturation: f32,
     vibrance: f32,
     highlight_clip: f32,
@@ -19,9 +19,13 @@ struct Params {
     dual_threshold: f32,
     frequency_chroma: f32,
     _demosaic_reserved: f32,
-    // Highlights, shadows, whites, blacks. Values use the Lightroom-style
-    // -100..100 UI domain and parameterize the adaptive scene-to-display map.
+    // Highlights, shadows, whites, blacks. These are scene-linear local
+    // exposure-shaping controls evaluated before the display transform.
     basic_tone: vec4<f32>,
+    // darktable sigmoid: white target, black target, paper exposure, film fog.
+    sigmoid_curve: vec4<f32>,
+    // darktable sigmoid: film power, paper power, hue preservation, method.
+    sigmoid_power: vec4<f32>,
     // Texture, clarity, dehaze, reserved.
     presence: vec4<f32>,
     // Reconstruction method, guided passes, colour adaptation, reserved.

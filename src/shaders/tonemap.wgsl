@@ -1,31 +1,15 @@
-// One image-adaptive scene-to-display transform. A robust histogram chooses
-// useful scene bounds while a low-resolution bilateral guide gives the Basic
-// tonal controls soft, edge-aware masks. All controls are integrated into this
-// mapping; no second basic-adjustments or filmic curve is applied.
+// darktable sigmoid display transform, ported from darktable 5.6.0
+// src/iop/sigmoid.c and data/kernels/sigmoid.cl.
+// Copyright (C) 2020-2026 darktable developers.
+// Copyright (C) 2026 AuRaw contributors (WGSL port).
+// GPL-3.0-or-later.
+//
+// AuRaw's Highlights/Shadows/Whites/Blacks remain a separate scene-linear,
+// edge-aware exposure-shaping stage. The final scene-to-display transform below
+// is darktable's generalized log-logistic sigmoid and color processing.
+
 @group(0) @binding(16) var<storage, read> tone_stats: ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
-
-const DISPLAY_SHOULDER_START: f32 = 0.94;
-// Match the modern darktable sigmoid rendition at the neutral UI setting.
-// The user Contrast slider scales around this photographic baseline rather
-// than around a mathematically flat 1.0 slope.
-const DEFAULT_MIDDLE_GREY_CONTRAST: f32 = 1.5;
-
-fn schlick_bias(value: f32, shape: f32) -> f32 {
-    let x = clamp(value, 0.0, 1.0);
-    let a = clamp(shape, 0.04, 96.0);
-    return x / max(a + (1.0 - a) * x, 1e-6);
-}
-
-fn highlight_shoulder(adjusted_ev: f32, white_ev: f32, length_ev: f32) -> f32 {
-    let distance = max(adjusted_ev - white_ev, 0.0);
-    let normalized = distance / max(length_ev, 1e-4);
-
-    // Four exponential half-lives fit inside the requested shoulder length.
-    // white_ev is now the shoulder start, not a clipping boundary. Exact
-    // display white is approached asymptotically instead of becoming a plateau.
-    return 1.0 - (1.0 - DISPLAY_SHOULDER_START) * exp2(-4.0 * normalized);
-}
 
 fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
     let guide_size_i = vec2<i32>(textureDimensions(tone_guide_tex));
@@ -55,25 +39,6 @@ fn tone_percentiles() -> TonePercentiles {
     return TonePercentiles(p0.x, p0.y, p0.z, p0.w, p1.x);
 }
 
-fn adaptive_scene_bounds(percentiles: TonePercentiles) -> vec2<f32> {
-    let robust_black = min(percentiles.p005 - 0.25, percentiles.p05 - 0.80);
-    let robust_white = max(percentiles.p995 + 0.25, percentiles.p95 + 0.80);
-
-    // Blend histogram bounds with conservative fixed bounds. This avoids
-    // unstable auto-levels on unusual images while making the default curve
-    // use the photographed range instead of always fitting twelve stops.
-    var black_ev = mix(-8.0, clamp(robust_black, -12.0, -2.0), 0.72);
-    var white_ev = mix(4.0, clamp(robust_white, 1.5, 9.0), 0.72);
-
-    let minimum_range = 5.5;
-    if white_ev - black_ev < minimum_range {
-        let center = clamp(percentiles.p50, -1.5, 1.5);
-        black_ev = center - minimum_range * 0.58;
-        white_ev = center + minimum_range * 0.42;
-    }
-    return vec2<f32>(black_ev, white_ev);
-}
-
 fn adaptive_tone_masks(local_ev: f32, percentiles: TonePercentiles) -> vec4<f32> {
     let black_mask = 1.0 - tone_smoothstep(
         percentiles.p005 - 0.45,
@@ -98,103 +63,187 @@ fn adaptive_tone_masks(local_ev: f32, percentiles: TonePercentiles) -> vec4<f32>
     return vec4<f32>(black_mask, shadow_mask, highlight_mask, white_mask);
 }
 
-fn scene_to_display_luminance(scene_luminance: f32, local_ev: f32) -> f32 {
+fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     let highlights = clamp(params.basic_tone.x / 100.0, -1.0, 1.0);
     let shadows = clamp(params.basic_tone.y / 100.0, -1.0, 1.0);
     let whites = clamp(params.basic_tone.z / 100.0, -1.0, 1.0);
     let blacks = clamp(params.basic_tone.w / 100.0, -1.0, 1.0);
-    let contrast = clamp(params.contrast / 100.0, -1.0, 1.0);
+    if max(max(abs(highlights), abs(shadows)), max(abs(whites), abs(blacks))) < 1e-6 {
+        return rgb;
+    }
 
-    let percentiles = tone_percentiles();
-    let masks = adaptive_tone_masks(local_ev, percentiles);
-    let bounds = adaptive_scene_bounds(percentiles);
-
-    // Whites and Blacks move the robust scene endpoints and also receive a
-    // narrow end-zone lift/crush. Highlights and Shadows act through broader
-    // edge-aware zones. This is still one per-pixel monotonic transform.
-    let black_ev = bounds.x - 2.75 * blacks;
-    let white_ev = bounds.y - 2.25 * whites;
-    let range_ev = max(white_ev - black_ev, 3.5);
-
-    let scene_ev = log2(max(scene_luminance, 1e-8) / SCENE_MIDDLE_GREY);
-    let zone_offset =
-          0.60 * blacks * masks.x
+    let masks = adaptive_tone_masks(sample_tone_guide_ev(pos), tone_percentiles());
+    let offset_ev = 0.60 * blacks * masks.x
         + 1.35 * shadows * masks.y
         + 1.20 * highlights * masks.z
         + 0.60 * whites * masks.w;
-    let adjusted_ev = scene_ev + zone_offset;
-
-    let position = clamp((adjusted_ev - black_ev) / range_ev, 0.0, 1.0);
-    let middle_position = clamp(-black_ev / range_ev, 0.04, 0.96);
-
-    // Stronger than the old one-stop full-range mapping so a Lightroom-style
-    // +/-100 Contrast control has an obvious but bounded effect.
-    let middle_slope = DEFAULT_MIDDLE_GREY_CONTRAST * exp2(1.55 * contrast);
-    let shadow_shape = clamp(
-        middle_slope * middle_position / DISPLAY_MIDDLE_GREY
-            * exp2(-0.70 * shadows),
-        0.04,
-        96.0,
-    );
-    let highlight_shape = clamp(
-        (DISPLAY_SHOULDER_START - DISPLAY_MIDDLE_GREY)
-            / max(middle_slope * (1.0 - middle_position), 1e-4)
-            * exp2(-0.70 * highlights),
-        0.04,
-        96.0,
-    );
-
-    if adjusted_ev > white_ev {
-        // Positive Whites/Highlights make the shoulder a little firmer, while
-        // negative values preserve up to four stops of highlight latitude.
-        let shoulder_length_ev = clamp(
-            3.0 - 0.5 * whites - 0.5 * highlights,
-            2.0,
-            4.0,
-        );
-        return highlight_shoulder(adjusted_ev, white_ev, shoulder_length_ev);
-    }
-
-    if position <= middle_position {
-        let local = position / max(middle_position, 1e-5);
-        return DISPLAY_MIDDLE_GREY * schlick_bias(local, shadow_shape);
-    }
-
-    let local = (position - middle_position) / max(1.0 - middle_position, 1e-5);
-    return DISPLAY_MIDDLE_GREY
-        + (DISPLAY_SHOULDER_START - DISPLAY_MIDDLE_GREY)
-            * schlick_bias(local, highlight_shape);
+    return rgb * exp2(offset_ev);
 }
 
-fn scene_to_display(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
-    let positive = max(rgb, vec3<f32>(0.0));
-    let scene_luminance = safe_luma(positive);
-    let local_ev = sample_tone_guide_ev(pos);
-    let display_luminance = scene_to_display_luminance(scene_luminance, local_ev);
-    return positive * (display_luminance / scene_luminance);
+fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
+    let white_target = params.sigmoid_curve.x;
+    let paper_exposure = params.sigmoid_curve.z;
+    let film_fog = params.sigmoid_curve.w;
+    let film_power = params.sigmoid_power.x;
+    let paper_power = params.sigmoid_power.y;
+
+    let clamped_value = max(value, 0.0);
+    let film_response = pow(film_fog + clamped_value, film_power);
+    let paper_response = white_target
+        * pow(film_response / (paper_exposure + film_response), paper_power);
+    return select(paper_response, white_target, paper_response != paper_response);
 }
 
-fn compress_display_gamut(rgb: vec3<f32>) -> vec3<f32> {
-    let x = max(rgb, vec3<f32>(0.0));
-    let peak = max(max(x.r, x.g), x.b);
-    if peak <= 1.0 {
-        return x;
+fn desaturate_negative_values(rgb: vec3<f32>) -> vec3<f32> {
+    let pixel_average = max((rgb.r + rgb.g + rgb.b) / 3.0, 0.0);
+    let min_value = min(rgb.r, min(rgb.g, rgb.b));
+    let saturation_factor = select(
+        1.0,
+        -pixel_average / (min_value - pixel_average),
+        min_value < 0.0,
+    );
+    return vec3<f32>(pixel_average)
+        + saturation_factor * (rgb - vec3<f32>(pixel_average));
+}
+
+// Returns min, mid, max channel indices, matching darktable's seven cases.
+fn pixel_channel_order(rgb: vec3<f32>) -> vec3<u32> {
+    if rgb.r >= rgb.g {
+        if rgb.g > rgb.b {
+            return vec3<u32>(2u, 1u, 0u);
+        }
+        if rgb.b > rgb.r {
+            return vec3<u32>(1u, 0u, 2u);
+        }
+        if rgb.b > rgb.g {
+            return vec3<u32>(1u, 2u, 0u);
+        }
+        return vec3<u32>(2u, 1u, 0u);
+    }
+    if rgb.r >= rgb.b {
+        return vec3<u32>(2u, 0u, 1u);
+    }
+    if rgb.b > rgb.g {
+        return vec3<u32>(0u, 1u, 2u);
+    }
+    return vec3<u32>(0u, 2u, 1u);
+}
+
+fn preserve_hue_and_energy(
+    pix_in: vec3<f32>,
+    per_channel: vec3<f32>,
+    order: vec3<u32>,
+    hue_preservation: f32,
+) -> vec3<f32> {
+    let min_index = order.x;
+    let mid_index = order.y;
+    let max_index = order.z;
+    let chroma = pix_in[max_index] - pix_in[min_index];
+    let midscale = select(
+        0.0,
+        (pix_in[mid_index] - pix_in[min_index]) / chroma,
+        chroma != 0.0,
+    );
+    let full_hue_correction = per_channel[min_index]
+        + (per_channel[max_index] - per_channel[min_index]) * midscale;
+    let naive_hue_mid = (1.0 - hue_preservation) * per_channel[mid_index]
+        + hue_preservation * full_hue_correction;
+    let per_channel_energy = per_channel.r + per_channel.g + per_channel.b;
+    let naive_hue_energy = per_channel[min_index] + naive_hue_mid + per_channel[max_index];
+    let pix_in_min_plus_mid = pix_in[min_index] + pix_in[mid_index];
+    let blend_factor = select(
+        0.0,
+        2.0 * pix_in[min_index] / pix_in_min_plus_mid,
+        pix_in_min_plus_mid != 0.0,
+    );
+    let energy_target = blend_factor * per_channel_energy
+        + (1.0 - blend_factor) * naive_hue_energy;
+
+    var result = per_channel;
+    if naive_hue_mid <= per_channel[mid_index] {
+        let corrected_mid = ((1.0 - hue_preservation) * per_channel[mid_index]
+            + hue_preservation
+                * (midscale * per_channel[max_index]
+                    + (1.0 - midscale) * (energy_target - per_channel[max_index])))
+            / (1.0 + hue_preservation * (1.0 - midscale));
+        result[min_index] = energy_target - per_channel[max_index] - corrected_mid;
+        result[mid_index] = corrected_mid;
+        result[max_index] = per_channel[max_index];
+    } else {
+        let corrected_mid = ((1.0 - hue_preservation) * per_channel[mid_index]
+            + hue_preservation
+                * (per_channel[min_index] * (1.0 - midscale)
+                    + midscale * (energy_target - per_channel[min_index])))
+            / (1.0 + hue_preservation * midscale);
+        result[min_index] = per_channel[min_index];
+        result[mid_index] = corrected_mid;
+        result[max_index] = energy_target - per_channel[min_index] - corrected_mid;
+    }
+    return result;
+}
+
+fn sigmoid_per_channel(rgb: vec3<f32>) -> vec3<f32> {
+    let positive = desaturate_negative_values(rgb);
+    let per_channel = vec3<f32>(
+        generalized_loglogistic_sigmoid(positive.r),
+        generalized_loglogistic_sigmoid(positive.g),
+        generalized_loglogistic_sigmoid(positive.b),
+    );
+    let order = pixel_channel_order(positive);
+    return preserve_hue_and_energy(
+        positive,
+        per_channel,
+        order,
+        clamp(params.sigmoid_power.z, 0.0, 1.0),
+    );
+}
+
+fn sigmoid_rgb_ratio(rgb: vec3<f32>) -> vec3<f32> {
+    let white_target = params.sigmoid_curve.x;
+    let black_target = params.sigmoid_curve.y;
+    let positive = desaturate_negative_values(rgb);
+    let luma = (positive.r + positive.g + positive.b) / 3.0;
+    let mapped_luma = generalized_loglogistic_sigmoid(luma);
+
+    var pre_out = vec3<f32>(mapped_luma);
+    if luma > 1e-9 {
+        pre_out = positive * (mapped_luma / luma);
     }
 
-    let lum = clamp(safe_luma(x), 0.0, 1.0);
-    let boundary = vec3<f32>(lum);
-    let scale = clamp((1.0 - lum) / max(peak - lum, 1e-6), 0.0, 1.0);
-    return mix(boundary, x, scale);
+    let pixel_min = min(pre_out.r, min(pre_out.g, pre_out.b));
+    let pixel_max = max(pre_out.r, max(pre_out.g, pre_out.b));
+    let epsilon = 1e-6;
+    let display_border_vs_chroma_white =
+        (white_target - mapped_luma) / (pixel_max - mapped_luma + epsilon);
+    let display_border_vs_chroma_black =
+        (black_target - mapped_luma) / (pixel_min - mapped_luma - epsilon);
+    let display_border_vs_chroma = min(
+        display_border_vs_chroma_white,
+        display_border_vs_chroma_black,
+    );
+    let chroma_vs_mapping_border =
+        (mapped_luma - pixel_min) / (mapped_luma + epsilon);
+    let pixel_chroma_adjustment = 1.0
+        / (chroma_vs_mapping_border * display_border_vs_chroma + epsilon);
+    let hyperbolic_chroma = 2.0 * chroma_vs_mapping_border
+        / (1.0 - chroma_vs_mapping_border * chroma_vs_mapping_border + epsilon)
+        * pixel_chroma_adjustment;
+    let hyperbolic_z = sqrt(hyperbolic_chroma * hyperbolic_chroma + 1.0);
+    let chroma_factor = hyperbolic_chroma / (1.0 + hyperbolic_z)
+        * display_border_vs_chroma;
+    return vec3<f32>(mapped_luma)
+        + chroma_factor * (pre_out - vec3<f32>(mapped_luma));
+}
+
+fn darktable_sigmoid(rgb: vec3<f32>) -> vec3<f32> {
+    if params.sigmoid_power.w < 0.5 {
+        return sigmoid_per_channel(rgb);
+    }
+    return sigmoid_rgb_ratio(rgb);
 }
 
 fn display_render(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
-    // The adaptive tone map produces display-referred linear Rec.2020. The
-    // final 3D LUT is generated from the selected ICC display/output profile,
-    // including its transfer curves and rendering intent.
-    let mapped = scene_to_display(rgb, pos);
-    // The ICC cube is defined only on [0, 1]^3. Softly compress display-linear
-    // channel excursions first; clamping the LUT coordinates directly creates
-    // hard hue shifts in saturated highlights.
-    let gamut_mapped = compress_display_gamut(mapped);
-    return apply_output_lut(gamut_mapped);
+    let locally_shaped = apply_local_basic_tone(rgb, pos);
+    let mapped = darktable_sigmoid(locally_shaped);
+    return apply_output_lut(mapped);
 }

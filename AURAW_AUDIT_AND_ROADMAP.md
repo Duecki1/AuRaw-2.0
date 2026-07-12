@@ -32,15 +32,15 @@ This avoids silently changing the meaning of sensor-space `black_point`; darktab
 
 Opening a second RAW reused the full previous `ExposureParams`, including exposure, tone, HSL, clarity, dehaze, CA, and denoise edits. New images now start from the scene-referred rendition while preserving only application-level reconstruction choices (highlight method/settings and demosaic mode/settings).
 
-### 4. Adaptive tone statistics did not analyze the rendered profile signal
+### 4. Tone statistics did not analyze the rendered profile signal
 
-The tone histogram included the DCP HueSat map and baseline exposure but omitted the DCP LookTable and profile tone curve. The adaptive endpoints could therefore be calculated from a different signal than the final render. `tone_analysis.wgsl` now includes all fixed DCP rendering stages and still deliberately excludes the live user Exposure slider so bounds do not move while adjusting exposure.
+The tone histogram included the DCP HueSat map and baseline exposure but omitted the DCP LookTable and profile tone curve. The local Highlights/Shadows/Whites/Blacks masks could therefore be calculated from a different signal than the final render. `tone_analysis.wgsl` now includes all fixed DCP rendering stages and still deliberately excludes the live user Exposure slider so masks do not move while adjusting exposure.
 
-### 5. Saturated display colors were hard-clipped at the ICC LUT boundary
+### 5. The custom display mapper was replaced with darktable sigmoid
 
-`compress_display_gamut()` existed but was not called. Out-of-range display-linear channels were implicitly clamped when sampling the bounded 3D output LUT, which can create hue shifts in bright saturated colors and LEDs. The output path now performs soft display-gamut compression before the ICC LUT.
+The previous percentile-fitted Schlick mapper is no longer the default display transform. AuRaw now ports darktable 5.6.0's generalized log-logistic coefficient construction, target black/white controls, negative-value handling, per-channel hue/energy preservation, RGB-ratio processing, and hyperbolic gamut compression.
 
-This is an interim safeguard, not a substitute for a perceptual, output-profile-aware gamut mapper.
+The port uses darktable's exact default working-primary path. Optional custom-primary attenuation/rotation, purity recovery, and selectable base-primary controls are not exposed; at their defaults they are identity in AuRaw's fixed Rec.2020 working space.
 
 ### 6. Full export used half-float global tone analysis
 
@@ -51,8 +51,10 @@ The tiled full-resolution export rendered tiles in `RGBA32Float` but derived its
 The camera-profile validator now asserts:
 
 - all fixed DCP stages participate in tone analysis,
-- the 1.5 neutral photographic contrast baseline is present,
-- display-gamut compression occurs before the ICC LUT.
+- darktable's 1.5 default contrast and generalized log-logistic coefficient construction are present,
+- both per-channel and RGB-ratio sigmoid paths are present,
+- sigmoid runs before the ICC output LUT, and
+- the expanded Rust/WGSL uniform layout remains synchronized.
 
 ## Why the no-edit starlight preview looked flat
 
@@ -68,13 +70,11 @@ There are several independent causes.
 
 The first four are patched. I did not add arbitrary global saturation because the correct solution is a hue-constant, gamut-safe colorfulness stage rather than an HSL saturation bump.
 
-### Largest remaining cause: the custom image-adaptive tone mapper
+### Former largest cause fixed: the custom image-adaptive tone mapper
 
-AuRaw does not actually use darktable sigmoid or Ansel filmic. Its custom percentile mapper blends every image with fixed `-8 EV`/`+4 EV` bounds, forces at least a 5.5-stop range, and constrains the white endpoint to at least +1.5 EV before blending. For a low-key night image, this can reserve a large part of the display range for highlights that barely exist, leaving stars and the sky low on the curve.
+The percentile-fitted display mapper described in the original audit has been removed from the final scene-to-display path. Image percentiles now drive only the separate local Highlights/Shadows/Whites/Blacks masks. The global view transform is darktable 5.6.0 sigmoid with explicit, image-independent parameters, so low-key files no longer reserve display range according to unrelated percentile endpoints.
 
-Illustrative code-path example only: for percentiles around `p0.5=-12`, `p5=-10`, `p50=-7`, `p95=-3`, `p99.5=-1 EV`, the current formula produces roughly `-10.9 EV` black and `+2.2 EV` white. Even the 99.5th percentile remains over three stops below the white endpoint before the new +0.7 EV default exposure. This is a plausible explanation for a flat low-key preview, but it is not a measurement of the missing starlight file.
-
-**Recommended fix:** port the exact darktable generalized log-logistic sigmoid as the default display transform, including its target black/white, per-channel versus RGB-ratio behavior, hue preservation, and gamut handling. Keep the current percentile auto-level algorithm as an optional “Auto tone” mode rather than the default no-edit rendition. For Ansel matching, add filmic RGB as a second selectable view transform using the pinned Ansel source/history.
+For Ansel matching, filmic RGB remains a separate future view-transform option rather than being blended into sigmoid.
 
 ### Other remaining differences likely visible in starlight/astro RAWs
 
@@ -97,7 +97,7 @@ Illustrative code-path example only: for percentiles around `p0.5=-12`, `p5=-10`
 
 ### P1 — default rendition and color correctness
 
-5. **Port exact darktable sigmoid.** Use the upstream generalized log-logistic equations and parameters, not only the 1.5 slope. Add deterministic golden-vector tests against the C/OpenCL implementation.
+5. **Completed: port exact darktable sigmoid core.** The generalized log-logistic equations, coefficient construction, per-channel hue/energy preservation, RGB-ratio mode, and hyperbolic gamut compression are ported from darktable 5.6.0. Remaining validation work is to add checked-in C/OpenCL golden vectors and expose optional custom-primary controls.
 6. **Add selectable Ansel filmic RGB.** Port its display transform and highlight/color reconstruction behavior as a distinct mode.
 7. **Implement camera exposure-bias compensation.** Store the relevant metadata separately from user exposure and expose an opt-out.
 8. **Implement modern white balance/color calibration.** Separate camera reference white balance from chromatic adaptation; add CAT16/Bradford-style illuminant adaptation, robust temperature/tint controls, dual-illuminant interpolation validation, and optional chart calibration.
@@ -133,16 +133,16 @@ Illustrative code-path example only: for percentiles around `p0.5=-12`, `p5=-10`
 ## Specific code risks still open
 
 - `build_proxy()` necessarily changes sampling statistics before demosaic; it should not be treated as a full-quality image path.
-- Export tone bounds still come from the preview-sized RAW proxy, so rare small highlights can be missed and output can depend on proxy scale. Use a full-resolution reduced histogram or merge per-tile histograms before final rendering.
+- Export local-tone masks still use statistics from the preview-sized RAW proxy, so rare small highlights can be missed when Highlights/Whites/Blacks/Shadows are non-zero. The global sigmoid transform is no longer percentile-fitted.
 - `embedded_camera_icc` is captured but not consumed for input characterization.
 - `set_display_icc_profile()`/`set_output_icc_profile()` are not wired to the desktop/Android environment or UI.
 - The fallback output is hard-coded sRGB unless a caller supplies a LUT.
 - Export is only 8-bit RGBA PNG and has no dithering.
 - The HSL mixer works in linear sRGB HSL and is not perceptually uniform or robust for large edits.
-- The current display gamut compressor is a simple luminance-axis compression in the working cube, not profile-aware perceptual gamut mapping.
+- darktable's RGB-ratio sigmoid mode includes its hyperbolic display-boundary compression, but AuRaw still lacks a general output-profile-aware perceptual gamut mapper for other creative/output operations.
 - `linear_max` versus LibRaw `maximum` handling is plausible but must be validated camera-by-camera. Vendor linearity metadata can differ from the true clipping threshold.
 - Non-square pixels and orientation codes outside 0/3/5/6 are rejected.
-- The archive has no `LICENSE`/`COPYING` file and Cargo package metadata has no `license` field. Add the exact intended SPDX expression and retain upstream copyright/license notices and file-level provenance for copied/converted code.
+- Copied/converted upstream code must continue to retain file-level provenance and compatible GPL notices as the implementation evolves.
 
 ## Verification performed after patches
 
@@ -150,7 +150,7 @@ Passed:
 
 - `python3 -m py_compile scripts/*.py regression/iqr/*.py tests/*.py`
 - `python3 scripts/check-source-tree.py`
-- `python3 scripts/validate_camera_profiles.py` — 59/59
+- `python3 scripts/validate_camera_profiles.py` — 60/60
 - `python3 scripts/validate_demosaic.py` — 26/26
 - `python3 -m unittest discover -s tests -v` — 12/12
 
@@ -170,17 +170,27 @@ Not run in this environment:
 
 - `src/app.rs`
 - `src/pipeline/basicadj.rs`
+- `src/pipeline/sigmoid.rs`
+- `src/pipeline/gpu.rs`
+- `src/ui/sidebar.rs`
+- `src/shaders/common.wgsl`
+- `src/shaders/basic_adjustments.wgsl`
 - `src/pipeline/export.rs`
 - `src/shaders/tone_analysis.wgsl`
 - `src/shaders/tonemap.wgsl`
 - `scripts/validate_camera_profiles.py`
 - `PROCESSING_ARCHITECTURE.md`
 - `CAMERA_PROFILE_ENGINE.md`
+- `DARKTABLE_SIGMOID.md`
+- `THIRD_PARTY_NOTICES.md`
+- `COPYING`
+- `Cargo.toml`
 - this audit document
 
 ## Primary upstream references consulted
 
-- darktable sigmoid source: https://github.com/darktable-org/darktable/blob/master/src/iop/sigmoid.c
+- darktable 5.6.0 sigmoid CPU source: https://github.com/darktable-org/darktable/blob/release-5.6.0/src/iop/sigmoid.c
+- darktable 5.6.0 sigmoid OpenCL source: https://github.com/darktable-org/darktable/blob/release-5.6.0/data/kernels/sigmoid.cl
 - darktable processing and module documentation: https://docs.darktable.org/usermanual/development/en/
 - darktable demosaic/capture sharpening: https://docs.darktable.org/usermanual/development/en/module-reference/processing-modules/demosaic/
 - darktable highlight reconstruction: https://docs.darktable.org/usermanual/development/en/module-reference/processing-modules/highlight-reconstruction/

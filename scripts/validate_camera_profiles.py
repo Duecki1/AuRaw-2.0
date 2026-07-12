@@ -281,19 +281,27 @@ def main() -> int:
         ],
         "adaptive histogram includes all fixed DCP rendering stages",
     )
+    sigmoid_rust = read("src/pipeline/sigmoid.rs")
     c.check(
-        "const DEFAULT_MIDDLE_GREY_CONTRAST: f32 = 1.5" in tonemap
-        and "DEFAULT_MIDDLE_GREY_CONTRAST * exp2(1.55 * contrast)" in tonemap,
-        "neutral display transform uses the 1.5 photographic contrast baseline",
+        "contrast: 1.5" in sigmoid_rust
+        and "pub const MIDDLE_GREY: f32 = 0.1845" in sigmoid_rust
+        and "5.0f32.powf(-skew)" in sigmoid_rust,
+        "darktable sigmoid defaults and generalized log-logistic coefficients are present",
     )
     c.require_in_order(
         tonemap,
         [
-            "scene_to_display(rgb, pos)",
-            "compress_display_gamut(mapped)",
-            "apply_output_lut(gamut_mapped)",
+            "let locally_shaped = apply_local_basic_tone(rgb, pos)",
+            "let mapped = darktable_sigmoid(locally_shaped)",
+            "apply_output_lut(mapped)",
         ],
-        "display gamut is compressed before the bounded ICC LUT",
+        "darktable sigmoid runs before the bounded ICC LUT",
+    )
+    c.check(
+        "preserve_hue_and_energy" in tonemap
+        and "hyperbolic_chroma" in tonemap
+        and "sigmoid_rgb_ratio" in tonemap,
+        "both darktable sigmoid color-processing paths are present",
     )
 
     c.check('signature == *b"IIRC" || signature == *b"MMCR"' in rust_profile, "standalone DCP camera-profile header is recognized")
@@ -337,9 +345,11 @@ def main() -> int:
         "LibRaw's missing BaselineExposure sentinel cannot black out proprietary RAW previews",
     )
     c.check(
-        "size_of::<super::GpuParams>(), 416" in gpu
-        and "offset_of!(super::GpuParams, profile_hue_sat), 336" in gpu
-        and "offset_of!(super::GpuParams, profile_flags), 400" in gpu,
+        "size_of::<super::GpuParams>(), 448" in gpu
+        and "offset_of!(super::GpuParams, sigmoid_curve), 80" in gpu
+        and "offset_of!(super::GpuParams, sigmoid_power), 96" in gpu
+        and "offset_of!(super::GpuParams, profile_hue_sat), 368" in gpu
+        and "offset_of!(super::GpuParams, profile_flags), 432" in gpu,
         "camera-profile uniform ABI regression test covers the appended metadata block",
     )
 
