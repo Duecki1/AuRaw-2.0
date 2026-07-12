@@ -40,13 +40,21 @@ def rustAbi = providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")
 def repositoryRoot = rootProject.projectDir.parentFile
 def buildRustEnabled = providers.gradleProperty("aurawBuildRust").map { it.toBoolean() }.getOrElse(true)
 
-tasks.register("buildRust", Exec) {
+tasks.register("buildRustDebug", Exec) {
+    workingDir repositoryRoot
+    commandLine "sh", new File(repositoryRoot, "scripts/build-android.sh"), rustAbi, "debug"
+}
+
+tasks.register("buildRustRelease", Exec) {
     workingDir repositoryRoot
     commandLine "sh", new File(repositoryRoot, "scripts/build-android.sh"), rustAbi, "release"
 }
 
 if (buildRustEnabled) {
-    tasks.named("preBuild").configure {
-        dependsOn("buildRust")
+    tasks.matching { it.name == "preDebugBuild" }.configureEach {
+        dependsOn("buildRustDebug")
+    }
+    tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+        dependsOn("buildRustRelease")
     }
 }
