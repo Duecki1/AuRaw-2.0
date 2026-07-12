@@ -25,6 +25,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Restore Linux build cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            /tmp/auraw-libraw
+            /tmp/linuxdeploy-x86_64.AppImage
+          key: auraw-linux-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-libraw-823f25d-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs') }}
+          restore-keys: |
+            auraw-linux-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-libraw-823f25d-
+
       - name: Install Linux build dependencies
         shell: bash
         run: |
@@ -91,21 +104,27 @@ jobs:
           # Match the LibRaw checkout and default Autotools configuration
           # installed in /usr/local on the development PC.
           LIBRAW_REVISION=823f25dae9b86bf4504511ee42252ebc8d5513b1
-          rm -rf /tmp/auraw-libraw-src "$LIBRAW_PREFIX"
-          mkdir -p /tmp/auraw-libraw-src
-          download \
-            "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_REVISION.tar.gz" \
-            /tmp/auraw-libraw.tar.gz
-          tar -xzf /tmp/auraw-libraw.tar.gz \
-            --strip-components=1 \
-            -C /tmp/auraw-libraw-src
-          (
-            cd /tmp/auraw-libraw-src
-            autoreconf --install --force
-            ./configure --prefix="$LIBRAW_PREFIX"
-            make --jobs="$(nproc)"
-            make install
-          )
+          if [ -f "$LIBRAW_PREFIX/lib/pkgconfig/libraw.pc" ] \
+            && [ -f "$LIBRAW_PREFIX/lib/libraw.so" ] \
+            && [ "$(pkg-config --modversion libraw)" = "0.22.0" ]; then
+            echo "Using cached desktop LibRaw $LIBRAW_REVISION"
+          else
+            rm -rf /tmp/auraw-libraw-src "$LIBRAW_PREFIX"
+            mkdir -p /tmp/auraw-libraw-src
+            download \
+              "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_REVISION.tar.gz" \
+              /tmp/auraw-libraw.tar.gz
+            tar -xzf /tmp/auraw-libraw.tar.gz \
+              --strip-components=1 \
+              -C /tmp/auraw-libraw-src
+            (
+              cd /tmp/auraw-libraw-src
+              autoreconf --install --force
+              ./configure --prefix="$LIBRAW_PREFIX"
+              make --jobs="$(nproc)"
+              make install
+            )
+          fi
 
           LIBCLANG_SO="$(find /usr/lib -path '*/llvm-*/lib/libclang.so*' -print -quit 2>/dev/null || true)"
           if [ -n "$LIBCLANG_SO" ]; then
@@ -194,14 +213,16 @@ jobs:
               handle.write(png)
           PY
 
-          download \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
-            linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
+          if [ ! -x /tmp/linuxdeploy-x86_64.AppImage ]; then
+            download \
+              https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
+              /tmp/linuxdeploy-x86_64.AppImage
+            chmod +x /tmp/linuxdeploy-x86_64.AppImage
+          fi
 
           export APPIMAGE_EXTRACT_AND_RUN=1
           export LDAI_OUTPUT="AuRaw-${VERSION}-x86_64.AppImage"
-          ./linuxdeploy-x86_64.AppImage \
+          /tmp/linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --executable "$PWD/target/release/auraw" \
             --library "$LIBRAW_SO" \
@@ -236,6 +257,33 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Restore pinned Android toolchains
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/android-sdk
+            ~/gradle-8.11.1
+            ~/.cargo/bin/cargo-ndk
+            ~/.cargo/bin/cargo-ndk-env
+            ~/.cargo/bin/cargo-ndk-runner
+            ~/.cargo/bin/cargo-ndk-test
+            android/native
+          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-ndk-27.0.12077973-cmake-3.22.1-gradle-8.11.1-cargo-ndk-4.1.2-libraw-0.22.1-v1
+
+      - name: Restore Android dependency and build cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/.gradle/caches
+            ~/.gradle/notifications
+            android/.gradle
+          key: auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'android/build.gradle', 'android/app/build.gradle') }}
+          restore-keys: |
+            auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -306,15 +354,17 @@ jobs:
           GRADLE_VERSION="8.11.1"
           export ANDROID_HOME ANDROID_SDK_ROOT ANDROID_NDK_VERSION ANDROID_CMAKE_VERSION
 
-          rm -rf /tmp/android-command-line-tools
-          mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-command-line-tools
-          download \
-            https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip \
-            /tmp/android-command-line-tools.zip
-          unzip -q /tmp/android-command-line-tools.zip -d /tmp/android-command-line-tools
-          rm -rf "$ANDROID_HOME/cmdline-tools/latest"
-          mv /tmp/android-command-line-tools/cmdline-tools \
-            "$ANDROID_HOME/cmdline-tools/latest"
+          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            rm -rf /tmp/android-command-line-tools
+            mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-command-line-tools
+            download \
+              https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip \
+              /tmp/android-command-line-tools.zip
+            unzip -q /tmp/android-command-line-tools.zip -d /tmp/android-command-line-tools
+            rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+            mv /tmp/android-command-line-tools/cmdline-tools \
+              "$ANDROID_HOME/cmdline-tools/latest"
+          fi
 
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses >/dev/null || true
@@ -329,18 +379,22 @@ jobs:
           /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android
-          cargo install cargo-ndk --version 4.1.2 --locked
+          if [ "$(cargo ndk --version 2>/dev/null || true)" != "cargo-ndk 4.1.2" ]; then
+            cargo install cargo-ndk --version 4.1.2 --locked
+          fi
 
           LIBCLANG_SO="$(find /usr/lib -path '*/llvm-*/lib/libclang.so*' -print -quit 2>/dev/null || true)"
           if [ -n "$LIBCLANG_SO" ]; then
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          download \
-            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-            /tmp/gradle.zip
-          rm -rf "$HOME/gradle-${GRADLE_VERSION}"
-          unzip -q /tmp/gradle.zip -d "$HOME"
+          if [ ! -x "$HOME/gradle-${GRADLE_VERSION}/bin/gradle" ]; then
+            download \
+              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+              /tmp/gradle.zip
+            rm -rf "$HOME/gradle-${GRADLE_VERSION}"
+            unzip -q /tmp/gradle.zip -d "$HOME"
+          fi
           export PATH="$HOME/gradle-${GRADLE_VERSION}/bin:$PATH"
 
           gradle --version

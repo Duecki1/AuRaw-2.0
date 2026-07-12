@@ -51,6 +51,7 @@ pub struct AurawApp {
     loading_label: Option<String>,
     export_receiver: Option<mpsc::Receiver<ExportEvent>>,
     export_progress: Option<(usize, usize)>,
+    export_publish_pending: bool,
     image_status: String,
     notice: Option<String>,
 
@@ -117,6 +118,7 @@ impl AurawApp {
             loading_label: None,
             export_receiver: None,
             export_progress: None,
+            export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
             notice: None,
         }
@@ -151,6 +153,7 @@ impl AurawApp {
             loading_label: None,
             export_receiver: None,
             export_progress: None,
+            export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
             notice: None,
             android_app,
@@ -424,16 +427,16 @@ impl AurawApp {
         };
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn can_export(&self) -> bool {
         self.loaded_raw.is_some()
             && self.preview_raw.is_some()
             && self.export_receiver.is_none()
+            && !self.export_publish_pending
             && self.load_receiver.is_none()
     }
 
     #[cfg(not(target_os = "android"))]
-    pub(crate) fn export_file_dialog(&mut self, frame: &eframe::Frame) {
+    pub(crate) fn export_png(&mut self, frame: &eframe::Frame) {
         if !self.can_export() {
             return;
         }
@@ -460,6 +463,37 @@ impl AurawApp {
             path.set_extension("png");
         }
 
+        self.start_export(path, frame);
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn export_png(&mut self, frame: &eframe::Frame) {
+        if !self.can_export() {
+            return;
+        }
+
+        let Some(data_dir) = self.android_app.internal_data_path() else {
+            self.notice = Some("Android did not provide an app data directory.".to_owned());
+            return;
+        };
+        let export_dir = data_dir.join("cache").join("exports");
+        if let Err(error) = std::fs::create_dir_all(&export_dir) {
+            self.notice = Some(format!("Could not prepare Android export cache: {error}"));
+            return;
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let path = export_dir.join(format!("AuRaw-{timestamp}.png"));
+        self.start_export(path, frame);
+    }
+
+    fn start_export(&mut self, path: PathBuf, frame: &eframe::Frame) {
+        if !self.can_export() {
+            return;
+        }
+
         let (Some(raw), Some(preview_raw)) = (&self.loaded_raw, &self.preview_raw) else {
             return;
         };
@@ -479,6 +513,22 @@ impl AurawApp {
         ));
         self.export_progress = Some((0, 0));
         self.notice = None;
+    }
+
+    #[cfg(target_os = "android")]
+    fn poll_android_export_publish(&mut self) {
+        while let Some(result) = crate::android::take_export_publish_result() {
+            self.export_publish_pending = false;
+            match result {
+                crate::android::ExportPublishResult::Published(location) => {
+                    self.notice = Some(format!("Exported to {location}"));
+                }
+                crate::android::ExportPublishResult::Failed(error) => {
+                    self.notice = Some(format!("Export failed: {error}"));
+                    log::error!("Android export publish failed: {error}");
+                }
+            }
+        }
     }
 
     fn poll_export_worker(&mut self) {
@@ -509,7 +559,33 @@ impl AurawApp {
                     self.export_progress = None;
                     match result {
                         Ok(path) => {
-                            self.notice = Some(format!("Exported {}", path.display()));
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                self.notice = Some(format!("Exported {}", path.display()));
+                            }
+
+                            #[cfg(target_os = "android")]
+                            {
+                                let display_name = path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("AuRaw-export.png")
+                                    .to_owned();
+                                match crate::android::publish_png(
+                                    &self.android_app,
+                                    &path,
+                                    &display_name,
+                                ) {
+                                    Ok(()) => {
+                                        self.export_publish_pending = true;
+                                        self.notice = Some("Saving to Pictures/AuRaw…".to_owned());
+                                    }
+                                    Err(error) => {
+                                        let _ = std::fs::remove_file(&path);
+                                        self.notice = Some(format!("Export failed: {error}"));
+                                    }
+                                }
+                            }
                         }
                         Err(error) => {
                             self.notice = Some(format!("Export failed: {error}"));
@@ -538,6 +614,8 @@ impl AurawApp {
             } else {
                 format!("Exporting full resolution — tile {completed}/{total}")
             }
+        } else if self.export_publish_pending {
+            "Saving to Pictures/AuRaw…".to_owned()
         } else if let Some(stage) = self.pending_stage {
             format!("Updating preview — {}…", stage.label())
         } else if let Some(notice) = &self.notice {
@@ -583,7 +661,10 @@ impl AurawApp {
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(target_os = "android")]
-        self.poll_android_picker(frame);
+        {
+            self.poll_android_picker(frame);
+            self.poll_android_export_publish();
+        }
 
         self.poll_load_worker(frame);
         self.poll_export_worker();
@@ -638,7 +719,7 @@ impl eframe::App for AurawApp {
         if self.pending_stage.is_some() {
             ui.ctx().request_repaint();
         }
-        if self.export_receiver.is_some() {
+        if self.export_receiver.is_some() || self.export_publish_pending {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
     }
