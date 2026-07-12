@@ -343,13 +343,16 @@ def main() -> int:
         "LibRaw's missing BaselineExposure sentinel cannot black out proprietary RAW previews",
     )
     c.check(
-        "size_of::<super::GpuParams>(), 528" in gpu
+        "size_of::<super::GpuParams>(), 816" in gpu
         and "offset_of!(super::GpuParams, sigmoid_curve), 80" in gpu
         and "offset_of!(super::GpuParams, sigmoid_power), 96" in gpu
-        and "offset_of!(super::GpuParams, tone_curve_0), 144" in gpu
-        and "offset_of!(super::GpuParams, tone_curve_meta), 208" in gpu
-        and "offset_of!(super::GpuParams, profile_hue_sat), 448" in gpu
-        and "offset_of!(super::GpuParams, profile_flags), 512" in gpu,
+        and "offset_of!(super::GpuParams, tone_curve_0), 192" in gpu
+        and "offset_of!(super::GpuParams, tone_curve_meta), 256" in gpu
+        and "offset_of!(super::GpuParams, tone_curve_red_0), 272" in gpu
+        and "offset_of!(super::GpuParams, tone_curve_green_0), 352" in gpu
+        and "offset_of!(super::GpuParams, tone_curve_blue_0), 432" in gpu
+        and "offset_of!(super::GpuParams, profile_hue_sat), 736" in gpu
+        and "offset_of!(super::GpuParams, profile_flags), 800" in gpu,
         "camera-profile uniform ABI regression test covers the appended metadata block",
     )
 

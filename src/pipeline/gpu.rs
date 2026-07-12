@@ -239,12 +239,30 @@ pub struct GpuParams {
     sigmoid_curve: [f32; 4],
     sigmoid_power: [f32; 4],
     presence: [f32; 4],
+    creative_effects: [f32; 4],
+    vignette: [f32; 4],
+    vignette_options: [f32; 4],
     highlight_options: [f32; 4],
     tone_curve_0: [f32; 4],
     tone_curve_1: [f32; 4],
     tone_curve_2: [f32; 4],
     tone_curve_3: [f32; 4],
     tone_curve_meta: [f32; 4],
+    tone_curve_red_0: [f32; 4],
+    tone_curve_red_1: [f32; 4],
+    tone_curve_red_2: [f32; 4],
+    tone_curve_red_3: [f32; 4],
+    tone_curve_red_meta: [f32; 4],
+    tone_curve_green_0: [f32; 4],
+    tone_curve_green_1: [f32; 4],
+    tone_curve_green_2: [f32; 4],
+    tone_curve_green_3: [f32; 4],
+    tone_curve_green_meta: [f32; 4],
+    tone_curve_blue_0: [f32; 4],
+    tone_curve_blue_1: [f32; 4],
+    tone_curve_blue_2: [f32; 4],
+    tone_curve_blue_3: [f32; 4],
+    tone_curve_blue_meta: [f32; 4],
     hsl_hue_0: [f32; 4],
     hsl_hue_1: [f32; 4],
     hsl_saturation_0: [f32; 4],
@@ -328,6 +346,24 @@ impl GpuParams {
                 exposure.dehaze,
                 exposure.contrast.clamp(-100.0, 100.0),
             ],
+            creative_effects: [
+                exposure.glow_amount.clamp(0.0, 100.0),
+                exposure.glow_radius.clamp(0.0, 100.0),
+                exposure.glow_threshold.clamp(0.0, 100.0),
+                0.0,
+            ],
+            vignette: [
+                exposure.vignette_amount.clamp(-100.0, 100.0),
+                exposure.vignette_midpoint.clamp(0.0, 100.0),
+                exposure.vignette_roundness.clamp(-100.0, 100.0),
+                exposure.vignette_feather.clamp(0.0, 100.0),
+            ],
+            vignette_options: [
+                exposure.vignette_highlights.clamp(0.0, 100.0),
+                0.0,
+                0.0,
+                0.0,
+            ],
             highlight_options: [
                 exposure.highlight_method.shader_value(),
                 exposure.highlight_iterations.clamp(1, 4) as f32,
@@ -360,7 +396,73 @@ impl GpuParams {
             ],
             tone_curve_meta: [
                 exposure.tone_curve.len.clamp(2, 8) as f32,
+                if exposure.tone_curve.is_identity() { 1.0 } else { 0.0 },
                 0.0,
+                0.0,
+            ],
+            tone_curve_red_0: [
+                exposure.tone_curve_red.points[0][0], exposure.tone_curve_red.points[0][1],
+                exposure.tone_curve_red.points[1][0], exposure.tone_curve_red.points[1][1],
+            ],
+            tone_curve_red_1: [
+                exposure.tone_curve_red.points[2][0], exposure.tone_curve_red.points[2][1],
+                exposure.tone_curve_red.points[3][0], exposure.tone_curve_red.points[3][1],
+            ],
+            tone_curve_red_2: [
+                exposure.tone_curve_red.points[4][0], exposure.tone_curve_red.points[4][1],
+                exposure.tone_curve_red.points[5][0], exposure.tone_curve_red.points[5][1],
+            ],
+            tone_curve_red_3: [
+                exposure.tone_curve_red.points[6][0], exposure.tone_curve_red.points[6][1],
+                exposure.tone_curve_red.points[7][0], exposure.tone_curve_red.points[7][1],
+            ],
+            tone_curve_red_meta: [
+                exposure.tone_curve_red.len.clamp(2, 8) as f32,
+                if exposure.tone_curve_red.is_identity() { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
+            tone_curve_green_0: [
+                exposure.tone_curve_green.points[0][0], exposure.tone_curve_green.points[0][1],
+                exposure.tone_curve_green.points[1][0], exposure.tone_curve_green.points[1][1],
+            ],
+            tone_curve_green_1: [
+                exposure.tone_curve_green.points[2][0], exposure.tone_curve_green.points[2][1],
+                exposure.tone_curve_green.points[3][0], exposure.tone_curve_green.points[3][1],
+            ],
+            tone_curve_green_2: [
+                exposure.tone_curve_green.points[4][0], exposure.tone_curve_green.points[4][1],
+                exposure.tone_curve_green.points[5][0], exposure.tone_curve_green.points[5][1],
+            ],
+            tone_curve_green_3: [
+                exposure.tone_curve_green.points[6][0], exposure.tone_curve_green.points[6][1],
+                exposure.tone_curve_green.points[7][0], exposure.tone_curve_green.points[7][1],
+            ],
+            tone_curve_green_meta: [
+                exposure.tone_curve_green.len.clamp(2, 8) as f32,
+                if exposure.tone_curve_green.is_identity() { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
+            tone_curve_blue_0: [
+                exposure.tone_curve_blue.points[0][0], exposure.tone_curve_blue.points[0][1],
+                exposure.tone_curve_blue.points[1][0], exposure.tone_curve_blue.points[1][1],
+            ],
+            tone_curve_blue_1: [
+                exposure.tone_curve_blue.points[2][0], exposure.tone_curve_blue.points[2][1],
+                exposure.tone_curve_blue.points[3][0], exposure.tone_curve_blue.points[3][1],
+            ],
+            tone_curve_blue_2: [
+                exposure.tone_curve_blue.points[4][0], exposure.tone_curve_blue.points[4][1],
+                exposure.tone_curve_blue.points[5][0], exposure.tone_curve_blue.points[5][1],
+            ],
+            tone_curve_blue_3: [
+                exposure.tone_curve_blue.points[6][0], exposure.tone_curve_blue.points[6][1],
+                exposure.tone_curve_blue.points[7][0], exposure.tone_curve_blue.points[7][1],
+            ],
+            tone_curve_blue_meta: [
+                exposure.tone_curve_blue.len.clamp(2, 8) as f32,
+                if exposure.tone_curve_blue.is_identity() { 1.0 } else { 0.0 },
                 0.0,
                 0.0,
             ],
@@ -848,6 +950,34 @@ impl RawGpuPipeline {
                 ],
             });
 
+        let bgl_adjust_effects =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl Lightroom local effects"),
+                entries: &[
+                    buffer_entry(0),
+                    texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        23,
+                        work_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            });
+
+        let bgl_adjust_creative =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl creative glow and vignette"),
+                entries: &[
+                    buffer_entry(0),
+                    texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        25,
+                        work_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            });
+
         let bgl_adjust_render =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl perceptual color mixer and render"),
@@ -858,7 +988,7 @@ impl RawGpuPipeline {
                         wgpu::TextureFormat::Rgba8Unorm,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                    texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_buffer_entry(20, true),
                 ],
             });
@@ -1326,6 +1456,47 @@ impl RawGpuPipeline {
             ],
         });
 
+        let bg_adjust_effects = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg Lightroom local effects"),
+            layout: &bgl_adjust_effects,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+            ],
+        });
+
+        // The local-effects result is read from tex2 and the creative pass
+        // writes back into tex1. This reuses the existing ping-pong textures
+        // while ensuring Glow samples the exact same developed stage it adds to.
+        let bg_adjust_creative = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg creative glow and vignette"),
+            layout: &bgl_adjust_creative,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 25,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+            ],
+        });
+
         let bg_adjust_render = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg perceptual color mixer and render"),
             layout: &bgl_adjust_render,
@@ -1339,7 +1510,7 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&out_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 22,
+                    binding: 26,
                     resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
                 wgpu::BindGroupEntry {
@@ -1388,7 +1559,7 @@ impl RawGpuPipeline {
             };
 
         let mut passes = Vec::with_capacity(
-            1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 8 + 6,
+            1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 8 + 7,
         );
 
         // Prepare writes the initial RGB estimate and reliability into A.
@@ -1616,10 +1787,28 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_shader.as_ref(),
-                    "prepare_color_mixer",
+                    "prepare_adjustment_base",
                     &bgl_adjust_prepare,
                 ),
                 bind_group: bg_adjust_prepare,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_shader.as_ref(),
+                    "apply_lightroom_effects",
+                    &bgl_adjust_effects,
+                ),
+                bind_group: bg_adjust_effects,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_shader.as_ref(),
+                    "apply_creative_effects",
+                    &bgl_adjust_creative,
+                ),
+                bind_group: bg_adjust_creative,
                 workgroups: image_workgroups,
             },
             Pass {
@@ -2739,19 +2928,25 @@ mod tests {
         // Sixteen scalar values keep the stable 64-byte prefix. The two
         // darktable sigmoid vec4s follow the local-tone controls, then the
         // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 528);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 816);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 128);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 144);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 208);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 320);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 416);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 424);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 432);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 448);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 512);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, creative_effects), 128);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, vignette), 144);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, vignette_options), 160);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 176);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 192);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 256);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_red_0), 272);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_green_0), 352);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_blue_0), 432);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 608);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 704);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 712);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 720);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 736);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 800);
     }
 
     #[test]
@@ -2769,7 +2964,11 @@ mod tests {
         assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
         assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
         assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
-        assert!(SHADER_ADJUSTMENTS.contains("prepare_color_mixer"));
+        assert!(SHADER_ADJUSTMENTS.contains("prepare_adjustment_base"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_lightroom_effects"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_creative_effects"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_glow"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_vignette"));
         assert!(SHADER_ADJUSTMENTS.contains("stabilized_mixer_sample"));
         assert!(SHADER_ADJUSTMENTS.contains("positive_rec2020_from_oklab"));
         assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));

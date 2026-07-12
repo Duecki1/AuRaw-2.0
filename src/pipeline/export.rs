@@ -1,13 +1,110 @@
 use super::{
-    extract_padded_tile, ExposureParams, GpuParams, LoadedRaw, ProcessingQuality,
+    extract_padded_tile, resample_raw, ExposureParams, GpuParams, LoadedRaw, ProcessingQuality,
     ProcessingStage, RawGpuPipeline, TilePlan, TileSpec,
 };
 use anyhow::{Context, Result};
 use eframe::wgpu;
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportResizeMode {
+    #[default]
+    Original,
+    LongEdge,
+    ShortEdge,
+    Width,
+    Height,
+    Percentage,
+}
+
+impl ExportResizeMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Original size",
+            Self::LongEdge => "Long edge",
+            Self::ShortEdge => "Short edge",
+            Self::Width => "Width",
+            Self::Height => "Height",
+            Self::Percentage => "Percentage",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExportSettings {
+    pub resize_mode: ExportResizeMode,
+    pub edge_or_dimension: u32,
+    pub percentage: f32,
+    pub allow_upscale: bool,
+    pub keep_metadata: bool,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            resize_mode: ExportResizeMode::Original,
+            edge_or_dimension: 3000,
+            percentage: 100.0,
+            allow_upscale: false,
+            keep_metadata: true,
+        }
+    }
+}
+
+impl ExportSettings {
+    pub fn output_dimensions(self, source_width: u32, source_height: u32) -> (u32, u32) {
+        let source_width = source_width.max(1);
+        let source_height = source_height.max(1);
+        if self.resize_mode == ExportResizeMode::Original {
+            return (source_width, source_height);
+        }
+
+        let width = source_width as f64;
+        let height = source_height as f64;
+        let requested = self.edge_or_dimension.max(1) as f64;
+        let mut scale = match self.resize_mode {
+            ExportResizeMode::Original => 1.0,
+            ExportResizeMode::LongEdge => requested / width.max(height),
+            ExportResizeMode::ShortEdge => requested / width.min(height),
+            ExportResizeMode::Width => requested / width,
+            ExportResizeMode::Height => requested / height,
+            ExportResizeMode::Percentage => f64::from(self.percentage.clamp(1.0, 400.0)) / 100.0,
+        };
+        if !self.allow_upscale {
+            scale = scale.min(1.0);
+        }
+        scale = scale.max(1.0 / width.max(height));
+
+        let output_width = (width * scale).round().clamp(1.0, u32::MAX as f64) as u32;
+        let output_height = (height * scale).round().clamp(1.0, u32::MAX as f64) as u32;
+        (output_width, output_height)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportMetadata {
+    pub source_file_name: Option<String>,
+    pub camera_make: String,
+    pub camera_model: String,
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
+impl ExportMetadata {
+    pub fn from_raw(raw: &LoadedRaw, source_file_name: Option<String>) -> Self {
+        Self {
+            source_file_name,
+            camera_make: raw.camera_make.clone(),
+            camera_model: raw.camera_model.clone(),
+            source_width: raw.width,
+            source_height: raw.height,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ExportEvent {
@@ -18,10 +115,10 @@ pub enum ExportEvent {
     Finished(Result<PathBuf, String>),
 }
 
-/// Runs full-resolution export on a worker thread. The worker first computes
-/// global tone statistics from the cached preview RAW, then processes the full
-/// sensor image as halo-padded high-quality tiles and streams completed rows to
-/// the PNG encoder. No full-resolution rendered RGBA image is retained.
+/// Runs export on a worker thread. The worker computes global tone statistics
+/// from the cached preview RAW, optionally resamples the sensor mosaic to the
+/// requested aspect-preserving dimensions, then processes halo-padded
+/// high-quality tiles and streams completed rows to the PNG encoder.
 pub fn spawn_tiled_png_export(
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -30,6 +127,8 @@ pub fn spawn_tiled_png_export(
     exposure: ExposureParams,
     path: PathBuf,
     tile_spec: TileSpec,
+    settings: ExportSettings,
+    metadata: ExportMetadata,
 ) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -38,14 +137,26 @@ pub fn spawn_tiled_png_export(
     let spawn_result = std::thread::Builder::new()
         .name("auraw-tiled-export".to_owned())
         .spawn(move || {
+            let (output_width, output_height) =
+                settings.output_dimensions(raw.width, raw.height);
+            let resized_raw;
+            let export_raw = if output_width == raw.width && output_height == raw.height {
+                raw.as_ref()
+            } else {
+                resized_raw = resample_raw(raw.as_ref(), output_width, output_height);
+                &resized_raw
+            };
+
             let result = export_tiled_png(
                 &device,
                 &queue,
-                &raw,
+                export_raw,
                 &preview_raw,
                 &exposure,
                 &worker_path,
                 tile_spec,
+                settings.keep_metadata,
+                &metadata,
                 &worker_sender,
             );
             if result.is_err() {
@@ -75,13 +186,11 @@ fn export_tiled_png(
     exposure: &ExposureParams,
     path: &Path,
     tile_spec: TileSpec,
+    keep_metadata: bool,
+    metadata: &ExportMetadata,
     events: &mpsc::Sender<ExportEvent>,
 ) -> Result<()> {
     let global_params = GpuParams::new(exposure, preview_raw);
-    // Export must not derive its global curve from a half-float analysis
-    // pipeline. The source is only the bounded preview proxy, so RGBA32F has
-    // modest memory cost while keeping desktop preview and export statistics
-    // consistent.
     let global_tone_source = RawGpuPipeline::new_headless_with_quality(
         device,
         queue,
@@ -117,9 +226,18 @@ fn export_tiled_png(
     .context("create reusable full-quality export pipeline")?;
 
     let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
-    let mut encoder = png::Encoder::new(BufWriter::new(file), raw.width, raw.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
+    let mut info = png::Info::with_size(raw.width, raw.height);
+    info.color_type = png::ColorType::Rgba;
+    info.bit_depth = png::BitDepth::Eight;
+    if keep_metadata {
+        info.exif_metadata = Some(Cow::Owned(build_exif_payload(metadata, raw.width, raw.height)));
+    }
+    let mut encoder = png::Encoder::with_info(BufWriter::new(file), info)
+        .context("configure PNG encoder")?;
+    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    if keep_metadata {
+        add_png_text_metadata(&mut encoder, metadata, raw.width, raw.height)?;
+    }
     let mut writer = encoder
         .write_header()
         .with_context(|| format!("write PNG header for {}", path.display()))?;
@@ -131,9 +249,6 @@ fn export_tiled_png(
     let mut completed_tiles = 0usize;
     let mut tile_index = 0usize;
 
-    // TilePlan is row-major. Holding one core-height band at a time allows PNG
-    // scanlines to remain ordered while bounding CPU render memory to roughly
-    // full_width * tile_height * 4 bytes.
     while tile_index < plan.tiles.len() {
         let band_y = plan.tiles[tile_index].core_y;
         let band_height = plan.tiles[tile_index].core_height;
@@ -196,6 +311,140 @@ fn export_tiled_png(
     Ok(())
 }
 
+fn add_png_text_metadata<W: Write>(
+    encoder: &mut png::Encoder<'_, W>,
+    metadata: &ExportMetadata,
+    output_width: u32,
+    output_height: u32,
+) -> Result<()> {
+    encoder
+        .add_itxt_chunk("Software".to_owned(), "AuRaw".to_owned())
+        .context("write PNG software metadata")?;
+    if let Some(source) = metadata.source_file_name.as_deref().filter(|value| !value.is_empty()) {
+        encoder
+            .add_itxt_chunk("Source".to_owned(), source.to_owned())
+            .context("write PNG source metadata")?;
+    }
+    let camera = format!("{} {}", metadata.camera_make, metadata.camera_model)
+        .trim()
+        .to_owned();
+    if !camera.is_empty() {
+        encoder
+            .add_itxt_chunk("Camera".to_owned(), camera)
+            .context("write PNG camera metadata")?;
+    }
+    encoder
+        .add_itxt_chunk(
+            "Original dimensions".to_owned(),
+            format!("{}x{}", metadata.source_width, metadata.source_height),
+        )
+        .context("write original dimensions metadata")?;
+    encoder
+        .add_itxt_chunk(
+            "Export dimensions".to_owned(),
+            format!("{output_width}x{output_height}"),
+        )
+        .context("write export dimensions metadata")?;
+    Ok(())
+}
+
+/// Builds a compact TIFF/EXIF IFD for PNG's eXIf chunk. The output image has
+/// already been physically oriented, so Orientation is always written as 1.
+fn build_exif_payload(
+    metadata: &ExportMetadata,
+    output_width: u32,
+    output_height: u32,
+) -> Vec<u8> {
+    #[derive(Clone)]
+    enum Value {
+        Short(u16),
+        Long(u32),
+        Ascii(Vec<u8>),
+    }
+    #[derive(Clone)]
+    struct Entry {
+        tag: u16,
+        value: Value,
+    }
+
+    let mut entries = vec![
+        Entry {
+            tag: 0x0100,
+            value: Value::Long(output_width),
+        },
+        Entry {
+            tag: 0x0101,
+            value: Value::Long(output_height),
+        },
+        Entry {
+            tag: 0x0112,
+            value: Value::Short(1),
+        },
+        Entry {
+            tag: 0x0131,
+            value: Value::Ascii(b"AuRaw\0".to_vec()),
+        },
+    ];
+    if !metadata.camera_make.is_empty() {
+        let mut value = metadata.camera_make.as_bytes().to_vec();
+        value.push(0);
+        entries.push(Entry {
+            tag: 0x010f,
+            value: Value::Ascii(value),
+        });
+    }
+    if !metadata.camera_model.is_empty() {
+        let mut value = metadata.camera_model.as_bytes().to_vec();
+        value.push(0);
+        entries.push(Entry {
+            tag: 0x0110,
+            value: Value::Ascii(value),
+        });
+    }
+    entries.sort_by_key(|entry| entry.tag);
+
+    let ifd_offset = 8u32;
+    let data_offset = ifd_offset + 2 + entries.len() as u32 * 12 + 4;
+    let mut data = Vec::<u8>::new();
+    let mut output = Vec::with_capacity(data_offset as usize + 128);
+    output.extend_from_slice(b"II");
+    output.extend_from_slice(&42u16.to_le_bytes());
+    output.extend_from_slice(&ifd_offset.to_le_bytes());
+    output.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+
+    for entry in entries {
+        output.extend_from_slice(&entry.tag.to_le_bytes());
+        match entry.value {
+            Value::Short(value) => {
+                output.extend_from_slice(&3u16.to_le_bytes());
+                output.extend_from_slice(&1u32.to_le_bytes());
+                output.extend_from_slice(&value.to_le_bytes());
+                output.extend_from_slice(&0u16.to_le_bytes());
+            }
+            Value::Long(value) => {
+                output.extend_from_slice(&4u16.to_le_bytes());
+                output.extend_from_slice(&1u32.to_le_bytes());
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+            Value::Ascii(value) => {
+                output.extend_from_slice(&2u16.to_le_bytes());
+                output.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                if value.len() <= 4 {
+                    output.extend_from_slice(&value);
+                    output.resize(output.len() + 4 - value.len(), 0);
+                } else {
+                    let offset = data_offset + data.len() as u32;
+                    output.extend_from_slice(&offset.to_le_bytes());
+                    data.extend_from_slice(&value);
+                }
+            }
+        }
+    }
+    output.extend_from_slice(&0u32.to_le_bytes());
+    output.extend_from_slice(&data);
+    output
+}
+
 fn stitch_tile_into_band(
     band: &mut [u8],
     output_width: u32,
@@ -216,8 +465,52 @@ fn stitch_tile_into_band(
 
 #[cfg(test)]
 mod tests {
-    use super::stitch_tile_into_band;
+    use super::{build_exif_payload, stitch_tile_into_band, ExportMetadata, ExportResizeMode, ExportSettings};
     use crate::pipeline::ExportTile;
+
+    #[test]
+    fn resize_modes_preserve_aspect_ratio() {
+        let base = ExportSettings::default();
+        let cases = [
+            (ExportResizeMode::LongEdge, 3000, (3000, 2000)),
+            (ExportResizeMode::ShortEdge, 1000, (1500, 1000)),
+            (ExportResizeMode::Width, 1200, (1200, 800)),
+            (ExportResizeMode::Height, 800, (1200, 800)),
+        ];
+        for (resize_mode, edge_or_dimension, expected) in cases {
+            let settings = ExportSettings {
+                resize_mode,
+                edge_or_dimension,
+                ..base
+            };
+            assert_eq!(settings.output_dimensions(6000, 4000), expected);
+        }
+    }
+
+    #[test]
+    fn resizing_does_not_enlarge_by_default() {
+        let settings = ExportSettings {
+            resize_mode: ExportResizeMode::LongEdge,
+            edge_or_dimension: 12000,
+            ..ExportSettings::default()
+        };
+        assert_eq!(settings.output_dimensions(6000, 4000), (6000, 4000));
+    }
+
+    #[test]
+    fn exif_payload_is_a_little_endian_tiff() {
+        let metadata = ExportMetadata {
+            camera_make: "CameraCo".to_owned(),
+            camera_model: "Model X".to_owned(),
+            source_width: 6000,
+            source_height: 4000,
+            ..ExportMetadata::default()
+        };
+        let exif = build_exif_payload(&metadata, 3000, 2000);
+        assert_eq!(&exif[..4], &[b'I', b'I', 42, 0]);
+        assert!(exif.windows(9).any(|window| window == b"CameraCo\0"));
+        assert!(exif.windows(8).any(|window| window == b"Model X\0"));
+    }
 
     #[test]
     fn tile_rows_land_at_their_band_offset() {

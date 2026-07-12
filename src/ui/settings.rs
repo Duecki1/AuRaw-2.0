@@ -10,6 +10,23 @@ impl Settings {
         ui.heading("Settings");
         ui.add_space(4.0);
 
+        ui.group(|ui| {
+            ui.set_max_width(720.0);
+            ui.heading("Interface");
+            ui.checkbox(&mut app.expert_mode, "Expert mode")
+                .on_hover_text(
+                    "Show detailed creative-effect tuning, darktable-style rendering internals, and RAW reconstruction controls. Disabled by default.",
+                );
+            ui.label(
+                "The standard Develop view keeps only Lightroom-style photographic controls visible.",
+            );
+        });
+
+        if !app.expert_mode {
+            return;
+        }
+
+        ui.add_space(8.0);
         let mut changed = false;
 
         ui.group(|ui| {

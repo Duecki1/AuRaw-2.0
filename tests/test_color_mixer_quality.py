@@ -29,7 +29,7 @@ def test_selector_is_spatially_stable_but_center_detail_is_not_blurred() -> None
     assert "fn stabilized_mixer_sample" in ADJUSTMENTS
     assert "range_weight" in ADJUSTMENTS
     assert "hue_agreement" in ADJUSTMENTS
-    assert "textureLoad(color_mixer_tex" in ADJUSTMENTS
+    assert "textureLoad(final_adjustment_tex" in ADJUSTMENTS
     assert "Only hue selection is" in ADJUSTMENTS
     assert "actual RGB detail always comes from the center pixel" in ADJUSTMENTS
 
@@ -41,14 +41,19 @@ def test_luminance_is_ratio_preserving_and_gamut_mapping_is_constant_hue() -> No
     assert "clamp(hsl.z" not in ADJUSTMENTS
 
 
-def test_gpu_schedules_full_precision_prepare_then_mixer_render() -> None:
-    prepare = GPU.index('"prepare_color_mixer"')
-    render = GPU.index('"apply_lightroom_adjustments"', prepare)
-    assert prepare < render
+def test_gpu_schedules_full_precision_base_effects_then_mixer_render() -> None:
+    prepare = GPU.index('"prepare_adjustment_base"')
+    effects = GPU.index('"apply_lightroom_effects"', prepare)
+    creative = GPU.index('"apply_creative_effects"', effects)
+    render = GPU.index('"apply_lightroom_adjustments"', creative)
+    assert prepare < effects < creative < render
     assert "work_shader_source(SHADER_ADJUSTMENTS, work_format)" in GPU
-    # The color-mixer image reuses a full-precision demosaic scratch texture
-    # after the raw stage, avoiding another full-resolution allocation.
-    assert GPU.count("TextureView(&tex1_view)") >= 3
+    # Two existing demosaic scratch textures are reused after the RAW stage:
+    # tex1 stores the base/final creative output and tex2 stores local Effects.
+    assert "binding: 22" in GPU and "TextureView(&tex1_view)" in GPU
+    assert "binding: 23" in GPU and "TextureView(&tex2_view)" in GPU
+    assert "binding: 24" in GPU and "TextureView(&tex2_view)" in GPU
+    assert "binding: 25" in GPU and "TextureView(&tex1_view)" in GPU
 
 
 def test_named_channels_are_calibrated_in_oklab_not_hsl_angles() -> None:

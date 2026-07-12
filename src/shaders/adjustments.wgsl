@@ -1,9 +1,17 @@
-// Post-demosaic scene-linear controls. Keeping this in its own pass lets
-// local operations sample neighbouring RGB pixels. Global tone controls are
-// evaluated once, at the end, by display_render().
+// Post-demosaic scene-linear controls. Global controls are prepared into a
+// full-precision texture first. Local detail Effects sample that exact image,
+// then creative Effects sample the completed local-effects result. Keeping the
+// stages separate prevents blur/detail residuals from becoming global exposure
+// changes and gives Glow a same-stage highlight source.
 
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(21) var adjustment_base_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(22) var adjustment_base_tex: texture_2d<f32>;
+@group(0) @binding(23) var local_effects_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(24) var local_effects_tex: texture_2d<f32>;
+@group(0) @binding(25) var creative_effects_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(26) var final_adjustment_tex: texture_2d<f32>;
 
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(scene_tex, clamp_pos(pos), 0).xyz;
@@ -14,70 +22,296 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     return profile_corrected * exp2(profile_exposure_ev);
 }
 
-fn blur_luminance(pos: vec2<i32>, radius: i32) -> f32 {
-    let center = safe_luma(max(scene_working_at(pos), vec3<f32>(0.0)));
+fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
+    return max(textureLoad(adjustment_base_tex, clamp_pos(pos), 0).xyz, vec3<f32>(0.0));
+}
+
+fn local_effects_at(pos: vec2<i32>) -> vec3<f32> {
+    return max(textureLoad(local_effects_tex, clamp_pos(pos), 0).xyz, vec3<f32>(0.0));
+}
+
+fn log_luminance(rgb: vec3<f32>) -> f32 {
+    return log2(safe_luma(max(rgb, vec3<f32>(0.0))));
+}
+
+fn bilateral_log_luminance(pos: vec2<i32>, radius: i32, range_strength: f32) -> f32 {
+    let center = log_luminance(adjustment_base_at(pos));
+    let sigma = max(f32(radius) * 0.72, 0.85);
     var sum = 0.0;
     var sum_w = 0.0;
-    for (var dy = -radius; dy <= radius; dy = dy + 1) {
-        for (var dx = -radius; dx <= radius; dx = dx + 1) {
-            let sample_lum = safe_luma(max(scene_working_at(pos + vec2<i32>(dx, dy)), vec3<f32>(0.0)));
-            let distance = f32(dx * dx + dy * dy);
-            let spatial = 1.0 / (1.0 + distance);
-            // Edge-aware weighting keeps detail controls from making halos.
-            let range = 1.0 / (1.0 + 12.0 * abs(sample_lum - center));
+
+    // The shader has a fixed maximum footprint so mobile and desktop compile
+    // the same code. `radius` selects 3x3, 5x5, or 7x7 behavior at runtime.
+    for (var dy = -3; dy <= 3; dy = dy + 1) {
+        for (var dx = -3; dx <= 3; dx = dx + 1) {
+            if abs(dx) > radius || abs(dy) > radius { continue; }
+            let sample_ev = log_luminance(adjustment_base_at(pos + vec2<i32>(dx, dy)));
+            let distance_squared = f32(dx * dx + dy * dy);
+            let spatial = exp(-0.5 * distance_squared / (sigma * sigma));
+            let delta = sample_ev - center;
+            let range = exp(-range_strength * delta * delta);
             let weight = spatial * range;
-            sum = sum + sample_lum * weight;
+            sum = sum + sample_ev * weight;
             sum_w = sum_w + weight;
         }
     }
     return sum / max(sum_w, 1e-6);
 }
 
+fn atrous_kernel_weight(offset: i32) -> f32 {
+    switch abs(offset) {
+        case 0: { return 6.0; }
+        case 1: { return 4.0; }
+        default: { return 1.0; }
+    }
+}
+
+fn atrous_log_luminance(pos: vec2<i32>, step: i32, range_strength: f32) -> f32 {
+    let center = log_luminance(adjustment_base_at(pos));
+    var sum = 0.0;
+    var sum_w = 0.0;
+    // A 5x5 B3-spline à-trous kernel samples a much wider spatial scale than
+    // a dense 7x7 blur at lower cost. This gives Clarity a genuinely mid-scale
+    // response (roughly 25-35 preview pixels) while remaining edge-aware.
+    for (var ky = -2; ky <= 2; ky = ky + 1) {
+        for (var kx = -2; kx <= 2; kx = kx + 1) {
+            let sample_pos = pos + vec2<i32>(kx * step, ky * step);
+            let sample_ev = log_luminance(adjustment_base_at(sample_pos));
+            let delta = sample_ev - center;
+            let spatial = atrous_kernel_weight(kx) * atrous_kernel_weight(ky);
+            let range = exp(-range_strength * delta * delta);
+            let weight = spatial * range;
+            sum = sum + sample_ev * weight;
+            sum_w = sum_w + weight;
+        }
+    }
+    return sum / max(sum_w, 1e-6);
+}
+
+fn soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
+    return sign(detail) * max(abs(detail) - threshold, 0.0);
+}
+
 fn apply_texture_and_clarity(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let texture = params.presence.x / 100.0;
-    let clarity = params.presence.y / 100.0;
+    let texture = clamp(params.presence.x / 100.0, -1.0, 1.0);
+    let clarity = clamp(params.presence.y / 100.0, -1.0, 1.0);
     if abs(texture) < 1e-6 && abs(clarity) < 1e-6 {
         return rgb;
     }
 
-    let lum = safe_luma(max(rgb, vec3<f32>(0.0)));
-    let fine_blur = blur_luminance(pos, 1);
-    let broad_blur = blur_luminance(pos, 2);
-    let fine_detail = lum - fine_blur;
-    let mid_detail = lum - broad_blur;
-    let midtone_gate = smoothstep(0.015, 0.20, lum) * (1.0 - smoothstep(1.0, 4.0, lum));
-    let adjusted_lum = max(
-        lum + fine_detail * texture * 0.75 + mid_detail * clarity * 0.60 * midtone_gate,
-        0.0,
-    );
-    return rgb * clamp(adjusted_lum / max(lum, 1e-6), 0.0, 4.0);
+    let center_ev = log_luminance(rgb);
+    let fine_base_ev = bilateral_log_luminance(pos, 1, 8.0);
+    let clarity_step = select(3, 4, params.tone_guide_radius > 3.5);
+    let broad_base_ev = atrous_log_luminance(pos, clarity_step, 1.35);
+
+    // Two true band-pass residuals. Because every term comes from the same
+    // developed texture, a flat field produces exactly zero effect instead of
+    // a global exposure offset.
+    let fine_detail_ev = center_ev - fine_base_ev;
+    let mid_detail_ev = fine_base_ev - broad_base_ev;
+
+    // Fine-detail enhancement is noise-aware. At low signal, positive Texture
+    // ignores tiny residuals that are more likely sensor/demosaic noise than
+    // surface structure; negative Texture can still smooth them naturally.
+    let signal_gate = smoothstep(-7.5, -2.5, center_ev);
+    let fine_threshold = mix(0.070, 0.016, signal_gate);
+    let positive_fine = soft_detail_threshold(fine_detail_ev, fine_threshold);
+    let selected_fine = select(fine_detail_ev, positive_fine, texture >= 0.0);
+
+    // Clarity is restricted to midtones and a broader spatial band. The soft
+    // shoulder avoids halos around deep silhouettes and specular highlights.
+    let midtone_gate = smoothstep(-6.0, -2.0, center_ev)
+        * (1.0 - smoothstep(0.7, 3.5, center_ev));
+    let selected_mid = soft_detail_threshold(mid_detail_ev, 0.010);
+
+    let texture_ev = texture * selected_fine * 0.85;
+    let clarity_ev = clarity * selected_mid * 2.00 * midtone_gate;
+    let delta_ev = clamp(texture_ev + clarity_ev, -1.25, 1.25);
+    return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
 }
 
-fn dark_channel(pos: vec2<i32>) -> f32 {
+fn local_dark_channel(pos: vec2<i32>, radius: i32) -> f32 {
     var dark = 1e20;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let sample = max(scene_working_at(pos + vec2<i32>(dx, dy)), vec3<f32>(0.0));
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            if abs(dx) > radius || abs(dy) > radius { continue; }
+            let sample = adjustment_base_at(pos + vec2<i32>(dx, dy));
             dark = min(dark, min(sample.r, min(sample.g, sample.b)));
         }
     }
-    return dark;
+    return max(dark, 0.0);
 }
 
 fn apply_dehaze(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let amount = params.presence.z / 100.0;
+    let amount = clamp(params.presence.z / 100.0, -1.0, 1.0);
     if abs(amount) < 1e-6 {
         return rgb;
     }
 
-    // A deliberately conservative dark-channel transmission estimate.  The
-    // full Ansel haze module also has global reductions and a guided filter;
-    // this local form keeps an interactive mobile preview stable.
-    let dark = clamp(dark_channel(pos), 0.0, 1.0);
-    let local_lum = safe_luma(max(rgb, vec3<f32>(0.0)));
-    let airlight = vec3<f32>(max(0.20, min(1.0, local_lum + 0.20)));
-    let transmission = clamp(1.0 - amount * (1.0 - dark) * 0.45, 0.35, 1.65);
-    return max((rgb - airlight * (1.0 - transmission)) / transmission, vec3<f32>(0.0));
+    // Estimate atmospheric veil from the same developed image used by the
+    // other Effects. The neutral airlight model changes local contrast and
+    // saturation together, rather than behaving like another Exposure slider.
+    let center_lum = safe_luma(rgb);
+    let broad_ev = bilateral_log_luminance(pos, 2, 1.6);
+    let broad_lum = exp2(broad_ev);
+    let dark = local_dark_channel(pos, 2);
+    let veil = clamp(dark / max(broad_lum, 1e-6), 0.0, 1.0);
+    let airlight_lum = max(center_lum, broad_lum);
+    let airlight = vec3<f32>(airlight_lum);
+
+    if amount > 0.0 {
+        let transmission = clamp(1.0 - amount * veil * 0.72, 0.38, 1.0);
+        let restored = (rgb - airlight * (1.0 - transmission)) / transmission;
+        return max(restored, vec3<f32>(0.0));
+    }
+
+    let haze = -amount;
+    let haze_mix = haze * (0.22 + 0.38 * (1.0 - veil));
+    return mix(rgb, airlight, clamp(haze_mix, 0.0, 0.60));
+}
+
+
+fn extended_perceptual_luminance(linear_luma: f32) -> f32 {
+    if linear_luma <= 1.0 {
+        return pow(max(linear_luma, 0.0), 1.0 / 2.2);
+    }
+    return 1.0 + pow(linear_luma - 1.0, 1.0 / 2.2);
+}
+
+fn glow_emission(rgb: vec3<f32>, cutoff: f32) -> vec3<f32> {
+    let linear_luma = safe_luma(rgb);
+    let perceptual_luma = extended_perceptual_luminance(linear_luma);
+    let cutoff_fade = smoothstep(cutoff, cutoff + 0.16, perceptual_luma);
+    let excess = max(perceptual_luma - cutoff, 0.0);
+    let range = max(2.25 - cutoff, 0.25);
+    let intensity = pow(smoothstep(0.0, range, excess), 0.48);
+    let black_gate = pow(smoothstep(0.0, 0.42, linear_luma), 0.5);
+
+    // Preserve the source hue while giving the bloom the subtle warm bias of
+    // optical diffusion. The source is normalized by luminance so a coloured
+    // light blooms in its own colour instead of becoming neutral grey.
+    let colour_ratio = rgb / max(linear_luma, 1e-6);
+    let warm_tint = vec3<f32>(1.025, 1.0, 0.975);
+    return colour_ratio * warm_tint
+        * intensity * pow(linear_luma, 0.62) * cutoff_fade * black_gate;
+}
+
+fn glow_blur_at(pos: vec2<i32>, step: i32, cutoff: f32) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    var sum_weight = 0.0;
+    // A separable B3-spline kernel written as one 5x5 gather. Two differently
+    // spaced gathers are blended below for a smooth, multi-scale bloom without
+    // a low-resolution intermediate or box-shaped artefacts.
+    for (var ky = -2; ky <= 2; ky = ky + 1) {
+        for (var kx = -2; kx <= 2; kx = kx + 1) {
+            let weight = atrous_kernel_weight(kx) * atrous_kernel_weight(ky);
+            let sample_pos = pos + vec2<i32>(kx * step, ky * step);
+            sum = sum + glow_emission(local_effects_at(sample_pos), cutoff) * weight;
+            sum_weight = sum_weight + weight;
+        }
+    }
+    return sum / max(sum_weight, 1e-6);
+}
+
+fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    let amount = clamp(params.creative_effects.x / 100.0, 0.0, 1.0);
+    if amount < 1e-6 {
+        return rgb;
+    }
+
+    let radius = clamp(params.creative_effects.y / 100.0, 0.0, 1.0);
+    let threshold = clamp(params.creative_effects.z / 100.0, 0.0, 1.0);
+    let cutoff = mix(0.06, 0.92, pow(threshold, 1.12));
+    let reference_scale = clamp(
+        f32(min(params.full_width, params.full_height)) / 1080.0,
+        0.45,
+        3.0,
+    );
+    let step_f = mix(1.0, 9.0, pow(radius, 1.35)) * reference_scale;
+    let step_near = i32(clamp(round(step_f), 1.0, 28.0));
+    let step_far = min(step_near * 2, 48);
+
+    let near_bloom = glow_blur_at(pos, step_near, cutoff);
+    let far_bloom = glow_blur_at(pos, step_far, cutoff);
+    let bloom = mix(near_bloom, far_bloom, 0.36 + radius * 0.24);
+
+    // Very bright cores already carry their own energy. Protecting them keeps
+    // Glow from clipping the light source while the blurred halo expands into
+    // the surrounding darker pixels.
+    let current_luma = safe_luma(rgb);
+    let core_protection = 1.0 - 0.72 * smoothstep(1.0, 3.2, current_luma);
+    return max(rgb + bloom * amount * 3.2 * core_protection, vec3<f32>(0.0));
+}
+
+fn full_image_uv(pos: vec2<i32>) -> vec2<f32> {
+    let dimensions = max(
+        vec2<f32>(f32(params.full_width), f32(params.full_height)),
+        vec2<f32>(1.0),
+    );
+    let global_pos = clamp(pos + tile_origin(), vec2<i32>(0), full_image_max());
+    return (vec2<f32>(global_pos) + vec2<f32>(0.5)) / dimensions;
+}
+
+fn vignette_distance(pos: vec2<i32>, roundness: f32) -> f32 {
+    let dimensions = max(
+        vec2<f32>(f32(params.full_width), f32(params.full_height)),
+        vec2<f32>(1.0),
+    );
+    let p = abs(full_image_uv(pos) * 2.0 - vec2<f32>(1.0));
+    let frame_ellipse = length(p);
+    let frame_rectangle = pow(pow(p.x, 8.0) + pow(p.y, 8.0), 1.0 / 8.0);
+    let short_dimension = max(min(dimensions.x, dimensions.y), 1.0);
+    let image_circle = length(vec2<f32>(
+        p.x * dimensions.x / short_dimension,
+        p.y * dimensions.y / short_dimension,
+    ));
+
+    if roundness < 0.0 {
+        return mix(frame_ellipse, frame_rectangle, -roundness);
+    }
+    return mix(frame_ellipse, image_circle, roundness);
+}
+
+fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    let amount = clamp(params.vignette.x / 100.0, -1.0, 1.0);
+    if abs(amount) < 1e-6 {
+        return rgb;
+    }
+
+    let midpoint = clamp(params.vignette.y / 100.0, 0.0, 1.0);
+    let roundness = clamp(params.vignette.z / 100.0, -1.0, 1.0);
+    let feather = clamp(params.vignette.w / 100.0, 0.0, 1.0);
+    let distance = vignette_distance(pos, roundness);
+
+    // A high midpoint must be able to confine the effect to the final few
+    // percent of the frame. Feather still softens the transition, but its
+    // inward reach is progressively reduced as midpoint approaches 100.
+    let midpoint_shaped = pow(midpoint, 0.82);
+    let transition_center = mix(0.16, 0.985, midpoint_shaped);
+    let edge_confinement = mix(1.0, 0.16, midpoint * midpoint);
+    let inner_width = mix(0.010, 0.42, feather) * edge_confinement;
+    let outer_width = mix(0.015, 0.12, feather)
+        * mix(1.0, 0.25, midpoint * midpoint);
+    let transition_start = max(transition_center - inner_width, 0.0);
+    let transition_end = min(transition_center + outer_width, 1.0);
+    let mask = smoothstep(
+        transition_start,
+        max(transition_end, transition_start + 0.01),
+        distance,
+    );
+
+    // Lightroom-style negative vignettes are stronger than positive edge
+    // brightening. Highlights restores bright edge detail only for a dark
+    // vignette and never changes hue because the operation is a scalar gain.
+    let edge_ev = select(amount * 2.45, amount * 1.55, amount > 0.0);
+    var highlight_protection = 1.0;
+    if amount < 0.0 {
+        let highlights = clamp(params.vignette_options.x / 100.0, 0.0, 1.0);
+        highlight_protection = 1.0
+            - highlights * smoothstep(0.50, 2.4, safe_luma(rgb));
+    }
+    let delta_ev = clamp(edge_ev * mask * highlight_protection, -3.0, 2.0);
+    return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
 }
 
 // Lightroom's named HSL channels are a UI model, not a reason to process in
@@ -213,7 +447,7 @@ fn stabilized_mixer_sample(pos: vec2<i32>, center_rgb: vec3<f32>) -> MixerSample
             if (dx == 0 && dy == 0) || abs(dx) > selector_radius || abs(dy) > selector_radius {
                 continue;
             }
-            let neighbour_rgb = textureLoad(color_mixer_tex, clamp_pos(pos + vec2<i32>(dx, dy)), 0).xyz;
+            let neighbour_rgb = textureLoad(final_adjustment_tex, clamp_pos(pos + vec2<i32>(dx, dy)), 0).xyz;
             let neighbour = mixer_sample_from_rgb(neighbour_rgb);
             if neighbour.confidence < 1e-5 {
                 continue;
@@ -347,33 +581,48 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return max(adjusted, vec3<f32>(0.0));
 }
 
-@group(0) @binding(21) var color_mixer_out: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(22) var color_mixer_tex: texture_2d<f32>;
-
 @compute @workgroup_size(8, 8, 1)
-fn prepare_color_mixer(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
     var rgb = scene_working_at(pos);
     // Camera-profile rendering establishes the base rendition. User controls
-    // then follow the Lightroom panel order before the selective colour pass.
+    // then follow Lightroom's panel order before local Effects.
     rgb = apply_profile_look(rgb);
     rgb = apply_profile_tone_curve(rgb);
     rgb = apply_exposure(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
     rgb = apply_lightroom_tone(rgb, pos);
+    textureStore(adjustment_base_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn apply_lightroom_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    var rgb = adjustment_base_at(pos);
     rgb = apply_texture_and_clarity(pos, rgb);
     rgb = apply_dehaze(pos, rgb);
     rgb = apply_saturation_vibrance(rgb);
-    textureStore(color_mixer_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+    textureStore(local_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    var rgb = local_effects_at(pos);
+    rgb = apply_glow(pos, rgb);
+    rgb = apply_vignette(pos, rgb);
+    textureStore(creative_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    let rgb = textureLoad(color_mixer_tex, pos, 0).xyz;
+    let rgb = textureLoad(final_adjustment_tex, pos, 0).xyz;
     let mixed = apply_color_mixer(pos, rgb);
     textureStore(out_tex, pos, vec4<f32>(display_render(mixed), 1.0));
 }
