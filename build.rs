@@ -68,13 +68,12 @@ fn configure_source_revision() {
     watch_git_revision(&manifest_dir);
 
     let configured_revision = std::env::var("AURAW_SOURCE_REVISION").ok();
-    let release = std::env::var("PROFILE").as_deref() == Ok("release");
-    let require_committed = release
-        || std::env::var("AURAW_REQUIRE_COMMITTED_SOURCE").as_deref() == Ok("1");
+    let require_committed =
+        std::env::var("AURAW_REQUIRE_COMMITTED_SOURCE").as_deref() == Ok("1");
 
     if require_committed {
         let revision = git_revision.as_deref().unwrap_or_else(|| {
-            panic!("release builds must run from a Git checkout with a committed revision")
+            panic!("reproducible builds must run from a Git checkout with a committed revision")
         });
         let status = command_output(
             Command::new("git")
@@ -83,7 +82,7 @@ fn configure_source_revision() {
         )
         .unwrap_or_else(|| panic!("could not inspect the Git source tree"));
         if !status.is_empty() {
-            panic!("release builds require a clean source tree:\n{status}");
+            panic!("reproducible builds require a clean source tree:\n{status}");
         }
         if let Some(configured) = configured_revision.as_deref() {
             assert_eq!(

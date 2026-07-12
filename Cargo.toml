@@ -6,6 +6,7 @@ rust-version = "1.92.0"
 authors = ["Duecki <dueckis@dueckis.de>"]
 description = "A GPU-first RAW image editor in Rust"
 license = "GPL-3.0-or-later"
+default-run = "auraw"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

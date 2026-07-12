@@ -132,6 +132,10 @@ jobs:
           fi
 
           test "$(pkg-config --modversion libraw)" = "0.22.0"
+          REVISION="$(scripts/verify-source-revision.sh)"
+          export AURAW_REQUIRE_COMMITTED_SOURCE=1
+          export AURAW_SOURCE_REVISION="$REVISION"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$REVISION")"
           cargo build --release --locked
           strip target/release/auraw
 
