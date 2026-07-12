@@ -70,6 +70,13 @@ temporary copy as soon as decoding finishes. This needs no broad storage
 permission and works with local files, SD-card providers, and cloud document
 providers that offer a readable stream.
 
+The Export PNG button renders the full-resolution image to app-private cache
+and then publishes it as `Pictures/AuRaw/AuRaw-<timestamp>.png`. Android 10 and
+newer use MediaStore scoped storage, so gallery apps see the image without a
+permission prompt. Android 8 and 9 request legacy write permission on the first
+export, copy the PNG into the same public folder, and notify the media scanner.
+No export destination dialog is shown.
+
 eframe is forced to use wgpu. wgpu includes Vulkan and GLES backends on
 Android, and AuRaw requests the adapter's actual 2D texture-size limit so RAWs
 wider than eframe's usual 8192-pixel default can be processed when the device

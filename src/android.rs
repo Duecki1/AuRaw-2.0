@@ -3,7 +3,7 @@ use jni::{
     errors::LogContextErrorAndDefault,
     objects::{JClass, JObject, JString},
     refs::Global,
-    EnvUnowned, JavaVM,
+    EnvUnowned, JValue, JavaVM,
 };
 use std::{
     collections::VecDeque,
@@ -24,11 +24,30 @@ pub enum PickerResult {
     Failed(String),
 }
 
+#[derive(Debug)]
+pub enum ExportPublishResult {
+    Published(String),
+    Failed(String),
+}
+
 static RESULTS: OnceLock<Mutex<VecDeque<PickerResult>>> = OnceLock::new();
+static EXPORT_RESULTS: OnceLock<Mutex<VecDeque<ExportPublishResult>>> = OnceLock::new();
 static EGUI_CONTEXT: Mutex<Option<eframe::egui::Context>> = Mutex::new(None);
 
 fn results() -> &'static Mutex<VecDeque<PickerResult>> {
     RESULTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn export_results() -> &'static Mutex<VecDeque<ExportPublishResult>> {
+    EXPORT_RESULTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn request_repaint() {
+    if let Ok(installed) = EGUI_CONTEXT.lock() {
+        if let Some(context) = installed.as_ref() {
+            context.request_repaint();
+        }
+    }
 }
 
 pub fn install_context(context: &eframe::egui::Context) {
@@ -39,6 +58,10 @@ pub fn install_context(context: &eframe::egui::Context) {
 
 pub fn take_picker_result() -> Option<PickerResult> {
     results().lock().ok()?.pop_front()
+}
+
+pub fn take_export_publish_result() -> Option<ExportPublishResult> {
+    export_results().lock().ok()?.pop_front()
 }
 
 pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
@@ -55,6 +78,31 @@ pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
         Ok(())
     })
     .map_err(|error| format!("could not open Android's file picker: {error:#}"))
+}
+
+pub fn publish_png(
+    app: &AndroidApp,
+    path: &std::path::Path,
+    display_name: &str,
+) -> Result<(), String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "Android export cache path is not valid UTF-8".to_owned())?;
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+        let path = env.new_string(path)?;
+        let display_name = env.new_string(display_name)?;
+        env.call_method(
+            activity,
+            jni::jni_str!("publishPng"),
+            jni::jni_sig!((JString, JString) -> void),
+            &[JValue::Object(&path), JValue::Object(&display_name)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not publish Android PNG: {error:#}"))
 }
 
 #[unsafe(no_mangle)]
@@ -85,14 +133,37 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePicked<'lo
             if let Ok(mut queue) = results().lock() {
                 queue.push_back(result);
             }
-            if let Ok(installed) = EGUI_CONTEXT.lock() {
-                if let Some(context) = installed.as_ref() {
-                    context.request_repaint();
-                }
-            }
+            request_repaint();
             Ok(())
         })
         .resolve_with::<LogContextErrorAndDefault, _>(|| {
             "AuRawActivity.nativeOnFilePicked".to_owned()
+        });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnExportPublished<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    location: JString<'local>,
+    error: JString<'local>,
+) {
+    unowned_env
+        .with_env(|_env| -> jni::errors::Result<()> {
+            let location = location.to_string();
+            let error = error.to_string();
+            let result = if error.is_empty() {
+                ExportPublishResult::Published(location)
+            } else {
+                ExportPublishResult::Failed(error)
+            };
+            if let Ok(mut queue) = export_results().lock() {
+                queue.push_back(result);
+            }
+            request_repaint();
+            Ok(())
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "AuRawActivity.nativeOnExportPublished".to_owned()
         });
 }
