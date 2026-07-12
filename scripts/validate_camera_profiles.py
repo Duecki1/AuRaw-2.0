@@ -262,14 +262,17 @@ def main() -> int:
     c.require_in_order(
         adjustments,
         [
-            "apply_profile_hue_sat(working)",
+            "apply_temperature_tint(working)",
+            "apply_profile_hue_sat(white_balanced)",
             "exp2(profile_exposure_ev)",
-            "apply_exposure(rgb)",
             "apply_profile_look(rgb)",
             "apply_profile_tone_curve(rgb)",
+            "apply_exposure(rgb)",
+            "apply_lightroom_tone(rgb, pos)",
+            "apply_saturation_vibrance(rgb)",
             "display_render",
         ],
-        "render order is HueSat -> default exposure -> controls -> LookTable -> profile curve -> display transform",
+        "render order is WB -> camera profile -> Basic -> point curve -> Color -> display transform",
     )
     c.require_in_order(
         tone_analysis,
@@ -288,13 +291,8 @@ def main() -> int:
         and "5.0f32.powf(-skew)" in sigmoid_rust,
         "darktable sigmoid defaults and generalized log-logistic coefficients are present",
     )
-    c.require_in_order(
-        tonemap,
-        [
-            "let locally_shaped = apply_local_basic_tone(rgb, pos)",
-            "let mapped = darktable_sigmoid(locally_shaped)",
-            "apply_output_lut(mapped)",
-        ],
+    c.check(
+        "return apply_output_lut(darktable_sigmoid(rgb));" in tonemap,
         "darktable sigmoid runs before the bounded ICC LUT",
     )
     c.check(
@@ -345,11 +343,13 @@ def main() -> int:
         "LibRaw's missing BaselineExposure sentinel cannot black out proprietary RAW previews",
     )
     c.check(
-        "size_of::<super::GpuParams>(), 448" in gpu
+        "size_of::<super::GpuParams>(), 528" in gpu
         and "offset_of!(super::GpuParams, sigmoid_curve), 80" in gpu
         and "offset_of!(super::GpuParams, sigmoid_power), 96" in gpu
-        and "offset_of!(super::GpuParams, profile_hue_sat), 368" in gpu
-        and "offset_of!(super::GpuParams, profile_flags), 432" in gpu,
+        and "offset_of!(super::GpuParams, tone_curve_0), 144" in gpu
+        and "offset_of!(super::GpuParams, tone_curve_meta), 208" in gpu
+        and "offset_of!(super::GpuParams, profile_hue_sat), 448" in gpu
+        and "offset_of!(super::GpuParams, profile_flags), 512" in gpu,
         "camera-profile uniform ABI regression test covers the appended metadata block",
     )
 
