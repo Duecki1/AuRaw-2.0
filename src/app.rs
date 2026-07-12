@@ -1,7 +1,7 @@
 use crate::pipeline::{
     affected_stage, build_proxy, load_raw_file, spawn_tiled_png_export, ExportEvent,
-    ExposureParams, GpuParams, LoadedRaw, ProcessingQuality, ProcessingStage, ProxySpec,
-    RawGpuPipeline, TileSpec,
+    ExportMetadata, ExportSettings, ExposureParams, GpuParams, LoadedRaw, ProcessingQuality,
+    ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec,
 };
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::Library;
@@ -20,6 +20,24 @@ pub enum AppTab {
     #[default]
     Develop,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidebarTab {
+    #[default]
+    Adjustments,
+    Masks,
+    Inpainting,
+    Export,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToneCurveTab {
+    #[default]
+    Rgb,
+    Red,
+    Green,
+    Blue,
 }
 
 struct LoadedPreview {
@@ -42,7 +60,13 @@ pub struct AurawApp {
     pub gpu_pipeline: Option<RawGpuPipeline>,
     pub exposure: ExposureParams,
     pub active_tab: AppTab,
+    pub sidebar_tab: SidebarTab,
+    pub tone_curve_tab: ToneCurveTab,
+    pub export_settings: ExportSettings,
     pub status: String,
+    /// Reveals low-level darktable/raw controls. The default Lightroom-like
+    /// interface intentionally keeps these implementation details hidden.
+    pub expert_mode: bool,
 
     egui_ctx: egui::Context,
     target_exposure: ExposureParams,
@@ -53,6 +77,7 @@ pub struct AurawApp {
     export_progress: Option<(usize, usize)>,
     export_publish_pending: bool,
     image_status: String,
+    current_label: Option<String>,
     notice: Option<String>,
 
     #[cfg(target_os = "android")]
@@ -110,7 +135,11 @@ impl AurawApp {
             gpu_pipeline: None,
             exposure,
             active_tab: AppTab::default(),
+            sidebar_tab: SidebarTab::default(),
+            tone_curve_tab: ToneCurveTab::default(),
+            export_settings: ExportSettings::default(),
             status: "Open a RAW file to get started.".to_owned(),
+            expert_mode: false,
             egui_ctx: ctx.clone(),
             target_exposure: exposure,
             pending_stage: None,
@@ -120,6 +149,7 @@ impl AurawApp {
             export_progress: None,
             export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
+            current_label: None,
             notice: None,
         }
     }
@@ -145,7 +175,11 @@ impl AurawApp {
             gpu_pipeline: None,
             exposure,
             active_tab: AppTab::default(),
+            sidebar_tab: SidebarTab::default(),
+            tone_curve_tab: ToneCurveTab::default(),
+            export_settings: ExportSettings::default(),
             status: "Open a RAW file to get started.".to_owned(),
+            expert_mode: false,
             egui_ctx: cc.egui_ctx.clone(),
             target_exposure: exposure,
             pending_stage: None,
@@ -155,6 +189,7 @@ impl AurawApp {
             export_progress: None,
             export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
+            current_label: None,
             notice: None,
             android_app,
             picker_pending: false,
@@ -374,6 +409,7 @@ impl AurawApp {
                     preview_height
                 );
                 self.current_path = loaded.source_path;
+                self.current_label = Some(loaded.label.clone());
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
                 self.gpu_pipeline = Some(loaded.pipeline);
@@ -502,6 +538,14 @@ impl AurawApp {
             return;
         };
 
+        let source_file_name = self
+            .current_path
+            .as_ref()
+            .and_then(|source| source.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            .or_else(|| self.current_label.clone());
+        let metadata = ExportMetadata::from_raw(raw, source_file_name);
         self.export_receiver = Some(spawn_tiled_png_export(
             render_state.device.clone(),
             render_state.queue.clone(),
@@ -510,6 +554,8 @@ impl AurawApp {
             self.exposure,
             path,
             TileSpec::default(),
+            self.export_settings,
+            metadata,
         ));
         self.export_progress = Some((0, 0));
         self.notice = None;
@@ -612,7 +658,7 @@ impl AurawApp {
             if total == 0 {
                 "Preparing tiled export…".to_owned()
             } else {
-                format!("Exporting full resolution — tile {completed}/{total}")
+                format!("Exporting PNG — tile {completed}/{total}")
             }
         } else if self.export_publish_pending {
             "Saving to Pictures/AuRaw…".to_owned()
@@ -686,7 +732,7 @@ impl eframe::App for AurawApp {
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
-                                .show(ui, |ui| Sidebar::show(ui, self, layout));
+                                .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
                         });
                 }
                 ScreenLayout::Vertical => {
@@ -697,7 +743,7 @@ impl eframe::App for AurawApp {
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
-                                .show(ui, |ui| Sidebar::show(ui, self, layout));
+                                .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
                         });
                 }
             }

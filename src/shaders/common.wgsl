@@ -30,6 +30,12 @@ struct Params {
     sigmoid_power: vec4<f32>,
     // Texture, clarity, dehaze, Lightroom-style contrast.
     presence: vec4<f32>,
+    // Glow amount, radius, highlight threshold, reserved.
+    creative_effects: vec4<f32>,
+    // Vignette amount, midpoint, roundness, feather.
+    vignette: vec4<f32>,
+    // Vignette highlight protection, followed by reserved values.
+    vignette_options: vec4<f32>,
     // Reconstruction method, guided passes, colour adaptation, reserved.
     highlight_options: vec4<f32>,
     // Eight editable point-curve coordinates, packed as x0,y0,x1,y1.
@@ -39,6 +45,22 @@ struct Params {
     tone_curve_3: vec4<f32>,
     // Active point count, followed by reserved values.
     tone_curve_meta: vec4<f32>,
+    // Independent scene-referred red, green and blue point curves.
+    tone_curve_red_0: vec4<f32>,
+    tone_curve_red_1: vec4<f32>,
+    tone_curve_red_2: vec4<f32>,
+    tone_curve_red_3: vec4<f32>,
+    tone_curve_red_meta: vec4<f32>,
+    tone_curve_green_0: vec4<f32>,
+    tone_curve_green_1: vec4<f32>,
+    tone_curve_green_2: vec4<f32>,
+    tone_curve_green_3: vec4<f32>,
+    tone_curve_green_meta: vec4<f32>,
+    tone_curve_blue_0: vec4<f32>,
+    tone_curve_blue_1: vec4<f32>,
+    tone_curve_blue_2: vec4<f32>,
+    tone_curve_blue_3: vec4<f32>,
+    tone_curve_blue_meta: vec4<f32>,
     // Red, orange, yellow, green / aqua, blue, purple, magenta.
     hsl_hue_0: vec4<f32>,
     hsl_hue_1: vec4<f32>,

@@ -5,7 +5,7 @@ const CURVE_HEIGHT: f32 = 210.0;
 const POINT_RADIUS: f32 = 5.0;
 const PICK_RADIUS: f32 = 16.0;
 
-pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve) -> bool {
+pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color32) -> bool {
     curve.sanitize();
     let width = ui.available_width().max(180.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CURVE_HEIGHT), Sense::click_and_drag());
@@ -38,14 +38,14 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve) -> bool {
     for sample in 1..=128 {
         let x = sample as f32 / 128.0;
         let next = curve_to_screen(rect, [x, sample_curve(curve, x)]);
-        painter.line_segment([previous, next], Stroke::new(2.0, visuals.selection.bg_fill));
+        painter.line_segment([previous, next], Stroke::new(2.0, curve_color));
         previous = next;
     }
 
     for point in curve.points.iter().take(curve.len as usize) {
         let center = curve_to_screen(rect, *point);
         painter.circle_filled(center, POINT_RADIUS, Color32::WHITE);
-        painter.circle_stroke(center, POINT_RADIUS, Stroke::new(1.5, visuals.selection.bg_fill));
+        painter.circle_stroke(center, POINT_RADIUS, Stroke::new(1.5, curve_color));
     }
 
     let mut changed = false;
