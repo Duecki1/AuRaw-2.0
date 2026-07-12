@@ -97,6 +97,7 @@ cargo run --release
 On a computer without desktop LibRaw, AuRaw still compiles, but the desktop RAW
 loader reports that it was disabled at build time.
 
-Release builds must run from a clean Git checkout. The full commit ID is embedded
-in the Rust library, and the build scripts discard native output if the source
-changes while compilation is running. See `REPRODUCIBLE_BUILDS.md`.
+Normal local commands such as `cargo run --release` may build uncommitted work.
+The reproducible Linux and Android release scripts still require a clean Git
+checkout, embed the full commit ID, and discard native output if the source
+changes while compilation is running.
