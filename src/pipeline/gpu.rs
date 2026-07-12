@@ -828,24 +828,40 @@ impl RawGpuPipeline {
                 ],
             });
 
-        let bgl5 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl adjustments"),
-            entries: &[
-                common_entries[0].clone(),
-                common_entries[1].clone(),
-                common_entries[2].clone(),
-                common_entries[3].clone(),
-                texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    12,
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
-                storage_buffer_entry(16, true),
-                texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_buffer_entry(20, true),
-            ],
-        });
+        let bgl_adjust_prepare =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl adjustment preparation"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        21,
+                        work_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                    storage_buffer_entry(16, true),
+                    texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_buffer_entry(20, true),
+                ],
+            });
+
+        let bgl_adjust_render =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl perceptual color mixer and render"),
+                entries: &[
+                    buffer_entry(0),
+                    storage_texture_entry(
+                        12,
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                    texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_buffer_entry(20, true),
+                ],
+            });
 
         let make_highlight_bind_group =
             |label: &str,
@@ -1267,9 +1283,9 @@ impl RawGpuPipeline {
             ],
         });
 
-        let bg5 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg adjustments"),
-            layout: &bgl5,
+        let bg_adjust_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg adjustment preparation"),
+            layout: &bgl_adjust_prepare,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1292,8 +1308,8 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&scene_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: wgpu::BindingResource::TextureView(&out_view),
+                    binding: 21,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
@@ -1302,6 +1318,29 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 17,
                     resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: profile_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let bg_adjust_render = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg perceptual color mixer and render"),
+            layout: &bgl_adjust_render,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&out_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 20,
@@ -1325,6 +1364,7 @@ impl RawGpuPipeline {
         let xtrans_p5 = work_shader_source(SHADER_XTRANS_P5, demosaic_format);
         let xtrans_p6 = work_shader_source(SHADER_XTRANS_P6, demosaic_format);
         let xtrans_p7 = work_shader_source(SHADER_XTRANS_P7, demosaic_format);
+        let adjustments_shader = work_shader_source(SHADER_ADJUSTMENTS, work_format);
 
         let make_pipeline =
             |source: &str, entry: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::ComputePipeline {
@@ -1348,7 +1388,7 @@ impl RawGpuPipeline {
             };
 
         let mut passes = Vec::with_capacity(
-            1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 8 + 5,
+            1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 8 + 6,
         );
 
         // Prepare writes the initial RGB estimate and reliability into A.
@@ -1572,15 +1612,26 @@ impl RawGpuPipeline {
         let tone_reduce_pass_index = tone_prepare_pass_index + 3;
         let tone_stage_end = passes.len();
 
-        passes.push(Pass {
-            pipeline: make_pipeline(
-                SHADER_ADJUSTMENTS,
-                "apply_lightroom_adjustments",
-                &bgl5,
-            ),
-            bind_group: bg5,
-            workgroups: image_workgroups,
-        });
+        passes.extend([
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_shader.as_ref(),
+                    "prepare_color_mixer",
+                    &bgl_adjust_prepare,
+                ),
+                bind_group: bg_adjust_prepare,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_shader.as_ref(),
+                    "apply_lightroom_adjustments",
+                    &bgl_adjust_render,
+                ),
+                bind_group: bg_adjust_render,
+                workgroups: image_workgroups,
+            },
+        ]);
 
         let egui_texture_id = renderer.map(|renderer| {
             renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)
@@ -2567,6 +2618,13 @@ mod tests {
                     processing_work_format(ProcessingQuality::High),
                 ),
             ),
+            (
+                "32-bit perceptual color mixer",
+                work_shader_source(
+                    SHADER_ADJUSTMENTS,
+                    processing_work_format(ProcessingQuality::High),
+                ),
+            ),
         ] {
             assert!(!source.contains("rgba16float"));
             assert!(source.contains("rgba32float"));
@@ -2711,6 +2769,12 @@ mod tests {
         assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
         assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
         assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
+        assert!(SHADER_ADJUSTMENTS.contains("prepare_color_mixer"));
+        assert!(SHADER_ADJUSTMENTS.contains("stabilized_mixer_sample"));
+        assert!(SHADER_ADJUSTMENTS.contains("positive_rec2020_from_oklab"));
+        assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));
+        assert!(!SHADER_ADJUSTMENTS.contains("rgb_to_hsl"));
+        assert!(!SHADER_ADJUSTMENTS.contains("hsl_to_rgb"));
     }
 
     #[test]
