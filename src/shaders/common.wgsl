@@ -5,7 +5,8 @@ struct Params {
     // and demosaic finishing while the stable 64-byte prefix does not move.
     black_point: f32,
     exposure: f32,
-    sigmoid_contrast: f32,
+    // Relative user white-balance temperature in the -100..100 domain.
+    temperature: f32,
     saturation: f32,
     vibrance: f32,
     highlight_clip: f32,
@@ -18,7 +19,8 @@ struct Params {
     demosaic_mode: f32,
     dual_threshold: f32,
     frequency_chroma: f32,
-    _demosaic_reserved: f32,
+    // Relative green-magenta white-balance tint in the -100..100 domain.
+    tint: f32,
     // Highlights, shadows, whites, blacks. These are scene-linear local
     // exposure-shaping controls evaluated before the display transform.
     basic_tone: vec4<f32>,
@@ -26,10 +28,17 @@ struct Params {
     sigmoid_curve: vec4<f32>,
     // darktable sigmoid: film power, paper power, hue preservation, method.
     sigmoid_power: vec4<f32>,
-    // Texture, clarity, dehaze, reserved.
+    // Texture, clarity, dehaze, Lightroom-style contrast.
     presence: vec4<f32>,
     // Reconstruction method, guided passes, colour adaptation, reserved.
     highlight_options: vec4<f32>,
+    // Eight editable point-curve coordinates, packed as x0,y0,x1,y1.
+    tone_curve_0: vec4<f32>,
+    tone_curve_1: vec4<f32>,
+    tone_curve_2: vec4<f32>,
+    tone_curve_3: vec4<f32>,
+    // Active point count, followed by reserved values.
+    tone_curve_meta: vec4<f32>,
     // Red, orange, yellow, green / aqua, blue, purple, magenta.
     hsl_hue_0: vec4<f32>,
     hsl_hue_1: vec4<f32>,
@@ -77,6 +86,12 @@ const REC2020_TO_SRGB: mat3x3<f32> = mat3x3<f32>(
     vec3<f32>( 1.6604910, -0.1245505, -0.0181508),
     vec3<f32>(-0.5876411,  1.1328999, -0.1005789),
     vec3<f32>(-0.0728499, -0.0083494,  1.1187297),
+);
+
+const SRGB_TO_REC2020: mat3x3<f32> = mat3x3<f32>(
+    vec3<f32>(0.6274039, 0.0690973, 0.0163914),
+    vec3<f32>(0.3292830, 0.9195404, 0.0880133),
+    vec3<f32>(0.0433131, 0.0113623, 0.8955953),
 );
 
 fn image_max() -> vec2<i32> {

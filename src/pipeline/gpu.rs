@@ -221,7 +221,7 @@ pub struct GpuParams {
     // floats intentionally form one 64-byte scalar block before vec4 fields.
     black_point: f32,
     exposure: f32,
-    sigmoid_contrast: f32,
+    temperature: f32,
     saturation: f32,
     vibrance: f32,
     highlight_clip: f32,
@@ -234,12 +234,17 @@ pub struct GpuParams {
     demosaic_mode: f32,
     dual_threshold: f32,
     frequency_chroma: f32,
-    _demosaic_reserved: f32,
+    tint: f32,
     basic_tone: [f32; 4],
     sigmoid_curve: [f32; 4],
     sigmoid_power: [f32; 4],
     presence: [f32; 4],
     highlight_options: [f32; 4],
+    tone_curve_0: [f32; 4],
+    tone_curve_1: [f32; 4],
+    tone_curve_2: [f32; 4],
+    tone_curve_3: [f32; 4],
+    tone_curve_meta: [f32; 4],
     hsl_hue_0: [f32; 4],
     hsl_hue_1: [f32; 4],
     hsl_saturation_0: [f32; 4],
@@ -285,7 +290,7 @@ impl GpuParams {
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
-            sigmoid_contrast: exposure.sigmoid.contrast,
+            temperature: exposure.temperature.clamp(-100.0, 100.0),
             saturation: exposure.saturation,
             vibrance: exposure.vibrance,
             highlight_clip: exposure.highlight_clip,
@@ -298,7 +303,7 @@ impl GpuParams {
             demosaic_mode: exposure.demosaic_mode.shader_value(),
             dual_threshold: exposure.dual_threshold.clamp(0.0, 100.0),
             frequency_chroma: exposure.frequency_chroma.clamp(0.0, 1.0),
-            _demosaic_reserved: 9.0,
+            tint: exposure.tint.clamp(-100.0, 100.0),
             basic_tone: [
                 exposure.highlights,
                 exposure.shadows,
@@ -317,11 +322,46 @@ impl GpuParams {
                 sigmoid.hue_preservation,
                 sigmoid.color_processing,
             ],
-            presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
+            presence: [
+                exposure.texture,
+                exposure.clarity,
+                exposure.dehaze,
+                exposure.contrast.clamp(-100.0, 100.0),
+            ],
             highlight_options: [
                 exposure.highlight_method.shader_value(),
                 exposure.highlight_iterations.clamp(1, 4) as f32,
                 exposure.highlight_color_adaptation.clamp(0.0, 1.0),
+                0.0,
+            ],
+            tone_curve_0: [
+                exposure.tone_curve.points[0][0],
+                exposure.tone_curve.points[0][1],
+                exposure.tone_curve.points[1][0],
+                exposure.tone_curve.points[1][1],
+            ],
+            tone_curve_1: [
+                exposure.tone_curve.points[2][0],
+                exposure.tone_curve.points[2][1],
+                exposure.tone_curve.points[3][0],
+                exposure.tone_curve.points[3][1],
+            ],
+            tone_curve_2: [
+                exposure.tone_curve.points[4][0],
+                exposure.tone_curve.points[4][1],
+                exposure.tone_curve.points[5][0],
+                exposure.tone_curve.points[5][1],
+            ],
+            tone_curve_3: [
+                exposure.tone_curve.points[6][0],
+                exposure.tone_curve.points[6][1],
+                exposure.tone_curve.points[7][0],
+                exposure.tone_curve.points[7][1],
+            ],
+            tone_curve_meta: [
+                exposure.tone_curve.len.clamp(2, 8) as f32,
+                0.0,
+                0.0,
                 0.0,
             ],
             hsl_hue_0: exposure.hsl_hue[..4].try_into().unwrap(),
@@ -2641,17 +2681,19 @@ mod tests {
         // Sixteen scalar values keep the stable 64-byte prefix. The two
         // darktable sigmoid vec4s follow the local-tone controls, then the
         // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 448);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 528);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
         assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 128);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 240);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 336);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 344);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 352);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 368);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 432);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 144);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 208);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 320);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 416);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 424);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 432);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 448);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 512);
     }
 
     #[test]
@@ -2660,6 +2702,15 @@ mod tests {
         assert!(SHADER_ADJUSTMENTS.contains("preserve_hue_and_energy"));
         assert!(SHADER_ADJUSTMENTS.contains("sigmoid_rgb_ratio"));
         assert!(SHADER_ADJUSTMENTS.contains("hyperbolic_chroma"));
+    }
+
+    #[test]
+    fn adjustments_shader_contains_lightroom_style_controls() {
+        assert!(SHADER_ADJUSTMENTS.contains("apply_temperature_tint"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
+        assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
+        assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
     }
 
     #[test]

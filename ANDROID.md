@@ -32,12 +32,13 @@ The simplest route is to open the `android` directory in Android Studio and
 press Run. The variant pre-build task builds LibRaw and the matching debug or
 release Rust library before Gradle packages the app.
 
-For a command-line build:
+For a command-line build from the repository root:
 
 ```sh
-cd android
 gradle assembleDebug -PaurawAbi=arm64-v8a
 ```
+
+Running the same command from the `android` directory remains supported.
 
 The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
 To build only the native LibRaw and Rust library without packaging an APK:

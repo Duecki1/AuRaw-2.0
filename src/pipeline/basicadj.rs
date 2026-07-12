@@ -49,6 +49,63 @@ impl HighlightReconstructionMethod {
     }
 }
 
+
+/// Lightroom-style editable point curve. Points are stored in normalized
+/// input/output coordinates and evaluated in a reversible scene-luminance
+/// shaper, so the neutral diagonal is an exact no-op for HDR scene values.
+pub const MAX_POINT_CURVE_POINTS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointCurve {
+    pub points: [[f32; 2]; MAX_POINT_CURVE_POINTS],
+    pub len: u32,
+}
+
+impl PointCurve {
+    pub const fn linear() -> Self {
+        Self {
+            points: [
+                [0.0, 0.0],
+                [0.25, 0.25],
+                [0.5, 0.5],
+                [0.75, 0.75],
+                [1.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 1.0],
+            ],
+            len: 5,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::linear();
+    }
+
+    pub fn sanitize(&mut self) {
+        self.len = self.len.clamp(2, MAX_POINT_CURVE_POINTS as u32);
+        let len = self.len as usize;
+        self.points[0] = [0.0, self.points[0][1].clamp(0.0, 1.0)];
+        self.points[len - 1] = [1.0, self.points[len - 1][1].clamp(0.0, 1.0)];
+        for index in 1..len - 1 {
+            let lower = self.points[index - 1][0] + 0.005;
+            let remaining = (len - 1 - index) as f32;
+            let upper = 1.0 - 0.005 * remaining;
+            self.points[index][0] = self.points[index][0].clamp(lower, upper.max(lower));
+            self.points[index][1] = self.points[index][1].clamp(0.0, 1.0);
+        }
+        for point in &mut self.points[len..] {
+            *point = [1.0, 1.0];
+        }
+    }
+}
+
+impl Default for PointCurve {
+    fn default() -> Self {
+        Self::linear()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExposureParams {
     /// Additional normalized sensor-space black-point correction. It is applied
@@ -58,10 +115,17 @@ pub struct ExposureParams {
     pub black_point: f32,
     /// Scene-linear exposure in stops, applied before local/color processing.
     pub exposure: f32,
+    /// Lightroom-style contrast in the -100..100 UI domain.
+    pub contrast: f32,
     /// darktable-compatible sigmoid scene-to-display transform.
     pub sigmoid: SigmoidParams,
+    /// Relative white-balance temperature and tint in Lightroom-compatible
+    /// -100..100 adjustment domains. Zero preserves the camera as-shot WB.
+    pub temperature: f32,
+    pub tint: f32,
     pub saturation: f32,
     pub vibrance: f32,
+    pub tone_curve: PointCurve,
     pub chroma_denoise: f32,
     /// Demosaic finishing mode. The reference algorithm is always run first.
     pub demosaic_mode: DemosaicMode,
@@ -120,9 +184,13 @@ impl Default for ExposureParams {
         Self {
             black_point: 0.0,
             exposure: 0.0,
+            contrast: 0.0,
             sigmoid: SigmoidParams::default(),
+            temperature: 0.0,
+            tint: 0.0,
             saturation: 0.0,
             vibrance: 0.0,
+            tone_curve: PointCurve::linear(),
             chroma_denoise: 0.0,
             demosaic_mode: DemosaicMode::Reference,
             dual_threshold: 20.0,
@@ -150,7 +218,7 @@ impl Default for ExposureParams {
 
 #[cfg(test)]
 mod tests {
-    use super::{DemosaicMode, ExposureParams, DEFAULT_SCENE_EXPOSURE_EV};
+    use super::{DemosaicMode, ExposureParams, PointCurve, DEFAULT_SCENE_EXPOSURE_EV};
     use crate::pipeline::SigmoidParams;
 
     #[test]
@@ -171,8 +239,23 @@ mod tests {
         assert_eq!(rendition.exposure, DEFAULT_SCENE_EXPOSURE_EV);
         assert_eq!(rendition.black_point, 0.0);
         assert_eq!(rendition.sigmoid, SigmoidParams::default());
+        assert_eq!(rendition.contrast, 0.0);
+        assert_eq!(rendition.temperature, 0.0);
+        assert_eq!(rendition.tint, 0.0);
         assert_eq!(rendition.saturation, 0.0);
         assert_eq!(rendition.vibrance, 0.0);
+    }
+
+    #[test]
+    fn point_curve_default_is_a_sorted_identity() {
+        let curve = PointCurve::default();
+        assert_eq!(curve.len, 5);
+        for (index, point) in curve.points[..curve.len as usize].iter().enumerate() {
+            assert!((point[0] - point[1]).abs() < f32::EPSILON);
+            if index > 0 {
+                assert!(point[0] > curve.points[index - 1][0]);
+            }
+        }
     }
 
     #[test]

@@ -63,6 +63,10 @@ fn adaptive_tone_masks(local_ev: f32, percentiles: TonePercentiles) -> vec4<f32>
     return vec4<f32>(black_mask, shadow_mask, highlight_mask, white_mask);
 }
 
+fn signed_tone_range(value: f32, negative_ev: f32, positive_ev: f32) -> f32 {
+    return select(value * negative_ev, value * positive_ev, value >= 0.0);
+}
+
 fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     let highlights = clamp(params.basic_tone.x / 100.0, -1.0, 1.0);
     let shadows = clamp(params.basic_tone.y / 100.0, -1.0, 1.0);
@@ -73,11 +77,105 @@ fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     }
 
     let masks = adaptive_tone_masks(sample_tone_guide_ev(pos), tone_percentiles());
-    let offset_ev = 0.60 * blacks * masks.x
-        + 1.35 * shadows * masks.y
-        + 1.20 * highlights * masks.z
-        + 0.60 * whites * masks.w;
+    // Lightroom-like asymmetric ranges: highlight recovery and shadow lift are
+    // deliberately stronger than their opposite directions, while Whites and
+    // Blacks primarily move the endpoints. All four remain exposure-like in
+    // scene space, preserving hue and avoiding channel clipping.
+    let offset_ev = signed_tone_range(blacks, 1.45, 1.15) * masks.x
+        + signed_tone_range(shadows, 1.20, 1.90) * masks.y
+        + signed_tone_range(highlights, 1.90, 1.15) * masks.z
+        + signed_tone_range(whites, 1.25, 1.40) * masks.w;
     return rgb * exp2(offset_ev);
+}
+
+fn apply_basic_contrast(rgb: vec3<f32>) -> vec3<f32> {
+    let amount = clamp(params.presence.w / 100.0, -1.0, 1.0);
+    if abs(amount) < 1e-6 {
+        return rgb;
+    }
+
+    let luminance = safe_luma(max(rgb, vec3<f32>(0.0)));
+    let contrast_power = exp2(amount);
+    let scene_ev = log2(luminance / 0.1845);
+    let adjusted_luminance = 0.1845 * exp2(scene_ev * contrast_power);
+    return rgb * clamp(adjusted_luminance / luminance, 0.0, 64.0);
+}
+
+fn tone_curve_point(index: u32) -> vec2<f32> {
+    switch index {
+        case 0u: { return params.tone_curve_0.xy; }
+        case 1u: { return params.tone_curve_0.zw; }
+        case 2u: { return params.tone_curve_1.xy; }
+        case 3u: { return params.tone_curve_1.zw; }
+        case 4u: { return params.tone_curve_2.xy; }
+        case 5u: { return params.tone_curve_2.zw; }
+        case 6u: { return params.tone_curve_3.xy; }
+        default: { return params.tone_curve_3.zw; }
+    }
+}
+
+fn tone_curve_secant(a: vec2<f32>, b: vec2<f32>) -> f32 {
+    return (b.y - a.y) / max(b.x - a.x, 1e-5);
+}
+
+fn tone_curve_tangent(index: u32, count: u32) -> f32 {
+    if index == 0u {
+        return tone_curve_secant(tone_curve_point(0u), tone_curve_point(1u));
+    }
+    if index + 1u >= count {
+        return tone_curve_secant(tone_curve_point(count - 2u), tone_curve_point(count - 1u));
+    }
+
+    let previous = tone_curve_secant(tone_curve_point(index - 1u), tone_curve_point(index));
+    let next = tone_curve_secant(tone_curve_point(index), tone_curve_point(index + 1u));
+    if previous * next <= 0.0 {
+        return 0.0;
+    }
+    return 2.0 * previous * next / max(abs(previous + next), 1e-6) * sign(previous + next);
+}
+
+fn point_curve_value(input: f32) -> f32 {
+    let count = u32(clamp(params.tone_curve_meta.x, 2.0, 8.0));
+    let x = clamp(input, 0.0, 1.0);
+    var segment = count - 2u;
+    for (var index = 0u; index + 1u < count; index = index + 1u) {
+        if x <= tone_curve_point(index + 1u).x {
+            segment = index;
+            break;
+        }
+    }
+
+    let p0 = tone_curve_point(segment);
+    let p1 = tone_curve_point(segment + 1u);
+    let width = max(p1.x - p0.x, 1e-5);
+    let t = clamp((x - p0.x) / width, 0.0, 1.0);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let m0 = tone_curve_tangent(segment, count) * width;
+    let m1 = tone_curve_tangent(segment + 1u, count) * width;
+    let hermite = (2.0 * t3 - 3.0 * t2 + 1.0) * p0.y
+        + (t3 - 2.0 * t2 + t) * m0
+        + (-2.0 * t3 + 3.0 * t2) * p1.y
+        + (t3 - t2) * m1;
+    return clamp(hermite, min(p0.y, p1.y), max(p0.y, p1.y));
+}
+
+fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
+    let luminance = max(dot(rgb, LUMA), 0.0);
+    // The rational shaper maps [0, infinity) to [0, 1) and has an analytic
+    // inverse. Therefore a diagonal point curve is exactly neutral even for
+    // HDR values, unlike applying an SDR LUT directly to scene-linear RGB.
+    let input = luminance / (luminance + 0.1845);
+    let output = clamp(point_curve_value(input), 0.0, 0.999999);
+    let adjusted_luminance = 0.1845 * output / max(1.0 - output, 1e-6);
+    if luminance <= 1e-9 {
+        return vec3<f32>(adjusted_luminance);
+    }
+    return rgb * clamp(adjusted_luminance / luminance, 0.0, 256.0);
+}
+
+fn apply_lightroom_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
+    return apply_point_tone_curve(apply_basic_contrast(apply_local_basic_tone(rgb, pos)));
 }
 
 fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
@@ -242,8 +340,6 @@ fn darktable_sigmoid(rgb: vec3<f32>) -> vec3<f32> {
     return sigmoid_rgb_ratio(rgb);
 }
 
-fn display_render(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
-    let locally_shaped = apply_local_basic_tone(rgb, pos);
-    let mapped = darktable_sigmoid(locally_shaped);
-    return apply_output_lut(mapped);
+fn display_render(rgb: vec3<f32>) -> vec3<f32> {
+    return apply_output_lut(darktable_sigmoid(rgb));
 }
