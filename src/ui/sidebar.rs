@@ -10,6 +10,12 @@ use eframe::egui::{self, Ui};
 
 pub struct Sidebar;
 
+#[derive(Clone, Copy, Debug)]
+enum MaskDragPayload {
+    Group(usize),
+    Component { mask: usize, component: usize },
+}
+
 impl Sidebar {
     const SCROLLBAR_GUTTER: f32 = 18.0;
 
@@ -84,12 +90,7 @@ impl Sidebar {
     }
 
     fn show_masks(ui: &mut Ui, app: &mut AurawApp) {
-        ui.horizontal(|ui| {
-            ui.heading("Masking Groups");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut app.masks.show_overlay, "Show overlay");
-            });
-        });
+        ui.heading("Masking Groups");
         ui.add_space(4.0);
 
         let mut new_mask = None;
@@ -107,8 +108,13 @@ impl Sidebar {
                     MaskKind::ColorRange,
                     MaskKind::DepthRange,
                 ] {
+                    let label = if kind.is_available() {
+                        kind.label().to_owned()
+                    } else {
+                        format!("{} · soon", kind.label())
+                    };
                     if ui
-                        .add_enabled(kind.is_available(), egui::Button::new(kind.label()))
+                        .add_enabled(kind.is_available(), egui::Button::new(label))
                         .on_disabled_hover_text(
                             "This mask type is planned but not implemented yet.",
                         )
@@ -142,6 +148,7 @@ impl Sidebar {
 
         let mut select_mask = None;
         let mut remove_mask = None;
+        let mut move_mask = None;
         let mut enabled_changed = false;
         egui::Frame::new()
             .fill(ui.visuals().widgets.noninteractive.bg_fill)
@@ -152,45 +159,51 @@ impl Sidebar {
                 ui.set_width(ui.available_width());
                 for index in (0..app.masks.masks.len()).rev() {
                     let selected = app.masks.selected_mask == Some(index);
-                    ui.push_id(("mask-row", index), |ui| {
-                        ui.horizontal(|ui| {
-                            let mask = &mut app.masks.masks[index];
-                            let visibility = if mask.enabled { "On" } else { "Off" };
-                            if ui.selectable_label(mask.enabled, visibility).clicked() {
-                                mask.enabled = !mask.enabled;
-                                enabled_changed = true;
-                            }
-                            if ui
-                                .selectable_label(
-                                    selected,
-                                    egui::RichText::new(format!(
-                                        "{}  ·  {}",
-                                        mask.name,
-                                        mask.components.len()
-                                    ))
-                                    .strong(),
-                                )
-                                .clicked()
-                            {
-                                select_mask = Some(index);
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .small_button("Delete")
-                                        .on_hover_text("Delete mask group")
-                                        .clicked()
-                                    {
-                                        remove_mask = Some(index);
-                                    }
-                                    if app.masks.masks[index].adjustments.is_neutral() {
-                                        ui.weak("Overlay");
-                                    }
-                                },
-                            );
-                        });
-                    });
+                    let row = ui.dnd_drag_source(
+                        ui.id().with(("mask-row", index)),
+                        MaskDragPayload::Group(index),
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                let mask = &mut app.masks.masks[index];
+                                let visibility = if mask.enabled { "On" } else { "Off" };
+                                if ui.selectable_label(mask.enabled, visibility).clicked() {
+                                    mask.enabled = !mask.enabled;
+                                    enabled_changed = true;
+                                }
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        egui::RichText::new(format!(
+                                            "{}  ·  {}",
+                                            mask.name,
+                                            mask.components.len()
+                                        ))
+                                        .strong(),
+                                    )
+                                    .clicked()
+                                {
+                                    select_mask = Some(index);
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button("Delete")
+                                            .on_hover_text("Delete mask group")
+                                            .clicked()
+                                        {
+                                            remove_mask = Some(index);
+                                        }
+                                    },
+                                );
+                            })
+                        },
+                    );
+                    if let Some(payload) = row.response.dnd_release_payload::<MaskDragPayload>() {
+                        if let MaskDragPayload::Group(from) = *payload {
+                            move_mask = Some((from, index));
+                        }
+                    }
                     if index > 0 {
                         ui.separator();
                     }
@@ -202,13 +215,32 @@ impl Sidebar {
         if let Some(index) = select_mask {
             app.masks.selected_mask = Some(index);
             app.masks.selected_component = Some(0);
-            app.active_mask_tool = None;
+            if let Some(kind) = app
+                .masks
+                .selected_component()
+                .map(|component| component.kind)
+            {
+                app.select_mask_tool(kind);
+            }
+        }
+        if let Some((from, to)) = move_mask {
+            if app.masks.move_mask(from, to) {
+                app.mark_all_mask_layers_dirty();
+            }
         }
         if let Some(index) = remove_mask {
             app.masks.selected_mask = Some(index);
             app.masks.remove_selected_mask();
-            app.active_mask_tool = None;
             app.mark_all_mask_layers_dirty();
+            if let Some(kind) = app
+                .masks
+                .selected_component()
+                .map(|component| component.kind)
+            {
+                app.select_mask_tool(kind);
+            } else {
+                app.active_mask_tool = None;
+            }
         }
 
         let Some(mask_index) = app.masks.selected_mask else {
@@ -223,8 +255,8 @@ impl Sidebar {
         ui.add_space(8.0);
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
-        let mut activate_tool = None;
-        let mut remove_component = false;
+        let mut remove_component = None;
+        let mut move_component = None;
         let mut add_component = None;
         let selected_component_before = app.masks.selected_component;
         let mut selected_component_choice = None;
@@ -254,8 +286,13 @@ impl Sidebar {
                             MaskKind::ColorRange,
                             MaskKind::DepthRange,
                         ] {
+                            let label = if kind.is_available() {
+                                kind.label().to_owned()
+                            } else {
+                                format!("{} · soon", kind.label())
+                            };
                             if ui
-                                .add_enabled(kind.is_available(), egui::Button::new(kind.label()))
+                                .add_enabled(kind.is_available(), egui::Button::new(label))
                                 .on_disabled_hover_text(
                                     "This sub-mask type is planned but not implemented yet.",
                                 )
@@ -294,26 +331,66 @@ impl Sidebar {
                     ui.set_width(ui.available_width());
                     for component_index in (0..mask.components.len()).rev() {
                         let selected = selected_component_before == Some(component_index);
+                        let can_delete = mask.components.len() > 1;
                         let component = &mut mask.components[component_index];
                         let badge = if component_index == 0 {
-                            "Base"
+                            "_"
                         } else {
-                            component.combine.label()
+                            match component.combine {
+                                MaskCombineMode::Add => "+",
+                                MaskCombineMode::Subtract => "−",
+                                MaskCombineMode::Intersect => "/",
+                            }
                         };
-                        ui.horizontal(|ui| {
-                            let visibility = if component.enabled { "On" } else { "Off" };
-                            if ui.selectable_label(component.enabled, visibility).clicked() {
-                                component.enabled = !component.enabled;
-                                geometry_changed = true;
-                            }
-                            ui.label(egui::RichText::new(badge).strong());
-                            if ui
-                                .selectable_label(selected, component.kind.label())
-                                .clicked()
+                        let row = ui.dnd_drag_source(
+                            ui.id().with(("submask-row", mask_index, component_index)),
+                            MaskDragPayload::Component {
+                                mask: mask_index,
+                                component: component_index,
+                            },
+                            |ui| {
+                                ui.horizontal(|ui| {
+                                    let visibility = if component.enabled { "On" } else { "Off" };
+                                    if ui.selectable_label(component.enabled, visibility).clicked()
+                                    {
+                                        component.enabled = !component.enabled;
+                                        geometry_changed = true;
+                                    }
+                                    ui.label(egui::RichText::new(badge).strong());
+                                    if ui
+                                        .selectable_label(selected, component.kind.label())
+                                        .clicked()
+                                    {
+                                        selected_component_choice = Some(component_index);
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if can_delete
+                                                && ui
+                                                    .small_button("Delete")
+                                                    .on_hover_text("Delete sub-mask")
+                                                    .clicked()
+                                            {
+                                                remove_component = Some(component_index);
+                                            }
+                                        },
+                                    );
+                                })
+                            },
+                        );
+                        if let Some(payload) = row.response.dnd_release_payload::<MaskDragPayload>()
+                        {
+                            if let MaskDragPayload::Component {
+                                mask: source_mask,
+                                component: from,
+                            } = *payload
                             {
-                                selected_component_choice = Some(component_index);
+                                if source_mask == mask_index {
+                                    move_component = Some((from, component_index));
+                                }
                             }
-                        });
+                        }
                         if component_index > 0 {
                             ui.separator();
                         }
@@ -323,13 +400,37 @@ impl Sidebar {
 
         if let Some(component_index) = selected_component_choice {
             app.masks.selected_component = Some(component_index);
-            app.active_mask_tool = None;
+            if let Some(kind) = app
+                .masks
+                .selected_component()
+                .map(|component| component.kind)
+            {
+                app.select_mask_tool(kind);
+            }
         }
 
         if let Some((kind, combine)) = add_component {
             if app.masks.add_component(kind, combine).is_some() {
                 app.activate_mask_tool(kind);
                 geometry_changed = true;
+            }
+        }
+
+        if let Some((from, to)) = move_component {
+            geometry_changed |= app.masks.move_component(from, to);
+        }
+
+        if let Some(component_index) = remove_component {
+            app.masks.selected_component = Some(component_index);
+            if app.masks.remove_selected_component().is_some() {
+                geometry_changed = true;
+                if let Some(kind) = app
+                    .masks
+                    .selected_component()
+                    .map(|component| component.kind)
+                {
+                    app.select_mask_tool(kind);
+                }
             }
         }
 
@@ -343,7 +444,6 @@ impl Sidebar {
 
         {
             let mask = &mut app.masks.masks[mask_index];
-            let component_count = mask.components.len();
             if let Some(component) = mask.components.get_mut(component_index) {
                 ui.add_space(6.0);
                 ui.separator();
@@ -356,8 +456,6 @@ impl Sidebar {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.strong(component.kind.label());
-                        geometry_changed |=
-                            ui.checkbox(&mut component.enabled, "Enabled").changed();
                         geometry_changed |= ui.checkbox(&mut component.invert, "Invert").changed();
                     });
                     if component_index > 0 {
@@ -405,9 +503,6 @@ impl Sidebar {
                                 Some("Softness from the brush core to its edge."),
                             );
                             ui.horizontal(|ui| {
-                                if ui.button("Paint on image").clicked() {
-                                    activate_tool = Some(MaskKind::Brush);
-                                }
                                 if ui.small_button("Clear strokes").clicked() {
                                     dabs.clear();
                                     geometry_changed = true;
@@ -425,9 +520,6 @@ impl Sidebar {
                                 0.01,
                                 Some("Soft transition from the ellipse interior to its edge."),
                             );
-                            if ui.button("Draw / redraw on image").clicked() {
-                                activate_tool = Some(MaskKind::Radial);
-                            }
                         }
                         MaskGeometry::Linear { feather, .. } => {
                             geometry_changed |= adjustment_slider(
@@ -439,16 +531,10 @@ impl Sidebar {
                                 0.01,
                                 Some("Controls the width of the gradient transition."),
                             );
-                            if ui.button("Draw / redraw on image").clicked() {
-                                activate_tool = Some(MaskKind::Linear);
-                            }
                         }
                         MaskGeometry::Placeholder => {
                             ui.label("This mask type is not implemented yet.");
                         }
-                    }
-                    if component_count > 1 && ui.small_button("Delete submask").clicked() {
-                        remove_component = true;
                     }
                 });
             }
@@ -468,14 +554,8 @@ impl Sidebar {
         }
 
         app.brush_mode = brush_mode;
-        if remove_component {
-            app.masks.remove_selected_component();
-            geometry_changed = true;
-        }
-        if let Some(kind) = activate_tool {
-            app.activate_mask_tool(kind);
-        }
         if geometry_changed {
+            app.mask_properties_active = true;
             app.mark_mask_geometry_dirty(mask_index);
         }
         if adjustments_changed {

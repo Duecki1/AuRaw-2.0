@@ -54,6 +54,25 @@ enum LoadEvent {
     Finished(Result<LoadedPreview, String>),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MaskDragState {
+    Create([f32; 2]),
+    MoveRadial {
+        pointer: [f32; 2],
+        center: [f32; 2],
+    },
+    ResizeRadial {
+        axis: usize,
+    },
+    MoveLinear {
+        pointer: [f32; 2],
+        start: [f32; 2],
+        end: [f32; 2],
+    },
+    LinearStart,
+    LinearEnd,
+}
+
 pub struct AurawApp {
     pub current_path: Option<PathBuf>,
     pub loaded_raw: Option<Arc<LoadedRaw>>,
@@ -67,8 +86,12 @@ pub struct AurawApp {
     pub masks: MaskStack,
     pub(crate) active_mask_tool: Option<MaskKind>,
     pub(crate) brush_mode: BrushMode,
-    pub(crate) mask_drag_start: Option<[f32; 2]>,
+    pub(crate) mask_drag: Option<MaskDragState>,
     pub(crate) last_brush_point: Option<[f32; 2]>,
+    pub(crate) mask_properties_active: bool,
+    pub(crate) mask_overlay_revision: u64,
+    pub(crate) mask_overlay_texture: Option<egui::TextureHandle>,
+    pub(crate) mask_overlay_texture_key: Option<(usize, u64, u32, u32)>,
     pub status: String,
     /// Reveals low-level darktable/raw controls. The default Lightroom-like
     /// interface intentionally keeps these implementation details hidden.
@@ -148,8 +171,12 @@ impl AurawApp {
             masks: MaskStack::default(),
             active_mask_tool: None,
             brush_mode: BrushMode::Paint,
-            mask_drag_start: None,
+            mask_drag: None,
             last_brush_point: None,
+            mask_properties_active: false,
+            mask_overlay_revision: 0,
+            mask_overlay_texture: None,
+            mask_overlay_texture_key: None,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
             egui_ctx: ctx.clone(),
@@ -194,8 +221,12 @@ impl AurawApp {
             masks: MaskStack::default(),
             active_mask_tool: None,
             brush_mode: BrushMode::Paint,
-            mask_drag_start: None,
+            mask_drag: None,
             last_brush_point: None,
+            mask_properties_active: false,
+            mask_overlay_revision: 0,
+            mask_overlay_texture: None,
+            mask_overlay_texture_key: None,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
             egui_ctx: cc.egui_ctx.clone(),
@@ -292,8 +323,12 @@ impl AurawApp {
         self.masks.clear();
         self.active_mask_tool = None;
         self.brush_mode = BrushMode::Paint;
-        self.mask_drag_start = None;
+        self.mask_drag = None;
         self.last_brush_point = None;
+        self.mask_properties_active = false;
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
+        self.mask_overlay_texture = None;
+        self.mask_overlay_texture_key = None;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.pending_stage = None;
         let source_path = (!delete_after_decode).then_some(path.clone());
@@ -466,21 +501,29 @@ impl AurawApp {
         if layer < MAX_LOCAL_MASKS {
             self.dirty_mask_layers[layer] = true;
         }
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mark_mask_adjustments_dirty();
     }
 
     pub(crate) fn mark_all_mask_layers_dirty(&mut self) {
         self.dirty_mask_layers.fill(true);
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mark_mask_adjustments_dirty();
     }
 
     pub(crate) fn activate_mask_tool(&mut self, kind: MaskKind) {
         self.active_mask_tool = kind.is_available().then_some(kind);
-        self.mask_drag_start = None;
+        self.mask_drag = None;
         self.last_brush_point = None;
         if kind == MaskKind::Brush {
             self.brush_mode = BrushMode::Paint;
         }
+    }
+
+    pub(crate) fn select_mask_tool(&mut self, kind: MaskKind) {
+        self.active_mask_tool = kind.is_available().then_some(kind);
+        self.mask_drag = None;
+        self.last_brush_point = None;
     }
 
     pub(crate) fn mark_pipeline_dirty(&mut self) {
@@ -798,6 +841,7 @@ impl eframe::App for AurawApp {
 
         self.poll_load_worker(frame);
         self.poll_export_worker();
+        self.mask_properties_active = false;
 
         let viewport_size = ui.max_rect().size();
         let layout = ScreenLayout::from_size(viewport_size);

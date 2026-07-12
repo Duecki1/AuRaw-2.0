@@ -260,25 +260,11 @@ impl LocalMask {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MaskStack {
     pub masks: Vec<LocalMask>,
     pub selected_mask: Option<usize>,
     pub selected_component: Option<usize>,
-    pub show_overlay: bool,
-}
-
-impl Default for MaskStack {
-    fn default() -> Self {
-        Self {
-            masks: Vec::new(),
-            selected_mask: None,
-            selected_component: None,
-            // Lightroom-style mask controls should be visible immediately
-            // while a mask is being created or edited.
-            show_overlay: true,
-        }
-    }
 }
 
 impl MaskStack {
@@ -365,6 +351,36 @@ impl MaskStack {
         Some((mask_index, component_index))
     }
 
+    pub fn move_mask(&mut self, from: usize, to: usize) -> bool {
+        if from == to || from >= self.masks.len() || to >= self.masks.len() {
+            return false;
+        }
+        let mask = self.masks.remove(from);
+        self.masks.insert(to, mask);
+        self.selected_mask = self
+            .selected_mask
+            .map(|selected| moved_index(selected, from, to));
+        true
+    }
+
+    pub fn move_component(&mut self, from: usize, to: usize) -> bool {
+        let Some(mask_index) = self.selected_mask else {
+            return false;
+        };
+        let Some(mask) = self.masks.get_mut(mask_index) else {
+            return false;
+        };
+        if from == to || from >= mask.components.len() || to >= mask.components.len() {
+            return false;
+        }
+        let component = mask.components.remove(from);
+        mask.components.insert(to, component);
+        self.selected_component = self
+            .selected_component
+            .map(|selected| moved_index(selected, from, to));
+        true
+    }
+
     pub fn rasterize_layer(
         &self,
         layer: usize,
@@ -434,6 +450,18 @@ impl MaskStack {
             .into_iter()
             .map(|value| (value.clamp(0.0, 1.0) * opacity * 255.0 + 0.5) as u8)
             .collect()
+    }
+}
+
+fn moved_index(selected: usize, from: usize, to: usize) -> usize {
+    if selected == from {
+        to
+    } else if from < to && selected > from && selected <= to {
+        selected - 1
+    } else if from > to && selected >= to && selected < from {
+        selected + 1
+    } else {
+        selected
     }
 }
 
@@ -672,6 +700,47 @@ mod tests {
         let layer = stack.rasterize_layer(0, 32, 32, 100, 100);
         assert_eq!(layer[15 * 32 + 15], layer[15 * 32 + 16]);
         assert_eq!(layer[16 * 32 + 15], layer[16 * 32 + 16]);
+    }
+
+    #[test]
+    fn brush_eraser_removes_existing_coverage() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Brush);
+        if let MaskGeometry::Brush { dabs, .. } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            dabs.push(BrushDab {
+                center: [0.5, 0.5],
+                size: 0.25,
+                feather: 0.2,
+                opacity: 1.0,
+            });
+            dabs.push(BrushDab {
+                center: [0.5, 0.5],
+                size: 0.1,
+                feather: 0.2,
+                opacity: -1.0,
+            });
+        }
+        let layer = stack.rasterize_layer(0, 64, 64, 100, 100);
+        assert!(layer[32 * 64 + 32] < 8);
+        assert!(layer[32 * 64 + 40] > 200);
+    }
+
+    #[test]
+    fn reordering_tracks_selected_mask_and_component() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Brush);
+        stack.add_mask(MaskKind::Radial);
+        stack.add_mask(MaskKind::Linear);
+        assert!(stack.move_mask(2, 0));
+        assert_eq!(stack.selected_mask, Some(0));
+        assert_eq!(stack.masks[0].components[0].kind, MaskKind::Linear);
+
+        stack.add_component(MaskKind::Brush, MaskCombineMode::Subtract);
+        assert!(stack.move_component(1, 0));
+        assert_eq!(stack.selected_component, Some(0));
+        assert_eq!(stack.masks[0].components[0].kind, MaskKind::Brush);
     }
 
     #[test]
