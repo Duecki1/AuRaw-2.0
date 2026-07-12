@@ -41,11 +41,15 @@ if [ "$NDK_REVISION" != "$EXPECTED_NDK_VERSION" ]; then
     exit 1
 fi
 
-command -v cmake >/dev/null 2>&1 || {
+SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+CMAKE=cmake
+if [ -n "$SDK" ] && [ -x "$SDK/cmake/$EXPECTED_CMAKE_VERSION/bin/cmake" ]; then
+    CMAKE="$SDK/cmake/$EXPECTED_CMAKE_VERSION/bin/cmake"
+elif ! command -v "$CMAKE" >/dev/null 2>&1; then
     echo "CMake $EXPECTED_CMAKE_VERSION is required to build LibRaw" >&2
     exit 1
-}
-CMAKE_VERSION=$(cmake --version | sed -n '1s/^cmake version //p')
+fi
+CMAKE_VERSION=$("$CMAKE" --version | sed -n '1s/^cmake version //p')
 CMAKE_BASE_VERSION=${CMAKE_VERSION%%-*}
 if [ "$CMAKE_BASE_VERSION" != "$EXPECTED_CMAKE_VERSION" ]; then
     echo "CMake $EXPECTED_CMAKE_VERSION is required, found ${CMAKE_VERSION:-unknown}" >&2
@@ -101,7 +105,7 @@ if command -v ninja >/dev/null 2>&1; then
 fi
 
 rm -rf "$BUILD_DIR" "$INSTALL_DIR"
-cmake -S "$LIBRAW_SRC" -B "$BUILD_DIR" $GENERATOR \
+"$CMAKE" -S "$LIBRAW_SRC" -B "$BUILD_DIR" $GENERATOR \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$ABI" \
     -DANDROID_PLATFORM="android-$API" \
@@ -119,7 +123,7 @@ cmake -S "$LIBRAW_SRC" -B "$BUILD_DIR" $GENERATOR \
     -DLIBRAW_INSTALL=ON \
     -DLIBRAW_UNINSTALL_TARGET=OFF \
     -DCMAKE_DISABLE_FIND_PACKAGE_JPEG=ON
-cmake --build "$BUILD_DIR" --target install --parallel
+"$CMAKE" --build "$BUILD_DIR" --target install --parallel
 
 test -f "$INSTALL_DIR/include/libraw/libraw.h"
 test -f "$INSTALL_DIR/lib/libraw.a"
