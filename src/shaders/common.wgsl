@@ -5,7 +5,8 @@ struct Params {
     // and demosaic finishing while the stable 64-byte prefix does not move.
     black_point: f32,
     exposure: f32,
-    contrast: f32,
+    // Relative user white-balance temperature in the -100..100 domain.
+    temperature: f32,
     saturation: f32,
     vibrance: f32,
     highlight_clip: f32,
@@ -18,14 +19,26 @@ struct Params {
     demosaic_mode: f32,
     dual_threshold: f32,
     frequency_chroma: f32,
-    _demosaic_reserved: f32,
-    // Highlights, shadows, whites, blacks. Values use the Lightroom-style
-    // -100..100 UI domain and parameterize the adaptive scene-to-display map.
+    // Relative green-magenta white-balance tint in the -100..100 domain.
+    tint: f32,
+    // Highlights, shadows, whites, blacks. These are scene-linear local
+    // exposure-shaping controls evaluated before the display transform.
     basic_tone: vec4<f32>,
-    // Texture, clarity, dehaze, reserved.
+    // darktable sigmoid: white target, black target, paper exposure, film fog.
+    sigmoid_curve: vec4<f32>,
+    // darktable sigmoid: film power, paper power, hue preservation, method.
+    sigmoid_power: vec4<f32>,
+    // Texture, clarity, dehaze, Lightroom-style contrast.
     presence: vec4<f32>,
     // Reconstruction method, guided passes, colour adaptation, reserved.
     highlight_options: vec4<f32>,
+    // Eight editable point-curve coordinates, packed as x0,y0,x1,y1.
+    tone_curve_0: vec4<f32>,
+    tone_curve_1: vec4<f32>,
+    tone_curve_2: vec4<f32>,
+    tone_curve_3: vec4<f32>,
+    // Active point count, followed by reserved values.
+    tone_curve_meta: vec4<f32>,
     // Red, orange, yellow, green / aqua, blue, purple, magenta.
     hsl_hue_0: vec4<f32>,
     hsl_hue_1: vec4<f32>,
@@ -41,8 +54,19 @@ struct Params {
     white_levels: vec4<f32>,
     width: u32,
     height: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    full_width: u32,
+    full_height: u32,
     _pad0: u32,
     _pad1: u32,
+    // DCP/ICC LUT metadata: dimensions and packed-buffer offset.
+    profile_hue_sat: vec4<u32>,
+    profile_look: vec4<u32>,
+    profile_tone: vec4<u32>,
+    output_lut: vec4<u32>,
+    // HueSat encoding, LookTable encoding, default exposure EV bits, reserved.
+    profile_flags: vec4<u32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -64,8 +88,22 @@ const REC2020_TO_SRGB: mat3x3<f32> = mat3x3<f32>(
     vec3<f32>(-0.0728499, -0.0083494,  1.1187297),
 );
 
+const SRGB_TO_REC2020: mat3x3<f32> = mat3x3<f32>(
+    vec3<f32>(0.6274039, 0.0690973, 0.0163914),
+    vec3<f32>(0.3292830, 0.9195404, 0.0880133),
+    vec3<f32>(0.0433131, 0.0113623, 0.8955953),
+);
+
 fn image_max() -> vec2<i32> {
     return vec2<i32>(i32(params.width) - 1, i32(params.height) - 1);
+}
+
+fn tile_origin() -> vec2<i32> {
+    return vec2<i32>(params.tile_origin_x, params.tile_origin_y);
+}
+
+fn full_image_max() -> vec2<i32> {
+    return vec2<i32>(i32(params.full_width) - 1, i32(params.full_height) - 1);
 }
 
 fn clamp_pos(pos: vec2<i32>) -> vec2<i32> {

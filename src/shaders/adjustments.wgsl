@@ -5,15 +5,13 @@
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
 
-const SRGB_TO_REC2020: mat3x3<f32> = mat3x3<f32>(
-    vec3<f32>(0.6274039, 0.0690973, 0.0163914),
-    vec3<f32>(0.3292830, 0.9195404, 0.0880133),
-    vec3<f32>(0.0433131, 0.0113623, 0.8955953),
-);
-
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(scene_tex, clamp_pos(pos), 0).xyz;
-    return map_negative_gamut(cam_to_working(camera_rgb));
+    let working = map_negative_gamut(cam_to_working(camera_rgb));
+    let white_balanced = map_negative_gamut(apply_temperature_tint(working));
+    let profile_corrected = map_negative_gamut(apply_profile_hue_sat(white_balanced));
+    let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
+    return profile_corrected * exp2(profile_exposure_ev);
 }
 
 fn blur_luminance(pos: vec2<i32>, radius: i32) -> f32 {
@@ -174,12 +172,17 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
     var rgb = scene_working_at(pos);
+    // Camera-profile rendering establishes the base rendition. User controls
+    // then follow the Lightroom panel order: Basic tone, point curve, Color.
+    rgb = apply_profile_look(rgb);
+    rgb = apply_profile_tone_curve(rgb);
     rgb = apply_exposure(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
+    rgb = apply_lightroom_tone(rgb, pos);
     rgb = apply_texture_and_clarity(pos, rgb);
     rgb = apply_dehaze(pos, rgb);
     rgb = apply_saturation_vibrance(rgb);
     rgb = apply_hsl_mixer(rgb);
 
-    textureStore(out_tex, pos, vec4<f32>(display_render(max(rgb, vec3<f32>(0.0)), pos), 1.0));
+    textureStore(out_tex, pos, vec4<f32>(display_render(max(rgb, vec3<f32>(0.0))), 1.0));
 }

@@ -3,8 +3,11 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ABI=${1:-arm64-v8a}
-API=${ANDROID_API_LEVEL:-26}
+API=26
 LIBRAW_VERSION=0.22.1
+LIBRAW_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
+EXPECTED_NDK_VERSION=27.0.12077973
+EXPECTED_CMAKE_VERSION=3.22.1
 LIBRAW_CMAKE_COMMIT=eb98e4325aef2ce85d2eb031c2ff18640ca616d3
 
 case "$ABI" in
@@ -25,21 +28,38 @@ if [ -z "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}" ] \
 fi
 if [ -z "$NDK" ] && [ -n "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}" ]; then
     SDK=${ANDROID_SDK_ROOT:-$ANDROID_HOME}
-    NDK=$(find "$SDK/ndk" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
+    NDK="$SDK/ndk/$EXPECTED_NDK_VERSION"
 fi
-if [ -z "$NDK" ] || [ ! -f "$NDK/build/cmake/android.toolchain.cmake" ]; then
+if [ -z "$NDK" ] || [ ! -f "$NDK/build/cmake/android.toolchain.cmake" ] || [ ! -f "$NDK/source.properties" ]; then
     echo "Android NDK not found. Set ANDROID_NDK_HOME (or ANDROID_SDK_ROOT)." >&2
     exit 1
 fi
 
-command -v cmake >/dev/null 2>&1 || {
-    echo "cmake is required to build LibRaw" >&2
+NDK_REVISION=$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "$NDK/source.properties" | head -n 1)
+if [ "$NDK_REVISION" != "$EXPECTED_NDK_VERSION" ]; then
+    echo "Android NDK $EXPECTED_NDK_VERSION is required, found ${NDK_REVISION:-unknown} at $NDK" >&2
     exit 1
-}
+fi
+
+SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+CMAKE=cmake
+if [ -n "$SDK" ] && [ -x "$SDK/cmake/$EXPECTED_CMAKE_VERSION/bin/cmake" ]; then
+    CMAKE="$SDK/cmake/$EXPECTED_CMAKE_VERSION/bin/cmake"
+elif ! command -v "$CMAKE" >/dev/null 2>&1; then
+    echo "CMake $EXPECTED_CMAKE_VERSION is required to build LibRaw" >&2
+    exit 1
+fi
+CMAKE_VERSION=$("$CMAKE" --version | sed -n '1s/^cmake version //p')
+CMAKE_BASE_VERSION=${CMAKE_VERSION%%-*}
+if [ "$CMAKE_BASE_VERSION" != "$EXPECTED_CMAKE_VERSION" ]; then
+    echo "CMake $EXPECTED_CMAKE_VERSION is required, found ${CMAKE_VERSION:-unknown}" >&2
+    exit 1
+fi
 command -v curl >/dev/null 2>&1 || {
     echo "curl is required to download LibRaw" >&2
     exit 1
 }
+unset AR CC CFLAGS CPPFLAGS CXX CXXFLAGS LDFLAGS RANLIB
 
 SRC_ROOT="$ROOT/android/native/src"
 LIBRAW_SRC="$SRC_ROOT/LibRaw-$LIBRAW_VERSION"
@@ -48,7 +68,7 @@ BUILD_DIR="$ROOT/android/native/build/libraw-$ABI"
 INSTALL_DIR="$ROOT/android/native/libraw/$ABI"
 mkdir -p "$SRC_ROOT"
 
-BUILD_KEY="LibRaw=$LIBRAW_VERSION cmake=$LIBRAW_CMAKE_COMMIT abi=$ABI api=$API ndk=$NDK"
+BUILD_KEY="LibRaw=$LIBRAW_VERSION@$LIBRAW_REVISION cmake-files=$LIBRAW_CMAKE_COMMIT cmake=$CMAKE_VERSION abi=$ABI api=$API ndk=$NDK_REVISION"
 if [ "${AURAW_REBUILD_LIBRAW:-0}" != 1 ] \
     && [ -f "$INSTALL_DIR/include/libraw/libraw.h" ] \
     && [ -f "$INSTALL_DIR/lib/libraw.a" ] \
@@ -61,14 +81,16 @@ fi
 if [ ! -f "$LIBRAW_SRC/libraw/libraw.h" ]; then
     rm -rf "$LIBRAW_SRC"
     mkdir -p "$LIBRAW_SRC"
-    curl -fL "https://api.github.com/repos/LibRaw/LibRaw/tarball/$LIBRAW_VERSION" \
+    curl --fail --location --proto "=https" --tlsv1.2 --retry 3 \
+        "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_REVISION.tar.gz" \
         | tar -xz --strip-components=1 -C "$LIBRAW_SRC"
 fi
 
 if [ ! -f "$CMAKE_SRC/CMakeLists.txt" ]; then
     rm -rf "$CMAKE_SRC"
     mkdir -p "$CMAKE_SRC"
-    curl -fL "https://github.com/LibRaw/LibRaw-cmake/archive/$LIBRAW_CMAKE_COMMIT.tar.gz" \
+    curl --fail --location --proto "=https" --tlsv1.2 --retry 3 \
+        "https://github.com/LibRaw/LibRaw-cmake/archive/$LIBRAW_CMAKE_COMMIT.tar.gz" \
         | tar -xz --strip-components=1 -C "$CMAKE_SRC"
 fi
 
@@ -83,7 +105,7 @@ if command -v ninja >/dev/null 2>&1; then
 fi
 
 rm -rf "$BUILD_DIR" "$INSTALL_DIR"
-cmake -S "$LIBRAW_SRC" -B "$BUILD_DIR" $GENERATOR \
+"$CMAKE" -S "$LIBRAW_SRC" -B "$BUILD_DIR" $GENERATOR \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$ABI" \
     -DANDROID_PLATFORM="android-$API" \
@@ -101,7 +123,7 @@ cmake -S "$LIBRAW_SRC" -B "$BUILD_DIR" $GENERATOR \
     -DLIBRAW_INSTALL=ON \
     -DLIBRAW_UNINSTALL_TARGET=OFF \
     -DCMAKE_DISABLE_FIND_PACKAGE_JPEG=ON
-cmake --build "$BUILD_DIR" --target install --parallel
+"$CMAKE" --build "$BUILD_DIR" --target install --parallel
 
 test -f "$INSTALL_DIR/include/libraw/libraw.h"
 test -f "$INSTALL_DIR/lib/libraw.a"

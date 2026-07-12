@@ -1,15 +1,22 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
+    configure_source_revision();
+
     for shader in [
         "src/shaders/common.wgsl",
+        "src/shaders/profile.wgsl",
         "src/shaders/raw_sampling.wgsl",
         "src/shaders/color.wgsl",
         "src/shaders/highlights.wgsl",
         "src/shaders/highlight_lch_pass.wgsl",
         "src/shaders/basic_adjustments.wgsl",
+        "src/shaders/tone_common.wgsl",
+        "src/shaders/tone_analysis.wgsl",
         "src/shaders/tonemap.wgsl",
         "src/shaders/adjustments.wgsl",
+        "src/shaders/regression_scene.wgsl",
         "src/shaders/pass1.wgsl",
         "src/shaders/pass2.wgsl",
         "src/shaders/pass3.wgsl",
@@ -42,6 +49,87 @@ fn main() {
     } else {
         configure_desktop_libraw();
     }
+}
+
+fn configure_source_revision() {
+    for path in ["Cargo.toml", "Cargo.lock", "src"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    for variable in ["AURAW_REQUIRE_COMMITTED_SOURCE", "AURAW_SOURCE_REVISION"] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let git_revision = command_output(
+        Command::new("git")
+            .current_dir(&manifest_dir)
+            .args(["rev-parse", "--verify", "HEAD"]),
+    );
+    watch_git_revision(&manifest_dir);
+
+    let configured_revision = std::env::var("AURAW_SOURCE_REVISION").ok();
+    let require_committed =
+        std::env::var("AURAW_REQUIRE_COMMITTED_SOURCE").as_deref() == Ok("1");
+
+    if require_committed {
+        let revision = git_revision.as_deref().unwrap_or_else(|| {
+            panic!("reproducible builds must run from a Git checkout with a committed revision")
+        });
+        let status = command_output(
+            Command::new("git")
+                .current_dir(&manifest_dir)
+                .args(["status", "--porcelain=v1", "--untracked-files=all"]),
+        )
+        .unwrap_or_else(|| panic!("could not inspect the Git source tree"));
+        if !status.is_empty() {
+            panic!("reproducible builds require a clean source tree:\n{status}");
+        }
+        if let Some(configured) = configured_revision.as_deref() {
+            assert_eq!(
+                configured, revision,
+                "AURAW_SOURCE_REVISION does not match the checked-out commit"
+            );
+        }
+    }
+
+    let revision = configured_revision
+        .or(git_revision)
+        .unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rustc-env=AURAW_SOURCE_REVISION={revision}");
+}
+
+fn watch_git_revision(manifest_dir: &Path) {
+    for git_path in ["HEAD", "packed-refs"] {
+        if let Some(path) = command_output(
+            Command::new("git")
+                .current_dir(manifest_dir)
+                .args(["rev-parse", "--git-path", git_path]),
+        ) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+
+    if let Some(reference) = command_output(
+        Command::new("git")
+            .current_dir(manifest_dir)
+            .args(["symbolic-ref", "-q", "HEAD"]),
+    ) {
+        if let Some(path) = command_output(
+            Command::new("git")
+                .current_dir(manifest_dir)
+                .args(["rev-parse", "--git-path", &reference]),
+        ) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+}
+
+fn command_output(command: &mut Command) -> Option<String> {
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn configure_android_libraw() {

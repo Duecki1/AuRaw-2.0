@@ -1,0 +1,46 @@
+schema: 1
+engine: darktable
+engine_version: 5.6.0
+history_name: auraw-regression-scene-linear-v1
+intent: Produce a full-resolution scene-linear comparison image before display rendering.
+input:
+  crop: active-area
+  orientation: metadata
+  black_white_levels: metadata
+  white_balance: camera
+  chromatic_aberration: disabled
+  hot_pixels: disabled
+highlight_reconstruction:
+  enabled: true
+  method: guided-laplacians
+  clip: 1.0
+demosaic:
+  bayer: rcd
+  xtrans: markesteijn-3-pass
+  color_smoothing: 0
+  dual_demosaic: disabled
+noise_reduction:
+  raw_denoise: disabled
+  profiled_denoise: disabled
+  chroma_smoothing: disabled
+color:
+  input_profile: embedded-or-matrix
+  working_profile: linear-rec2020-d65
+  output_profile: linear-rec2020-d65
+  rendering_intent: relative-colorimetric
+creative_modules:
+  exposure: disabled
+  sigmoid: disabled
+  filmic_rgb: disabled
+  tone_equalizer: disabled
+  color_balance_rgb: disabled
+  color_calibration: disabled
+  local_contrast: disabled
+  sharpen: disabled
+  diffuse_or_sharpen: disabled
+output:
+  format: tiff
+  sample_type: float32
+  transfer: linear
+  resize: disabled
+  output_sharpening: disabled

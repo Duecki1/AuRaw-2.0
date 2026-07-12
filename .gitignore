@@ -41,3 +41,13 @@ android.iml
 
 # Cargo config (machine-specific linker paths, NDK versions)
 .cargo/
+# Packaged release artifacts
+dist/
+
+# Python validation caches
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+STATIC_CHECKS_CAMERA_PROFILE.txt
+STATIC_CHECKS.txt

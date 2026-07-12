@@ -1,0 +1,62 @@
+[PASS] balanced delimiters in src/pipeline/color_profile.rs
+[PASS] balanced delimiters in src/pipeline/raw_loader.rs
+[PASS] balanced delimiters in src/pipeline/gpu.rs
+[PASS] balanced delimiters in build.rs
+[PASS] balanced delimiters in src/shaders/common.wgsl
+[PASS] balanced delimiters in src/shaders/profile.wgsl
+[PASS] balanced delimiters in src/shaders/adjustments.wgsl
+[PASS] balanced delimiters in src/shaders/tone_analysis.wgsl
+[PASS] balanced delimiters in src/shaders/tonemap.wgsl
+[PASS] WGSL sources contain no reserved words as identifiers
+[PASS] build script tracks camera-profile shader changes
+[PASS] Rust/WGSL parameter ABI field order matches
+[PASS] DCP/ICC metadata occupies the final five uniform vec4 slots
+[PASS] adaptive tone shader includes camera-profile operations
+[PASS] profile LUT storage binding is declared
+[PASS] profile buffer is visible to tone analysis and final adjustments
+[PASS] profile buffer is bound in both GPU paths
+[PASS] render order is HueSat -> default exposure -> controls -> LookTable -> profile curve -> display transform
+[PASS] adaptive histogram includes all fixed DCP rendering stages
+[PASS] darktable sigmoid defaults and generalized log-logistic coefficients are present
+[PASS] darktable sigmoid runs before the bounded ICC LUT
+[PASS] both darktable sigmoid color-processing paths are present
+[PASS] standalone DCP camera-profile header is recognized
+[PASS] TIFF reader accepts DCP magic 0x4352
+[PASS] three- and four-plane DCP matrices are accepted
+[PASS] required DNG/DCP tag numbers are present
+[PASS] profile calibration signatures gate CameraCalibration
+[PASS] directly parsed DNG/DCP matrices are applied before the LibRaw fallback
+[PASS] DNG AnalogBalance participates in the matrix chain
+[PASS] AB * CC ordering is explicit
+[PASS] AB * CC * CM ordering is explicit
+[PASS] ForwardMatrix path applies FM * D * inverse(AB * CC)
+[PASS] dual-illuminant interpolation is reciprocal-CCT based
+[PASS] BaselineExposure and profile offset are combined
+[PASS] LibRaw's missing BaselineExposure sentinel cannot black out proprietary RAW previews
+[PASS] camera-profile uniform ABI regression test covers the appended metadata block
+[PASS] shader receives normalized encoding flags rather than reparsing metadata
+[PASS] unknown DCP table encodings are rejected
+[PASS] DCP HSV table indexing documents the specified storage order
+[PASS] SDR DCP encoding is applied to HSV value only
+[PASS] DCP encoding tags are ignored for 2.5D maps
+[PASS] DCP zero-saturation value-scale invariant is validated
+[PASS] HueSat maps use the matrix interpolation weight
+[PASS] profile tone curve is sampled at 4096 entries
+[PASS] profile tone curve uses a natural cubic spline
+[PASS] SDR profile tone-curve endpoints are validated
+[PASS] ICC profile signature is validated
+[PASS] ICC v2/v4 profile versions are enforced
+[PASS] ICC display/output/color-space profile classes are enforced
+[PASS] ICC RGB colorants and transfer curves are parsed
+[PASS] ICC transfer curves are finite and monotonic before inversion
+[PASS] ICC rendering intents are exposed
+[PASS] all standard ICC LUT transform tag families fail explicitly
+[PASS] display and output ICC APIs are available
+[PASS] external DCP profiles can drive RAW loading
+[PASS] CPU ICC LUT evaluation is available for export
+[PASS] Rec.2020/ProPhoto matrices are numerical inverses
+[PASS] ICC GPU LUT uses a 33-cube
+[PASS] GPU ICC LUT indexing matches CPU R-fastest packing
+[PASS] CPU ICC LUT indexing matches GPU packing
+
+60/60 camera-profile checks passed

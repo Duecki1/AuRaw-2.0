@@ -1,0 +1,21 @@
+// Allow Android Gradle tasks to be launched from the repository root while
+// keeping the Android project and all of its build outputs under android/.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "AuRaw"
+rootProject.projectDir = file("android")
+include(":app")
