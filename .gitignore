@@ -48,3 +48,6 @@ dist/
 .pytest_cache/
 __pycache__/
 *.py[cod]
+
+STATIC_CHECKS_CAMERA_PROFILE.txt
+STATIC_CHECKS.txt
