@@ -1,7 +1,8 @@
 use crate::pipeline::{
     affected_stage, build_proxy, load_raw_file, spawn_tiled_png_export, ExportEvent,
-    ExportMetadata, ExportSettings, ExposureParams, GpuParams, LoadedRaw, ProcessingQuality,
-    ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec,
+    BrushMode, ExportMetadata, ExportSettings, ExposureParams, GpuParams, LoadedRaw, MaskKind,
+    MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec,
+    MAX_LOCAL_MASKS,
 };
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::Library;
@@ -53,6 +54,25 @@ enum LoadEvent {
     Finished(Result<LoadedPreview, String>),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MaskDragState {
+    Create([f32; 2]),
+    MoveRadial {
+        pointer: [f32; 2],
+        center: [f32; 2],
+    },
+    ResizeRadial {
+        axis: usize,
+    },
+    MoveLinear {
+        pointer: [f32; 2],
+        start: [f32; 2],
+        end: [f32; 2],
+    },
+    LinearStart,
+    LinearEnd,
+}
+
 pub struct AurawApp {
     pub current_path: Option<PathBuf>,
     pub loaded_raw: Option<Arc<LoadedRaw>>,
@@ -63,6 +83,15 @@ pub struct AurawApp {
     pub sidebar_tab: SidebarTab,
     pub tone_curve_tab: ToneCurveTab,
     pub export_settings: ExportSettings,
+    pub masks: MaskStack,
+    pub(crate) active_mask_tool: Option<MaskKind>,
+    pub(crate) brush_mode: BrushMode,
+    pub(crate) mask_drag: Option<MaskDragState>,
+    pub(crate) last_brush_point: Option<[f32; 2]>,
+    pub(crate) mask_properties_active: bool,
+    pub(crate) mask_overlay_revision: u64,
+    pub(crate) mask_overlay_texture: Option<egui::TextureHandle>,
+    pub(crate) mask_overlay_texture_key: Option<(usize, u64, u32, u32)>,
     pub status: String,
     /// Reveals low-level darktable/raw controls. The default Lightroom-like
     /// interface intentionally keeps these implementation details hidden.
@@ -79,6 +108,7 @@ pub struct AurawApp {
     image_status: String,
     current_label: Option<String>,
     notice: Option<String>,
+    dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
 
     #[cfg(target_os = "android")]
     android_app: android_activity::AndroidApp,
@@ -138,6 +168,15 @@ impl AurawApp {
             sidebar_tab: SidebarTab::default(),
             tone_curve_tab: ToneCurveTab::default(),
             export_settings: ExportSettings::default(),
+            masks: MaskStack::default(),
+            active_mask_tool: None,
+            brush_mode: BrushMode::Paint,
+            mask_drag: None,
+            last_brush_point: None,
+            mask_properties_active: false,
+            mask_overlay_revision: 0,
+            mask_overlay_texture: None,
+            mask_overlay_texture_key: None,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
             egui_ctx: ctx.clone(),
@@ -151,6 +190,7 @@ impl AurawApp {
             image_status: "Open a RAW file to get started.".to_owned(),
             current_label: None,
             notice: None,
+            dirty_mask_layers: [false; MAX_LOCAL_MASKS],
         }
     }
 
@@ -178,6 +218,15 @@ impl AurawApp {
             sidebar_tab: SidebarTab::default(),
             tone_curve_tab: ToneCurveTab::default(),
             export_settings: ExportSettings::default(),
+            masks: MaskStack::default(),
+            active_mask_tool: None,
+            brush_mode: BrushMode::Paint,
+            mask_drag: None,
+            last_brush_point: None,
+            mask_properties_active: false,
+            mask_overlay_revision: 0,
+            mask_overlay_texture: None,
+            mask_overlay_texture_key: None,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
             egui_ctx: cc.egui_ctx.clone(),
@@ -191,6 +240,7 @@ impl AurawApp {
             image_status: "Open a RAW file to get started.".to_owned(),
             current_label: None,
             notice: None,
+            dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             android_app,
             picker_pending: false,
         }
@@ -270,6 +320,16 @@ impl AurawApp {
         let initial_exposure = self.new_image_exposure();
         self.exposure = initial_exposure;
         self.target_exposure = initial_exposure;
+        self.masks.clear();
+        self.active_mask_tool = None;
+        self.brush_mode = BrushMode::Paint;
+        self.mask_drag = None;
+        self.last_brush_point = None;
+        self.mask_properties_active = false;
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
+        self.mask_overlay_texture = None;
+        self.mask_overlay_texture_key = None;
+        self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.pending_stage = None;
         let source_path = (!delete_after_decode).then_some(path.clone());
         let repaint = self.egui_ctx.clone();
@@ -298,7 +358,7 @@ impl AurawApp {
                     } else {
                         Arc::new(build_proxy(&full_raw, preview_spec))
                     };
-                    let params = GpuParams::new(&initial_exposure, &preview_raw);
+                    let params = GpuParams::new(&initial_exposure, &MaskStack::default(), &preview_raw);
                     // Desktop has enough bandwidth for the 32-bit working
                     // path. Keep the half-float preview only on Android, where
                     // memory pressure is materially higher.
@@ -426,6 +486,46 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn mark_mask_adjustments_dirty(&mut self) {
+        if self.gpu_pipeline.is_none() {
+            return;
+        }
+        self.pending_stage = Some(match self.pending_stage {
+            Some(existing) => existing.min(ProcessingStage::Output),
+            None => ProcessingStage::Output,
+        });
+        self.notice = None;
+    }
+
+    pub(crate) fn mark_mask_geometry_dirty(&mut self, layer: usize) {
+        if layer < MAX_LOCAL_MASKS {
+            self.dirty_mask_layers[layer] = true;
+        }
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
+        self.mark_mask_adjustments_dirty();
+    }
+
+    pub(crate) fn mark_all_mask_layers_dirty(&mut self) {
+        self.dirty_mask_layers.fill(true);
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
+        self.mark_mask_adjustments_dirty();
+    }
+
+    pub(crate) fn activate_mask_tool(&mut self, kind: MaskKind) {
+        self.active_mask_tool = kind.is_available().then_some(kind);
+        self.mask_drag = None;
+        self.last_brush_point = None;
+        if kind == MaskKind::Brush {
+            self.brush_mode = BrushMode::Paint;
+        }
+    }
+
+    pub(crate) fn select_mask_tool(&mut self, kind: MaskKind) {
+        self.active_mask_tool = kind.is_available().then_some(kind);
+        self.mask_drag = None;
+        self.last_brush_point = None;
+    }
+
     pub(crate) fn mark_pipeline_dirty(&mut self) {
         if self.gpu_pipeline.is_none() {
             self.target_exposure = self.exposure;
@@ -454,7 +554,33 @@ impl AurawApp {
             return;
         };
 
-        let params = GpuParams::new(&self.target_exposure, raw);
+        if stage == ProcessingStage::Output && self.dirty_mask_layers.iter().any(|dirty| *dirty) {
+            let edge = pipeline.mask_atlas_edge();
+            let mut upload_error = None;
+            for layer in 0..MAX_LOCAL_MASKS {
+                if !self.dirty_mask_layers[layer] {
+                    continue;
+                }
+                let bytes = self.masks.rasterize_layer(
+                    layer,
+                    edge,
+                    edge,
+                    raw.width,
+                    raw.height,
+                );
+                if let Err(error) = pipeline.update_mask_layer(&render_state.queue, layer, &bytes) {
+                    upload_error = Some(format!("Could not update local mask: {error:#}"));
+                    break;
+                }
+                self.dirty_mask_layers[layer] = false;
+            }
+            if let Some(error) = upload_error {
+                self.notice = Some(error);
+                return;
+            }
+        }
+
+        let params = GpuParams::new(&self.target_exposure, &self.masks, raw);
         pipeline.dispatch_stage(&render_state.queue, &render_state.device, &params, stage);
         self.pending_stage = match stage {
             ProcessingStage::Raw => Some(ProcessingStage::Tone),
@@ -552,6 +678,7 @@ impl AurawApp {
             Arc::clone(raw),
             Arc::clone(preview_raw),
             self.exposure,
+            self.masks.clone(),
             path,
             TileSpec::default(),
             self.export_settings,
@@ -714,6 +841,7 @@ impl eframe::App for AurawApp {
 
         self.poll_load_worker(frame);
         self.poll_export_worker();
+        self.mask_properties_active = false;
 
         let viewport_size = ui.max_rect().size();
         let layout = ScreenLayout::from_size(viewport_size);

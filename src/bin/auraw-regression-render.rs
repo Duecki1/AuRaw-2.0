@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use auraw::pipeline::{
-    load_raw_file, load_raw_file_with_dcp, CfaKind, ExposureParams, GpuParams,
+    load_raw_file, load_raw_file_with_dcp, CfaKind, ExposureParams, GpuParams, MaskStack,
     ProcessingQuality, RawGpuPipeline,
 };
 use auraw::regression::write_linear_rgb_npz;
@@ -82,7 +82,7 @@ fn run() -> Result<()> {
     .context("request a wgpu device")?;
 
     let exposure = ExposureParams::default();
-    let params = GpuParams::new(&exposure, &raw);
+    let params = GpuParams::new(&exposure, &MaskStack::default(), &raw);
     let pipeline = RawGpuPipeline::new_headless_with_quality(
         &device,
         &queue,

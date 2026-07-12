@@ -67,7 +67,7 @@ impl Default for ProxySpec {
 /// map. Each proxy photosite averages only source samples from the same CFA
 /// plane, preventing colour-plane cross-contamination before demosaic.
 pub fn build_proxy(raw: &LoadedRaw, spec: ProxySpec) -> LoadedRaw {
-    let max_edge = spec.max_edge.max(64);
+    let max_edge = spec.max_edge.max(1);
     let longest = raw.width.max(raw.height);
     let scale = longest.div_ceil(max_edge).max(1);
     if scale == 1 {

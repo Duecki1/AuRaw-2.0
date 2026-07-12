@@ -89,6 +89,16 @@ struct Params {
     output_lut: vec4<u32>,
     // HueSat encoding, LookTable encoding, default exposure EV bits, reserved.
     profile_flags: vec4<u32>,
+    // Local adjustments. Each mask index maps directly to one layer in the
+    // normalized R8 array texture sampled by adjustments.wgsl.
+    mask_counts: vec4<u32>,
+    mask_meta: array<vec4<u32>, 8>,
+    // Exposure, contrast, highlights, shadows.
+    mask_adjust_0: array<vec4<f32>, 8>,
+    // Whites, blacks, temperature, tint.
+    mask_adjust_1: array<vec4<f32>, 8>,
+    // Saturation, texture, clarity, dehaze.
+    mask_adjust_2: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
