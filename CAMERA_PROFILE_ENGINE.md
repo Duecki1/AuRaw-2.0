@@ -9,10 +9,10 @@ AuRaw now keeps camera characterization, creative DCP stages, and display/output
 3. The camera-to-working transform follows either `FM × D × inverse(AB × CC)` or the pseudoinverse/Bradford path when no forward matrix exists. The result is converted from the D50 profile connection space to linear Rec.2020 D65.
 4. The interpolated DCP HueSat map is evaluated in linear ProPhoto RGB/HSV, followed by DNG BaselineExposure plus BaselineExposureOffset.
 5. User scene-linear controls run.
-6. The DCP LookTable and profile tone curve run before the adaptive scene-to-display transform.
+6. The DCP LookTable and profile tone curve run before the darktable 5.6.0 sigmoid scene-to-display transform. AuRaw's local Highlights/Shadows/Whites/Blacks exposure shaping also runs immediately before sigmoid.
 7. A replaceable 33³ ICC output LUT converts display-referred linear Rec.2020 to encoded device RGB.
 
-Adaptive tone analysis includes the fixed HueSat map, DNG default exposure, LookTable, and profile tone curve used by final rendering, while deliberately ignoring the user's live Exposure slider so histogram bounds remain stable.
+Tone analysis includes the fixed HueSat map, DNG default exposure, LookTable, and profile tone curve used by final rendering, while deliberately ignoring the user's live Exposure slider so the local-control masks remain stable. The sigmoid curve itself is global and is not fitted to image percentiles.
 
 ## Public API
 
@@ -42,3 +42,5 @@ cargo test
 ```
 
 The first script checks the Rust/WGSL ABI, profile stage order, DCP tag/container support, ICC plumbing, matrix inverses, and CPU/GPU LUT packing. `cargo test` remains the authoritative compiler and shader-parser check on a machine with the Rust and LibRaw build dependencies installed.
+
+See `DARKTABLE_SIGMOID.md` and `THIRD_PARTY_NOTICES.md` for the view-transform implementation and attribution.

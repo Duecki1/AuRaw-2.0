@@ -1,6 +1,7 @@
-// Scene-linear operations that intentionally happen before the single
-// scene-to-display curve. Global contrast/highlight/shadow/white/black shaping
-// lives exclusively in tonemap.wgsl.
+// Scene-linear operations that intentionally happen before the final
+// scene-to-display transform. Exposure and colourfulness are applied here;
+// local Highlights/Shadows/Whites/Blacks and darktable sigmoid live in
+// tonemap.wgsl.
 
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
     // Sensor black calibration is applied while normalizing each CFA plane in

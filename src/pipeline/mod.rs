@@ -4,6 +4,7 @@ mod export;
 mod gpu;
 mod processing;
 mod raw_loader;
+mod sigmoid;
 
 pub use basicadj::{DemosaicMode, ExposureParams, HighlightReconstructionMethod};
 pub use color_profile::{
@@ -17,3 +18,4 @@ pub use processing::{
     TilePlan, TileSpec,
 };
 pub use raw_loader::{load_raw_file, load_raw_file_with_dcp, CfaKind, LoadedRaw};
+pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};
