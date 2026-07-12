@@ -293,12 +293,16 @@ fn dual_high_weight(pos: vec2<i32>) -> f32 {
 }
 
 fn warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
-    let extent = vec2<f32>(f32(params.width - 1u), f32(params.height - 1u));
-    let center = 0.5 * extent;
-    let rel = vec2<f32>(pos) - center;
+    let local_extent = vec2<f32>(f32(params.width - 1u), f32(params.height - 1u));
+    let origin = vec2<f32>(f32(params.tile_origin_x), f32(params.tile_origin_y));
+    let full_extent = vec2<f32>(f32(params.full_width - 1u), f32(params.full_height - 1u));
+    let center = 0.5 * full_extent;
+    let global_pos = vec2<f32>(pos) + origin;
+    let rel = global_pos - center;
     let norm = rel / max(center, vec2<f32>(1.0));
     let scale = 1.0 + amount * 0.001 * dot(norm, norm);
-    return clamp(center + rel * scale, vec2<f32>(0.0), extent);
+    let warped_global = clamp(center + rel * scale, vec2<f32>(0.0), full_extent);
+    return clamp(warped_global - origin, vec2<f32>(0.0), local_extent);
 }
 
 fn reference_bilinear(pos: vec2<f32>) -> vec3<f32> {

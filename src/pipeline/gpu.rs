@@ -1,5 +1,5 @@
 use crate::pipeline::{
-    CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, RenderingIntent,
+    CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, ProcessingStage, RenderingIntent,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -241,6 +241,10 @@ pub struct GpuParams {
     white_levels: [f32; 4],
     width: u32,
     height: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    full_width: u32,
+    full_height: u32,
     _pad0: u32,
     _pad1: u32,
     profile_hue_sat: [u32; 4],
@@ -252,6 +256,17 @@ pub struct GpuParams {
 
 impl GpuParams {
     pub fn new(exposure: &ExposureParams, raw: &LoadedRaw) -> Self {
+        Self::new_for_tile(exposure, raw, 0, 0, raw.width, raw.height)
+    }
+
+    pub fn new_for_tile(
+        exposure: &ExposureParams,
+        raw: &LoadedRaw,
+        tile_origin_x: i32,
+        tile_origin_y: i32,
+        full_width: u32,
+        full_height: u32,
+    ) -> Self {
         let profile_layout = raw.camera_profile.gpu_layout();
         Self {
             black_point: exposure.black_point,
@@ -297,6 +312,10 @@ impl GpuParams {
             white_levels: raw.white_levels,
             width: raw.width,
             height: raw.height,
+            tile_origin_x,
+            tile_origin_y,
+            full_width,
+            full_height,
             _pad0: 0,
             _pad1: 0,
             profile_hue_sat: profile_layout.hue_sat,
@@ -315,28 +334,31 @@ struct Pass {
 }
 
 pub struct RawGpuPipeline {
-    pub egui_texture_id: egui::TextureId,
+    pub egui_texture_id: Option<egui::TextureId>,
     pub width: u32,
     pub height: u32,
     params_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
+    raw_stage_end: usize,
     tone_prepare_pass_index: usize,
+    tone_reduce_pass_index: usize,
+    tone_stage_end: usize,
     passes: Vec<Pass>,
-    _raw_texture: wgpu::Texture,
-    _color_texture: wgpu::Texture,
-    _black_texture: wgpu::Texture,
+    raw_texture: wgpu::Texture,
+    color_texture: wgpu::Texture,
+    black_texture: wgpu::Texture,
     _reconstructed_raw_texture: wgpu::Texture,
     _highlight_work_a: wgpu::Texture,
     _highlight_work_b: wgpu::Texture,
     _tex1: wgpu::Texture,
     _tex2: wgpu::Texture,
     _scene_texture: wgpu::Texture,
-    _tone_stats_buffer: wgpu::Buffer,
+    tone_stats_buffer: wgpu::Buffer,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
     profile_buffer: wgpu::Buffer,
     output_lut_offset_bytes: u64,
-    _out_texture: wgpu::Texture,
+    out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
 }
 
@@ -362,6 +384,27 @@ impl RawGpuPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: &mut egui_wgpu::Renderer,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+    ) -> Result<Self> {
+        Self::new_internal(device, queue, Some(renderer), raw, params, quality)
+    }
+
+    pub fn new_headless_with_quality(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+    ) -> Result<Self> {
+        Self::new_internal(device, queue, None, raw, params, quality)
+    }
+
+    fn new_internal(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: Option<&mut egui_wgpu::Renderer>,
         raw: &LoadedRaw,
         params: &GpuParams,
         quality: ProcessingQuality,
@@ -424,7 +467,9 @@ impl RawGpuPipeline {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         });
 
@@ -486,7 +531,9 @@ impl RawGpuPipeline {
         let tone_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("auraw tone statistics"),
             size: 2 * std::mem::size_of::<[f32; 4]>() as u64,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -1410,6 +1457,8 @@ impl RawGpuPipeline {
             ]),
         }
 
+        let raw_stage_end = passes.len();
+
         // Analyze the unexposed scene at reduced resolution. The guide is
         // bilateral and the histogram reduction emits robust tonal anchors.
         // recompute() clears the histogram immediately before this pass.
@@ -1453,6 +1502,9 @@ impl RawGpuPipeline {
             },
         ]);
 
+        let tone_reduce_pass_index = tone_prepare_pass_index + 3;
+        let tone_stage_end = passes.len();
+
         passes.push(Pass {
             pipeline: make_pipeline(
                 SHADER_ADJUSTMENTS,
@@ -1463,8 +1515,9 @@ impl RawGpuPipeline {
             workgroups: image_workgroups,
         });
 
-        let egui_texture_id =
-            renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear);
+        let egui_texture_id = renderer.map(|renderer| {
+            renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)
+        });
 
         let pipeline = Self {
             egui_texture_id,
@@ -1472,27 +1525,49 @@ impl RawGpuPipeline {
             height: raw.height,
             params_buffer,
             tone_histogram_buffer,
+            raw_stage_end,
             tone_prepare_pass_index,
+            tone_reduce_pass_index,
+            tone_stage_end,
             passes,
-            _raw_texture: raw_texture,
-            _color_texture: color_texture,
-            _black_texture: black_texture,
+            raw_texture,
+            color_texture,
+            black_texture,
             _reconstructed_raw_texture: reconstructed_raw_texture,
             _highlight_work_a: highlight_work_a,
             _highlight_work_b: highlight_work_b,
             _tex1: tex1,
             _tex2: tex2,
             _scene_texture: scene_texture,
-            _tone_stats_buffer: tone_stats_buffer,
+            tone_stats_buffer,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
             profile_buffer,
             output_lut_offset_bytes,
-            _out_texture: out_texture,
+            out_texture,
             _out_view: out_view,
         };
-        pipeline.recompute(queue, device, params);
         Ok(pipeline)
+    }
+
+    /// Registers a headless pipeline's output texture with egui after the
+    /// expensive GPU setup has completed on a worker thread.
+    pub fn register_egui_texture(
+        &mut self,
+        device: &wgpu::Device,
+        renderer: &mut egui_wgpu::Renderer,
+    ) -> egui::TextureId {
+        if let Some(texture_id) = self.egui_texture_id {
+            return texture_id;
+        }
+
+        let texture_id = renderer.register_native_texture(
+            device,
+            &self._out_view,
+            wgpu::FilterMode::Linear,
+        );
+        self.egui_texture_id = Some(texture_id);
+        texture_id
     }
 
     /// Updates the preview/display transform from an RGB ICC matrix-shaper
@@ -1538,21 +1613,219 @@ impl RawGpuPipeline {
         Ok(())
     }
 
+    /// Compatibility entry point that executes the complete pipeline. New UI
+    /// code should prefer `dispatch_stage` so cached upstream results survive
+    /// ordinary Develop adjustments.
     pub fn recompute(&self, queue: &wgpu::Queue, device: &wgpu::Device, params: &GpuParams) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
-
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw recompute encoder"),
+            label: Some("auraw complete recompute encoder"),
+        });
+        encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
+        self.encode_pass_range(&mut encoder, 0, self.passes.len());
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Dispatches exactly one dependency stage. GPU submission is asynchronous;
+    /// callers can spread Raw -> Tone -> Output across event-loop iterations.
+    pub fn dispatch_stage(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        stage: ProcessingStage,
+    ) {
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some(stage.label()),
         });
 
-        for i in 0..self.passes.len() {
-            if i == self.tone_prepare_pass_index {
-                // tone_guide_prepare atomically accumulates all source pixels.
-                // Clearing in the same command encoder immediately before that
-                // dispatch guarantees every analysis starts from zero.
+        match stage {
+            ProcessingStage::Raw => self.encode_pass_range(&mut encoder, 0, self.raw_stage_end),
+            ProcessingStage::Tone => {
                 encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
+                self.encode_pass_range(
+                    &mut encoder,
+                    self.tone_prepare_pass_index,
+                    self.tone_stage_end,
+                );
             }
+            ProcessingStage::Output => {
+                self.encode_pass_range(&mut encoder, self.tone_stage_end, self.passes.len());
+            }
+        }
 
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Replaces the sensor textures of a fixed-size headless pipeline so one
+    /// allocation and one set of compiled compute pipelines can process every
+    /// export tile.
+    pub fn upload_raw_tile(&self, queue: &wgpu::Queue, raw: &LoadedRaw) -> Result<()> {
+        if raw.width != self.width || raw.height != self.height {
+            return Err(anyhow!(
+                "tile dimensions {}x{} do not match reusable pipeline {}x{}",
+                raw.width,
+                raw.height,
+                self.width,
+                self.height
+            ));
+        }
+        validate_raw(raw)?;
+
+        queue.write_texture(
+            copy_texture(&self.raw_texture),
+            bytemuck::cast_slice(&raw.raw_pixels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width * 2),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+        queue.write_texture(
+            copy_texture(&self.color_texture),
+            &raw.color_indices,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+        queue.write_texture(
+            copy_texture(&self.black_texture),
+            bytemuck::cast_slice(&raw.black_levels_per_pixel),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width * 4),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+        Ok(())
+    }
+
+    /// Executes one export tile using the preview pipeline's cached global
+    /// tone statistics. The tile still builds its own halo-aware tone guide,
+    /// but skipping histogram reduction prevents tile-to-tile tonal seams.
+    pub fn dispatch_export_tile(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        global_tone_source: &RawGpuPipeline,
+    ) {
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw tiled export encoder"),
+        });
+
+        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_reduce_pass_index,
+        );
+        encoder.copy_buffer_to_buffer(
+            &global_tone_source.tone_stats_buffer,
+            0,
+            &self.tone_stats_buffer,
+            0,
+            2 * std::mem::size_of::<[f32; 4]>() as u64,
+        );
+        self.encode_pass_range(&mut encoder, self.tone_stage_end, self.passes.len());
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Copies an RGBA8 output sub-rectangle to CPU memory. This method blocks
+    /// only the export worker thread; the interactive UI remains responsive.
+    pub fn read_output_region_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        if width == 0 || height == 0 || x + width > self.width || y + height > self.height {
+            return Err(anyhow!("invalid GPU readback rectangle"));
+        }
+
+        let unpadded_bytes_per_row = width * 4;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+        let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auraw tiled export readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw tiled export copy encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.out_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = queue.submit(Some(encoder.finish()));
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        readback.map_async(wgpu::MapMode::Read, .., move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map_err(|error| anyhow!("GPU poll failed during export: {error}"))?;
+        receiver
+            .recv()
+            .map_err(|_| anyhow!("GPU readback callback was dropped"))?
+            .map_err(|error| anyhow!("GPU readback mapping failed: {error}"))?;
+
+        let mapped = readback
+            .get_mapped_range(..)
+            .map_err(|error| anyhow!("could not access mapped export buffer: {error}"))?;
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for row in 0..height as usize {
+            let src = row * padded_bytes_per_row as usize;
+            let dst = row * unpadded_bytes_per_row as usize;
+            rgba[dst..dst + unpadded_bytes_per_row as usize]
+                .copy_from_slice(&mapped[src..src + unpadded_bytes_per_row as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+        Ok(rgba)
+    }
+
+    fn encode_pass_range(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        start: usize,
+        end: usize,
+    ) {
+        for i in start..end {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(&format!("auraw pass {}", i + 1)),
                 timestamp_writes: None,
@@ -1562,8 +1835,6 @@ impl RawGpuPipeline {
             let workgroups = self.passes[i].workgroups;
             pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
-
-        queue.submit(Some(encoder.finish()));
     }
 }
 
@@ -2049,13 +2320,15 @@ mod tests {
         // followed by nine adjustment vec4s, six camera/raw
         // vec4s, then dimensions/padding. This catches accidental
         // Rust/WGSL field drift before it turns sliders into random values.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 400);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 416);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 96);
         assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 208);
         assert_eq!(std::mem::offset_of!(super::GpuParams, width), 304);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 320);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 384);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 312);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 320);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 336);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 400);
     }
 
     fn adaptive_tone_curve_cpu(

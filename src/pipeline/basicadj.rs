@@ -47,7 +47,7 @@ impl HighlightReconstructionMethod {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExposureParams {
     /// Additional normalized sensor-space black-point correction. It is applied
     /// per CFA plane before white balance and demosaic, and is deliberately

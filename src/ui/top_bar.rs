@@ -19,6 +19,14 @@ impl TopBar {
                 app.open_file_dialog(frame);
             }
 
+            #[cfg(not(target_os = "android"))]
+            if ui
+                .add_enabled(app.can_export(), egui::Button::new("Export PNG…"))
+                .clicked()
+            {
+                app.export_file_dialog(frame);
+            }
+
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(&app.status)

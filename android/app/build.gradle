@@ -5,6 +5,8 @@ plugins {
 android {
     namespace "de.duecki.auraw"
     compileSdk 35
+    buildToolsVersion "35.0.0"
+    ndkVersion "27.0.12077973"
 
     defaultConfig {
         applicationId "de.duecki.auraw"
@@ -36,12 +38,15 @@ android {
 
 def rustAbi = providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")
 def repositoryRoot = rootProject.projectDir.parentFile
+def buildRustEnabled = providers.gradleProperty("aurawBuildRust").map { it.toBoolean() }.getOrElse(true)
 
 tasks.register("buildRust", Exec) {
     workingDir repositoryRoot
     commandLine "sh", new File(repositoryRoot, "scripts/build-android.sh"), rustAbi, "release"
 }
 
-tasks.named("preBuild").configure {
-    dependsOn("buildRust")
+if (buildRustEnabled) {
+    tasks.named("preBuild").configure {
+        dependsOn("buildRust")
+    }
 }

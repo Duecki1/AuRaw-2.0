@@ -8,9 +8,9 @@ the application entry point and the system file-picker bridge.
 
 - Rust with the Android target for the device (normally
   `aarch64-linux-android`)
-- Android SDK 35 and Android NDK 26 or newer
-- CMake, Ninja, a JDK, host `libclang`, and Android Studio or Gradle
-- `cargo-ndk` (`cargo install cargo-ndk`)
+- Android SDK 35 and Android NDK 27.0.12077973
+- Android SDK CMake 3.22.1 (with its bundled Ninja), a JDK, host `libclang`, and Gradle 8.11.1
+- `cargo-ndk` 4.1.2 (`cargo install cargo-ndk --version 4.1.2 --locked`)
 
 Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
 
@@ -18,7 +18,7 @@ Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
 export ANDROID_SDK_ROOT="/home/duecki/Android/Sdk"
 export ANDROID_NDK_HOME="/home/duecki/Android/Sdk/ndk/27.0.12077973"
 rustup target add aarch64-linux-android
-cargo install cargo-ndk
+cargo install cargo-ndk --version 4.1.2 --locked
 ```
 
 On Debian/Ubuntu, the bindgen prerequisite is provided by `libclang-dev`. If
@@ -46,12 +46,15 @@ To build only the native LibRaw and Rust library without packaging an APK:
 ./scripts/build-android.sh arm64-v8a release
 ```
 
-The first native build downloads the pinned LibRaw 0.22.1 source and its
-official companion CMake files, then cross-compiles a static library with the
-NDK. Generated sources, libraries, and APKs are ignored by Git. No LibRaw
-installation on the Linux host is required. LibRaw is cached until its version,
-ABI, API level, or NDK path changes; set `AURAW_REBUILD_LIBRAW=1` to force a
-clean native rebuild.
+The first native build downloads LibRaw 0.22.1 and its official companion
+CMake files by immutable commit ID, then cross-compiles a static library with
+the pinned NDK. Generated sources, libraries, and APKs are ignored by Git. The native build
+also copies `libc++_shared.so` from the pinned NDK instead of storing it in the
+repository. No LibRaw installation on the Linux host is required. LibRaw is
+cached for development builds until its version, ABI, API level, or NDK
+revision changes; set `AURAW_REBUILD_LIBRAW=1` to force a clean native rebuild.
+Release builds always discard the ignored native cache and rebuild it from the
+pinned source revisions.
 
 Other supported ABI names are `armeabi-v7a`, `x86`, and `x86_64`. Build and
 package one ABI at a time by passing the same name to the script and the Gradle
@@ -86,3 +89,7 @@ cargo run --release
 
 On a computer without desktop LibRaw, AuRaw still compiles, but the desktop RAW
 loader reports that it was disabled at build time.
+
+Release builds must run from a clean Git checkout. The full commit ID is embedded
+in the Rust library, and the build scripts discard native output if the source
+changes while compilation is running. See `REPRODUCIBLE_BUILDS.md`.
