@@ -9,7 +9,7 @@ the application entry point and the system file-picker bridge.
 - Rust with the Android target for the device (normally
   `aarch64-linux-android`)
 - Android SDK 35 and Android NDK 27.0.12077973
-- Android SDK CMake 3.22.1 (with its bundled Ninja), a JDK, host `libclang`, and Gradle 8.11.1
+- Android SDK CMake 3.22.1 (with its bundled Ninja), a JDK, host `libclang`, and Gradle 8.11.1 or newer in the Gradle 8 series (CI uses 8.11.1)
 - `cargo-ndk` 4.1.2 (`cargo install cargo-ndk --version 4.1.2 --locked`)
 
 Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
@@ -29,8 +29,8 @@ NDK's copy when that NDK distribution includes one.
 ## Build and run
 
 The simplest route is to open the `android` directory in Android Studio and
-press Run. Its `preBuild` task builds LibRaw and the Rust library before Gradle
-packages the app.
+press Run. The variant pre-build task builds LibRaw and the matching debug or
+release Rust library before Gradle packages the app.
 
 For a command-line build:
 
