@@ -71,11 +71,18 @@ fn signed_tone_range(value: f32, negative_ev: f32, positive_ev: f32) -> f32 {
     return select(value * negative_ev, value * positive_ev, value >= 0.0);
 }
 
-fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
-    let highlights = clamp(params.basic_tone.x / 100.0, -1.0, 1.0);
-    let shadows = clamp(params.basic_tone.y / 100.0, -1.0, 1.0);
-    let whites = clamp(params.basic_tone.z / 100.0, -1.0, 1.0);
-    let blacks = clamp(params.basic_tone.w / 100.0, -1.0, 1.0);
+fn apply_local_basic_tone_values(
+    rgb: vec3<f32>,
+    pos: vec2<i32>,
+    highlights_value: f32,
+    shadows_value: f32,
+    whites_value: f32,
+    blacks_value: f32,
+) -> vec3<f32> {
+    let highlights = clamp(highlights_value / 100.0, -1.0, 1.0);
+    let shadows = clamp(shadows_value / 100.0, -1.0, 1.0);
+    let whites = clamp(whites_value / 100.0, -1.0, 1.0);
+    let blacks = clamp(blacks_value / 100.0, -1.0, 1.0);
     if max(max(abs(highlights), abs(shadows)), max(abs(whites), abs(blacks))) < 1e-6 {
         return rgb;
     }
@@ -92,8 +99,19 @@ fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     return rgb * exp2(offset_ev);
 }
 
-fn apply_basic_contrast(rgb: vec3<f32>) -> vec3<f32> {
-    let amount = clamp(params.presence.w / 100.0, -1.0, 1.0);
+fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
+    return apply_local_basic_tone_values(
+        rgb,
+        pos,
+        params.basic_tone.x,
+        params.basic_tone.y,
+        params.basic_tone.z,
+        params.basic_tone.w,
+    );
+}
+
+fn apply_basic_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
+    let amount = clamp(value / 100.0, -1.0, 1.0);
     if abs(amount) < 1e-6 {
         return rgb;
     }
@@ -103,6 +121,10 @@ fn apply_basic_contrast(rgb: vec3<f32>) -> vec3<f32> {
     let scene_ev = log2(luminance / 0.1845);
     let adjusted_luminance = 0.1845 * exp2(scene_ev * contrast_power);
     return rgb * clamp(adjusted_luminance / luminance, 0.0, 64.0);
+}
+
+fn apply_basic_contrast(rgb: vec3<f32>) -> vec3<f32> {
+    return apply_basic_contrast_value(rgb, params.presence.w);
 }
 
 // Curve 0 is the composite luminance curve; 1, 2 and 3 are R, G and B.

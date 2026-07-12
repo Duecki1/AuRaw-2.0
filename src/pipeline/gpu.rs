@@ -1,6 +1,7 @@
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
-    CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, ProcessingStage, RenderingIntent,
+    mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, MaskStack,
+    ProcessingStage, RenderingIntent, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -288,15 +289,26 @@ pub struct GpuParams {
     profile_tone: [u32; 4],
     output_lut: [u32; 4],
     profile_flags: [u32; 4],
+    // Local mask count followed by reserved values. Each fixed mask index maps
+    // directly to one layer in the normalized R8 mask atlas.
+    mask_counts: [u32; 4],
+    mask_meta: [[u32; 4]; MAX_LOCAL_MASKS],
+    // Exposure, contrast, highlights, shadows.
+    mask_adjust_0: [[f32; 4]; MAX_LOCAL_MASKS],
+    // Whites, blacks, temperature, tint.
+    mask_adjust_1: [[f32; 4]; MAX_LOCAL_MASKS],
+    // Saturation, texture, clarity, dehaze.
+    mask_adjust_2: [[f32; 4]; MAX_LOCAL_MASKS],
 }
 
 impl GpuParams {
-    pub fn new(exposure: &ExposureParams, raw: &LoadedRaw) -> Self {
-        Self::new_for_tile(exposure, raw, 0, 0, raw.width, raw.height)
+    pub fn new(exposure: &ExposureParams, masks: &MaskStack, raw: &LoadedRaw) -> Self {
+        Self::new_for_tile(exposure, masks, raw, 0, 0, raw.width, raw.height)
     }
 
     pub fn new_for_tile(
         exposure: &ExposureParams,
+        masks: &MaskStack,
         raw: &LoadedRaw,
         tile_origin_x: i32,
         tile_origin_y: i32,
@@ -305,6 +317,32 @@ impl GpuParams {
     ) -> Self {
         let profile_layout = raw.camera_profile.gpu_layout();
         let sigmoid = sigmoid_coefficients(exposure.sigmoid);
+        let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_adjust_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_adjust_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_adjust_2 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
+            let adjustment = mask.adjustments;
+            mask_meta[index] = [u32::from(mask.enabled), u32::from(!adjustment.is_neutral()), 0, 0];
+            mask_adjust_0[index] = [
+                adjustment.exposure.clamp(-5.0, 5.0),
+                adjustment.contrast.clamp(-100.0, 100.0),
+                adjustment.highlights.clamp(-100.0, 100.0),
+                adjustment.shadows.clamp(-100.0, 100.0),
+            ];
+            mask_adjust_1[index] = [
+                adjustment.whites.clamp(-100.0, 100.0),
+                adjustment.blacks.clamp(-100.0, 100.0),
+                adjustment.temperature.clamp(-100.0, 100.0),
+                adjustment.tint.clamp(-100.0, 100.0),
+            ];
+            mask_adjust_2[index] = [
+                adjustment.saturation.clamp(-100.0, 100.0),
+                adjustment.texture.clamp(-100.0, 100.0),
+                adjustment.clarity.clamp(-100.0, 100.0),
+                adjustment.dehaze.clamp(-100.0, 100.0),
+            ];
+        }
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
@@ -491,6 +529,11 @@ impl GpuParams {
             profile_tone: profile_layout.tone,
             output_lut: profile_layout.output,
             profile_flags: profile_layout.flags,
+            mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
+            mask_meta,
+            mask_adjust_0,
+            mask_adjust_1,
+            mask_adjust_2,
         }
     }
 }
@@ -525,6 +568,8 @@ pub struct RawGpuPipeline {
     tone_stats_buffer: wgpu::Buffer,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
+    mask_texture: wgpu::Texture,
+    mask_atlas_edge: u32,
     profile_buffer: wgpu::Buffer,
     output_lut_offset_bytes: u64,
     out_texture: wgpu::Texture,
@@ -656,6 +701,46 @@ impl RawGpuPipeline {
             tone_format,
             "auraw adaptive tone guide B",
         );
+        let mask_atlas_edge = mask_atlas_edge();
+        let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw normalized local-mask atlas"),
+            size: wgpu::Extent3d {
+                width: mask_atlas_edge,
+                height: mask_atlas_edge,
+                depth_or_array_layers: MAX_LOCAL_MASKS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[wgpu::TextureFormat::R8Unorm],
+        });
+        let empty_masks = vec![
+            0u8;
+            mask_atlas_edge as usize
+                * mask_atlas_edge as usize
+                * MAX_LOCAL_MASKS
+        ];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &empty_masks,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(mask_atlas_edge),
+                rows_per_image: Some(mask_atlas_edge),
+            },
+            wgpu::Extent3d {
+                width: mask_atlas_edge,
+                height: mask_atlas_edge,
+                depth_or_array_layers: MAX_LOCAL_MASKS as u32,
+            },
+        );
 
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let reconstructed_raw_view =
@@ -674,6 +759,21 @@ impl RawGpuPipeline {
         let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let black_view = black_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("auraw local-mask array view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("auraw local-mask linear sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
 
         let default_output_transform = IccOutputTransform::srgb();
         let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
@@ -947,6 +1047,8 @@ impl RawGpuPipeline {
                     storage_buffer_entry(16, true),
                     texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_buffer_entry(20, true),
+                    texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
+                    sampler_entry(28),
                 ],
             });
 
@@ -961,6 +1063,8 @@ impl RawGpuPipeline {
                         work_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
+                    texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
+                    sampler_entry(28),
                 ],
             });
 
@@ -1453,6 +1557,14 @@ impl RawGpuPipeline {
                     binding: 20,
                     resource: profile_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
             ],
         });
 
@@ -1471,6 +1583,14 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 23,
                     resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
                 },
             ],
         });
@@ -1850,12 +1970,62 @@ impl RawGpuPipeline {
             tone_stats_buffer,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
+            mask_texture,
+            mask_atlas_edge,
             profile_buffer,
             output_lut_offset_bytes,
             out_texture,
             _out_view: out_view,
         };
         Ok(pipeline)
+    }
+
+    /// Uploads one normalized, anti-aliased local-mask layer. The same atlas
+    /// is sampled by preview proxies and full-resolution export tiles.
+    pub fn update_mask_layer(
+        &self,
+        queue: &wgpu::Queue,
+        layer: usize,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if layer >= MAX_LOCAL_MASKS {
+            return Err(anyhow!("local-mask layer {layer} is out of range"));
+        }
+        let expected = self.mask_atlas_edge as usize * self.mask_atlas_edge as usize;
+        if bytes.len() != expected {
+            return Err(anyhow!(
+                "local-mask layer has {} bytes, expected {expected}",
+                bytes.len()
+            ));
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.mask_atlas_edge),
+                rows_per_image: Some(self.mask_atlas_edge),
+            },
+            wgpu::Extent3d {
+                width: self.mask_atlas_edge,
+                height: self.mask_atlas_edge,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
+    }
+
+    pub const fn mask_atlas_edge(&self) -> u32 {
+        self.mask_atlas_edge
     }
 
     /// Registers a headless pipeline's output texture with egui after the
@@ -2634,6 +2804,31 @@ fn validate_raw(raw: &LoadedRaw) -> Result<()> {
     Ok(())
 }
 
+fn texture_array_entry(
+    binding: u32,
+    sample_type: wgpu::TextureSampleType,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
 fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -2928,7 +3123,7 @@ mod tests {
         // Sixteen scalar values keep the stable 64-byte prefix. The two
         // darktable sigmoid vec4s follow the local-tone controls, then the
         // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 816);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 1344);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
@@ -2947,6 +3142,11 @@ mod tests {
         assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 720);
         assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 736);
         assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 800);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 816);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 832);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 960);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1088);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1216);
     }
 
     #[test]
@@ -3046,7 +3246,7 @@ mod tests {
                 white_levels: [4095.0; 4],
                 camera_profile: Default::default(),
             };
-            let params = super::GpuParams::new(&ExposureParams::default(), &raw);
+            let params = super::GpuParams::new(&ExposureParams::default(), &crate::pipeline::MaskStack::default(), &raw);
 
             let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let pipeline = RawGpuPipeline::new_headless_with_quality(

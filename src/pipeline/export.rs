@@ -1,6 +1,6 @@
 use super::{
-    extract_padded_tile, resample_raw, ExposureParams, GpuParams, LoadedRaw, ProcessingQuality,
-    ProcessingStage, RawGpuPipeline, TilePlan, TileSpec,
+    extract_padded_tile, resample_raw, ExposureParams, GpuParams, LoadedRaw, MaskStack,
+    ProcessingQuality, ProcessingStage, RawGpuPipeline, TilePlan, TileSpec, MAX_LOCAL_MASKS,
 };
 use anyhow::{Context, Result};
 use eframe::wgpu;
@@ -125,6 +125,7 @@ pub fn spawn_tiled_png_export(
     raw: Arc<LoadedRaw>,
     preview_raw: Arc<LoadedRaw>,
     exposure: ExposureParams,
+    masks: MaskStack,
     path: PathBuf,
     tile_spec: TileSpec,
     settings: ExportSettings,
@@ -153,6 +154,7 @@ pub fn spawn_tiled_png_export(
                 export_raw,
                 &preview_raw,
                 &exposure,
+                &masks,
                 &worker_path,
                 tile_spec,
                 settings.keep_metadata,
@@ -184,13 +186,14 @@ fn export_tiled_png(
     raw: &LoadedRaw,
     preview_raw: &LoadedRaw,
     exposure: &ExposureParams,
+    masks: &MaskStack,
     path: &Path,
     tile_spec: TileSpec,
     keep_metadata: bool,
     metadata: &ExportMetadata,
     events: &mpsc::Sender<ExportEvent>,
 ) -> Result<()> {
-    let global_params = GpuParams::new(exposure, preview_raw);
+    let global_params = GpuParams::new(exposure, masks, preview_raw);
     let global_tone_source = RawGpuPipeline::new_headless_with_quality(
         device,
         queue,
@@ -199,6 +202,7 @@ fn export_tiled_png(
         ProcessingQuality::High,
     )
     .context("create global tone-analysis pipeline")?;
+    upload_mask_atlas(&global_tone_source, queue, masks, preview_raw.width, preview_raw.height)?;
     global_tone_source.dispatch_stage(queue, device, &global_params, ProcessingStage::Raw);
     global_tone_source.dispatch_stage(queue, device, &global_params, ProcessingStage::Tone);
 
@@ -210,6 +214,7 @@ fn export_tiled_png(
     let first_raw = extract_padded_tile(raw, first);
     let first_params = GpuParams::new_for_tile(
         exposure,
+        masks,
         &first_raw,
         first.global_origin_x,
         first.global_origin_y,
@@ -224,6 +229,7 @@ fn export_tiled_png(
         ProcessingQuality::High,
     )
     .context("create reusable full-quality export pipeline")?;
+    upload_mask_atlas(&tile_pipeline, queue, masks, raw.width, raw.height)?;
 
     let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
     let mut info = png::Info::with_size(raw.width, raw.height);
@@ -275,6 +281,7 @@ fn export_tiled_png(
 
             let params = GpuParams::new_for_tile(
                 exposure,
+                masks,
                 &tile_raw,
                 tile.global_origin_x,
                 tile.global_origin_y,
@@ -308,6 +315,29 @@ fn export_tiled_png(
 
     stream.finish().context("finish streaming PNG data")?;
     writer.finish().context("finish PNG file")?;
+    Ok(())
+}
+
+fn upload_mask_atlas(
+    pipeline: &RawGpuPipeline,
+    queue: &wgpu::Queue,
+    masks: &MaskStack,
+    image_width: u32,
+    image_height: u32,
+) -> Result<()> {
+    let edge = pipeline.mask_atlas_edge();
+    for layer in 0..MAX_LOCAL_MASKS {
+        let bytes = masks.rasterize_layer(
+            layer,
+            edge,
+            edge,
+            image_width,
+            image_height,
+        );
+        pipeline
+            .update_mask_layer(queue, layer, &bytes)
+            .with_context(|| format!("upload local-mask layer {}", layer + 1))?;
+    }
     Ok(())
 }
 

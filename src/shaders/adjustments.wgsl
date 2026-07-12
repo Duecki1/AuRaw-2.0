@@ -12,6 +12,50 @@
 @group(0) @binding(24) var local_effects_tex: texture_2d<f32>;
 @group(0) @binding(25) var creative_effects_out: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(26) var final_adjustment_tex: texture_2d<f32>;
+@group(0) @binding(27) var local_mask_tex: texture_2d_array<f32>;
+@group(0) @binding(28) var local_mask_sampler: sampler;
+
+struct LocalAdjustmentMix {
+    tone0: vec4<f32>,
+    tone1: vec4<f32>,
+    effects: vec4<f32>,
+}
+
+fn local_adjustment_mix(pos: vec2<i32>) -> LocalAdjustmentMix {
+    var tone0 = vec4<f32>(0.0);
+    var tone1 = vec4<f32>(0.0);
+    var effects = vec4<f32>(0.0);
+    let full_size = vec2<f32>(
+        f32(max(params.full_width, 1u)),
+        f32(max(params.full_height, 1u)),
+    );
+    let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
+    let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
+    let count = min(params.mask_counts.x, 8u);
+    for (var index = 0u; index < 8u; index = index + 1u) {
+        if index >= count {
+            break;
+        }
+        let mask_state = params.mask_meta[index];
+        if mask_state.x == 0u || mask_state.y == 0u {
+            continue;
+        }
+        let weight = textureSampleLevel(
+            local_mask_tex,
+            local_mask_sampler,
+            uv,
+            i32(index),
+            0.0,
+        ).x;
+        if weight <= 1e-5 {
+            continue;
+        }
+        tone0 = tone0 + params.mask_adjust_0[index] * weight;
+        tone1 = tone1 + params.mask_adjust_1[index] * weight;
+        effects = effects + params.mask_adjust_2[index] * weight;
+    }
+    return LocalAdjustmentMix(tone0, tone1, effects);
+}
 
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(scene_tex, clamp_pos(pos), 0).xyz;
@@ -92,9 +136,14 @@ fn soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
     return sign(detail) * max(abs(detail) - threshold, 0.0);
 }
 
-fn apply_texture_and_clarity(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let texture = clamp(params.presence.x / 100.0, -1.0, 1.0);
-    let clarity = clamp(params.presence.y / 100.0, -1.0, 1.0);
+fn apply_texture_and_clarity_values(
+    pos: vec2<i32>,
+    rgb: vec3<f32>,
+    texture_value: f32,
+    clarity_value: f32,
+) -> vec3<f32> {
+    let texture = clamp(texture_value / 100.0, -1.0, 1.0);
+    let clarity = clamp(clarity_value / 100.0, -1.0, 1.0);
     if abs(texture) < 1e-6 && abs(clarity) < 1e-6 {
         return rgb;
     }
@@ -130,6 +179,10 @@ fn apply_texture_and_clarity(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
 }
 
+fn apply_texture_and_clarity(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    return apply_texture_and_clarity_values(pos, rgb, params.presence.x, params.presence.y);
+}
+
 fn local_dark_channel(pos: vec2<i32>, radius: i32) -> f32 {
     var dark = 1e20;
     for (var dy = -2; dy <= 2; dy = dy + 1) {
@@ -142,8 +195,8 @@ fn local_dark_channel(pos: vec2<i32>, radius: i32) -> f32 {
     return max(dark, 0.0);
 }
 
-fn apply_dehaze(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let amount = clamp(params.presence.z / 100.0, -1.0, 1.0);
+fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
+    let amount = clamp(value / 100.0, -1.0, 1.0);
     if abs(amount) < 1e-6 {
         return rgb;
     }
@@ -168,6 +221,10 @@ fn apply_dehaze(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let haze = -amount;
     let haze_mix = haze * (0.22 + 0.38 * (1.0 - veil));
     return mix(rgb, airlight, clamp(haze_mix, 0.0, 0.60));
+}
+
+fn apply_dehaze(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    return apply_dehaze_value(pos, rgb, params.presence.z);
 }
 
 
@@ -623,6 +680,21 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_exposure(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
     rgb = apply_lightroom_tone(rgb, pos);
+
+    // Local masks are evaluated in normalized full-image coordinates, so the
+    // same feathered mask is used by the preview proxy and every export tile.
+    let local = local_adjustment_mix(pos);
+    rgb = rgb * exp2(clamp(local.tone0.x, -10.0, 10.0));
+    rgb = apply_local_basic_tone_values(
+        rgb,
+        pos,
+        local.tone0.z,
+        local.tone0.w,
+        local.tone1.x,
+        local.tone1.y,
+    );
+    rgb = apply_basic_contrast_value(rgb, local.tone0.y);
+    rgb = apply_temperature_tint_values(rgb, local.tone1.z, local.tone1.w);
     textureStore(adjustment_base_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
 }
 
@@ -631,9 +703,16 @@ fn apply_lightroom_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
-    rgb = apply_texture_and_clarity(pos, rgb);
-    rgb = apply_dehaze(pos, rgb);
+    let local = local_adjustment_mix(pos);
+    rgb = apply_texture_and_clarity_values(
+        pos,
+        rgb,
+        params.presence.x + local.effects.y,
+        params.presence.y + local.effects.z,
+    );
+    rgb = apply_dehaze_value(pos, rgb, params.presence.z + local.effects.w);
     rgb = apply_saturation_vibrance(rgb);
+    rgb = apply_saturation_value(rgb, local.effects.x);
     textureStore(local_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
 }
 

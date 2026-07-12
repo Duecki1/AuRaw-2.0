@@ -18,7 +18,9 @@ def test_sidebar_has_exactly_four_requested_tabs() -> None:
     for name in ("Adjustments", "Masks", "Inpainting", "Export"):
         assert name in body
         assert f'SidebarTab::{name}, "{name}"' in SIDEBAR
-    assert "Local adjustment masks will appear here" in SIDEBAR
+    assert "fn show_masks" in SIDEBAR
+    for kind in ("Brush", "Radial", "Linear", "Subject", "Background", "Object", "Landscape", "LuminanceRange", "ColorRange", "DepthRange"):
+        assert f"MaskKind::{kind}" in SIDEBAR
     assert "generative inpainting controls are coming later" in SIDEBAR
 
 

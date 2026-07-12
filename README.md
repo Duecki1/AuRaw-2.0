@@ -103,7 +103,7 @@ and applies a hue-preserving scene-linear gain. See
 The Develop sidebar is divided into four tabs:
 
 - **Adjustments** contains the complete photographic processing stack.
-- **Masks** is reserved for future local-adjustment tools.
+- **Masks** provides Lightroom-style Brush, Radial Gradient, and Linear Gradient masks with add, subtract, and intersect submasks. Brush includes paint/erase modes, size, and feather; local adjustments are applied in the scene-linear GPU pipeline. Subject, Background, Object, Landscape, Luminance Range, Color Range, and Depth Range appear as future-tool placeholders.
 - **Inpainting** is reserved for future healing and object removal.
 - **Export** contains the PNG export action and all output options.
 

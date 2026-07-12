@@ -2,6 +2,7 @@ mod basicadj;
 mod color_profile;
 mod export;
 mod gpu;
+mod masks;
 mod processing;
 mod raw_loader;
 mod sigmoid;
@@ -18,6 +19,10 @@ pub use export::{
     spawn_tiled_png_export, ExportEvent, ExportMetadata, ExportResizeMode, ExportSettings,
 };
 pub use gpu::{GpuParams, ProcessingQuality, RawGpuPipeline};
+pub use masks::{
+    ellipse_outline_points, mask_atlas_edge, BrushDab, BrushMode, LocalAdjustments, LocalMask,
+    MaskCombineMode, MaskComponent, MaskGeometry, MaskKind, MaskStack, MAX_LOCAL_MASKS,
+};
 pub use processing::{
     affected_stage, build_proxy, extract_padded_tile, resample_raw, ExportTile, ProcessingStage, ProxySpec,
     TilePlan, TileSpec,
