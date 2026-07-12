@@ -2,6 +2,7 @@
 name = "auraw"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.92.0"
 authors = ["Duecki <dueckis@dueckis.de>"]
 description = "A GPU-first RAW image editor in Rust"
 
@@ -14,6 +15,7 @@ bytemuck = { version = "1.16", features = ["derive"] }
 rayon = "1.10"
 log = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+png = "0.18"
 anyhow = "1.0"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]

@@ -41,6 +41,10 @@ struct Params {
     white_levels: vec4<f32>,
     width: u32,
     height: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    full_width: u32,
+    full_height: u32,
     _pad0: u32,
     _pad1: u32,
     // DCP/ICC LUT metadata: dimensions and packed-buffer offset.
@@ -73,6 +77,14 @@ const REC2020_TO_SRGB: mat3x3<f32> = mat3x3<f32>(
 
 fn image_max() -> vec2<i32> {
     return vec2<i32>(i32(params.width) - 1, i32(params.height) - 1);
+}
+
+fn tile_origin() -> vec2<i32> {
+    return vec2<i32>(params.tile_origin_x, params.tile_origin_y);
+}
+
+fn full_image_max() -> vec2<i32> {
+    return vec2<i32>(i32(params.full_width) - 1, i32(params.full_height) - 1);
 }
 
 fn clamp_pos(pos: vec2<i32>) -> vec2<i32> {

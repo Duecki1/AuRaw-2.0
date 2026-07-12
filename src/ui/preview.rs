@@ -14,6 +14,13 @@ impl Preview {
             });
             return;
         };
+        let Some(texture_id) = pipeline.egui_texture_id else {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+                ui.label("Preparing preview…");
+            });
+            return;
+        };
 
         let available = ui.available_size();
         if available.x <= 0.0 || available.y <= 0.0 || pipeline.height == 0 {
@@ -31,7 +38,7 @@ impl Preview {
         ui.centered_and_justified(|ui| {
             ui.add(
                 egui::Image::new(egui::load::SizedTexture::new(
-                    pipeline.egui_texture_id,
+                    texture_id,
                     size,
                 ))
                 .fit_to_exact_size(size),

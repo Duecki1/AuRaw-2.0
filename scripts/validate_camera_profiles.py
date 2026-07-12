@@ -323,9 +323,9 @@ def main() -> int:
         "LibRaw's missing BaselineExposure sentinel cannot black out proprietary RAW previews",
     )
     c.check(
-        "size_of::<super::GpuParams>(), 400" in gpu
-        and "offset_of!(super::GpuParams, profile_hue_sat), 320" in gpu
-        and "offset_of!(super::GpuParams, profile_flags), 384" in gpu,
+        "size_of::<super::GpuParams>(), 416" in gpu
+        and "offset_of!(super::GpuParams, profile_hue_sat), 336" in gpu
+        and "offset_of!(super::GpuParams, profile_flags), 400" in gpu,
         "camera-profile uniform ABI regression test covers the appended metadata block",
     )
 

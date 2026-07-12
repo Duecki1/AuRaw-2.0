@@ -41,3 +41,10 @@ android.iml
 
 # Cargo config (machine-specific linker paths, NDK versions)
 .cargo/
+# Packaged release artifacts
+dist/
+
+# Python validation caches
+.pytest_cache/
+__pycache__/
+*.py[cod]
