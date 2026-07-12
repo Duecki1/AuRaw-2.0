@@ -15,7 +15,7 @@ env:
 jobs:
   linux-appimage:
     name: Linux AppImage
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
       LIBRAW_PREFIX: /tmp/auraw-libraw
       PKG_CONFIG_PATH: /tmp/auraw-libraw/lib/pkgconfig
@@ -231,7 +231,7 @@ jobs:
 
   android-debug-apk:
     name: Android debug APK
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
