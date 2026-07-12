@@ -46,7 +46,8 @@ command -v cmake >/dev/null 2>&1 || {
     exit 1
 }
 CMAKE_VERSION=$(cmake --version | sed -n '1s/^cmake version //p')
-if [ "$CMAKE_VERSION" != "$EXPECTED_CMAKE_VERSION" ]; then
+CMAKE_BASE_VERSION=${CMAKE_VERSION%%-*}
+if [ "$CMAKE_BASE_VERSION" != "$EXPECTED_CMAKE_VERSION" ]; then
     echo "CMake $EXPECTED_CMAKE_VERSION is required, found ${CMAKE_VERSION:-unknown}" >&2
     exit 1
 fi
