@@ -1,0 +1,84 @@
+schema: 1
+color_space: linear-rec2020-d65
+raw_root: raw
+
+# Copy this file to regression/corpus.yaml, replace every placeholder, enable
+# the scenes, and run `python3 scripts/image_regression.py validate-corpus`.
+# Keep RAW licensing explicit. Non-redistributable files should live in a
+# private artifact store and never be committed.
+scenes:
+  - id: bayer-detail-daylight
+    enabled: false
+    raw: REPLACE_WITH_BAYER.RAW
+    sha256: REPLACE_WITH_64_HEX_SHA256
+    cfa: bayer
+    tags: [difficult-frequency]
+    source: REPLACE_WITH_SOURCE_OR_CAPTURE_OWNER
+    license: REPLACE_WITH_LICENSE
+    redistributable: false
+    rois:
+      - {name: slanted-edge, kind: edge, rect: [0, 0, 256, 256]}
+      - {name: fabric, kind: frequency, rect: [256, 0, 256, 256]}
+      - {name: neutral-patch, kind: neutral, rect: [0, 256, 128, 128]}
+
+  - id: xtrans-detail-daylight
+    enabled: false
+    raw: REPLACE_WITH_XTRANS.RAF
+    sha256: REPLACE_WITH_64_HEX_SHA256
+    cfa: xtrans
+    tags: [difficult-frequency]
+    source: REPLACE_WITH_SOURCE_OR_CAPTURE_OWNER
+    license: REPLACE_WITH_LICENSE
+    redistributable: false
+    rois:
+      - {name: textile, kind: frequency, rect: [0, 0, 256, 256]}
+      - {name: neutral-edge, kind: neutral, rect: [256, 0, 256, 256]}
+
+  - id: bayer-high-iso-underexposed
+    enabled: false
+    raw: REPLACE_WITH_HIGH_ISO.RAW
+    sha256: REPLACE_WITH_64_HEX_SHA256
+    cfa: bayer
+    tags: [high-iso, underexposed]
+    source: REPLACE_WITH_SOURCE_OR_CAPTURE_OWNER
+    license: REPLACE_WITH_LICENSE
+    redistributable: false
+    rois:
+      - {name: shadow-flat, kind: noise, rect: [0, 0, 256, 256]}
+      - {name: shadow-edge, kind: edge, rect: [256, 0, 256, 256]}
+
+  - id: xtrans-high-iso-underexposed
+    enabled: false
+    raw: REPLACE_WITH_HIGH_ISO.RAF
+    sha256: REPLACE_WITH_64_HEX_SHA256
+    cfa: xtrans
+    tags: [high-iso, underexposed]
+    source: REPLACE_WITH_SOURCE_OR_CAPTURE_OWNER
+    license: REPLACE_WITH_LICENSE
+    redistributable: false
+    rois:
+      - {name: shadow-flat, kind: flat, rect: [0, 0, 256, 256]}
+
+  - id: bayer-saturated-highlights
+    enabled: false
+    raw: REPLACE_WITH_HIGHLIGHTS.RAW
+    sha256: REPLACE_WITH_64_HEX_SHA256
+    cfa: bayer
+    tags: [saturated-highlight]
+    source: REPLACE_WITH_SOURCE_OR_CAPTURE_OWNER
+    license: REPLACE_WITH_LICENSE
+    redistributable: false
+    rois:
+      - {name: clipped-leds, kind: highlight, rect: [0, 0, 256, 256]}
+
+  - id: xtrans-saturated-highlights
+    enabled: false
+    raw: REPLACE_WITH_HIGHLIGHTS.RAF
+    sha256: REPLACE_WITH_64_HEX_SHA256
+    cfa: xtrans
+    tags: [saturated-highlight]
+    source: REPLACE_WITH_SOURCE_OR_CAPTURE_OWNER
+    license: REPLACE_WITH_LICENSE
+    redistributable: false
+    rois:
+      - {name: clipped-specular, kind: highlight, rect: [0, 0, 256, 256]}

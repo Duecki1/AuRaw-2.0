@@ -1,3 +1,13 @@
 plugins {
     id "com.android.application" version "8.9.2" apply false
 }
+
+
+def minimumGradleVersion = org.gradle.util.GradleVersion.version("8.11.1")
+def nextGradleMajor = org.gradle.util.GradleVersion.version("9.0")
+def currentGradleVersion = org.gradle.util.GradleVersion.current()
+if (currentGradleVersion < minimumGradleVersion || currentGradleVersion >= nextGradleMajor) {
+    throw new org.gradle.api.GradleException(
+        "AuRaw requires Gradle 8.11.1 or newer within the Gradle 8 series; found ${currentGradleVersion}"
+    )
+}

@@ -1,23 +1,28 @@
-PASS: No NUL bytes — all Rust/WGSL sources
-PASS: Balanced source delimiters — 40 Rust/WGSL files
-PASS: Repeating black-pattern indexing — 2x3 pattern, active-area coordinates
-PASS: Malformed black pattern fallback — per-plane offset retained, no pattern OOB
-PASS: Orientation coordinate mapping — LibRaw flip 5/6
-PASS: White-level sanity fallback — invalid low/high linear_max values rejected
-PASS: Pseudoinverse reference check — full-rank 4x3 profile
-PASS: Black-point UI/shader range consistency — -0.25..0.25 in both UI paths and both sensor shaders
-PASS: Black-texture binding inventory — binding 19 declared and connected to six bind groups
-PASS: LoadedRaw initialization coverage — loader and synthetic GPU constructor both provide the black map
+PASS: RCD exterior margin is 9 pixels
+PASS: RCD exterior is initialized by PPG
+PASS: RCD VH blend matches interpolatef(VH, H, V)
+PASS: RCD PQ blend matches interpolatef(PQ, Q, P)
+PASS: RCD green-site VH blend matches reference orientation
+PASS: RCD uses 13x13 frequency-domain chroma support
+PASS: RCD dual mask uses radius-2 Gaussian normalization
+PASS: Markesteijn-3 keeps a 17-pixel exterior
+PASS: Markesteijn differentiates eight directional candidates
+PASS: Markesteijn homogeneity threshold is 8x minimum derivative
+PASS: Markesteijn builds 3x3 maps and 5x5 sums
+PASS: Markesteijn quenches opposite direction pairs
+PASS: Markesteijn one-eighth maximum cutoff is retained
+PASS: X-Trans FDC uses a 13x13 carrier window and median cleanup
+PASS: X-Trans dual mask uses radius-2 Gaussian normalization
+PASS: GPU schedule includes xtrans_seed
+PASS: GPU schedule includes xtrans_markesteijn_pass1
+PASS: GPU schedule includes xtrans_markesteijn_pass2
+PASS: GPU schedule includes xtrans_markesteijn_pass3
+PASS: GPU schedule includes xtrans_markesteijn_derivatives
+PASS: GPU schedule includes xtrans_markesteijn_homogeneity
+PASS: GPU schedule includes xtrans_markesteijn_accumulate
+PASS: GPU schedule includes xtrans_demosaic_finish
+PASS: Rust/WGSL uniform contains demosaic_mode
+PASS: Rust/WGSL uniform contains dual_threshold
+PASS: Rust/WGSL uniform contains frequency_chroma
 
-Summary: 10 passed, 0 failed
-
-Demosaic reference invariant checks:
-PASS: Bayer RCD PPG exterior and 9-pixel reference margin
-PASS: RCD VH/PQ interpolation orientation matches darktable interpolatef
-PASS: Markesteijn-3 17-pixel margin, eight directions, 3x3/5x5 homogeneity, quenching, cutoff
-PASS: Bayer/X-Trans 13x13 frequency-domain chroma support
-PASS: Bayer/X-Trans radius-2 Gaussian Scharr dual mask
-PASS: All eight X-Trans GPU entry points are scheduled
-PASS: Demosaic mode uniforms are aligned between Rust and WGSL
-
-Summary: 26 demosaic checks passed, 0 failed
+Summary: 26 passed, 0 failed

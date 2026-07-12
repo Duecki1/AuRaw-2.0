@@ -10,7 +10,7 @@ fn bayer_rcd_directional(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var v_stat = 0.0;
     var h_stat = 0.0;
-    
+
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         let p = pos + vec2<i32>(0, dy);
         let c  = raw_cfa_at(p);

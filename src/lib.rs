@@ -1,10 +1,15 @@
 #[cfg(target_os = "android")]
 mod android;
 mod app;
-mod pipeline;
+pub mod pipeline;
+pub mod regression;
 mod ui;
 
 pub use app::AurawApp;
+
+/// Git revision embedded by `build.rs` for traceable binaries.
+#[used]
+pub static SOURCE_REVISION: &str = env!("AURAW_SOURCE_REVISION");
 
 fn native_options() -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {

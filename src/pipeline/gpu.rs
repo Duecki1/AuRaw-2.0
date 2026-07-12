@@ -1,4 +1,7 @@
-use crate::pipeline::{CfaKind, ExposureParams, LoadedRaw};
+use super::sigmoid::coefficients as sigmoid_coefficients;
+use crate::pipeline::{
+    CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, ProcessingStage, RenderingIntent,
+};
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
@@ -176,6 +179,8 @@ const SHADER_TONE_ANALYSIS: &str = concat!(
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
+    include_str!("../shaders/profile.wgsl"),
+    "\n",
     include_str!("../shaders/basic_adjustments.wgsl"),
     "\n",
     include_str!("../shaders/tone_common.wgsl"),
@@ -183,10 +188,22 @@ const SHADER_TONE_ANALYSIS: &str = concat!(
     include_str!("../shaders/tone_analysis.wgsl")
 );
 
+const SHADER_REGRESSION_SCENE: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/profile.wgsl"),
+    "\n",
+    include_str!("../shaders/regression_scene.wgsl")
+);
+
 const SHADER_ADJUSTMENTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
     include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/profile.wgsl"),
     "\n",
     include_str!("../shaders/basic_adjustments.wgsl"),
     "\n",
@@ -204,7 +221,7 @@ pub struct GpuParams {
     // floats intentionally form one 64-byte scalar block before vec4 fields.
     black_point: f32,
     exposure: f32,
-    contrast: f32,
+    temperature: f32,
     saturation: f32,
     vibrance: f32,
     highlight_clip: f32,
@@ -217,10 +234,17 @@ pub struct GpuParams {
     demosaic_mode: f32,
     dual_threshold: f32,
     frequency_chroma: f32,
-    _demosaic_reserved: f32,
+    tint: f32,
     basic_tone: [f32; 4],
+    sigmoid_curve: [f32; 4],
+    sigmoid_power: [f32; 4],
     presence: [f32; 4],
     highlight_options: [f32; 4],
+    tone_curve_0: [f32; 4],
+    tone_curve_1: [f32; 4],
+    tone_curve_2: [f32; 4],
+    tone_curve_3: [f32; 4],
+    tone_curve_meta: [f32; 4],
     hsl_hue_0: [f32; 4],
     hsl_hue_1: [f32; 4],
     hsl_saturation_0: [f32; 4],
@@ -235,16 +259,38 @@ pub struct GpuParams {
     white_levels: [f32; 4],
     width: u32,
     height: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    full_width: u32,
+    full_height: u32,
     _pad0: u32,
     _pad1: u32,
+    profile_hue_sat: [u32; 4],
+    profile_look: [u32; 4],
+    profile_tone: [u32; 4],
+    output_lut: [u32; 4],
+    profile_flags: [u32; 4],
 }
 
 impl GpuParams {
     pub fn new(exposure: &ExposureParams, raw: &LoadedRaw) -> Self {
+        Self::new_for_tile(exposure, raw, 0, 0, raw.width, raw.height)
+    }
+
+    pub fn new_for_tile(
+        exposure: &ExposureParams,
+        raw: &LoadedRaw,
+        tile_origin_x: i32,
+        tile_origin_y: i32,
+        full_width: u32,
+        full_height: u32,
+    ) -> Self {
+        let profile_layout = raw.camera_profile.gpu_layout();
+        let sigmoid = sigmoid_coefficients(exposure.sigmoid);
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
-            contrast: exposure.contrast,
+            temperature: exposure.temperature.clamp(-100.0, 100.0),
             saturation: exposure.saturation,
             vibrance: exposure.vibrance,
             highlight_clip: exposure.highlight_clip,
@@ -257,18 +303,65 @@ impl GpuParams {
             demosaic_mode: exposure.demosaic_mode.shader_value(),
             dual_threshold: exposure.dual_threshold.clamp(0.0, 100.0),
             frequency_chroma: exposure.frequency_chroma.clamp(0.0, 1.0),
-            _demosaic_reserved: 9.0,
+            tint: exposure.tint.clamp(-100.0, 100.0),
             basic_tone: [
                 exposure.highlights,
                 exposure.shadows,
                 exposure.whites,
                 exposure.blacks,
             ],
-            presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
+            sigmoid_curve: [
+                sigmoid.white_target,
+                sigmoid.black_target,
+                sigmoid.paper_exposure,
+                sigmoid.film_fog,
+            ],
+            sigmoid_power: [
+                sigmoid.film_power,
+                sigmoid.paper_power,
+                sigmoid.hue_preservation,
+                sigmoid.color_processing,
+            ],
+            presence: [
+                exposure.texture,
+                exposure.clarity,
+                exposure.dehaze,
+                exposure.contrast.clamp(-100.0, 100.0),
+            ],
             highlight_options: [
                 exposure.highlight_method.shader_value(),
                 exposure.highlight_iterations.clamp(1, 4) as f32,
                 exposure.highlight_color_adaptation.clamp(0.0, 1.0),
+                0.0,
+            ],
+            tone_curve_0: [
+                exposure.tone_curve.points[0][0],
+                exposure.tone_curve.points[0][1],
+                exposure.tone_curve.points[1][0],
+                exposure.tone_curve.points[1][1],
+            ],
+            tone_curve_1: [
+                exposure.tone_curve.points[2][0],
+                exposure.tone_curve.points[2][1],
+                exposure.tone_curve.points[3][0],
+                exposure.tone_curve.points[3][1],
+            ],
+            tone_curve_2: [
+                exposure.tone_curve.points[4][0],
+                exposure.tone_curve.points[4][1],
+                exposure.tone_curve.points[5][0],
+                exposure.tone_curve.points[5][1],
+            ],
+            tone_curve_3: [
+                exposure.tone_curve.points[6][0],
+                exposure.tone_curve.points[6][1],
+                exposure.tone_curve.points[7][0],
+                exposure.tone_curve.points[7][1],
+            ],
+            tone_curve_meta: [
+                exposure.tone_curve.len.clamp(2, 8) as f32,
+                0.0,
+                0.0,
                 0.0,
             ],
             hsl_hue_0: exposure.hsl_hue[..4].try_into().unwrap(),
@@ -285,8 +378,17 @@ impl GpuParams {
             white_levels: raw.white_levels,
             width: raw.width,
             height: raw.height,
+            tile_origin_x,
+            tile_origin_y,
+            full_width,
+            full_height,
             _pad0: 0,
             _pad1: 0,
+            profile_hue_sat: profile_layout.hue_sat,
+            profile_look: profile_layout.look,
+            profile_tone: profile_layout.tone,
+            output_lut: profile_layout.output,
+            profile_flags: profile_layout.flags,
         }
     }
 }
@@ -298,26 +400,32 @@ struct Pass {
 }
 
 pub struct RawGpuPipeline {
-    pub egui_texture_id: egui::TextureId,
+    pub egui_texture_id: Option<egui::TextureId>,
     pub width: u32,
     pub height: u32,
     params_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
+    raw_stage_end: usize,
     tone_prepare_pass_index: usize,
+    tone_reduce_pass_index: usize,
+    tone_stage_end: usize,
     passes: Vec<Pass>,
-    _raw_texture: wgpu::Texture,
-    _color_texture: wgpu::Texture,
-    _black_texture: wgpu::Texture,
+    raw_texture: wgpu::Texture,
+    color_texture: wgpu::Texture,
+    black_texture: wgpu::Texture,
     _reconstructed_raw_texture: wgpu::Texture,
     _highlight_work_a: wgpu::Texture,
     _highlight_work_b: wgpu::Texture,
     _tex1: wgpu::Texture,
     _tex2: wgpu::Texture,
-    _scene_texture: wgpu::Texture,
-    _tone_stats_buffer: wgpu::Buffer,
+    scene_texture: wgpu::Texture,
+    scene_format: wgpu::TextureFormat,
+    tone_stats_buffer: wgpu::Buffer,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
-    _out_texture: wgpu::Texture,
+    profile_buffer: wgpu::Buffer,
+    output_lut_offset_bytes: u64,
+    out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
 }
 
@@ -343,6 +451,27 @@ impl RawGpuPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: &mut egui_wgpu::Renderer,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+    ) -> Result<Self> {
+        Self::new_internal(device, queue, Some(renderer), raw, params, quality)
+    }
+
+    pub fn new_headless_with_quality(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+    ) -> Result<Self> {
+        Self::new_internal(device, queue, None, raw, params, quality)
+    }
+
+    fn new_internal(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: Option<&mut egui_wgpu::Renderer>,
         raw: &LoadedRaw,
         params: &GpuParams,
         quality: ProcessingQuality,
@@ -405,7 +534,9 @@ impl RawGpuPipeline {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         });
 
@@ -442,6 +573,16 @@ impl RawGpuPipeline {
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let black_view = black_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let default_output_transform = IccOutputTransform::srgb();
+        let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
+        let output_lut_offset_bytes = u64::from(profile_gpu_data.layout.output[3])
+            * std::mem::size_of::<[f32; 4]>() as u64;
+        let profile_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("auraw DCP and ICC profile LUTs"),
+            contents: bytemuck::cast_slice(&profile_gpu_data.words),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("auraw params"),
             contents: bytemuck::bytes_of(params),
@@ -457,7 +598,9 @@ impl RawGpuPipeline {
         let tone_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("auraw tone statistics"),
             size: 2 * std::mem::size_of::<[f32; 4]>() as u64,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -653,6 +796,7 @@ impl RawGpuPipeline {
                     buffer_entry(0),
                     texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_buffer_entry(15, false),
+                    storage_buffer_entry(20, true),
                     storage_texture_entry(
                         18,
                         tone_format,
@@ -699,6 +843,7 @@ impl RawGpuPipeline {
                 ),
                 storage_buffer_entry(16, true),
                 texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_buffer_entry(20, true),
             ],
         });
 
@@ -1063,6 +1208,10 @@ impl RawGpuPipeline {
                     resource: tone_histogram_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: profile_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
                 },
@@ -1153,6 +1302,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 17,
                     resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: profile_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1371,6 +1524,8 @@ impl RawGpuPipeline {
             ]),
         }
 
+        let raw_stage_end = passes.len();
+
         // Analyze the unexposed scene at reduced resolution. The guide is
         // bilateral and the histogram reduction emits robust tonal anchors.
         // recompute() clears the histogram immediately before this pass.
@@ -1414,6 +1569,9 @@ impl RawGpuPipeline {
             },
         ]);
 
+        let tone_reduce_pass_index = tone_prepare_pass_index + 3;
+        let tone_stage_end = passes.len();
+
         passes.push(Pass {
             pipeline: make_pipeline(
                 SHADER_ADJUSTMENTS,
@@ -1424,8 +1582,9 @@ impl RawGpuPipeline {
             workgroups: image_workgroups,
         });
 
-        let egui_texture_id =
-            renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear);
+        let egui_texture_id = renderer.map(|renderer| {
+            renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)
+        });
 
         let pipeline = Self {
             egui_texture_id,
@@ -1433,42 +1592,477 @@ impl RawGpuPipeline {
             height: raw.height,
             params_buffer,
             tone_histogram_buffer,
+            raw_stage_end,
             tone_prepare_pass_index,
+            tone_reduce_pass_index,
+            tone_stage_end,
             passes,
-            _raw_texture: raw_texture,
-            _color_texture: color_texture,
-            _black_texture: black_texture,
+            raw_texture,
+            color_texture,
+            black_texture,
             _reconstructed_raw_texture: reconstructed_raw_texture,
             _highlight_work_a: highlight_work_a,
             _highlight_work_b: highlight_work_b,
             _tex1: tex1,
             _tex2: tex2,
-            _scene_texture: scene_texture,
-            _tone_stats_buffer: tone_stats_buffer,
+            scene_texture,
+            scene_format: demosaic_format,
+            tone_stats_buffer,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
-            _out_texture: out_texture,
+            profile_buffer,
+            output_lut_offset_bytes,
+            out_texture,
             _out_view: out_view,
         };
-        pipeline.recompute(queue, device, params);
         Ok(pipeline)
     }
 
+    /// Registers a headless pipeline's output texture with egui after the
+    /// expensive GPU setup has completed on a worker thread.
+    pub fn register_egui_texture(
+        &mut self,
+        device: &wgpu::Device,
+        renderer: &mut egui_wgpu::Renderer,
+    ) -> egui::TextureId {
+        if let Some(texture_id) = self.egui_texture_id {
+            return texture_id;
+        }
+
+        let texture_id = renderer.register_native_texture(
+            device,
+            &self._out_view,
+            wgpu::FilterMode::Linear,
+        );
+        self.egui_texture_id = Some(texture_id);
+        texture_id
+    }
+
+    /// Updates the preview/display transform from an RGB ICC matrix-shaper
+    /// profile without rebuilding compute pipelines or bind groups.
+    pub fn set_display_icc_profile(
+        &self,
+        queue: &wgpu::Queue,
+        profile_bytes: &[u8],
+        intent: RenderingIntent,
+    ) -> Result<()> {
+        let transform = IccOutputTransform::from_icc(profile_bytes, intent)?;
+        self.write_output_transform(queue, &transform)
+    }
+
+    /// Alias for export-oriented callers that use the same managed output
+    /// transform as the live preview.
+    pub fn set_output_icc_profile(
+        &self,
+        queue: &wgpu::Queue,
+        profile_bytes: &[u8],
+        intent: RenderingIntent,
+    ) -> Result<()> {
+        self.set_display_icc_profile(queue, profile_bytes, intent)
+    }
+
+    pub fn reset_display_to_srgb(&self, queue: &wgpu::Queue) -> Result<()> {
+        self.write_output_transform(queue, &IccOutputTransform::srgb())
+    }
+
+    pub fn write_output_transform(
+        &self,
+        queue: &wgpu::Queue,
+        transform: &IccOutputTransform,
+    ) -> Result<()> {
+        if transform.size() != crate::pipeline::color_profile::OUTPUT_LUT_EDGE {
+            return Err(anyhow!("output ICC LUT edge does not match the GPU profile layout"));
+        }
+        queue.write_buffer(
+            &self.profile_buffer,
+            self.output_lut_offset_bytes,
+            bytemuck::cast_slice(transform.entries()),
+        );
+        Ok(())
+    }
+
+    /// Compatibility entry point that executes the complete pipeline. New UI
+    /// code should prefer `dispatch_stage` so cached upstream results survive
+    /// ordinary Develop adjustments.
     pub fn recompute(&self, queue: &wgpu::Queue, device: &wgpu::Device, params: &GpuParams) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
-
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw recompute encoder"),
+            label: Some("auraw complete recompute encoder"),
+        });
+        encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
+        self.encode_pass_range(&mut encoder, 0, self.passes.len());
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Dispatches exactly one dependency stage. GPU submission is asynchronous;
+    /// callers can spread Raw -> Tone -> Output across event-loop iterations.
+    pub fn dispatch_stage(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        stage: ProcessingStage,
+    ) {
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some(stage.label()),
         });
 
-        for i in 0..self.passes.len() {
-            if i == self.tone_prepare_pass_index {
-                // tone_guide_prepare atomically accumulates all source pixels.
-                // Clearing in the same command encoder immediately before that
-                // dispatch guarantees every analysis starts from zero.
+        match stage {
+            ProcessingStage::Raw => self.encode_pass_range(&mut encoder, 0, self.raw_stage_end),
+            ProcessingStage::Tone => {
                 encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
+                self.encode_pass_range(
+                    &mut encoder,
+                    self.tone_prepare_pass_index,
+                    self.tone_stage_end,
+                );
             }
+            ProcessingStage::Output => {
+                self.encode_pass_range(&mut encoder, self.tone_stage_end, self.passes.len());
+            }
+        }
 
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Replaces the sensor textures of a fixed-size headless pipeline so one
+    /// allocation and one set of compiled compute pipelines can process every
+    /// export tile.
+    pub fn upload_raw_tile(&self, queue: &wgpu::Queue, raw: &LoadedRaw) -> Result<()> {
+        if raw.width != self.width || raw.height != self.height {
+            return Err(anyhow!(
+                "tile dimensions {}x{} do not match reusable pipeline {}x{}",
+                raw.width,
+                raw.height,
+                self.width,
+                self.height
+            ));
+        }
+        validate_raw(raw)?;
+
+        queue.write_texture(
+            copy_texture(&self.raw_texture),
+            bytemuck::cast_slice(&raw.raw_pixels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width * 2),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+        queue.write_texture(
+            copy_texture(&self.color_texture),
+            &raw.color_indices,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+        queue.write_texture(
+            copy_texture(&self.black_texture),
+            bytemuck::cast_slice(&raw.black_levels_per_pixel),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width * 4),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+        Ok(())
+    }
+
+    /// Executes one export tile using the preview pipeline's cached global
+    /// tone statistics. The tile still builds its own halo-aware tone guide,
+    /// but skipping histogram reduction prevents tile-to-tile tonal seams.
+    pub fn dispatch_export_tile(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        global_tone_source: &RawGpuPipeline,
+    ) {
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw tiled export encoder"),
+        });
+
+        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_reduce_pass_index,
+        );
+        encoder.copy_buffer_to_buffer(
+            &global_tone_source.tone_stats_buffer,
+            0,
+            &self.tone_stats_buffer,
+            0,
+            2 * std::mem::size_of::<[f32; 4]>() as u64,
+        );
+        self.encode_pass_range(&mut encoder, self.tone_stage_end, self.passes.len());
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Copies an RGBA8 output sub-rectangle to CPU memory. This method blocks
+    /// only the export worker thread; the interactive UI remains responsive.
+    pub fn read_output_region_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        if width == 0 || height == 0 || x + width > self.width || y + height > self.height {
+            return Err(anyhow!("invalid GPU readback rectangle"));
+        }
+
+        let unpadded_bytes_per_row = width * 4;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+        let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auraw tiled export readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw tiled export copy encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.out_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = queue.submit(Some(encoder.finish()));
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        readback.map_async(wgpu::MapMode::Read, .., move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map_err(|error| anyhow!("GPU poll failed during export: {error}"))?;
+        receiver
+            .recv()
+            .map_err(|_| anyhow!("GPU readback callback was dropped"))?
+            .map_err(|error| anyhow!("GPU readback mapping failed: {error}"))?;
+
+        let mapped = readback.get_mapped_range(..);
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for row in 0..height as usize {
+            let src = row * padded_bytes_per_row as usize;
+            let dst = row * unpadded_bytes_per_row as usize;
+            rgba[dst..dst + unpadded_bytes_per_row as usize]
+                .copy_from_slice(&mapped[src..src + unpadded_bytes_per_row as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+        Ok(rgba)
+    }
+
+    /// Reads the internal demosaiced scene texture as tightly packed RGB32F.
+    /// The raw stage must have been submitted before this call. Regression
+    /// renders use `ProcessingQuality::High`, because half-float preview
+    /// intermediates are intentionally rejected rather than silently widened.
+    pub fn read_scene_texture_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Vec<f32>> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "scene texture readback requires ProcessingQuality::High (RGBA32Float), got {:?}",
+                self.scene_format
+            ));
+        }
+        read_rgba32_texture_rgb_blocking(
+            device,
+            queue,
+            &self.scene_texture,
+            self.width,
+            self.height,
+            "auraw scene texture readback",
+        )
+    }
+
+    /// Runs the raw stage and converts its camera-RGB scene texture into the
+    /// canonical scene-linear Rec.2020 representation used by the regression
+    /// harness. This deliberately stops before creative look/tone modules and
+    /// before the display transform.
+    pub fn render_regression_scene_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: &GpuParams,
+    ) -> Result<Vec<f32>> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "regression scene rendering requires ProcessingQuality::High (RGBA32Float)"
+            ));
+        }
+
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let size = texture_size(self.width, self.height);
+        let working_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw regression scene-linear Rec.2020"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[wgpu::TextureFormat::Rgba32Float],
+        });
+        let working_view = working_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_view = self
+            .scene_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let raw_view = self.raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_view = self
+            .color_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let black_view = self
+            .black_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("auraw regression scene layout"),
+            entries: &[
+                buffer_entry(0),
+                texture_entry(1, wgpu::TextureSampleType::Uint),
+                texture_entry(2, wgpu::TextureSampleType::Uint),
+                texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_texture_entry(
+                    12,
+                    wgpu::TextureFormat::Rgba32Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
+                storage_buffer_entry(20, true),
+            ],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("auraw regression scene bind group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&working_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: self.profile_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("auraw regression scene shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_REGRESSION_SCENE.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("auraw regression scene pipeline layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("auraw regression scene pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("write_regression_scene"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let (readback, padded_bytes_per_row) = create_rgba32_readback_buffer(
+            device,
+            self.width,
+            self.height,
+            "auraw regression readback",
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw regression scene encoder"),
+        });
+        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("auraw regression scene conversion"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+        }
+        encode_rgba32_texture_copy(
+            &mut encoder,
+            &working_texture,
+            &readback,
+            self.width,
+            self.height,
+            padded_bytes_per_row,
+        );
+        let submission = queue.submit(Some(encoder.finish()));
+        map_rgba32_readback_rgb(
+            device,
+            &readback,
+            submission,
+            self.width,
+            self.height,
+            padded_bytes_per_row,
+        )
+    }
+
+    fn encode_pass_range(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        start: usize,
+        end: usize,
+    ) {
+        for i in start..end {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(&format!("auraw pass {}", i + 1)),
                 timestamp_writes: None,
@@ -1478,9 +2072,129 @@ impl RawGpuPipeline {
             let workgroups = self.passes[i].workgroups;
             pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
-
-        queue.submit(Some(encoder.finish()));
     }
+}
+
+fn read_rgba32_texture_rgb_blocking(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    label: &'static str,
+) -> Result<Vec<f32>> {
+    let (readback, padded_bytes_per_row) =
+        create_rgba32_readback_buffer(device, width, height, label);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some(label),
+    });
+    encode_rgba32_texture_copy(
+        &mut encoder,
+        texture,
+        &readback,
+        width,
+        height,
+        padded_bytes_per_row,
+    );
+    let submission = queue.submit(Some(encoder.finish()));
+    map_rgba32_readback_rgb(
+        device,
+        &readback,
+        submission,
+        width,
+        height,
+        padded_bytes_per_row,
+    )
+}
+
+fn create_rgba32_readback_buffer(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    label: &'static str,
+) -> (wgpu::Buffer, u32) {
+    let unpadded_bytes_per_row = width * 16;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: u64::from(padded_bytes_per_row) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    (buffer, padded_bytes_per_row)
+}
+
+fn encode_rgba32_texture_copy(
+    encoder: &mut wgpu::CommandEncoder,
+    texture: &wgpu::Texture,
+    readback: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+) {
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        texture_size(width, height),
+    );
+}
+
+fn map_rgba32_readback_rgb(
+    device: &wgpu::Device,
+    readback: &wgpu::Buffer,
+    submission: wgpu::SubmissionIndex,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+) -> Result<Vec<f32>> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    readback.map_async(wgpu::MapMode::Read, .., move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .map_err(|error| anyhow!("GPU poll failed during scene readback: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| anyhow!("GPU scene readback callback was dropped"))?
+        .map_err(|error| anyhow!("GPU scene readback mapping failed: {error}"))?;
+
+    let mapped = readback.get_mapped_range(..);
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for row in 0..height as usize {
+        let row_start = row * padded_bytes_per_row as usize;
+        for column in 0..width as usize {
+            let pixel_start = row_start + column * 16;
+            for channel in 0..3 {
+                let offset = pixel_start + channel * 4;
+                let bytes: [u8; 4] = mapped[offset..offset + 4]
+                    .try_into()
+                    .expect("RGBA32Float texel is four aligned f32 values");
+                rgb.push(f32::from_le_bytes(bytes));
+            }
+        }
+    }
+    drop(mapped);
+    readback.unmap();
+    if rgb.iter().any(|value| !value.is_finite()) {
+        return Err(anyhow!("scene texture readback contains NaN or infinity"));
+    }
+    Ok(rgb)
 }
 
 fn tone_analysis_scale() -> u32 {
@@ -1531,7 +2245,9 @@ fn create_demosaic_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[format],
     })
 }
@@ -1799,9 +2515,9 @@ mod tests {
         work_shader_source, HighlightWorkSlot, ProcessingQuality,
         HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1,
         SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
-        SHADER_HIGHLIGHTS, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1, SHADER_XTRANS_P2,
-        SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5, SHADER_XTRANS_P6,
-        SHADER_XTRANS_P7,
+        SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
+        SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4,
+        SHADER_XTRANS_P5, SHADER_XTRANS_P6, SHADER_XTRANS_P7,
     };
 
     #[test]
@@ -1820,6 +2536,7 @@ mod tests {
             ("X-Trans accumulation", SHADER_XTRANS_P6),
             ("X-Trans finish", SHADER_XTRANS_P7),
             ("adaptive tone analysis", SHADER_TONE_ANALYSIS),
+            ("regression scene export", SHADER_REGRESSION_SCENE),
             ("Lightroom adjustments", SHADER_ADJUSTMENTS),
         ] {
             let module = naga::front::wgsl::parse_str(source)
@@ -1961,170 +2678,47 @@ mod tests {
 
     #[test]
     fn gpu_params_follow_the_wgsl_uniform_layout() {
-        // Sixteen active scalar values keep the stable 64-byte prefix,
-        // followed by nine adjustment vec4s, six camera/raw
-        // vec4s, then dimensions/padding. This catches accidental
-        // Rust/WGSL field drift before it turns sliders into random values.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 320);
+        // Sixteen scalar values keep the stable 64-byte prefix. The two
+        // darktable sigmoid vec4s follow the local-tone controls, then the
+        // remaining adjustment, camera/raw, dimension and profile blocks.
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 528);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 96);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 208);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 304);
-    }
-
-    fn adaptive_tone_curve_cpu(
-        scene_ev: f32,
-        local_ev: f32,
-        contrast: f32,
-        highlights: f32,
-        shadows: f32,
-        whites: f32,
-        blacks: f32,
-        percentiles: [f32; 5],
-    ) -> f32 {
-        const MIDDLE: f32 = 0.1842;
-        const SHOULDER_START: f32 = 0.94;
-
-        fn bias(value: f32, shape: f32) -> f32 {
-            let x = value.clamp(0.0, 1.0);
-            let a = shape.clamp(0.04, 96.0);
-            x / (a + (1.0 - a) * x).max(1e-6)
-        }
-
-        fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
-            let width = (edge1 - edge0).max(1e-4);
-            let x = ((value - edge0) / width).clamp(0.0, 1.0);
-            x * x * (3.0 - 2.0 * x)
-        }
-
-        let robust_black = (percentiles[0] - 0.25).min(percentiles[1] - 0.80);
-        let robust_white = (percentiles[4] + 0.25).max(percentiles[3] + 0.80);
-        let mut base_black = -8.0 * 0.28 + robust_black.clamp(-12.0, -2.0) * 0.72;
-        let mut base_white = 4.0 * 0.28 + robust_white.clamp(1.5, 9.0) * 0.72;
-        if base_white - base_black < 5.5 {
-            let center = percentiles[2].clamp(-1.5, 1.5);
-            base_black = center - 5.5 * 0.58;
-            base_white = center + 5.5 * 0.42;
-        }
-
-        let black_mask = 1.0
-            - smoothstep(percentiles[0] - 0.45, percentiles[1] + 0.30, local_ev);
-        let shadow_mask = 1.0
-            - smoothstep(percentiles[1] - 0.60, percentiles[2] + 0.45, local_ev);
-        let highlight_mask =
-            smoothstep(percentiles[2] - 0.45, percentiles[3] + 0.60, local_ev);
-        let white_mask =
-            smoothstep(percentiles[3] - 0.30, percentiles[4] + 0.45, local_ev);
-
-        let black_ev = base_black - 2.75 * blacks.clamp(-1.0, 1.0);
-        let white_ev = base_white - 2.25 * whites.clamp(-1.0, 1.0);
-        let range_ev = (white_ev - black_ev).max(3.5);
-        let adjusted_ev = scene_ev
-            + 0.60 * blacks * black_mask
-            + 1.35 * shadows * shadow_mask
-            + 1.20 * highlights * highlight_mask
-            + 0.60 * whites * white_mask;
-        let position = ((adjusted_ev - black_ev) / range_ev).clamp(0.0, 1.0);
-        let middle_position = (-black_ev / range_ev).clamp(0.04, 0.96);
-        let middle_slope = 2.0f32.powf(1.55 * contrast.clamp(-1.0, 1.0));
-        let shadow_shape = (middle_slope * middle_position / MIDDLE
-            * 2.0f32.powf(-0.70 * shadows.clamp(-1.0, 1.0)))
-        .clamp(0.04, 96.0);
-        let highlight_shape = ((SHOULDER_START - MIDDLE)
-            / (middle_slope * (1.0 - middle_position)).max(1e-4)
-            * 2.0f32.powf(-0.70 * highlights.clamp(-1.0, 1.0)))
-        .clamp(0.04, 96.0);
-
-        if adjusted_ev > white_ev {
-            let shoulder_length = (3.0
-                - 0.5 * whites.clamp(-1.0, 1.0)
-                - 0.5 * highlights.clamp(-1.0, 1.0))
-                .clamp(2.0, 4.0);
-            let normalized = (adjusted_ev - white_ev) / shoulder_length;
-            return 1.0 - (1.0 - SHOULDER_START) * 2.0f32.powf(-4.0 * normalized);
-        }
-
-        if position <= middle_position {
-            MIDDLE * bias(position / middle_position.max(1e-5), shadow_shape)
-        } else {
-            MIDDLE
-                + (SHOULDER_START - MIDDLE)
-                    * bias(
-                        (position - middle_position)
-                            / (1.0 - middle_position).max(1e-5),
-                        highlight_shape,
-                    )
-        }
+        assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 128);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 144);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 208);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 320);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 416);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 424);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 432);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 448);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 512);
     }
 
     #[test]
-    fn adaptive_tone_curve_is_monotonic_at_slider_extremes() {
-        let controls = [-1.0f32, 0.0, 1.0];
-        let local_evs = [-9.0f32, -5.0, -1.0, 2.0, 5.0];
-        let percentiles = [-7.5f32, -5.0, -1.2, 2.1, 3.7];
-
-        for &local_ev in &local_evs {
-            for &contrast in &controls {
-                for &highlights in &controls {
-                    for &shadows in &controls {
-                        for &whites in &controls {
-                            for &blacks in &controls {
-                                let mut previous = -1.0f32;
-                                for sample in 0..=480 {
-                                    let scene_ev = -12.0 + sample as f32 * 0.05;
-                                    let mapped = adaptive_tone_curve_cpu(
-                                        scene_ev,
-                                        local_ev,
-                                        contrast,
-                                        highlights,
-                                        shadows,
-                                        whites,
-                                        blacks,
-                                        percentiles,
-                                    );
-                                    assert!(mapped.is_finite());
-                                    assert!((-1e-6..=1.0 + 1e-6).contains(&mapped));
-                                    assert!(
-                                        mapped + 1e-6 >= previous,
-                                        "adaptive tone curve decreased at {scene_ev} EV, local={local_ev},                                          c={contrast}, h={highlights}, s={shadows},                                          w={whites}, b={blacks}: {previous} -> {mapped}"
-                                    );
-                                    previous = mapped;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let middle = adaptive_tone_curve_cpu(
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            percentiles,
-        );
-        assert!((middle - 0.1842).abs() < 1e-5);
+    fn adjustments_shader_contains_darktable_sigmoid_paths() {
+        assert!(SHADER_ADJUSTMENTS.contains("generalized_loglogistic_sigmoid"));
+        assert!(SHADER_ADJUSTMENTS.contains("preserve_hue_and_energy"));
+        assert!(SHADER_ADJUSTMENTS.contains("sigmoid_rgb_ratio"));
+        assert!(SHADER_ADJUSTMENTS.contains("hyperbolic_chroma"));
     }
 
     #[test]
-    fn highlight_shoulder_preserves_headroom_without_a_white_plateau() {
-        let percentiles = [-7.5f32, -5.0, -1.2, 2.1, 3.7];
-        let a = adaptive_tone_curve_cpu(5.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
-        let b = adaptive_tone_curve_cpu(6.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
-        let c = adaptive_tone_curve_cpu(8.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, percentiles);
-
-        assert!(a < b && b < c, "highlight shoulder contains a plateau: {a}, {b}, {c}");
-        assert!(c < 1.0, "highlight shoulder must approach white asymptotically");
+    fn adjustments_shader_contains_lightroom_style_controls() {
+        assert!(SHADER_ADJUSTMENTS.contains("apply_temperature_tint"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
+        assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
+        assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
     }
 
     #[test]
-    fn gpu_pipeline_creates_with_real_bind_group_layouts_when_an_adapter_exists() {
-        use super::{CfaKind, ExposureParams, LoadedRaw, RawGpuPipeline};
-        use eframe::{egui_wgpu, wgpu};
+    fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
+        use super::{
+            CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline,
+        };
+        use eframe::wgpu;
 
         let instance = wgpu::Instance::default();
         let Ok(adapter) =
@@ -2153,8 +2747,6 @@ mod tests {
             [2, 1, 2, 0, 1, 0],
             [1, 0, 1, 1, 2, 1],
         ];
-        let mut renderer =
-            egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, Default::default());
 
         for cfa_kind in [CfaKind::Bayer, CfaKind::XTrans] {
             let color_indices = (0..height)
@@ -2165,7 +2757,9 @@ mod tests {
                             (1, 1) => 2,
                             _ => 1,
                         },
-                        CfaKind::XTrans => xtrans_pattern[(y % 6) as usize][(x % 6) as usize],
+                        CfaKind::XTrans => {
+                            xtrans_pattern[(y % 6) as usize][(x % 6) as usize]
+                        }
                     })
                 })
                 .collect();
@@ -2187,20 +2781,49 @@ mod tests {
                 black_levels: [0.0; 4],
                 black_levels_per_pixel: vec![0.0; (width * height) as usize],
                 white_levels: [4095.0; 4],
+                camera_profile: Default::default(),
             };
             let params = super::GpuParams::new(&ExposureParams::default(), &raw);
 
             let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let pipeline = RawGpuPipeline::new(&device, &queue, &mut renderer, &raw, &params);
+            let pipeline = RawGpuPipeline::new_headless_with_quality(
+                &device,
+                &queue,
+                &raw,
+                &params,
+                ProcessingQuality::High,
+            );
             let validation_error = pollster::block_on(validation_scope.pop());
-
-            if let Err(error) = pipeline {
-                panic!("{cfa_kind:?} GPU pipeline creation failed: {error:#}");
-            }
+            let pipeline = pipeline.unwrap_or_else(|error| {
+                panic!("{cfa_kind:?} GPU pipeline creation failed: {error:#}")
+            });
             assert!(
                 validation_error.is_none(),
                 "{cfa_kind:?} wgpu layout/shader validation failed: {validation_error:?}"
             );
+
+            let regression_validation_scope =
+                device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let regression = pipeline.render_regression_scene_blocking(&device, &queue, &params);
+            let regression_validation_error =
+                pollster::block_on(regression_validation_scope.pop());
+            let regression = regression.unwrap_or_else(|error| {
+                panic!("{cfa_kind:?} regression scene render failed: {error:#}")
+            });
+            assert!(
+                regression_validation_error.is_none(),
+                "{cfa_kind:?} regression shader validation failed: {regression_validation_error:?}"
+            );
+            assert_eq!(regression.len(), (width * height * 3) as usize);
+            assert!(regression.iter().all(|value| value.is_finite()));
+
+            let camera_scene = pipeline
+                .read_scene_texture_blocking(&device, &queue)
+                .unwrap_or_else(|error| {
+                    panic!("{cfa_kind:?} scene texture readback failed: {error:#}")
+                });
+            assert_eq!(camera_scene.len(), (width * height * 3) as usize);
+            assert!(camera_scene.iter().all(|value| value.is_finite()));
         }
     }
 }

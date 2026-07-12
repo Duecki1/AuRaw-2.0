@@ -1,5 +1,8 @@
 #[allow(unused_imports)]
-use anyhow::{anyhow, Result};
+use super::color_profile::CameraProfile;
+use anyhow::Result;
+#[cfg(not(libraw_available))]
+use anyhow::anyhow;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,10 +29,19 @@ pub struct LoadedRaw {
     /// repeating row/column pattern from `cblack[4..]`.
     pub black_levels_per_pixel: Vec<f32>,
     pub white_levels: [f32; 4],
+    /// DCP creative profile stages and retained embedded camera ICC data.
+    pub camera_profile: CameraProfile,
 }
 
 #[cfg(not(libraw_available))]
 pub fn load_raw_file(_path: &Path) -> Result<LoadedRaw> {
+    Err(anyhow!(
+        "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
+    ))
+}
+
+#[cfg(not(libraw_available))]
+pub fn load_raw_file_with_dcp(_path: &Path, _profile_path: &Path) -> Result<LoadedRaw> {
     Err(anyhow!(
         "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
     ))
@@ -41,8 +53,14 @@ pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
 }
 
 #[cfg(libraw_available)]
+pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<LoadedRaw> {
+    libraw_loader::load_raw_file_with_dcp(path, profile_path)
+}
+
+#[cfg(libraw_available)]
 mod libraw_loader {
-    use super::{CfaKind, LoadedRaw};
+    use super::{CameraProfile, CfaKind, LoadedRaw};
+    use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
     use anyhow::{anyhow, Context, Result};
     use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
@@ -70,17 +88,50 @@ mod libraw_loader {
     }
 
     pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
-        let path = CString::new(path.to_string_lossy().as_bytes())
+        load_raw_file_with_selected_profile(path, read_optional_profile(path))
+    }
+
+    pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<LoadedRaw> {
+        let mut selected = DcpProfile::from_path(profile_path)
+            .with_context(|| format!("read DCP profile {}", profile_path.display()))?
+            .ok_or_else(|| anyhow!("{} is not a DNG camera profile", profile_path.display()))?;
+
+        // CameraCalibration belongs to the raw DNG, while the compatibility
+        // signature belongs to the selected profile. Carry the camera-side
+        // signature into an external profile before evaluating the matrix path.
+        if let Some(raw_profile) = read_optional_profile(path) {
+            selected.camera_calibration_signature = raw_profile.camera_calibration_signature;
+        }
+        load_raw_file_with_selected_profile(path, Some(selected))
+    }
+
+    fn read_optional_profile(path: &Path) -> Option<DcpProfile> {
+        // DCP tags can be embedded directly in a DNG. Treat malformed optional
+        // creative-profile metadata as non-fatal while preserving a diagnostic.
+        match DcpProfile::from_path(path) {
+            Ok(profile) => profile,
+            Err(error) => {
+                log::warn!("ignoring malformed embedded DCP profile in {}: {error:#}", path.display());
+                None
+            }
+        }
+    }
+
+    fn load_raw_file_with_selected_profile(
+        path: &Path,
+        dcp_profile: Option<DcpProfile>,
+    ) -> Result<LoadedRaw> {
+        let c_path = CString::new(path.to_string_lossy().as_bytes())
             .context("RAW path contains an interior NUL byte")?;
         let ctx = LibRawContext::new()?;
 
         check_libraw(
-            unsafe { ffi::libraw_open_file(ctx.raw, path.as_ptr()) },
+            unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
             "open RAW file",
         )?;
         check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
 
-        unsafe { loaded_raw_from_context(&ctx) }
+        unsafe { loaded_raw_from_context(&ctx, dcp_profile) }
     }
 
     struct LibRawContext {
@@ -106,7 +157,10 @@ mod libraw_loader {
         }
     }
 
-    unsafe fn loaded_raw_from_context(ctx: &LibRawContext) -> Result<LoadedRaw> {
+    unsafe fn loaded_raw_from_context(
+        ctx: &LibRawContext,
+        dcp_profile: Option<DcpProfile>,
+    ) -> Result<LoadedRaw> {
         let raw = &*ctx.raw;
         let rawdata = &raw.rawdata;
         let sizes = &rawdata.sizes;
@@ -187,7 +241,16 @@ mod libraw_loader {
         )?;
         let physical_wb = white_balance(color.cam_mul, cdesc);
         let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
-        let cam_to_srgb = camera_to_working_matrix(color, physical_wb, cdesc)?;
+        let calibration_compatible = dcp_profile
+            .as_ref()
+            .map_or(true, DcpProfile::calibration_is_compatible);
+        let (cam_to_srgb, profile_weight) = camera_to_working_matrix(
+            color,
+            physical_wb,
+            cdesc,
+            dcp_profile.as_ref(),
+            calibration_compatible,
+        )?;
         let black_levels = canonicalize_f32x4(physical_black_levels, cfa_map);
         // LibRaw changed `linear_max` from `long[4]` in the 0.21 series
         // to `unsigned[4]` in newer releases. Bindgen therefore exposes it
@@ -202,6 +265,24 @@ mod libraw_loader {
             cfa_map,
         );
 
+        let mut camera_profile = dcp_profile
+            .map(|profile| CameraProfile::from_dcp(profile, profile_weight))
+            .unwrap_or_default();
+        let baseline_exposure = color.dng_levels.baseline_exposure as f32;
+        // LibRaw initializes a missing BaselineExposure to a sentinel below
+        // -999 EV. It is finite, but applying it makes exp2(EV) underflow to
+        // zero and turns every non-DNG/proprietary RAW preview black.
+        if baseline_exposure.is_finite() && baseline_exposure > -999.0 {
+            camera_profile.baseline_exposure_offset += baseline_exposure;
+        }
+        if !color.profile.is_null() && color.profile_length > 0 {
+            let length = usize::try_from(color.profile_length).unwrap_or(0);
+            if length <= 64 * 1024 * 1024 {
+                camera_profile.embedded_camera_icc =
+                    Some(std::slice::from_raw_parts(color.profile as *const u8, length).to_vec());
+            }
+        }
+
         Ok(LoadedRaw {
             width,
             height,
@@ -215,6 +296,7 @@ mod libraw_loader {
             black_levels,
             black_levels_per_pixel,
             white_levels,
+            camera_profile,
         })
     }
 
@@ -550,15 +632,54 @@ mod libraw_loader {
         out
     }
 
+    #[derive(Clone, Copy)]
+    struct InterpolatedDngProfile {
+        color_matrix: [[f32; 3]; 4],
+        calibration: [[f32; 4]; 4],
+        forward_matrix: Option<[[f32; 4]; 3]>,
+        weight: f32,
+    }
+
     fn camera_to_working_matrix(
         color: &ffi::libraw_colordata_t,
         wb_coeffs: [f32; 4],
         cdesc: [u8; 4],
-    ) -> Result<[[f32; 4]; 3]> {
-        let matrix = if let Some(xyz_to_cam) = interpolated_dng_xyz_to_cam(color, wb_coeffs, cdesc) {
-            cam_to_working(xyz_to_cam, cdesc)
+        parsed_profile: Option<&DcpProfile>,
+        calibration_compatible: bool,
+    ) -> Result<([[f32; 4]; 3], f32)> {
+        let analog_balance = analog_balance_matrix(color.dng_levels.analogbalance);
+        // Prefer the profile records parsed directly from the selected DNG/DCP
+        // IFD. LibRaw remains the fallback for proprietary RAW files and DNGs
+        // whose optional profile IFD could not be read.
+        let dng_profile = parsed_profile
+            .and_then(|profile| {
+                interpolated_parsed_dng_profile(
+                    profile,
+                    color,
+                    wb_coeffs,
+                    cdesc,
+                    analog_balance,
+                    calibration_compatible,
+                )
+            })
+            .or_else(|| {
+                interpolated_dng_profile(
+                    color,
+                    wb_coeffs,
+                    cdesc,
+                    analog_balance,
+                    calibration_compatible,
+                )
+            });
+        let (matrix, weight) = if let Some(profile) = dng_profile {
+            (
+                dng_camera_to_working(profile, analog_balance, wb_coeffs, cdesc)?,
+                profile.weight,
+            )
         } else {
-            cam_to_working(color.cam_xyz, cdesc)
+            // Proprietary RAW formats generally expose LibRaw's consolidated
+            // XYZ->camera matrix rather than individual DNG tags.
+            (cam_to_working(color.cam_xyz, cdesc), 0.0)
         };
 
         if matrix.iter().flatten().any(|value| !value.is_finite())
@@ -568,57 +689,350 @@ mod libraw_loader {
                 "LibRaw did not provide an invertible camera colour matrix; refusing to treat camera RGB as the working colour space"
             ));
         }
-        Ok(matrix)
+        Ok((matrix, weight))
     }
 
-    fn interpolated_dng_xyz_to_cam(
+    fn interpolated_parsed_dng_profile(
+        profile: &DcpProfile,
         color: &ffi::libraw_colordata_t,
         wb_coeffs: [f32; 4],
         cdesc: [u8; 4],
-    ) -> Option<[[f32; 3]; 4]> {
-        let matrix0 = calibrated_dng_xyz_to_cam(&color.dng_color[0])?;
-        let matrix1 = calibrated_dng_xyz_to_cam(&color.dng_color[1])?;
-        let cct0 = calibration_illuminant_cct(color.dng_color[0].illuminant)?;
-        let cct1 = calibration_illuminant_cct(color.dng_color[1].illuminant)?;
-        let scene_cct = estimate_scene_cct(color, wb_coeffs, cdesc)?;
-
-        let mired0 = 1_000_000.0 / cct0;
-        let mired1 = 1_000_000.0 / cct1;
-        let mired = 1_000_000.0 / scene_cct;
-        let denom = mired1 - mired0;
-        if denom.abs() < 1e-6 {
-            return None;
+        analog_balance: [[f32; 4]; 4],
+        calibration_compatible: bool,
+    ) -> Option<InterpolatedDngProfile> {
+        let first = &profile.matrices[0];
+        let second = &profile.matrices[1];
+        let valid = [
+            first.color_matrix.is_some_and(matrix4x3_is_valid),
+            second.color_matrix.is_some_and(matrix4x3_is_valid),
+        ];
+        match valid {
+            [false, false] => return None,
+            [true, false] => {
+                return parsed_single_dng_profile(
+                    first,
+                    color.dng_color[0].calibration,
+                    0.0,
+                    calibration_compatible,
+                )
+            }
+            [false, true] => {
+                return parsed_single_dng_profile(
+                    second,
+                    color.dng_color[1].calibration,
+                    1.0,
+                    calibration_compatible,
+                )
+            }
+            [true, true] => {}
         }
 
-        let t = ((mired - mired0) / denom).clamp(0.0, 1.0);
-        let mut out = [[0.0; 3]; 4];
-        for row in 0..4 {
-            for col in 0..3 {
-                out[row][col] = matrix0[row][col] * (1.0 - t) + matrix1[row][col] * t;
+        let cct0 = calibration_illuminant_cct(first.illuminant?)?;
+        let cct1 = calibration_illuminant_cct(second.illuminant?)?;
+        let mut scene_cct = estimate_scene_cct(color, wb_coeffs, cdesc)
+            .unwrap_or_else(|| (cct0 * cct1).sqrt());
+        let neutral = camera_neutral(wb_coeffs);
+        let first_color = first.color_matrix?;
+        let second_color = second.color_matrix?;
+        let first_calibration = parsed_calibration(
+            first,
+            color.dng_color[0].calibration,
+            calibration_compatible,
+        );
+        let second_calibration = parsed_calibration(
+            second,
+            color.dng_color[1].calibration,
+            calibration_compatible,
+        );
+
+        let mut weight = mired_interpolation_weight(scene_cct, cct0, cct1);
+        for _ in 0..6 {
+            let color_matrix = lerp_4x3(first_color, second_color, weight);
+            let calibration = lerp_4x4(first_calibration, second_calibration, weight);
+            let abcc = multiply_4x4(analog_balance, calibration);
+            let xyz_to_camera = multiply_4x4_4x3(abcc, color_matrix);
+            let camera_to_xyz = pseudoinverse(xyz_to_camera);
+            let white_xyz = multiply_3x4_vector(camera_to_xyz, neutral);
+            if let Some(refined) = xyz_to_cct(white_xyz) {
+                scene_cct = refined.clamp(1500.0, 50_000.0);
+                weight = mired_interpolation_weight(scene_cct, cct0, cct1);
             }
         }
-        Some(out)
+
+        Some(InterpolatedDngProfile {
+            color_matrix: lerp_4x3(first_color, second_color, weight),
+            calibration: lerp_4x4(first_calibration, second_calibration, weight),
+            forward_matrix: interpolate_optional_forward_matrix(
+                first.forward_matrix,
+                second.forward_matrix,
+                weight,
+            ),
+            weight,
+        })
     }
 
-    fn calibrated_dng_xyz_to_cam(dng: &ffi::libraw_dng_color_t) -> Option<[[f32; 3]; 4]> {
-        if !matrix4x3_is_valid(dng.colormatrix) {
-            return None;
+    fn parsed_single_dng_profile(
+        set: &DcpMatrixSet,
+        fallback_calibration: [[f32; 4]; 4],
+        weight: f32,
+        calibration_compatible: bool,
+    ) -> Option<InterpolatedDngProfile> {
+        Some(InterpolatedDngProfile {
+            color_matrix: set.color_matrix?,
+            calibration: parsed_calibration(
+                set,
+                fallback_calibration,
+                calibration_compatible,
+            ),
+            forward_matrix: set.forward_matrix.filter(|matrix| matrix3x4_is_valid(*matrix)),
+            weight,
+        })
+    }
+
+    fn parsed_calibration(
+        set: &DcpMatrixSet,
+        fallback: [[f32; 4]; 4],
+        calibration_compatible: bool,
+    ) -> [[f32; 4]; 4] {
+        if calibration_compatible {
+            set.camera_calibration
+                .filter(|matrix| matrix4x4_is_valid(*matrix))
+                .unwrap_or_else(|| identity_fallback_4x4(fallback))
+        } else {
+            identity_4x4()
+        }
+    }
+
+    fn interpolated_dng_profile(
+        color: &ffi::libraw_colordata_t,
+        wb_coeffs: [f32; 4],
+        cdesc: [u8; 4],
+        analog_balance: [[f32; 4]; 4],
+        calibration_compatible: bool,
+    ) -> Option<InterpolatedDngProfile> {
+        let valid = [
+            matrix4x3_is_valid(color.dng_color[0].colormatrix),
+            matrix4x3_is_valid(color.dng_color[1].colormatrix),
+        ];
+        match valid {
+            [false, false] => return None,
+            [true, false] => {
+                return Some(single_dng_profile(
+                    &color.dng_color[0],
+                    0.0,
+                    calibration_compatible,
+                ));
+            }
+            [false, true] => {
+                return Some(single_dng_profile(
+                    &color.dng_color[1],
+                    1.0,
+                    calibration_compatible,
+                ));
+            }
+            [true, true] => {}
         }
 
-        let calibration = identity_fallback_4x4(dng.calibration);
-        let mut out = [[0.0; 3]; 4];
-        for row in 0..4 {
-            for col in 0..3 {
-                for k in 0..4 {
-                    out[row][col] += calibration[row][k] * dng.colormatrix[k][col];
-                }
+        let cct0 = calibration_illuminant_cct(color.dng_color[0].illuminant)?;
+        let cct1 = calibration_illuminant_cct(color.dng_color[1].illuminant)?;
+        let mut scene_cct = estimate_scene_cct(color, wb_coeffs, cdesc)
+            .unwrap_or_else(|| (cct0 * cct1).sqrt());
+        let neutral = camera_neutral(wb_coeffs);
+
+        // DNG interpolation is linear in reciprocal correlated colour
+        // temperature. Refine the initial metadata estimate from the actual
+        // AsShotNeutral response so files without a WBCT table still select the
+        // correct profile blend.
+        let mut weight = mired_interpolation_weight(scene_cct, cct0, cct1);
+        for _ in 0..6 {
+            let color_matrix = lerp_4x3(
+                color.dng_color[0].colormatrix,
+                color.dng_color[1].colormatrix,
+                weight,
+            );
+            let calibration = if calibration_compatible {
+                lerp_4x4(
+                    identity_fallback_4x4(color.dng_color[0].calibration),
+                    identity_fallback_4x4(color.dng_color[1].calibration),
+                    weight,
+                )
+            } else {
+                identity_4x4()
+            };
+            let abcc = multiply_4x4(analog_balance, calibration);
+            let xyz_to_camera = multiply_4x4_4x3(abcc, color_matrix);
+            let camera_to_xyz = pseudoinverse(xyz_to_camera);
+            let white_xyz = multiply_3x4_vector(camera_to_xyz, neutral);
+            if let Some(refined) = xyz_to_cct(white_xyz) {
+                scene_cct = refined.clamp(1500.0, 50_000.0);
+                weight = mired_interpolation_weight(scene_cct, cct0, cct1);
             }
         }
 
-        if matrix4x3_is_valid(out) {
-            Some(out)
+        let color_matrix = lerp_4x3(
+            color.dng_color[0].colormatrix,
+            color.dng_color[1].colormatrix,
+            weight,
+        );
+        let calibration = if calibration_compatible {
+            lerp_4x4(
+                identity_fallback_4x4(color.dng_color[0].calibration),
+                identity_fallback_4x4(color.dng_color[1].calibration),
+                weight,
+            )
         } else {
-            None
+            identity_4x4()
+        };
+        let forward_matrix = interpolate_forward_matrix(
+            color.dng_color[0].forwardmatrix,
+            color.dng_color[1].forwardmatrix,
+            weight,
+        );
+        Some(InterpolatedDngProfile {
+            color_matrix,
+            calibration,
+            forward_matrix,
+            weight,
+        })
+    }
+
+    fn single_dng_profile(
+        dng: &ffi::libraw_dng_color_t,
+        weight: f32,
+        calibration_compatible: bool,
+    ) -> InterpolatedDngProfile {
+        InterpolatedDngProfile {
+            color_matrix: dng.colormatrix,
+            calibration: if calibration_compatible {
+                identity_fallback_4x4(dng.calibration)
+            } else {
+                identity_4x4()
+            },
+            forward_matrix: matrix3x4_is_valid(dng.forwardmatrix).then_some(dng.forwardmatrix),
+            weight,
+        }
+    }
+
+    fn dng_camera_to_working(
+        profile: InterpolatedDngProfile,
+        analog_balance: [[f32; 4]; 4],
+        wb_coeffs: [f32; 4],
+        cdesc: [u8; 4],
+    ) -> Result<[[f32; 4]; 3]> {
+        let abcc = multiply_4x4(analog_balance, profile.calibration);
+        let neutral = camera_neutral(wb_coeffs);
+
+        let camera_to_xyz_d50 = if let Some(forward) = profile.forward_matrix {
+            // DNG 1.7: FM * D * inverse(AB * CC), where D white-balances
+            // reference-camera coordinates using ReferenceNeutral.
+            let inverse_abcc = invert_4x4(abcc)
+                .ok_or_else(|| anyhow!("DNG AnalogBalance * CameraCalibration is singular"))?;
+            let reference_neutral = multiply_4x4_vector(inverse_abcc, neutral);
+            let mut balanced_reference_to_xyz = forward;
+            for column in 0..4 {
+                let value = reference_neutral[column];
+                if !value.is_finite() || value.abs() < 1e-10 {
+                    return Err(anyhow!("DNG ReferenceNeutral contains an invalid channel"));
+                }
+                for row in &mut balanced_reference_to_xyz {
+                    row[column] /= value;
+                }
+            }
+            multiply_3x4_4x4(balanced_reference_to_xyz, inverse_abcc)
+        } else {
+            // Without ForwardMatrix, invert AB*CC*CM and chromatically adapt
+            // the scene white represented by CameraNeutral to PCS D50.
+            let xyz_to_camera = multiply_4x4_4x3(abcc, profile.color_matrix);
+            let camera_to_xyz = pseudoinverse(xyz_to_camera);
+            if camera_to_xyz
+                .iter()
+                .flatten()
+                .all(|value| value.abs() <= 1e-12)
+            {
+                return Err(anyhow!("DNG XYZ-to-camera matrix is singular"));
+            }
+            let source_white = multiply_3x4_vector(camera_to_xyz, neutral);
+            let adaptation = bradford_adaptation(source_white, [0.964_22, 1.0, 0.825_21])
+                .ok_or_else(|| anyhow!("DNG CameraNeutral does not define a valid white point"))?;
+            multiply_3x3_3x4(adaptation, camera_to_xyz)
+        };
+
+        // DNG's PCS is D50 while the scene working space is linear Rec.2020
+        // D65. Adapt once, then factor out the white balance already applied to
+        // CFA samples on the GPU.
+        const D50_TO_D65: [[f32; 3]; 3] = [
+            [0.955_473_4, -0.023_098_5, 0.063_259_3],
+            [-0.028_369_7, 1.009_995_5, 0.021_041_4],
+            [0.012_314, -0.020_507_7, 1.330_365_9],
+        ];
+        let xyz_d50_to_rec2020 = multiply_3x3(XYZ_TO_REC2020, D50_TO_D65);
+        let mut physical = multiply_3x3_3x4(xyz_d50_to_rec2020, camera_to_xyz_d50);
+        for column in 0..4 {
+            let gain = wb_coeffs[column].max(1e-8);
+            for row in &mut physical {
+                row[column] /= gain;
+            }
+        }
+        Ok(fold_physical_camera_planes(physical, cdesc))
+    }
+
+    fn fold_physical_camera_planes(
+        physical: [[f32; 4]; 3],
+        cdesc: [u8; 4],
+    ) -> [[f32; 4]; 3] {
+        let mut out = [[0.0; 4]; 3];
+        for physical_col in 0..4 {
+            let Some(rgb_col) = logical_rgb_channel(cdesc, physical_col) else {
+                continue;
+            };
+            for row in 0..3 {
+                out[row][rgb_col] += physical[row][physical_col];
+            }
+        }
+        out
+    }
+
+    fn analog_balance_matrix(values: [f32; 4]) -> [[f32; 4]; 4] {
+        let mut out = [[0.0; 4]; 4];
+        for index in 0..4 {
+            out[index][index] = if values[index].is_finite() && values[index] > 1e-8 {
+                values[index]
+            } else {
+                1.0
+            };
+        }
+        out
+    }
+
+    fn camera_neutral(wb_coeffs: [f32; 4]) -> [f32; 4] {
+        wb_coeffs.map(|gain| 1.0 / gain.max(1e-8))
+    }
+
+    fn interpolate_forward_matrix(
+        first: [[f32; 4]; 3],
+        second: [[f32; 4]; 3],
+        weight: f32,
+    ) -> Option<[[f32; 4]; 3]> {
+        match (matrix3x4_is_valid(first), matrix3x4_is_valid(second)) {
+            (true, true) => Some(lerp_3x4(first, second, weight)),
+            (true, false) => Some(first),
+            (false, true) => Some(second),
+            (false, false) => None,
+        }
+    }
+
+    fn interpolate_optional_forward_matrix(
+        first: Option<[[f32; 4]; 3]>,
+        second: Option<[[f32; 4]; 3]>,
+        weight: f32,
+    ) -> Option<[[f32; 4]; 3]> {
+        match (
+            first.filter(|matrix| matrix3x4_is_valid(*matrix)),
+            second.filter(|matrix| matrix3x4_is_valid(*matrix)),
+        ) {
+            (Some(a), Some(b)) => Some(lerp_3x4(a, b, weight)),
+            (Some(matrix), None) | (None, Some(matrix)) => Some(matrix),
+            (None, None) => None,
         }
     }
 
@@ -630,16 +1044,30 @@ mod libraw_loader {
         {
             matrix
         } else {
-            [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ]
+            identity_4x4()
         }
     }
 
+    fn identity_4x4() -> [[f32; 4]; 4] {
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    }
+
     fn matrix4x3_is_valid(matrix: [[f32; 3]; 4]) -> bool {
+        matrix.iter().flatten().all(|v| v.is_finite())
+            && matrix.iter().flatten().any(|v| v.abs() > 1e-8)
+    }
+
+    fn matrix3x4_is_valid(matrix: [[f32; 4]; 3]) -> bool {
+        matrix.iter().flatten().all(|v| v.is_finite())
+            && matrix.iter().flatten().any(|v| v.abs() > 1e-8)
+    }
+
+    fn matrix4x4_is_valid(matrix: [[f32; 4]; 4]) -> bool {
         matrix.iter().flatten().all(|v| v.is_finite())
             && matrix.iter().flatten().any(|v| v.abs() > 1e-8)
     }
@@ -677,16 +1105,236 @@ mod libraw_loader {
 
     fn calibration_illuminant_cct(illuminant: u16) -> Option<f32> {
         match illuminant {
-            17 => Some(2856.0),
-            18 => Some(4874.0),
-            19 => Some(6774.0),
-            20 => Some(5503.0),
-            21 => Some(6504.0),
-            22 => Some(7504.0),
-            23 => Some(5003.0),
-            24 => Some(3200.0),
+            1 => Some(5500.0), // Daylight
+            2 => Some(4000.0), // Fluorescent
+            3 => Some(2856.0), // Tungsten
+            4 => Some(5500.0), // Flash
+            9 => Some(5500.0), // Fine weather
+            10 => Some(6500.0), // Cloudy weather
+            11 => Some(7500.0), // Shade
+            12 => Some(6500.0), // Daylight fluorescent
+            13 => Some(5000.0), // Day white fluorescent
+            14 => Some(4150.0), // Cool white fluorescent
+            15 => Some(3500.0), // White fluorescent
+            16 => Some(3000.0), // Warm white fluorescent
+            17 => Some(2856.0), // Standard light A
+            18 => Some(4874.0), // Standard light B
+            19 => Some(6774.0), // Standard light C
+            20 => Some(5503.0), // D55
+            21 => Some(6504.0), // D65
+            22 => Some(7504.0), // D75
+            23 => Some(5003.0), // D50
+            24 => Some(3200.0), // ISO studio tungsten
             _ => None,
         }
+    }
+
+    fn mired_interpolation_weight(cct: f32, first_cct: f32, second_cct: f32) -> f32 {
+        let first = 1_000_000.0 / first_cct.max(1.0);
+        let second = 1_000_000.0 / second_cct.max(1.0);
+        let scene = 1_000_000.0 / cct.max(1.0);
+        let denominator = second - first;
+        if denominator.abs() < 1e-8 {
+            0.0
+        } else {
+            ((scene - first) / denominator).clamp(0.0, 1.0)
+        }
+    }
+
+    fn xyz_to_cct(xyz: [f32; 3]) -> Option<f32> {
+        let sum = xyz[0] + xyz[1] + xyz[2];
+        if !sum.is_finite() || sum.abs() < 1e-10 {
+            return None;
+        }
+        let x = xyz[0] / sum;
+        let y = xyz[1] / sum;
+        let denominator = y - 0.1858;
+        if denominator.abs() < 1e-8 {
+            return None;
+        }
+        let n = (x - 0.3320) / denominator;
+        let cct = -449.0 * n * n * n + 3525.0 * n * n - 6823.3 * n + 5520.33;
+        (cct.is_finite() && cct > 0.0).then_some(cct)
+    }
+
+    fn bradford_adaptation(source: [f32; 3], target: [f32; 3]) -> Option<[[f32; 3]; 3]> {
+        const BRADFORD: [[f32; 3]; 3] = [
+            [0.8951, 0.2664, -0.1614],
+            [-0.7502, 1.7135, 0.0367],
+            [0.0389, -0.0685, 1.0296],
+        ];
+        const BRADFORD_INV: [[f32; 3]; 3] = [
+            [0.986_992_9, -0.147_054_3, 0.159_962_7],
+            [0.432_305_3, 0.518_360_3, 0.049_291_2],
+            [-0.008_528_7, 0.040_042_8, 0.968_486_7],
+        ];
+        if !source.iter().all(|v| v.is_finite()) || source[1].abs() < 1e-10 {
+            return None;
+        }
+        let normalized_source = source.map(|v| v / source[1]);
+        let source_lms = multiply_3x3_vector(BRADFORD, normalized_source);
+        let target_lms = multiply_3x3_vector(BRADFORD, target);
+        if source_lms.iter().any(|v| !v.is_finite() || v.abs() < 1e-10) {
+            return None;
+        }
+        let diagonal = [
+            [target_lms[0] / source_lms[0], 0.0, 0.0],
+            [0.0, target_lms[1] / source_lms[1], 0.0],
+            [0.0, 0.0, target_lms[2] / source_lms[2]],
+        ];
+        Some(multiply_3x3(BRADFORD_INV, multiply_3x3(diagonal, BRADFORD)))
+    }
+
+    fn lerp_4x3(a: [[f32; 3]; 4], b: [[f32; 3]; 4], t: f32) -> [[f32; 3]; 4] {
+        let mut out = [[0.0; 3]; 4];
+        for row in 0..4 {
+            for col in 0..3 {
+                out[row][col] = a[row][col] + (b[row][col] - a[row][col]) * t;
+            }
+        }
+        out
+    }
+
+    fn lerp_3x4(a: [[f32; 4]; 3], b: [[f32; 4]; 3], t: f32) -> [[f32; 4]; 3] {
+        let mut out = [[0.0; 4]; 3];
+        for row in 0..3 {
+            for col in 0..4 {
+                out[row][col] = a[row][col] + (b[row][col] - a[row][col]) * t;
+            }
+        }
+        out
+    }
+
+    fn lerp_4x4(a: [[f32; 4]; 4], b: [[f32; 4]; 4], t: f32) -> [[f32; 4]; 4] {
+        let mut out = [[0.0; 4]; 4];
+        for row in 0..4 {
+            for col in 0..4 {
+                out[row][col] = a[row][col] + (b[row][col] - a[row][col]) * t;
+            }
+        }
+        out
+    }
+
+    fn multiply_4x4(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+        let mut out = [[0.0; 4]; 4];
+        for row in 0..4 {
+            for col in 0..4 {
+                for k in 0..4 {
+                    out[row][col] += a[row][k] * b[k][col];
+                }
+            }
+        }
+        out
+    }
+
+    fn multiply_4x4_4x3(a: [[f32; 4]; 4], b: [[f32; 3]; 4]) -> [[f32; 3]; 4] {
+        let mut out = [[0.0; 3]; 4];
+        for row in 0..4 {
+            for col in 0..3 {
+                for k in 0..4 {
+                    out[row][col] += a[row][k] * b[k][col];
+                }
+            }
+        }
+        out
+    }
+
+    fn multiply_3x4_4x4(a: [[f32; 4]; 3], b: [[f32; 4]; 4]) -> [[f32; 4]; 3] {
+        let mut out = [[0.0; 4]; 3];
+        for row in 0..3 {
+            for col in 0..4 {
+                for k in 0..4 {
+                    out[row][col] += a[row][k] * b[k][col];
+                }
+            }
+        }
+        out
+    }
+
+    fn multiply_3x3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+        let mut out = [[0.0; 3]; 3];
+        for row in 0..3 {
+            for col in 0..3 {
+                for k in 0..3 {
+                    out[row][col] += a[row][k] * b[k][col];
+                }
+            }
+        }
+        out
+    }
+
+    fn multiply_3x3_3x4(a: [[f32; 3]; 3], b: [[f32; 4]; 3]) -> [[f32; 4]; 3] {
+        let mut out = [[0.0; 4]; 3];
+        for row in 0..3 {
+            for col in 0..4 {
+                for k in 0..3 {
+                    out[row][col] += a[row][k] * b[k][col];
+                }
+            }
+        }
+        out
+    }
+
+    fn multiply_4x4_vector(matrix: [[f32; 4]; 4], vector: [f32; 4]) -> [f32; 4] {
+        matrix.map(|row| {
+            row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2] + row[3] * vector[3]
+        })
+    }
+
+    fn multiply_3x4_vector(matrix: [[f32; 4]; 3], vector: [f32; 4]) -> [f32; 3] {
+        matrix.map(|row| {
+            row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2] + row[3] * vector[3]
+        })
+    }
+
+    fn multiply_3x3_vector(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
+        matrix.map(|row| row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2])
+    }
+
+    fn invert_4x4(matrix: [[f32; 4]; 4]) -> Option<[[f32; 4]; 4]> {
+        let mut augmented = [[0.0f64; 8]; 4];
+        for row in 0..4 {
+            for col in 0..4 {
+                augmented[row][col] = f64::from(matrix[row][col]);
+            }
+            augmented[row][row + 4] = 1.0;
+        }
+        for pivot in 0..4 {
+            let mut best = pivot;
+            for row in pivot + 1..4 {
+                if augmented[row][pivot].abs() > augmented[best][pivot].abs() {
+                    best = row;
+                }
+            }
+            if !augmented[best][pivot].is_finite() || augmented[best][pivot].abs() < 1e-14 {
+                return None;
+            }
+            augmented.swap(pivot, best);
+            let divisor = augmented[pivot][pivot];
+            for value in &mut augmented[pivot] {
+                *value /= divisor;
+            }
+            for row in 0..4 {
+                if row == pivot {
+                    continue;
+                }
+                let factor = augmented[row][pivot];
+                for col in 0..8 {
+                    augmented[row][col] -= factor * augmented[pivot][col];
+                }
+            }
+        }
+        let mut out = [[0.0; 4]; 4];
+        for row in 0..4 {
+            for col in 0..4 {
+                let value = augmented[row][col + 4];
+                if !value.is_finite() {
+                    return None;
+                }
+                out[row][col] = value as f32;
+            }
+        }
+        Some(out)
     }
 
     fn normalized_pseudoinverse(mut xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
