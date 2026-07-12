@@ -15,7 +15,11 @@ env:
 jobs:
   linux-appimage:
     name: Linux AppImage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      LIBRAW_PREFIX: /tmp/auraw-libraw
+      PKG_CONFIG_PATH: /tmp/auraw-libraw/lib/pkgconfig
+      LD_LIBRARY_PATH: /tmp/auraw-libraw/lib
 
     steps:
       - name: Check out repository
@@ -35,6 +39,8 @@ jobs:
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
             build-essential \
+            autoconf \
+            automake \
             ca-certificates \
             clang \
             curl \
@@ -45,7 +51,9 @@ jobs:
             libegl1-mesa-dev \
             libfontconfig1-dev \
             libgl1-mesa-dev \
-            libraw-dev \
+            libjpeg-dev \
+            liblcms2-dev \
+            libtool \
             libudev-dev \
             libwayland-dev \
             libx11-dev \
@@ -54,7 +62,8 @@ jobs:
             pkg-config \
             python3 \
             squashfs-tools \
-            wget
+            wget \
+            zlib1g-dev
 
       - name: Build release binary
         shell: bash
@@ -76,15 +85,34 @@ jobs:
             https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
             /tmp/rustup-init
           chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal --default-toolchain stable
+          /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
+
+          # Match the LibRaw checkout and default Autotools configuration
+          # installed in /usr/local on the development PC.
+          LIBRAW_REVISION=823f25dae9b86bf4504511ee42252ebc8d5513b1
+          rm -rf /tmp/auraw-libraw-src "$LIBRAW_PREFIX"
+          mkdir -p /tmp/auraw-libraw-src
+          download \
+            "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_REVISION.tar.gz" \
+            /tmp/auraw-libraw.tar.gz
+          tar -xzf /tmp/auraw-libraw.tar.gz \
+            --strip-components=1 \
+            -C /tmp/auraw-libraw-src
+          (
+            cd /tmp/auraw-libraw-src
+            autoreconf --install --force
+            ./configure --prefix="$LIBRAW_PREFIX"
+            make --jobs="$(nproc)"
+            make install
+          )
 
           LIBCLANG_SO="$(find /usr/lib -path '*/llvm-*/lib/libclang.so*' -print -quit 2>/dev/null || true)"
           if [ -n "$LIBCLANG_SO" ]; then
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          pkg-config --modversion libraw
+          test "$(pkg-config --modversion libraw)" = "0.22.0"
           cargo build --release --locked
           strip target/release/auraw
 
@@ -203,7 +231,7 @@ jobs:
 
   android-debug-apk:
     name: Android debug APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
@@ -231,10 +259,8 @@ jobs:
             build-essential \
             ca-certificates \
             clang \
-            cmake \
             curl \
             libclang-dev \
-            ninja-build \
             pkg-config \
             tar \
             unzip \
@@ -263,7 +289,8 @@ jobs:
                 "platform-tools" \
                 "platforms;android-35" \
                 "build-tools;35.0.0" \
-                "ndk;$ANDROID_NDK_VERSION"; then
+                "ndk;$ANDROID_NDK_VERSION" \
+                "cmake;$ANDROID_CMAKE_VERSION"; then
                 return 0
               fi
               echo "sdkmanager failed on attempt $attempt; retrying..." >&2
@@ -274,9 +301,10 @@ jobs:
 
           ANDROID_HOME="$HOME/android-sdk"
           ANDROID_SDK_ROOT="$ANDROID_HOME"
-          ANDROID_NDK_VERSION="28.0.13004108"
+          ANDROID_NDK_VERSION="27.0.12077973"
+          ANDROID_CMAKE_VERSION="3.22.1"
           GRADLE_VERSION="8.11.1"
-          export ANDROID_HOME ANDROID_SDK_ROOT ANDROID_NDK_VERSION
+          export ANDROID_HOME ANDROID_SDK_ROOT ANDROID_NDK_VERSION ANDROID_CMAKE_VERSION
 
           rm -rf /tmp/android-command-line-tools
           mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-command-line-tools
@@ -292,12 +320,13 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           install_sdk_packages
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          export PATH="$ANDROID_HOME/cmake/$ANDROID_CMAKE_VERSION/bin:$PATH"
 
           download \
             https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
             /tmp/rustup-init
           chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal --default-toolchain stable
+          /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android
           cargo install cargo-ndk --version 4.1.2 --locked
@@ -320,11 +349,12 @@ jobs:
             --stacktrace \
             -p android \
             assembleDebug \
-            -PaurawAbi=arm64-v8a \
-            -PaurawRustProfile=debug
+            -PaurawAbi=arm64-v8a
 
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libauraw.so'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libc++_shared.so'
           mkdir -p dist
           cp "$APK" dist/AuRaw-debug-arm64-v8a.apk
           sha256sum dist/AuRaw-debug-arm64-v8a.apk \
