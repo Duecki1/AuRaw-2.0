@@ -18,10 +18,6 @@ impl ScreenLayout {
         }
     }
 
-    pub fn is_vertical(self) -> bool {
-        matches!(self, Self::Vertical)
-    }
-
     pub fn sidebar_default_size(self, viewport: Vec2) -> f32 {
         match self {
             Self::Horizontal => (viewport.x * 0.28)
