@@ -24,9 +24,10 @@ def test_glow_is_highlight_aware_multiscale_and_same_stage() -> None:
     assert "black_gate" in ADJUSTMENTS
     assert "colour_ratio" in ADJUSTMENTS
     assert "warm_tint" in ADJUSTMENTS
-    assert "near_bloom" in ADJUSTMENTS and "far_bloom" in ADJUSTMENTS
+    assert "core_bloom" in ADJUSTMENTS and "near_bloom" in ADJUSTMENTS and "far_bloom" in ADJUSTMENTS
     assert "core_protection" in ADJUSTMENTS
-    assert "glow_emission(local_effects_at(sample_pos)" in ADJUSTMENTS
+    assert "fn glow_source_at" in ADJUSTMENTS
+    assert "glow_emission(sample_rgb, cutoff)" in ADJUSTMENTS
     assert "scene_working_at(sample_pos)" not in ADJUSTMENTS
 
 
@@ -152,9 +153,13 @@ def test_vignette_highlight_protection_only_reduces_darkening() -> None:
 
 def test_vignette_max_midpoint_reaches_outermost_edge() -> None:
     midpoint = 1.0
-    feather = 1.0
-    center = 0.16 + (0.985 - 0.16) * midpoint**0.82
-    confinement = 1.0 + (0.16 - 1.0) * midpoint * midpoint
-    start = center - (0.010 + (0.42 - 0.010) * feather) * confinement
-    assert start > 0.90
-    assert "edge_confinement" in ADJUSTMENTS
+    feather = 0.0
+    midpoint_shaped = midpoint**0.80
+    center = 0.18 + (0.992 - 0.18) * midpoint_shaped
+    inward_softness = (0.010 + (0.72 - 0.010) * feather) * (
+        1.0 + (0.62 - 1.0) * midpoint_shaped * midpoint_shaped
+    )
+    start = center - inward_softness
+    assert start > 0.97
+    assert "inward_softness" in ADJUSTMENTS
+    assert "outward_softness" in ADJUSTMENTS

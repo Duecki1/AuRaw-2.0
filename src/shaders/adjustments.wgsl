@@ -189,24 +189,50 @@ fn glow_emission(rgb: vec3<f32>, cutoff: f32) -> vec3<f32> {
 
     // Preserve the source hue while giving the bloom the subtle warm bias of
     // optical diffusion. The source is normalized by luminance so a coloured
-    // light blooms in its own colour instead of becoming neutral grey.
-    let colour_ratio = rgb / max(linear_luma, 1e-6);
+    // light blooms in its own colour instead of becoming neutral grey. The
+    // ratio is softly clamped so very narrow-band highlights cannot explode
+    // into dotted colour speckles when the blur radius becomes large.
+    let colour_ratio = clamp(rgb / max(linear_luma, 1e-6), vec3<f32>(0.0), vec3<f32>(3.5));
     let warm_tint = vec3<f32>(1.025, 1.0, 0.975);
     return colour_ratio * warm_tint
         * intensity * pow(linear_luma, 0.62) * cutoff_fade * black_gate;
 }
 
+fn glow_source_at(pos: vec2<i32>, cutoff: f32) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    var sum_weight = 0.0;
+    let center_luma = safe_luma(local_effects_at(pos));
+
+    // A small, edge-aware prefilter suppresses isolated sparkle pixels and
+    // demosaic specks before the larger bloom blur is applied. This keeps Glow
+    // smooth and photographic instead of producing pointillist dots.
+    for (var ky = -1; ky <= 1; ky = ky + 1) {
+        for (var kx = -1; kx <= 1; kx = kx + 1) {
+            let sample_pos = pos + vec2<i32>(kx, ky);
+            let sample_rgb = local_effects_at(sample_pos);
+            let sample_luma = safe_luma(sample_rgb);
+            let spatial = select(2.0, 4.0, kx == 0 && ky == 0)
+                * select(1.0, 2.0, kx == 0 || ky == 0);
+            let range = exp(-8.0 * abs(sample_luma - center_luma));
+            let weight = spatial * range;
+            sum = sum + glow_emission(sample_rgb, cutoff) * weight;
+            sum_weight = sum_weight + weight;
+        }
+    }
+    return sum / max(sum_weight, 1e-6);
+}
+
 fn glow_blur_at(pos: vec2<i32>, step: i32, cutoff: f32) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     var sum_weight = 0.0;
-    // A separable B3-spline kernel written as one 5x5 gather. Two differently
-    // spaced gathers are blended below for a smooth, multi-scale bloom without
-    // a low-resolution intermediate or box-shaped artefacts.
+    // A separable B3-spline kernel written as one 5x5 gather. The glow source
+    // has already been prefiltered, so the large-radius gathers stay smooth
+    // instead of turning isolated bright pixels into repeated dot artefacts.
     for (var ky = -2; ky <= 2; ky = ky + 1) {
         for (var kx = -2; kx <= 2; kx = kx + 1) {
             let weight = atrous_kernel_weight(kx) * atrous_kernel_weight(ky);
             let sample_pos = pos + vec2<i32>(kx * step, ky * step);
-            sum = sum + glow_emission(local_effects_at(sample_pos), cutoff) * weight;
+            sum = sum + glow_source_at(sample_pos, cutoff) * weight;
             sum_weight = sum_weight + weight;
         }
     }
@@ -228,19 +254,23 @@ fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         3.0,
     );
     let step_f = mix(1.0, 9.0, pow(radius, 1.35)) * reference_scale;
+    let step_core = i32(clamp(round(max(step_f * 0.5, 1.0)), 1.0, 16.0));
     let step_near = i32(clamp(round(step_f), 1.0, 28.0));
     let step_far = min(step_near * 2, 48);
 
+    let core_bloom = glow_blur_at(pos, step_core, cutoff);
     let near_bloom = glow_blur_at(pos, step_near, cutoff);
     let far_bloom = glow_blur_at(pos, step_far, cutoff);
-    let bloom = mix(near_bloom, far_bloom, 0.36 + radius * 0.24);
+    let bloom = core_bloom * 0.26
+        + near_bloom * (0.48 - radius * 0.08)
+        + far_bloom * (0.26 + radius * 0.08);
 
     // Very bright cores already carry their own energy. Protecting them keeps
     // Glow from clipping the light source while the blurred halo expands into
     // the surrounding darker pixels.
     let current_luma = safe_luma(rgb);
     let core_protection = 1.0 - 0.72 * smoothstep(1.0, 3.2, current_luma);
-    return max(rgb + bloom * amount * 3.2 * core_protection, vec3<f32>(0.0));
+    return max(rgb + bloom * amount * 3.0 * core_protection, vec3<f32>(0.0));
 }
 
 fn full_image_uv(pos: vec2<i32>) -> vec2<f32> {
@@ -283,22 +313,21 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let feather = clamp(params.vignette.w / 100.0, 0.0, 1.0);
     let distance = vignette_distance(pos, roundness);
 
-    // A high midpoint must be able to confine the effect to the final few
-    // percent of the frame. Feather still softens the transition, but its
-    // inward reach is progressively reduced as midpoint approaches 100.
-    let midpoint_shaped = pow(midpoint, 0.82);
-    let transition_center = mix(0.16, 0.985, midpoint_shaped);
-    let edge_confinement = mix(1.0, 0.16, midpoint * midpoint);
-    let inner_width = mix(0.010, 0.42, feather) * edge_confinement;
-    let outer_width = mix(0.015, 0.12, feather)
-        * mix(1.0, 0.25, midpoint * midpoint);
-    let transition_start = max(transition_center - inner_width, 0.0);
-    let transition_end = min(transition_center + outer_width, 1.0);
-    let mask = smoothstep(
-        transition_start,
-        max(transition_end, transition_start + 0.01),
-        distance,
+    // Midpoint controls where the vignette is centred. Feather should then
+    // spread the transition across a long distance instead of compressing most
+    // of the darkening into the final few pixels near the edge.
+    let midpoint_shaped = pow(midpoint, 0.80);
+    let transition_center = mix(0.18, 0.992, midpoint_shaped);
+    let inward_softness = mix(0.010, 0.72, feather)
+        * mix(1.0, 0.62, midpoint_shaped * midpoint_shaped);
+    let outward_softness = mix(0.020, 0.46, feather)
+        * mix(1.0, 0.80, midpoint_shaped * midpoint_shaped);
+    let transition_start = max(transition_center - inward_softness, 0.0);
+    let transition_end = min(
+        max(transition_center + outward_softness, transition_start + 0.02),
+        1.0,
     );
+    let mask = smoothstep(transition_start, transition_end, distance);
 
     // Lightroom-style negative vignettes are stronger than positive edge
     // brightening. Highlights restores bright edge detail only for a dark
