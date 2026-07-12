@@ -1,19 +1,33 @@
 package de.duecki.auraw;
 
+import android.Manifest;
 import android.app.NativeActivity;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.Locale;
 
 public final class AuRawActivity extends NativeActivity {
     private static final int OPEN_RAW_DOCUMENT = 1001;
+    private static final int WRITE_EXPORT_PERMISSION = 1002;
+
+    private String pendingExportPath;
+    private String pendingExportName;
 
     static {
         System.loadLibrary("auraw");
@@ -22,6 +36,10 @@ public final class AuRawActivity extends NativeActivity {
     private static native void nativeOnFilePicked(
             String cachedPath,
             String displayName,
+            String error);
+
+    private static native void nativeOnExportPublished(
+            String location,
             String error);
 
     /** Called from Rust's egui button. */
@@ -73,6 +91,170 @@ public final class AuRawActivity extends NativeActivity {
             nativeOnFilePicked(imported.getAbsolutePath(), displayName, "");
         } catch (Exception error) {
             nativeOnFilePicked("", displayName, error.toString());
+        }
+    }
+
+    /** Publishes a completed cache PNG to Pictures/AuRaw without showing a picker. */
+    public void publishPng(String cachedPath, String displayName) {
+        runOnUiThread(() -> beginPublishPng(cachedPath, displayName));
+    }
+
+    private void beginPublishPng(String cachedPath, String displayName) {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+            pendingExportPath = cachedPath;
+            pendingExportName = displayName;
+            requestPermissions(
+                    new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                    WRITE_EXPORT_PERMISSION);
+            return;
+        }
+        startPublishThread(cachedPath, displayName);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != WRITE_EXPORT_PERMISSION) {
+            return;
+        }
+        String cachedPath = pendingExportPath;
+        String displayName = pendingExportName;
+        pendingExportPath = null;
+        pendingExportName = null;
+        if (grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                && cachedPath != null) {
+            startPublishThread(cachedPath, displayName);
+        } else {
+            if (cachedPath != null) {
+                new File(cachedPath).delete();
+            }
+            nativeOnExportPublished(
+                    "",
+                    "Storage permission is required to export on Android 8 and 9");
+        }
+    }
+
+    private void startPublishThread(String cachedPath, String displayName) {
+        new Thread(
+                () -> publishPngInBackground(cachedPath, displayName),
+                "AuRaw PNG publish").start();
+    }
+
+    private void publishPngInBackground(String cachedPath, String requestedName) {
+        File cachedFile = new File(cachedPath);
+        String displayName = safePngName(requestedName);
+        try {
+            String location;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                location = publishPngScoped(cachedFile, displayName);
+            } else {
+                location = publishPngLegacy(cachedFile, displayName);
+            }
+            nativeOnExportPublished(location, "");
+        } catch (Exception error) {
+            nativeOnExportPublished("", error.toString());
+        } finally {
+            if (!cachedFile.delete() && cachedFile.exists()) {
+                cachedFile.deleteOnExit();
+            }
+        }
+    }
+
+    private String publishPngScoped(File cachedFile, String displayName) throws Exception {
+        ContentResolver resolver = getContentResolver();
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, displayName);
+        values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+        values.put(
+                MediaStore.Images.Media.RELATIVE_PATH,
+                Environment.DIRECTORY_PICTURES + "/AuRaw");
+        values.put(MediaStore.Images.Media.IS_PENDING, 1);
+
+        Uri uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) {
+            throw new IllegalStateException("Android MediaStore could not create the image");
+        }
+        boolean published = false;
+        try {
+            try (InputStream input = new FileInputStream(cachedFile);
+                 OutputStream output = resolver.openOutputStream(uri, "w")) {
+                if (output == null) {
+                    throw new IllegalStateException("Android MediaStore returned no output stream");
+                }
+                copy(input, output);
+            }
+            values.clear();
+            values.put(MediaStore.Images.Media.IS_PENDING, 0);
+            if (resolver.update(uri, values, null, null) <= 0) {
+                throw new IllegalStateException("Android MediaStore could not publish the image");
+            }
+            published = true;
+            return Environment.DIRECTORY_PICTURES + "/AuRaw/" + displayName;
+        } finally {
+            if (!published) {
+                resolver.delete(uri, null, null);
+            }
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private String publishPngLegacy(File cachedFile, String displayName) throws Exception {
+        File pictures = Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_PICTURES);
+        File directory = new File(pictures, "AuRaw");
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IllegalStateException("Could not create " + directory);
+        }
+        File destination = uniqueFile(directory, displayName);
+        try (InputStream input = new FileInputStream(cachedFile);
+             OutputStream output = new FileOutputStream(destination)) {
+            copy(input, output);
+        }
+        MediaScannerConnection.scanFile(
+                this,
+                new String[]{destination.getAbsolutePath()},
+                new String[]{"image/png"},
+                null);
+        return destination.getAbsolutePath();
+    }
+
+    private static File uniqueFile(File directory, String displayName) {
+        File candidate = new File(directory, displayName);
+        if (!candidate.exists()) {
+            return candidate;
+        }
+        String stem = displayName.substring(0, displayName.length() - 4);
+        for (int suffix = 1; ; suffix++) {
+            candidate = new File(directory, stem + "-" + suffix + ".png");
+            if (!candidate.exists()) {
+                return candidate;
+            }
+        }
+    }
+
+    private static String safePngName(String requestedName) {
+        String name = requestedName == null ? "AuRaw-export.png" : requestedName;
+        name = name.replaceAll("[^A-Za-z0-9._-]", "_");
+        if (name.isEmpty()) {
+            name = "AuRaw-export.png";
+        }
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".png")) {
+            name += ".png";
+        }
+        return name;
+    }
+
+    private static void copy(InputStream input, OutputStream output) throws Exception {
+        byte[] buffer = new byte[1024 * 1024];
+        int count;
+        while ((count = input.read(buffer)) >= 0) {
+            output.write(buffer, 0, count);
         }
     }
 
