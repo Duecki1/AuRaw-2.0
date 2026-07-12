@@ -1804,9 +1804,7 @@ impl RawGpuPipeline {
             .map_err(|_| anyhow!("GPU readback callback was dropped"))?
             .map_err(|error| anyhow!("GPU readback mapping failed: {error}"))?;
 
-        let mapped = readback
-            .get_mapped_range(..)
-            .map_err(|error| anyhow!("could not access mapped export buffer: {error}"))?;
+        let mapped = readback.get_mapped_range(..);
         let mut rgba = vec![0u8; (width * height * 4) as usize];
         for row in 0..height as usize {
             let src = row * padded_bytes_per_row as usize;
