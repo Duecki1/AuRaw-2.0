@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use auraw::pipeline::{
-    load_raw_file, load_raw_file_with_dcp, CfaKind, ExposureParams, GpuParams, MaskStack,
-    ProcessingQuality, RawGpuPipeline,
+    load_raw_file, load_raw_file_with_dcp, mask_atlas_edge, CfaKind, ExposureParams, GpuParams,
+    MaskStack, ProcessingQuality, RawGpuPipeline,
 };
 use auraw::regression::write_linear_rgb_npz;
 use eframe::wgpu;
@@ -60,10 +60,12 @@ fn run() -> Result<()> {
     .context("request a hardware or software wgpu adapter")?;
     let adapter_info = adapter.get_info();
     let adapter_limits = adapter.limits();
-    let required_dimension = raw.width.max(raw.height);
+    // The headless pipeline also allocates the fixed local-mask atlas. Small
+    // regression fixtures must not request a device limit below that resource.
+    let required_dimension = raw.width.max(raw.height).max(mask_atlas_edge());
     if required_dimension > adapter_limits.max_texture_dimension_2d {
         bail!(
-            "RAW dimensions {}x{} exceed adapter texture limit {}",
+            "pipeline requires texture dimension {required_dimension} for RAW {}x{} and its mask atlas, but the adapter limit is {}",
             raw.width,
             raw.height,
             adapter_limits.max_texture_dimension_2d

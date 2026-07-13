@@ -114,6 +114,76 @@ impl Default for PointCurve {
     }
 }
 
+/// One perceptual color-grading wheel. Hue is stored in degrees so presets
+/// and numeric entry remain intuitive; saturation and luminance use the
+/// familiar -/0..100 editing domains. A zero-saturation wheel is an exact
+/// chromatic no-op regardless of its remembered hue.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorGradeWheel {
+    pub hue: f32,
+    pub saturation: f32,
+    pub luminance: f32,
+}
+
+impl Default for ColorGradeWheel {
+    fn default() -> Self {
+        Self {
+            hue: 0.0,
+            saturation: 0.0,
+            luminance: 0.0,
+        }
+    }
+}
+
+impl ColorGradeWheel {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn is_neutral(self) -> bool {
+        self.saturation.abs() <= 1e-6 && self.luminance.abs() <= 1e-6
+    }
+}
+
+/// Scene-referred four-way grading inspired by Lightroom Color Grading and
+/// darktable color balance rgb. Tonal ranges overlap smoothly in log-luminance
+/// space; `blending` controls that overlap and `balance` moves the pivot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorGrading {
+    pub shadows: ColorGradeWheel,
+    pub midtones: ColorGradeWheel,
+    pub highlights: ColorGradeWheel,
+    pub global: ColorGradeWheel,
+    pub blending: f32,
+    pub balance: f32,
+}
+
+impl Default for ColorGrading {
+    fn default() -> Self {
+        Self {
+            shadows: ColorGradeWheel::default(),
+            midtones: ColorGradeWheel::default(),
+            highlights: ColorGradeWheel::default(),
+            global: ColorGradeWheel::default(),
+            blending: 50.0,
+            balance: 0.0,
+        }
+    }
+}
+
+impl ColorGrading {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn is_neutral(self) -> bool {
+        self.shadows.is_neutral()
+            && self.midtones.is_neutral()
+            && self.highlights.is_neutral()
+            && self.global.is_neutral()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExposureParams {
     /// Additional normalized sensor-space black-point correction. It is applied
@@ -187,6 +257,9 @@ pub struct ExposureParams {
     pub hsl_hue: [f32; 8],
     pub hsl_saturation: [f32; 8],
     pub hsl_luminance: [f32; 8],
+
+    /// Perceptual four-way color grading in scene-linear Rec.2020.
+    pub color_grading: ColorGrading,
 }
 
 /// Exposure lift used for a newly opened image in the modern scene-referred
@@ -261,6 +334,7 @@ impl Default for ExposureParams {
             hsl_hue: [0.0; 8],
             hsl_saturation: [0.0; 8],
             hsl_luminance: [0.0; 8],
+            color_grading: ColorGrading::default(),
         }
     }
 }

@@ -94,7 +94,8 @@ struct Params {
     // live DCP dual-illuminant interpolation weight as f32 bits.
     profile_flags: vec4<u32>,
     // Local adjustments. Each mask index maps directly to one layer in the
-    // normalized R8 array texture sampled by adjustments.wgsl.
+    // normalized R8 array texture sampled by adjustments.wgsl. mask_meta.w is
+    // a feature bitset: bit 0 color mixer, bit 1 color grading.
     mask_counts: vec4<u32>,
     mask_meta: array<vec4<u32>, 8>,
     // Exposure, contrast, highlights, shadows.
@@ -141,6 +142,19 @@ struct Params {
     mask_hsl_saturation_1: array<vec4<f32>, 8>,
     mask_hsl_luminance_0: array<vec4<f32>, 8>,
     mask_hsl_luminance_1: array<vec4<f32>, 8>,
+    // Four-way scene-referred grading. Wheels contain normalized hue,
+    // saturation, luminance and a reserved slot. Options contain blending and
+    // balance in normalized UI domains.
+    grade_shadows: vec4<f32>,
+    grade_midtones: vec4<f32>,
+    grade_highlights: vec4<f32>,
+    grade_global: vec4<f32>,
+    grade_options: vec4<f32>,
+    mask_grade_shadows: array<vec4<f32>, 8>,
+    mask_grade_midtones: array<vec4<f32>, 8>,
+    mask_grade_highlights: array<vec4<f32>, 8>,
+    mask_grade_global: array<vec4<f32>, 8>,
+    mask_grade_options: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
