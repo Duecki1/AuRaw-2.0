@@ -1,0 +1,147 @@
+name: Build Windows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Windows x86_64 (GNU + LibRaw)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+      PKG_CONFIG_ALLOW_CROSS: "1"
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+          targets: x86_64-pc-windows-gnu
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-gnu
+
+      - name: Install MSYS2 build dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          path-type: inherit
+          install: >-
+            git
+            zip
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-libraw
+
+      - name: Verify native dependencies
+        run: |
+          export PKG_CONFIG_PATH="$(cygpath -w /mingw64/lib/pkgconfig);$(cygpath -w /mingw64/share/pkgconfig)"
+          export LIBCLANG_PATH="$(cygpath -w /mingw64/bin)"
+
+          x86_64-w64-mingw32-gcc --version
+          cargo --version
+          rustc --version
+          pkg-config --modversion libraw || pkg-config --modversion libraw_r
+          test -f /mingw64/bin/libclang.dll
+
+      - name: Build release binaries
+        run: |
+          export PKG_CONFIG_PATH="$(cygpath -w /mingw64/lib/pkgconfig);$(cygpath -w /mingw64/share/pkgconfig)"
+          export LIBCLANG_PATH="$(cygpath -w /mingw64/bin)"
+
+          revision="$(git rev-parse --verify HEAD)"
+          export AURAW_REQUIRE_COMMITTED_SOURCE=1
+          export AURAW_SOURCE_REVISION="$revision"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$revision")"
+
+          cargo build \
+            --locked \
+            --release \
+            --target x86_64-pc-windows-gnu \
+            --bins
+
+          release_dir="target/x86_64-pc-windows-gnu/release"
+          test -f "$release_dir/auraw.exe"
+          test -f "$release_dir/auraw-regression-render.exe"
+          test "$(git rev-parse --verify HEAD)" = "$revision"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Package Windows artifact
+        run: |
+          export PKG_CONFIG_PATH="$(cygpath -w /mingw64/lib/pkgconfig);$(cygpath -w /mingw64/share/pkgconfig)"
+
+          release_dir="target/x86_64-pc-windows-gnu/release"
+          package_name="AuRaw-windows-x86_64"
+          package_dir="dist/$package_name"
+
+          rm -rf dist
+          mkdir -p "$package_dir"
+          cp "$release_dir/auraw.exe" "$package_dir/"
+          cp "$release_dir/auraw-regression-render.exe" "$package_dir/"
+          cp COPYING THIRD_PARTY_NOTICES.md README.md "$package_dir/"
+
+          # Copy every non-system MinGW DLL needed by the executables and their
+          # dependent DLLs. The loop repeats because ldd may expose additional
+          # transitive dependencies after each DLL is copied.
+          changed=1
+          while [ "$changed" -eq 1 ]; do
+            changed=0
+            for binary in "$package_dir"/*.exe "$package_dir"/*.dll; do
+              [ -f "$binary" ] || continue
+              while IFS= read -r dll; do
+                [ -n "$dll" ] || continue
+                dll_name="$(basename "$dll")"
+                if [ ! -f "$package_dir/$dll_name" ]; then
+                  cp "$dll" "$package_dir/$dll_name"
+                  changed=1
+                fi
+              done < <(ldd "$binary" | awk '$3 ~ /^\/mingw64\/bin\// { print $3 }')
+            done
+          done
+
+          libraw_version="$(pkg-config --modversion libraw 2>/dev/null || pkg-config --modversion libraw_r)"
+          {
+            echo "AuRaw Windows x86_64 build"
+            echo "Source revision: $(git rev-parse --verify HEAD)"
+            echo "Rust compiler: $(rustc --version)"
+            echo "Target: x86_64-pc-windows-gnu"
+            echo "LibRaw: $libraw_version"
+          } > "$package_dir/BUILD-INFO.txt"
+
+          (cd dist && zip -9 -r "$package_name.zip" "$package_name")
+          test -s "dist/$package_name.zip"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: AuRaw-windows-x86_64
+          path: dist/AuRaw-windows-x86_64.zip
+          if-no-files-found: error
+          archive: false
