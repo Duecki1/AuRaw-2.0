@@ -70,6 +70,22 @@ This avoids the pixel-brightness noise caused by adding directly to HSL
 lightness while retaining the existing Rec.2020 scene pipeline and darktable
 sigmoid display transform.
 
+## Perceptual Color Grading
+
+The Develop panel and every local mask include four interactive color wheels:
+Shadows, Midtones, Highlights, and Global. Each wheel combines hue,
+saturation, and a separate luminance control, with Lightroom-style Blending
+and Balance controls for the three tonal ranges.
+
+Color grading is evaluated at full floating-point precision in the
+scene-linear Rec.2020 pipeline before the darktable sigmoid display transform.
+The grading tint is composed in perceptual OKLab, with smooth log-luminance
+range masks, deep-shadow signal protection, an HDR shoulder, and constant-hue
+positive-gamut compression instead of per-channel clipping. Wheel luminance
+uses a scene-linear RGB-ratio-preserving exposure gain. Neutral grading is an
+exact bypass, and masked grading uses the same normalized full-image mask
+atlas for preview proxies and tiled exports.
+
 
 ## Lightroom-style Effects and interface
 

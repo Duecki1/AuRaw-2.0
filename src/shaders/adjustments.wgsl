@@ -619,6 +619,99 @@ fn mixer_luminance_ev(amount: f32, lightness: f32) -> f32 {
     return value * endpoint_ev * signal * hdr_guard;
 }
 
+fn color_grade_strength(
+    shadows: vec4<f32>,
+    midtones: vec4<f32>,
+    highlights: vec4<f32>,
+    global: vec4<f32>,
+) -> f32 {
+    return max(
+        max(max(abs(shadows.y), abs(shadows.z)), max(abs(midtones.y), abs(midtones.z))),
+        max(max(abs(highlights.y), abs(highlights.z)), max(abs(global.y), abs(global.z))),
+    );
+}
+
+fn color_grade_vector(wheel: vec4<f32>) -> vec2<f32> {
+    let angle = wheel.x * 2.0 * 3.14159265359;
+    return vec2<f32>(cos(angle), sin(angle)) * clamp(wheel.y, 0.0, 1.0);
+}
+
+fn color_grade_tonal_weights(luminance: f32, options: vec4<f32>) -> vec3<f32> {
+    // Evaluate ranges in exposure space around photographic middle gray.
+    // Wider blending produces Lightroom-like overlap without hard range
+    // boundaries. Balance shifts the shared pivot by up to 1.5 stops.
+    let ev = log2(max(luminance, 1e-7) / 0.18);
+    let width = mix(0.60, 2.80, clamp(options.x, 0.0, 1.0));
+    let pivot = -clamp(options.y, -1.0, 1.0) * 1.5;
+    let shadows = 1.0 - smoothstep(
+        -1.25 + pivot - 0.5 * width,
+        -1.25 + pivot + 0.5 * width,
+        ev,
+    );
+    let highlights = smoothstep(
+        1.25 + pivot - 0.5 * width,
+        1.25 + pivot + 0.5 * width,
+        ev,
+    );
+    let midtones = max(1.0 - shadows - highlights, 0.0);
+    let total = max(shadows + midtones + highlights, 1e-6);
+    return vec3<f32>(shadows, midtones, highlights) / total;
+}
+
+fn apply_color_grading_wheels(
+    input_rgb: vec3<f32>,
+    shadows: vec4<f32>,
+    midtones: vec4<f32>,
+    highlights: vec4<f32>,
+    global: vec4<f32>,
+    options: vec4<f32>,
+) -> vec3<f32> {
+    if color_grade_strength(shadows, midtones, highlights, global) < 1e-7 {
+        return input_rgb;
+    }
+
+    let rgb = max(input_rgb, vec3<f32>(0.0));
+    let luminance = max(dot(rgb, LUMA), 0.0);
+    let weights = color_grade_tonal_weights(luminance, options);
+    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
+
+    let grade_vector = color_grade_vector(shadows) * weights.x
+        + color_grade_vector(midtones) * weights.y
+        + color_grade_vector(highlights) * weights.z
+        + color_grade_vector(global);
+
+    var adjusted = rgb;
+    if dot(grade_vector, grade_vector) > 1e-12 {
+        // Deep-shadow confidence and a soft saturation guard prevent grading
+        // from amplifying demosaic chroma noise or forcing already vivid
+        // colors against the gamut boundary. Gamut compression then holds
+        // OKLab lightness and hue instead of clipping individual RGB channels.
+        let signal = smoothstep(0.025, 0.115, max(lab.x, 0.0));
+        let hdr_guard = 1.0 / (1.0 + 0.25 * max(lab.x - 1.0, 0.0));
+        let existing_chroma = length(lab.yz);
+        let saturation_guard = 1.0 / (1.0 + 1.8 * existing_chroma);
+        let target_ab = lab.yz + grade_vector * (0.135 * signal * hdr_guard * saturation_guard);
+        let target_chroma = length(target_ab);
+        if target_chroma > 1e-8 {
+            adjusted = positive_rec2020_from_oklab(
+                lab.x,
+                target_ab / target_chroma,
+                target_chroma,
+            );
+        }
+    }
+
+    let luminance_grade = shadows.z * weights.x
+        + midtones.z * weights.y
+        + highlights.z * weights.z
+        + global.z;
+    if abs(luminance_grade) > 1e-7 {
+        // Scene-linear scalar gain preserves the graded hue and RGB ratios.
+        adjusted = adjusted * exp2(mixer_luminance_ev(luminance_grade, lab.x));
+    }
+    return max(adjusted, vec3<f32>(0.0));
+}
+
 fn local_curve_block(mask_index: u32, curve: u32, block: u32) -> vec4<f32> {
     if curve == 1u {
         switch block {
@@ -719,7 +812,7 @@ fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
         if (state.z & 8u) != 0u && adjusted.b >= 0.0 {
             adjusted.b = scene_curve_decode(local_curve_value(index, 3u, scene_curve_encode(adjusted.b)));
         }
-        if state.w != 0u {
+        if (state.w & 1u) != 0u {
             let sample = mixer_sample_from_rgb(adjusted);
             if sample.confidence > 1e-5 {
                 let hue = fract(atan2(sample.hue_vector.y, sample.hue_vector.x) / (2.0 * 3.14159265359) + 1.0);
@@ -740,6 +833,30 @@ fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
                 }
             }
         }
+        rgb = mix(rgb, adjusted, weight);
+    }
+    return max(rgb, vec3<f32>(0.0));
+}
+
+fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    let full_size = vec2<f32>(f32(max(params.full_width, 1u)), f32(max(params.full_height, 1u)));
+    let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
+    let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
+    let count = min(params.mask_counts.x, 8u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = params.mask_meta[index];
+        if state.x == 0u || (state.w & 2u) == 0u { continue; }
+        let weight = textureSampleLevel(local_mask_tex, local_mask_sampler, uv, i32(index), 0.0).x;
+        if weight <= 1e-5 { continue; }
+        let adjusted = apply_color_grading_wheels(
+            rgb,
+            params.mask_grade_shadows[index],
+            params.mask_grade_midtones[index],
+            params.mask_grade_highlights[index],
+            params.mask_grade_global[index],
+            params.mask_grade_options[index],
+        );
         rgb = mix(rgb, adjusted, weight);
     }
     return max(rgb, vec3<f32>(0.0));
@@ -861,7 +978,16 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let rgb = textureLoad(final_adjustment_tex, pos, 0).xyz;
     let mixed = apply_color_mixer(pos, rgb);
-    let display_linear = darktable_sigmoid(mixed);
+    let globally_graded = apply_color_grading_wheels(
+        mixed,
+        params.grade_shadows,
+        params.grade_midtones,
+        params.grade_highlights,
+        params.grade_global,
+        params.grade_options,
+    );
+    let graded = apply_local_color_grading(pos, globally_graded);
+    let display_linear = darktable_sigmoid(graded);
     textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
     textureStore(out_tex, pos, vec4<f32>(apply_output_lut(display_linear), 1.0));
 }

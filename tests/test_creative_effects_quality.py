@@ -97,7 +97,7 @@ def test_uniform_layout_contains_creative_and_vignette_blocks() -> None:
     assert "creative_effects: [f32; 4]" in GPU
     assert "vignette: [f32; 4]" in GPU
     assert "vignette_options: [f32; 4]" in GPU
-    assert "size_of::<super::GpuParams>(), 6224" in GPU
+    assert "size_of::<super::GpuParams>(), 6944" in GPU
 
 
 def test_default_glow_threshold_rejects_shadows_but_accepts_bright_sources() -> None:

@@ -42,6 +42,15 @@ pub enum ToneCurveTab {
     Blue,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorGradeTab {
+    Shadows,
+    #[default]
+    Midtones,
+    Highlights,
+    Global,
+}
+
 struct LoadedPreview {
     source_path: Option<PathBuf>,
     label: String,
@@ -90,6 +99,7 @@ pub struct AurawApp {
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
     pub tone_curve_tab: ToneCurveTab,
+    pub color_grade_tab: ColorGradeTab,
     pub export_settings: ExportSettings,
     pub masks: MaskStack,
     pub(crate) active_mask_tool: Option<MaskKind>,
@@ -185,6 +195,7 @@ impl AurawApp {
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
             tone_curve_tab: ToneCurveTab::default(),
+            color_grade_tab: ColorGradeTab::default(),
             export_settings: ExportSettings::default(),
             masks: MaskStack::default(),
             active_mask_tool: None,
@@ -243,6 +254,7 @@ impl AurawApp {
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
             tone_curve_tab: ToneCurveTab::default(),
+            color_grade_tab: ColorGradeTab::default(),
             export_settings: ExportSettings::default(),
             masks: MaskStack::default(),
             active_mask_tool: None,
