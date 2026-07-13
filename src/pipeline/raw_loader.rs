@@ -43,6 +43,33 @@ pub enum CfaKind {
     XTrans,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DngColorEndpoint {
+    pub cct: Option<f32>,
+    pub color_matrix: [[f32; 3]; 4],
+    pub calibration: [[f32; 4]; 4],
+    pub forward_matrix: Option<[[f32; 4]; 3]>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum CameraColorModel {
+    Dng {
+        endpoints: Box<[DngColorEndpoint; 2]>,
+        analog_balance: [[f32; 4]; 4],
+    },
+    Matrix {
+        xyz_to_camera: [[f32; 3]; 4],
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CameraWhiteBalanceModel {
+    pub base_wb: [f32; 4],
+    pub cdesc: [u8; 4],
+    pub base_cct: f32,
+    pub color: CameraColorModel,
+}
+
 #[derive(Clone, Debug)]
 pub struct LoadedRaw {
     pub width: u32,
@@ -62,6 +89,36 @@ pub struct LoadedRaw {
     pub white_levels: [f32; 4],
     /// DCP creative profile stages and retained embedded camera ICC data.
     pub camera_profile: CameraProfile,
+    /// Camera/DCP calibration data retained so global white-balance edits can
+    /// rebuild the camera transform instead of applying generic RGB gains.
+    pub(crate) white_balance_model: Option<CameraWhiteBalanceModel>,
+}
+
+impl LoadedRaw {
+    /// Returns the camera-to-working transform and DCP blend for a relative
+    /// global white-balance edit. Temperature is expressed as a reciprocal-
+    /// temperature (mired) displacement; tint is a Planckian-locus-normal Duv
+    /// displacement. Both are converted through the selected camera matrices.
+    pub(crate) fn adjusted_camera_transform(
+        &self,
+        temperature: f32,
+        tint: f32,
+    ) -> ([[f32; 4]; 3], f32) {
+        if temperature.abs() < 1e-6 && tint.abs() < 1e-6 {
+            return (self.cam_to_srgb, self.camera_profile.interpolation_weight);
+        }
+        #[cfg(libraw_available)]
+        if let Some(model) = &self.white_balance_model {
+            if let Some(adjusted) = libraw_loader::adjusted_camera_transform(
+                model,
+                temperature.clamp(-100.0, 100.0),
+                tint.clamp(-100.0, 100.0),
+            ) {
+                return adjusted;
+            }
+        }
+        (self.cam_to_srgb, self.camera_profile.interpolation_weight)
+    }
 }
 
 #[cfg(not(libraw_available))]
@@ -91,8 +148,8 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
 #[cfg(libraw_available)]
 mod libraw_loader {
     use super::{
-        validate_raw_dimensions, CameraProfile, CfaKind, LoadedRaw, MAX_RAW_FILE_BYTES,
-        MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
+        validate_raw_dimensions, CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind,
+        DngColorEndpoint, LoadedRaw, MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
     };
     use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
     use anyhow::{anyhow, Context, Result};
@@ -364,7 +421,7 @@ mod libraw_loader {
         let calibration_compatible = dcp_profile
             .as_ref()
             .map_or(true, DcpProfile::calibration_is_compatible);
-        let (cam_to_srgb, profile_weight) = camera_to_working_matrix(
+        let (cam_to_srgb, profile_weight, white_balance_model) = camera_to_working_matrix(
             color,
             physical_wb,
             cdesc,
@@ -424,6 +481,7 @@ mod libraw_loader {
             black_levels_per_pixel,
             white_levels,
             camera_profile,
+            white_balance_model,
         })
     }
 
@@ -739,16 +797,7 @@ mod libraw_loader {
     }
 
     fn cam_to_working(xyz_to_cam: [[f32; 3]; 4], cdesc: [u8; 4]) -> [[f32; 4]; 3] {
-        let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
-
-        let mut physical = [[0.0; 4]; 3];
-        for row in 0..3 {
-            for col in 0..4 {
-                physical[row][col] = XYZ_TO_REC2020[row][0] * cam_to_xyz[0][col]
-                    + XYZ_TO_REC2020[row][1] * cam_to_xyz[1][col]
-                    + XYZ_TO_REC2020[row][2] * cam_to_xyz[2][col];
-            }
-        }
+        let physical = camera_to_working_physical(xyz_to_cam);
 
         // The demosaic output is RGB, but camera profiles can contain four
         // physical planes (normally R, G1, B, G2). Fold profile columns by
@@ -766,6 +815,19 @@ mod libraw_loader {
         out
     }
 
+    fn camera_to_working_physical(xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
+        let cam_to_xyz = normalized_pseudoinverse(xyz_to_cam);
+        let mut physical = [[0.0; 4]; 3];
+        for row in 0..3 {
+            for col in 0..4 {
+                physical[row][col] = XYZ_TO_REC2020[row][0] * cam_to_xyz[0][col]
+                    + XYZ_TO_REC2020[row][1] * cam_to_xyz[1][col]
+                    + XYZ_TO_REC2020[row][2] * cam_to_xyz[2][col];
+            }
+        }
+        physical
+    }
+
     #[derive(Clone, Copy)]
     struct InterpolatedDngProfile {
         color_matrix: [[f32; 3]; 4],
@@ -780,7 +842,7 @@ mod libraw_loader {
         cdesc: [u8; 4],
         parsed_profile: Option<&DcpProfile>,
         calibration_compatible: bool,
-    ) -> Result<([[f32; 4]; 3], f32)> {
+    ) -> Result<([[f32; 4]; 3], f32, Option<CameraWhiteBalanceModel>)> {
         let analog_balance = analog_balance_matrix(color.dng_levels.analogbalance);
         // Prefer the profile records parsed directly from the selected DNG/DCP
         // IFD. LibRaw remains the fallback for proprietary RAW files and DNGs
@@ -807,7 +869,7 @@ mod libraw_loader {
             });
         let (matrix, weight) = if let Some(profile) = dng_profile {
             (
-                dng_camera_to_working(profile, analog_balance, wb_coeffs, cdesc)?,
+                dng_camera_to_working(profile, analog_balance, wb_coeffs, wb_coeffs, cdesc)?,
                 profile.weight,
             )
         } else {
@@ -823,7 +885,302 @@ mod libraw_loader {
                 "LibRaw did not provide an invertible camera colour matrix; refusing to treat camera RGB as the working colour space"
             ));
         }
-        Ok((matrix, weight))
+        let color_model = parsed_profile
+            .and_then(|profile| {
+                parsed_camera_color_model(profile, color, analog_balance, calibration_compatible)
+            })
+            .or_else(|| libraw_camera_color_model(color, analog_balance, calibration_compatible))
+            .unwrap_or(CameraColorModel::Matrix {
+                xyz_to_camera: color.cam_xyz,
+            });
+        let base_cct = cct_from_profile_weight(&color_model, weight)
+            .or_else(|| estimate_scene_cct(color, wb_coeffs, cdesc))
+            .or_else(|| estimate_cct_from_model(&color_model, wb_coeffs))
+            .unwrap_or(6504.0)
+            .clamp(1500.0, 50_000.0);
+        let model = CameraWhiteBalanceModel {
+            base_wb: wb_coeffs,
+            cdesc,
+            base_cct,
+            color: color_model,
+        };
+        Ok((matrix, weight, Some(model)))
+    }
+
+    fn parsed_camera_color_model(
+        profile: &DcpProfile,
+        color: &ffi::libraw_colordata_t,
+        analog_balance: [[f32; 4]; 4],
+        calibration_compatible: bool,
+    ) -> Option<CameraColorModel> {
+        let endpoint = |index: usize| {
+            let set = &profile.matrices[index];
+            Some(DngColorEndpoint {
+                cct: set.illuminant.and_then(calibration_illuminant_cct),
+                color_matrix: set
+                    .color_matrix
+                    .filter(|matrix| matrix4x3_is_valid(*matrix))?,
+                calibration: parsed_calibration(
+                    set,
+                    color.dng_color[index].calibration,
+                    calibration_compatible,
+                ),
+                forward_matrix: set
+                    .forward_matrix
+                    .filter(|matrix| matrix3x4_is_valid(*matrix)),
+            })
+        };
+        paired_endpoints(endpoint(0), endpoint(1)).map(|endpoints| CameraColorModel::Dng {
+            endpoints: Box::new(endpoints),
+            analog_balance,
+        })
+    }
+
+    fn libraw_camera_color_model(
+        color: &ffi::libraw_colordata_t,
+        analog_balance: [[f32; 4]; 4],
+        calibration_compatible: bool,
+    ) -> Option<CameraColorModel> {
+        let endpoint = |index: usize| {
+            let set = &color.dng_color[index];
+            matrix4x3_is_valid(set.colormatrix).then(|| DngColorEndpoint {
+                cct: calibration_illuminant_cct(set.illuminant),
+                color_matrix: set.colormatrix,
+                calibration: if calibration_compatible {
+                    identity_fallback_4x4(set.calibration)
+                } else {
+                    identity_4x4()
+                },
+                forward_matrix: matrix3x4_is_valid(set.forwardmatrix).then_some(set.forwardmatrix),
+            })
+        };
+        paired_endpoints(endpoint(0), endpoint(1)).map(|endpoints| CameraColorModel::Dng {
+            endpoints: Box::new(endpoints),
+            analog_balance,
+        })
+    }
+
+    fn paired_endpoints(
+        first: Option<DngColorEndpoint>,
+        second: Option<DngColorEndpoint>,
+    ) -> Option<[DngColorEndpoint; 2]> {
+        match (first, second) {
+            (Some(a), Some(b)) => Some([a, b]),
+            (Some(a), None) => Some([a, a]),
+            (None, Some(b)) => Some([b, b]),
+            (None, None) => None,
+        }
+    }
+
+    fn cct_from_profile_weight(color: &CameraColorModel, weight: f32) -> Option<f32> {
+        let CameraColorModel::Dng { endpoints, .. } = color else {
+            return None;
+        };
+        let first = 1_000_000.0 / endpoints[0].cct?.max(1.0);
+        let second = 1_000_000.0 / endpoints[1].cct?.max(1.0);
+        Some(1_000_000.0 / (first + (second - first) * weight.clamp(0.0, 1.0)))
+    }
+
+    fn estimate_cct_from_model(color: &CameraColorModel, wb: [f32; 4]) -> Option<f32> {
+        let neutral = camera_neutral(wb);
+        let xyz_to_camera = match color {
+            CameraColorModel::Dng {
+                endpoints,
+                analog_balance,
+            } => multiply_4x4_4x3(
+                multiply_4x4(*analog_balance, endpoints[0].calibration),
+                endpoints[0].color_matrix,
+            ),
+            CameraColorModel::Matrix { xyz_to_camera } => *xyz_to_camera,
+        };
+        xyz_to_cct(multiply_3x4_vector(pseudoinverse(xyz_to_camera), neutral))
+    }
+
+    pub(super) fn adjusted_camera_transform(
+        model: &CameraWhiteBalanceModel,
+        temperature: f32,
+        tint: f32,
+    ) -> Option<([[f32; 4]; 3], f32)> {
+        // The global temperature control is a physical mired displacement:
+        // positive values select a higher-CCT white and therefore render the
+        // scene warmer. Tint is Duv normal to the Planckian locus. Neither
+        // control contains camera-channel coefficients.
+        let base_mired = 1_000_000.0 / model.base_cct.max(1.0);
+        let target_mired = (base_mired - temperature).clamp(20.0, 666.666_7);
+        let target_cct = 1_000_000.0 / target_mired;
+        let base_white = planckian_white_xyz(model.base_cct, 0.0)?;
+        // Positive UI tint moves toward magenta; negative moves toward green.
+        let target_white = planckian_white_xyz(target_cct, tint * 0.000_5)?;
+        let base_neutral = camera_neutral(model.base_wb);
+
+        match &model.color {
+            CameraColorModel::Dng {
+                endpoints,
+                analog_balance,
+            } => {
+                let base_weight = endpoint_weight(endpoints, model.base_cct);
+                let target_weight = endpoint_weight(endpoints, target_cct);
+                let base_profile = interpolate_endpoints(endpoints, base_weight);
+                let target_profile = interpolate_endpoints(endpoints, target_weight);
+                let base_xyz_to_camera = multiply_4x4_4x3(
+                    multiply_4x4(*analog_balance, base_profile.calibration),
+                    base_profile.color_matrix,
+                );
+                let target_xyz_to_camera = multiply_4x4_4x3(
+                    multiply_4x4(*analog_balance, target_profile.calibration),
+                    target_profile.color_matrix,
+                );
+                let predicted_base = multiply_4x3_vector(base_xyz_to_camera, base_white);
+                let predicted_target = multiply_4x3_vector(target_xyz_to_camera, target_white);
+                let target_neutral = neutral_from_camera_ratio(
+                    base_neutral,
+                    predicted_base,
+                    predicted_target,
+                    model.cdesc,
+                )?;
+                let target_wb = target_neutral.map(|value| 1.0 / value.max(1e-8));
+                let transform = dng_camera_to_working(
+                    target_profile,
+                    *analog_balance,
+                    target_wb,
+                    model.base_wb,
+                    model.cdesc,
+                )
+                .ok()?;
+                Some((transform, target_weight))
+            }
+            CameraColorModel::Matrix { xyz_to_camera } => {
+                let predicted_base = multiply_4x3_vector(*xyz_to_camera, base_white);
+                let predicted_target = multiply_4x3_vector(*xyz_to_camera, target_white);
+                let target_neutral = neutral_from_camera_ratio(
+                    base_neutral,
+                    predicted_base,
+                    predicted_target,
+                    model.cdesc,
+                )?;
+                let target_wb = target_neutral.map(|value| 1.0 / value.max(1e-8));
+                let mut physical = camera_to_working_physical(*xyz_to_camera);
+                for column in 0..4 {
+                    let relative_gain = target_wb[column] / model.base_wb[column].max(1e-8);
+                    for row in &mut physical {
+                        row[column] *= relative_gain;
+                    }
+                }
+                Some((fold_physical_camera_planes(physical, model.cdesc), 0.0))
+            }
+        }
+    }
+
+    fn neutral_from_camera_ratio(
+        base: [f32; 4],
+        predicted_base: [f32; 4],
+        predicted_target: [f32; 4],
+        cdesc: [u8; 4],
+    ) -> Option<[f32; 4]> {
+        let mut out = [0.0; 4];
+        for index in 0..4 {
+            if logical_rgb_channel(cdesc, index).is_none() {
+                out[index] = base[index];
+                continue;
+            }
+            // Three-channel DNG matrices commonly leave the fourth physical
+            // row at zero even when LibRaw reports RGBG in cdesc. It is an
+            // inactive coordinate, not a failed WB calculation.
+            if predicted_base[index].abs() < 1e-8 && predicted_target[index].abs() < 1e-8 {
+                out[index] = base[index];
+                continue;
+            }
+            if predicted_base[index].abs() < 1e-8
+                || !predicted_base[index].is_finite()
+                || !predicted_target[index].is_finite()
+            {
+                return None;
+            }
+            out[index] = base[index] * predicted_target[index] / predicted_base[index];
+            if !out[index].is_finite() || out[index] <= 1e-8 {
+                return None;
+            }
+        }
+        Some(out)
+    }
+
+    fn endpoint_weight(endpoints: &[DngColorEndpoint; 2], cct: f32) -> f32 {
+        match (endpoints[0].cct, endpoints[1].cct) {
+            (Some(first), Some(second)) => mired_interpolation_weight(cct, first, second),
+            _ => 0.0,
+        }
+    }
+
+    fn interpolate_endpoints(
+        endpoints: &[DngColorEndpoint; 2],
+        weight: f32,
+    ) -> InterpolatedDngProfile {
+        InterpolatedDngProfile {
+            color_matrix: lerp_4x3(endpoints[0].color_matrix, endpoints[1].color_matrix, weight),
+            calibration: lerp_4x4(endpoints[0].calibration, endpoints[1].calibration, weight),
+            forward_matrix: interpolate_optional_forward_matrix(
+                endpoints[0].forward_matrix,
+                endpoints[1].forward_matrix,
+                weight,
+            ),
+            weight,
+        }
+    }
+
+    fn planckian_white_xyz(cct: f32, duv: f32) -> Option<[f32; 3]> {
+        let t = cct.clamp(1667.0, 25_000.0);
+        let [x, y] = planckian_xy(t)?;
+        let uv = xy_to_uv([x, y])?;
+        let low = locus_uv((t * 0.99).max(1667.0))?;
+        let high = locus_uv((t * 1.01).min(25_000.0))?;
+        let tangent = [high[0] - low[0], high[1] - low[1]];
+        let length = (tangent[0] * tangent[0] + tangent[1] * tangent[1]).sqrt();
+        if length <= 1e-10 {
+            return None;
+        }
+        let mut normal = [-tangent[1] / length, tangent[0] / length];
+        if normal[1] < 0.0 {
+            normal = [-normal[0], -normal[1]];
+        }
+        uv_to_xyz([uv[0] + normal[0] * duv, uv[1] + normal[1] * duv])
+    }
+
+    fn locus_uv(cct: f32) -> Option<[f32; 2]> {
+        let xyz = planckian_xy(cct)?;
+        xy_to_uv(xyz)
+    }
+
+    fn planckian_xy(cct: f32) -> Option<[f32; 2]> {
+        let t = cct.clamp(1667.0, 25_000.0);
+        let x = if t <= 4000.0 {
+            -0.266_123_9e9 / t.powi(3) - 0.234_358e6 / t.powi(2) + 0.877_695_6e3 / t + 0.179_91
+        } else {
+            -3.025_846_9e9 / t.powi(3) + 2.107_038e6 / t.powi(2) + 0.222_634_7e3 / t + 0.240_39
+        };
+        let y = if t <= 2222.0 {
+            -1.106_381_4 * x.powi(3) - 1.348_110_2 * x.powi(2) + 2.185_558_3 * x - 0.202_196_8
+        } else if t <= 4000.0 {
+            -0.954_947_6 * x.powi(3) - 1.374_185_9 * x.powi(2) + 2.091_37 * x - 0.167_488_7
+        } else {
+            3.081_758 * x.powi(3) - 5.873_387 * x.powi(2) + 3.751_129_9 * x - 0.370_014_8
+        };
+        (x.is_finite() && y.is_finite() && x > 0.0 && y > 0.0).then_some([x, y])
+    }
+
+    fn xy_to_uv(xy: [f32; 2]) -> Option<[f32; 2]> {
+        let denominator = -2.0 * xy[0] + 12.0 * xy[1] + 3.0;
+        (denominator.abs() > 1e-10)
+            .then_some([4.0 * xy[0] / denominator, 6.0 * xy[1] / denominator])
+    }
+
+    fn uv_to_xyz(uv: [f32; 2]) -> Option<[f32; 3]> {
+        let denominator = 2.0 * uv[0] - 8.0 * uv[1] + 4.0;
+        if denominator.abs() <= 1e-10 {
+            return None;
+        }
+        let x = 3.0 * uv[0] / denominator;
+        let y = 2.0 * uv[1] / denominator;
+        (x.is_finite() && y.is_finite() && y > 1e-10).then_some([x / y, 1.0, (1.0 - x - y) / y])
     }
 
     fn interpolated_parsed_dng_profile(
@@ -1048,11 +1405,12 @@ mod libraw_loader {
     fn dng_camera_to_working(
         profile: InterpolatedDngProfile,
         analog_balance: [[f32; 4]; 4],
-        wb_coeffs: [f32; 4],
+        neutral_wb: [f32; 4],
+        applied_wb: [f32; 4],
         cdesc: [u8; 4],
     ) -> Result<[[f32; 4]; 3]> {
         let abcc = multiply_4x4(analog_balance, profile.calibration);
-        let neutral = camera_neutral(wb_coeffs);
+        let neutral = camera_neutral(neutral_wb);
 
         let camera_to_xyz_d50 = if let Some(forward) = profile.forward_matrix {
             // DNG 1.7: FM * D * inverse(AB * CC), where D white-balances
@@ -1100,7 +1458,7 @@ mod libraw_loader {
         let xyz_d50_to_rec2020 = multiply_3x3(XYZ_TO_REC2020, D50_TO_D65);
         let mut physical = multiply_3x3_3x4(xyz_d50_to_rec2020, camera_to_xyz_d50);
         for column in 0..4 {
-            let gain = wb_coeffs[column].max(1e-8);
+            let gain = applied_wb[column].max(1e-8);
             for row in &mut physical {
                 row[column] /= gain;
             }
@@ -1416,6 +1774,10 @@ mod libraw_loader {
         })
     }
 
+    fn multiply_4x3_vector(matrix: [[f32; 3]; 4], vector: [f32; 3]) -> [f32; 4] {
+        matrix.map(|row| row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2])
+    }
+
     fn multiply_3x3_vector(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
         matrix.map(|row| row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2])
     }
@@ -1577,12 +1939,46 @@ mod libraw_loader {
     #[cfg(test)]
     mod tests {
         use super::{
-            black_levels, cam_to_working, canonical_cfa_map, canonicalize_f32x4,
-            cfa_kind_from_filters, effective_black_level, oriented_source_pos, white_balance,
-            white_levels, CfaKind,
+            adjusted_camera_transform, black_levels, cam_to_working, canonical_cfa_map,
+            canonicalize_f32x4, cfa_kind_from_filters, effective_black_level, identity_4x4,
+            oriented_source_pos, white_balance, white_levels, CameraColorModel,
+            CameraWhiteBalanceModel, CfaKind, DngColorEndpoint,
         };
 
         const RGBG: [u8; 4] = *b"RGBG";
+
+        #[test]
+        fn global_wb_reinterpolates_dual_illuminant_camera_data() {
+            let endpoint = |cct, red_scale, blue_scale| DngColorEndpoint {
+                cct: Some(cct),
+                color_matrix: [
+                    [red_scale, 0.0, 0.0],
+                    [0.0, 0.5, 0.0],
+                    [0.0, 0.0, blue_scale],
+                    [0.0, 0.5, 0.0],
+                ],
+                calibration: identity_4x4(),
+                forward_matrix: None,
+            };
+            let model = CameraWhiteBalanceModel {
+                base_wb: [2.0, 1.0, 1.5, 1.0],
+                cdesc: RGBG,
+                base_cct: 5000.0,
+                color: CameraColorModel::Dng {
+                    endpoints: Box::new([endpoint(2856.0, 1.2, 0.8), endpoint(6504.0, 0.9, 1.1)]),
+                    analog_balance: identity_4x4(),
+                },
+            };
+
+            let (cooler, cooler_weight) = adjusted_camera_transform(&model, -20.0, 0.0).unwrap();
+            let (warmer, warmer_weight) = adjusted_camera_transform(&model, 20.0, 0.0).unwrap();
+            assert!(warmer_weight > cooler_weight);
+            assert!(warmer.iter().flatten().all(|value| value.is_finite()));
+            assert_ne!(cooler, warmer);
+
+            let (tinted, _) = adjusted_camera_transform(&model, 20.0, 20.0).unwrap();
+            assert_ne!(warmer, tinted);
+        }
 
         #[test]
         fn libraw_filter_codes_select_the_demosaic_family() {

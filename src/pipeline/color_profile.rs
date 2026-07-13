@@ -284,7 +284,9 @@ pub struct CameraProfile {
     /// Default exposure contribution in EV. `from_dcp` initializes this
     /// from BaselineExposureOffset; the RAW loader adds DNG BaselineExposure.
     pub baseline_exposure_offset: f32,
-    pub hue_sat_map: Option<HsvMap>,
+    /// Retain both calibration-illuminant maps. Their DNG mired-space blend is
+    /// selected at render time from the adjusted camera white balance.
+    pub hue_sat_maps: [Option<HsvMap>; 2],
     pub look_table: Option<HsvMap>,
     pub tone_curve: Option<ToneCurve>,
     pub interpolation_weight: f32,
@@ -295,12 +297,26 @@ pub struct CameraProfile {
 
 impl CameraProfile {
     pub fn from_dcp(dcp: DcpProfile, interpolation_weight: f32) -> Self {
-        // Compute interpolated data before moving owned fields out of `dcp`.
-        let hue_sat_map = dcp.interpolated_hue_sat_map(interpolation_weight);
+        let maps_are_compatible = match (&dcp.hue_sat_maps[0], &dcp.hue_sat_maps[1]) {
+            (Some(first), Some(second)) => {
+                first.divisions == second.divisions && first.encoding == second.encoding
+            }
+            _ => true,
+        };
+        let fallback_map = (!maps_are_compatible)
+            .then(|| dcp.interpolated_hue_sat_map(interpolation_weight))
+            .flatten();
+        let hue_sat_maps = if maps_are_compatible {
+            dcp.hue_sat_maps
+        } else {
+            // Malformed/non-conforming endpoint tables cannot be interpolated
+            // entrywise. Preserve the previous nearest-endpoint behavior.
+            [fallback_map, None]
+        };
         Self {
             name: dcp.name,
             baseline_exposure_offset: dcp.baseline_exposure_offset,
-            hue_sat_map,
+            hue_sat_maps,
             look_table: dcp.look_table,
             tone_curve: dcp.tone_curve,
             interpolation_weight: interpolation_weight.clamp(0.0, 1.0),
@@ -405,6 +421,7 @@ impl IccOutputTransform {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProfileGpuLayout {
     pub hue_sat: [u32; 4],
+    pub hue_sat_2: [u32; 4],
     pub look: [u32; 4],
     pub tone: [u32; 4],
     pub output: [u32; 4],
@@ -414,10 +431,25 @@ pub(crate) struct ProfileGpuLayout {
 impl ProfileGpuLayout {
     fn new(profile: &CameraProfile) -> Self {
         let mut offset = 1u32; // A non-empty storage buffer is required by wgpu.
-        let hue_sat = if let Some(map) = &profile.hue_sat_map {
+        let hue_sat = if let Some(map) = &profile.hue_sat_maps[0] {
             let out = [map.divisions[0], map.divisions[1], map.divisions[2], offset];
             offset += map.entries.len() as u32;
             out
+        } else if let Some(map) = &profile.hue_sat_maps[1] {
+            let out = [map.divisions[0], map.divisions[1], map.divisions[2], offset];
+            offset += map.entries.len() as u32;
+            out
+        } else {
+            [0; 4]
+        };
+        let hue_sat_2 = if profile.hue_sat_maps[0].is_some() {
+            if let Some(map) = &profile.hue_sat_maps[1] {
+                let out = [map.divisions[0], map.divisions[1], map.divisions[2], offset];
+                offset += map.entries.len() as u32;
+                out
+            } else {
+                [0; 4]
+            }
         } else {
             [0; 4]
         };
@@ -438,8 +470,10 @@ impl ProfileGpuLayout {
         let output = [OUTPUT_LUT_EDGE, OUTPUT_LUT_EDGE, OUTPUT_LUT_EDGE, offset];
         let flags = [
             profile
-                .hue_sat_map
-                .as_ref()
+                .hue_sat_maps
+                .iter()
+                .flatten()
+                .next()
                 .map_or(0, |map| map.encoding.shader_value()),
             profile
                 .look_table
@@ -450,6 +484,7 @@ impl ProfileGpuLayout {
         ];
         Self {
             hue_sat,
+            hue_sat_2,
             look,
             tone,
             output,
@@ -469,13 +504,27 @@ impl ProfileGpuData {
         debug_assert_eq!(output.size(), OUTPUT_LUT_EDGE);
         let total = layout.output[3] as usize + output.entries().len();
         let mut words = Vec::with_capacity(total);
-        words.push([0.0; 4]);
-        if let Some(map) = &profile.hue_sat_map {
+        // The otherwise-unused first word carries the second HueSat map's
+        // metadata as raw u32 bits, avoiding another uniform ABI field.
+        words.push(layout.hue_sat_2.map(f32::from_bits));
+        if let Some(map) = profile.hue_sat_maps[0]
+            .as_ref()
+            .or(profile.hue_sat_maps[1].as_ref())
+        {
             words.extend(
                 map.entries
                     .iter()
                     .map(|entry| [entry[0], entry[1], entry[2], 0.0]),
             );
+        }
+        if profile.hue_sat_maps[0].is_some() {
+            if let Some(map) = &profile.hue_sat_maps[1] {
+                words.extend(
+                    map.entries
+                        .iter()
+                        .map(|entry| [entry[0], entry[1], entry[2], 0.0]),
+                );
+            }
         }
         if let Some(map) = &profile.look_table {
             words.extend(
@@ -1690,15 +1739,24 @@ mod tests {
     #[test]
     fn gpu_layout_offsets_are_contiguous() {
         let profile = CameraProfile {
-            hue_sat_map: Some(
-                HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear).unwrap(),
-            ),
+            hue_sat_maps: [
+                Some(
+                    HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear)
+                        .unwrap(),
+                ),
+                Some(
+                    HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear)
+                        .unwrap(),
+                ),
+            ],
             tone_curve: Some(ToneCurve::new(vec![[0.0, 0.0], [1.0, 1.0]]).unwrap()),
             ..Default::default()
         };
         let data = profile.gpu_data(&IccOutputTransform::srgb());
         assert_eq!(data.layout.hue_sat[3], 1);
-        assert_eq!(data.layout.tone[1], 3);
+        assert_eq!(data.layout.hue_sat_2[3], 3);
+        assert_eq!(data.words[0].map(f32::to_bits), data.layout.hue_sat_2);
+        assert_eq!(data.layout.tone[1], 5);
         assert_eq!(
             data.words.len(),
             data.layout.output[3] as usize + 33usize.pow(3)

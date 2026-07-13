@@ -127,8 +127,9 @@ pub struct ExposureParams {
     pub contrast: f32,
     /// darktable-compatible sigmoid scene-to-display transform.
     pub sigmoid: SigmoidParams,
-    /// Relative white-balance temperature and tint in Lightroom-compatible
-    /// -100..100 adjustment domains. Zero preserves the camera as-shot WB.
+    /// Relative metadata-aware white balance in familiar -100..100 domains.
+    /// Temperature is a mired displacement and tint is a Planckian-normal Duv
+    /// displacement; zero preserves the camera's as-shot neutral exactly.
     pub temperature: f32,
     pub tint: f32,
     pub saturation: f32,

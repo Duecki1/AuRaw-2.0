@@ -20,10 +20,9 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     // the adaptive bounds describe the same signal that reaches the display
     // transform. Deliberately omit only the user's creative Exposure control,
     // keeping the histogram stable while that slider moves.
-    // Match the rendered DCP order and colour domain: global white balance is
-    // a camera-RGB gain before the camera matrix and every profile operation.
-    let white_balanced_camera = apply_camera_temperature_tint(camera_rgb);
-    let working = map_negative_gamut(cam_to_working(white_balanced_camera));
+    // Match the rendered DCP order and colour domain. Global white balance is
+    // already represented by the camera-specific transform in GpuParams.
+    let working = map_negative_gamut(cam_to_working(camera_rgb));
     let hue_sat = map_negative_gamut(apply_profile_hue_sat(working));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     let exposed = hue_sat * exp2(profile_exposure_ev);

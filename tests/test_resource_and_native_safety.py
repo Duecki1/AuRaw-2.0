@@ -92,13 +92,17 @@ def test_libraw_preserves_non_utf8_unix_paths() -> None:
     assert "to_string_lossy" not in path_conversion
 
 
-def test_global_white_balance_precedes_camera_and_dcp_transforms() -> None:
+def test_global_white_balance_rebuilds_camera_and_dcp_transforms() -> None:
     adjustments = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
     tone = (ROOT / "src/shaders/tone_analysis.wgsl").read_text(encoding="utf-8")
     basic = (ROOT / "src/shaders/basic_adjustments.wgsl").read_text(encoding="utf-8")
-    assert "return camera_rgb * (gains / max(gains.y, 1e-6));" in basic
+    gpu = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+    profile = (ROOT / "src/shaders/profile.wgsl").read_text(encoding="utf-8")
+    assert "apply_camera_temperature_tint" not in basic
+    assert "raw.adjusted_camera_transform(" in gpu
+    assert "profile_layout.flags[3] = profile_weight" in gpu
+    assert "bitcast<f32>(params.profile_flags.w)" in profile
     for source in (adjustments, tone):
-        wb = source.index("apply_camera_temperature_tint(camera_rgb)")
-        matrix = source.index("cam_to_working(white_balanced_camera)")
-        profile = source.index("apply_profile_hue_sat(working)")
-        assert wb < matrix < profile
+        matrix = source.index("cam_to_working(camera_rgb)")
+        hue_sat = source.index("apply_profile_hue_sat(working)")
+        assert matrix < hue_sat
