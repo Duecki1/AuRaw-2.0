@@ -138,8 +138,7 @@ pub fn spawn_tiled_png_export(
     let spawn_result = std::thread::Builder::new()
         .name("auraw-tiled-export".to_owned())
         .spawn(move || {
-            let (output_width, output_height) =
-                settings.output_dimensions(raw.width, raw.height);
+            let (output_width, output_height) = settings.output_dimensions(raw.width, raw.height);
             let resized_raw;
             let export_raw = if output_width == raw.width && output_height == raw.height {
                 raw.as_ref()
@@ -202,7 +201,13 @@ fn export_tiled_png(
         ProcessingQuality::High,
     )
     .context("create global tone-analysis pipeline")?;
-    upload_mask_atlas(&global_tone_source, queue, masks, preview_raw.width, preview_raw.height)?;
+    upload_mask_atlas(
+        &global_tone_source,
+        queue,
+        masks,
+        preview_raw.width,
+        preview_raw.height,
+    )?;
     global_tone_source.dispatch_stage(queue, device, &global_params, ProcessingStage::Raw);
     global_tone_source.dispatch_stage(queue, device, &global_params, ProcessingStage::Tone);
 
@@ -236,10 +241,12 @@ fn export_tiled_png(
     info.color_type = png::ColorType::Rgba;
     info.bit_depth = png::BitDepth::Eight;
     if keep_metadata {
-        info.exif_metadata = Some(Cow::Owned(build_exif_payload(metadata, raw.width, raw.height)));
+        info.exif_metadata = Some(Cow::Owned(build_exif_payload(
+            metadata, raw.width, raw.height,
+        )));
     }
-    let mut encoder = png::Encoder::with_info(BufWriter::new(file), info)
-        .context("configure PNG encoder")?;
+    let mut encoder =
+        png::Encoder::with_info(BufWriter::new(file), info).context("configure PNG encoder")?;
     encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
     if keep_metadata {
         add_png_text_metadata(&mut encoder, metadata, raw.width, raw.height)?;
@@ -327,13 +334,7 @@ fn upload_mask_atlas(
 ) -> Result<()> {
     let edge = pipeline.mask_atlas_edge();
     for layer in 0..MAX_LOCAL_MASKS {
-        let bytes = masks.rasterize_layer(
-            layer,
-            edge,
-            edge,
-            image_width,
-            image_height,
-        );
+        let bytes = masks.rasterize_layer(layer, edge, edge, image_width, image_height);
         pipeline
             .update_mask_layer(queue, layer, &bytes)
             .with_context(|| format!("upload local-mask layer {}", layer + 1))?;
@@ -350,7 +351,11 @@ fn add_png_text_metadata<W: Write>(
     encoder
         .add_itxt_chunk("Software".to_owned(), "AuRaw".to_owned())
         .context("write PNG software metadata")?;
-    if let Some(source) = metadata.source_file_name.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(source) = metadata
+        .source_file_name
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         encoder
             .add_itxt_chunk("Source".to_owned(), source.to_owned())
             .context("write PNG source metadata")?;
@@ -380,11 +385,7 @@ fn add_png_text_metadata<W: Write>(
 
 /// Builds a compact TIFF/EXIF IFD for PNG's eXIf chunk. The output image has
 /// already been physically oriented, so Orientation is always written as 1.
-fn build_exif_payload(
-    metadata: &ExportMetadata,
-    output_width: u32,
-    output_height: u32,
-) -> Vec<u8> {
+fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_height: u32) -> Vec<u8> {
     #[derive(Clone)]
     enum Value {
         Short(u16),
@@ -495,7 +496,9 @@ fn stitch_tile_into_band(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_exif_payload, stitch_tile_into_band, ExportMetadata, ExportResizeMode, ExportSettings};
+    use super::{
+        build_exif_payload, stitch_tile_into_band, ExportMetadata, ExportResizeMode, ExportSettings,
+    };
     use crate::pipeline::ExportTile;
 
     #[test]

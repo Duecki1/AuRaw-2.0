@@ -58,7 +58,11 @@ pub struct ProxySpec {
 impl Default for ProxySpec {
     fn default() -> Self {
         Self {
-            max_edge: if cfg!(target_os = "android") { 1280 } else { 2048 },
+            max_edge: if cfg!(target_os = "android") {
+                1280
+            } else {
+                2048
+            },
         }
     }
 }
@@ -146,7 +150,6 @@ pub fn build_proxy(raw: &LoadedRaw, spec: ProxySpec) -> LoadedRaw {
     }
 }
 
-
 /// Resamples the RAW mosaic to an exact output size while preserving the CFA
 /// identity of every output photosite. Downscaling performs area-weighted
 /// averaging within each colour plane, which avoids mixing red, green, and
@@ -189,9 +192,7 @@ pub fn resample_raw(raw: &LoadedRaw, width: u32, height: u32) -> LoadedRaw {
             let mut black_sum = 0.0f64;
             let mut weight_sum = 0.0f64;
             for sy in iy0..iy1 {
-                let y_weight = (source_y1.min((sy + 1) as f64)
-                    - source_y0.max(sy as f64))
-                    .max(0.0);
+                let y_weight = (source_y1.min((sy + 1) as f64) - source_y0.max(sy as f64)).max(0.0);
                 if y_weight == 0.0 {
                     continue;
                 }
@@ -201,9 +202,8 @@ pub fn resample_raw(raw: &LoadedRaw, width: u32, height: u32) -> LoadedRaw {
                     if raw.color_indices[index] != cfa {
                         continue;
                     }
-                    let x_weight = (source_x1.min((sx + 1) as f64)
-                        - source_x0.max(sx as f64))
-                        .max(0.0);
+                    let x_weight =
+                        (source_x1.min((sx + 1) as f64) - source_x0.max(sx as f64)).max(0.0);
                     let weight = x_weight * y_weight;
                     pixel_sum += f64::from(raw.raw_pixels[index]) * weight;
                     black_sum += f64::from(raw.black_levels_per_pixel[index]) * weight;
@@ -212,15 +212,18 @@ pub fn resample_raw(raw: &LoadedRaw, width: u32, height: u32) -> LoadedRaw {
             }
 
             if weight_sum > 1e-12 {
-                raw_pixels.push((pixel_sum / weight_sum).round().clamp(0.0, u16::MAX as f64) as u16);
+                raw_pixels
+                    .push((pixel_sum / weight_sum).round().clamp(0.0, u16::MAX as f64) as u16);
                 black_levels_per_pixel.push((black_sum / weight_sum) as f32);
             } else {
                 let center_x = ((source_x0 + source_x1) * 0.5)
                     .floor()
-                    .clamp(0.0, raw.width.saturating_sub(1) as f64) as u32;
+                    .clamp(0.0, raw.width.saturating_sub(1) as f64)
+                    as u32;
                 let center_y = ((source_y0 + source_y1) * 0.5)
                     .floor()
-                    .clamp(0.0, raw.height.saturating_sub(1) as f64) as u32;
+                    .clamp(0.0, raw.height.saturating_sub(1) as f64)
+                    as u32;
                 let fallback = nearest_cfa_sample(raw, center_x, center_y, cfa, cfa_period);
                 raw_pixels.push(raw.raw_pixels[fallback]);
                 black_levels_per_pixel.push(raw.black_levels_per_pixel[fallback]);
@@ -284,7 +287,11 @@ pub struct TileSpec {
 impl Default for TileSpec {
     fn default() -> Self {
         Self {
-            core_edge: if cfg!(target_os = "android") { 768 } else { 1024 },
+            core_edge: if cfg!(target_os = "android") {
+                768
+            } else {
+                1024
+            },
             // Covers the widest current demosaic/local-adjustment support and
             // the maximum UI chromatic-aberration displacement on large files.
             halo: 48,
@@ -371,8 +378,7 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
     for local_y in 0..tile.padded_height {
         let global_y = (i64::from(tile.global_origin_y) + i64::from(local_y)).clamp(0, max_y);
         for local_x in 0..tile.padded_width {
-            let global_x =
-                (i64::from(tile.global_origin_x) + i64::from(local_x)).clamp(0, max_x);
+            let global_x = (i64::from(tile.global_origin_x) + i64::from(local_x)).clamp(0, max_x);
             let index = (global_y as u32 * raw.width + global_x as u32) as usize;
             raw_pixels.push(raw.raw_pixels[index]);
             color_indices.push(raw.color_indices[index]);
@@ -407,7 +413,10 @@ mod tests {
         let before = ExposureParams::default();
         let mut after = before;
         after.exposure = 1.0;
-        assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Output));
+        assert_eq!(
+            affected_stage(&before, &after),
+            Some(ProcessingStage::Output)
+        );
     }
 
     #[test]

@@ -150,16 +150,14 @@ fn next_value(values: &mut impl Iterator<Item = String>, option: &str) -> Result
 }
 
 fn print_help() {
-    println!(
-        concat!(
-            "AuRaw canonical image-regression renderer\n\n",
-            "Usage:\n",
-            "  auraw-regression-render --backend gpu --input FILE --output FILE.npz\n",
-            "  [--dcp PROFILE.dcp]\n\n",
-            "The output is full-resolution scene-linear D65 Rec.2020 RGB float32, before\n",
-            "creative look/tone modules, display encoding, sharpening, or resizing."
-        )
-    );
+    println!(concat!(
+        "AuRaw canonical image-regression renderer\n\n",
+        "Usage:\n",
+        "  auraw-regression-render --backend gpu --input FILE --output FILE.npz\n",
+        "  [--dcp PROFILE.dcp]\n\n",
+        "The output is full-resolution scene-linear D65 Rec.2020 RGB float32, before\n",
+        "creative look/tone modules, display encoding, sharpening, or resizing."
+    ));
 }
 
 fn metadata_json(

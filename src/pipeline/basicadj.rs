@@ -49,7 +49,6 @@ impl HighlightReconstructionMethod {
     }
 }
 
-
 /// Lightroom-style editable point curve. Points are stored in normalized
 /// input/output coordinates and evaluated in a reversible scene-luminance
 /// shaper, so the neutral diagonal is an exact no-op for HDR scene values.
