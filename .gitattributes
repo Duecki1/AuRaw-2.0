@@ -1,0 +1,6 @@
+# Keep source checkouts byte-stable across Linux, macOS, Windows, and MSYS2.
+* text=auto eol=lf
+
+# Preserve conventional Windows line endings for native command scripts.
+*.bat text eol=crlf
+*.cmd text eol=crlf
