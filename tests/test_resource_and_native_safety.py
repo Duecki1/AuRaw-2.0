@@ -90,3 +90,15 @@ def test_libraw_preserves_non_utf8_unix_paths() -> None:
     assert "OsStrExt" in RAW
     assert "path.as_os_str().as_bytes()" in path_conversion
     assert "to_string_lossy" not in path_conversion
+
+
+def test_global_white_balance_precedes_camera_and_dcp_transforms() -> None:
+    adjustments = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
+    tone = (ROOT / "src/shaders/tone_analysis.wgsl").read_text(encoding="utf-8")
+    basic = (ROOT / "src/shaders/basic_adjustments.wgsl").read_text(encoding="utf-8")
+    assert "return camera_rgb * (gains / max(gains.y, 1e-6));" in basic
+    for source in (adjustments, tone):
+        wb = source.index("apply_camera_temperature_tint(camera_rgb)")
+        matrix = source.index("cam_to_working(white_balanced_camera)")
+        profile = source.index("apply_profile_hue_sat(working)")
+        assert wb < matrix < profile

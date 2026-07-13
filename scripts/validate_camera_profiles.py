@@ -265,8 +265,9 @@ def main() -> int:
     c.require_in_order(
         adjustments,
         [
-            "apply_temperature_tint(working)",
-            "apply_profile_hue_sat(white_balanced)",
+            "apply_camera_temperature_tint(camera_rgb)",
+            "cam_to_working(white_balanced_camera)",
+            "apply_profile_hue_sat(working)",
             "exp2(profile_exposure_ev)",
             "apply_profile_look(rgb)",
             "apply_profile_tone_curve(rgb)",
@@ -280,8 +281,9 @@ def main() -> int:
     c.require_in_order(
         tone_analysis,
         [
-            "apply_temperature_tint(working)",
-            "apply_profile_hue_sat(white_balanced)",
+            "apply_camera_temperature_tint(camera_rgb)",
+            "cam_to_working(white_balanced_camera)",
+            "apply_profile_hue_sat(working)",
             "exp2(profile_exposure_ev)",
             "apply_profile_look(exposed)",
             "apply_profile_tone_curve(looked)",
