@@ -16,6 +16,69 @@ fn highlight_chroma_ratio(rgb: vec3<f32>) -> vec3<f32> {
     return max(rgb, vec3<f32>(0.0)) / highlight_intensity(rgb);
 }
 
+// Keep the original per-channel clipping mask alongside the propagated
+// support confidence. The integer part stores RGB clip bits and the fractional
+// half-range stores confidence, which remains representable in both RGBA16F
+// preview and RGBA32F high-quality work textures.
+fn highlight_encode_state(mask: u32, confidence: f32) -> f32 {
+    return f32(mask) + 0.5 * clamp(confidence, 0.0, 1.0);
+}
+
+fn highlight_state_mask(encoded: f32) -> u32 {
+    return u32(floor(max(encoded, 0.0)));
+}
+
+fn highlight_state_confidence(encoded: f32) -> f32 {
+    return clamp(2.0 * fract(max(encoded, 0.0)), 0.0, 1.0);
+}
+
+fn highlight_clip_mask(clipped: vec3<f32>) -> u32 {
+    return select(0u, 1u, clipped.r > 0.5)
+        | select(0u, 2u, clipped.g > 0.5)
+        | select(0u, 4u, clipped.b > 0.5);
+}
+
+fn highlight_mask_channels(mask: u32) -> vec3<f32> {
+    return vec3<f32>(
+        select(0.0, 1.0, (mask & 1u) != 0u),
+        select(0.0, 1.0, (mask & 2u) != 0u),
+        select(0.0, 1.0, (mask & 4u) != 0u),
+    );
+}
+
+fn highlight_opposed_power_mean(a: f32, b: f32) -> f32 {
+    let root = 0.5 * (
+        pow(max(a, 0.0), 1.0 / 3.0)
+        + pow(max(b, 0.0), 1.0 / 3.0)
+    );
+    return root * root * root;
+}
+
+fn highlight_safe_seed(sample: HighlightSample, mask: u32) -> vec3<f32> {
+    var seed = max(sample.rgb, vec3<f32>(0.0));
+    let clipped_count = sample.clipped.r + sample.clipped.g + sample.clipped.b;
+
+    if clipped_count > 1.5 {
+        // With two unknown components there is only one trustworthy colour
+        // coordinate; with three there is no hue evidence at all. A common
+        // peak keeps the strongest measured saturation lower bound while the
+        // valid CFA sites are selectively restored during remosaicing.
+        return vec3<f32>(max(seed.r, max(seed.g, seed.b)));
+    }
+
+    // One missing component can be estimated from its two opposed, surviving
+    // channels. The cube-root power mean is robust to a strongly coloured
+    // survivor, and max() never lowers the sensor's saturation lower bound.
+    if (mask & 1u) != 0u {
+        seed.r = max(seed.r, highlight_opposed_power_mean(seed.g, seed.b));
+    } else if (mask & 2u) != 0u {
+        seed.g = max(seed.g, highlight_opposed_power_mean(seed.r, seed.b));
+    } else if (mask & 4u) != 0u {
+        seed.b = max(seed.b, highlight_opposed_power_mean(seed.r, seed.g));
+    }
+    return seed;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn highlight_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
@@ -30,8 +93,10 @@ fn highlight_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
         0.0,
         1.0,
     );
-    let reliability = 1.0 - clipped_fraction;
-    store_highlight_work(pos, vec4<f32>(sample.rgb, reliability));
+    let confidence = 1.0 - clipped_fraction;
+    let mask = highlight_clip_mask(sample.clipped);
+    let seed = highlight_safe_seed(sample, mask);
+    store_highlight_work(pos, vec4<f32>(seed, highlight_encode_state(mask, confidence)));
 }
 
 fn reconstruct_highlight_at(
@@ -45,14 +110,16 @@ fn reconstruct_highlight_at(
     let quality = clamp(params.highlight_options.y, 1.0, 4.0);
     let strength = clamp(params.highlight_reconstruction, 0.0, 1.0);
 
-    if !guided || quality < minimum_quality || strength <= 1e-5 {
+    if !guided || quality < minimum_quality || strength <= 0.0 {
         return center;
     }
 
-    let center_reliability = clamp(center.w, 0.0, 1.0);
-    if center_reliability >= 0.9995 {
-        // Reliable source pixels are Dirichlet boundary conditions. Never
-        // diffuse into them, otherwise edges outside the clipped region blur.
+    let center_mask = highlight_state_mask(center.w);
+    let center_reliability = highlight_state_confidence(center.w);
+    if center_mask == 0u {
+        // Unclipped source pixels are Dirichlet boundary conditions. The clip
+        // mask stays persistent even after confidence has propagated inward,
+        // so reconstructed channels can receive every refinement pass.
         return center;
     }
 
@@ -71,14 +138,14 @@ fn reconstruct_highlight_at(
             let outward_pos = clamp_pos(pos + offset * 2);
             let neighbour = textureLoad(highlight_work_read, neighbour_pos, 0);
             let outward = textureLoad(highlight_work_read, outward_pos, 0);
-            let neighbour_reliability = clamp(neighbour.w, 0.0, 1.0);
+            let neighbour_reliability = highlight_state_confidence(neighbour.w);
 
             if neighbour_reliability <= 1e-5 { continue; }
 
             let neighbour_rgb = max(neighbour.rgb, vec3<f32>(0.0));
             let outward_rgb = max(outward.rgb, vec3<f32>(0.0));
             let neighbour_log_intensity = log(highlight_intensity(neighbour_rgb));
-            let outward_reliability = clamp(outward.w, 0.0, 1.0);
+            let outward_reliability = highlight_state_confidence(outward.w);
             let measured_outward_log_intensity = log(highlight_intensity(outward_rgb));
             // Do not derive a gradient from an unknown second sample. Falling
             // back to the neighbour itself yields a zero-gradient continuation.
@@ -132,18 +199,41 @@ fn reconstruct_highlight_at(
         return center;
     }
 
-    let candidate = rgb_sum / weight_sum;
+    var candidate = rgb_sum / weight_sum;
     let propagated_reliability = clamp(
         (reliability_sum / weight_sum) * 0.985,
         0.0,
         1.0,
     );
-    let missing = 1.0 - center_reliability;
-    let update_amount = clamp(missing * (0.35 + 0.65 * strength), 0.0, 1.0);
-    let reconstructed = mix(center_rgb, candidate, update_amount);
+    let unknown_channels = highlight_mask_channels(center_mask);
+    let known_channels = vec3<f32>(1.0) - unknown_channels;
+    let known_energy = dot(center_rgb * candidate, known_channels);
+    let candidate_known_energy = dot(candidate * candidate, known_channels);
+    if candidate_known_energy > 1e-10 {
+        // A surviving sensor component is an exact exposure anchor. Transport
+        // the boundary's chroma/gradient, but scale it to agree with those
+        // measured components before filling only the unknown channels.
+        let anchor_scale = clamp(known_energy / candidate_known_energy, 0.25, 4.0);
+        candidate = candidate * anchor_scale;
+    }
+    // Saturated measurements and the opposed-channel seed are lower bounds,
+    // not values that diffusion may darken. Guided structure can add missing
+    // energy, while the final display transform remains responsible for
+    // compressing it into the output range.
+    let proposed = max(candidate, center_rgb);
+    // Only replace components known to be invalid. Surviving sensor channels
+    // retain their measured values and anchor colour/luminance propagation.
+    let reconstructed = mix(
+        center_rgb,
+        proposed,
+        unknown_channels,
+    );
     let next_reliability = max(center_reliability, propagated_reliability);
 
-    return vec4<f32>(max(reconstructed, vec3<f32>(0.0)), next_reliability);
+    return vec4<f32>(
+        max(reconstructed, vec3<f32>(0.0)),
+        highlight_encode_state(center_mask, next_reliability),
+    );
 }
 
 fn run_highlight_guided_pass(
@@ -231,22 +321,29 @@ fn highlight_finalize(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if method >= 0.5 && method < 1.5 {
         output = ansel_lch_reconstructed_cfa_at(pos);
-    } else if method >= 1.5 && strength > 1e-5 {
-        let guided_rgb = max(textureLoad(highlight_work_read, pos, 0).rgb, vec3<f32>(0.0));
+    } else if method >= 1.5 && strength > 0.0 {
+        let final_sample = textureLoad(highlight_work_read, pos, 0);
+        var guided_rgb = max(final_sample.rgb, vec3<f32>(0.0));
+        let clip_mask = highlight_state_mask(final_sample.w);
+        if clip_mask == 7u {
+            // Every sensor plane was saturated, so hue is unknowable. Keep a
+            // common post-WB lower bound even if no guided boundary reached
+            // this pixel; this is the hard invariant that prevents magenta
+            // cores from reappearing when exposure is reduced.
+            let maximum_wb = max(
+                max(params.wb.r, params.wb.g),
+                max(params.wb.b, params.wb.a),
+            );
+            let neutral_floor = guided_sensor_clip() * maximum_wb;
+            guided_rgb = max(guided_rgb, vec3<f32>(neutral_floor));
+        }
         let guided = guided_rgb[channel];
         let clip_amount = guided_cfa_clip_amount(pos);
 
-        if guided_cfa_is_clipped(pos) {
-            // Once a photosite is known to be clipped, its measured value is
-            // invalid. Replace it completely instead of blending the plateau
-            // back into the reconstruction. The strength slider already
-            // controls how strongly the multiscale solver changes its seed.
-            output = guided;
-        } else if clip_amount > 0.0 {
-            // A narrow pre-clip feather avoids a hard seam without modifying
-            // ordinary valid highlights.
-            output = mix(original, guided, clip_amount * strength);
-        }
+        // Reconstruct a full-strength candidate internally, then apply the UI
+        // strength exactly once. This keeps the slider continuous from the
+        // untouched RAW plateau at zero to complete replacement at one.
+        output = mix(original, guided, clip_amount * strength);
     }
 
     textureStore(

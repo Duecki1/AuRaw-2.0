@@ -95,7 +95,7 @@ fn ansel_lch_reconstructed_cfa_at(pos: vec2<i32>) -> f32 {
             let p = center + vec2<i32>(dx, dy);
             let channel = highlight_color_at(p);
             let value = highlight_raw_camera_at(p);
-            clipped = clipped || value > clip;
+            clipped = clipped || value >= clip;
             if channel == 0u {
                 r = value;
                 have_r = true;
@@ -180,6 +180,7 @@ fn highlight_interpolate_and_mask(pos: vec2<i32>) -> HighlightSample {
             var best_any_distance = 100000;
             var any_sum = 0.0;
             var any_count = 0.0;
+            var nearest_any_clipped = 0.0;
 
             // Radius four covers the nearest same-colour sites for Bayer and
             // gives unusual mosaics a useful fallback without a CFA-specific
@@ -198,9 +199,14 @@ fn highlight_interpolate_and_mask(pos: vec2<i32>) -> HighlightSample {
                         best_any_distance = distance;
                         any_sum = camera;
                         any_count = 1.0;
+                        nearest_any_clipped = select(0.0, 1.0, sensor >= sensor_clip);
                     } else if distance == best_any_distance {
                         any_sum = any_sum + camera;
                         any_count = any_count + 1.0;
+                        nearest_any_clipped = max(
+                            nearest_any_clipped,
+                            select(0.0, 1.0, sensor >= sensor_clip),
+                        );
                     }
 
                     if sensor < sensor_clip {
@@ -218,7 +224,11 @@ fn highlight_interpolate_and_mask(pos: vec2<i32>) -> HighlightSample {
 
             if valid_count > 0.0 {
                 rgb[channel] = valid_sum / valid_count;
-                clipped[channel] = 0.0;
+                // The farther valid sample supplies a useful value seed, but
+                // clipping belongs to this pixel's nearest CFA neighbourhood.
+                // Otherwise a distant shoulder is mislabeled as a trustworthy
+                // center sample and reintroduces WB-shaped false colour.
+                clipped[channel] = nearest_any_clipped;
             } else if any_count > 0.0 {
                 // There is no trustworthy sample of this colour in the search
                 // footprint. Keep a finite seed for the multiscale solver, but
@@ -243,8 +253,4 @@ fn guided_cfa_clip_amount(pos: vec2<i32>) -> f32 {
         threshold,
         highlight_raw_sensor_at(pos),
     );
-}
-
-fn guided_cfa_is_clipped(pos: vec2<i32>) -> bool {
-    return highlight_raw_sensor_at(pos) >= guided_sensor_clip();
 }

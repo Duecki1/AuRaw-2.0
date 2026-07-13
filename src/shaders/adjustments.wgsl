@@ -62,10 +62,7 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(scene_tex, clamp_pos(pos), 0).xyz;
     // The global white balance and its DCP interpolation are folded into the
     // camera-specific matrix assembled on the CPU.
-    let working = map_negative_gamut(cam_to_working(camera_rgb));
-    let profile_corrected = map_negative_gamut(apply_profile_hue_sat(working));
-    let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
-    return profile_corrected * exp2(profile_exposure_ev);
+    return map_negative_gamut(cam_to_working(camera_rgb));
 }
 
 fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
@@ -917,12 +914,15 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
-    var rgb = scene_working_at(pos);
-    // Camera-profile rendering establishes the base rendition. User controls
-    // then follow Lightroom's panel order before local Effects.
+    // Exposure is a scene-referred input correction, so it must run before
+    // every bounded-domain DCP table. Applying it later cannot recover
+    // headroom those profile stages have already compressed.
+    var rgb = apply_exposure(scene_working_at(pos));
+    rgb = map_negative_gamut(apply_profile_hue_sat(rgb));
+    let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
+    rgb = rgb * exp2(profile_exposure_ev);
     rgb = apply_profile_look(rgb);
     rgb = apply_profile_tone_curve(rgb);
-    rgb = apply_exposure(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
     rgb = apply_lightroom_tone(rgb, pos);
 
