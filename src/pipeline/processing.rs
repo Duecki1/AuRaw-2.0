@@ -179,13 +179,30 @@ fn nearest_cfa_sample(
     (center_y * raw.width + center_x) as usize
 }
 
-/// Minimum export halo required by the widest spatial adjustment.
-///
-/// Glow samples a 5x5 kernel at a maximum stride of 48 pixels and its
-/// source term samples one additional neighbouring pixel, for a 97-pixel
-/// support radius. 104 preserves the 8-pixel Android guide-grid alignment
-/// while leaving a small guard band for filter-coordinate rounding.
-pub const EXPORT_TILE_HALO: u32 = 104;
+/// Cumulative input support of every spatial stage used by an export tile.
+/// These are deliberately separate constants: taking only the maximum stage
+/// radius is incorrect when one spatial pass consumes another pass's output.
+const HIGHLIGHT_PREP_SUPPORT: u32 = 4;
+// The quality-4 guided sequence has radii 16+8+4+2+1+4+2+1+2+1+1 = 42.
+// Each pass also reads the outward sample at twice its radius, so its
+// dependency support accumulates to 84 pixels across the ping-pong chain.
+const HIGHLIGHT_GUIDED_SUPPORT: u32 = 2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 1 + 1);
+// Conservative bound over the complete Bayer RCD and X-Trans Markesteijn-3
+// pass chains, including their final detail-recovery neighbourhoods.
+const DEMOSAIC_CHAIN_SUPPORT: u32 = 32;
+const LOCAL_EFFECTS_SUPPORT: u32 = 8;
+// Glow's 5x5 kernel reaches +/-2*48 and glow_source_at reaches one more pixel.
+const GLOW_SUPPORT: u32 = 97;
+const COLOR_MIXER_SUPPORT: u32 = 4;
+const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_PREP_SUPPORT
+    + HIGHLIGHT_GUIDED_SUPPORT
+    + DEMOSAIC_CHAIN_SUPPORT
+    + LOCAL_EFFECTS_SUPPORT
+    + GLOW_SUPPORT
+    + COLOR_MIXER_SUPPORT;
+
+/// Rounded up to the 8-pixel guide/workgroup alignment.
+pub const EXPORT_TILE_HALO: u32 = EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TileSpec {

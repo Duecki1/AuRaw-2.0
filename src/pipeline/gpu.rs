@@ -284,6 +284,9 @@ pub struct GpuParams {
     full_height: u32,
     _pad0: u32,
     _pad1: u32,
+    // Local half-open rectangle whose pixels contribute to a tiled export's
+    // global histogram. Ordinary preview analysis uses the complete image.
+    tone_histogram_bounds: [u32; 4],
     profile_hue_sat: [u32; 4],
     profile_look: [u32; 4],
     profile_tone: [u32; 4],
@@ -649,6 +652,7 @@ impl GpuParams {
             full_height,
             _pad0: 0,
             _pad1: 0,
+            tone_histogram_bounds: [0, 0, raw.width, raw.height],
             profile_hue_sat: profile_layout.hue_sat,
             profile_look: profile_layout.look,
             profile_tone: profile_layout.tone,
@@ -698,6 +702,16 @@ impl GpuParams {
             mask_hsl_luminance_0,
             mask_hsl_luminance_1,
         }
+    }
+
+    pub fn with_tone_histogram_bounds(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
+        self.tone_histogram_bounds = [
+            x,
+            y,
+            x.saturating_add(width).min(self.width),
+            y.saturating_add(height).min(self.height),
+        ];
+        self
     }
 }
 
@@ -765,7 +779,6 @@ pub struct RawGpuPipeline {
     scene_texture: wgpu::Texture,
     scene_format: wgpu::TextureFormat,
     display_linear_texture: wgpu::Texture,
-    tone_stats_buffer: wgpu::Buffer,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
     mask_texture: wgpu::Texture,
@@ -2112,7 +2125,6 @@ impl RawGpuPipeline {
             scene_texture,
             scene_format: demosaic_format,
             display_linear_texture,
-            tone_stats_buffer,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
             mask_texture,
@@ -2323,15 +2335,58 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Executes one export tile using the preview pipeline's cached global
-    /// tone statistics. The tile still builds its own halo-aware tone guide,
-    /// but skipping histogram reduction prevents tile-to-tile tonal seams.
+    /// Clears the reusable histogram before a full-resolution tiled analysis.
+    pub fn begin_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw export tone histogram clear"),
+        });
+        encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Demosaics one native-resolution tile and adds only its non-halo core to
+    /// the shared export histogram. The bounds in `params` prevent duplicated
+    /// halo pixels from biasing the full-image percentiles.
+    pub fn accumulate_export_tone_tile(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+    ) {
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw native-resolution export tone tile"),
+        });
+        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_prepare_pass_index + 1,
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Reduces the histogram accumulated from every native-resolution core.
+    pub fn finish_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw export tone histogram reduction"),
+        });
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_reduce_pass_index,
+            self.tone_reduce_pass_index + 1,
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Executes one export tile using the full-resolution histogram cached by
+    /// `finish_export_tone_analysis`. The tile still builds its own halo-aware
+    /// tone guide; skipping reduction keeps the global statistics unchanged.
     pub fn dispatch_export_tile(
         &self,
         queue: &wgpu::Queue,
         device: &wgpu::Device,
         params: &GpuParams,
-        global_tone_source: &RawGpuPipeline,
     ) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2343,13 +2398,6 @@ impl RawGpuPipeline {
             &mut encoder,
             self.tone_prepare_pass_index,
             self.tone_reduce_pass_index,
-        );
-        encoder.copy_buffer_to_buffer(
-            &global_tone_source.tone_stats_buffer,
-            0,
-            &self.tone_stats_buffer,
-            0,
-            2 * std::mem::size_of::<[f32; 4]>() as u64,
         );
         self.encode_pass_range(&mut encoder, self.tone_stage_end, self.passes.len());
         queue.submit(Some(encoder.finish()));
@@ -3373,7 +3421,7 @@ mod tests {
         // Sixteen scalar values keep the stable 64-byte prefix. The two
         // darktable sigmoid vec4s follow the local-tone controls, then the
         // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 6208);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 6224);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
@@ -3408,31 +3456,35 @@ mod tests {
         assert_eq!(std::mem::offset_of!(super::GpuParams, width), 704);
         assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 712);
         assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 720);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 736);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 800);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 816);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 832);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 960);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1088);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1216);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1344);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2240);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, tone_histogram_bounds),
+            736
+        );
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 752);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 816);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 832);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 848);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 976);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1104);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1232);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1360);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2256);
         assert_eq!(
             std::mem::offset_of!(super::GpuParams, mask_curve_red_0),
-            2368
+            2384
         );
         assert_eq!(
             std::mem::offset_of!(super::GpuParams, mask_curve_green_0),
-            3392
+            3408
         );
         assert_eq!(
             std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
-            4416
+            4432
         );
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5440);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5456);
         assert_eq!(
             std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
-            6080
+            6096
         );
     }
 

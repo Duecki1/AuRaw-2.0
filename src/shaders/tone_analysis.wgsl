@@ -21,7 +21,11 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     // transform. Deliberately omit only the user's creative Exposure control,
     // keeping the histogram stable while that slider moves.
     let working = map_negative_gamut(cam_to_working(camera_rgb));
-    let hue_sat = map_negative_gamut(apply_profile_hue_sat(working));
+    // Match the rendered DCP order: user white balance precedes the profile's
+    // HueSat map. Omitting WB here made adaptive profile statistics describe a
+    // different colour/luminance signal than the final render.
+    let white_balanced = map_negative_gamut(apply_temperature_tint(working));
+    let hue_sat = map_negative_gamut(apply_profile_hue_sat(white_balanced));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     let exposed = hue_sat * exp2(profile_exposure_ev);
     let looked = apply_profile_look(exposed);
@@ -66,7 +70,12 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Histogram every source pixel rather than the cell average. This
             // preserves small specular highlights and makes the 99.5th
             // percentile independent of the reduced guide resolution.
-            atomicAdd(&tone_histogram.bins[tone_ev_to_bin(ev)], 1u);
+            let histogram_min = params.tone_histogram_bounds.xy;
+            let histogram_max = params.tone_histogram_bounds.zw;
+            if x >= histogram_min.x && y >= histogram_min.y
+                && x < histogram_max.x && y < histogram_max.y {
+                atomicAdd(&tone_histogram.bins[tone_ev_to_bin(ev)], 1u);
+            }
             x = x + 1u;
         }
         y = y + 1u;

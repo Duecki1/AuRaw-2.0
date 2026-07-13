@@ -6,9 +6,11 @@ ABI=${1:-arm64-v8a}
 API=26
 LIBRAW_VERSION=0.22.1
 LIBRAW_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
+LIBRAW_ARCHIVE_SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
 EXPECTED_NDK_VERSION=27.0.12077973
 EXPECTED_CMAKE_VERSION=3.22.1
 LIBRAW_CMAKE_COMMIT=eb98e4325aef2ce85d2eb031c2ff18640ca616d3
+LIBRAW_CMAKE_ARCHIVE_SHA256=3cd218bf6d1254de86e27269541277fbfc5bae57a9002ce0b46fbe2a97088b43
 
 case "$ABI" in
     arm64-v8a|armeabi-v7a|x86|x86_64) ;;
@@ -59,6 +61,10 @@ command -v curl >/dev/null 2>&1 || {
     echo "curl is required to download LibRaw" >&2
     exit 1
 }
+command -v sha256sum >/dev/null 2>&1 || {
+    echo "sha256sum is required to verify LibRaw sources" >&2
+    exit 1
+}
 unset AR CC CFLAGS CPPFLAGS CXX CXXFLAGS LDFLAGS RANLIB
 
 SRC_ROOT="$ROOT/android/native/src"
@@ -78,20 +84,38 @@ if [ "${AURAW_REBUILD_LIBRAW:-0}" != 1 ] \
     exit 0
 fi
 
-if [ ! -f "$LIBRAW_SRC/libraw/libraw.h" ]; then
+if [ ! -f "$LIBRAW_SRC/libraw/libraw.h" ] \
+    || [ ! -f "$LIBRAW_SRC/.auraw-archive-sha256" ] \
+    || [ "$(cat "$LIBRAW_SRC/.auraw-archive-sha256")" != "$LIBRAW_ARCHIVE_SHA256" ]; then
+    LIBRAW_ARCHIVE=$(mktemp "$SRC_ROOT/.libraw.XXXXXX.tar.gz")
+    trap 'rm -f "${LIBRAW_ARCHIVE:-}" "${CMAKE_ARCHIVE:-}"' EXIT HUP INT TERM
+    curl --fail --location --proto "=https" --tlsv1.2 --retry 3 \
+        --output "$LIBRAW_ARCHIVE" \
+        "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_REVISION.tar.gz"
+    printf '%s  %s\n' "$LIBRAW_ARCHIVE_SHA256" "$LIBRAW_ARCHIVE" | sha256sum --check --status
     rm -rf "$LIBRAW_SRC"
     mkdir -p "$LIBRAW_SRC"
-    curl --fail --location --proto "=https" --tlsv1.2 --retry 3 \
-        "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_REVISION.tar.gz" \
-        | tar -xz --strip-components=1 -C "$LIBRAW_SRC"
+    tar -xzf "$LIBRAW_ARCHIVE" --strip-components=1 -C "$LIBRAW_SRC"
+    printf '%s\n' "$LIBRAW_ARCHIVE_SHA256" > "$LIBRAW_SRC/.auraw-archive-sha256"
+    rm -f "$LIBRAW_ARCHIVE"
+    LIBRAW_ARCHIVE=
 fi
 
-if [ ! -f "$CMAKE_SRC/CMakeLists.txt" ]; then
+if [ ! -f "$CMAKE_SRC/CMakeLists.txt" ] \
+    || [ ! -f "$CMAKE_SRC/.auraw-archive-sha256" ] \
+    || [ "$(cat "$CMAKE_SRC/.auraw-archive-sha256")" != "$LIBRAW_CMAKE_ARCHIVE_SHA256" ]; then
+    CMAKE_ARCHIVE=$(mktemp "$SRC_ROOT/.libraw-cmake.XXXXXX.tar.gz")
+    trap 'rm -f "${LIBRAW_ARCHIVE:-}" "${CMAKE_ARCHIVE:-}"' EXIT HUP INT TERM
+    curl --fail --location --proto "=https" --tlsv1.2 --retry 3 \
+        --output "$CMAKE_ARCHIVE" \
+        "https://github.com/LibRaw/LibRaw-cmake/archive/$LIBRAW_CMAKE_COMMIT.tar.gz"
+    printf '%s  %s\n' "$LIBRAW_CMAKE_ARCHIVE_SHA256" "$CMAKE_ARCHIVE" | sha256sum --check --status
     rm -rf "$CMAKE_SRC"
     mkdir -p "$CMAKE_SRC"
-    curl --fail --location --proto "=https" --tlsv1.2 --retry 3 \
-        "https://github.com/LibRaw/LibRaw-cmake/archive/$LIBRAW_CMAKE_COMMIT.tar.gz" \
-        | tar -xz --strip-components=1 -C "$CMAKE_SRC"
+    tar -xzf "$CMAKE_ARCHIVE" --strip-components=1 -C "$CMAKE_SRC"
+    printf '%s\n' "$LIBRAW_CMAKE_ARCHIVE_SHA256" > "$CMAKE_SRC/.auraw-archive-sha256"
+    rm -f "$CMAKE_ARCHIVE"
+    CMAKE_ARCHIVE=
 fi
 
 # LibRaw intentionally maintains its CMake files in a companion repository.

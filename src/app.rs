@@ -1030,13 +1030,6 @@ impl AurawApp {
             self.notice = Some(format!("Could not prepare Android export cache: {error}"));
             return;
         }
-        if let Ok(entries) = std::fs::read_dir(&export_dir) {
-            for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1050,7 +1043,7 @@ impl AurawApp {
             return;
         }
 
-        let (Some(raw), Some(preview_raw)) = (&self.loaded_raw, &self.preview_raw) else {
+        let Some(raw) = &self.loaded_raw else {
             return;
         };
         let Some(render_state) = frame.wgpu_render_state() else {
@@ -1070,7 +1063,6 @@ impl AurawApp {
             render_state.device.clone(),
             render_state.queue.clone(),
             Arc::clone(raw),
-            Arc::clone(preview_raw),
             self.exposure,
             self.masks.clone(),
             path,

@@ -82,6 +82,8 @@ struct Params {
     full_height: u32,
     _pad0: u32,
     _pad1: u32,
+    // Local half-open rectangle included in a tiled full-resolution histogram.
+    tone_histogram_bounds: vec4<u32>,
     // DCP/ICC LUT metadata: dimensions and packed-buffer offset.
     profile_hue_sat: vec4<u32>,
     profile_look: vec4<u32>,
