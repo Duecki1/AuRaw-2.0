@@ -157,12 +157,14 @@ fn verify_model(path: &Path) -> Result<()> {
 
 fn sha256_file(path: &Path) -> Result<[u8; 32]> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    sha256_reader(&mut file).with_context(|| format!("hash {}", path.display()))
+}
+
+fn sha256_reader(reader: &mut impl Read) -> Result<[u8; 32]> {
     let mut hasher = Sha256Context::new(&SHA256);
     let mut buffer = [0u8; 256 * 1024];
     loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("hash {}", path.display()))?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -280,8 +282,9 @@ fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: Option<&str>
         "selected ONNX Runtime has an implausible size of {} bytes",
         metadata.len()
     );
-    let actual_sha256 =
-        sha256_file_hex(&runtime_path).context("verify selected ONNX Runtime SHA-256")?;
+    let (runtime_load_path, _verified_runtime_handle, actual_sha256) =
+        verified_runtime_load_path(&runtime_path)
+            .context("stage selected ONNX Runtime for race-free loading")?;
     anyhow::ensure!(
         actual_sha256 == expected_sha256,
         "selected ONNX Runtime changed after approval: expected SHA-256 {expected_sha256}, found {actual_sha256}; select it again only if you trust the replacement"
@@ -292,7 +295,7 @@ fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: Option<&str>
             "a different ONNX Runtime is already active in this process; restart AuRaw before changing the pinned runtime"
         );
     }
-    let initialized = RUNTIME_INITIALIZED.get_or_init(|| match ort::init_from(&runtime_path) {
+    let initialized = RUNTIME_INITIALIZED.get_or_init(|| match ort::init_from(&runtime_load_path) {
         Ok(builder) => {
             if builder.with_name("AuRaw").commit() {
                 let _ =
@@ -319,6 +322,73 @@ fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: Option<&str>
         "a different ONNX Runtime is already active in this process; restart AuRaw before changing the pinned runtime"
     );
     Ok(())
+}
+
+/// Returns a path whose bytes are the bytes that were hashed, plus an open
+/// handle that must remain alive through `dlopen`/runtime initialization.
+#[cfg(target_os = "linux")]
+fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::raw::{c_char, c_int, c_uint};
+
+    unsafe extern "C" {
+        fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
+        fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
+    }
+
+    const MFD_CLOEXEC: c_uint = 0x0001;
+    const MFD_ALLOW_SEALING: c_uint = 0x0002;
+    const F_ADD_SEALS: c_int = 1033;
+    const F_SEAL_SEAL: c_int = 0x0001;
+    const F_SEAL_SHRINK: c_int = 0x0002;
+    const F_SEAL_GROW: c_int = 0x0004;
+    const F_SEAL_WRITE: c_int = 0x0008;
+
+    let mut source = File::open(path)
+        .with_context(|| format!("open selected ONNX Runtime {}", path.display()))?;
+    let name = CString::new("auraw-verified-onnx-runtime").expect("literal has no NUL");
+    let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC | MFD_ALLOW_SEALING) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("create sealed runtime file");
+    }
+    let mut sealed = unsafe { File::from_raw_fd(fd) };
+    let mut hasher = Sha256Context::new(&SHA256);
+    let mut buffer = [0u8; 256 * 1024];
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .with_context(|| format!("read selected ONNX Runtime {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        sealed
+            .write_all(&buffer[..read])
+            .context("copy selected ONNX Runtime into sealed memory")?;
+    }
+    sealed.sync_all().context("flush sealed ONNX Runtime")?;
+    let digest: [u8; 32] =
+        hasher.finish().as_ref().try_into().map_err(|_| {
+            anyhow::anyhow!("SHA-256 implementation returned the wrong digest length")
+        })?;
+    let actual_sha256 = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    let seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
+    if unsafe { fcntl(sealed.as_raw_fd(), F_ADD_SEALS, seals) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("seal verified ONNX Runtime bytes");
+    }
+    let load_path = PathBuf::from(format!("/proc/self/fd/{}", sealed.as_raw_fd()));
+    Ok((load_path, Some(sealed), actual_sha256))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
+    let digest = sha256_file_hex(path).context("verify selected ONNX Runtime SHA-256")?;
+    Ok((path.to_path_buf(), None, digest))
 }
 
 #[cfg(target_os = "android")]

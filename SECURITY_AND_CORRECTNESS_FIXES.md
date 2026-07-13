@@ -9,8 +9,11 @@ issues.
 - Desktop builds no longer download, extract, or automatically select ONNX
   Runtime native libraries.
 - A desktop runtime must be selected locally. Its canonical path and SHA-256
-  are persisted, and the file is rehashed immediately before dynamic loading.
-  A different runtime cannot be activated later in the same process.
+  are persisted. On Linux the selected bytes are copied and hashed in one
+  pass, sealed in an anonymous `memfd`, and loaded through that descriptor, so
+  pathname replacement cannot change the bytes between verification and
+  dynamic loading. A different runtime cannot be activated later in the same
+  process.
 - The BiRefNet model is pinned to an exact SHA-256 and byte length. Existing
   cache entries are revalidated; downloads are streamed through a hard size
   limit into a unique temporary file, synchronized, verified, and renamed only
@@ -31,6 +34,12 @@ issues.
 - Invalid dimensions are blocked in the UI and checked again in the worker.
   Incomplete exports remain in unique `.part` files and are removed on failure;
   only a complete PNG is published to the destination.
+- Android document import enforces the same 2 GB input cap both from provider
+  metadata and while streaming, handles zero-progress reads, and removes a
+  partial cache file on error. Export startup no longer removes other regular
+  files from the shared cache directory.
+- Unix RAW paths are passed to LibRaw as their original `OsStr` bytes; invalid
+  UTF-8 filenames are no longer replaced by lossy Unicode text.
 
 ## Export seams and color correctness
 
@@ -38,9 +47,22 @@ issues.
 - RAW processing runs at native resolution. Export reads the developed,
   post-tone-map display-linear Rec.2020 surface, performs linear-light Lanczos
   resampling, applies the output transform once, and writes sRGB PNG bytes.
-- The export tile halo is 104 pixels. This covers the widest current Glow
-  support radius (97 pixels) and remains aligned to the global guide grid,
-  preventing cross-tile filter seams.
+- The export tile halo is 232 pixels. It is derived from cumulative support:
+  initial and guided highlight reconstruction, the full demosaic chain, local
+  effects, Glow, and color-mixer stabilization. It remains aligned to the
+  global guide grid.
+- Export tone statistics are accumulated from every native-resolution tile
+  core before rendering. Halo pixels are excluded, the result is reduced once,
+  and no preview proxy participates in export highlight/shadow percentiles.
+- Adaptive tone analysis now applies user white balance before the DCP HueSat
+  map, matching the rendered camera-profile order.
+
+## Build input trust
+
+- GitHub Actions are pinned to full commit IDs rather than mutable major tags.
+- The LibRaw and LibRaw-cmake revisions remain commit-pinned, and their archive
+  SHA-256 values are verified before extraction. Cached source directories are
+  accepted only when their recorded archive digest matches.
 
 ## CI and parity evidence
 
@@ -56,23 +78,21 @@ issues.
 - Android CI performs a real LibRaw-enabled native build instead of treating a
   no-LibRaw check as proof that the RAW-enabled application builds.
 
-## Validation performed for this archive
+## Validation performed in the repaired worktree
 
-- `python3 -m pytest -q`: **62 passed**.
-- `python3 scripts/check-source-tree.py`: passed.
-- Python bytecode compilation, shell syntax checks, and TOML parsing: passed.
-- Rust formatting check: passed.
-- Rust 1.92-compatible `cargo check --locked --all-targets`: passed.
-- Rust library and runtime WGSL tests: **49 passed, 0 failed**, including the
-  live GPU render/readback integration test on the available adapter.
-- `cargo clippy --locked --all-targets`: completed with no errors. Existing
-  advisory warnings remain because CI does not promote warnings to errors.
+- `python3 -m pytest -q`: **66 passed**.
+- `python3 scripts/validate_camera_profiles.py`: **60/60 passed**.
+- `cargo fmt --all -- --check`: passed.
+- `cargo check --locked --all-targets`: passed.
+- `cargo test --locked --all-targets`: **61 passed, 0 failed**, including WGSL
+  parsing/validation and live GPU render/readback on the available adapter.
+- `cargo clippy --locked --all-targets`: completed with no errors; existing
+  advisory warnings remain.
+- Offline Android Java compilation (`:app:compileDebugJavaWithJavac`): passed.
+- `sh -n scripts/build-android-libraw.sh`: passed.
 
 ## Local verification limits
 
-- The container did not provide the LibRaw development package, so local Rust
-  checks used the project's explicit no-LibRaw build mode. The repaired Linux
-  and Android CI jobs install/build LibRaw and exercise the RAW-enabled paths.
-- The exact stable `1.92.0` toolchain was unavailable locally; validation used
-  `rustc 1.92.0-nightly (2025-09-24)`, Cargo 1.92, matching Clippy, and rustfmt.
-- Android packaging was not executed locally.
+- `scripts/check-source-tree.py` is currently blocked by pre-existing generated
+  `android/app/src/main/jniLibs/arm64-v8a/*.so` files in this checkout.
+- Android packaging was not executed as part of this validation pass.

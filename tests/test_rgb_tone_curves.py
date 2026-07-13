@@ -31,7 +31,7 @@ def test_rgb_curve_uniforms_match_between_rust_and_wgsl() -> None:
             field = f"tone_curve_{channel}_{part}"
             assert f"{field}: [f32; 4]" in GPU
             assert f"{field}: vec4<f32>" in COMMON
-    assert "size_of::<super::GpuParams>(), 6208" in GPU
+    assert "size_of::<super::GpuParams>(), 6224" in GPU
 
 
 def test_channel_curves_use_monotone_scene_referred_processing() -> None:

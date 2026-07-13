@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 use super::color_profile::CameraProfile;
+#[allow(unused_imports)]
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 
@@ -100,6 +101,9 @@ mod libraw_loader {
     use std::os::raw::c_char;
     use std::path::Path;
 
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
     const MAX_DCP_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
     // Rec.2020 and the camera profiles used here are D65-referred. Normalizing
@@ -178,8 +182,7 @@ mod libraw_loader {
     ) -> Result<LoadedRaw> {
         validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW input")?;
 
-        let c_path = CString::new(path.to_string_lossy().as_bytes())
-            .context("RAW path contains an interior NUL byte")?;
+        let c_path = path_to_libraw_cstring(path)?;
         let ctx = LibRawContext::new()?;
 
         check_libraw(
@@ -192,6 +195,24 @@ mod libraw_loader {
         check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
 
         unsafe { loaded_raw_from_context(&ctx, dcp_profile) }
+    }
+
+    #[cfg(unix)]
+    fn path_to_libraw_cstring(path: &Path) -> Result<CString> {
+        CString::new(path.as_os_str().as_bytes())
+            .with_context(|| format!("RAW path contains an interior NUL byte: {}", path.display()))
+    }
+
+    #[cfg(not(unix))]
+    fn path_to_libraw_cstring(path: &Path) -> Result<CString> {
+        let utf8 = path.to_str().with_context(|| {
+            format!(
+                "LibRaw requires a Unicode path on this platform: {}",
+                path.display()
+            )
+        })?;
+        CString::new(utf8.as_bytes())
+            .with_context(|| format!("RAW path contains an interior NUL byte: {}", path.display()))
     }
 
     struct LibRawContext {

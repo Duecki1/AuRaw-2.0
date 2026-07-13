@@ -80,16 +80,30 @@ def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
     assert "settings.keep_metadata" in EXPORT
 
 
-def test_export_halo_covers_the_widest_glow_filter_support() -> None:
+def test_export_halo_covers_cumulative_spatial_support() -> None:
     shader = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
-    match = re.search(r"pub const EXPORT_TILE_HALO: u32 = (\d+);", PROCESSING)
-    assert match is not None
-    halo = int(match.group(1))
+    highlight = (ROOT / "src/shaders/highlight_lch_pass.wgsl").read_text(encoding="utf-8")
     # glow_blur_at spans +/-2 * step_far and glow_source_at reaches one
     # additional pixel, so the current shader needs a 97-pixel radius.
     assert "let step_far = min(step_near * 2, 48);" in shader
     assert "for (var ky = -2; ky <= 2; ky = ky + 1)" in shader
     assert "for (var kx = -2; kx <= 2; kx = kx + 1)" in shader
-    assert halo >= 2 * 48 + 1
-    assert halo % 8 == 0
+    assert "2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 1 + 1)" in PROCESSING
+    for radius in (16, 8, 4, 2, 1):
+        assert f"run_highlight_guided_pass(gid, {radius}," in highlight
+    assert "const EXPORT_CUMULATIVE_SUPPORT" in PROCESSING
+    assert "EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8" in PROCESSING
+    assert "GLOW_SUPPORT: u32 = 97" in PROCESSING
     assert "(EXPORT_TILE_HALO..=512).contains(&spec.halo)" in EXPORT
+
+
+def test_export_tone_statistics_cover_native_resolution_tile_cores() -> None:
+    gpu = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+    tone = (ROOT / "src/shaders/tone_analysis.wgsl").read_text(encoding="utf-8")
+    assert "preview_raw" not in EXPORT
+    assert "begin_export_tone_analysis" in EXPORT
+    assert "accumulate_export_tone_tile" in EXPORT
+    assert "finish_export_tone_analysis" in EXPORT
+    assert ".with_tone_histogram_bounds(" in EXPORT
+    assert "tone_histogram_bounds: [u32; 4]" in gpu
+    assert "params.tone_histogram_bounds" in tone

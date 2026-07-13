@@ -1,7 +1,6 @@
 use super::{
     extract_padded_tile, ExposureParams, GpuParams, IccOutputTransform, LoadedRaw, MaskStack,
-    ProcessingQuality, ProcessingStage, RawGpuPipeline, TilePlan, TileSpec, EXPORT_TILE_HALO,
-    MAX_LOCAL_MASKS,
+    ProcessingQuality, RawGpuPipeline, TilePlan, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use anyhow::{Context, Result};
 use eframe::wgpu;
@@ -166,7 +165,6 @@ pub fn spawn_tiled_png_export(
     device: wgpu::Device,
     queue: wgpu::Queue,
     raw: Arc<LoadedRaw>,
-    preview_raw: Arc<LoadedRaw>,
     exposure: ExposureParams,
     masks: MaskStack,
     path: PathBuf,
@@ -190,7 +188,6 @@ pub fn spawn_tiled_png_export(
                     &device,
                     &queue,
                     &raw,
-                    &preview_raw,
                     &exposure,
                     &masks,
                     &temporary,
@@ -232,7 +229,6 @@ fn export_tiled_png(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     raw: &LoadedRaw,
-    preview_raw: &LoadedRaw,
     exposure: &ExposureParams,
     masks: &MaskStack,
     path: &Path,
@@ -244,25 +240,6 @@ fn export_tiled_png(
     events: &mpsc::Sender<ExportEvent>,
 ) -> Result<()> {
     validate_export_dimensions(output_width, output_height)?;
-    let global_params = GpuParams::new(exposure, masks, preview_raw);
-    let global_tone_source = RawGpuPipeline::new_headless_with_quality(
-        device,
-        queue,
-        preview_raw,
-        &global_params,
-        ProcessingQuality::High,
-    )
-    .context("create global tone-analysis pipeline")?;
-    upload_mask_atlas(
-        &global_tone_source,
-        queue,
-        masks,
-        preview_raw.width,
-        preview_raw.height,
-    )?;
-    global_tone_source.dispatch_stage(queue, device, &global_params, ProcessingStage::Raw);
-    global_tone_source.dispatch_stage(queue, device, &global_params, ProcessingStage::Tone);
-
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
     let first = *plan
         .tiles
@@ -287,6 +264,38 @@ fn export_tiled_png(
     )
     .context("create reusable full-quality export pipeline")?;
     upload_mask_atlas(&tile_pipeline, queue, masks, raw.width, raw.height)?;
+
+    // Establish one histogram from every full-resolution source pixel before
+    // rendering output tiles. Reusing the tile pipeline keeps peak memory
+    // bounded; restricting each dispatch to its core avoids counting halos.
+    tile_pipeline.begin_export_tone_analysis(queue, device);
+    for (index, tile) in plan.tiles.iter().copied().enumerate() {
+        let tile_raw = if index == 0 {
+            first_raw.clone()
+        } else {
+            extract_padded_tile(raw, tile)
+        };
+        tile_pipeline
+            .upload_raw_tile(queue, &tile_raw)
+            .with_context(|| format!("upload tone-analysis tile {}", index + 1))?;
+        let params = GpuParams::new_for_tile(
+            exposure,
+            masks,
+            &tile_raw,
+            tile.global_origin_x,
+            tile.global_origin_y,
+            raw.width,
+            raw.height,
+        )
+        .with_tone_histogram_bounds(
+            tile.local_core_x,
+            tile.local_core_y,
+            tile.core_width,
+            tile.core_height,
+        );
+        tile_pipeline.accumulate_export_tone_tile(queue, device, &params);
+    }
+    tile_pipeline.finish_export_tone_analysis(queue, device);
 
     let file = OpenOptions::new()
         .write(true)
@@ -359,7 +368,7 @@ fn export_tiled_png(
                 raw.width,
                 raw.height,
             );
-            tile_pipeline.dispatch_export_tile(queue, device, &params, &global_tone_source);
+            tile_pipeline.dispatch_export_tile(queue, device, &params);
             let rgb = tile_pipeline
                 .read_display_linear_region_blocking(
                     device,
