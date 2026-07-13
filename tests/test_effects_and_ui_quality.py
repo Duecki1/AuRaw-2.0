@@ -94,8 +94,6 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
         "exposure.shadows": ("exposure.shadows", "params.basic_tone.y"),
         "exposure.whites": ("exposure.whites", "params.basic_tone.z"),
         "exposure.blacks": ("exposure.blacks", "params.basic_tone.w"),
-        "exposure.temperature": ("exposure.temperature.clamp", "params.temperature"),
-        "exposure.tint": ("exposure.tint.clamp", "params.tint"),
         "exposure.vibrance": ("vibrance: exposure.vibrance", "params.vibrance"),
         "exposure.saturation": ("saturation: exposure.saturation", "params.saturation"),
         "exposure.texture": ("exposure.texture", "params.presence.x"),
@@ -114,6 +112,14 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
         assert f"&mut {ui_field}" in SIDEBAR, ui_field
         assert rust_mapping in GPU, ui_field
         assert shader_use in ALL_SHADERS, ui_field
+
+    # Global WB is camera/profile metadata-driven on the CPU; its result reaches
+    # shaders through the live camera matrix and DCP interpolation weight.
+    for ui_field in ("exposure.temperature", "exposure.tint"):
+        assert f"&mut {ui_field}" in SIDEBAR, ui_field
+        assert f"{ui_field}.clamp" in GPU, ui_field
+    assert "raw.adjusted_camera_transform(" in GPU
+    assert "cam_to_working(camera_rgb)" in ALL_SHADERS
 
     # Color Mixer arrays, advanced rendering, and RAW expert controls.
     for name in ("hsl_hue", "hsl_saturation", "hsl_luminance"):

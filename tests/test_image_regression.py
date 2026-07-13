@@ -12,8 +12,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "regression"))
 
+from iqr.cli import (  # noqa: E402
+    _require_candidate_metadata,
+    _require_independent_backend_provenance,
+    _require_matching_provenance,
+)
 from iqr.io import LinearImage, load_linear_image, save_linear_image  # noqa: E402
-from iqr.manifest import load_manifest, validate_manifest  # noqa: E402
+from iqr.manifest import Scene, load_manifest, validate_manifest  # noqa: E402
 from iqr.metrics import Roi, compare_images, convolve2d, delta_e_ciede2000  # noqa: E402
 from iqr.report import evaluate_thresholds  # noqa: E402
 from iqr.reference import load_reference_engines, validate_reference_engines  # noqa: E402
@@ -203,6 +208,76 @@ scenes:
             raw.write_bytes(b"changed")
             errors = validate_manifest(manifest, verify_files=True)
             self.assertTrue(any("SHA-256 mismatch" in error for error in errors))
+
+
+class CandidateProvenanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.scene = Scene(
+            scene_id="provenance",
+            raw=Path("fixture.raw"),
+            sha256="a" * 64,
+            cfa="bayer",
+            tags=(),
+            license="CC0-1.0",
+            source="test",
+            redistributable=True,
+        )
+
+    def metadata(self, backend: str, implementation: str) -> dict[str, object]:
+        return {
+            "backend": backend,
+            "implementation": implementation,
+            "implementation_fingerprint": f"{implementation}@revision",
+            "source_revision": "revision",
+            "raw_sha256": self.scene.sha256,
+            "renderer_sha256": ("b" if backend == "cpu" else "c") * 64,
+            "color_space": "linear-rec2020-d65",
+            "transfer": "linear",
+        }
+
+    def test_rejects_command_label_that_disagrees_with_artifact_backend(self) -> None:
+        with self.assertRaisesRegex(ValueError, "backend"):
+            _require_candidate_metadata(
+                self.metadata("gpu", "auraw-wgpu"),
+                expected_backend="cpu",
+                scene=self.scene,
+                color_space="linear-rec2020-d65",
+            )
+
+    def test_rejects_missing_or_unverified_renderer_identity(self) -> None:
+        metadata = self.metadata("gpu", "auraw-wgpu")
+        metadata["renderer_sha256"] = "unknown"
+        with self.assertRaisesRegex(ValueError, "renderer_sha256"):
+            _require_candidate_metadata(
+                metadata,
+                expected_backend="gpu",
+                scene=self.scene,
+                color_space="linear-rec2020-d65",
+            )
+
+    def test_cpu_gpu_pair_requires_independent_implementations(self) -> None:
+        cpu = self.metadata("cpu", "same-renderer")
+        gpu = self.metadata("gpu", "same-renderer")
+        with self.assertRaisesRegex(ValueError, "distinct implementation"):
+            _require_independent_backend_provenance(cpu, gpu, self.scene.scene_id)
+
+    def test_cpu_gpu_pair_rejects_same_renderer_executable(self) -> None:
+        cpu = self.metadata("cpu", "auraw-cpu-raw-stage-v1")
+        gpu = self.metadata("gpu", "auraw-wgpu-raw-stage-v1")
+        gpu["renderer_sha256"] = cpu["renderer_sha256"]
+        with self.assertRaisesRegex(ValueError, "independently hashed"):
+            _require_independent_backend_provenance(cpu, gpu, self.scene.scene_id)
+
+    def test_cpu_gpu_pair_accepts_distinct_provenance_from_same_revision(self) -> None:
+        cpu = self.metadata("cpu", "auraw-cpu-raw-stage-v1")
+        gpu = self.metadata("gpu", "auraw-wgpu-raw-stage-v1")
+        _require_independent_backend_provenance(cpu, gpu, self.scene.scene_id)
+
+    def test_determinism_pair_rejects_changed_renderer_provenance(self) -> None:
+        first = self.metadata("gpu", "auraw-wgpu-raw-stage-v1")
+        second = dict(first, renderer_sha256="d" * 64)
+        with self.assertRaisesRegex(ValueError, "renderer_sha256"):
+            _require_matching_provenance(first, second, self.scene.scene_id)
 
 
 class ReferenceEngineTests(unittest.TestCase):

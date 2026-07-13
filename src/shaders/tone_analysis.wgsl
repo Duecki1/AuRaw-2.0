@@ -20,6 +20,8 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     // the adaptive bounds describe the same signal that reaches the display
     // transform. Deliberately omit only the user's creative Exposure control,
     // keeping the histogram stable while that slider moves.
+    // Match the rendered DCP order and colour domain. Global white balance is
+    // already represented by the camera-specific transform in GpuParams.
     let working = map_negative_gamut(cam_to_working(camera_rgb));
     let hue_sat = map_negative_gamut(apply_profile_hue_sat(working));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
@@ -66,7 +68,12 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Histogram every source pixel rather than the cell average. This
             // preserves small specular highlights and makes the 99.5th
             // percentile independent of the reduced guide resolution.
-            atomicAdd(&tone_histogram.bins[tone_ev_to_bin(ev)], 1u);
+            let histogram_min = params.tone_histogram_bounds.xy;
+            let histogram_max = params.tone_histogram_bounds.zw;
+            if x >= histogram_min.x && y >= histogram_min.y
+                && x < histogram_max.x && y < histogram_max.y {
+                atomicAdd(&tone_histogram.bins[tone_ev_to_bin(ev)], 1u);
+            }
             x = x + 1u;
         }
         y = y + 1u;

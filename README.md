@@ -109,6 +109,28 @@ The Develop sidebar is divided into four tabs:
 
 PNG sizing can use the original dimensions, long edge, short edge, width,
 height, or a percentage while preserving the source aspect ratio. Upscaling is
-disabled by default. The **Keep metadata** option embeds the available source
-filename, camera make/model, original dimensions, output dimensions, software,
-and normalized orientation in PNG iTXt and eXIf metadata.
+disabled by default. Final-size resampling happens only after demosaic and tone
+processing, in display-linear Rec.2020, before a single sRGB output encoding;
+the sensor mosaic is never resized for final output. Export dimensions, pixel
+counts, tile working sets, and temporary files are bounded, and the destination
+is published only after a complete PNG has been written. The **Keep metadata**
+option embeds the available source filename, camera make/model, original
+dimensions, output dimensions, software, and normalized orientation in PNG iTXt
+and eXIf metadata.
+
+## Subject-selection runtime trust
+
+Desktop subject selection never downloads or extracts native runtime code.
+Choose a local ONNX Runtime library in Settings; AuRaw records its SHA-256 and
+revalidates that exact file before every dynamic load. The segmentation model
+is separately pinned by exact byte length and SHA-256, downloaded through a
+bounded temporary file, revalidated on cache hits, and atomically moved into
+the cache only after verification. On Linux, subject selection stays disabled
+until a local runtime has been selected and pinned.
+
+## Resource limits
+
+RAW dimensions, sensor dimensions, file size, embedded ICC data, model input,
+model output, export dimensions, export pixels, and export row buffers are
+checked before allocation or unpacking. Oversized or inconsistent inputs fail
+with an error rather than allowing unbounded memory or storage growth.

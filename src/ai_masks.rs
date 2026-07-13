@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::{session::Session, value::Tensor};
+use ring::digest::{Context as Sha256Context, SHA256};
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{mpsc, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(not(target_os = "android"))]
@@ -13,12 +15,20 @@ use std::sync::Mutex;
 
 pub const BIREFNET_MODEL_BYTES: u64 = 224_005_088;
 pub const BIREFNET_MODEL_URL: &str = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
+pub const BIREFNET_MODEL_SHA256_HEX: &str =
+    "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333";
+const BIREFNET_MODEL_SHA256: [u8; 32] = [
+    0x56, 0x00, 0x02, 0x43, 0x76, 0xf5, 0x72, 0xa5, 0x57, 0x87, 0x0a, 0x5e, 0xb0, 0xaf, 0xb1, 0xe5,
+    0x96, 0x16, 0x36, 0xbe, 0xf4, 0xe1, 0xe2, 0x21, 0x32, 0x02, 0x54, 0x67, 0xd0, 0xf0, 0x33, 0x33,
+];
 const MODEL_SIZE: u32 = 1024;
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 #[cfg(not(target_os = "android"))]
 static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+#[cfg(not(target_os = "android"))]
+static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[derive(Debug)]
@@ -65,6 +75,7 @@ impl Letterbox {
 pub fn spawn_subject_mask(
     model_path: PathBuf,
     runtime_path: Option<PathBuf>,
+    runtime_sha256: Option<String>,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
@@ -76,16 +87,16 @@ pub fn spawn_subject_mask(
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
-                    if !model_path.exists() {
-                        download_model(&model_path, &worker_sender)?;
-                    }
-                    #[cfg(target_os = "linux")]
-                    let runtime_path = match runtime_path {
-                        Some(path) => Some(path),
-                        None => Some(download_cpu_runtime(&model_path, &worker_sender)?),
-                    };
+                    ensure_model(&model_path, &worker_sender)?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
-                    infer_subject(&model_path, runtime_path.as_deref(), width, height, rgba)
+                    infer_subject(
+                        &model_path,
+                        runtime_path.as_deref(),
+                        runtime_sha256.as_deref(),
+                        width,
+                        height,
+                        rgba,
+                    )
                 })()
             }))
             .unwrap_or_else(|panic| {
@@ -110,170 +121,278 @@ pub fn spawn_subject_mask(
     receiver
 }
 
+fn ensure_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Result<()> {
+    match verify_model(path) {
+        Ok(()) => return Ok(()),
+        Err(error) if path.exists() => {
+            log::warn!(
+                "discarding untrusted BiRefNet cache {}: {error:#}",
+                path.display()
+            );
+            fs::remove_file(path)
+                .with_context(|| format!("remove invalid model cache {}", path.display()))?;
+        }
+        Err(_) => {}
+    }
+    download_model(path, events)?;
+    verify_model(path).context("verify published BiRefNet model")
+}
+
+fn verify_model(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("read BiRefNet model metadata {}", path.display()))?;
+    anyhow::ensure!(metadata.is_file(), "BiRefNet cache is not a regular file");
+    anyhow::ensure!(
+        metadata.len() == BIREFNET_MODEL_BYTES,
+        "BiRefNet model size mismatch: found {}, expected {BIREFNET_MODEL_BYTES}",
+        metadata.len()
+    );
+    let digest = sha256_file(path)?;
+    anyhow::ensure!(
+        digest == BIREFNET_MODEL_SHA256,
+        "BiRefNet model SHA-256 mismatch (expected {BIREFNET_MODEL_SHA256_HEX})"
+    );
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<[u8; 32]> {
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    sha256_reader(&mut file).with_context(|| format!("hash {}", path.display()))
+}
+
+fn sha256_reader(reader: &mut impl Read) -> Result<[u8; 32]> {
+    let mut hasher = Sha256Context::new(&SHA256);
+    let mut buffer = [0u8; 256 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finish();
+    digest
+        .as_ref()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("SHA-256 implementation returned the wrong digest length"))
+}
+
+pub(crate) fn sha256_file_hex(path: &Path) -> Result<String> {
+    Ok(sha256_file(path)?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create model cache {}", parent.display()))?;
     }
-    let temporary = path.with_extension("onnx.part");
-    let mut response = ureq::get(BIREFNET_MODEL_URL)
-        .call()
-        .context("download BiRefNet ONNX model")?;
-    let total = response
-        .body()
-        .content_length()
-        .unwrap_or(BIREFNET_MODEL_BYTES);
-    let mut reader = response.body_mut().as_reader();
-    let mut file =
-        File::create(&temporary).with_context(|| format!("create {}", temporary.display()))?;
-    let mut downloaded = 0u64;
-    let mut buffer = [0u8; 256 * 1024];
-    loop {
-        let read = reader.read(&mut buffer).context("read BiRefNet download")?;
-        if read == 0 {
-            break;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
+    let result = (|| -> Result<()> {
+        let mut response = ureq::get(BIREFNET_MODEL_URL)
+            .call()
+            .context("download BiRefNet ONNX model")?;
+        if let Some(length) = response.body().content_length() {
+            anyhow::ensure!(
+                length == BIREFNET_MODEL_BYTES,
+                "BiRefNet server declared {length} bytes, expected {BIREFNET_MODEL_BYTES}"
+            );
         }
-        file.write_all(&buffer[..read])
-            .context("write BiRefNet ONNX model")?;
-        downloaded += read as u64;
-        let _ = events.send(SubjectMaskEvent::DownloadProgress {
-            label: "BiRefNet model",
-            downloaded,
-            total,
-        });
-    }
-    file.sync_all().context("flush BiRefNet ONNX model")?;
-    if downloaded != BIREFNET_MODEL_BYTES {
-        let _ = fs::remove_file(&temporary);
-        anyhow::bail!(
+        let mut reader = response.body_mut().as_reader();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("create {}", temporary.display()))?;
+        let mut downloaded = 0u64;
+        let mut hasher = Sha256Context::new(&SHA256);
+        let mut buffer = [0u8; 256 * 1024];
+        loop {
+            let read = reader.read(&mut buffer).context("read BiRefNet download")?;
+            if read == 0 {
+                break;
+            }
+            downloaded = downloaded
+                .checked_add(read as u64)
+                .context("BiRefNet download byte count overflow")?;
+            anyhow::ensure!(
+                downloaded <= BIREFNET_MODEL_BYTES,
+                "BiRefNet download exceeded its pinned {BIREFNET_MODEL_BYTES}-byte size"
+            );
+            hasher.update(&buffer[..read]);
+            file.write_all(&buffer[..read])
+                .context("write BiRefNet ONNX model")?;
+            let _ = events.send(SubjectMaskEvent::DownloadProgress {
+                label: "BiRefNet model",
+                downloaded,
+                total: BIREFNET_MODEL_BYTES,
+            });
+        }
+        file.sync_all().context("flush BiRefNet ONNX model")?;
+        anyhow::ensure!(
+            downloaded == BIREFNET_MODEL_BYTES,
             "BiRefNet model size mismatch: received {downloaded}, expected {BIREFNET_MODEL_BYTES}"
         );
+        let digest: [u8; 32] = hasher.finish().as_ref().try_into().map_err(|_| {
+            anyhow::anyhow!("SHA-256 implementation returned the wrong digest length")
+        })?;
+        anyhow::ensure!(
+            digest == BIREFNET_MODEL_SHA256,
+            "BiRefNet model SHA-256 mismatch (expected {BIREFNET_MODEL_SHA256_HEX})"
+        );
+        fs::rename(&temporary, path)
+            .with_context(|| format!("publish BiRefNet model to {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    fs::rename(&temporary, path)
-        .with_context(|| format!("publish BiRefNet model to {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const CPU_RUNTIME_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz";
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const CPU_RUNTIME_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-aarch64-1.24.4.tgz";
-#[cfg(target_os = "linux")]
-const CPU_RUNTIME_FILE: &str = "libonnxruntime.so.1.24.4";
-
-#[cfg(target_os = "linux")]
-fn download_cpu_runtime(
-    model_path: &Path,
-    events: &mpsc::Sender<SubjectMaskEvent>,
-) -> Result<PathBuf> {
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    anyhow::bail!(
-        "the automatic CPU ONNX Runtime is unavailable for this Linux architecture; select a runtime in Settings"
-    );
-
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        let auraw_cache = model_path
-            .parent()
-            .and_then(Path::parent)
-            .context("invalid AuRaw model cache path")?;
-        let runtime_dir = auraw_cache.join("runtime/onnxruntime-1.24.4");
-        let runtime_path = runtime_dir.join(CPU_RUNTIME_FILE);
-        if runtime_path.is_file() {
-            return Ok(runtime_path);
-        }
-        fs::create_dir_all(&runtime_dir)
-            .with_context(|| format!("create CPU runtime cache {}", runtime_dir.display()))?;
-        let archive_path = runtime_dir.join("onnxruntime.tgz.part");
-        let temporary = runtime_path.with_extension("part");
-        let result = (|| {
-            let mut response = ureq::get(CPU_RUNTIME_URL)
-                .call()
-                .context("download CPU ONNX Runtime")?;
-            let total = response.body().content_length().unwrap_or(8_200_000);
-            let mut reader = response.body_mut().as_reader();
-            let mut archive_file = File::create(&archive_path)
-                .with_context(|| format!("create {}", archive_path.display()))?;
-            let mut downloaded = 0u64;
-            let mut buffer = [0u8; 256 * 1024];
-            loop {
-                let read = reader
-                    .read(&mut buffer)
-                    .context("read CPU runtime download")?;
-                if read == 0 {
-                    break;
-                }
-                archive_file
-                    .write_all(&buffer[..read])
-                    .context("write CPU runtime archive")?;
-                downloaded += read as u64;
-                let _ = events.send(SubjectMaskEvent::DownloadProgress {
-                    label: "CPU ONNX Runtime",
-                    downloaded,
-                    total,
-                });
-            }
-            archive_file
-                .sync_all()
-                .context("flush CPU runtime archive")?;
-
-            let archive_file = File::open(&archive_path)
-                .with_context(|| format!("open {}", archive_path.display()))?;
-            let decoder = flate2::read::GzDecoder::new(archive_file);
-            let mut archive = tar::Archive::new(decoder);
-            let mut found = false;
-            for entry in archive.entries().context("read CPU runtime archive")? {
-                let mut entry = entry.context("read CPU runtime archive entry")?;
-                let matches = entry
-                    .path()
-                    .ok()
-                    .and_then(|path| path.file_name().map(|name| name == CPU_RUNTIME_FILE))
-                    .unwrap_or(false);
-                if matches {
-                    let mut output = File::create(&temporary)
-                        .with_context(|| format!("create {}", temporary.display()))?;
-                    std::io::copy(&mut entry, &mut output).context("extract CPU ONNX Runtime")?;
-                    output.sync_all().context("flush CPU ONNX Runtime")?;
-                    found = true;
-                    break;
-                }
-            }
-            anyhow::ensure!(found, "CPU runtime library was missing from its archive");
-            fs::rename(&temporary, &runtime_path).with_context(|| {
-                format!("publish CPU ONNX Runtime to {}", runtime_path.display())
-            })?;
-            Ok(())
-        })();
-        let _ = fs::remove_file(&archive_path);
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result?;
-        Ok(runtime_path)
-    }
+    result
 }
 
 #[cfg(not(target_os = "android"))]
-fn initialize_runtime(runtime_path: Option<&Path>) -> Result<()> {
-    let runtime_path = runtime_path
+fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: Option<&str>) -> Result<()> {
+    let selected = runtime_path
         .context("no ONNX Runtime library is selected; choose one in Settings and try again")?;
-    let initialized = RUNTIME_INITIALIZED.get_or_init(|| {
-        ort::init_from(runtime_path)
-            .map(|builder| {
-                builder.with_name("AuRaw").commit();
-            })
-            .map_err(|error| {
-                format!(
-                    "could not load ONNX Runtime from {}: {error}",
-                    runtime_path.display()
+    let expected_sha256 = expected_sha256
+        .context("the selected ONNX Runtime has no pinned SHA-256; select it again in Settings")?;
+    anyhow::ensure!(
+        expected_sha256.len() == 64
+            && expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "the selected ONNX Runtime SHA-256 pin is invalid"
+    );
+    let runtime_path = fs::canonicalize(selected)
+        .with_context(|| format!("resolve selected ONNX Runtime {}", selected.display()))?;
+    let metadata = fs::metadata(&runtime_path)
+        .with_context(|| format!("inspect selected ONNX Runtime {}", runtime_path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "selected ONNX Runtime is not a regular file"
+    );
+    anyhow::ensure!(
+        (1_000_000..=1_000_000_000).contains(&metadata.len()),
+        "selected ONNX Runtime has an implausible size of {} bytes",
+        metadata.len()
+    );
+    let (runtime_load_path, _verified_runtime_handle, actual_sha256) =
+        verified_runtime_load_path(&runtime_path)
+            .context("stage selected ONNX Runtime for race-free loading")?;
+    anyhow::ensure!(
+        actual_sha256 == expected_sha256,
+        "selected ONNX Runtime changed after approval: expected SHA-256 {expected_sha256}, found {actual_sha256}; select it again only if you trust the replacement"
+    );
+    if let Some((loaded_path, loaded_sha256)) = DESKTOP_RUNTIME_IDENTITY.get() {
+        anyhow::ensure!(
+            loaded_path == &runtime_path && loaded_sha256 == &actual_sha256,
+            "a different ONNX Runtime is already active in this process; restart AuRaw before changing the pinned runtime"
+        );
+    }
+    let initialized = RUNTIME_INITIALIZED.get_or_init(|| match ort::init_from(&runtime_load_path) {
+        Ok(builder) => {
+            if builder.with_name("AuRaw").commit() {
+                let _ =
+                    DESKTOP_RUNTIME_IDENTITY.set((runtime_path.clone(), actual_sha256.clone()));
+                Ok(())
+            } else {
+                Err(
+                    "ONNX Runtime was already initialized before the selected pinned library could be committed"
+                        .to_owned(),
                 )
-            })
+            }
+        }
+        Err(error) => Err(format!(
+            "could not load ONNX Runtime from {}: {error}",
+            runtime_path.display()
+        )),
     });
-    initialized.clone().map_err(anyhow::Error::msg)
+    initialized.clone().map_err(anyhow::Error::msg)?;
+    let (loaded_path, loaded_sha256) = DESKTOP_RUNTIME_IDENTITY
+        .get()
+        .context("ONNX Runtime initialized without a pinned desktop identity")?;
+    anyhow::ensure!(
+        loaded_path == &runtime_path && loaded_sha256 == &actual_sha256,
+        "a different ONNX Runtime is already active in this process; restart AuRaw before changing the pinned runtime"
+    );
+    Ok(())
+}
+
+/// Returns a path whose bytes are the bytes that were hashed, plus an open
+/// handle that must remain alive through `dlopen`/runtime initialization.
+#[cfg(target_os = "linux")]
+fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::raw::{c_char, c_int, c_uint};
+
+    unsafe extern "C" {
+        fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
+        fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
+    }
+
+    const MFD_CLOEXEC: c_uint = 0x0001;
+    const MFD_ALLOW_SEALING: c_uint = 0x0002;
+    const F_ADD_SEALS: c_int = 1033;
+    const F_SEAL_SEAL: c_int = 0x0001;
+    const F_SEAL_SHRINK: c_int = 0x0002;
+    const F_SEAL_GROW: c_int = 0x0004;
+    const F_SEAL_WRITE: c_int = 0x0008;
+
+    let mut source = File::open(path)
+        .with_context(|| format!("open selected ONNX Runtime {}", path.display()))?;
+    let name = CString::new("auraw-verified-onnx-runtime").expect("literal has no NUL");
+    let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC | MFD_ALLOW_SEALING) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("create sealed runtime file");
+    }
+    let mut sealed = unsafe { File::from_raw_fd(fd) };
+    let mut hasher = Sha256Context::new(&SHA256);
+    let mut buffer = [0u8; 256 * 1024];
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .with_context(|| format!("read selected ONNX Runtime {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        sealed
+            .write_all(&buffer[..read])
+            .context("copy selected ONNX Runtime into sealed memory")?;
+    }
+    sealed.sync_all().context("flush sealed ONNX Runtime")?;
+    let digest: [u8; 32] =
+        hasher.finish().as_ref().try_into().map_err(|_| {
+            anyhow::anyhow!("SHA-256 implementation returned the wrong digest length")
+        })?;
+    let actual_sha256 = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    let seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
+    if unsafe { fcntl(sealed.as_raw_fd(), F_ADD_SEALS, seals) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("seal verified ONNX Runtime bytes");
+    }
+    let load_path = PathBuf::from(format!("/proc/self/fd/{}", sealed.as_raw_fd()));
+    Ok((load_path, Some(sealed), actual_sha256))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
+    let digest = sha256_file_hex(path).context("verify selected ONNX Runtime SHA-256")?;
+    Ok((path.to_path_buf(), None, digest))
 }
 
 #[cfg(target_os = "android")]
-fn initialize_runtime(_runtime_path: Option<&Path>) -> Result<()> {
+fn initialize_runtime(_runtime_path: Option<&Path>, _expected_sha256: Option<&str>) -> Result<()> {
     let initialized = RUNTIME_INITIALIZED.get_or_init(|| {
         ort::init().with_name("AuRaw").commit();
         Ok(())
@@ -353,11 +472,29 @@ fn create_session(model_path: &Path) -> Result<Session> {
 fn infer_subject(
     model_path: &Path,
     runtime_path: Option<&Path>,
+    runtime_sha256: Option<&str>,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
 ) -> Result<SubjectMaskResult> {
-    initialize_runtime(runtime_path)?;
+    const MAX_SUBJECT_MASK_PIXELS: u64 = 16_000_000;
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .context("subject-mask input dimensions overflow")?;
+    anyhow::ensure!(
+        pixels > 0 && pixels <= MAX_SUBJECT_MASK_PIXELS,
+        "subject-mask input {width}x{height} exceeds the {MAX_SUBJECT_MASK_PIXELS}-pixel limit"
+    );
+    let expected_bytes = pixels
+        .checked_mul(4)
+        .and_then(|value| usize::try_from(value).ok())
+        .context("subject-mask input byte count overflow")?;
+    anyhow::ensure!(
+        rgba.len() == expected_bytes,
+        "subject-mask RGBA buffer has {} bytes, expected {expected_bytes}",
+        rgba.len()
+    );
+    initialize_runtime(runtime_path, runtime_sha256)?;
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
         .context("invalid preview image for BiRefNet")?;
     let letterbox = Letterbox::for_image(width, height)?;
@@ -367,7 +504,7 @@ fn infer_subject(
         letterbox.height,
         FilterType::Lanczos3,
     );
-    let input = normalized_letterbox(&resized, letterbox);
+    let input = normalized_letterbox(&resized, letterbox)?;
     let input = Tensor::from_array(([1usize, 3, MODEL_SIZE as usize, MODEL_SIZE as usize], input))
         .context("create BiRefNet input tensor")?;
 
@@ -416,23 +553,37 @@ fn run_subject_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32
     anyhow::ensure!(shape.len() >= 2, "unexpected BiRefNet output shape {shape}");
     let output_height = shape[shape.len() - 2] as usize;
     let output_width = shape[shape.len() - 1] as usize;
+    let output_elements = output_width
+        .checked_mul(output_height)
+        .context("BiRefNet output dimensions overflow")?;
     anyhow::ensure!(
-        output_width > 0 && output_height > 0 && logits.len() >= output_width * output_height,
+        output_width > 0
+            && output_height > 0
+            && output_elements <= (MODEL_SIZE as usize * MODEL_SIZE as usize * 4)
+            && logits.len() >= output_elements,
         "invalid BiRefNet output shape {shape}"
     );
-    Ok((
-        output_width as u32,
-        output_height as u32,
-        logits[..output_width * output_height].to_vec(),
-    ))
+    let mut owned_logits = Vec::new();
+    owned_logits
+        .try_reserve_exact(output_elements)
+        .context("reserve BiRefNet output logits")?;
+    owned_logits.extend_from_slice(&logits[..output_elements]);
+    Ok((output_width as u32, output_height as u32, owned_logits))
 }
 
 fn normalized_letterbox(
     resized: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     letterbox: Letterbox,
-) -> Vec<f32> {
+) -> Result<Vec<f32>> {
     let plane = (MODEL_SIZE * MODEL_SIZE) as usize;
-    let mut input = vec![0.0; plane * 3];
+    let values = plane
+        .checked_mul(3)
+        .context("BiRefNet input size overflow")?;
+    let mut input = Vec::new();
+    input
+        .try_reserve_exact(values)
+        .context("reserve BiRefNet input tensor")?;
+    input.resize(values, 0.0);
     for channel in 0..3 {
         let padding = (0.0 - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
         input[channel * plane..(channel + 1) * plane].fill(padding);
@@ -449,7 +600,7 @@ fn normalized_letterbox(
             }
         }
     }
-    input
+    Ok(input)
 }
 
 fn restore_from_letterbox(
@@ -460,8 +611,18 @@ fn restore_from_letterbox(
     target_width: u32,
     target_height: u32,
 ) -> Result<Vec<u8>> {
-    let output_elements = (output_width * output_height) as usize;
-    let mut probabilities = Vec::with_capacity(output_elements);
+    let output_elements = usize::try_from(output_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(output_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .context("BiRefNet output dimensions overflow")?;
+    let mut probabilities = Vec::new();
+    probabilities
+        .try_reserve_exact(output_elements)
+        .context("reserve BiRefNet probability map")?;
     let mut minimum = f32::INFINITY;
     let mut maximum = f32::NEG_INFINITY;
     for &logit in logits.iter().take(output_elements) {
@@ -520,20 +681,5 @@ mod tests {
         assert_eq!(box_.height, MODEL_SIZE);
         assert_eq!(box_.offset_x, 256);
         assert_eq!(box_.offset_y, 0);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "downloads the official CPU ONNX Runtime"]
-    fn cpu_runtime_download_extracts_a_shared_library() {
-        let root =
-            std::env::temp_dir().join(format!("auraw-onnx-runtime-test-{}", std::process::id()));
-        let model_path = root.join("models/model.onnx");
-        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
-        let (sender, _receiver) = std::sync::mpsc::channel();
-        let runtime = super::download_cpu_runtime(&model_path, &sender).unwrap();
-        assert!(runtime.is_file());
-        assert!(std::fs::metadata(&runtime).unwrap().len() > 1_000_000);
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -25,6 +25,7 @@ import java.util.Locale;
 public final class AuRawActivity extends NativeActivity {
     private static final int OPEN_RAW_DOCUMENT = 1001;
     private static final int WRITE_EXPORT_PERMISSION = 1002;
+    private static final long MAX_RAW_IMPORT_BYTES = 2_000_000_000L;
 
     private String pendingExportPath;
     private String pendingExportName;
@@ -74,22 +75,30 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     private void importDocument(Uri uri, String displayName) {
+        File imported = null;
         try {
+            Long declaredSize = queryDocumentSize(uri);
+            if (declaredSize != null && declaredSize > MAX_RAW_IMPORT_BYTES) {
+                throw new IllegalStateException(
+                        "The selected RAW is " + declaredSize
+                                + " bytes; the Android import limit is "
+                                + MAX_RAW_IMPORT_BYTES);
+            }
             String suffix = suffixFor(displayName);
-            File imported = File.createTempFile("auraw-import-", suffix, getCacheDir());
+            imported = File.createTempFile("auraw-import-", suffix, getCacheDir());
             try (InputStream input = getContentResolver().openInputStream(uri);
                  FileOutputStream output = new FileOutputStream(imported)) {
                 if (input == null) {
                     throw new IllegalStateException("The document provider returned no input stream");
                 }
                 byte[] buffer = new byte[1024 * 1024];
-                int count;
-                while ((count = input.read(buffer)) >= 0) {
-                    output.write(buffer, 0, count);
-                }
+                copy(input, output, MAX_RAW_IMPORT_BYTES);
             }
             nativeOnFilePicked(imported.getAbsolutePath(), displayName, "");
         } catch (Exception error) {
+            if (imported != null && !imported.delete() && imported.exists()) {
+                imported.deleteOnExit();
+            }
             nativeOnFilePicked("", displayName, error.toString());
         }
     }
@@ -187,7 +196,7 @@ public final class AuRawActivity extends NativeActivity {
                 if (output == null) {
                     throw new IllegalStateException("Android MediaStore returned no output stream");
                 }
-                copy(input, output);
+                copy(input, output, Long.MAX_VALUE);
             }
             values.clear();
             values.put(MediaStore.Images.Media.IS_PENDING, 0);
@@ -214,7 +223,7 @@ public final class AuRawActivity extends NativeActivity {
         File destination = uniqueFile(directory, displayName);
         try (InputStream input = new FileInputStream(cachedFile);
              OutputStream output = new FileOutputStream(destination)) {
-            copy(input, output);
+            copy(input, output, Long.MAX_VALUE);
         }
         MediaScannerConnection.scanFile(
                 this,
@@ -250,12 +259,61 @@ public final class AuRawActivity extends NativeActivity {
         return name;
     }
 
-    private static void copy(InputStream input, OutputStream output) throws Exception {
+    private static void copy(InputStream input, OutputStream output, long maximumBytes)
+            throws Exception {
         byte[] buffer = new byte[1024 * 1024];
-        int count;
-        while ((count = input.read(buffer)) >= 0) {
+        long copied = 0;
+        while (true) {
+            int count = input.read(buffer);
+            if (count < 0) {
+                break;
+            }
+            if (count == 0) {
+                // Some ContentProvider streams are allowed to make no
+                // progress. A one-byte read either advances or reaches EOF,
+                // avoiding an unbounded zero-byte loop.
+                int value = input.read();
+                if (value < 0) {
+                    break;
+                }
+                copied = checkedCopyLength(copied, 1, maximumBytes);
+                output.write(value);
+                continue;
+            }
+            copied = checkedCopyLength(copied, count, maximumBytes);
             output.write(buffer, 0, count);
         }
+    }
+
+    private static long checkedCopyLength(long copied, int count, long maximumBytes) {
+        if (count < 0 || copied > maximumBytes - count) {
+            throw new IllegalStateException(
+                    "The document exceeds the " + maximumBytes + "-byte import limit");
+        }
+        return copied + count;
+    }
+
+    private Long queryDocumentSize(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(
+                uri,
+                new String[]{OpenableColumns.SIZE},
+                null,
+                null,
+                null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int column = cursor.getColumnIndex(OpenableColumns.SIZE);
+                if (column >= 0 && !cursor.isNull(column)) {
+                    long size = cursor.getLong(column);
+                    if (size >= 0) {
+                        return size;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // The streaming limit remains authoritative when metadata is
+            // absent, stale, or unavailable from the provider.
+        }
+        return null;
     }
 
     private String queryDisplayName(Uri uri) {

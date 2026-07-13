@@ -140,7 +140,34 @@ fn apply_profile_hsv_map(rgb_rec2020: vec3<f32>, map_info: vec4<u32>, encoding: 
 }
 
 fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
-    return apply_profile_hsv_map(rgb, params.profile_hue_sat, params.profile_flags.x);
+    let second = bitcast<vec4<u32>>(profile_data[0]);
+    if second.x == 0u || second.y == 0u || second.z == 0u {
+        return apply_profile_hsv_map(rgb, params.profile_hue_sat, params.profile_flags.x);
+    }
+
+    let profile_rgb = max(REC2020_TO_PROPHOTO * rgb, vec3<f32>(0.0));
+    var hsv = profile_rgb_to_hsv(profile_rgb);
+    let encode_value = params.profile_flags.x == 1u
+        && (params.profile_hue_sat.z > 1u || second.z > 1u);
+    if encode_value {
+        hsv.z = profile_srgb_encode_value(hsv.z);
+    }
+    // DNG dual-illuminant profile tables are interpolated entrywise. Sampling
+    // each endpoint and mixing the adjustment is equivalent for the tables'
+    // trilinear interpolation, while retaining the endpoints for live WB.
+    let weight = clamp(bitcast<f32>(params.profile_flags.w), 0.0, 1.0);
+    let adjustment = mix(
+        profile_map_sample(params.profile_hue_sat, hsv),
+        profile_map_sample(second, hsv),
+        weight,
+    );
+    hsv.x = fract(hsv.x + adjustment.x / 360.0 + 1.0);
+    hsv.y = clamp(hsv.y * adjustment.y, 0.0, 1.0);
+    hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0);
+    if encode_value {
+        hsv.z = profile_srgb_decode_value(hsv.z);
+    }
+    return PROPHOTO_TO_REC2020 * profile_hsv_to_rgb(hsv);
 }
 
 fn apply_profile_look(rgb: vec3<f32>) -> vec3<f32> {

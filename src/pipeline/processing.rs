@@ -20,9 +20,9 @@ impl ProcessingStage {
 }
 
 /// Returns the earliest affected stage. RAW-space controls invalidate the
-/// cached demosaic result and every downstream stage. Develop controls only
-/// invalidate the final render because the scene texture, tone guide, and
-/// histogram remain valid.
+/// cached demosaic result and every downstream stage. Global white balance
+/// invalidates tone analysis because it changes scene-working luminance;
+/// ordinary Develop controls only invalidate the final render.
 pub fn affected_stage(before: &ExposureParams, after: &ExposureParams) -> Option<ProcessingStage> {
     if before == after {
         return None;
@@ -30,6 +30,8 @@ pub fn affected_stage(before: &ExposureParams, after: &ExposureParams) -> Option
 
     if raw_controls_changed(before, after) {
         Some(ProcessingStage::Raw)
+    } else if before.temperature != after.temperature || before.tint != after.tint {
+        Some(ProcessingStage::Tone)
     } else {
         Some(ProcessingStage::Output)
     }
@@ -147,105 +149,7 @@ pub fn build_proxy(raw: &LoadedRaw, spec: ProxySpec) -> LoadedRaw {
         black_levels_per_pixel,
         white_levels: raw.white_levels,
         camera_profile: raw.camera_profile.clone(),
-    }
-}
-
-/// Resamples the RAW mosaic to an exact output size while preserving the CFA
-/// identity of every output photosite. Downscaling performs area-weighted
-/// averaging within each colour plane, which avoids mixing red, green, and
-/// blue sensor samples before demosaicing.
-pub fn resample_raw(raw: &LoadedRaw, width: u32, height: u32) -> LoadedRaw {
-    let width = width.max(1);
-    let height = height.max(1);
-    if width == raw.width && height == raw.height {
-        return raw.clone();
-    }
-
-    let pixel_count = (width as usize).saturating_mul(height as usize);
-    let mut raw_pixels = Vec::with_capacity(pixel_count);
-    let mut color_indices = Vec::with_capacity(pixel_count);
-    let mut black_levels_per_pixel = Vec::with_capacity(pixel_count);
-    let cfa_period = match raw.cfa_kind {
-        super::CfaKind::Bayer => 2,
-        super::CfaKind::XTrans => 6,
-    };
-
-    let scale_x = raw.width as f64 / width as f64;
-    let scale_y = raw.height as f64 / height as f64;
-    for py in 0..height {
-        let source_y0 = py as f64 * scale_y;
-        let source_y1 = (py + 1) as f64 * scale_y;
-        let iy0 = source_y0.floor() as u32;
-        let iy1 = source_y1.ceil().min(raw.height as f64) as u32;
-        for px in 0..width {
-            let phase_x = px % cfa_period;
-            let phase_y = py % cfa_period;
-            let phase_index = (phase_y * raw.width + phase_x) as usize;
-            let cfa = raw.color_indices[phase_index];
-
-            let source_x0 = px as f64 * scale_x;
-            let source_x1 = (px + 1) as f64 * scale_x;
-            let ix0 = source_x0.floor() as u32;
-            let ix1 = source_x1.ceil().min(raw.width as f64) as u32;
-
-            let mut pixel_sum = 0.0f64;
-            let mut black_sum = 0.0f64;
-            let mut weight_sum = 0.0f64;
-            for sy in iy0..iy1 {
-                let y_weight = (source_y1.min((sy + 1) as f64) - source_y0.max(sy as f64)).max(0.0);
-                if y_weight == 0.0 {
-                    continue;
-                }
-                let row = sy * raw.width;
-                for sx in ix0..ix1 {
-                    let index = (row + sx) as usize;
-                    if raw.color_indices[index] != cfa {
-                        continue;
-                    }
-                    let x_weight =
-                        (source_x1.min((sx + 1) as f64) - source_x0.max(sx as f64)).max(0.0);
-                    let weight = x_weight * y_weight;
-                    pixel_sum += f64::from(raw.raw_pixels[index]) * weight;
-                    black_sum += f64::from(raw.black_levels_per_pixel[index]) * weight;
-                    weight_sum += weight;
-                }
-            }
-
-            if weight_sum > 1e-12 {
-                raw_pixels
-                    .push((pixel_sum / weight_sum).round().clamp(0.0, u16::MAX as f64) as u16);
-                black_levels_per_pixel.push((black_sum / weight_sum) as f32);
-            } else {
-                let center_x = ((source_x0 + source_x1) * 0.5)
-                    .floor()
-                    .clamp(0.0, raw.width.saturating_sub(1) as f64)
-                    as u32;
-                let center_y = ((source_y0 + source_y1) * 0.5)
-                    .floor()
-                    .clamp(0.0, raw.height.saturating_sub(1) as f64)
-                    as u32;
-                let fallback = nearest_cfa_sample(raw, center_x, center_y, cfa, cfa_period);
-                raw_pixels.push(raw.raw_pixels[fallback]);
-                black_levels_per_pixel.push(raw.black_levels_per_pixel[fallback]);
-            }
-            color_indices.push(cfa);
-        }
-    }
-
-    LoadedRaw {
-        width,
-        height,
-        camera_make: raw.camera_make.clone(),
-        camera_model: raw.camera_model.clone(),
-        cfa_kind: raw.cfa_kind,
-        raw_pixels,
-        color_indices,
-        wb_coeffs: raw.wb_coeffs,
-        cam_to_srgb: raw.cam_to_srgb,
-        black_levels: raw.black_levels,
-        black_levels_per_pixel,
-        white_levels: raw.white_levels,
-        camera_profile: raw.camera_profile.clone(),
+        white_balance_model: raw.white_balance_model.clone(),
     }
 }
 
@@ -278,6 +182,31 @@ fn nearest_cfa_sample(
     (center_y * raw.width + center_x) as usize
 }
 
+/// Cumulative input support of every spatial stage used by an export tile.
+/// These are deliberately separate constants: taking only the maximum stage
+/// radius is incorrect when one spatial pass consumes another pass's output.
+const HIGHLIGHT_PREP_SUPPORT: u32 = 4;
+// The quality-4 guided sequence has radii 16+8+4+2+1+4+2+1+2+1+1 = 42.
+// Each pass also reads the outward sample at twice its radius, so its
+// dependency support accumulates to 84 pixels across the ping-pong chain.
+const HIGHLIGHT_GUIDED_SUPPORT: u32 = 2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 1 + 1);
+// Conservative bound over the complete Bayer RCD and X-Trans Markesteijn-3
+// pass chains, including their final detail-recovery neighbourhoods.
+const DEMOSAIC_CHAIN_SUPPORT: u32 = 32;
+const LOCAL_EFFECTS_SUPPORT: u32 = 8;
+// Glow's 5x5 kernel reaches +/-2*48 and glow_source_at reaches one more pixel.
+const GLOW_SUPPORT: u32 = 97;
+const COLOR_MIXER_SUPPORT: u32 = 4;
+const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_PREP_SUPPORT
+    + HIGHLIGHT_GUIDED_SUPPORT
+    + DEMOSAIC_CHAIN_SUPPORT
+    + LOCAL_EFFECTS_SUPPORT
+    + GLOW_SUPPORT
+    + COLOR_MIXER_SUPPORT;
+
+/// Rounded up to the 8-pixel guide/workgroup alignment.
+pub const EXPORT_TILE_HALO: u32 = EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8;
+
 #[derive(Clone, Copy, Debug)]
 pub struct TileSpec {
     pub core_edge: u32,
@@ -292,9 +221,8 @@ impl Default for TileSpec {
             } else {
                 1024
             },
-            // Covers the widest current demosaic/local-adjustment support and
-            // the maximum UI chromatic-aberration displacement on large files.
-            halo: 48,
+            // Must cover every spatial operation executed inside a tile.
+            halo: EXPORT_TILE_HALO,
         }
     }
 }
@@ -400,6 +328,7 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
         black_levels_per_pixel,
         white_levels: raw.white_levels,
         camera_profile: raw.camera_profile.clone(),
+        white_balance_model: raw.white_balance_model.clone(),
     }
 }
 
@@ -425,6 +354,23 @@ mod tests {
         let mut after = before;
         after.black_point = 0.01;
         assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Raw));
+    }
+
+    #[test]
+    fn global_wb_invalidates_tone_analysis_and_output() {
+        let before = ExposureParams::default();
+        for after in [
+            ExposureParams {
+                temperature: 1.0,
+                ..before
+            },
+            ExposureParams {
+                tint: 1.0,
+                ..before
+            },
+        ] {
+            assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Tone));
+        }
     }
 
     #[test]
@@ -471,6 +417,7 @@ mod tests {
             black_levels_per_pixel: vec![0.0; (width * height) as usize],
             white_levels: [1023.0; 4],
             camera_profile: CameraProfile::default(),
+            white_balance_model: None,
         };
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 4 });

@@ -284,6 +284,9 @@ pub struct GpuParams {
     full_height: u32,
     _pad0: u32,
     _pad1: u32,
+    // Local half-open rectangle whose pixels contribute to a tiled export's
+    // global histogram. Ordinary preview analysis uses the complete image.
+    tone_histogram_bounds: [u32; 4],
     profile_hue_sat: [u32; 4],
     profile_look: [u32; 4],
     profile_tone: [u32; 4],
@@ -354,7 +357,12 @@ impl GpuParams {
         full_width: u32,
         full_height: u32,
     ) -> Self {
-        let profile_layout = raw.camera_profile.gpu_layout();
+        let (camera_transform, profile_weight) = raw.adjusted_camera_transform(
+            exposure.temperature.clamp(-100.0, 100.0),
+            exposure.tint.clamp(-100.0, 100.0),
+        );
+        let mut profile_layout = raw.camera_profile.gpu_layout();
+        profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
         let sigmoid = sigmoid_coefficients(exposure.sigmoid);
         let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
@@ -636,9 +644,9 @@ impl GpuParams {
             hsl_luminance_0: exposure.hsl_luminance[..4].try_into().unwrap(),
             hsl_luminance_1: exposure.hsl_luminance[4..].try_into().unwrap(),
             wb: raw.wb_coeffs,
-            cam_to_srgb_0: raw.cam_to_srgb[0],
-            cam_to_srgb_1: raw.cam_to_srgb[1],
-            cam_to_srgb_2: raw.cam_to_srgb[2],
+            cam_to_srgb_0: camera_transform[0],
+            cam_to_srgb_1: camera_transform[1],
+            cam_to_srgb_2: camera_transform[2],
             black_levels: raw.black_levels,
             white_levels: raw.white_levels,
             width: raw.width,
@@ -649,6 +657,7 @@ impl GpuParams {
             full_height,
             _pad0: 0,
             _pad1: 0,
+            tone_histogram_bounds: [0, 0, raw.width, raw.height],
             profile_hue_sat: profile_layout.hue_sat,
             profile_look: profile_layout.look,
             profile_tone: profile_layout.tone,
@@ -698,6 +707,16 @@ impl GpuParams {
             mask_hsl_luminance_0,
             mask_hsl_luminance_1,
         }
+    }
+
+    pub fn with_tone_histogram_bounds(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
+        self.tone_histogram_bounds = [
+            x,
+            y,
+            x.saturating_add(width).min(self.width),
+            y.saturating_add(height).min(self.height),
+        ];
+        self
     }
 }
 
@@ -764,7 +783,7 @@ pub struct RawGpuPipeline {
     _tex2: wgpu::Texture,
     scene_texture: wgpu::Texture,
     scene_format: wgpu::TextureFormat,
-    tone_stats_buffer: wgpu::Buffer,
+    display_linear_texture: wgpu::Texture,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
     mask_texture: wgpu::Texture,
@@ -880,6 +899,13 @@ impl RawGpuPipeline {
             "auraw scene-linear camera RGB",
         );
 
+        // The final creative result is tone-mapped into display-linear Rec.2020
+        // before any output transfer function is applied. Export reads this
+        // surface so resizing happens after demosaic/tone processing and before
+        // sRGB encoding.
+        let display_linear_texture =
+            create_demosaic_texture(device, size, work_format, "auraw display-linear Rec.2020");
+
         let out_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw output texture"),
             size,
@@ -945,6 +971,8 @@ impl RawGpuPipeline {
         );
 
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let display_linear_view =
+            display_linear_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let reconstructed_raw_view =
             reconstructed_raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let highlight_work_a_view =
@@ -1249,6 +1277,7 @@ impl RawGpuPipeline {
                 ),
                 texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_buffer_entry(20, true),
+                storage_texture_entry(29, work_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -1788,6 +1817,10 @@ impl RawGpuPipeline {
                     binding: 20,
                     resource: profile_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 29,
+                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
+                },
             ],
         });
 
@@ -2096,7 +2129,7 @@ impl RawGpuPipeline {
             _tex2: tex2,
             scene_texture,
             scene_format: demosaic_format,
-            tone_stats_buffer,
+            display_linear_texture,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
             mask_texture,
@@ -2307,15 +2340,58 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Executes one export tile using the preview pipeline's cached global
-    /// tone statistics. The tile still builds its own halo-aware tone guide,
-    /// but skipping histogram reduction prevents tile-to-tile tonal seams.
+    /// Clears the reusable histogram before a full-resolution tiled analysis.
+    pub fn begin_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw export tone histogram clear"),
+        });
+        encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Demosaics one native-resolution tile and adds only its non-halo core to
+    /// the shared export histogram. The bounds in `params` prevent duplicated
+    /// halo pixels from biasing the full-image percentiles.
+    pub fn accumulate_export_tone_tile(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+    ) {
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw native-resolution export tone tile"),
+        });
+        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_prepare_pass_index + 1,
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Reduces the histogram accumulated from every native-resolution core.
+    pub fn finish_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw export tone histogram reduction"),
+        });
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_reduce_pass_index,
+            self.tone_reduce_pass_index + 1,
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Executes one export tile using the full-resolution histogram cached by
+    /// `finish_export_tone_analysis`. The tile still builds its own halo-aware
+    /// tone guide; skipping reduction keeps the global statistics unchanged.
     pub fn dispatch_export_tile(
         &self,
         queue: &wgpu::Queue,
         device: &wgpu::Device,
         params: &GpuParams,
-        global_tone_source: &RawGpuPipeline,
     ) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2327,13 +2403,6 @@ impl RawGpuPipeline {
             &mut encoder,
             self.tone_prepare_pass_index,
             self.tone_reduce_pass_index,
-        );
-        encoder.copy_buffer_to_buffer(
-            &global_tone_source.tone_stats_buffer,
-            0,
-            &self.tone_stats_buffer,
-            0,
-            2 * std::mem::size_of::<[f32; 4]>() as u64,
         );
         self.encode_pass_range(&mut encoder, self.tone_stage_end, self.passes.len());
         queue.submit(Some(encoder.finish()));
@@ -2416,6 +2485,37 @@ impl RawGpuPipeline {
         drop(mapped);
         readback.unmap();
         Ok(rgba)
+    }
+
+    /// Copies a post-tone-map, display-linear Rec.2020 sub-rectangle as
+    /// tightly packed RGB32F. High-quality export uses this surface so any
+    /// resize occurs before the output transfer function and after demosaic.
+    pub fn read_display_linear_region_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<f32>> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "display-linear export readback requires ProcessingQuality::High (RGBA32Float)"
+            ));
+        }
+        read_rgba32_texture_region_rgb_blocking(
+            device,
+            queue,
+            &self.display_linear_texture,
+            x,
+            y,
+            width,
+            height,
+            self.width,
+            self.height,
+            "auraw display-linear export readback",
+        )
     }
 
     /// Reads the internal demosaiced scene texture as tightly packed RGB32F.
@@ -2603,6 +2703,64 @@ impl RawGpuPipeline {
             pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
     }
+}
+
+fn read_rgba32_texture_region_rgb_blocking(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    texture_width: u32,
+    texture_height: u32,
+    label: &'static str,
+) -> Result<Vec<f32>> {
+    let right = x
+        .checked_add(width)
+        .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
+    let bottom = y
+        .checked_add(height)
+        .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
+    if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
+        return Err(anyhow!("invalid GPU RGBA32F readback rectangle"));
+    }
+
+    let (readback, padded_bytes_per_row) =
+        create_rgba32_readback_buffer(device, width, height, label);
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let submission = queue.submit(Some(encoder.finish()));
+    map_rgba32_readback_rgb(
+        device,
+        &readback,
+        submission,
+        width,
+        height,
+        padded_bytes_per_row,
+    )
 }
 
 fn read_rgba32_texture_rgb_blocking(
@@ -2865,13 +3023,7 @@ fn storage_texture_entry(
 }
 
 fn validate_raw(raw: &LoadedRaw) -> Result<()> {
-    if raw.width == 0 || raw.height == 0 {
-        return Err(anyhow!("raw dimensions must be non-zero"));
-    }
-    let pixels = raw
-        .width
-        .checked_mul(raw.height)
-        .ok_or_else(|| anyhow!("raw dimensions overflow"))? as usize;
+    let pixels = super::raw_loader::validate_raw_dimensions(raw.width, raw.height)?;
     if raw.raw_pixels.len() != pixels {
         return Err(anyhow!(
             "raw pixel count mismatch: got {}, expected {}",
@@ -3274,7 +3426,7 @@ mod tests {
         // Sixteen scalar values keep the stable 64-byte prefix. The two
         // darktable sigmoid vec4s follow the local-tone controls, then the
         // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 6208);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 6224);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
@@ -3309,31 +3461,35 @@ mod tests {
         assert_eq!(std::mem::offset_of!(super::GpuParams, width), 704);
         assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 712);
         assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 720);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 736);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 800);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 816);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 832);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 960);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1088);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1216);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1344);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2240);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, tone_histogram_bounds),
+            736
+        );
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 752);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 816);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 832);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 848);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 976);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1104);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1232);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1360);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2256);
         assert_eq!(
             std::mem::offset_of!(super::GpuParams, mask_curve_red_0),
-            2368
+            2384
         );
         assert_eq!(
             std::mem::offset_of!(super::GpuParams, mask_curve_green_0),
-            3392
+            3408
         );
         assert_eq!(
             std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
-            4416
+            4432
         );
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5440);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5456);
         assert_eq!(
             std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
-            6080
+            6096
         );
     }
 
@@ -3347,7 +3503,8 @@ mod tests {
 
     #[test]
     fn adjustments_shader_contains_lightroom_style_controls() {
-        assert!(SHADER_ADJUSTMENTS.contains("apply_temperature_tint"));
+        assert!(!SHADER_ADJUSTMENTS.contains("apply_camera_temperature_tint"));
+        assert!(SHADER_ADJUSTMENTS.contains("bitcast<f32>(params.profile_flags.w)"));
         assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast"));
         assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
         assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
@@ -3362,6 +3519,46 @@ mod tests {
         assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));
         assert!(!SHADER_ADJUSTMENTS.contains("rgb_to_hsl"));
         assert!(!SHADER_ADJUSTMENTS.contains("hsl_to_rgb"));
+    }
+
+    #[test]
+    fn global_wb_changes_camera_transform_for_dng_metadata() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("regression/raw/synthetic-bayer.dng");
+        let raw = crate::pipeline::load_raw_file(&path).unwrap();
+        let neutral = super::GpuParams::new(
+            &crate::pipeline::ExposureParams::default(),
+            &crate::pipeline::MaskStack::default(),
+            &raw,
+        );
+        let mut adjusted = crate::pipeline::ExposureParams::default();
+        adjusted.temperature = 40.0;
+        adjusted.tint = 20.0;
+        let changed =
+            super::GpuParams::new(&adjusted, &crate::pipeline::MaskStack::default(), &raw);
+        assert_ne!(neutral.cam_to_srgb_0, changed.cam_to_srgb_0);
+        assert_ne!(neutral.cam_to_srgb_1, changed.cam_to_srgb_1);
+        assert_ne!(neutral.cam_to_srgb_2, changed.cam_to_srgb_2);
+
+        let tint_rendition = |tint| {
+            let params = super::GpuParams::new(
+                &crate::pipeline::ExposureParams {
+                    tint,
+                    ..Default::default()
+                },
+                &crate::pipeline::MaskStack::default(),
+                &raw,
+            );
+            [
+                params.cam_to_srgb_0[..3].iter().sum::<f32>(),
+                params.cam_to_srgb_1[..3].iter().sum::<f32>(),
+                params.cam_to_srgb_2[..3].iter().sum::<f32>(),
+            ]
+        };
+        let green = tint_rendition(-20.0);
+        let magenta = tint_rendition(20.0);
+        let magenta_axis = |rgb: [f32; 3]| (rgb[0] + rgb[2]) * 0.5 - rgb[1];
+        assert!(magenta_axis(magenta) > magenta_axis(green));
     }
 
     #[test]
@@ -3429,6 +3626,7 @@ mod tests {
                 black_levels_per_pixel: vec![0.0; (width * height) as usize],
                 white_levels: [4095.0; 4],
                 camera_profile: Default::default(),
+                white_balance_model: None,
             };
             let params = super::GpuParams::new(
                 &ExposureParams::default(),

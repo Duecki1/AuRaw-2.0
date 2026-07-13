@@ -159,7 +159,7 @@ python3 scripts/image_regression.py compare \
   --report-dir regression/reports/gpu-vs-darktable
 ```
 
-Compare CPU and GPU outputs directly:
+Compare independently rendered CPU and GPU outputs directly:
 
 ```sh
 python3 scripts/image_regression.py cpu-gpu \
@@ -170,4 +170,20 @@ python3 scripts/image_regression.py cpu-gpu \
   --report-dir regression/reports/cpu-gpu
 ```
 
-Each comparison writes JSON, JUnit XML, and HTML. CI retains renderer manifests and reports. Threshold changes and baseline changes are reviewed source changes, never an automatic overwrite from a candidate build.
+Every candidate NPZ must attest its backend, immutable source revision, RAW
+SHA-256, renderer-executable SHA-256, implementation identifier,
+implementation fingerprint, color space, and transfer function. The harness
+rejects command-line/backend disagreement, unknown revisions, changed input or
+renderer hashes, mismatched source revisions, and CPU/GPU pairs that share an
+implementation identity, fingerprint, or executable hash. Determinism checks
+also require identical provenance across runs before comparing pixels.
+
+The repository currently ships the canonical GPU renderer only. Therefore a
+successful GPU/reference comparison is not evidence of CPU/GPU parity. The
+`cpu-gpu` command becomes meaningful only when a separately built and hashed
+CPU renderer emits the same provenance contract; until then CI must not report
+CPU/GPU parity as proven.
+
+Each comparison writes JSON, JUnit XML, and HTML. CI retains renderer manifests
+and reports. Threshold changes and baseline changes are reviewed source
+changes, never an automatic overwrite from a candidate build.

@@ -5,6 +5,9 @@ use std::path::Path;
 
 pub const OUTPUT_LUT_EDGE: u32 = 33;
 const PROFILE_TONE_LUT_SIZE: usize = 4096;
+const MAX_DCP_TAG_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_DCP_MAP_ENTRIES: usize = 1_000_000;
+const MAX_DCP_TONE_POINTS: usize = 65_536;
 const D50_XYZ: [f32; 3] = [0.964_22, 1.0, 0.825_21];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -281,7 +284,9 @@ pub struct CameraProfile {
     /// Default exposure contribution in EV. `from_dcp` initializes this
     /// from BaselineExposureOffset; the RAW loader adds DNG BaselineExposure.
     pub baseline_exposure_offset: f32,
-    pub hue_sat_map: Option<HsvMap>,
+    /// Retain both calibration-illuminant maps. Their DNG mired-space blend is
+    /// selected at render time from the adjusted camera white balance.
+    pub hue_sat_maps: [Option<HsvMap>; 2],
     pub look_table: Option<HsvMap>,
     pub tone_curve: Option<ToneCurve>,
     pub interpolation_weight: f32,
@@ -292,12 +297,26 @@ pub struct CameraProfile {
 
 impl CameraProfile {
     pub fn from_dcp(dcp: DcpProfile, interpolation_weight: f32) -> Self {
-        // Compute interpolated data before moving owned fields out of `dcp`.
-        let hue_sat_map = dcp.interpolated_hue_sat_map(interpolation_weight);
+        let maps_are_compatible = match (&dcp.hue_sat_maps[0], &dcp.hue_sat_maps[1]) {
+            (Some(first), Some(second)) => {
+                first.divisions == second.divisions && first.encoding == second.encoding
+            }
+            _ => true,
+        };
+        let fallback_map = (!maps_are_compatible)
+            .then(|| dcp.interpolated_hue_sat_map(interpolation_weight))
+            .flatten();
+        let hue_sat_maps = if maps_are_compatible {
+            dcp.hue_sat_maps
+        } else {
+            // Malformed/non-conforming endpoint tables cannot be interpolated
+            // entrywise. Preserve the previous nearest-endpoint behavior.
+            [fallback_map, None]
+        };
         Self {
             name: dcp.name,
             baseline_exposure_offset: dcp.baseline_exposure_offset,
-            hue_sat_map,
+            hue_sat_maps,
             look_table: dcp.look_table,
             tone_curve: dcp.tone_curve,
             interpolation_weight: interpolation_weight.clamp(0.0, 1.0),
@@ -402,6 +421,7 @@ impl IccOutputTransform {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProfileGpuLayout {
     pub hue_sat: [u32; 4],
+    pub hue_sat_2: [u32; 4],
     pub look: [u32; 4],
     pub tone: [u32; 4],
     pub output: [u32; 4],
@@ -411,10 +431,25 @@ pub(crate) struct ProfileGpuLayout {
 impl ProfileGpuLayout {
     fn new(profile: &CameraProfile) -> Self {
         let mut offset = 1u32; // A non-empty storage buffer is required by wgpu.
-        let hue_sat = if let Some(map) = &profile.hue_sat_map {
+        let hue_sat = if let Some(map) = &profile.hue_sat_maps[0] {
             let out = [map.divisions[0], map.divisions[1], map.divisions[2], offset];
             offset += map.entries.len() as u32;
             out
+        } else if let Some(map) = &profile.hue_sat_maps[1] {
+            let out = [map.divisions[0], map.divisions[1], map.divisions[2], offset];
+            offset += map.entries.len() as u32;
+            out
+        } else {
+            [0; 4]
+        };
+        let hue_sat_2 = if profile.hue_sat_maps[0].is_some() {
+            if let Some(map) = &profile.hue_sat_maps[1] {
+                let out = [map.divisions[0], map.divisions[1], map.divisions[2], offset];
+                offset += map.entries.len() as u32;
+                out
+            } else {
+                [0; 4]
+            }
         } else {
             [0; 4]
         };
@@ -435,8 +470,10 @@ impl ProfileGpuLayout {
         let output = [OUTPUT_LUT_EDGE, OUTPUT_LUT_EDGE, OUTPUT_LUT_EDGE, offset];
         let flags = [
             profile
-                .hue_sat_map
-                .as_ref()
+                .hue_sat_maps
+                .iter()
+                .flatten()
+                .next()
                 .map_or(0, |map| map.encoding.shader_value()),
             profile
                 .look_table
@@ -447,6 +484,7 @@ impl ProfileGpuLayout {
         ];
         Self {
             hue_sat,
+            hue_sat_2,
             look,
             tone,
             output,
@@ -466,13 +504,27 @@ impl ProfileGpuData {
         debug_assert_eq!(output.size(), OUTPUT_LUT_EDGE);
         let total = layout.output[3] as usize + output.entries().len();
         let mut words = Vec::with_capacity(total);
-        words.push([0.0; 4]);
-        if let Some(map) = &profile.hue_sat_map {
+        // The otherwise-unused first word carries the second HueSat map's
+        // metadata as raw u32 bits, avoiding another uniform ABI field.
+        words.push(layout.hue_sat_2.map(f32::from_bits));
+        if let Some(map) = profile.hue_sat_maps[0]
+            .as_ref()
+            .or(profile.hue_sat_maps[1].as_ref())
+        {
             words.extend(
                 map.entries
                     .iter()
                     .map(|entry| [entry[0], entry[1], entry[2], 0.0]),
             );
+        }
+        if profile.hue_sat_maps[0].is_some() {
+            if let Some(map) = &profile.hue_sat_maps[1] {
+                words.extend(
+                    map.entries
+                        .iter()
+                        .map(|entry| [entry[0], entry[1], entry[2], 0.0]),
+                );
+            }
         }
         if let Some(map) = &profile.look_table {
             words.extend(
@@ -570,10 +622,14 @@ fn dng_illuminant_cct(illuminant: u16) -> Option<f32> {
 }
 
 fn checked_map_len(divisions: [u32; 3]) -> Result<usize> {
-    divisions
+    let entries = divisions
         .into_iter()
         .try_fold(1usize, |acc, value| acc.checked_mul(value as usize))
-        .ok_or_else(|| anyhow!("DCP HSV map dimensions overflow"))
+        .ok_or_else(|| anyhow!("DCP HSV map dimensions overflow"))?;
+    if entries > MAX_DCP_MAP_ENTRIES {
+        bail!("DCP HSV map contains {entries} entries; the safe limit is {MAX_DCP_MAP_ENTRIES}");
+    }
+    Ok(entries)
 }
 
 fn normalized_curve_points(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
@@ -723,12 +779,18 @@ fn profile_from_tags(reader: &mut TiffReader, tags: &[IfdEntry]) -> Result<Optio
         if tone_values.len() % 2 != 0 {
             bail!("ProfileToneCurve contains an odd number of values");
         }
-        Some(ToneCurve::new(
-            tone_values
-                .chunks_exact(2)
-                .map(|pair| [pair[0], pair[1]])
-                .collect(),
-        )?)
+        let point_count = tone_values.len() / 2;
+        if point_count > MAX_DCP_TONE_POINTS {
+            bail!(
+                "ProfileToneCurve contains {point_count} points; the safe limit is {MAX_DCP_TONE_POINTS}"
+            );
+        }
+        let mut points = Vec::new();
+        points
+            .try_reserve_exact(point_count)
+            .context("reserve DCP tone curve")?;
+        points.extend(tone_values.chunks_exact(2).map(|pair| [pair[0], pair[1]]));
+        Some(ToneCurve::new(points)?)
     };
 
     let matrices = [
@@ -789,10 +851,16 @@ fn read_hsv_map(
             values.len()
         );
     }
-    let entries = values
-        .chunks_exact(3)
-        .map(|entry| [entry[0], entry[1], entry[2]])
-        .collect();
+    let entry_count = expected / 3;
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(entry_count)
+        .context("reserve DCP HSV map")?;
+    entries.extend(
+        values
+            .chunks_exact(3)
+            .map(|entry| [entry[0], entry[1], entry[2]]),
+    );
     Ok(Some(HsvMap::new(dimensions, entries, encoding)?))
 }
 
@@ -1000,7 +1068,10 @@ impl TiffReader {
         if count > 65_536 {
             bail!("unreasonable TIFF IFD entry count {count}");
         }
-        let mut entries = Vec::with_capacity(count as usize);
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(count as usize)
+            .context("reserve TIFF IFD entries")?;
         for _ in 0..count {
             let tag = read_u16(&mut self.file, self.endian)?;
             let field_type = read_u16(&mut self.file, self.endian)?;
@@ -1040,8 +1111,10 @@ impl TiffReader {
             .count
             .checked_mul(type_size)
             .ok_or_else(|| anyhow!("TIFF field size overflow"))?;
-        if byte_len > 64 * 1024 * 1024 {
-            bail!("refusing to allocate oversized TIFF profile tag ({byte_len} bytes)");
+        if byte_len > MAX_DCP_TAG_BYTES {
+            bail!(
+                "refusing to allocate oversized TIFF profile tag ({byte_len} bytes; limit {MAX_DCP_TAG_BYTES})"
+            );
         }
         let inline_size = if self.big_tiff { 8 } else { 4 };
         if byte_len as usize <= inline_size {
@@ -1056,7 +1129,11 @@ impl TiffReader {
         }
         let return_pos = self.file.stream_position()?;
         self.file.seek(SeekFrom::Start(entry.value_or_offset))?;
-        let mut bytes = vec![0; byte_len as usize];
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(byte_len as usize)
+            .context("reserve TIFF profile tag")?;
+        bytes.resize(byte_len as usize, 0);
         self.file.read_exact(&mut bytes)?;
         self.file.seek(SeekFrom::Start(return_pos))?;
         Ok(bytes)
@@ -1064,74 +1141,83 @@ impl TiffReader {
 
     fn entry_u32(&mut self, entry: &IfdEntry) -> Result<Vec<u32>> {
         let bytes = self.entry_bytes(entry)?;
-        match entry.field_type {
-            1 | 6 | 7 => Ok(bytes.into_iter().map(u32::from).collect()),
-            3 => Ok(bytes
-                .chunks_exact(2)
-                .map(|chunk| self.endian.u16([chunk[0], chunk[1]]) as u32)
-                .collect()),
-            4 | 13 => Ok(bytes
-                .chunks_exact(4)
-                .map(|chunk| self.endian.u32(chunk.try_into().unwrap()))
-                .collect()),
-            16 | 18 => bytes
-                .chunks_exact(8)
-                .map(|chunk| {
-                    u32::try_from(self.endian.u64(chunk.try_into().unwrap()))
-                        .context("TIFF integer does not fit in u32")
-                })
-                .collect(),
+        let stride = match entry.field_type {
+            1 | 6 | 7 => 1,
+            3 => 2,
+            4 | 13 => 4,
+            16 | 18 => 8,
             _ => bail!("TIFF tag {} is not an integer field", entry.tag),
+        };
+        anyhow::ensure!(
+            bytes.len() % stride == 0,
+            "TIFF integer tag {} has a truncated value",
+            entry.tag
+        );
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(bytes.len() / stride)
+            .context("reserve TIFF integer values")?;
+        for chunk in bytes.chunks_exact(stride) {
+            let value = match entry.field_type {
+                1 | 6 | 7 => u32::from(chunk[0]),
+                3 => self.endian.u16([chunk[0], chunk[1]]) as u32,
+                4 | 13 => self.endian.u32(chunk.try_into().unwrap()),
+                16 | 18 => u32::try_from(self.endian.u64(chunk.try_into().unwrap()))
+                    .context("TIFF integer does not fit in u32")?,
+                _ => unreachable!(),
+            };
+            values.push(value);
         }
+        Ok(values)
     }
 
     fn entry_f32(&mut self, entry: &IfdEntry) -> Result<Vec<f32>> {
         let bytes = self.entry_bytes(entry)?;
-        let values: Vec<f32> = match entry.field_type {
-            3 => bytes
-                .chunks_exact(2)
-                .map(|chunk| self.endian.u16([chunk[0], chunk[1]]) as f32)
-                .collect(),
-            4 => bytes
-                .chunks_exact(4)
-                .map(|chunk| self.endian.u32(chunk.try_into().unwrap()) as f32)
-                .collect(),
-            5 => bytes
-                .chunks_exact(8)
-                .map(|chunk| {
-                    let n = self.endian.u32(chunk[0..4].try_into().unwrap());
-                    let d = self.endian.u32(chunk[4..8].try_into().unwrap());
-                    if d == 0 {
-                        f32::NAN
-                    } else {
-                        n as f32 / d as f32
-                    }
-                })
-                .collect(),
-            10 => bytes
-                .chunks_exact(8)
-                .map(|chunk| {
-                    let n = self.endian.i32(chunk[0..4].try_into().unwrap());
-                    let d = self.endian.i32(chunk[4..8].try_into().unwrap());
-                    if d == 0 {
-                        f32::NAN
-                    } else {
-                        n as f32 / d as f32
-                    }
-                })
-                .collect(),
-            11 => bytes
-                .chunks_exact(4)
-                .map(|chunk| self.endian.f32(chunk.try_into().unwrap()))
-                .collect(),
-            12 => bytes
-                .chunks_exact(8)
-                .map(|chunk| self.endian.f64(chunk.try_into().unwrap()) as f32)
-                .collect(),
+        let stride = match entry.field_type {
+            3 => 2,
+            4 | 11 => 4,
+            5 | 10 | 12 => 8,
             _ => bail!("TIFF tag {} is not a numeric profile field", entry.tag),
         };
-        if values.iter().any(|value| !value.is_finite()) {
-            bail!("TIFF profile tag {} contains non-finite values", entry.tag);
+        anyhow::ensure!(
+            bytes.len() % stride == 0,
+            "TIFF numeric tag {} has a truncated value",
+            entry.tag
+        );
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(bytes.len() / stride)
+            .context("reserve TIFF numeric values")?;
+        for chunk in bytes.chunks_exact(stride) {
+            let value = match entry.field_type {
+                3 => self.endian.u16([chunk[0], chunk[1]]) as f32,
+                4 => self.endian.u32(chunk.try_into().unwrap()) as f32,
+                5 => {
+                    let numerator = self.endian.u32(chunk[0..4].try_into().unwrap());
+                    let denominator = self.endian.u32(chunk[4..8].try_into().unwrap());
+                    if denominator == 0 {
+                        f32::NAN
+                    } else {
+                        numerator as f32 / denominator as f32
+                    }
+                }
+                10 => {
+                    let numerator = self.endian.i32(chunk[0..4].try_into().unwrap());
+                    let denominator = self.endian.i32(chunk[4..8].try_into().unwrap());
+                    if denominator == 0 {
+                        f32::NAN
+                    } else {
+                        numerator as f32 / denominator as f32
+                    }
+                }
+                11 => self.endian.f32(chunk.try_into().unwrap()),
+                12 => self.endian.f64(chunk.try_into().unwrap()) as f32,
+                _ => unreachable!(),
+            };
+            if !value.is_finite() {
+                bail!("TIFF profile tag {} contains non-finite values", entry.tag);
+            }
+            values.push(value);
         }
         Ok(values)
     }
@@ -1653,15 +1739,24 @@ mod tests {
     #[test]
     fn gpu_layout_offsets_are_contiguous() {
         let profile = CameraProfile {
-            hue_sat_map: Some(
-                HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear).unwrap(),
-            ),
+            hue_sat_maps: [
+                Some(
+                    HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear)
+                        .unwrap(),
+                ),
+                Some(
+                    HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear)
+                        .unwrap(),
+                ),
+            ],
             tone_curve: Some(ToneCurve::new(vec![[0.0, 0.0], [1.0, 1.0]]).unwrap()),
             ..Default::default()
         };
         let data = profile.gpu_data(&IccOutputTransform::srgb());
         assert_eq!(data.layout.hue_sat[3], 1);
-        assert_eq!(data.layout.tone[1], 3);
+        assert_eq!(data.layout.hue_sat_2[3], 3);
+        assert_eq!(data.words[0].map(f32::to_bits), data.layout.hue_sat_2);
+        assert_eq!(data.layout.tone[1], 5);
         assert_eq!(
             data.words.len(),
             data.layout.output[3] as usize + 33usize.pow(3)

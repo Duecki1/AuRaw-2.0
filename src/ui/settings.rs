@@ -29,16 +29,17 @@ impl Settings {
                 ui.set_max_width(720.0);
                 ui.heading("Subject selection runtime");
                 ui.label(
-                    "Choose an ONNX Runtime 1.18 or newer shared library built for your hardware. GPU provider libraries and their CUDA, ROCm, TensorRT, or OpenVINO dependencies must remain beside it.",
+                    "Choose a trusted ONNX Runtime 1.18 or newer shared library built for your hardware. AuRaw never downloads or dynamically loads a native runtime without this explicit selection. GPU provider libraries and their dependencies must remain beside it.",
                 );
                 ui.add_space(4.0);
                 if let Some(path) = &app.onnx_runtime_path {
                     ui.label("Selected runtime:");
                     ui.monospace(path.display().to_string());
+                    if let Some(sha256) = &app.onnx_runtime_sha256 {
+                        ui.small("Pinned SHA-256:");
+                        ui.monospace(sha256);
+                    }
                 } else {
-                    #[cfg(target_os = "linux")]
-                    ui.label("Automatic CPU runtime (GPU override not selected)");
-                    #[cfg(not(target_os = "linux"))]
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
                         "No runtime selected. Subject and Background masks cannot run yet.",

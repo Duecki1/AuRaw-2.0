@@ -16,6 +16,7 @@ pub use color_profile::{
 };
 pub use export::{
     spawn_tiled_png_export, ExportEvent, ExportMetadata, ExportResizeMode, ExportSettings,
+    MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub use gpu::{GpuParams, ProcessingQuality, RawGpuPipeline};
 pub use masks::{
@@ -24,8 +25,8 @@ pub use masks::{
     MAX_LOCAL_MASKS,
 };
 pub use processing::{
-    affected_stage, build_proxy, extract_padded_tile, resample_raw, ExportTile, ProcessingStage,
-    ProxySpec, TilePlan, TileSpec,
+    affected_stage, build_proxy, extract_padded_tile, ExportTile, ProcessingStage, ProxySpec,
+    TilePlan, TileSpec, EXPORT_TILE_HALO,
 };
 pub use raw_loader::{load_raw_file, load_raw_file_with_dcp, CfaKind, LoadedRaw};
 pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};
