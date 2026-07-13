@@ -1,3 +1,4 @@
+mod ai_masks;
 #[cfg(target_os = "android")]
 mod android;
 mod app;

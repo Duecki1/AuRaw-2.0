@@ -170,7 +170,11 @@ impl DcpMatrixSet {
     pub fn interpolate(first: &Self, second: &Self, weight: f32) -> Self {
         let t = weight.clamp(0.0, 1.0);
         Self {
-            illuminant: if t < 0.5 { first.illuminant } else { second.illuminant },
+            illuminant: if t < 0.5 {
+                first.illuminant
+            } else {
+                second.illuminant
+            },
             color_matrix: interpolate_optional_matrix_4x3(
                 first.color_matrix,
                 second.color_matrix,
@@ -235,7 +239,9 @@ impl DcpProfile {
     /// Missing tags have the specified empty-string default, so two missing
     /// signatures are compatible while one missing and one non-empty are not.
     pub fn calibration_is_compatible(&self) -> bool {
-        self.camera_calibration_signature.as_deref().unwrap_or_default()
+        self.camera_calibration_signature
+            .as_deref()
+            .unwrap_or_default()
             == self.calibration_signature.as_deref().unwrap_or_default()
     }
 
@@ -462,10 +468,18 @@ impl ProfileGpuData {
         let mut words = Vec::with_capacity(total);
         words.push([0.0; 4]);
         if let Some(map) = &profile.hue_sat_map {
-            words.extend(map.entries.iter().map(|entry| [entry[0], entry[1], entry[2], 0.0]));
+            words.extend(
+                map.entries
+                    .iter()
+                    .map(|entry| [entry[0], entry[1], entry[2], 0.0]),
+            );
         }
         if let Some(map) = &profile.look_table {
-            words.extend(map.entries.iter().map(|entry| [entry[0], entry[1], entry[2], 0.0]));
+            words.extend(
+                map.entries
+                    .iter()
+                    .map(|entry| [entry[0], entry[1], entry[2], 0.0]),
+            );
         }
         if let Some(curve) = &profile.tone_curve {
             words.extend(
@@ -531,11 +545,11 @@ fn interpolate_optional_matrix_4x4(
 
 fn dng_illuminant_cct(illuminant: u16) -> Option<f32> {
     match illuminant {
-        1 => Some(5500.0), // Daylight
-        2 => Some(4000.0), // Fluorescent
-        3 => Some(2856.0), // Tungsten
-        4 => Some(5500.0), // Flash
-        9 => Some(5500.0), // Fine weather
+        1 => Some(5500.0),  // Daylight
+        2 => Some(4000.0),  // Fluorescent
+        3 => Some(2856.0),  // Tungsten
+        4 => Some(5500.0),  // Flash
+        9 => Some(5500.0),  // Fine weather
         10 => Some(6500.0), // Cloudy weather
         11 => Some(7500.0), // Shade
         12 => Some(6500.0), // Daylight fluorescent
@@ -585,13 +599,9 @@ fn natural_cubic_second_derivatives(points: &[[f32; 2]]) -> Vec<f64> {
         let pivot = sigma * second[index - 1] + 2.0;
         second[index] = (sigma - 1.0) / pivot;
 
-        let slope_next = (points[index + 1][1] as f64 - points[index][1] as f64)
-            / (x_next - x);
-        let slope_prev = (points[index][1] as f64 - points[index - 1][1] as f64)
-            / (x - x_prev);
-        rhs[index] = (6.0 * (slope_next - slope_prev) / span
-            - sigma * rhs[index - 1])
-            / pivot;
+        let slope_next = (points[index + 1][1] as f64 - points[index][1] as f64) / (x_next - x);
+        let slope_prev = (points[index][1] as f64 - points[index - 1][1] as f64) / (x - x_prev);
+        rhs[index] = (6.0 * (slope_next - slope_prev) / span - sigma * rhs[index - 1]) / pivot;
     }
 
     for index in (0..count - 1).rev() {
@@ -619,11 +629,7 @@ fn sample_natural_cubic(points: &[[f32; 2]], second: &[f64], x: f32) -> f32 {
     let b = (x as f64 - x0) / width;
     let value = a * points[lower][1] as f64
         + b * points[upper][1] as f64
-        + ((a * a * a - a) * second[lower]
-            + (b * b * b - b) * second[upper])
-            * width
-            * width
-            / 6.0;
+        + ((a * a * a - a) * second[lower] + (b * b * b - b) * second[upper]) * width * width / 6.0;
     value as f32
 }
 
@@ -669,8 +675,7 @@ fn profile_from_tags(reader: &mut TiffReader, tags: &[IfdEntry]) -> Result<Optio
     }
 
     let name = read_ascii_tag(reader, tags, PROFILE_NAME)?;
-    let camera_calibration_signature =
-        read_ascii_tag(reader, tags, CAMERA_CALIBRATION_SIGNATURE)?;
+    let camera_calibration_signature = read_ascii_tag(reader, tags, CAMERA_CALIBRATION_SIGNATURE)?;
     let calibration_signature = read_ascii_tag(reader, tags, PROFILE_CALIBRATION_SIGNATURE)?;
     let hue_dims = read_u32_tag(reader, tags, PROFILE_HUE_SAT_MAP_DIMS)?;
     let hue_dims = (hue_dims.len() >= 3).then(|| [hue_dims[0], hue_dims[1], hue_dims[2]]);
@@ -680,8 +685,20 @@ fn profile_from_tags(reader: &mut TiffReader, tags: &[IfdEntry]) -> Result<Optio
             .copied(),
     )?;
     let hue_sat_maps = [
-        read_hsv_map(reader, tags, PROFILE_HUE_SAT_MAP_DATA_1, hue_dims, hue_encoding)?,
-        read_hsv_map(reader, tags, PROFILE_HUE_SAT_MAP_DATA_2, hue_dims, hue_encoding)?,
+        read_hsv_map(
+            reader,
+            tags,
+            PROFILE_HUE_SAT_MAP_DATA_1,
+            hue_dims,
+            hue_encoding,
+        )?,
+        read_hsv_map(
+            reader,
+            tags,
+            PROFILE_HUE_SAT_MAP_DATA_2,
+            hue_dims,
+            hue_encoding,
+        )?,
     ];
 
     let look_dims = read_u32_tag(reader, tags, PROFILE_LOOK_TABLE_DIMS)?;
@@ -1084,7 +1101,11 @@ impl TiffReader {
                 .map(|chunk| {
                     let n = self.endian.u32(chunk[0..4].try_into().unwrap());
                     let d = self.endian.u32(chunk[4..8].try_into().unwrap());
-                    if d == 0 { f32::NAN } else { n as f32 / d as f32 }
+                    if d == 0 {
+                        f32::NAN
+                    } else {
+                        n as f32 / d as f32
+                    }
                 })
                 .collect(),
             10 => bytes
@@ -1092,7 +1113,11 @@ impl TiffReader {
                 .map(|chunk| {
                     let n = self.endian.i32(chunk[0..4].try_into().unwrap());
                     let d = self.endian.i32(chunk[4..8].try_into().unwrap());
-                    if d == 0 { f32::NAN } else { n as f32 / d as f32 }
+                    if d == 0 {
+                        f32::NAN
+                    } else {
+                        n as f32 / d as f32
+                    }
                 })
                 .collect(),
             11 => bytes
@@ -1238,7 +1263,11 @@ impl MatrixShaperProfile {
         }
         let count = be_u32(&bytes[128..132]) as usize;
         let table_end = 132usize
-            .checked_add(count.checked_mul(12).ok_or_else(|| anyhow!("ICC tag table overflow"))?)
+            .checked_add(
+                count
+                    .checked_mul(12)
+                    .ok_or_else(|| anyhow!("ICC tag table overflow"))?,
+            )
             .ok_or_else(|| anyhow!("ICC tag table overflow"))?;
         if table_end > declared {
             bail!("ICC tag table extends outside the profile");
@@ -1249,7 +1278,9 @@ impl MatrixShaperProfile {
             let signature: [u8; 4] = bytes[base..base + 4].try_into().unwrap();
             let offset = be_u32(&bytes[base + 4..base + 8]) as usize;
             let size = be_u32(&bytes[base + 8..base + 12]) as usize;
-            let end = offset.checked_add(size).ok_or_else(|| anyhow!("ICC tag overflow"))?;
+            let end = offset
+                .checked_add(size)
+                .ok_or_else(|| anyhow!("ICC tag overflow"))?;
             if offset < table_end || end > declared {
                 bail!("ICC tag {:?} points outside the profile", signature);
             }
@@ -1269,8 +1300,8 @@ impl MatrixShaperProfile {
             [r_xyz[1], g_xyz[1], b_xyz[1]],
             [r_xyz[2], g_xyz[2], b_xyz[2]],
         ];
-        let pcs_to_device_linear = invert3(device_to_pcs)
-            .ok_or_else(|| anyhow!("ICC RGB colorant matrix is singular"))?;
+        let pcs_to_device_linear =
+            invert3(device_to_pcs).ok_or_else(|| anyhow!("ICC RGB colorant matrix is singular"))?;
         let curves = [
             parse_icc_curve(find_icc_tag(&tags, b"rTRC")?)?,
             parse_icc_curve(find_icc_tag(&tags, b"gTRC")?)?,
@@ -1347,8 +1378,12 @@ fn is_icc_lut_transform_signature(signature: &[u8; 4]) -> bool {
 }
 
 fn find_icc_tag<'a>(tags: &'a [([u8; 4], &'a [u8])], signature: &[u8; 4]) -> Result<&'a [u8]> {
-    find_icc_tag_optional(tags, signature)
-        .ok_or_else(|| anyhow!("ICC profile is missing tag {}", String::from_utf8_lossy(signature)))
+    find_icc_tag_optional(tags, signature).ok_or_else(|| {
+        anyhow!(
+            "ICC profile is missing tag {}",
+            String::from_utf8_lossy(signature)
+        )
+    })
 }
 
 fn find_icc_tag_optional<'a>(
@@ -1382,7 +1417,11 @@ fn parse_icc_curve(data: &[u8]) -> Result<TransferCurve> {
                 return Ok(TransferCurve::Identity);
             }
             let end = 12usize
-                .checked_add(count.checked_mul(2).ok_or_else(|| anyhow!("ICC curve overflow"))?)
+                .checked_add(
+                    count
+                        .checked_mul(2)
+                        .ok_or_else(|| anyhow!("ICC curve overflow"))?,
+                )
                 .ok_or_else(|| anyhow!("ICC curve overflow"))?;
             if end > data.len() {
                 bail!("truncated ICC sampled curve");
@@ -1415,10 +1454,7 @@ fn parse_icc_curve(data: &[u8]) -> Result<TransferCurve> {
             if end > data.len() {
                 bail!("truncated ICC parametric curve");
             }
-            let params = data[12..end]
-                .chunks_exact(4)
-                .map(s15_fixed16)
-                .collect();
+            let params = data[12..end].chunks_exact(4).map(s15_fixed16).collect();
             Ok(TransferCurve::Parametric { kind, params })
         }
         signature => bail!("unsupported ICC TRC tag type {signature:?}"),
@@ -1430,19 +1466,35 @@ fn parametric_curve(kind: u16, p: &[f32], x: f32) -> f32 {
         0 => x.max(0.0).powf(p[0]),
         1 => {
             let [g, a, b] = [p[0], p[1], p[2]];
-            if x >= -b / a { (a * x + b).powf(g) } else { 0.0 }
+            if x >= -b / a {
+                (a * x + b).powf(g)
+            } else {
+                0.0
+            }
         }
         2 => {
             let [g, a, b, c] = [p[0], p[1], p[2], p[3]];
-            if x >= -b / a { (a * x + b).powf(g) + c } else { c }
+            if x >= -b / a {
+                (a * x + b).powf(g) + c
+            } else {
+                c
+            }
         }
         3 => {
             let [g, a, b, c, d] = [p[0], p[1], p[2], p[3], p[4]];
-            if x >= d { (a * x + b).powf(g) } else { c * x }
+            if x >= d {
+                (a * x + b).powf(g)
+            } else {
+                c * x
+            }
         }
         4 => {
             let [g, a, b, c, d, e, f] = [p[0], p[1], p[2], p[3], p[4], p[5], p[6]];
-            if x >= d { (a * x + b).powf(g) + e } else { c * x + f }
+            if x >= d {
+                (a * x + b).powf(g) + e
+            } else {
+                c * x + f
+            }
         }
         _ => x,
     }
@@ -1495,8 +1547,7 @@ fn perceptual_gamut_compress(rgb: [f32; 3]) -> [f32; 3] {
     if min >= 0.0 && max <= 1.0 {
         return rgb;
     }
-    let luma = (rgb[0] * 0.212_672_9 + rgb[1] * 0.715_152_2 + rgb[2] * 0.072_175)
-        .clamp(0.0, 1.0);
+    let luma = (rgb[0] * 0.212_672_9 + rgb[1] * 0.715_152_2 + rgb[2] * 0.072_175).clamp(0.0, 1.0);
     let mut scale: f32 = 1.0;
     for value in rgb {
         let delta = value - luma;
@@ -1534,7 +1585,11 @@ fn sample_rgb_lut(entries: &[[f32; 4]], size: u32, rgb: [f32; 3]) -> [f32; 3] {
     let coord = rgb.map(|v| v.clamp(0.0, 1.0) * (edge - 1) as f32);
     let lo = coord.map(|v| v.floor() as u32);
     let hi = lo.map(|v| (v + 1).min(edge - 1));
-    let f = [coord[0] - lo[0] as f32, coord[1] - lo[1] as f32, coord[2] - lo[2] as f32];
+    let f = [
+        coord[0] - lo[0] as f32,
+        coord[1] - lo[1] as f32,
+        coord[2] - lo[2] as f32,
+    ];
     let fetch = |r: u32, g: u32, b: u32| -> [f32; 3] {
         let index = ((b * edge + g) * edge + r) as usize;
         let entry = entries[index];
@@ -1563,8 +1618,18 @@ mod tests {
 
     #[test]
     fn dual_illuminant_maps_interpolate_entrywise() {
-        let a = HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0], [10.0, 0.5, 1.0]], ProfileEncoding::Linear).unwrap();
-        let b = HsvMap::new([1, 2, 1], vec![[20.0, 2.0, 1.0], [30.0, 1.5, 2.0]], ProfileEncoding::Linear).unwrap();
+        let a = HsvMap::new(
+            [1, 2, 1],
+            vec![[0.0, 1.0, 1.0], [10.0, 0.5, 1.0]],
+            ProfileEncoding::Linear,
+        )
+        .unwrap();
+        let b = HsvMap::new(
+            [1, 2, 1],
+            vec![[20.0, 2.0, 1.0], [30.0, 1.5, 2.0]],
+            ProfileEncoding::Linear,
+        )
+        .unwrap();
         let mixed = HsvMap::interpolate(&a, &b, 0.25).unwrap();
         assert_eq!(mixed.entries[0], [5.0, 1.25, 1.0]);
     }
@@ -1588,13 +1653,18 @@ mod tests {
     #[test]
     fn gpu_layout_offsets_are_contiguous() {
         let profile = CameraProfile {
-            hue_sat_map: Some(HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear).unwrap()),
+            hue_sat_map: Some(
+                HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear).unwrap(),
+            ),
             tone_curve: Some(ToneCurve::new(vec![[0.0, 0.0], [1.0, 1.0]]).unwrap()),
             ..Default::default()
         };
         let data = profile.gpu_data(&IccOutputTransform::srgb());
         assert_eq!(data.layout.hue_sat[3], 1);
         assert_eq!(data.layout.tone[1], 3);
-        assert_eq!(data.words.len(), data.layout.output[3] as usize + 33usize.pow(3));
+        assert_eq!(
+            data.words.len(),
+            data.layout.output[3] as usize + 33usize.pow(3)
+        );
     }
 }

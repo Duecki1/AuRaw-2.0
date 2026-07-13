@@ -85,8 +85,8 @@ fn generalized_loglogistic_sigmoid(
 ) -> f32 {
     let clamped_value = value.max(0.0);
     let film_response = (film_fog + clamped_value).powf(film_power);
-    let paper_response = magnitude
-        * (film_response / (paper_exposure + film_response)).powf(paper_power);
+    let paper_response =
+        magnitude * (film_response / (paper_exposure + film_response)).powf(paper_power);
     if paper_response.is_nan() {
         magnitude
     } else {
@@ -105,8 +105,8 @@ pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
     let ref_paper_power = 1.0;
     let ref_magnitude = 1.0;
     let ref_film_fog = 0.0;
-    let ref_paper_exposure = (ref_film_fog + MIDDLE_GREY).powf(ref_film_power)
-        * ((ref_magnitude / MIDDLE_GREY) - 1.0);
+    let ref_paper_exposure =
+        (ref_film_fog + MIDDLE_GREY).powf(ref_film_power) * ((ref_magnitude / MIDDLE_GREY) - 1.0);
     let delta = 1e-6;
     let ref_slope = (generalized_loglogistic_sigmoid(
         MIDDLE_GREY + delta,
@@ -127,8 +127,7 @@ pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
     let paper_power = 5.0f32.powf(-skew);
     let temp_film_power = 1.0;
     let temp_white_target = 0.01 * display_white_target;
-    let temp_white_grey_relation =
-        (temp_white_target / MIDDLE_GREY).powf(1.0 / paper_power) - 1.0;
+    let temp_white_grey_relation = (temp_white_target / MIDDLE_GREY).powf(1.0 / paper_power) - 1.0;
     let temp_paper_exposure = MIDDLE_GREY.powf(temp_film_power) * temp_white_grey_relation;
     let temp_slope = (generalized_loglogistic_sigmoid(
         MIDDLE_GREY + delta,
@@ -149,8 +148,7 @@ pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
     let film_power = ref_slope / temp_slope;
     let white_target = 0.01 * display_white_target;
     let black_target = 0.01 * display_black_target;
-    let white_grey_relation =
-        (white_target / MIDDLE_GREY).powf(1.0 / paper_power) - 1.0;
+    let white_grey_relation = (white_target / MIDDLE_GREY).powf(1.0 / paper_power) - 1.0;
     let white_black_relation = if black_target == 0.0 {
         f32::INFINITY
     } else {
@@ -159,8 +157,7 @@ pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
     let film_fog = MIDDLE_GREY * white_grey_relation.powf(1.0 / film_power)
         / (white_black_relation.powf(1.0 / film_power)
             - white_grey_relation.powf(1.0 / film_power));
-    let paper_exposure =
-        (film_fog + MIDDLE_GREY).powf(film_power) * white_grey_relation;
+    let paper_exposure = (film_fog + MIDDLE_GREY).powf(film_power) * white_grey_relation;
 
     SigmoidCoefficients {
         white_target,
@@ -225,7 +222,11 @@ mod tests {
             c.paper_power,
         );
 
-        assert!((black - c.black_target).abs() < 2e-6, "{black} != {}", c.black_target);
+        assert!(
+            (black - c.black_target).abs() < 2e-6,
+            "{black} != {}",
+            c.black_target
+        );
         assert!((grey - MIDDLE_GREY).abs() < 2e-6, "{grey} != {MIDDLE_GREY}");
         assert!((very_bright - c.white_target).abs() < 2e-5);
     }
@@ -251,7 +252,10 @@ mod tests {
                         c.paper_power,
                     );
                     assert!(y.is_finite());
-                    assert!(y + 1e-6 >= previous, "curve decreased at {x}: {previous} -> {y}");
+                    assert!(
+                        y + 1e-6 >= previous,
+                        "curve decreased at {x}: {previous} -> {y}"
+                    );
                     previous = y;
                 }
             }

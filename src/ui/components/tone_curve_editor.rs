@@ -5,10 +5,11 @@ const CURVE_HEIGHT: f32 = 210.0;
 const POINT_RADIUS: f32 = 5.0;
 const PICK_RADIUS: f32 = 16.0;
 
-pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve) -> bool {
+pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color32) -> bool {
     curve.sanitize();
     let width = ui.available_width().max(180.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CURVE_HEIGHT), Sense::click_and_drag());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, CURVE_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
 
@@ -25,12 +26,21 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve) -> bool {
         let x = egui::lerp(rect.left()..=rect.right(), t);
         let y = egui::lerp(rect.bottom()..=rect.top(), t);
         let grid = Stroke::new(1.0, visuals.faint_bg_color);
-        painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], grid);
-        painter.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], grid);
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            grid,
+        );
+        painter.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            grid,
+        );
     }
 
     painter.line_segment(
-        [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.top())],
+        [
+            Pos2::new(rect.left(), rect.bottom()),
+            Pos2::new(rect.right(), rect.top()),
+        ],
         Stroke::new(1.0, visuals.weak_text_color()),
     );
 
@@ -38,14 +48,14 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve) -> bool {
     for sample in 1..=128 {
         let x = sample as f32 / 128.0;
         let next = curve_to_screen(rect, [x, sample_curve(curve, x)]);
-        painter.line_segment([previous, next], Stroke::new(2.0, visuals.selection.bg_fill));
+        painter.line_segment([previous, next], Stroke::new(2.0, curve_color));
         previous = next;
     }
 
     for point in curve.points.iter().take(curve.len as usize) {
         let center = curve_to_screen(rect, *point);
         painter.circle_filled(center, POINT_RADIUS, Color32::WHITE);
-        painter.circle_stroke(center, POINT_RADIUS, Stroke::new(1.5, visuals.selection.bg_fill));
+        painter.circle_stroke(center, POINT_RADIUS, Stroke::new(1.5, curve_color));
     }
 
     let mut changed = false;
@@ -73,6 +83,15 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve) -> bool {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
+    if response.clicked() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let point = screen_to_curve(rect, pointer);
+            changed |= insert_point(curve, point);
+        }
+    }
+
+    #[cfg(target_os = "android")]
     if response.double_clicked() {
         if let Some(pointer) = response.interact_pointer_pos() {
             let point = screen_to_curve(rect, pointer);
@@ -88,9 +107,12 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve) -> bool {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     response.on_hover_text(
-        "Drag points to shape the curve. Double-click to add a point; right-click an interior point to remove it.",
+        "Click to add a point. Drag points to shape the curve; right-click an interior point to remove it.",
     );
+    #[cfg(target_os = "android")]
+    response.on_hover_text("Drag points to shape the curve. Double-tap to add a point.");
     curve.sanitize();
     changed
 }
@@ -109,7 +131,12 @@ fn screen_to_curve(rect: egui::Rect, point: Pos2) -> [f32; 2] {
     ]
 }
 
-fn nearest_point(curve: &PointCurve, rect: egui::Rect, pointer: Pos2, radius: f32) -> Option<usize> {
+fn nearest_point(
+    curve: &PointCurve,
+    rect: egui::Rect,
+    pointer: Pos2,
+    radius: f32,
+) -> Option<usize> {
     curve
         .points
         .iter()

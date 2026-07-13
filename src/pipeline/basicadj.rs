@@ -49,7 +49,6 @@ impl HighlightReconstructionMethod {
     }
 }
 
-
 /// Lightroom-style editable point curve. Points are stored in normalized
 /// input/output coordinates and evaluated in a reversible scene-luminance
 /// shaper, so the neutral diagonal is an exact no-op for HDR scene values.
@@ -63,23 +62,32 @@ pub struct PointCurve {
 
 impl PointCurve {
     pub const fn linear() -> Self {
+        // Lightroom's Point Curve starts with only the two locked endpoints.
+        // Interior control points are created explicitly by the user.
         Self {
             points: [
                 [0.0, 0.0],
-                [0.25, 0.25],
-                [0.5, 0.5],
-                [0.75, 0.75],
+                [1.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 1.0],
                 [1.0, 1.0],
                 [1.0, 1.0],
                 [1.0, 1.0],
                 [1.0, 1.0],
             ],
-            len: 5,
+            len: 2,
         }
     }
 
     pub fn reset(&mut self) {
         *self = Self::linear();
+    }
+
+    pub fn is_identity(&self) -> bool {
+        let len = self.len.clamp(2, MAX_POINT_CURVE_POINTS as u32) as usize;
+        self.points[..len]
+            .iter()
+            .all(|point| (point[1] - point[0]).abs() <= 1e-6)
     }
 
     pub fn sanitize(&mut self) {
@@ -125,7 +133,11 @@ pub struct ExposureParams {
     pub tint: f32,
     pub saturation: f32,
     pub vibrance: f32,
+    /// Composite luminance curve followed by independent scene-referred RGB channel curves.
     pub tone_curve: PointCurve,
+    pub tone_curve_red: PointCurve,
+    pub tone_curve_green: PointCurve,
+    pub tone_curve_blue: PointCurve,
     pub chroma_denoise: f32,
     /// Demosaic finishing mode. The reference algorithm is always run first.
     pub demosaic_mode: DemosaicMode,
@@ -159,6 +171,17 @@ pub struct ExposureParams {
     pub clarity: f32,
     pub dehaze: f32,
 
+    // Creative effects. Glow follows a highlight-aware, multi-scale bloom
+    // model; vignette is a post-crop, exposure-domain edge treatment.
+    pub glow_amount: f32,
+    pub glow_radius: f32,
+    pub glow_threshold: f32,
+    pub vignette_amount: f32,
+    pub vignette_midpoint: f32,
+    pub vignette_roundness: f32,
+    pub vignette_feather: f32,
+    pub vignette_highlights: f32,
+
     // Red, orange, yellow, green, aqua, blue, purple, magenta.
     pub hsl_hue: [f32; 8],
     pub hsl_saturation: [f32; 8],
@@ -171,6 +194,20 @@ pub struct ExposureParams {
 pub const DEFAULT_SCENE_EXPOSURE_EV: f32 = 0.7;
 
 impl ExposureParams {
+    pub fn sanitize_tone_curves(&mut self) {
+        self.tone_curve.sanitize();
+        self.tone_curve_red.sanitize();
+        self.tone_curve_green.sanitize();
+        self.tone_curve_blue.sanitize();
+    }
+
+    pub fn reset_tone_curves(&mut self) {
+        self.tone_curve.reset();
+        self.tone_curve_red.reset();
+        self.tone_curve_green.reset();
+        self.tone_curve_blue.reset();
+    }
+
     pub fn scene_referred_default() -> Self {
         Self {
             exposure: DEFAULT_SCENE_EXPOSURE_EV,
@@ -191,6 +228,9 @@ impl Default for ExposureParams {
             saturation: 0.0,
             vibrance: 0.0,
             tone_curve: PointCurve::linear(),
+            tone_curve_red: PointCurve::linear(),
+            tone_curve_green: PointCurve::linear(),
+            tone_curve_blue: PointCurve::linear(),
             chroma_denoise: 0.0,
             demosaic_mode: DemosaicMode::Reference,
             dual_threshold: 20.0,
@@ -209,6 +249,14 @@ impl Default for ExposureParams {
             texture: 0.0,
             clarity: 0.0,
             dehaze: 0.0,
+            glow_amount: 0.0,
+            glow_radius: 50.0,
+            glow_threshold: 60.0,
+            vignette_amount: 0.0,
+            vignette_midpoint: 50.0,
+            vignette_roundness: 0.0,
+            vignette_feather: 50.0,
+            vignette_highlights: 0.0,
             hsl_hue: [0.0; 8],
             hsl_saturation: [0.0; 8],
             hsl_luminance: [0.0; 8],
@@ -249,7 +297,7 @@ mod tests {
     #[test]
     fn point_curve_default_is_a_sorted_identity() {
         let curve = PointCurve::default();
-        assert_eq!(curve.len, 5);
+        assert_eq!(curve.len, 2);
         for (index, point) in curve.points[..curve.len as usize].iter().enumerate() {
             assert!((point[0] - point[1]).abs() < f32::EPSILON);
             if index > 0 {
