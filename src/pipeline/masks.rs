@@ -298,6 +298,7 @@ pub struct LocalAdjustments {
     pub hsl_hue: [f32; 8],
     pub hsl_saturation: [f32; 8],
     pub hsl_luminance: [f32; 8],
+    pub color_grading: super::ColorGrading,
 }
 
 impl Default for LocalAdjustments {
@@ -322,13 +323,21 @@ impl Default for LocalAdjustments {
             hsl_hue: [0.0; 8],
             hsl_saturation: [0.0; 8],
             hsl_luminance: [0.0; 8],
+            color_grading: super::ColorGrading::default(),
         }
     }
 }
 
 impl LocalAdjustments {
     pub fn is_neutral(self) -> bool {
-        self == Self::default()
+        let mut normalized = self;
+        // Hue is intentionally remembered when a wheel is pulled back to the
+        // center. With zero saturation/luminance it must still count as a
+        // neutral local adjustment and take the exact bypass path.
+        if normalized.color_grading.is_neutral() {
+            normalized.color_grading = super::ColorGrading::default();
+        }
+        normalized == Self::default()
     }
 
     pub fn reset(&mut self) {

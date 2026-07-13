@@ -1,9 +1,10 @@
-use crate::app::{AurawApp, SidebarTab, ToneCurveTab};
+use crate::app::{AurawApp, ColorGradeTab, SidebarTab, ToneCurveTab};
 use crate::pipeline::{
     BrushMode, DemosaicMode, ExportResizeMode, ExposureParams, MaskCombineMode, MaskGeometry,
     MaskKind, SigmoidColorProcessing, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS,
 };
 use crate::ui::components::adjustment_slider::adjustment_slider;
+use crate::ui::components::color_grading::color_grading_editor;
 use crate::ui::components::tone_curve_editor::tone_curve_editor;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::mask_component_color;
@@ -75,6 +76,11 @@ impl Sidebar {
         changed |= Self::show_basic(ui, &mut app.exposure);
         changed |= Self::show_tone_curve(ui, &mut app.exposure, &mut app.tone_curve_tab);
         changed |= Self::show_color(ui, &mut app.exposure);
+        changed |= Self::show_color_grading(
+            ui,
+            &mut app.exposure.color_grading,
+            &mut app.color_grade_tab,
+        );
         changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode);
         changed |= Self::show_hsl(ui, &mut app.exposure);
         if app.expert_mode {
@@ -271,6 +277,7 @@ impl Sidebar {
         let mut selected_component_choice = None;
         let mut brush_mode = app.brush_mode;
         let mut local_curve_tab = app.tone_curve_tab;
+        let mut local_color_grade_tab = app.color_grade_tab;
 
         {
             let mask = &mut app.masks.masks[mask_index];
@@ -671,9 +678,15 @@ impl Sidebar {
                 });
             });
             adjustments_changed |=
-                Self::show_local_mask_adjustments(ui, &mut mask.adjustments, &mut local_curve_tab);
+                Self::show_local_mask_adjustments(
+                    ui,
+                    &mut mask.adjustments,
+                    &mut local_curve_tab,
+                    &mut local_color_grade_tab,
+                );
         }
         app.tone_curve_tab = local_curve_tab;
+        app.color_grade_tab = local_color_grade_tab;
 
         app.brush_mode = brush_mode;
         if request_subject {
@@ -712,6 +725,7 @@ impl Sidebar {
         ui: &mut Ui,
         adjustment: &mut crate::pipeline::LocalAdjustments,
         selected_tab: &mut ToneCurveTab,
+        selected_grade_tab: &mut ColorGradeTab,
     ) -> bool {
         let mut changed = false;
         egui::CollapsingHeader::new("Light")
@@ -832,6 +846,15 @@ impl Sidebar {
                     0,
                     1.0,
                     None,
+                );
+            });
+        egui::CollapsingHeader::new("Color Grading")
+            .default_open(false)
+            .show(ui, |ui| {
+                changed |= color_grading_editor(
+                    ui,
+                    &mut adjustment.color_grading,
+                    selected_grade_tab,
                 );
             });
         egui::CollapsingHeader::new("Tone Curve")
@@ -1250,6 +1273,27 @@ impl Sidebar {
                     1.0,
                     Some("Uniform perceptual chroma scaling."),
                 );
+            });
+        changed
+    }
+
+    fn show_color_grading(
+        ui: &mut Ui,
+        grading: &mut crate::pipeline::ColorGrading,
+        selected_tab: &mut ColorGradeTab,
+    ) -> bool {
+        let mut changed = false;
+        egui::CollapsingHeader::new("Color Grading")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Perceptual four-way grading in scene-linear Rec.2020",
+                    )
+                    .size(11.5)
+                    .color(ui.visuals().weak_text_color()),
+                );
+                changed |= color_grading_editor(ui, grading, selected_tab);
             });
         changed
     }

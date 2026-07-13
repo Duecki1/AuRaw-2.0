@@ -8,7 +8,8 @@ mod raw_loader;
 mod sigmoid;
 
 pub use basicadj::{
-    DemosaicMode, ExposureParams, HighlightReconstructionMethod, PointCurve, MAX_POINT_CURVE_POINTS,
+    ColorGradeWheel, ColorGrading, DemosaicMode, ExposureParams, HighlightReconstructionMethod,
+    PointCurve, MAX_POINT_CURVE_POINTS,
 };
 pub use color_profile::{
     CameraProfile, DcpMatrixSet, DcpProfile, HsvMap, IccOutputTransform, ProfileEncoding,

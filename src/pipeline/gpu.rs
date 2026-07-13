@@ -341,6 +341,36 @@ pub struct GpuParams {
     mask_hsl_saturation_1: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_hsl_luminance_0: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_hsl_luminance_1: [[f32; 4]; MAX_LOCAL_MASKS],
+    // Perceptual scene-referred color grading. Wheels are packed as normalized
+    // hue, saturation, luminance, reserved. Options are blending, balance.
+    grade_shadows: [f32; 4],
+    grade_midtones: [f32; 4],
+    grade_highlights: [f32; 4],
+    grade_global: [f32; 4],
+    grade_options: [f32; 4],
+    mask_grade_shadows: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_grade_midtones: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_grade_highlights: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_grade_global: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_grade_options: [[f32; 4]; MAX_LOCAL_MASKS],
+}
+
+fn pack_color_grade_wheel(wheel: crate::pipeline::ColorGradeWheel) -> [f32; 4] {
+    [
+        wheel.hue.rem_euclid(360.0) / 360.0,
+        (wheel.saturation / 100.0).clamp(0.0, 1.0),
+        (wheel.luminance / 100.0).clamp(-1.0, 1.0),
+        0.0,
+    ]
+}
+
+fn pack_color_grade_options(grading: crate::pipeline::ColorGrading) -> [f32; 4] {
+    [
+        (grading.blending / 100.0).clamp(0.0, 1.0),
+        (grading.balance / 100.0).clamp(-1.0, 1.0),
+        0.0,
+        0.0,
+    ]
 }
 
 impl GpuParams {
@@ -378,6 +408,11 @@ impl GpuParams {
         let mut mask_hsl_saturation_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_hsl_luminance_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_hsl_luminance_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_grade_shadows = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_grade_midtones = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_grade_highlights = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_grade_global = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_grade_options = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
             let adjustment = mask.adjustments;
             let has_hsl = adjustment
@@ -390,11 +425,12 @@ impl GpuParams {
                 | (u32::from(!adjustment.tone_curve_red.is_identity()) << 1)
                 | (u32::from(!adjustment.tone_curve_green.is_identity()) << 2)
                 | (u32::from(!adjustment.tone_curve_blue.is_identity()) << 3);
+            let has_grading = !adjustment.color_grading.is_neutral();
             mask_meta[index] = [
                 u32::from(mask.enabled),
                 u32::from(!adjustment.is_neutral()),
                 curve_flags,
-                u32::from(has_hsl),
+                u32::from(has_hsl) | (u32::from(has_grading) << 1),
             ];
             mask_adjust_0[index] = [
                 adjustment.exposure.clamp(-5.0, 5.0),
@@ -431,6 +467,12 @@ impl GpuParams {
             mask_hsl_saturation_1[index] = adjustment.hsl_saturation[4..].try_into().unwrap();
             mask_hsl_luminance_0[index] = adjustment.hsl_luminance[..4].try_into().unwrap();
             mask_hsl_luminance_1[index] = adjustment.hsl_luminance[4..].try_into().unwrap();
+            mask_grade_shadows[index] = pack_color_grade_wheel(adjustment.color_grading.shadows);
+            mask_grade_midtones[index] = pack_color_grade_wheel(adjustment.color_grading.midtones);
+            mask_grade_highlights[index] =
+                pack_color_grade_wheel(adjustment.color_grading.highlights);
+            mask_grade_global[index] = pack_color_grade_wheel(adjustment.color_grading.global);
+            mask_grade_options[index] = pack_color_grade_options(adjustment.color_grading);
         }
         Self {
             black_point: exposure.black_point,
@@ -706,6 +748,16 @@ impl GpuParams {
             mask_hsl_saturation_1,
             mask_hsl_luminance_0,
             mask_hsl_luminance_1,
+            grade_shadows: pack_color_grade_wheel(exposure.color_grading.shadows),
+            grade_midtones: pack_color_grade_wheel(exposure.color_grading.midtones),
+            grade_highlights: pack_color_grade_wheel(exposure.color_grading.highlights),
+            grade_global: pack_color_grade_wheel(exposure.color_grading.global),
+            grade_options: pack_color_grade_options(exposure.color_grading),
+            mask_grade_shadows,
+            mask_grade_midtones,
+            mask_grade_highlights,
+            mask_grade_global,
+            mask_grade_options,
         }
     }
 
@@ -1277,6 +1329,8 @@ impl RawGpuPipeline {
                 ),
                 texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_buffer_entry(20, true),
+                texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
+                sampler_entry(28),
                 storage_texture_entry(29, work_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
@@ -1816,6 +1870,14 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 20,
                     resource: profile_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 29,
@@ -3426,7 +3488,7 @@ mod tests {
         // Sixteen scalar values keep the stable 64-byte prefix. The two
         // darktable sigmoid vec4s follow the local-tone controls, then the
         // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 6224);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 6944);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
@@ -3491,6 +3553,16 @@ mod tests {
             std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
             6096
         );
+        assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 6224);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 6288);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, mask_grade_shadows),
+            6304
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, mask_grade_options),
+            6816
+        );
     }
 
     #[test]
@@ -3517,6 +3589,9 @@ mod tests {
         assert!(SHADER_ADJUSTMENTS.contains("stabilized_mixer_sample"));
         assert!(SHADER_ADJUSTMENTS.contains("positive_rec2020_from_oklab"));
         assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_color_grading_wheels"));
+        assert!(SHADER_ADJUSTMENTS.contains("color_grade_tonal_weights"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_local_color_grading"));
         assert!(!SHADER_ADJUSTMENTS.contains("rgb_to_hsl"));
         assert!(!SHADER_ADJUSTMENTS.contains("hsl_to_rgb"));
     }
