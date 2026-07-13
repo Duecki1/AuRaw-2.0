@@ -14,6 +14,7 @@
 @group(0) @binding(26) var final_adjustment_tex: texture_2d<f32>;
 @group(0) @binding(27) var local_mask_tex: texture_2d_array<f32>;
 @group(0) @binding(28) var local_mask_sampler: sampler;
+@group(0) @binding(29) var display_linear_out: texture_storage_2d<rgba16float, write>;
 
 struct LocalAdjustmentMix {
     tone0: vec4<f32>,
@@ -859,5 +860,7 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let rgb = textureLoad(final_adjustment_tex, pos, 0).xyz;
     let mixed = apply_color_mixer(pos, rgb);
-    textureStore(out_tex, pos, vec4<f32>(display_render(mixed), 1.0));
+    let display_linear = darktable_sigmoid(mixed);
+    textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
+    textureStore(out_tex, pos, vec4<f32>(apply_output_lut(display_linear), 1.0));
 }

@@ -764,6 +764,7 @@ pub struct RawGpuPipeline {
     _tex2: wgpu::Texture,
     scene_texture: wgpu::Texture,
     scene_format: wgpu::TextureFormat,
+    display_linear_texture: wgpu::Texture,
     tone_stats_buffer: wgpu::Buffer,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
@@ -880,6 +881,13 @@ impl RawGpuPipeline {
             "auraw scene-linear camera RGB",
         );
 
+        // The final creative result is tone-mapped into display-linear Rec.2020
+        // before any output transfer function is applied. Export reads this
+        // surface so resizing happens after demosaic/tone processing and before
+        // sRGB encoding.
+        let display_linear_texture =
+            create_demosaic_texture(device, size, work_format, "auraw display-linear Rec.2020");
+
         let out_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw output texture"),
             size,
@@ -945,6 +953,8 @@ impl RawGpuPipeline {
         );
 
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let display_linear_view =
+            display_linear_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let reconstructed_raw_view =
             reconstructed_raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let highlight_work_a_view =
@@ -1249,6 +1259,7 @@ impl RawGpuPipeline {
                 ),
                 texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_buffer_entry(20, true),
+                storage_texture_entry(29, work_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -1788,6 +1799,10 @@ impl RawGpuPipeline {
                     binding: 20,
                     resource: profile_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 29,
+                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
+                },
             ],
         });
 
@@ -2096,6 +2111,7 @@ impl RawGpuPipeline {
             _tex2: tex2,
             scene_texture,
             scene_format: demosaic_format,
+            display_linear_texture,
             tone_stats_buffer,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
@@ -2418,6 +2434,37 @@ impl RawGpuPipeline {
         Ok(rgba)
     }
 
+    /// Copies a post-tone-map, display-linear Rec.2020 sub-rectangle as
+    /// tightly packed RGB32F. High-quality export uses this surface so any
+    /// resize occurs before the output transfer function and after demosaic.
+    pub fn read_display_linear_region_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<f32>> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "display-linear export readback requires ProcessingQuality::High (RGBA32Float)"
+            ));
+        }
+        read_rgba32_texture_region_rgb_blocking(
+            device,
+            queue,
+            &self.display_linear_texture,
+            x,
+            y,
+            width,
+            height,
+            self.width,
+            self.height,
+            "auraw display-linear export readback",
+        )
+    }
+
     /// Reads the internal demosaiced scene texture as tightly packed RGB32F.
     /// The raw stage must have been submitted before this call. Regression
     /// renders use `ProcessingQuality::High`, because half-float preview
@@ -2603,6 +2650,64 @@ impl RawGpuPipeline {
             pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
     }
+}
+
+fn read_rgba32_texture_region_rgb_blocking(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    texture_width: u32,
+    texture_height: u32,
+    label: &'static str,
+) -> Result<Vec<f32>> {
+    let right = x
+        .checked_add(width)
+        .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
+    let bottom = y
+        .checked_add(height)
+        .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
+    if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
+        return Err(anyhow!("invalid GPU RGBA32F readback rectangle"));
+    }
+
+    let (readback, padded_bytes_per_row) =
+        create_rgba32_readback_buffer(device, width, height, label);
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let submission = queue.submit(Some(encoder.finish()));
+    map_rgba32_readback_rgb(
+        device,
+        &readback,
+        submission,
+        width,
+        height,
+        padded_bytes_per_row,
+    )
 }
 
 fn read_rgba32_texture_rgb_blocking(
@@ -2865,13 +2970,7 @@ fn storage_texture_entry(
 }
 
 fn validate_raw(raw: &LoadedRaw) -> Result<()> {
-    if raw.width == 0 || raw.height == 0 {
-        return Err(anyhow!("raw dimensions must be non-zero"));
-    }
-    let pixels = raw
-        .width
-        .checked_mul(raw.height)
-        .ok_or_else(|| anyhow!("raw dimensions overflow"))? as usize;
+    let pixels = super::raw_loader::validate_raw_dimensions(raw.width, raw.height)?;
     if raw.raw_pixels.len() != pixels {
         return Err(anyhow!(
             "raw pixel count mismatch: got {}, expected {}",
