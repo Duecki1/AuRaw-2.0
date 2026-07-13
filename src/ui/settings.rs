@@ -22,6 +22,46 @@ impl Settings {
             );
         });
 
+        #[cfg(not(target_os = "android"))]
+        {
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                ui.set_max_width(720.0);
+                ui.heading("Subject selection runtime");
+                ui.label(
+                    "Choose an ONNX Runtime 1.18 or newer shared library built for your hardware. GPU provider libraries and their CUDA, ROCm, TensorRT, or OpenVINO dependencies must remain beside it.",
+                );
+                ui.add_space(4.0);
+                if let Some(path) = &app.onnx_runtime_path {
+                    ui.label("Selected runtime:");
+                    ui.monospace(path.display().to_string());
+                } else {
+                    #[cfg(target_os = "linux")]
+                    ui.label("Automatic CPU runtime (GPU override not selected)");
+                    #[cfg(not(target_os = "linux"))]
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "No runtime selected. Subject and Background masks cannot run yet.",
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Choose ONNX Runtime…").clicked() {
+                        app.choose_onnx_runtime();
+                    }
+                    if ui
+                        .add_enabled(
+                            app.onnx_runtime_path.is_some(),
+                            eframe::egui::Button::new("Clear"),
+                        )
+                        .clicked()
+                    {
+                        app.clear_onnx_runtime();
+                    }
+                });
+                ui.small("Restart AuRaw after changing this library. The runtime is loaded once per process.");
+            });
+        }
+
         if !app.expert_mode {
             return;
         }

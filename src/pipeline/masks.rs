@@ -1,4 +1,5 @@
 use std::f32::consts::TAU;
+use std::sync::Arc;
 
 pub const MAX_LOCAL_MASKS: usize = 8;
 pub const MASK_ATLAS_EDGE_DESKTOP: u32 = 2048;
@@ -55,7 +56,16 @@ impl MaskKind {
     }
 
     pub const fn is_available(self) -> bool {
-        matches!(self, Self::Brush | Self::Radial | Self::Linear)
+        matches!(
+            self,
+            Self::Brush
+                | Self::Radial
+                | Self::Linear
+                | Self::Subject
+                | Self::Background
+                | Self::LuminanceRange
+                | Self::ColorRange
+        )
     }
 }
 
@@ -104,6 +114,40 @@ pub struct BrushDab {
     pub feather: f32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskImage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Arc<[u8]>,
+}
+
+impl MaskImage {
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
+        (pixels.len() == width as usize * height as usize).then(|| Self {
+            width,
+            height,
+            pixels: pixels.into(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskRgbImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Arc<[u8]>,
+}
+
+impl MaskRgbImage {
+    pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Option<Self> {
+        (rgba.len() == width as usize * height as usize * 4).then(|| Self {
+            width,
+            height,
+            rgba: rgba.into(),
+        })
+    }
+}
+
 impl Default for BrushDab {
     fn default() -> Self {
         Self {
@@ -136,6 +180,23 @@ pub enum MaskGeometry {
         feather: f32,
         initialized: bool,
     },
+    Ai {
+        mask: Option<MaskImage>,
+        feather: f32,
+    },
+    LuminanceRange {
+        source: Option<MaskRgbImage>,
+        low: f32,
+        high: f32,
+        feather: f32,
+    },
+    ColorRange {
+        source: Option<MaskRgbImage>,
+        sample: [f32; 3],
+        tolerance: f32,
+        feather: f32,
+        sampled: bool,
+    },
     Placeholder,
 }
 
@@ -160,6 +221,23 @@ impl MaskGeometry {
                 feather: 1.0,
                 initialized: false,
             },
+            MaskKind::Subject | MaskKind::Background => Self::Ai {
+                mask: None,
+                feather: 0.0,
+            },
+            MaskKind::LuminanceRange => Self::LuminanceRange {
+                source: None,
+                low: 0.2,
+                high: 0.8,
+                feather: 0.15,
+            },
+            MaskKind::ColorRange => Self::ColorRange {
+                source: None,
+                sample: [0.5; 3],
+                tolerance: 0.18,
+                feather: 0.12,
+                sampled: false,
+            },
             _ => Self::Placeholder,
         }
     }
@@ -168,6 +246,11 @@ impl MaskGeometry {
         match self {
             Self::Brush { dabs, .. } => !dabs.is_empty(),
             Self::Radial { initialized, .. } | Self::Linear { initialized, .. } => *initialized,
+            Self::Ai { mask, .. } => mask.is_some(),
+            Self::LuminanceRange { source, .. } => source.is_some(),
+            Self::ColorRange {
+                source, sampled, ..
+            } => source.is_some() && *sampled,
             Self::Placeholder => false,
         }
     }
@@ -208,6 +291,10 @@ pub struct LocalAdjustments {
     pub texture: f32,
     pub clarity: f32,
     pub dehaze: f32,
+    pub tone_curve: super::PointCurve,
+    pub hsl_hue: [f32; 8],
+    pub hsl_saturation: [f32; 8],
+    pub hsl_luminance: [f32; 8],
 }
 
 impl Default for LocalAdjustments {
@@ -225,6 +312,10 @@ impl Default for LocalAdjustments {
             texture: 0.0,
             clarity: 0.0,
             dehaze: 0.0,
+            tone_curve: super::PointCurve::linear(),
+            hsl_hue: [0.0; 8],
+            hsl_saturation: [0.0; 8],
+            hsl_luminance: [0.0; 8],
         }
     }
 }
@@ -451,6 +542,40 @@ impl MaskStack {
             .map(|value| (value.clamp(0.0, 1.0) * opacity * 255.0 + 0.5) as u8)
             .collect()
     }
+
+    pub fn rasterize_component_layer(
+        &self,
+        mask_index: usize,
+        component_index: usize,
+        width: u32,
+        height: u32,
+        image_width: u32,
+        image_height: u32,
+    ) -> Vec<u8> {
+        let Some(component) = self
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+        else {
+            return vec![0; width as usize * height as usize];
+        };
+        let mut coverage = rasterize_component(
+            component,
+            width,
+            height,
+            image_width,
+            image_height,
+        );
+        if component.invert {
+            for value in &mut coverage {
+                *value = 1.0 - *value;
+            }
+        }
+        coverage
+            .into_iter()
+            .map(|value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+            .collect()
+    }
 }
 
 fn moved_index(selected: usize, from: usize, to: usize) -> usize {
@@ -506,8 +631,182 @@ fn rasterize_component(
             *end,
             *feather,
         ),
+        MaskGeometry::Ai {
+            mask: Some(mask),
+            feather,
+        } => {
+            let mut coverage = rasterize_mask_image(width, height, mask);
+            if component.kind == MaskKind::Background {
+                for value in &mut coverage {
+                    *value = 1.0 - *value;
+                }
+            }
+            feather_probability_mask(&mut coverage, width, height, *feather);
+            coverage
+        }
+        MaskGeometry::LuminanceRange {
+            source: Some(source),
+            low,
+            high,
+            feather,
+        } => rasterize_luminance_range(width, height, source, *low, *high, *feather),
+        MaskGeometry::ColorRange {
+            source: Some(source),
+            sample,
+            tolerance,
+            feather,
+            sampled: true,
+        } => rasterize_color_range(
+            width,
+            height,
+            source,
+            *sample,
+            *tolerance,
+            *feather,
+        ),
         _ => vec![0.0; width as usize * height as usize],
     }
+}
+
+fn rasterize_mask_image(width: u32, height: u32, mask: &MaskImage) -> Vec<f32> {
+    let mut out = vec![0.0; width as usize * height as usize];
+    for y in 0..height {
+        let source_y = ((y as f32 + 0.5) * mask.height as f32 / height as f32 - 0.5)
+            .round()
+            .clamp(0.0, mask.height.saturating_sub(1) as f32) as usize;
+        for x in 0..width {
+            let source_x = ((x as f32 + 0.5) * mask.width as f32 / width as f32 - 0.5)
+                .round()
+                .clamp(0.0, mask.width.saturating_sub(1) as f32) as usize;
+            out[y as usize * width as usize + x as usize] =
+                mask.pixels[source_y * mask.width as usize + source_x] as f32 / 255.0;
+        }
+    }
+    out
+}
+
+fn feather_probability_mask(mask: &mut [f32], width: u32, height: u32, feather: f32) {
+    let radius = (feather.clamp(0.0, 1.0).powf(1.4) * 32.0).round() as usize;
+    if radius == 0 || width == 0 || height == 0 {
+        return;
+    }
+    let width = width as usize;
+    let height = height as usize;
+    let mut horizontal = vec![0.0; mask.len()];
+    let mut row_prefix = vec![0.0f32; width + 1];
+    for y in 0..height {
+        let row = &mask[y * width..(y + 1) * width];
+        row_prefix.fill(0.0);
+        for x in 0..width {
+            row_prefix[x + 1] = row_prefix[x] + row[x];
+        }
+        for x in 0..width {
+            let from = x.saturating_sub(radius);
+            let to = (x + radius + 1).min(width);
+            horizontal[y * width + x] =
+                (row_prefix[to] - row_prefix[from]) / (to - from) as f32;
+        }
+    }
+    let mut prefix = vec![0.0f32; height + 1];
+    for x in 0..width {
+        prefix.fill(0.0);
+        for y in 0..height {
+            prefix[y + 1] = prefix[y] + horizontal[y * width + x];
+        }
+        for y in 0..height {
+            let from = y.saturating_sub(radius);
+            let to = (y + radius + 1).min(height);
+            mask[y * width + x] = (prefix[to] - prefix[from]) / (to - from) as f32;
+        }
+    }
+}
+
+fn rasterize_luminance_range(
+    width: u32,
+    height: u32,
+    source: &MaskRgbImage,
+    low: f32,
+    high: f32,
+    feather: f32,
+) -> Vec<f32> {
+    let low = low.min(high).clamp(0.0, 1.0);
+    let high = high.max(low).clamp(0.0, 1.0);
+    let transition = feather.clamp(0.001, 1.0) * 0.35;
+    sample_rgb_mask(width, height, source, |rgb| {
+        let linear = rgb.map(srgb_to_linear);
+        let luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+        let enter = smoothstep(low - transition, low, luminance);
+        let leave = 1.0 - smoothstep(high, high + transition, luminance);
+        enter * leave
+    })
+}
+
+fn rasterize_color_range(
+    width: u32,
+    height: u32,
+    source: &MaskRgbImage,
+    sample: [f32; 3],
+    tolerance: f32,
+    feather: f32,
+) -> Vec<f32> {
+    let target = linear_srgb_to_oklab(sample.map(srgb_to_linear));
+    let tolerance = tolerance.clamp(0.005, 1.0) * 0.42;
+    let softness = feather.clamp(0.0, 1.0) * tolerance.max(0.01);
+    sample_rgb_mask(width, height, source, |rgb| {
+        let color = linear_srgb_to_oklab(rgb.map(srgb_to_linear));
+        let distance = ((color[0] - target[0]).powi(2)
+            + (color[1] - target[1]).powi(2)
+            + (color[2] - target[2]).powi(2))
+        .sqrt();
+        1.0 - smoothstep((tolerance - softness).max(0.0), tolerance + softness, distance)
+    })
+}
+
+fn sample_rgb_mask(
+    width: u32,
+    height: u32,
+    source: &MaskRgbImage,
+    coverage: impl Fn([f32; 3]) -> f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0; width as usize * height as usize];
+    for y in 0..height {
+        let source_y = (y as u64 * source.height as u64 / height.max(1) as u64)
+            .min(source.height.saturating_sub(1) as u64) as usize;
+        for x in 0..width {
+            let source_x = (x as u64 * source.width as u64 / width.max(1) as u64)
+                .min(source.width.saturating_sub(1) as u64) as usize;
+            let index = (source_y * source.width as usize + source_x) * 4;
+            let rgb = [
+                source.rgba[index] as f32 / 255.0,
+                source.rgba[index + 1] as f32 / 255.0,
+                source.rgba[index + 2] as f32 / 255.0,
+            ];
+            out[y as usize * width as usize + x as usize] = coverage(rgb).clamp(0.0, 1.0);
+        }
+    }
+    out
+}
+
+fn srgb_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+    let l = 0.412_221_46 * rgb[0] + 0.536_332_55 * rgb[1] + 0.051_445_995 * rgb[2];
+    let m = 0.211_903_5 * rgb[0] + 0.680_699_5 * rgb[1] + 0.107_396_96 * rgb[2];
+    let s = 0.088_302_46 * rgb[0] + 0.281_718_85 * rgb[1] + 0.629_978_7 * rgb[2];
+    let l = l.cbrt();
+    let m = m.cbrt();
+    let s = s.cbrt();
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
 }
 
 fn rasterize_brush(
@@ -741,6 +1040,68 @@ mod tests {
         assert!(stack.move_component(1, 0));
         assert_eq!(stack.selected_component, Some(0));
         assert_eq!(stack.masks[0].components[0].kind, MaskKind::Brush);
+    }
+
+    #[test]
+    fn background_reuses_and_inverts_subject_probability() {
+        let subject = MaskImage::new(2, 1, vec![0, 255]).unwrap();
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Subject);
+        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
+            *mask = Some(subject.clone());
+        }
+        stack.add_mask(MaskKind::Background);
+        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
+            *mask = Some(subject);
+        }
+        let foreground = stack.rasterize_layer(0, 2, 1, 2, 1);
+        let background = stack.rasterize_layer(1, 2, 1, 2, 1);
+        assert_eq!(foreground, vec![0, 255]);
+        assert_eq!(background, vec![255, 0]);
+    }
+
+    #[test]
+    fn luminance_and_color_ranges_use_the_cached_preview() {
+        let source = MaskRgbImage::new(
+            2,
+            1,
+            vec![0, 0, 0, 255, 255, 0, 0, 255],
+        )
+        .unwrap();
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::LuminanceRange);
+        if let MaskGeometry::LuminanceRange {
+            source: target,
+            low,
+            high,
+            ..
+        } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *target = Some(source.clone());
+            *low = 0.1;
+            *high = 0.4;
+        }
+        let luminance = stack.rasterize_layer(0, 2, 1, 2, 1);
+        assert!(luminance[0] < 8);
+        assert!(luminance[1] > 240);
+
+        stack.add_mask(MaskKind::ColorRange);
+        if let MaskGeometry::ColorRange {
+            source: target,
+            sample,
+            tolerance,
+            sampled,
+            ..
+        } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *target = Some(source);
+            *sample = [1.0, 0.0, 0.0];
+            *tolerance = 0.1;
+            *sampled = true;
+        }
+        let color = stack.rasterize_layer(1, 2, 1, 2, 1);
+        assert!(color[0] < 8);
+        assert!(color[1] > 240);
     }
 
     #[test]

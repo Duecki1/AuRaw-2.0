@@ -1,6 +1,6 @@
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
-    mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, MaskStack,
+    mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
     ProcessingStage, RenderingIntent, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Result};
@@ -299,6 +299,21 @@ pub struct GpuParams {
     mask_adjust_1: [[f32; 4]; MAX_LOCAL_MASKS],
     // Saturation, texture, clarity, dehaze.
     mask_adjust_2: [[f32; 4]; MAX_LOCAL_MASKS],
+    // 32-sample scene-luminance curve for each local mask.
+    mask_curve_0: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_1: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_2: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_3: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_4: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_5: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_6: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_7: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_hsl_hue_0: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_hsl_hue_1: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_hsl_saturation_0: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_hsl_saturation_1: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_hsl_luminance_0: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_hsl_luminance_1: [[f32; 4]; MAX_LOCAL_MASKS],
 }
 
 impl GpuParams {
@@ -321,9 +336,23 @@ impl GpuParams {
         let mut mask_adjust_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_2 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_curves = [[[0.0f32; 4]; 8]; MAX_LOCAL_MASKS];
+        let mut mask_hsl_hue_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_hsl_hue_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_hsl_saturation_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_hsl_saturation_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_hsl_luminance_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
+        let mut mask_hsl_luminance_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
             let adjustment = mask.adjustments;
-            mask_meta[index] = [u32::from(mask.enabled), u32::from(!adjustment.is_neutral()), 0, 0];
+            let has_hsl = adjustment.hsl_hue.iter().chain(&adjustment.hsl_saturation)
+                .chain(&adjustment.hsl_luminance).any(|value| value.abs() > 1e-6);
+            mask_meta[index] = [
+                u32::from(mask.enabled),
+                u32::from(!adjustment.is_neutral()),
+                u32::from(!adjustment.tone_curve.is_identity()),
+                u32::from(has_hsl),
+            ];
             mask_adjust_0[index] = [
                 adjustment.exposure.clamp(-5.0, 5.0),
                 adjustment.contrast.clamp(-100.0, 100.0),
@@ -342,6 +371,16 @@ impl GpuParams {
                 adjustment.clarity.clamp(-100.0, 100.0),
                 adjustment.dehaze.clamp(-100.0, 100.0),
             ];
+            for sample in 0..32 {
+                let x = sample as f32 / 31.0;
+                mask_curves[index][sample / 4][sample % 4] = evaluate_point_curve(&adjustment.tone_curve, x);
+            }
+            mask_hsl_hue_0[index] = adjustment.hsl_hue[..4].try_into().unwrap();
+            mask_hsl_hue_1[index] = adjustment.hsl_hue[4..].try_into().unwrap();
+            mask_hsl_saturation_0[index] = adjustment.hsl_saturation[..4].try_into().unwrap();
+            mask_hsl_saturation_1[index] = adjustment.hsl_saturation[4..].try_into().unwrap();
+            mask_hsl_luminance_0[index] = adjustment.hsl_luminance[..4].try_into().unwrap();
+            mask_hsl_luminance_1[index] = adjustment.hsl_luminance[4..].try_into().unwrap();
         }
         Self {
             black_point: exposure.black_point,
@@ -534,8 +573,58 @@ impl GpuParams {
             mask_adjust_0,
             mask_adjust_1,
             mask_adjust_2,
+            mask_curve_0: mask_curves.map(|curve| curve[0]),
+            mask_curve_1: mask_curves.map(|curve| curve[1]),
+            mask_curve_2: mask_curves.map(|curve| curve[2]),
+            mask_curve_3: mask_curves.map(|curve| curve[3]),
+            mask_curve_4: mask_curves.map(|curve| curve[4]),
+            mask_curve_5: mask_curves.map(|curve| curve[5]),
+            mask_curve_6: mask_curves.map(|curve| curve[6]),
+            mask_curve_7: mask_curves.map(|curve| curve[7]),
+            mask_hsl_hue_0,
+            mask_hsl_hue_1,
+            mask_hsl_saturation_0,
+            mask_hsl_saturation_1,
+            mask_hsl_luminance_0,
+            mask_hsl_luminance_1,
         }
     }
+}
+
+fn evaluate_point_curve(curve: &PointCurve, input: f32) -> f32 {
+    let count = curve.len.clamp(2, 8) as usize;
+    let x = input.clamp(0.0, 1.0);
+    let segment = (0..count - 1)
+        .find(|index| x <= curve.points[index + 1][0])
+        .unwrap_or(count - 2);
+    let p0 = curve.points[segment];
+    let p1 = curve.points[segment + 1];
+    let width = (p1[0] - p0[0]).max(1e-5);
+    let secant = |a: [f32; 2], b: [f32; 2]| (b[1] - a[1]) / (b[0] - a[0]).max(1e-5);
+    let tangent = |index: usize| {
+        if index == 0 {
+            secant(curve.points[0], curve.points[1])
+        } else if index + 1 >= count {
+            secant(curve.points[count - 2], curve.points[count - 1])
+        } else {
+            let previous = secant(curve.points[index - 1], curve.points[index]);
+            let next = secant(curve.points[index], curve.points[index + 1]);
+            if previous * next <= 0.0 {
+                0.0
+            } else {
+                2.0 * previous * next / (previous + next).abs().max(1e-6)
+                    * (previous + next).signum()
+            }
+        }
+    };
+    let t = ((x - p0[0]) / width).clamp(0.0, 1.0);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let value = (2.0 * t3 - 3.0 * t2 + 1.0) * p0[1]
+        + (t3 - 2.0 * t2 + t) * tangent(segment) * width
+        + (-2.0 * t3 + 3.0 * t2) * p1[1]
+        + (t3 - t2) * tangent(segment + 1) * width;
+    value.clamp(p0[1].min(p1[1]), p0[1].max(p1[1]))
 }
 
 struct Pass {
@@ -3123,7 +3212,7 @@ mod tests {
         // Sixteen scalar values keep the stable 64-byte prefix. The two
         // darktable sigmoid vec4s follow the local-tone controls, then the
         // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 1344);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 3136);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
@@ -3147,6 +3236,10 @@ mod tests {
         assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 960);
         assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1088);
         assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1216);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1344);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2240);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 2368);
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1), 3008);
     }
 
     #[test]

@@ -73,6 +73,15 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color
         }
     }
 
+    #[cfg(not(target_os = "android"))]
+    if response.clicked() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let point = screen_to_curve(rect, pointer);
+            changed |= insert_point(curve, point);
+        }
+    }
+
+    #[cfg(target_os = "android")]
     if response.double_clicked() {
         if let Some(pointer) = response.interact_pointer_pos() {
             let point = screen_to_curve(rect, pointer);
@@ -88,9 +97,12 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     response.on_hover_text(
-        "Drag points to shape the curve. Double-click to add a point; right-click an interior point to remove it.",
+        "Click to add a point. Drag points to shape the curve; right-click an interior point to remove it.",
     );
+    #[cfg(target_os = "android")]
+    response.on_hover_text("Drag points to shape the curve. Double-tap to add a point.");
     curve.sanitize();
     changed
 }

@@ -19,18 +19,25 @@ log = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 png = "0.18"
 anyhow = "1.0"
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }
 env_logger = "0.11"
 rfd = "0.15"
 pollster = "0.4"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-18"] }
+
+[target.'cfg(all(not(target_os = "android"), target_os = "linux"))'.dependencies]
+flate2 = "1.1"
+tar = "0.4"
 
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "android-native-activity"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 jni = "0.22"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-18", "nnapi", "xnnpack"] }
 
 # THIS SECTION IS REQUIRED FOR build.rs:
 [build-dependencies]

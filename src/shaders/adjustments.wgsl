@@ -617,6 +617,87 @@ fn mixer_luminance_ev(amount: f32, lightness: f32) -> f32 {
     return value * endpoint_ev * signal * hdr_guard;
 }
 
+fn local_curve_block(mask_index: u32, block: u32) -> vec4<f32> {
+    switch block {
+        case 0u: { return params.mask_curve_0[mask_index]; }
+        case 1u: { return params.mask_curve_1[mask_index]; }
+        case 2u: { return params.mask_curve_2[mask_index]; }
+        case 3u: { return params.mask_curve_3[mask_index]; }
+        case 4u: { return params.mask_curve_4[mask_index]; }
+        case 5u: { return params.mask_curve_5[mask_index]; }
+        case 6u: { return params.mask_curve_6[mask_index]; }
+        default: { return params.mask_curve_7[mask_index]; }
+    }
+}
+
+fn local_curve_value(mask_index: u32, input: f32) -> f32 {
+    let position = clamp(input, 0.0, 1.0) * 31.0;
+    let lower = u32(floor(position));
+    let upper = min(lower + 1u, 31u);
+    let first = local_curve_block(mask_index, lower / 4u)[lower % 4u];
+    let second = local_curve_block(mask_index, upper / 4u)[upper % 4u];
+    return mix(first, second, fract(position));
+}
+
+fn local_hue_shift(weights: MixerBandWeights, first_values: vec4<f32>, second_values: vec4<f32>) -> f32 {
+    let first = vec4<f32>(
+        directed_hue_shift(first_values.x, 0.1690846, 0.0653940),
+        directed_hue_shift(first_values.y, 0.0653940, 0.1583152),
+        directed_hue_shift(first_values.z, 0.1583152, 0.0909059),
+        directed_hue_shift(first_values.w, 0.0909059, 0.1452044),
+    );
+    let second = vec4<f32>(
+        directed_hue_shift(second_values.x, 0.1452044, 0.1924530),
+        directed_hue_shift(second_values.y, 0.1924530, 0.0825612),
+        directed_hue_shift(second_values.z, 0.0825612, 0.0960816),
+        directed_hue_shift(second_values.w, 0.0960816, 0.1690846),
+    );
+    return (dot(weights.first, first) + dot(weights.second, second)) / max(weights.total, 1e-6);
+}
+
+fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    let full_size = vec2<f32>(f32(max(params.full_width, 1u)), f32(max(params.full_height, 1u)));
+    let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
+    let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
+    let count = min(params.mask_counts.x, 8u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = params.mask_meta[index];
+        if state.x == 0u || (state.z == 0u && state.w == 0u) { continue; }
+        let weight = textureSampleLevel(local_mask_tex, local_mask_sampler, uv, i32(index), 0.0).x;
+        if weight <= 1e-5 { continue; }
+        var adjusted = rgb;
+        if state.z != 0u {
+            let luminance = max(dot(adjusted, LUMA), 0.0);
+            let curved = scene_curve_decode(local_curve_value(index, scene_curve_encode(luminance)));
+            adjusted = select(vec3<f32>(curved), adjusted * clamp(curved / luminance, 0.0, 256.0), luminance > 1e-9);
+        }
+        if state.w != 0u {
+            let sample = mixer_sample_from_rgb(adjusted);
+            if sample.confidence > 1e-5 {
+                let hue = fract(atan2(sample.hue_vector.y, sample.hue_vector.x) / (2.0 * 3.14159265359) + 1.0);
+                let bands = mixer_band_weights(hue);
+                let hue_shift = local_hue_shift(bands, params.mask_hsl_hue_0[index], params.mask_hsl_hue_1[index]) * sample.confidence;
+                let saturation = mixer_band_value(bands, params.mask_hsl_saturation_0[index], params.mask_hsl_saturation_1[index]) / 100.0 * sample.confidence;
+                let luminance = mixer_band_value(bands, params.mask_hsl_luminance_0[index], params.mask_hsl_luminance_1[index]) / 100.0 * sample.confidence;
+                if abs(hue_shift) > 1e-7 || abs(saturation) > 1e-7 {
+                    let angle = atan2(sample.lab.z, sample.lab.y) + hue_shift * 2.0 * 3.14159265359;
+                    adjusted = positive_rec2020_from_oklab(
+                        sample.lab.x,
+                        vec2<f32>(cos(angle), sin(angle)),
+                        sample.chroma * mixer_saturation_factor(saturation),
+                    );
+                }
+                if abs(luminance) > 1e-7 {
+                    adjusted = adjusted * exp2(mixer_luminance_ev(luminance, sample.lab.x));
+                }
+            }
+        }
+        rgb = mix(rgb, adjusted, weight);
+    }
+    return max(rgb, vec3<f32>(0.0));
+}
+
 fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let strengths = color_mixer_strength();
     if max(strengths.x, max(strengths.y, strengths.z)) < 1e-6 {
@@ -695,6 +776,7 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     rgb = apply_basic_contrast_value(rgb, local.tone0.y);
     rgb = apply_temperature_tint_values(rgb, local.tone1.z, local.tone1.w);
+    rgb = apply_local_curve_and_hsl(pos, rgb);
     textureStore(adjustment_base_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
 }
 

@@ -1,4 +1,4 @@
-use crate::app::{AurawApp, MaskDragState, SidebarTab};
+use crate::app::{AurawApp, MaskDragState, MaskOverlayBlink, SidebarTab};
 use crate::pipeline::{
     ellipse_outline_points, BrushDab, BrushMode, MaskGeometry, MaskKind,
 };
@@ -104,6 +104,17 @@ impl Preview {
             return;
         };
         let uv = screen_to_normalized(image_rect, pointer);
+        let color_was_sampled = app
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .is_some_and(|component| {
+                matches!(
+                    &component.geometry,
+                    MaskGeometry::ColorRange { sampled: true, .. }
+                )
+            });
 
         if app.mask_drag.is_none() && kind != MaskKind::Brush {
             let geometry = &app.masks.masks[mask_index].components[component_index].geometry;
@@ -247,13 +258,35 @@ impl Preview {
                     }
                     _ => {}
                 },
+                (
+                    MaskGeometry::ColorRange {
+                        source: Some(source),
+                        sample,
+                        sampled,
+                        ..
+                    },
+                    MaskKind::ColorRange,
+                ) => {
+                    let x = (uv[0] * source.width.saturating_sub(1) as f32).round() as usize;
+                    let y = (uv[1] * source.height.saturating_sub(1) as f32).round() as usize;
+                    let index = (y * source.width as usize + x) * 4;
+                    *sample = [
+                        source.rgba[index] as f32 / 255.0,
+                        source.rgba[index + 1] as f32 / 255.0,
+                        source.rgba[index + 2] as f32 / 255.0,
+                    ];
+                    *sampled = true;
+                    changed = true;
+                }
                 _ => {}
             }
         }
 
         if changed {
-            app.mask_properties_active = true;
             app.mark_mask_geometry_dirty(mask_index);
+            if kind == MaskKind::ColorRange && !color_was_sampled {
+                app.blink_selected_component();
+            }
             ui.ctx().request_repaint();
         }
     }
@@ -266,14 +299,51 @@ impl Preview {
             return;
         };
         let selected_component = app.masks.selected_component;
-        let show_coverage =
-            mask.enabled && (mask.adjustments.is_neutral() || app.mask_properties_active);
-        let accent = Color32::from_rgb(78, 163, 255);
+        let neutral = mask.adjustments.is_neutral();
+        let accent = selected_component
+            .map(component_overlay_color)
+            .unwrap_or(Color32::from_rgb(78, 163, 255));
         let subtract = Color32::from_rgb(255, 105, 105);
         let painter = ui.painter_at(image_rect);
 
-        if show_coverage {
-            Self::paint_coverage_texture(ui, app, image_rect, mask_index);
+        let mut coverage_target: Option<Option<usize>> =
+            (neutral && app.mask_properties_active).then_some(None);
+        if neutral {
+            if let Some((started, blink)) = app.mask_overlay_blink {
+                let elapsed = started.elapsed().as_secs_f32();
+                coverage_target = match blink {
+                    MaskOverlayBlink::GroupTwice if elapsed < 0.18 => Some(None),
+                    MaskOverlayBlink::GroupTwice if elapsed < 0.32 => None,
+                    MaskOverlayBlink::GroupTwice if elapsed < 0.50 => Some(None),
+                    MaskOverlayBlink::GroupTwice if elapsed < 0.64 => None,
+                    MaskOverlayBlink::ComponentThenGroup if elapsed < 0.22 => {
+                        selected_component.map(Some)
+                    }
+                    MaskOverlayBlink::ComponentThenGroup if elapsed < 0.35 => None,
+                    MaskOverlayBlink::ComponentThenGroup if elapsed < 0.57 => Some(None),
+                    MaskOverlayBlink::ComponentThenGroup if elapsed < 0.70 => None,
+                    _ => {
+                        app.mask_overlay_blink = None;
+                        coverage_target
+                    }
+                };
+                if app.mask_overlay_blink.is_some() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+        let pointer_editing = ui.input(|input| input.pointer.primary_down())
+            && ui
+                .ctx()
+                .pointer_interact_pos()
+                .is_some_and(|position| image_rect.contains(position));
+        if pointer_editing {
+            coverage_target = None;
+        }
+        if mask.enabled {
+            if let Some(component) = coverage_target {
+                Self::paint_coverage_texture(ui, app, image_rect, mask_index, component);
+            }
         }
 
         if let Some(component) = selected_component.and_then(|index| {
@@ -285,11 +355,7 @@ impl Preview {
             if !component.enabled {
                 return;
             }
-            let color = if component.combine == crate::pipeline::MaskCombineMode::Subtract {
-                subtract
-            } else {
-                accent
-            };
+            let color = accent;
             match &component.geometry {
                 MaskGeometry::Brush { .. } => {}
                 MaskGeometry::Radial {
@@ -376,7 +442,13 @@ impl Preview {
         }
     }
 
-    fn paint_coverage_texture(ui: &Ui, app: &mut AurawApp, image_rect: Rect, mask_index: usize) {
+    fn paint_coverage_texture(
+        ui: &Ui,
+        app: &mut AurawApp,
+        image_rect: Rect,
+        mask_index: usize,
+        component_index: Option<usize>,
+    ) {
         let Some(pipeline) = app.gpu_pipeline.as_ref() else {
             return;
         };
@@ -388,19 +460,44 @@ impl Preview {
         let scale = (max_edge / image_rect.width().max(image_rect.height())).min(1.0);
         let width = (image_rect.width() * scale).round().max(1.0) as u32;
         let height = (image_rect.height() * scale).round().max(1.0) as u32;
-        let key = (mask_index, app.mask_overlay_revision, width, height);
+        let key = (
+            mask_index,
+            component_index,
+            app.mask_overlay_revision,
+            width,
+            height,
+        );
 
         if app.mask_overlay_texture_key != Some(key) {
-            let coverage = app.masks.rasterize_layer(
-                mask_index,
-                width,
-                height,
-                pipeline.width,
-                pipeline.height,
-            );
+            let coverage = if let Some(component_index) = component_index {
+                app.masks.rasterize_component_layer(
+                    mask_index,
+                    component_index,
+                    width,
+                    height,
+                    pipeline.width,
+                    pipeline.height,
+                )
+            } else {
+                app.masks.rasterize_layer(
+                    mask_index,
+                    width,
+                    height,
+                    pipeline.width,
+                    pipeline.height,
+                )
+            };
+            let color = component_index
+                .map(component_overlay_color)
+                .unwrap_or(Color32::from_rgb(78, 163, 255));
             let mut rgba = Vec::with_capacity(coverage.len() * 4);
             for alpha in coverage {
-                rgba.extend_from_slice(&[78, 163, 255, ((alpha as u16 * 82) / 255) as u8]);
+                rgba.extend_from_slice(&[
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    ((alpha as u16 * 92) / 255) as u8,
+                ]);
             }
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
@@ -443,6 +540,13 @@ impl Preview {
             {
                 "Drag across the image to create a linear gradient"
             }
+            MaskKind::ColorRange
+                if !app.masks.selected_component().is_some_and(|component| {
+                    matches!(
+                        &component.geometry,
+                        MaskGeometry::ColorRange { sampled: true, .. }
+                    )
+                }) => "Drag on the image to sample a color",
             _ => return,
         };
         let painter = ui.painter_at(image_rect);
@@ -555,6 +659,20 @@ fn painter_image(ui: &Ui, texture_id: egui::TextureId, rect: Rect) {
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
         Color32::WHITE,
     );
+}
+
+fn component_overlay_color(index: usize) -> Color32 {
+    const COLORS: [Color32; 8] = [
+        Color32::from_rgb(78, 163, 255),
+        Color32::from_rgb(255, 116, 102),
+        Color32::from_rgb(83, 211, 146),
+        Color32::from_rgb(242, 192, 75),
+        Color32::from_rgb(183, 124, 255),
+        Color32::from_rgb(63, 207, 220),
+        Color32::from_rgb(255, 133, 196),
+        Color32::from_rgb(180, 205, 88),
+    ];
+    COLORS[index % COLORS.len()]
 }
 
 fn screen_to_normalized(rect: Rect, point: Pos2) -> [f32; 2] {

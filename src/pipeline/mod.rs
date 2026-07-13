@@ -21,7 +21,8 @@ pub use export::{
 pub use gpu::{GpuParams, ProcessingQuality, RawGpuPipeline};
 pub use masks::{
     ellipse_outline_points, mask_atlas_edge, BrushDab, BrushMode, LocalAdjustments, LocalMask,
-    MaskCombineMode, MaskComponent, MaskGeometry, MaskKind, MaskStack, MAX_LOCAL_MASKS,
+    MaskCombineMode, MaskComponent, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
+    MAX_LOCAL_MASKS,
 };
 pub use processing::{
     affected_stage, build_proxy, extract_padded_tile, resample_raw, ExportTile, ProcessingStage, ProxySpec,

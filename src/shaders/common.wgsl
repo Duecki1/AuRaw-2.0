@@ -99,6 +99,20 @@ struct Params {
     mask_adjust_1: array<vec4<f32>, 8>,
     // Saturation, texture, clarity, dehaze.
     mask_adjust_2: array<vec4<f32>, 8>,
+    mask_curve_0: array<vec4<f32>, 8>,
+    mask_curve_1: array<vec4<f32>, 8>,
+    mask_curve_2: array<vec4<f32>, 8>,
+    mask_curve_3: array<vec4<f32>, 8>,
+    mask_curve_4: array<vec4<f32>, 8>,
+    mask_curve_5: array<vec4<f32>, 8>,
+    mask_curve_6: array<vec4<f32>, 8>,
+    mask_curve_7: array<vec4<f32>, 8>,
+    mask_hsl_hue_0: array<vec4<f32>, 8>,
+    mask_hsl_hue_1: array<vec4<f32>, 8>,
+    mask_hsl_saturation_0: array<vec4<f32>, 8>,
+    mask_hsl_saturation_1: array<vec4<f32>, 8>,
+    mask_hsl_luminance_0: array<vec4<f32>, 8>,
+    mask_hsl_luminance_1: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;

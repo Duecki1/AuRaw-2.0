@@ -43,16 +43,19 @@ impl Sidebar {
         ui.add_space(2.0);
         ui.separator();
 
-        match app.sidebar_tab {
-            SidebarTab::Adjustments => Self::show_adjustments(ui, app),
-            SidebarTab::Masks => Self::show_masks(ui, app),
-            SidebarTab::Inpainting => Self::show_placeholder(
-                ui,
-                "Inpainting",
-                "Healing, object removal, and generative inpainting controls are coming later.",
-            ),
-            SidebarTab::Export => Self::show_export(ui, app, frame),
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("develop-sidebar-content")
+            .auto_shrink([false, false])
+            .show(ui, |ui| match app.sidebar_tab {
+                SidebarTab::Adjustments => Self::show_adjustments(ui, app),
+                SidebarTab::Masks => Self::show_masks(ui, app, frame),
+                SidebarTab::Inpainting => Self::show_placeholder(
+                    ui,
+                    "Inpainting",
+                    "Healing, object removal, and generative inpainting controls are coming later.",
+                ),
+                SidebarTab::Export => Self::show_export(ui, app, frame),
+            });
     }
 
     fn show_adjustments(ui: &mut Ui, app: &mut AurawApp) {
@@ -89,7 +92,7 @@ impl Sidebar {
         }
     }
 
-    fn show_masks(ui: &mut Ui, app: &mut AurawApp) {
+    fn show_masks(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         ui.heading("Masking Groups");
         ui.add_space(4.0);
 
@@ -129,7 +132,9 @@ impl Sidebar {
         if let Some(kind) = new_mask {
             if let Some((mask_index, _)) = app.masks.add_mask(kind) {
                 app.activate_mask_tool(kind);
+                Self::prepare_content_mask(app, frame, kind);
                 app.mark_mask_geometry_dirty(mask_index);
+                app.blink_selected_mask();
             }
         }
 
@@ -159,11 +164,10 @@ impl Sidebar {
                 ui.set_width(ui.available_width());
                 for index in (0..app.masks.masks.len()).rev() {
                     let selected = app.masks.selected_mask == Some(index);
-                    let row = ui.dnd_drag_source(
-                        ui.id().with(("mask-row", index)),
-                        MaskDragPayload::Group(index),
-                        |ui| {
-                            ui.horizontal(|ui| {
+                    let row = ui.horizontal(|ui| {
+                                ui.add(egui::Label::new("☷").sense(egui::Sense::drag()))
+                                    .on_hover_text("Drag to reorder")
+                                    .dnd_set_drag_payload(MaskDragPayload::Group(index));
                                 let mask = &mut app.masks.masks[index];
                                 let visibility = if mask.enabled { "On" } else { "Off" };
                                 if ui.selectable_label(mask.enabled, visibility).clicked() {
@@ -196,9 +200,7 @@ impl Sidebar {
                                         }
                                     },
                                 );
-                            })
-                        },
-                    );
+                            });
                     if let Some(payload) = row.response.dnd_release_payload::<MaskDragPayload>() {
                         if let MaskDragPayload::Group(from) = *payload {
                             move_mask = Some((from, index));
@@ -222,6 +224,7 @@ impl Sidebar {
             {
                 app.select_mask_tool(kind);
             }
+            app.blink_selected_mask();
         }
         if let Some((from, to)) = move_mask {
             if app.masks.move_mask(from, to) {
@@ -254,10 +257,12 @@ impl Sidebar {
         ui.separator();
         ui.add_space(8.0);
         let mut geometry_changed = false;
+        let mut mask_slider_active = false;
         let mut adjustments_changed = false;
         let mut remove_component = None;
         let mut move_component = None;
         let mut add_component = None;
+        let mut request_subject = false;
         let selected_component_before = app.masks.selected_component;
         let mut selected_component_choice = None;
         let mut brush_mode = app.brush_mode;
@@ -311,7 +316,7 @@ impl Sidebar {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut mask.name);
             });
-            geometry_changed |= adjustment_slider(
+            let opacity_changed = adjustment_slider(
                 ui,
                 "Mask opacity",
                 &mut mask.opacity,
@@ -320,6 +325,8 @@ impl Sidebar {
                 0.01,
                 Some("Controls the strength of the entire mask before local adjustments."),
             );
+            geometry_changed |= opacity_changed;
+            mask_slider_active |= opacity_changed;
 
             ui.add_space(4.0);
             egui::Frame::new()
@@ -334,7 +341,7 @@ impl Sidebar {
                         let can_delete = mask.components.len() > 1;
                         let component = &mut mask.components[component_index];
                         let badge = if component_index == 0 {
-                            "_"
+                            "●"
                         } else {
                             match component.combine {
                                 MaskCombineMode::Add => "+",
@@ -342,14 +349,15 @@ impl Sidebar {
                                 MaskCombineMode::Intersect => "/",
                             }
                         };
-                        let row = ui.dnd_drag_source(
-                            ui.id().with(("submask-row", mask_index, component_index)),
-                            MaskDragPayload::Component {
-                                mask: mask_index,
-                                component: component_index,
-                            },
-                            |ui| {
-                                ui.horizontal(|ui| {
+                        let row = ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::Label::new("☷").sense(egui::Sense::drag()),
+                                    )
+                                    .on_hover_text("Drag to reorder")
+                                    .dnd_set_drag_payload(MaskDragPayload::Component {
+                                        mask: mask_index,
+                                        component: component_index,
+                                    });
                                     let visibility = if component.enabled { "On" } else { "Off" };
                                     if ui.selectable_label(component.enabled, visibility).clicked()
                                     {
@@ -376,9 +384,7 @@ impl Sidebar {
                                             }
                                         },
                                     );
-                                })
-                            },
-                        );
+                                });
                         if let Some(payload) = row.response.dnd_release_payload::<MaskDragPayload>()
                         {
                             if let MaskDragPayload::Component {
@@ -407,12 +413,15 @@ impl Sidebar {
             {
                 app.select_mask_tool(kind);
             }
+            app.blink_selected_component();
         }
 
         if let Some((kind, combine)) = add_component {
             if app.masks.add_component(kind, combine).is_some() {
                 app.activate_mask_tool(kind);
+                Self::prepare_content_mask(app, frame, kind);
                 geometry_changed = true;
+                app.blink_selected_component();
             }
         }
 
@@ -484,7 +493,7 @@ impl Sidebar {
                                 ui.selectable_value(&mut brush_mode, BrushMode::Paint, "Brush");
                                 ui.selectable_value(&mut brush_mode, BrushMode::Erase, "Eraser");
                             });
-                            geometry_changed |= adjustment_slider(
+                            let size_changed = adjustment_slider(
                                 ui,
                                 "Size",
                                 size,
@@ -493,7 +502,7 @@ impl Sidebar {
                                 0.0025,
                                 Some("Brush radius relative to the shorter image edge."),
                             );
-                            geometry_changed |= adjustment_slider(
+                            let feather_changed = adjustment_slider(
                                 ui,
                                 "Feather",
                                 feather,
@@ -502,6 +511,8 @@ impl Sidebar {
                                 0.01,
                                 Some("Softness from the brush core to its edge."),
                             );
+                            geometry_changed |= size_changed || feather_changed;
+                            mask_slider_active |= size_changed || feather_changed;
                             ui.horizontal(|ui| {
                                 if ui.small_button("Clear strokes").clicked() {
                                     dabs.clear();
@@ -511,7 +522,7 @@ impl Sidebar {
                             ui.label(format!("{} brush dabs", dabs.len()));
                         }
                         MaskGeometry::Radial { feather, .. } => {
-                            geometry_changed |= adjustment_slider(
+                            let feather_changed = adjustment_slider(
                                 ui,
                                 "Feather",
                                 feather,
@@ -520,9 +531,11 @@ impl Sidebar {
                                 0.01,
                                 Some("Soft transition from the ellipse interior to its edge."),
                             );
+                            geometry_changed |= feather_changed;
+                            mask_slider_active |= feather_changed;
                         }
                         MaskGeometry::Linear { feather, .. } => {
-                            geometry_changed |= adjustment_slider(
+                            let feather_changed = adjustment_slider(
                                 ui,
                                 "Feather",
                                 feather,
@@ -531,6 +544,73 @@ impl Sidebar {
                                 0.01,
                                 Some("Controls the width of the gradient transition."),
                             );
+                            geometry_changed |= feather_changed;
+                            mask_slider_active |= feather_changed;
+                        }
+                        MaskGeometry::Ai { mask, feather } => {
+                            if mask.is_none() {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("Waiting for subject selection");
+                                });
+                                if ui.button("Generate subject mask").clicked() {
+                                    request_subject = true;
+                                }
+                            }
+                            let feather_changed = adjustment_slider(
+                                ui,
+                                "Feather",
+                                feather,
+                                0.0..=1.0,
+                                2,
+                                0.01,
+                                Some("Softens the BiRefNet subject boundary."),
+                            );
+                            geometry_changed |= feather_changed;
+                            mask_slider_active |= feather_changed;
+                        }
+                        MaskGeometry::LuminanceRange {
+                            low,
+                            high,
+                            feather,
+                            ..
+                        } => {
+                            let low_changed = adjustment_slider(
+                                ui, "Range low", low, 0.0..=1.0, 2, 0.01,
+                                Some("Lowest included scene luminance."),
+                            );
+                            let high_changed = adjustment_slider(
+                                ui, "Range high", high, 0.0..=1.0, 2, 0.01,
+                                Some("Highest included scene luminance."),
+                            );
+                            let feather_changed = adjustment_slider(
+                                ui, "Range feather", feather, 0.0..=1.0, 2, 0.01,
+                                Some("Softens both luminance-range boundaries."),
+                            );
+                            geometry_changed |= low_changed || high_changed || feather_changed;
+                            mask_slider_active |= low_changed || high_changed || feather_changed;
+                        }
+                        MaskGeometry::ColorRange {
+                            tolerance,
+                            feather,
+                            sampled,
+                            ..
+                        } => {
+                            ui.label(if *sampled {
+                                "Drag on the image to choose another color."
+                            } else {
+                                "Drag on the image to sample a color."
+                            });
+                            let tolerance_changed = adjustment_slider(
+                                ui, "Tolerance", tolerance, 0.005..=1.0, 3, 0.005,
+                                Some("Expands the selected color region in perceptual OkLab space."),
+                            );
+                            let feather_changed = adjustment_slider(
+                                ui, "Color feather", feather, 0.0..=1.0, 2, 0.01,
+                                Some("Softens the color-distance cutoff."),
+                            );
+                            geometry_changed |= tolerance_changed || feather_changed;
+                            mask_slider_active |= tolerance_changed || feather_changed;
                         }
                         MaskGeometry::Placeholder => {
                             ui.label("This mask type is not implemented yet.");
@@ -554,12 +634,36 @@ impl Sidebar {
         }
 
         app.brush_mode = brush_mode;
+        if request_subject {
+            app.request_subject_mask(frame);
+        }
         if geometry_changed {
-            app.mask_properties_active = true;
             app.mark_mask_geometry_dirty(mask_index);
         }
+        app.mask_properties_active |= mask_slider_active;
         if adjustments_changed {
             app.mark_mask_adjustments_dirty();
+        }
+    }
+
+    fn prepare_content_mask(app: &mut AurawApp, frame: &eframe::Frame, kind: MaskKind) {
+        match kind {
+            MaskKind::Subject | MaskKind::Background => app.request_subject_mask(frame),
+            MaskKind::LuminanceRange | MaskKind::ColorRange => {
+                if let Err(error) = app.capture_mask_source(frame) {
+                    app.status = error;
+                    return;
+                }
+                let source = app.mask_source_cache.clone();
+                if let Some(component) = app.masks.selected_component_mut() {
+                    match &mut component.geometry {
+                        MaskGeometry::LuminanceRange { source: target, .. }
+                        | MaskGeometry::ColorRange { source: target, .. } => *target = source,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -687,6 +791,51 @@ impl Sidebar {
                     1.0,
                     None,
                 );
+            });
+        egui::CollapsingHeader::new("Tone Curve")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Masked luminance curve");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Reset curve").clicked() {
+                            adjustment.tone_curve.reset();
+                            changed = true;
+                        }
+                    });
+                });
+                changed |= tone_curve_editor(
+                    ui,
+                    &mut adjustment.tone_curve,
+                    egui::Color32::WHITE,
+                );
+                if changed {
+                    adjustment.tone_curve.sanitize();
+                }
+            });
+        egui::CollapsingHeader::new("Color Mixer")
+            .default_open(false)
+            .show(ui, |ui| {
+                const COLORS: [&str; 8] = [
+                    "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
+                ];
+                for (index, color) in COLORS.iter().enumerate() {
+                    ui.push_id(("local-hsl", index), |ui| {
+                        ui.strong(*color);
+                        changed |= adjustment_slider(
+                            ui, "Hue", &mut adjustment.hsl_hue[index], -100.0..=100.0, 0, 1.0, None,
+                        );
+                        changed |= adjustment_slider(
+                            ui, "Saturation", &mut adjustment.hsl_saturation[index], -100.0..=100.0, 0, 1.0, None,
+                        );
+                        changed |= adjustment_slider(
+                            ui, "Luminance", &mut adjustment.hsl_luminance[index], -100.0..=100.0, 0, 1.0, None,
+                        );
+                    });
+                    if index + 1 < COLORS.len() {
+                        ui.separator();
+                    }
+                }
             });
         changed
     }
