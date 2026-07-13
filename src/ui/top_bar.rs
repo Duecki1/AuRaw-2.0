@@ -19,7 +19,6 @@ impl TopBar {
                 app.open_file_dialog(frame);
             }
 
-
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(&app.status)

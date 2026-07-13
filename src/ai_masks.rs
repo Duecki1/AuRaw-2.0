@@ -5,8 +5,11 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex, OnceLock},
+    sync::{mpsc, OnceLock},
 };
+
+#[cfg(not(target_os = "android"))]
+use std::sync::Mutex;
 
 pub const BIREFNET_MODEL_BYTES: u64 = 224_005_088;
 pub const BIREFNET_MODEL_URL: &str = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
@@ -14,6 +17,7 @@ const MODEL_SIZE: u32 = 1024;
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
+#[cfg(not(target_os = "android"))]
 static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -279,27 +283,15 @@ fn initialize_runtime(_runtime_path: Option<&Path>) -> Result<()> {
 
 #[cfg(target_os = "android")]
 fn create_session(model_path: &Path) -> Result<Session> {
-    let nnapi_result = (|| -> Result<Session> {
-        let mut builder = Session::builder()
-            .context("create NNAPI ONNX Runtime session")?
-            .with_execution_providers([ort::ep::NNAPI::default().build()])
-            .map_err(|error| anyhow::anyhow!("configure Android NNAPI: {error}"))?;
-        builder
-            .commit_from_file(model_path)
-            .context("compile BiRefNet for Android NNAPI")
-    })();
-    let nnapi_error = match nnapi_result {
-        Ok(session) => return Ok(session),
-        Err(error) => {
-            log::warn!("NNAPI could not compile BiRefNet; trying XNNPACK: {error:#}");
-            format!("{error:#}")
-        }
-    };
-
     let xnnpack_result = (|| -> Result<Session> {
         let mut builder = Session::builder()
             .context("create XNNPACK ONNX Runtime session")?
-            .with_execution_providers([ort::ep::XNNPACK::default().build()])
+            .with_memory_pattern(false)
+            .map_err(|error| anyhow::anyhow!("disable Android memory pattern: {error}"))?
+            .with_execution_providers([
+                ort::ep::XNNPACK::default().build(),
+                ort::ep::CPU::default().with_arena_allocator(false).build(),
+            ])
             .map_err(|error| anyhow::anyhow!("configure Android XNNPACK: {error}"))?;
         builder
             .commit_from_file(model_path)
@@ -313,11 +305,14 @@ fn create_session(model_path: &Path) -> Result<Session> {
         }
     };
 
-    let mut builder = Session::builder().context("create CPU ONNX Runtime session")?;
+    let mut builder = Session::builder()
+        .context("create CPU ONNX Runtime session")?
+        .with_memory_pattern(false)
+        .map_err(|error| anyhow::anyhow!("disable Android memory pattern: {error}"))?
+        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+        .map_err(|error| anyhow::anyhow!("configure Android CPU fallback: {error}"))?;
     builder.commit_from_file(model_path).with_context(|| {
-        format!(
-            "load BiRefNet with Android CPU fallback (NNAPI failed: {nnapi_error}; XNNPACK failed: {xnnpack_error})"
-        )
+        format!("load BiRefNet with Android CPU fallback (XNNPACK failed: {xnnpack_error})")
     })
 }
 
@@ -376,16 +371,43 @@ fn infer_subject(
     let input = Tensor::from_array(([1usize, 3, MODEL_SIZE as usize, MODEL_SIZE as usize], input))
         .context("create BiRefNet input tensor")?;
 
-    let sessions = SESSION.get_or_init(|| Mutex::new(None));
-    let mut session = sessions
-        .lock()
-        .map_err(|_| anyhow::anyhow!("BiRefNet session lock was poisoned"))?;
-    if session.is_none() {
-        *session = Some(create_session(model_path)?);
-    }
+    #[cfg(target_os = "android")]
+    let (output_width, output_height, logits) = {
+        // Mobile memory is more important than avoiding session startup. Drop
+        // all model weights and allocator state immediately after inference.
+        let mut session = create_session(model_path)?;
+        run_subject_session(&mut session, input)?
+    };
+
+    #[cfg(not(target_os = "android"))]
+    let (output_width, output_height, logits) = {
+        let sessions = SESSION.get_or_init(|| Mutex::new(None));
+        let mut session = sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("BiRefNet session lock was poisoned"))?;
+        if session.is_none() {
+            *session = Some(create_session(model_path)?);
+        }
+        run_subject_session(session.as_mut().expect("session was initialized"), input)?
+    };
+
+    let mask = restore_from_letterbox(
+        &logits,
+        output_width,
+        output_height,
+        letterbox,
+        width,
+        height,
+    )?;
+    Ok(SubjectMaskResult {
+        width,
+        height,
+        mask,
+    })
+}
+
+fn run_subject_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32, u32, Vec<f32>)> {
     let outputs = session
-        .as_mut()
-        .expect("session was initialized")
         .run(ort::inputs![input])
         .context("run BiRefNet ONNX inference")?;
     let (shape, logits) = outputs[0]
@@ -398,19 +420,11 @@ fn infer_subject(
         output_width > 0 && output_height > 0 && logits.len() >= output_width * output_height,
         "invalid BiRefNet output shape {shape}"
     );
-    let mask = restore_from_letterbox(
-        logits,
+    Ok((
         output_width as u32,
         output_height as u32,
-        letterbox,
-        width,
-        height,
-    )?;
-    Ok(SubjectMaskResult {
-        width,
-        height,
-        mask,
-    })
+        logits[..output_width * output_height].to_vec(),
+    ))
 }
 
 fn normalized_letterbox(

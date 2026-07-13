@@ -6,6 +6,7 @@ use crate::pipeline::{
 use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::components::tone_curve_editor::tone_curve_editor;
 use crate::ui::layout::ScreenLayout;
+use crate::ui::mask_component_color;
 use eframe::egui::{self, Ui};
 
 pub struct Sidebar;
@@ -19,12 +20,7 @@ enum MaskDragPayload {
 impl Sidebar {
     const SCROLLBAR_GUTTER: f32 = 18.0;
 
-    pub fn show(
-        ui: &mut Ui,
-        app: &mut AurawApp,
-        _layout: ScreenLayout,
-        frame: &eframe::Frame,
-    ) {
+    pub fn show(ui: &mut Ui, app: &mut AurawApp, _layout: ScreenLayout, frame: &eframe::Frame) {
         let content_width = (ui.available_width() - Self::SCROLLBAR_GUTTER).max(220.0);
         ui.set_width(content_width);
         ui.set_max_width(content_width);
@@ -165,6 +161,15 @@ impl Sidebar {
                 for index in (0..app.masks.masks.len()).rev() {
                     let selected = app.masks.selected_mask == Some(index);
                     let row = ui.horizontal(|ui| {
+                        let delete_width = 56.0;
+                        let spacing = ui.spacing().item_spacing.x;
+                        let row_height = ui.spacing().interact_size.y;
+                        let content_width =
+                            (ui.available_width() - delete_width - spacing).max(1.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(content_width, row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
                                 ui.add(egui::Label::new("☷").sense(egui::Sense::drag()))
                                     .on_hover_text("Drag to reorder")
                                     .dnd_set_drag_payload(MaskDragPayload::Group(index));
@@ -188,19 +193,19 @@ impl Sidebar {
                                 {
                                     select_mask = Some(index);
                                 }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .small_button("Delete")
-                                            .on_hover_text("Delete mask group")
-                                            .clicked()
-                                        {
-                                            remove_mask = Some(index);
-                                        }
-                                    },
-                                );
-                            });
+                            },
+                        );
+                        if ui
+                            .add_sized(
+                                [delete_width, row_height],
+                                egui::Button::new("Delete").small(),
+                            )
+                            .on_hover_text("Delete mask group")
+                            .clicked()
+                        {
+                            remove_mask = Some(index);
+                        }
+                    });
                     if let Some(payload) = row.response.dnd_release_payload::<MaskDragPayload>() {
                         if let MaskDragPayload::Group(from) = *payload {
                             move_mask = Some((from, index));
@@ -257,7 +262,6 @@ impl Sidebar {
         ui.separator();
         ui.add_space(8.0);
         let mut geometry_changed = false;
-        let mut mask_slider_active = false;
         let mut adjustments_changed = false;
         let mut remove_component = None;
         let mut move_component = None;
@@ -266,6 +270,7 @@ impl Sidebar {
         let selected_component_before = app.masks.selected_component;
         let mut selected_component_choice = None;
         let mut brush_mode = app.brush_mode;
+        let mut local_curve_tab = app.tone_curve_tab;
 
         {
             let mask = &mut app.masks.masks[mask_index];
@@ -326,7 +331,6 @@ impl Sidebar {
                 Some("Controls the strength of the entire mask before local adjustments."),
             );
             geometry_changed |= opacity_changed;
-            mask_slider_active |= opacity_changed;
 
             ui.add_space(4.0);
             egui::Frame::new()
@@ -350,14 +354,21 @@ impl Sidebar {
                             }
                         };
                         let row = ui.horizontal(|ui| {
-                                    ui.add(
-                                        egui::Label::new("☷").sense(egui::Sense::drag()),
-                                    )
-                                    .on_hover_text("Drag to reorder")
-                                    .dnd_set_drag_payload(MaskDragPayload::Component {
-                                        mask: mask_index,
-                                        component: component_index,
-                                    });
+                            let delete_width = 56.0;
+                            let spacing = ui.spacing().item_spacing.x;
+                            let row_height = ui.spacing().interact_size.y;
+                            let content_width =
+                                (ui.available_width() - delete_width - spacing).max(1.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(content_width, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(egui::Label::new("☷").sense(egui::Sense::drag()))
+                                        .on_hover_text("Drag to reorder")
+                                        .dnd_set_drag_payload(MaskDragPayload::Component {
+                                            mask: mask_index,
+                                            component: component_index,
+                                        });
                                     let visibility = if component.enabled { "On" } else { "Off" };
                                     if ui.selectable_label(component.enabled, visibility).clicked()
                                     {
@@ -366,25 +377,36 @@ impl Sidebar {
                                     }
                                     ui.label(egui::RichText::new(badge).strong());
                                     if ui
-                                        .selectable_label(selected, component.kind.label())
+                                        .add(
+                                            egui::Button::selectable(
+                                                selected,
+                                                component.kind.label(),
+                                            )
+                                            .fill(mask_component_color(component_index)),
+                                        )
                                         .clicked()
                                     {
                                         selected_component_choice = Some(component_index);
                                     }
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if can_delete
-                                                && ui
-                                                    .small_button("Delete")
-                                                    .on_hover_text("Delete sub-mask")
-                                                    .clicked()
-                                            {
-                                                remove_component = Some(component_index);
-                                            }
-                                        },
-                                    );
-                                });
+                                },
+                            );
+                            if ui
+                                .add_enabled(
+                                    can_delete,
+                                    egui::Button::new("Delete")
+                                        .small()
+                                        .min_size(egui::vec2(delete_width, row_height)),
+                                )
+                                .on_hover_text(if can_delete {
+                                    "Delete sub-mask"
+                                } else {
+                                    "A mask group must contain at least one sub-mask"
+                                })
+                                .clicked()
+                            {
+                                remove_component = Some(component_index);
+                            }
+                        });
                         if let Some(payload) = row.response.dnd_release_payload::<MaskDragPayload>()
                         {
                             if let MaskDragPayload::Component {
@@ -512,7 +534,6 @@ impl Sidebar {
                                 Some("Softness from the brush core to its edge."),
                             );
                             geometry_changed |= size_changed || feather_changed;
-                            mask_slider_active |= size_changed || feather_changed;
                             ui.horizontal(|ui| {
                                 if ui.small_button("Clear strokes").clicked() {
                                     dabs.clear();
@@ -532,7 +553,6 @@ impl Sidebar {
                                 Some("Soft transition from the ellipse interior to its edge."),
                             );
                             geometry_changed |= feather_changed;
-                            mask_slider_active |= feather_changed;
                         }
                         MaskGeometry::Linear { feather, .. } => {
                             let feather_changed = adjustment_slider(
@@ -545,7 +565,6 @@ impl Sidebar {
                                 Some("Controls the width of the gradient transition."),
                             );
                             geometry_changed |= feather_changed;
-                            mask_slider_active |= feather_changed;
                         }
                         MaskGeometry::Ai { mask, feather } => {
                             if mask.is_none() {
@@ -567,28 +586,38 @@ impl Sidebar {
                                 Some("Softens the BiRefNet subject boundary."),
                             );
                             geometry_changed |= feather_changed;
-                            mask_slider_active |= feather_changed;
                         }
                         MaskGeometry::LuminanceRange {
-                            low,
-                            high,
-                            feather,
-                            ..
+                            low, high, feather, ..
                         } => {
                             let low_changed = adjustment_slider(
-                                ui, "Range low", low, 0.0..=1.0, 2, 0.01,
+                                ui,
+                                "Range low",
+                                low,
+                                0.0..=1.0,
+                                2,
+                                0.01,
                                 Some("Lowest included scene luminance."),
                             );
                             let high_changed = adjustment_slider(
-                                ui, "Range high", high, 0.0..=1.0, 2, 0.01,
+                                ui,
+                                "Range high",
+                                high,
+                                0.0..=1.0,
+                                2,
+                                0.01,
                                 Some("Highest included scene luminance."),
                             );
                             let feather_changed = adjustment_slider(
-                                ui, "Range feather", feather, 0.0..=1.0, 2, 0.01,
+                                ui,
+                                "Range feather",
+                                feather,
+                                0.0..=1.0,
+                                2,
+                                0.01,
                                 Some("Softens both luminance-range boundaries."),
                             );
                             geometry_changed |= low_changed || high_changed || feather_changed;
-                            mask_slider_active |= low_changed || high_changed || feather_changed;
                         }
                         MaskGeometry::ColorRange {
                             tolerance,
@@ -602,15 +631,26 @@ impl Sidebar {
                                 "Drag on the image to sample a color."
                             });
                             let tolerance_changed = adjustment_slider(
-                                ui, "Tolerance", tolerance, 0.005..=1.0, 3, 0.005,
-                                Some("Expands the selected color region in perceptual OkLab space."),
+                                ui,
+                                "Tolerance",
+                                tolerance,
+                                0.005..=1.0,
+                                3,
+                                0.005,
+                                Some(
+                                    "Expands the selected color region in perceptual OkLab space.",
+                                ),
                             );
                             let feather_changed = adjustment_slider(
-                                ui, "Color feather", feather, 0.0..=1.0, 2, 0.01,
+                                ui,
+                                "Color feather",
+                                feather,
+                                0.0..=1.0,
+                                2,
+                                0.01,
                                 Some("Softens the color-distance cutoff."),
                             );
                             geometry_changed |= tolerance_changed || feather_changed;
-                            mask_slider_active |= tolerance_changed || feather_changed;
                         }
                         MaskGeometry::Placeholder => {
                             ui.label("This mask type is not implemented yet.");
@@ -630,8 +670,10 @@ impl Sidebar {
                     }
                 });
             });
-            adjustments_changed |= Self::show_local_mask_adjustments(ui, &mut mask.adjustments);
+            adjustments_changed |=
+                Self::show_local_mask_adjustments(ui, &mut mask.adjustments, &mut local_curve_tab);
         }
+        app.tone_curve_tab = local_curve_tab;
 
         app.brush_mode = brush_mode;
         if request_subject {
@@ -640,7 +682,6 @@ impl Sidebar {
         if geometry_changed {
             app.mark_mask_geometry_dirty(mask_index);
         }
-        app.mask_properties_active |= mask_slider_active;
         if adjustments_changed {
             app.mark_mask_adjustments_dirty();
         }
@@ -670,6 +711,7 @@ impl Sidebar {
     fn show_local_mask_adjustments(
         ui: &mut Ui,
         adjustment: &mut crate::pipeline::LocalAdjustments,
+        selected_tab: &mut ToneCurveTab,
     ) -> bool {
         let mut changed = false;
         egui::CollapsingHeader::new("Light")
@@ -796,21 +838,68 @@ impl Sidebar {
             .default_open(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Masked luminance curve");
+                    for (tab, label, color) in [
+                        (ToneCurveTab::Rgb, "RGB", egui::Color32::WHITE),
+                        (ToneCurveTab::Red, "R", egui::Color32::from_rgb(238, 84, 84)),
+                        (
+                            ToneCurveTab::Green,
+                            "G",
+                            egui::Color32::from_rgb(92, 210, 116),
+                        ),
+                        (
+                            ToneCurveTab::Blue,
+                            "B",
+                            egui::Color32::from_rgb(88, 150, 245),
+                        ),
+                    ] {
+                        ui.selectable_value(
+                            selected_tab,
+                            tab,
+                            egui::RichText::new(label).color(color),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Reset curve").clicked() {
-                            adjustment.tone_curve.reset();
+                            match selected_tab {
+                                ToneCurveTab::Rgb => adjustment.tone_curve.reset(),
+                                ToneCurveTab::Red => adjustment.tone_curve_red.reset(),
+                                ToneCurveTab::Green => adjustment.tone_curve_green.reset(),
+                                ToneCurveTab::Blue => adjustment.tone_curve_blue.reset(),
+                            }
                             changed = true;
                         }
                     });
                 });
-                changed |= tone_curve_editor(
-                    ui,
-                    &mut adjustment.tone_curve,
-                    egui::Color32::WHITE,
+                let (curve, color, description) = match selected_tab {
+                    ToneCurveTab::Rgb => (
+                        &mut adjustment.tone_curve,
+                        egui::Color32::WHITE,
+                        "Composite luminance curve",
+                    ),
+                    ToneCurveTab::Red => (
+                        &mut adjustment.tone_curve_red,
+                        egui::Color32::from_rgb(238, 84, 84),
+                        "Red channel curve",
+                    ),
+                    ToneCurveTab::Green => (
+                        &mut adjustment.tone_curve_green,
+                        egui::Color32::from_rgb(92, 210, 116),
+                        "Green channel curve",
+                    ),
+                    ToneCurveTab::Blue => (
+                        &mut adjustment.tone_curve_blue,
+                        egui::Color32::from_rgb(88, 150, 245),
+                        "Blue channel curve",
+                    ),
+                };
+                ui.label(
+                    egui::RichText::new(description)
+                        .size(11.5)
+                        .color(ui.visuals().weak_text_color()),
                 );
+                changed |= tone_curve_editor(ui, curve, color);
                 if changed {
-                    adjustment.tone_curve.sanitize();
+                    adjustment.sanitize_tone_curves();
                 }
             });
         egui::CollapsingHeader::new("Color Mixer")
@@ -823,13 +912,31 @@ impl Sidebar {
                     ui.push_id(("local-hsl", index), |ui| {
                         ui.strong(*color);
                         changed |= adjustment_slider(
-                            ui, "Hue", &mut adjustment.hsl_hue[index], -100.0..=100.0, 0, 1.0, None,
+                            ui,
+                            "Hue",
+                            &mut adjustment.hsl_hue[index],
+                            -100.0..=100.0,
+                            0,
+                            1.0,
+                            None,
                         );
                         changed |= adjustment_slider(
-                            ui, "Saturation", &mut adjustment.hsl_saturation[index], -100.0..=100.0, 0, 1.0, None,
+                            ui,
+                            "Saturation",
+                            &mut adjustment.hsl_saturation[index],
+                            -100.0..=100.0,
+                            0,
+                            1.0,
+                            None,
                         );
                         changed |= adjustment_slider(
-                            ui, "Luminance", &mut adjustment.hsl_luminance[index], -100.0..=100.0, 0, 1.0, None,
+                            ui,
+                            "Luminance",
+                            &mut adjustment.hsl_luminance[index],
+                            -100.0..=100.0,
+                            0,
+                            1.0,
+                            None,
                         );
                     });
                     if index + 1 < COLORS.len() {
@@ -845,10 +952,7 @@ impl Sidebar {
         ui.vertical_centered(|ui| {
             ui.heading(title);
             ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(message)
-                    .color(ui.visuals().weak_text_color()),
-            );
+            ui.label(egui::RichText::new(message).color(ui.visuals().weak_text_color()));
         });
     }
 
@@ -861,10 +965,7 @@ impl Sidebar {
         );
         ui.add_space(6.0);
 
-        let source_dimensions = app
-            .loaded_raw
-            .as_ref()
-            .map(|raw| (raw.width, raw.height));
+        let source_dimensions = app.loaded_raw.as_ref().map(|raw| (raw.width, raw.height));
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.strong("Image sizing");
@@ -917,7 +1018,9 @@ impl Sidebar {
 
             if app.export_settings.resize_mode != ExportResizeMode::Original {
                 ui.checkbox(&mut app.export_settings.allow_upscale, "Allow upscaling")
-                    .on_hover_text("Disabled by default to avoid enlarging beyond the source dimensions.");
+                    .on_hover_text(
+                        "Disabled by default to avoid enlarging beyond the source dimensions.",
+                    );
             }
 
             if let Some((width, height)) = source_dimensions {
@@ -942,15 +1045,18 @@ impl Sidebar {
         });
 
         ui.add_space(10.0);
-        let button = egui::Button::new("Export PNG…").min_size(egui::vec2(ui.available_width(), 30.0));
+        let button =
+            egui::Button::new("Export PNG…").min_size(egui::vec2(ui.available_width(), 30.0));
         if ui.add_enabled(app.can_export(), button).clicked() {
             app.export_png(frame);
         }
         if !app.can_export() {
             ui.label(
-                egui::RichText::new("Export becomes available after a RAW image has finished loading.")
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
+                egui::RichText::new(
+                    "Export becomes available after a RAW image has finished loading.",
+                )
+                .small()
+                .color(ui.visuals().weak_text_color()),
             );
         }
     }
@@ -1031,8 +1137,16 @@ impl Sidebar {
                     for (tab, label, color) in [
                         (ToneCurveTab::Rgb, "RGB", egui::Color32::WHITE),
                         (ToneCurveTab::Red, "R", egui::Color32::from_rgb(238, 84, 84)),
-                        (ToneCurveTab::Green, "G", egui::Color32::from_rgb(92, 210, 116)),
-                        (ToneCurveTab::Blue, "B", egui::Color32::from_rgb(88, 150, 245)),
+                        (
+                            ToneCurveTab::Green,
+                            "G",
+                            egui::Color32::from_rgb(92, 210, 116),
+                        ),
+                        (
+                            ToneCurveTab::Blue,
+                            "B",
+                            egui::Color32::from_rgb(88, 150, 245),
+                        ),
                     ] {
                         let text = egui::RichText::new(label).color(color);
                         ui.selectable_value(selected_tab, tab, text);

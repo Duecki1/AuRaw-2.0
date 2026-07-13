@@ -1,8 +1,8 @@
 #[allow(unused_imports)]
 use super::color_profile::CameraProfile;
-use anyhow::Result;
 #[cfg(not(libraw_available))]
 use anyhow::anyhow;
+use anyhow::Result;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -111,7 +111,10 @@ mod libraw_loader {
         match DcpProfile::from_path(path) {
             Ok(profile) => profile,
             Err(error) => {
-                log::warn!("ignoring malformed embedded DCP profile in {}: {error:#}", path.display());
+                log::warn!(
+                    "ignoring malformed embedded DCP profile in {}: {error:#}",
+                    path.display()
+                );
                 None
             }
         }
@@ -223,22 +226,23 @@ mod libraw_loader {
         let cdesc = cdesc4(iparams);
         let cfa_map = canonical_cfa_map(cdesc)?;
         let physical_black_levels = black_levels(color.black, &color.cblack);
-        let (width, height, raw_pixels, color_indices, black_levels_per_pixel) = copy_active_pixels(
-            ctx.raw,
-            rawdata.raw_image,
-            raw_width,
-            raw_height,
-            crop_x,
-            crop_y,
-            width,
-            height,
-            sizes.raw_pitch as usize,
-            sizes.flip,
-            cdesc,
-            cfa_map,
-            color.black,
-            &color.cblack,
-        )?;
+        let (width, height, raw_pixels, color_indices, black_levels_per_pixel) =
+            copy_active_pixels(
+                ctx.raw,
+                rawdata.raw_image,
+                raw_width,
+                raw_height,
+                crop_x,
+                crop_y,
+                width,
+                height,
+                sizes.raw_pitch as usize,
+                sizes.flip,
+                cdesc,
+                cfa_map,
+                color.black,
+                &color.cblack,
+            )?;
         let physical_wb = white_balance(color.cam_mul, cdesc);
         let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
         let calibration_compatible = dcp_profile
@@ -577,11 +581,7 @@ mod libraw_loader {
         (end <= cblack.len()).then_some((rows, cols))
     }
 
-    fn white_levels(
-        maximum: u32,
-        linear_max: [u32; 4],
-        black_levels: [f32; 4],
-    ) -> [f32; 4] {
+    fn white_levels(maximum: u32, linear_max: [u32; 4], black_levels: [f32; 4]) -> [f32; 4] {
         // `maximum` is LibRaw's decoded white/saturation level. `linear_max`
         // is an optional per-plane vendor "specular white" / linearity limit
         // and is known to be invalid in some files. Use it only when it forms
@@ -729,8 +729,8 @@ mod libraw_loader {
 
         let cct0 = calibration_illuminant_cct(first.illuminant?)?;
         let cct1 = calibration_illuminant_cct(second.illuminant?)?;
-        let mut scene_cct = estimate_scene_cct(color, wb_coeffs, cdesc)
-            .unwrap_or_else(|| (cct0 * cct1).sqrt());
+        let mut scene_cct =
+            estimate_scene_cct(color, wb_coeffs, cdesc).unwrap_or_else(|| (cct0 * cct1).sqrt());
         let neutral = camera_neutral(wb_coeffs);
         let first_color = first.color_matrix?;
         let second_color = second.color_matrix?;
@@ -779,12 +779,10 @@ mod libraw_loader {
     ) -> Option<InterpolatedDngProfile> {
         Some(InterpolatedDngProfile {
             color_matrix: set.color_matrix?,
-            calibration: parsed_calibration(
-                set,
-                fallback_calibration,
-                calibration_compatible,
-            ),
-            forward_matrix: set.forward_matrix.filter(|matrix| matrix3x4_is_valid(*matrix)),
+            calibration: parsed_calibration(set, fallback_calibration, calibration_compatible),
+            forward_matrix: set
+                .forward_matrix
+                .filter(|matrix| matrix3x4_is_valid(*matrix)),
             weight,
         })
     }
@@ -835,8 +833,8 @@ mod libraw_loader {
 
         let cct0 = calibration_illuminant_cct(color.dng_color[0].illuminant)?;
         let cct1 = calibration_illuminant_cct(color.dng_color[1].illuminant)?;
-        let mut scene_cct = estimate_scene_cct(color, wb_coeffs, cdesc)
-            .unwrap_or_else(|| (cct0 * cct1).sqrt());
+        let mut scene_cct =
+            estimate_scene_cct(color, wb_coeffs, cdesc).unwrap_or_else(|| (cct0 * cct1).sqrt());
         let neutral = camera_neutral(wb_coeffs);
 
         // DNG interpolation is linear in reciprocal correlated colour
@@ -976,10 +974,7 @@ mod libraw_loader {
         Ok(fold_physical_camera_planes(physical, cdesc))
     }
 
-    fn fold_physical_camera_planes(
-        physical: [[f32; 4]; 3],
-        cdesc: [u8; 4],
-    ) -> [[f32; 4]; 3] {
+    fn fold_physical_camera_planes(physical: [[f32; 4]; 3], cdesc: [u8; 4]) -> [[f32; 4]; 3] {
         let mut out = [[0.0; 4]; 3];
         for physical_col in 0..4 {
             let Some(rgb_col) = logical_rgb_channel(cdesc, physical_col) else {
@@ -1105,11 +1100,11 @@ mod libraw_loader {
 
     fn calibration_illuminant_cct(illuminant: u16) -> Option<f32> {
         match illuminant {
-            1 => Some(5500.0), // Daylight
-            2 => Some(4000.0), // Fluorescent
-            3 => Some(2856.0), // Tungsten
-            4 => Some(5500.0), // Flash
-            9 => Some(5500.0), // Fine weather
+            1 => Some(5500.0),  // Daylight
+            2 => Some(4000.0),  // Fluorescent
+            3 => Some(2856.0),  // Tungsten
+            4 => Some(5500.0),  // Flash
+            9 => Some(5500.0),  // Fine weather
             10 => Some(6500.0), // Cloudy weather
             11 => Some(7500.0), // Shade
             12 => Some(6500.0), // Daylight fluorescent

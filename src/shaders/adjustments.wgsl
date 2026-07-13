@@ -617,7 +617,43 @@ fn mixer_luminance_ev(amount: f32, lightness: f32) -> f32 {
     return value * endpoint_ev * signal * hdr_guard;
 }
 
-fn local_curve_block(mask_index: u32, block: u32) -> vec4<f32> {
+fn local_curve_block(mask_index: u32, curve: u32, block: u32) -> vec4<f32> {
+    if curve == 1u {
+        switch block {
+            case 0u: { return params.mask_curve_red_0[mask_index]; }
+            case 1u: { return params.mask_curve_red_1[mask_index]; }
+            case 2u: { return params.mask_curve_red_2[mask_index]; }
+            case 3u: { return params.mask_curve_red_3[mask_index]; }
+            case 4u: { return params.mask_curve_red_4[mask_index]; }
+            case 5u: { return params.mask_curve_red_5[mask_index]; }
+            case 6u: { return params.mask_curve_red_6[mask_index]; }
+            default: { return params.mask_curve_red_7[mask_index]; }
+        }
+    }
+    if curve == 2u {
+        switch block {
+            case 0u: { return params.mask_curve_green_0[mask_index]; }
+            case 1u: { return params.mask_curve_green_1[mask_index]; }
+            case 2u: { return params.mask_curve_green_2[mask_index]; }
+            case 3u: { return params.mask_curve_green_3[mask_index]; }
+            case 4u: { return params.mask_curve_green_4[mask_index]; }
+            case 5u: { return params.mask_curve_green_5[mask_index]; }
+            case 6u: { return params.mask_curve_green_6[mask_index]; }
+            default: { return params.mask_curve_green_7[mask_index]; }
+        }
+    }
+    if curve == 3u {
+        switch block {
+            case 0u: { return params.mask_curve_blue_0[mask_index]; }
+            case 1u: { return params.mask_curve_blue_1[mask_index]; }
+            case 2u: { return params.mask_curve_blue_2[mask_index]; }
+            case 3u: { return params.mask_curve_blue_3[mask_index]; }
+            case 4u: { return params.mask_curve_blue_4[mask_index]; }
+            case 5u: { return params.mask_curve_blue_5[mask_index]; }
+            case 6u: { return params.mask_curve_blue_6[mask_index]; }
+            default: { return params.mask_curve_blue_7[mask_index]; }
+        }
+    }
     switch block {
         case 0u: { return params.mask_curve_0[mask_index]; }
         case 1u: { return params.mask_curve_1[mask_index]; }
@@ -630,12 +666,12 @@ fn local_curve_block(mask_index: u32, block: u32) -> vec4<f32> {
     }
 }
 
-fn local_curve_value(mask_index: u32, input: f32) -> f32 {
+fn local_curve_value(mask_index: u32, curve: u32, input: f32) -> f32 {
     let position = clamp(input, 0.0, 1.0) * 31.0;
     let lower = u32(floor(position));
     let upper = min(lower + 1u, 31u);
-    let first = local_curve_block(mask_index, lower / 4u)[lower % 4u];
-    let second = local_curve_block(mask_index, upper / 4u)[upper % 4u];
+    let first = local_curve_block(mask_index, curve, lower / 4u)[lower % 4u];
+    let second = local_curve_block(mask_index, curve, upper / 4u)[upper % 4u];
     return mix(first, second, fract(position));
 }
 
@@ -667,10 +703,19 @@ fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
         let weight = textureSampleLevel(local_mask_tex, local_mask_sampler, uv, i32(index), 0.0).x;
         if weight <= 1e-5 { continue; }
         var adjusted = rgb;
-        if state.z != 0u {
+        if (state.z & 1u) != 0u {
             let luminance = max(dot(adjusted, LUMA), 0.0);
-            let curved = scene_curve_decode(local_curve_value(index, scene_curve_encode(luminance)));
+            let curved = scene_curve_decode(local_curve_value(index, 0u, scene_curve_encode(luminance)));
             adjusted = select(vec3<f32>(curved), adjusted * clamp(curved / luminance, 0.0, 256.0), luminance > 1e-9);
+        }
+        if (state.z & 2u) != 0u && adjusted.r >= 0.0 {
+            adjusted.r = scene_curve_decode(local_curve_value(index, 1u, scene_curve_encode(adjusted.r)));
+        }
+        if (state.z & 4u) != 0u && adjusted.g >= 0.0 {
+            adjusted.g = scene_curve_decode(local_curve_value(index, 2u, scene_curve_encode(adjusted.g)));
+        }
+        if (state.z & 8u) != 0u && adjusted.b >= 0.0 {
+            adjusted.b = scene_curve_decode(local_curve_value(index, 3u, scene_curve_encode(adjusted.b)));
         }
         if state.w != 0u {
             let sample = mixer_sample_from_rgb(adjusted);

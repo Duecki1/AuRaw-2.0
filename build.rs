@@ -60,26 +60,25 @@ fn configure_source_revision() {
     }
 
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let git_revision = command_output(
-        Command::new("git")
-            .current_dir(&manifest_dir)
-            .args(["rev-parse", "--verify", "HEAD"]),
-    );
+    let git_revision = command_output(Command::new("git").current_dir(&manifest_dir).args([
+        "rev-parse",
+        "--verify",
+        "HEAD",
+    ]));
     watch_git_revision(&manifest_dir);
 
     let configured_revision = std::env::var("AURAW_SOURCE_REVISION").ok();
-    let require_committed =
-        std::env::var("AURAW_REQUIRE_COMMITTED_SOURCE").as_deref() == Ok("1");
+    let require_committed = std::env::var("AURAW_REQUIRE_COMMITTED_SOURCE").as_deref() == Ok("1");
 
     if require_committed {
         let revision = git_revision.as_deref().unwrap_or_else(|| {
             panic!("reproducible builds must run from a Git checkout with a committed revision")
         });
-        let status = command_output(
-            Command::new("git")
-                .current_dir(&manifest_dir)
-                .args(["status", "--porcelain=v1", "--untracked-files=all"]),
-        )
+        let status = command_output(Command::new("git").current_dir(&manifest_dir).args([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ]))
         .unwrap_or_else(|| panic!("could not inspect the Git source tree"));
         if !status.is_empty() {
             panic!("reproducible builds require a clean source tree:\n{status}");
@@ -100,25 +99,25 @@ fn configure_source_revision() {
 
 fn watch_git_revision(manifest_dir: &Path) {
     for git_path in ["HEAD", "packed-refs"] {
-        if let Some(path) = command_output(
-            Command::new("git")
-                .current_dir(manifest_dir)
-                .args(["rev-parse", "--git-path", git_path]),
-        ) {
+        if let Some(path) = command_output(Command::new("git").current_dir(manifest_dir).args([
+            "rev-parse",
+            "--git-path",
+            git_path,
+        ])) {
             println!("cargo:rerun-if-changed={path}");
         }
     }
 
-    if let Some(reference) = command_output(
-        Command::new("git")
-            .current_dir(manifest_dir)
-            .args(["symbolic-ref", "-q", "HEAD"]),
-    ) {
-        if let Some(path) = command_output(
-            Command::new("git")
-                .current_dir(manifest_dir)
-                .args(["rev-parse", "--git-path", &reference]),
-        ) {
+    if let Some(reference) = command_output(Command::new("git").current_dir(manifest_dir).args([
+        "symbolic-ref",
+        "-q",
+        "HEAD",
+    ])) {
+        if let Some(path) = command_output(Command::new("git").current_dir(manifest_dir).args([
+            "rev-parse",
+            "--git-path",
+            &reference,
+        ])) {
             println!("cargo:rerun-if-changed={path}");
         }
     }

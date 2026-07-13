@@ -308,6 +308,30 @@ pub struct GpuParams {
     mask_curve_5: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_curve_6: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_curve_7: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_red_0: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_red_1: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_red_2: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_red_3: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_red_4: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_red_5: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_red_6: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_red_7: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_green_0: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_green_1: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_green_2: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_green_3: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_green_4: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_green_5: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_green_6: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_green_7: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_blue_0: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_blue_1: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_blue_2: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_blue_3: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_blue_4: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_blue_5: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_blue_6: [[f32; 4]; MAX_LOCAL_MASKS],
+    mask_curve_blue_7: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_hsl_hue_0: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_hsl_hue_1: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_hsl_saturation_0: [[f32; 4]; MAX_LOCAL_MASKS],
@@ -337,6 +361,9 @@ impl GpuParams {
         let mut mask_adjust_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_2 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_curves = [[[0.0f32; 4]; 8]; MAX_LOCAL_MASKS];
+        let mut mask_curves_red = [[[0.0f32; 4]; 8]; MAX_LOCAL_MASKS];
+        let mut mask_curves_green = [[[0.0f32; 4]; 8]; MAX_LOCAL_MASKS];
+        let mut mask_curves_blue = [[[0.0f32; 4]; 8]; MAX_LOCAL_MASKS];
         let mut mask_hsl_hue_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_hsl_hue_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_hsl_saturation_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
@@ -345,12 +372,20 @@ impl GpuParams {
         let mut mask_hsl_luminance_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
             let adjustment = mask.adjustments;
-            let has_hsl = adjustment.hsl_hue.iter().chain(&adjustment.hsl_saturation)
-                .chain(&adjustment.hsl_luminance).any(|value| value.abs() > 1e-6);
+            let has_hsl = adjustment
+                .hsl_hue
+                .iter()
+                .chain(&adjustment.hsl_saturation)
+                .chain(&adjustment.hsl_luminance)
+                .any(|value| value.abs() > 1e-6);
+            let curve_flags = u32::from(!adjustment.tone_curve.is_identity())
+                | (u32::from(!adjustment.tone_curve_red.is_identity()) << 1)
+                | (u32::from(!adjustment.tone_curve_green.is_identity()) << 2)
+                | (u32::from(!adjustment.tone_curve_blue.is_identity()) << 3);
             mask_meta[index] = [
                 u32::from(mask.enabled),
                 u32::from(!adjustment.is_neutral()),
-                u32::from(!adjustment.tone_curve.is_identity()),
+                curve_flags,
                 u32::from(has_hsl),
             ];
             mask_adjust_0[index] = [
@@ -373,7 +408,14 @@ impl GpuParams {
             ];
             for sample in 0..32 {
                 let x = sample as f32 / 31.0;
-                mask_curves[index][sample / 4][sample % 4] = evaluate_point_curve(&adjustment.tone_curve, x);
+                mask_curves[index][sample / 4][sample % 4] =
+                    evaluate_point_curve(&adjustment.tone_curve, x);
+                mask_curves_red[index][sample / 4][sample % 4] =
+                    evaluate_point_curve(&adjustment.tone_curve_red, x);
+                mask_curves_green[index][sample / 4][sample % 4] =
+                    evaluate_point_curve(&adjustment.tone_curve_green, x);
+                mask_curves_blue[index][sample / 4][sample % 4] =
+                    evaluate_point_curve(&adjustment.tone_curve_blue, x);
             }
             mask_hsl_hue_0[index] = adjustment.hsl_hue[..4].try_into().unwrap();
             mask_hsl_hue_1[index] = adjustment.hsl_hue[4..].try_into().unwrap();
@@ -394,7 +436,11 @@ impl GpuParams {
             ca_blue: exposure.ca_blue,
             highlight_reconstruction: exposure.highlight_reconstruction,
             tone_analysis_scale: tone_analysis_scale() as f32,
-            tone_guide_radius: if cfg!(target_os = "android") { 3.0 } else { 5.0 },
+            tone_guide_radius: if cfg!(target_os = "android") {
+                3.0
+            } else {
+                5.0
+            },
             demosaic_mode: exposure.demosaic_mode.shader_value(),
             dual_threshold: exposure.dual_threshold.clamp(0.0, 100.0),
             frequency_chroma: exposure.frequency_chroma.clamp(0.0, 1.0),
@@ -473,73 +519,113 @@ impl GpuParams {
             ],
             tone_curve_meta: [
                 exposure.tone_curve.len.clamp(2, 8) as f32,
-                if exposure.tone_curve.is_identity() { 1.0 } else { 0.0 },
+                if exposure.tone_curve.is_identity() {
+                    1.0
+                } else {
+                    0.0
+                },
                 0.0,
                 0.0,
             ],
             tone_curve_red_0: [
-                exposure.tone_curve_red.points[0][0], exposure.tone_curve_red.points[0][1],
-                exposure.tone_curve_red.points[1][0], exposure.tone_curve_red.points[1][1],
+                exposure.tone_curve_red.points[0][0],
+                exposure.tone_curve_red.points[0][1],
+                exposure.tone_curve_red.points[1][0],
+                exposure.tone_curve_red.points[1][1],
             ],
             tone_curve_red_1: [
-                exposure.tone_curve_red.points[2][0], exposure.tone_curve_red.points[2][1],
-                exposure.tone_curve_red.points[3][0], exposure.tone_curve_red.points[3][1],
+                exposure.tone_curve_red.points[2][0],
+                exposure.tone_curve_red.points[2][1],
+                exposure.tone_curve_red.points[3][0],
+                exposure.tone_curve_red.points[3][1],
             ],
             tone_curve_red_2: [
-                exposure.tone_curve_red.points[4][0], exposure.tone_curve_red.points[4][1],
-                exposure.tone_curve_red.points[5][0], exposure.tone_curve_red.points[5][1],
+                exposure.tone_curve_red.points[4][0],
+                exposure.tone_curve_red.points[4][1],
+                exposure.tone_curve_red.points[5][0],
+                exposure.tone_curve_red.points[5][1],
             ],
             tone_curve_red_3: [
-                exposure.tone_curve_red.points[6][0], exposure.tone_curve_red.points[6][1],
-                exposure.tone_curve_red.points[7][0], exposure.tone_curve_red.points[7][1],
+                exposure.tone_curve_red.points[6][0],
+                exposure.tone_curve_red.points[6][1],
+                exposure.tone_curve_red.points[7][0],
+                exposure.tone_curve_red.points[7][1],
             ],
             tone_curve_red_meta: [
                 exposure.tone_curve_red.len.clamp(2, 8) as f32,
-                if exposure.tone_curve_red.is_identity() { 1.0 } else { 0.0 },
+                if exposure.tone_curve_red.is_identity() {
+                    1.0
+                } else {
+                    0.0
+                },
                 0.0,
                 0.0,
             ],
             tone_curve_green_0: [
-                exposure.tone_curve_green.points[0][0], exposure.tone_curve_green.points[0][1],
-                exposure.tone_curve_green.points[1][0], exposure.tone_curve_green.points[1][1],
+                exposure.tone_curve_green.points[0][0],
+                exposure.tone_curve_green.points[0][1],
+                exposure.tone_curve_green.points[1][0],
+                exposure.tone_curve_green.points[1][1],
             ],
             tone_curve_green_1: [
-                exposure.tone_curve_green.points[2][0], exposure.tone_curve_green.points[2][1],
-                exposure.tone_curve_green.points[3][0], exposure.tone_curve_green.points[3][1],
+                exposure.tone_curve_green.points[2][0],
+                exposure.tone_curve_green.points[2][1],
+                exposure.tone_curve_green.points[3][0],
+                exposure.tone_curve_green.points[3][1],
             ],
             tone_curve_green_2: [
-                exposure.tone_curve_green.points[4][0], exposure.tone_curve_green.points[4][1],
-                exposure.tone_curve_green.points[5][0], exposure.tone_curve_green.points[5][1],
+                exposure.tone_curve_green.points[4][0],
+                exposure.tone_curve_green.points[4][1],
+                exposure.tone_curve_green.points[5][0],
+                exposure.tone_curve_green.points[5][1],
             ],
             tone_curve_green_3: [
-                exposure.tone_curve_green.points[6][0], exposure.tone_curve_green.points[6][1],
-                exposure.tone_curve_green.points[7][0], exposure.tone_curve_green.points[7][1],
+                exposure.tone_curve_green.points[6][0],
+                exposure.tone_curve_green.points[6][1],
+                exposure.tone_curve_green.points[7][0],
+                exposure.tone_curve_green.points[7][1],
             ],
             tone_curve_green_meta: [
                 exposure.tone_curve_green.len.clamp(2, 8) as f32,
-                if exposure.tone_curve_green.is_identity() { 1.0 } else { 0.0 },
+                if exposure.tone_curve_green.is_identity() {
+                    1.0
+                } else {
+                    0.0
+                },
                 0.0,
                 0.0,
             ],
             tone_curve_blue_0: [
-                exposure.tone_curve_blue.points[0][0], exposure.tone_curve_blue.points[0][1],
-                exposure.tone_curve_blue.points[1][0], exposure.tone_curve_blue.points[1][1],
+                exposure.tone_curve_blue.points[0][0],
+                exposure.tone_curve_blue.points[0][1],
+                exposure.tone_curve_blue.points[1][0],
+                exposure.tone_curve_blue.points[1][1],
             ],
             tone_curve_blue_1: [
-                exposure.tone_curve_blue.points[2][0], exposure.tone_curve_blue.points[2][1],
-                exposure.tone_curve_blue.points[3][0], exposure.tone_curve_blue.points[3][1],
+                exposure.tone_curve_blue.points[2][0],
+                exposure.tone_curve_blue.points[2][1],
+                exposure.tone_curve_blue.points[3][0],
+                exposure.tone_curve_blue.points[3][1],
             ],
             tone_curve_blue_2: [
-                exposure.tone_curve_blue.points[4][0], exposure.tone_curve_blue.points[4][1],
-                exposure.tone_curve_blue.points[5][0], exposure.tone_curve_blue.points[5][1],
+                exposure.tone_curve_blue.points[4][0],
+                exposure.tone_curve_blue.points[4][1],
+                exposure.tone_curve_blue.points[5][0],
+                exposure.tone_curve_blue.points[5][1],
             ],
             tone_curve_blue_3: [
-                exposure.tone_curve_blue.points[6][0], exposure.tone_curve_blue.points[6][1],
-                exposure.tone_curve_blue.points[7][0], exposure.tone_curve_blue.points[7][1],
+                exposure.tone_curve_blue.points[6][0],
+                exposure.tone_curve_blue.points[6][1],
+                exposure.tone_curve_blue.points[7][0],
+                exposure.tone_curve_blue.points[7][1],
             ],
             tone_curve_blue_meta: [
                 exposure.tone_curve_blue.len.clamp(2, 8) as f32,
-                if exposure.tone_curve_blue.is_identity() { 1.0 } else { 0.0 },
+                if exposure.tone_curve_blue.is_identity() {
+                    1.0
+                } else {
+                    0.0
+                },
                 0.0,
                 0.0,
             ],
@@ -581,6 +667,30 @@ impl GpuParams {
             mask_curve_5: mask_curves.map(|curve| curve[5]),
             mask_curve_6: mask_curves.map(|curve| curve[6]),
             mask_curve_7: mask_curves.map(|curve| curve[7]),
+            mask_curve_red_0: mask_curves_red.map(|curve| curve[0]),
+            mask_curve_red_1: mask_curves_red.map(|curve| curve[1]),
+            mask_curve_red_2: mask_curves_red.map(|curve| curve[2]),
+            mask_curve_red_3: mask_curves_red.map(|curve| curve[3]),
+            mask_curve_red_4: mask_curves_red.map(|curve| curve[4]),
+            mask_curve_red_5: mask_curves_red.map(|curve| curve[5]),
+            mask_curve_red_6: mask_curves_red.map(|curve| curve[6]),
+            mask_curve_red_7: mask_curves_red.map(|curve| curve[7]),
+            mask_curve_green_0: mask_curves_green.map(|curve| curve[0]),
+            mask_curve_green_1: mask_curves_green.map(|curve| curve[1]),
+            mask_curve_green_2: mask_curves_green.map(|curve| curve[2]),
+            mask_curve_green_3: mask_curves_green.map(|curve| curve[3]),
+            mask_curve_green_4: mask_curves_green.map(|curve| curve[4]),
+            mask_curve_green_5: mask_curves_green.map(|curve| curve[5]),
+            mask_curve_green_6: mask_curves_green.map(|curve| curve[6]),
+            mask_curve_green_7: mask_curves_green.map(|curve| curve[7]),
+            mask_curve_blue_0: mask_curves_blue.map(|curve| curve[0]),
+            mask_curve_blue_1: mask_curves_blue.map(|curve| curve[1]),
+            mask_curve_blue_2: mask_curves_blue.map(|curve| curve[2]),
+            mask_curve_blue_3: mask_curves_blue.map(|curve| curve[3]),
+            mask_curve_blue_4: mask_curves_blue.map(|curve| curve[4]),
+            mask_curve_blue_5: mask_curves_blue.map(|curve| curve[5]),
+            mask_curve_blue_6: mask_curves_blue.map(|curve| curve[6]),
+            mask_curve_blue_7: mask_curves_blue.map(|curve| curve[7]),
             mask_hsl_hue_0,
             mask_hsl_hue_1,
             mask_hsl_saturation_0,
@@ -722,7 +832,10 @@ impl RawGpuPipeline {
         let demosaic_format = work_format;
         let highlight_work_format = work_format;
         let tone_scale = tone_analysis_scale();
-        let tone_size = texture_size(raw.width.div_ceil(tone_scale), raw.height.div_ceil(tone_scale));
+        let tone_size = texture_size(
+            raw.width.div_ceil(tone_scale),
+            raw.height.div_ceil(tone_scale),
+        );
         let tone_format = tone_guide_format();
         let image_workgroups = [raw.width.div_ceil(8), raw.height.div_ceil(8), 1];
         let tone_workgroups = [tone_size.width.div_ceil(8), tone_size.height.div_ceil(8), 1];
@@ -760,8 +873,12 @@ impl RawGpuPipeline {
         // Preserve a scene-linear camera-RGB result between demosaic and the
         // display pass. This is what lets local Lightroom controls read true
         // RGB neighbourhoods instead of raw Bayer samples.
-        let scene_texture =
-            create_demosaic_texture(device, size, demosaic_format, "auraw scene-linear camera RGB");
+        let scene_texture = create_demosaic_texture(
+            device,
+            size,
+            demosaic_format,
+            "auraw scene-linear camera RGB",
+        );
 
         let out_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw output texture"),
@@ -805,12 +922,8 @@ impl RawGpuPipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[wgpu::TextureFormat::R8Unorm],
         });
-        let empty_masks = vec![
-            0u8;
-            mask_atlas_edge as usize
-                * mask_atlas_edge as usize
-                * MAX_LOCAL_MASKS
-        ];
+        let empty_masks =
+            vec![0u8; mask_atlas_edge as usize * mask_atlas_edge as usize * MAX_LOCAL_MASKS];
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &mask_texture,
@@ -841,10 +954,8 @@ impl RawGpuPipeline {
         let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let tex1_view = tex1.create_view(&wgpu::TextureViewDescriptor::default());
         let tex2_view = tex2.create_view(&wgpu::TextureViewDescriptor::default());
-        let tone_guide_a_view =
-            tone_guide_a.create_view(&wgpu::TextureViewDescriptor::default());
-        let tone_guide_b_view =
-            tone_guide_b.create_view(&wgpu::TextureViewDescriptor::default());
+        let tone_guide_a_view = tone_guide_a.create_view(&wgpu::TextureViewDescriptor::default());
+        let tone_guide_b_view = tone_guide_b.create_view(&wgpu::TextureViewDescriptor::default());
         let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let black_view = black_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -866,8 +977,8 @@ impl RawGpuPipeline {
 
         let default_output_transform = IccOutputTransform::srgb();
         let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
-        let output_lut_offset_bytes = u64::from(profile_gpu_data.layout.output[3])
-            * std::mem::size_of::<[f32; 4]>() as u64;
+        let output_lut_offset_bytes =
+            u64::from(profile_gpu_data.layout.output[3]) * std::mem::size_of::<[f32; 4]>() as u64;
         let profile_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("auraw DCP and ICC profile LUTs"),
             contents: bytemuck::cast_slice(&profile_gpu_data.words),
@@ -931,11 +1042,7 @@ impl RawGpuPipeline {
                 common_entries[2].clone(),
                 common_entries[3].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    4,
-                    demosaic_format,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
+                storage_texture_entry(4, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -948,11 +1055,7 @@ impl RawGpuPipeline {
                 common_entries[3].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    6,
-                    demosaic_format,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
+                storage_texture_entry(6, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -965,11 +1068,7 @@ impl RawGpuPipeline {
                 common_entries[3].clone(),
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    8,
-                    demosaic_format,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
+                storage_texture_entry(8, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -983,11 +1082,7 @@ impl RawGpuPipeline {
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    10,
-                    demosaic_format,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
+                storage_texture_entry(10, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
 
@@ -1062,62 +1157,46 @@ impl RawGpuPipeline {
                 ],
             });
 
-        let bgl_xtrans_finish =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl X-Trans finish"),
-                entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        10,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ],
-            });
+        let bgl_xtrans_finish = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bgl X-Trans finish"),
+            entries: &[
+                common_entries[0].clone(),
+                common_entries[1].clone(),
+                common_entries[2].clone(),
+                common_entries[3].clone(),
+                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_texture_entry(10, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
+            ],
+        });
 
-        let bgl_tone_prepare =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl tone prepare"),
-                entries: &[
-                    buffer_entry(0),
-                    texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_buffer_entry(15, false),
-                    storage_buffer_entry(20, true),
-                    storage_texture_entry(
-                        18,
-                        tone_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ],
-            });
+        let bgl_tone_prepare = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bgl tone prepare"),
+            entries: &[
+                buffer_entry(0),
+                texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_buffer_entry(15, false),
+                storage_buffer_entry(20, true),
+                storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
+            ],
+        });
 
-        let bgl_tone_blur =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl tone guide blur"),
-                entries: &[
-                    buffer_entry(0),
-                    texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        18,
-                        tone_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ],
-            });
+        let bgl_tone_blur = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bgl tone guide blur"),
+            entries: &[
+                buffer_entry(0),
+                texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
+            ],
+        });
 
-        let bgl_tone_reduce =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl tone histogram reduction"),
-                entries: &[
-                    storage_buffer_entry(15, false),
-                    storage_buffer_entry(16, false),
-                ],
-            });
+        let bgl_tone_reduce = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bgl tone histogram reduction"),
+            entries: &[
+                storage_buffer_entry(15, false),
+                storage_buffer_entry(16, false),
+            ],
+        });
 
         let bgl_adjust_prepare =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1128,11 +1207,7 @@ impl RawGpuPipeline {
                     common_entries[2].clone(),
                     common_entries[3].clone(),
                     texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        21,
-                        work_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
+                    storage_texture_entry(21, work_format, wgpu::StorageTextureAccess::WriteOnly),
                     storage_buffer_entry(16, true),
                     texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_buffer_entry(20, true),
@@ -1147,11 +1222,7 @@ impl RawGpuPipeline {
                 entries: &[
                     buffer_entry(0),
                     texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        23,
-                        work_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
+                    storage_texture_entry(23, work_format, wgpu::StorageTextureAccess::WriteOnly),
                     texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
                     sampler_entry(28),
                 ],
@@ -1163,33 +1234,26 @@ impl RawGpuPipeline {
                 entries: &[
                     buffer_entry(0),
                     texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        25,
-                        work_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
+                    storage_texture_entry(25, work_format, wgpu::StorageTextureAccess::WriteOnly),
                 ],
             });
 
-        let bgl_adjust_render =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl perceptual color mixer and render"),
-                entries: &[
-                    buffer_entry(0),
-                    storage_texture_entry(
-                        12,
-                        wgpu::TextureFormat::Rgba8Unorm,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                    texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_buffer_entry(20, true),
-                ],
-            });
+        let bgl_adjust_render = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bgl perceptual color mixer and render"),
+            entries: &[
+                buffer_entry(0),
+                storage_texture_entry(
+                    12,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
+                texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_buffer_entry(20, true),
+            ],
+        });
 
         let make_highlight_bind_group =
-            |label: &str,
-             read_view: &wgpu::TextureView,
-             write_view: &wgpu::TextureView| {
+            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(label),
                     layout: &bgl_highlights,
@@ -1558,9 +1622,7 @@ impl RawGpuPipeline {
         });
 
         let make_tone_blur_bind_group =
-            |label: &str,
-             read_view: &wgpu::TextureView,
-             write_view: &wgpu::TextureView| {
+            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(label),
                     layout: &bgl_tone_blur,
@@ -1767,13 +1829,15 @@ impl RawGpuPipeline {
                 })
             };
 
-        let mut passes = Vec::with_capacity(
-            1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 8 + 7,
-        );
+        let mut passes = Vec::with_capacity(1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 8 + 7);
 
         // Prepare writes the initial RGB estimate and reliability into A.
         passes.push(Pass {
-            pipeline: make_pipeline(highlight_shader.as_ref(), "highlight_prepare", &bgl_highlights),
+            pipeline: make_pipeline(
+                highlight_shader.as_ref(),
+                "highlight_prepare",
+                &bgl_highlights,
+            ),
             bind_group: make_highlight_bind_group(
                 "bg highlight prepare",
                 &highlight_work_b_view,
@@ -1820,7 +1884,11 @@ impl RawGpuPipeline {
             HighlightWorkSlot::B => &highlight_work_b_view,
         };
         passes.push(Pass {
-            pipeline: make_pipeline(highlight_shader.as_ref(), "highlight_finalize", &bgl_highlights),
+            pipeline: make_pipeline(
+                highlight_shader.as_ref(),
+                "highlight_finalize",
+                &bgl_highlights,
+            ),
             bind_group: make_highlight_bind_group(
                 "bg highlight finalize",
                 final_read_view,
@@ -1836,38 +1904,22 @@ impl RawGpuPipeline {
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
                 Pass {
-                    pipeline: make_pipeline(
-                        bayer_rcd_p1.as_ref(),
-                        "bayer_rcd_directional",
-                        &bgl1,
-                    ),
+                    pipeline: make_pipeline(bayer_rcd_p1.as_ref(), "bayer_rcd_directional", &bgl1),
                     bind_group: bg1,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(
-                        bayer_rcd_p2.as_ref(),
-                        "bayer_rcd_green",
-                        &bgl2,
-                    ),
+                    pipeline: make_pipeline(bayer_rcd_p2.as_ref(), "bayer_rcd_green", &bgl2),
                     bind_group: bg2,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(
-                        bayer_rcd_p3.as_ref(),
-                        "bayer_rcd_chroma",
-                        &bgl3,
-                    ),
+                    pipeline: make_pipeline(bayer_rcd_p3.as_ref(), "bayer_rcd_chroma", &bgl3),
                     bind_group: bg3,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(
-                        bayer_rcd_p4.as_ref(),
-                        "bayer_rcd_output",
-                        &bgl4,
-                    ),
+                    pipeline: make_pipeline(bayer_rcd_p4.as_ref(), "bayer_rcd_output", &bgl4),
                     bind_group: bg4,
                     workgroups: image_workgroups,
                 },
@@ -1879,29 +1931,17 @@ impl RawGpuPipeline {
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(
-                        xtrans_p2.as_ref(),
-                        "xtrans_markesteijn_pass1",
-                        &bgl2,
-                    ),
+                    pipeline: make_pipeline(xtrans_p2.as_ref(), "xtrans_markesteijn_pass1", &bgl2),
                     bind_group: bg2.clone(),
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(
-                        xtrans_p3.as_ref(),
-                        "xtrans_markesteijn_pass2",
-                        &bgl3,
-                    ),
+                    pipeline: make_pipeline(xtrans_p3.as_ref(), "xtrans_markesteijn_pass2", &bgl3),
                     bind_group: bg3,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(
-                        xtrans_p2.as_ref(),
-                        "xtrans_markesteijn_pass3",
-                        &bgl2,
-                    ),
+                    pipeline: make_pipeline(xtrans_p2.as_ref(), "xtrans_markesteijn_pass3", &bgl2),
                     bind_group: bg2,
                     workgroups: image_workgroups,
                 },
@@ -2071,12 +2111,7 @@ impl RawGpuPipeline {
 
     /// Uploads one normalized, anti-aliased local-mask layer. The same atlas
     /// is sampled by preview proxies and full-resolution export tiles.
-    pub fn update_mask_layer(
-        &self,
-        queue: &wgpu::Queue,
-        layer: usize,
-        bytes: &[u8],
-    ) -> Result<()> {
+    pub fn update_mask_layer(&self, queue: &wgpu::Queue, layer: usize, bytes: &[u8]) -> Result<()> {
         if layer >= MAX_LOCAL_MASKS {
             return Err(anyhow!("local-mask layer {layer} is out of range"));
         }
@@ -2128,11 +2163,8 @@ impl RawGpuPipeline {
             return texture_id;
         }
 
-        let texture_id = renderer.register_native_texture(
-            device,
-            &self._out_view,
-            wgpu::FilterMode::Linear,
-        );
+        let texture_id =
+            renderer.register_native_texture(device, &self._out_view, wgpu::FilterMode::Linear);
         self.egui_texture_id = Some(texture_id);
         texture_id
     }
@@ -2170,7 +2202,9 @@ impl RawGpuPipeline {
         transform: &IccOutputTransform,
     ) -> Result<()> {
         if transform.size() != crate::pipeline::color_profile::OUTPUT_LUT_EDGE {
-            return Err(anyhow!("output ICC LUT edge does not match the GPU profile layout"));
+            return Err(anyhow!(
+                "output ICC LUT edge does not match the GPU profile layout"
+            ));
         }
         queue.write_buffer(
             &self.profile_buffer,
@@ -2441,7 +2475,9 @@ impl RawGpuPipeline {
         let scene_view = self
             .scene_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let raw_view = self.raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let raw_view = self
+            .raw_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let color_view = self
             .color_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2555,12 +2591,7 @@ impl RawGpuPipeline {
         )
     }
 
-    fn encode_pass_range(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        start: usize,
-        end: usize,
-    ) {
+    fn encode_pass_range(&self, encoder: &mut wgpu::CommandEncoder, start: usize, end: usize) {
         for i in start..end {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(&format!("auraw pass {}", i + 1)),
@@ -2584,9 +2615,8 @@ fn read_rgba32_texture_rgb_blocking(
 ) -> Result<Vec<f32>> {
     let (readback, padded_bytes_per_row) =
         create_rgba32_readback_buffer(device, width, height, label);
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some(label),
-    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
     encode_rgba32_texture_copy(
         &mut encoder,
         texture,
@@ -2697,7 +2727,11 @@ fn map_rgba32_readback_rgb(
 }
 
 fn tone_analysis_scale() -> u32 {
-    if cfg!(target_os = "android") { 8 } else { 4 }
+    if cfg!(target_os = "android") {
+        8
+    } else {
+        4
+    }
 }
 
 fn tone_guide_format() -> wgpu::TextureFormat {
@@ -2862,19 +2896,39 @@ fn validate_raw(raw: &LoadedRaw) -> Result<()> {
     if raw.color_indices.iter().any(|channel| *channel > 3) {
         return Err(anyhow!("CFA index map contains a channel above 3"));
     }
-    if raw.wb_coeffs.iter().any(|value| !value.is_finite() || *value <= 0.0) {
-        return Err(anyhow!("white-balance coefficients must be finite and positive"));
+    if raw
+        .wb_coeffs
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(anyhow!(
+            "white-balance coefficients must be finite and positive"
+        ));
     }
-    if raw.cam_to_srgb.iter().flatten().any(|value| !value.is_finite()) {
-        return Err(anyhow!("camera-to-working matrix contains a non-finite value"));
+    if raw
+        .cam_to_srgb
+        .iter()
+        .flatten()
+        .any(|value| !value.is_finite())
+    {
+        return Err(anyhow!(
+            "camera-to-working matrix contains a non-finite value"
+        ));
     }
-    if raw.cam_to_srgb.iter().flatten().all(|value| value.abs() <= 1e-12) {
+    if raw
+        .cam_to_srgb
+        .iter()
+        .flatten()
+        .all(|value| value.abs() <= 1e-12)
+    {
         return Err(anyhow!("camera-to-working matrix is empty"));
     }
     if raw.black_levels.iter().any(|value| !value.is_finite())
         || raw.white_levels.iter().any(|value| !value.is_finite())
     {
-        return Err(anyhow!("black/white calibration contains a non-finite value"));
+        return Err(anyhow!(
+            "black/white calibration contains a non-finite value"
+        ));
     }
 
     for (index, (&black, &channel)) in raw
@@ -3036,12 +3090,11 @@ fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
 mod tests {
     use super::{
         highlight_final_read_slot, highlight_stage_slots, processing_work_format,
-        work_shader_source, HighlightWorkSlot, ProcessingQuality,
-        HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1,
-        SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
-        SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
-        SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4,
-        SHADER_XTRANS_P5, SHADER_XTRANS_P6, SHADER_XTRANS_P7,
+        work_shader_source, HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS,
+        SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
+        SHADER_BAYER_RCD_P4, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
+        SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5,
+        SHADER_XTRANS_P6, SHADER_XTRANS_P7,
     };
 
     #[test]
@@ -3139,7 +3192,10 @@ mod tests {
 
         for expected in expected_entry_points {
             assert!(
-                module.entry_points.iter().any(|entry| entry.name == expected),
+                module
+                    .entry_points
+                    .iter()
+                    .any(|entry| entry.name == expected),
                 "highlight shader is missing entry point {expected}"
             );
         }
@@ -3183,7 +3239,10 @@ mod tests {
             let module =
                 naga::front::wgsl::parse_str(source).expect("demosaic shader did not parse");
             assert!(
-                module.entry_points.iter().any(|entry| entry.name == expected),
+                module
+                    .entry_points
+                    .iter()
+                    .any(|entry| entry.name == expected),
                 "demosaic shader is missing entry point {expected}"
             );
         }
@@ -3201,7 +3260,10 @@ mod tests {
             "tone_reduce_histogram",
         ] {
             assert!(
-                module.entry_points.iter().any(|entry| entry.name == expected),
+                module
+                    .entry_points
+                    .iter()
+                    .any(|entry| entry.name == expected),
                 "tone-analysis shader is missing entry point {expected}"
             );
         }
@@ -3212,19 +3274,37 @@ mod tests {
         // Sixteen scalar values keep the stable 64-byte prefix. The two
         // darktable sigmoid vec4s follow the local-tone controls, then the
         // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 3136);
+        assert_eq!(std::mem::size_of::<super::GpuParams>(), 6208);
         assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
         assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, creative_effects), 128);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, creative_effects),
+            128
+        );
         assert_eq!(std::mem::offset_of!(super::GpuParams, vignette), 144);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, vignette_options), 160);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, highlight_options), 176);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, vignette_options),
+            160
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, highlight_options),
+            176
+        );
         assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 192);
         assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 256);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_red_0), 272);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_green_0), 352);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_blue_0), 432);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, tone_curve_red_0),
+            272
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, tone_curve_green_0),
+            352
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, tone_curve_blue_0),
+            432
+        );
         assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 608);
         assert_eq!(std::mem::offset_of!(super::GpuParams, width), 704);
         assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 712);
@@ -3238,8 +3318,23 @@ mod tests {
         assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1216);
         assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1344);
         assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2240);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 2368);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1), 3008);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, mask_curve_red_0),
+            2368
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, mask_curve_green_0),
+            3392
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
+            4416
+        );
+        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5440);
+        assert_eq!(
+            std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
+            6080
+        );
     }
 
     #[test]
@@ -3271,9 +3366,7 @@ mod tests {
 
     #[test]
     fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
-        use super::{
-            CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline,
-        };
+        use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
         use eframe::wgpu;
 
         let instance = wgpu::Instance::default();
@@ -3313,9 +3406,7 @@ mod tests {
                             (1, 1) => 2,
                             _ => 1,
                         },
-                        CfaKind::XTrans => {
-                            xtrans_pattern[(y % 6) as usize][(x % 6) as usize]
-                        }
+                        CfaKind::XTrans => xtrans_pattern[(y % 6) as usize][(x % 6) as usize],
                     })
                 })
                 .collect();
@@ -3339,7 +3430,11 @@ mod tests {
                 white_levels: [4095.0; 4],
                 camera_profile: Default::default(),
             };
-            let params = super::GpuParams::new(&ExposureParams::default(), &crate::pipeline::MaskStack::default(), &raw);
+            let params = super::GpuParams::new(
+                &ExposureParams::default(),
+                &crate::pipeline::MaskStack::default(),
+                &raw,
+            );
 
             let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let pipeline = RawGpuPipeline::new_headless_with_quality(
@@ -3361,8 +3456,7 @@ mod tests {
             let regression_validation_scope =
                 device.push_error_scope(wgpu::ErrorFilter::Validation);
             let regression = pipeline.render_regression_scene_blocking(&device, &queue, &params);
-            let regression_validation_error =
-                pollster::block_on(regression_validation_scope.pop());
+            let regression_validation_error = pollster::block_on(regression_validation_scope.pop());
             let regression = regression.unwrap_or_else(|error| {
                 panic!("{cfa_kind:?} regression scene render failed: {error:#}")
             });

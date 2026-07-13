@@ -1,6 +1,6 @@
+mod ai_masks;
 #[cfg(target_os = "android")]
 mod android;
-mod ai_masks;
 mod app;
 pub mod pipeline;
 pub mod regression;

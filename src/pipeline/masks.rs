@@ -292,6 +292,9 @@ pub struct LocalAdjustments {
     pub clarity: f32,
     pub dehaze: f32,
     pub tone_curve: super::PointCurve,
+    pub tone_curve_red: super::PointCurve,
+    pub tone_curve_green: super::PointCurve,
+    pub tone_curve_blue: super::PointCurve,
     pub hsl_hue: [f32; 8],
     pub hsl_saturation: [f32; 8],
     pub hsl_luminance: [f32; 8],
@@ -313,6 +316,9 @@ impl Default for LocalAdjustments {
             clarity: 0.0,
             dehaze: 0.0,
             tone_curve: super::PointCurve::linear(),
+            tone_curve_red: super::PointCurve::linear(),
+            tone_curve_green: super::PointCurve::linear(),
+            tone_curve_blue: super::PointCurve::linear(),
             hsl_hue: [0.0; 8],
             hsl_saturation: [0.0; 8],
             hsl_luminance: [0.0; 8],
@@ -327,6 +333,13 @@ impl LocalAdjustments {
 
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    pub fn sanitize_tone_curves(&mut self) {
+        self.tone_curve.sanitize();
+        self.tone_curve_red.sanitize();
+        self.tone_curve_green.sanitize();
+        self.tone_curve_blue.sanitize();
     }
 }
 
@@ -406,7 +419,9 @@ impl MaskStack {
 
     pub fn selected_component_mut(&mut self) -> Option<&mut MaskComponent> {
         let component_index = self.selected_component?;
-        self.selected_mask_mut()?.components.get_mut(component_index)
+        self.selected_mask_mut()?
+            .components
+            .get_mut(component_index)
     }
 
     pub fn remove_selected_mask(&mut self) -> Option<usize> {
@@ -559,13 +574,7 @@ impl MaskStack {
         else {
             return vec![0; width as usize * height as usize];
         };
-        let mut coverage = rasterize_component(
-            component,
-            width,
-            height,
-            image_width,
-            image_height,
-        );
+        let mut coverage = rasterize_component(component, width, height, image_width, image_height);
         if component.invert {
             for value in &mut coverage {
                 *value = 1.0 - *value;
@@ -656,14 +665,7 @@ fn rasterize_component(
             tolerance,
             feather,
             sampled: true,
-        } => rasterize_color_range(
-            width,
-            height,
-            source,
-            *sample,
-            *tolerance,
-            *feather,
-        ),
+        } => rasterize_color_range(width, height, source, *sample, *tolerance, *feather),
         _ => vec![0.0; width as usize * height as usize],
     }
 }
@@ -677,7 +679,8 @@ fn rasterize_mask_image(width: u32, height: u32, mask: &MaskImage) -> Vec<f32> {
         for x in 0..width {
             let source_x = ((x as f32 + 0.5) * mask.width as f32 / width as f32 - 0.5)
                 .round()
-                .clamp(0.0, mask.width.saturating_sub(1) as f32) as usize;
+                .clamp(0.0, mask.width.saturating_sub(1) as f32)
+                as usize;
             out[y as usize * width as usize + x as usize] =
                 mask.pixels[source_y * mask.width as usize + source_x] as f32 / 255.0;
         }
@@ -703,8 +706,7 @@ fn feather_probability_mask(mask: &mut [f32], width: u32, height: u32, feather: 
         for x in 0..width {
             let from = x.saturating_sub(radius);
             let to = (x + radius + 1).min(width);
-            horizontal[y * width + x] =
-                (row_prefix[to] - row_prefix[from]) / (to - from) as f32;
+            horizontal[y * width + x] = (row_prefix[to] - row_prefix[from]) / (to - from) as f32;
         }
     }
     let mut prefix = vec![0.0f32; height + 1];
@@ -758,7 +760,11 @@ fn rasterize_color_range(
             + (color[1] - target[1]).powi(2)
             + (color[2] - target[2]).powi(2))
         .sqrt();
-        1.0 - smoothstep((tolerance - softness).max(0.0), tolerance + softness, distance)
+        1.0 - smoothstep(
+            (tolerance - softness).max(0.0),
+            tolerance + softness,
+            distance,
+        )
     })
 }
 
@@ -885,8 +891,7 @@ fn rasterize_radial(
             let local_x = cos_r * dx + sin_r * dy;
             let local_y = -sin_r * dx + cos_r * dy;
             let distance = ((local_x / rx).powi(2) + (local_y / ry).powi(2)).sqrt();
-            out[y as usize * width as usize + x as usize] =
-                1.0 - smoothstep(inner, 1.0, distance);
+            out[y as usize * width as usize + x as usize] = 1.0 - smoothstep(inner, 1.0, distance);
         }
     }
     out
@@ -916,8 +921,7 @@ fn rasterize_linear(
         for x in 0..width {
             let px = (x as f32 + 0.5) / width as f32 * image_width.max(1) as f32;
             let t = ((px - sx) * dx + (py - sy) * dy) / length_sq;
-            out[y as usize * width as usize + x as usize] =
-                1.0 - smoothstep(edge0, edge1, t);
+            out[y as usize * width as usize + x as usize] = 1.0 - smoothstep(edge0, edge1, t);
         }
     }
     out
@@ -1047,11 +1051,13 @@ mod tests {
         let subject = MaskImage::new(2, 1, vec![0, 255]).unwrap();
         let mut stack = MaskStack::default();
         stack.add_mask(MaskKind::Subject);
-        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
+        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
+        {
             *mask = Some(subject.clone());
         }
         stack.add_mask(MaskKind::Background);
-        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
+        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
+        {
             *mask = Some(subject);
         }
         let foreground = stack.rasterize_layer(0, 2, 1, 2, 1);
@@ -1062,12 +1068,7 @@ mod tests {
 
     #[test]
     fn luminance_and_color_ranges_use_the_cached_preview() {
-        let source = MaskRgbImage::new(
-            2,
-            1,
-            vec![0, 0, 0, 255, 255, 0, 0, 255],
-        )
-        .unwrap();
+        let source = MaskRgbImage::new(2, 1, vec![0, 0, 0, 255, 255, 0, 0, 255]).unwrap();
         let mut stack = MaskStack::default();
         stack.add_mask(MaskKind::LuminanceRange);
         if let MaskGeometry::LuminanceRange {

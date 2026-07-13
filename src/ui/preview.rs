@@ -1,7 +1,8 @@
 use crate::app::{AurawApp, MaskDragState, MaskOverlayBlink, SidebarTab};
 use crate::pipeline::{
-    ellipse_outline_points, BrushDab, BrushMode, MaskGeometry, MaskKind,
+    ellipse_outline_points, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
 };
+use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui};
 
 pub struct Preview;
@@ -301,35 +302,37 @@ impl Preview {
         let selected_component = app.masks.selected_component;
         let neutral = mask.adjustments.is_neutral();
         let accent = selected_component
-            .map(component_overlay_color)
+            .map(mask_component_color)
             .unwrap_or(Color32::from_rgb(78, 163, 255));
         let subtract = Color32::from_rgb(255, 105, 105);
         let painter = ui.painter_at(image_rect);
 
-        let mut coverage_target: Option<Option<usize>> =
-            (neutral && app.mask_properties_active).then_some(None);
-        if neutral {
-            if let Some((started, blink)) = app.mask_overlay_blink {
-                let elapsed = started.elapsed().as_secs_f32();
-                coverage_target = match blink {
-                    MaskOverlayBlink::GroupTwice if elapsed < 0.18 => Some(None),
-                    MaskOverlayBlink::GroupTwice if elapsed < 0.32 => None,
-                    MaskOverlayBlink::GroupTwice if elapsed < 0.50 => Some(None),
-                    MaskOverlayBlink::GroupTwice if elapsed < 0.64 => None,
-                    MaskOverlayBlink::ComponentThenGroup if elapsed < 0.22 => {
-                        selected_component.map(Some)
-                    }
-                    MaskOverlayBlink::ComponentThenGroup if elapsed < 0.35 => None,
-                    MaskOverlayBlink::ComponentThenGroup if elapsed < 0.57 => Some(None),
-                    MaskOverlayBlink::ComponentThenGroup if elapsed < 0.70 => None,
-                    _ => {
-                        app.mask_overlay_blink = None;
-                        coverage_target
-                    }
-                };
-                if app.mask_overlay_blink.is_some() {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(25));
+        // An untouched mask remains visible after its selection flashes. Once
+        // local adjustments exist, selection still flashes for orientation but
+        // the overlay returns to hidden so it cannot obscure the edit.
+        let steady_target: Option<Option<usize>> = neutral.then_some(None);
+        let mut coverage_target = steady_target;
+        if let Some((started, blink)) = app.mask_overlay_blink {
+            let elapsed = started.elapsed().as_secs_f32();
+            coverage_target = match blink {
+                MaskOverlayBlink::GroupTwice if elapsed < 0.18 => Some(None),
+                MaskOverlayBlink::GroupTwice if elapsed < 0.32 => None,
+                MaskOverlayBlink::GroupTwice if elapsed < 0.50 => Some(None),
+                MaskOverlayBlink::GroupTwice if elapsed < 0.64 => None,
+                MaskOverlayBlink::ComponentThenGroup if elapsed < 0.22 => {
+                    selected_component.map(Some)
                 }
+                MaskOverlayBlink::ComponentThenGroup if elapsed < 0.35 => None,
+                MaskOverlayBlink::ComponentThenGroup if elapsed < 0.57 => Some(None),
+                MaskOverlayBlink::ComponentThenGroup if elapsed < 0.70 => None,
+                _ => {
+                    app.mask_overlay_blink = None;
+                    steady_target
+                }
+            };
+            if app.mask_overlay_blink.is_some() {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(25));
             }
         }
         let pointer_editing = ui.input(|input| input.pointer.primary_down())
@@ -338,7 +341,20 @@ impl Preview {
                 .pointer_interact_pos()
                 .is_some_and(|position| image_rect.contains(position));
         if pointer_editing {
-            coverage_target = None;
+            let editing_live_mask = neutral
+                && selected_component.is_some_and(|index| {
+                    app.masks.masks[mask_index]
+                        .components
+                        .get(index)
+                        .is_some_and(|component| {
+                            !matches!(component.kind, MaskKind::Subject | MaskKind::Background)
+                        })
+                });
+            coverage_target = if editing_live_mask {
+                selected_component.map(Some)
+            } else {
+                None
+            };
         }
         if mask.enabled {
             if let Some(component) = coverage_target {
@@ -469,17 +485,19 @@ impl Preview {
         );
 
         if app.mask_overlay_texture_key != Some(key) {
-            let coverage = if let Some(component_index) = component_index {
-                app.masks.rasterize_component_layer(
+            let rgba = if let Some(component_index) = component_index {
+                let coverage = app.masks.rasterize_component_layer(
                     mask_index,
                     component_index,
                     width,
                     height,
                     pipeline.width,
                     pipeline.height,
-                )
+                );
+                coverage_rgba(coverage, mask_component_color(component_index))
             } else {
-                app.masks.rasterize_layer(
+                group_coverage_rgba(
+                    app,
                     mask_index,
                     width,
                     height,
@@ -487,18 +505,6 @@ impl Preview {
                     pipeline.height,
                 )
             };
-            let color = component_index
-                .map(component_overlay_color)
-                .unwrap_or(Color32::from_rgb(78, 163, 255));
-            let mut rgba = Vec::with_capacity(coverage.len() * 4);
-            for alpha in coverage {
-                rgba.extend_from_slice(&[
-                    color.r(),
-                    color.g(),
-                    color.b(),
-                    ((alpha as u16 * 92) / 255) as u8,
-                ]);
-            }
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
             if let Some(texture) = app.mask_overlay_texture.as_mut() {
@@ -546,7 +552,10 @@ impl Preview {
                         &component.geometry,
                         MaskGeometry::ColorRange { sampled: true, .. }
                     )
-                }) => "Drag on the image to sample a color",
+                }) =>
+            {
+                "Drag on the image to sample a color"
+            }
             _ => return,
         };
         let painter = ui.painter_at(image_rect);
@@ -661,18 +670,130 @@ fn painter_image(ui: &Ui, texture_id: egui::TextureId, rect: Rect) {
     );
 }
 
-fn component_overlay_color(index: usize) -> Color32 {
-    const COLORS: [Color32; 8] = [
-        Color32::from_rgb(78, 163, 255),
-        Color32::from_rgb(255, 116, 102),
-        Color32::from_rgb(83, 211, 146),
-        Color32::from_rgb(242, 192, 75),
-        Color32::from_rgb(183, 124, 255),
-        Color32::from_rgb(63, 207, 220),
-        Color32::from_rgb(255, 133, 196),
-        Color32::from_rgb(180, 205, 88),
-    ];
-    COLORS[index % COLORS.len()]
+fn coverage_rgba(coverage: Vec<u8>, color: Color32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(coverage.len() * 4);
+    for alpha in coverage {
+        rgba.extend_from_slice(&[
+            color.r(),
+            color.g(),
+            color.b(),
+            ((alpha as u16 * 92) / 255) as u8,
+        ]);
+    }
+    rgba
+}
+
+fn group_coverage_rgba(
+    app: &AurawApp,
+    mask_index: usize,
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<u8> {
+    let final_coverage =
+        app.masks
+            .rasterize_layer(mask_index, width, height, image_width, image_height);
+    let component_count = app
+        .masks
+        .masks
+        .get(mask_index)
+        .map_or(0, |mask| mask.components.len());
+
+    // combined coverage, weighted red, green, blue, and total color weight.
+    // Keeping these together avoids allocating one full image per component.
+    let mut composite = vec![[0.0_f32; 5]; final_coverage.len()];
+    let mut has_component = false;
+
+    for component_index in 0..component_count {
+        let Some((combine, enabled, initialized)) = app
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .map(|component| {
+                (
+                    component.combine,
+                    component.enabled,
+                    component.geometry.is_initialized(),
+                )
+            })
+        else {
+            continue;
+        };
+        if !enabled || !initialized {
+            continue;
+        }
+
+        let coverage = app.masks.rasterize_component_layer(
+            mask_index,
+            component_index,
+            width,
+            height,
+            image_width,
+            image_height,
+        );
+        let color = mask_component_color(component_index);
+        let rgb = [color.r() as f32, color.g() as f32, color.b() as f32];
+
+        if !has_component {
+            has_component = true;
+            if combine != MaskCombineMode::Add {
+                continue;
+            }
+        }
+
+        for (pixel, alpha) in composite.iter_mut().zip(coverage) {
+            let source = alpha as f32 / 255.0;
+            match combine {
+                MaskCombineMode::Add => {
+                    pixel[0] = pixel[0].max(source);
+                    pixel[1] += rgb[0] * source;
+                    pixel[2] += rgb[1] * source;
+                    pixel[3] += rgb[2] * source;
+                    pixel[4] += source;
+                }
+                MaskCombineMode::Subtract => {
+                    let remaining = 1.0 - source;
+                    for value in pixel.iter_mut() {
+                        *value *= remaining;
+                    }
+                }
+                MaskCombineMode::Intersect => {
+                    pixel[0] *= source;
+                    pixel[1] *= source;
+                    pixel[2] *= source;
+                    pixel[3] *= source;
+                    pixel[4] *= source;
+
+                    // An intersection belongs visually to both operands. Give
+                    // the intersecting component an equal contribution in the
+                    // portion of the group mask that survives it.
+                    let contribution = pixel[0];
+                    pixel[1] += rgb[0] * contribution;
+                    pixel[2] += rgb[1] * contribution;
+                    pixel[3] += rgb[2] * contribution;
+                    pixel[4] += contribution;
+                }
+            }
+        }
+    }
+
+    let fallback = Color32::from_rgb(78, 163, 255);
+    let mut rgba = Vec::with_capacity(final_coverage.len() * 4);
+    for (alpha, pixel) in final_coverage.into_iter().zip(composite) {
+        let (red, green, blue) = if pixel[4] > f32::EPSILON {
+            (
+                (pixel[1] / pixel[4]).round().clamp(0.0, 255.0) as u8,
+                (pixel[2] / pixel[4]).round().clamp(0.0, 255.0) as u8,
+                (pixel[3] / pixel[4]).round().clamp(0.0, 255.0) as u8,
+            )
+        } else {
+            (fallback.r(), fallback.g(), fallback.b())
+        };
+        rgba.extend_from_slice(&[red, green, blue, ((alpha as u16 * 92) / 255) as u8]);
+    }
+    rgba
 }
 
 fn screen_to_normalized(rect: Rect, point: Pos2) -> [f32; 2] {

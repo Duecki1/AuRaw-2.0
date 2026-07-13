@@ -37,7 +37,7 @@ eframe = { version = "0.35", default-features = false, features = ["wgpu", "defa
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 jni = "0.22"
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-18", "nnapi", "xnnpack"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-18", "xnnpack"] }
 
 # THIS SECTION IS REQUIRED FOR build.rs:
 [build-dependencies]

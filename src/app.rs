@@ -1,9 +1,9 @@
 use crate::ai_masks::{spawn_subject_mask, SubjectMaskEvent, BIREFNET_MODEL_BYTES};
 use crate::pipeline::{
-    affected_stage, build_proxy, load_raw_file, spawn_tiled_png_export, ExportEvent,
-    BrushMode, ExportMetadata, ExportSettings, ExposureParams, GpuParams, LoadedRaw, MaskKind,
-    MaskImage, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec,
-    MAX_LOCAL_MASKS,
+    affected_stage, build_proxy, load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent,
+    ExportMetadata, ExportSettings, ExposureParams, GpuParams, LoadedRaw, MaskImage, MaskKind,
+    MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
+    TileSpec, MAX_LOCAL_MASKS,
 };
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::Library;
@@ -96,7 +96,6 @@ pub struct AurawApp {
     pub(crate) brush_mode: BrushMode,
     pub(crate) mask_drag: Option<MaskDragState>,
     pub(crate) last_brush_point: Option<[f32; 2]>,
-    pub(crate) mask_properties_active: bool,
     pub(crate) mask_overlay_revision: u64,
     pub(crate) mask_overlay_texture: Option<egui::TextureHandle>,
     pub(crate) mask_overlay_texture_key: Option<(usize, Option<usize>, u64, u32, u32)>,
@@ -152,18 +151,15 @@ impl AurawApp {
         ctx.set_visuals(visuals);
 
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
-        style.text_styles.insert(
-            egui::TextStyle::Body,
-            egui::FontId::proportional(13.0),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Button,
-            egui::FontId::proportional(12.5),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Small,
-            egui::FontId::proportional(11.5),
-        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(12.5));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(11.5));
         style.spacing.slider_width = 220.0;
         style.spacing.item_spacing = egui::vec2(7.0, 4.0);
         style.spacing.button_padding = egui::vec2(9.0, 4.0);
@@ -190,7 +186,6 @@ impl AurawApp {
             brush_mode: BrushMode::Paint,
             mask_drag: None,
             last_brush_point: None,
-            mask_properties_active: false,
             mask_overlay_revision: 0,
             mask_overlay_texture: None,
             mask_overlay_texture_key: None,
@@ -248,7 +243,6 @@ impl AurawApp {
             brush_mode: BrushMode::Paint,
             mask_drag: None,
             last_brush_point: None,
-            mask_properties_active: false,
             mask_overlay_revision: 0,
             mask_overlay_texture: None,
             mask_overlay_texture_key: None,
@@ -284,8 +278,8 @@ impl AurawApp {
             .add_filter(
                 "RAW images",
                 &[
-                    "cr2", "CR2", "cr3", "CR3", "nef", "NEF", "arw", "ARW", "raf", "RAF",
-                    "rw2", "RW2", "orf", "ORF", "dng", "DNG", "pef", "PEF", "srw", "SRW",
+                    "cr2", "CR2", "cr3", "CR3", "nef", "NEF", "arw", "ARW", "raf", "RAF", "rw2",
+                    "RW2", "orf", "ORF", "dng", "DNG", "pef", "PEF", "srw", "SRW",
                 ],
             )
             .pick_file()
@@ -357,7 +351,6 @@ impl AurawApp {
         self.brush_mode = BrushMode::Paint;
         self.mask_drag = None;
         self.last_brush_point = None;
-        self.mask_properties_active = false;
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mask_overlay_texture = None;
         self.mask_overlay_texture_key = None;
@@ -392,12 +385,14 @@ impl AurawApp {
                 let result = (|| {
                     let full_raw = Arc::new(decoded.map_err(|error| format!("{error:#}"))?);
                     let preview_spec = ProxySpec::default();
-                    let preview_raw = if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
-                        Arc::clone(&full_raw)
-                    } else {
-                        Arc::new(build_proxy(&full_raw, preview_spec))
-                    };
-                    let params = GpuParams::new(&initial_exposure, &MaskStack::default(), &preview_raw);
+                    let preview_raw =
+                        if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
+                            Arc::clone(&full_raw)
+                        } else {
+                            Arc::new(build_proxy(&full_raw, preview_spec))
+                        };
+                    let params =
+                        GpuParams::new(&initial_exposure, &MaskStack::default(), &preview_raw);
                     // Desktop has enough bandwidth for the 32-bit working
                     // path. Keep the half-float preview only on Android, where
                     // memory pressure is materially higher.
@@ -633,7 +628,8 @@ impl AurawApp {
             return;
         }
         let Some(source) = self.mask_source_cache.clone() else {
-            self.notice = Some("The preview could not be prepared for subject selection.".to_owned());
+            self.notice =
+                Some("The preview could not be prepared for subject selection.".to_owned());
             return;
         };
         self.subject_download_progress = None;
@@ -798,8 +794,7 @@ impl AurawApp {
             Ok(()) => {
                 self.onnx_runtime_path = None;
                 self.notice = Some(
-                    "ONNX Runtime selection cleared. Restart AuRaw to apply the change."
-                        .to_owned(),
+                    "ONNX Runtime selection cleared. Restart AuRaw to apply the change.".to_owned(),
                 );
             }
             Err(error) => self.notice = Some(error),
@@ -911,13 +906,9 @@ impl AurawApp {
                 if !self.dirty_mask_layers[layer] {
                     continue;
                 }
-                let bytes = self.masks.rasterize_layer(
-                    layer,
-                    edge,
-                    edge,
-                    raw.width,
-                    raw.height,
-                );
+                let bytes = self
+                    .masks
+                    .rasterize_layer(layer, edge, edge, raw.width, raw.height);
                 if let Err(error) = pipeline.update_mask_layer(&render_state.queue, layer, &bytes) {
                     upload_error = Some(format!("Could not update local mask: {error:#}"));
                     break;
@@ -1192,7 +1183,6 @@ impl eframe::App for AurawApp {
         self.poll_load_worker(frame);
         self.poll_export_worker();
         self.poll_subject_worker();
-        self.mask_properties_active = false;
 
         let viewport_size = ui.max_rect().size();
         let layout = ScreenLayout::from_size(viewport_size);

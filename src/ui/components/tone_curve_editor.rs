@@ -8,7 +8,8 @@ const PICK_RADIUS: f32 = 16.0;
 pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color32) -> bool {
     curve.sanitize();
     let width = ui.available_width().max(180.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CURVE_HEIGHT), Sense::click_and_drag());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, CURVE_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
 
@@ -25,12 +26,21 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color
         let x = egui::lerp(rect.left()..=rect.right(), t);
         let y = egui::lerp(rect.bottom()..=rect.top(), t);
         let grid = Stroke::new(1.0, visuals.faint_bg_color);
-        painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], grid);
-        painter.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], grid);
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            grid,
+        );
+        painter.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            grid,
+        );
     }
 
     painter.line_segment(
-        [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.top())],
+        [
+            Pos2::new(rect.left(), rect.bottom()),
+            Pos2::new(rect.right(), rect.top()),
+        ],
         Stroke::new(1.0, visuals.weak_text_color()),
     );
 
@@ -121,7 +131,12 @@ fn screen_to_curve(rect: egui::Rect, point: Pos2) -> [f32; 2] {
     ]
 }
 
-fn nearest_point(curve: &PointCurve, rect: egui::Rect, pointer: Pos2, radius: f32) -> Option<usize> {
+fn nearest_point(
+    curve: &PointCurve,
+    rect: egui::Rect,
+    pointer: Pos2,
+    radius: f32,
+) -> Option<usize> {
     curve
         .points
         .iter()

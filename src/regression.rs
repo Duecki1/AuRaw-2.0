@@ -35,16 +35,15 @@ pub fn write_linear_rgb_npz(
     }
     let temporary = temporary_path(path);
     let result = (|| {
-        let mut file = File::create(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
+        let mut file =
+            File::create(&temporary).with_context(|| format!("create {}", temporary.display()))?;
         let mut archive = StoredZipWriter::new(&mut file);
         archive.add("rgb.npy", &rgb_npy(width, height, rgb)?)?;
         archive.add("metadata_json.npy", &bytes_npy(metadata_json.as_bytes())?)?;
         archive.finish()?;
         file.sync_all()
             .with_context(|| format!("flush {}", temporary.display()))?;
-        fs::rename(&temporary, path)
-            .with_context(|| format!("replace {}", path.display()))?;
+        fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
         Ok(())
     })();
     if result.is_err() {
@@ -92,10 +91,9 @@ fn npy_header(descr: &str, shape: &[usize]) -> Result<Vec<u8>> {
                 .join(", ")
         ),
     };
-    let mut dictionary = format!(
-        "{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_text}, }}"
-    )
-    .into_bytes();
+    let mut dictionary =
+        format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_text}, }}")
+            .into_bytes();
     // NPY v1 aligns the magic, version, length, and header to 16 bytes.
     let prefix_len = 6 + 2 + 2;
     let padding = (16 - ((prefix_len + dictionary.len() + 1) % 16)) % 16;
@@ -135,7 +133,8 @@ impl<'a, W: Write + Seek> StoredZipWriter<'a, W> {
 
     fn add(&mut self, name: &str, payload: &[u8]) -> Result<()> {
         let name = name.as_bytes().to_vec();
-        let name_len = u16::try_from(name.len()).map_err(|_| anyhow!("ZIP member name too long"))?;
+        let name_len =
+            u16::try_from(name.len()).map_err(|_| anyhow!("ZIP member name too long"))?;
         let size = u32::try_from(payload.len()).map_err(|_| anyhow!("ZIP member exceeds 4 GiB"))?;
         let local_offset = u32::try_from(self.writer.stream_position()?)
             .map_err(|_| anyhow!("ZIP archive exceeds 4 GiB"))?;
@@ -166,8 +165,8 @@ impl<'a, W: Write + Seek> StoredZipWriter<'a, W> {
     fn finish(&mut self) -> Result<()> {
         let central_offset = self.writer.stream_position()?;
         for entry in &self.entries {
-            let name_len = u16::try_from(entry.name.len())
-                .map_err(|_| anyhow!("ZIP member name too long"))?;
+            let name_len =
+                u16::try_from(entry.name.len()).map_err(|_| anyhow!("ZIP member name too long"))?;
             write_u32(self.writer, 0x0201_4b50)?;
             write_u16(self.writer, 20)?;
             write_u16(self.writer, 20)?;
@@ -190,8 +189,8 @@ impl<'a, W: Write + Seek> StoredZipWriter<'a, W> {
         let central_end = self.writer.stream_position()?;
         let central_size = u32::try_from(central_end - central_offset)
             .map_err(|_| anyhow!("ZIP central directory exceeds 4 GiB"))?;
-        let central_offset = u32::try_from(central_offset)
-            .map_err(|_| anyhow!("ZIP archive exceeds 4 GiB"))?;
+        let central_offset =
+            u32::try_from(central_offset).map_err(|_| anyhow!("ZIP archive exceeds 4 GiB"))?;
         let count = u16::try_from(self.entries.len())
             .map_err(|_| anyhow!("ZIP archive contains too many members"))?;
         write_u32(self.writer, 0x0605_4b50)?;
