@@ -5,6 +5,7 @@ use auraw::pipeline::{
 };
 use auraw::regression::write_linear_rgb_npz;
 use eframe::wgpu;
+use ring::digest::{Context as Sha256Context, SHA256};
 use std::env;
 use std::path::PathBuf;
 
@@ -95,7 +96,7 @@ fn run() -> Result<()> {
         .render_regression_scene_blocking(&device, &queue, &params)
         .context("render and read scene-linear GPU texture")?;
 
-    let metadata = metadata_json(&args, &raw, &adapter_info);
+    let metadata = metadata_json(&args, &raw, &adapter_info)?;
     write_linear_rgb_npz(&args.output, raw.width, raw.height, &rgb, &metadata)
         .with_context(|| format!("write {}", args.output.display()))?;
     println!(
@@ -164,7 +165,7 @@ fn metadata_json(
     args: &Args,
     raw: &auraw::pipeline::LoadedRaw,
     info: &wgpu::AdapterInfo,
-) -> String {
+) -> Result<String> {
     let cfa = match raw.cfa_kind {
         CfaKind::Bayer => "bayer",
         CfaKind::XTrans => "xtrans",
@@ -174,45 +175,83 @@ fn metadata_json(
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("unknown");
-    format!(
+    let raw_sha256 = file_sha256_hex(&args.input)?;
+    let renderer_sha256 = env::current_exe()
+        .context("resolve regression renderer executable")
+        .and_then(|path| file_sha256_hex(&path))?;
+    let implementation = "auraw-wgpu-raw-stage-v1";
+    let implementation_fingerprint = format!("{implementation}@{}", auraw::SOURCE_REVISION);
+    Ok(format!(
         concat!(
             "{{",
-            "\"adapter_backend\":\"{}\",",
-            "\"adapter_device\":{},",
-            "\"adapter_device_type\":\"{}\",",
-            "\"adapter_driver\":\"{}\",",
-            "\"adapter_driver_info\":\"{}\",",
-            "\"adapter_name\":\"{}\",",
-            "\"adapter_vendor\":{},",
+            "\"adapter_backend\":\"{adapter_backend}\",",
+            "\"adapter_device\":{adapter_device},",
+            "\"adapter_device_type\":\"{adapter_device_type}\",",
+            "\"adapter_driver\":\"{adapter_driver}\",",
+            "\"adapter_driver_info\":\"{adapter_driver_info}\",",
+            "\"adapter_name\":\"{adapter_name}\",",
+            "\"adapter_vendor\":{adapter_vendor},",
             "\"backend\":\"gpu\",",
-            "\"camera_make\":\"{}\",",
-            "\"camera_model\":\"{}\",",
-            "\"cfa\":\"{}\",",
+            "\"camera_make\":\"{camera_make}\",",
+            "\"camera_model\":\"{camera_model}\",",
+            "\"cfa\":\"{cfa}\",",
             "\"channels\":[\"R\",\"G\",\"B\"],",
             "\"color_space\":\"linear-rec2020-d65\",",
             "\"dtype\":\"float32\",",
-            "\"input_file\":\"{}\",",
+            "\"implementation\":\"{implementation}\",",
+            "\"implementation_fingerprint\":\"{implementation_fingerprint}\",",
+            "\"input_file\":\"{input_file}\",",
             "\"layout\":\"HWC\",",
             "\"processing_quality\":\"high\",",
+            "\"raw_sha256\":\"{raw_sha256}\",",
             "\"renderer\":\"auraw-regression-render\",",
+            "\"renderer_sha256\":\"{renderer_sha256}\",",
             "\"schema\":1,",
-            "\"source_revision\":\"{}\",",
+            "\"source_revision\":\"{source_revision}\",",
             "\"transfer\":\"linear\"",
             "}}"
         ),
-        json_escape(&format!("{:?}", info.backend)),
-        info.device,
-        json_escape(&format!("{:?}", info.device_type)),
-        json_escape(&info.driver),
-        json_escape(&info.driver_info),
-        json_escape(&info.name),
-        info.vendor,
-        json_escape(&raw.camera_make),
-        json_escape(&raw.camera_model),
-        cfa,
-        json_escape(input_name),
-        json_escape(auraw::SOURCE_REVISION),
-    )
+        adapter_backend = json_escape(&format!("{:?}", info.backend)),
+        adapter_device = info.device,
+        adapter_device_type = json_escape(&format!("{:?}", info.device_type)),
+        adapter_driver = json_escape(&info.driver),
+        adapter_driver_info = json_escape(&info.driver_info),
+        adapter_name = json_escape(&info.name),
+        adapter_vendor = info.vendor,
+        camera_make = json_escape(&raw.camera_make),
+        camera_model = json_escape(&raw.camera_model),
+        cfa = cfa,
+        implementation = implementation,
+        implementation_fingerprint = json_escape(&implementation_fingerprint),
+        input_file = json_escape(input_name),
+        raw_sha256 = raw_sha256,
+        renderer_sha256 = renderer_sha256,
+        source_revision = json_escape(auraw::SOURCE_REVISION),
+    ))
+}
+
+fn file_sha256_hex(path: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("open {} for SHA-256", path.display()))?;
+    let mut digest = Sha256Context::new(&SHA256);
+    let mut buffer = [0u8; 256 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .with_context(|| format!("hash {}", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn json_escape(value: &str) -> String {

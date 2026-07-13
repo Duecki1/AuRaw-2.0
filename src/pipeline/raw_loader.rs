@@ -1,9 +1,39 @@
 #[allow(unused_imports)]
 use super::color_profile::CameraProfile;
-#[cfg(not(libraw_available))]
-use anyhow::anyhow;
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use std::path::Path;
+
+pub const MAX_RAW_EDGE: u32 = 32_768;
+#[cfg(target_os = "android")]
+pub const MAX_RAW_PIXELS: u64 = 50_000_000;
+#[cfg(not(target_os = "android"))]
+pub const MAX_RAW_PIXELS: u64 = 120_000_000;
+#[cfg(all(libraw_available, target_os = "android"))]
+const MAX_RAW_FILE_BYTES: u64 = 2_000_000_000;
+#[cfg(all(libraw_available, not(target_os = "android")))]
+const MAX_RAW_FILE_BYTES: u64 = 8_000_000_000;
+#[cfg(all(libraw_available, target_os = "android"))]
+const MAX_SENSOR_PIXELS: u64 = 70_000_000;
+#[cfg(all(libraw_available, not(target_os = "android")))]
+const MAX_SENSOR_PIXELS: u64 = 160_000_000;
+#[cfg(libraw_available)]
+const MAX_SENSOR_EDGE: u32 = 40_000;
+
+pub fn validate_raw_dimensions(width: u32, height: u32) -> Result<usize> {
+    anyhow::ensure!(width > 0 && height > 0, "RAW dimensions must be non-zero");
+    anyhow::ensure!(
+        width <= MAX_RAW_EDGE && height <= MAX_RAW_EDGE,
+        "RAW dimensions {width}x{height} exceed the {MAX_RAW_EDGE}-pixel edge limit"
+    );
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .context("RAW pixel count overflow")?;
+    anyhow::ensure!(
+        pixels <= MAX_RAW_PIXELS,
+        "RAW dimensions {width}x{height} contain {pixels} pixels; the limit is {MAX_RAW_PIXELS}"
+    );
+    usize::try_from(pixels).context("RAW pixel count does not fit this platform")
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CfaKind {
@@ -59,12 +89,18 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
 
 #[cfg(libraw_available)]
 mod libraw_loader {
-    use super::{CameraProfile, CfaKind, LoadedRaw};
+    use super::{
+        validate_raw_dimensions, CameraProfile, CfaKind, LoadedRaw, MAX_RAW_FILE_BYTES,
+        MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
+    };
     use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
     use anyhow::{anyhow, Context, Result};
     use std::ffi::{CStr, CString};
+    use std::fs;
     use std::os::raw::c_char;
     use std::path::Path;
+
+    const MAX_DCP_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
     // Rec.2020 and the camera profiles used here are D65-referred. Normalizing
     // XYZ -> camera rows against equal-energy XYZ (1, 1, 1) makes an otherwise
@@ -88,10 +124,13 @@ mod libraw_loader {
     }
 
     pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
+        validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW input")?;
         load_raw_file_with_selected_profile(path, read_optional_profile(path))
     }
 
     pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<LoadedRaw> {
+        validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW input")?;
+        validate_input_file(profile_path, MAX_DCP_FILE_BYTES, "DCP profile")?;
         let mut selected = DcpProfile::from_path(profile_path)
             .with_context(|| format!("read DCP profile {}", profile_path.display()))?
             .ok_or_else(|| anyhow!("{} is not a DNG camera profile", profile_path.display()))?;
@@ -103,6 +142,19 @@ mod libraw_loader {
             selected.camera_calibration_signature = raw_profile.camera_calibration_signature;
         }
         load_raw_file_with_selected_profile(path, Some(selected))
+    }
+
+    fn validate_input_file(path: &Path, maximum_bytes: u64, label: &str) -> Result<()> {
+        let source =
+            fs::metadata(path).with_context(|| format!("inspect {label} {}", path.display()))?;
+        anyhow::ensure!(source.is_file(), "{label} is not a regular file");
+        anyhow::ensure!(source.len() > 0, "{label} is empty");
+        anyhow::ensure!(
+            source.len() <= maximum_bytes,
+            "{label} is {} bytes; the safe input limit is {maximum_bytes}",
+            source.len()
+        );
+        Ok(())
     }
 
     fn read_optional_profile(path: &Path) -> Option<DcpProfile> {
@@ -124,6 +176,8 @@ mod libraw_loader {
         path: &Path,
         dcp_profile: Option<DcpProfile>,
     ) -> Result<LoadedRaw> {
+        validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW input")?;
+
         let c_path = CString::new(path.to_string_lossy().as_bytes())
             .context("RAW path contains an interior NUL byte")?;
         let ctx = LibRawContext::new()?;
@@ -132,6 +186,9 @@ mod libraw_loader {
             unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
             "open RAW file",
         )?;
+        // LibRaw exposes dimensions after open_file. Reject hostile geometry
+        // before unpack can allocate the full decoded sensor buffer.
+        unsafe { validate_opened_raw_geometry(&ctx) }?;
         check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
 
         unsafe { loaded_raw_from_context(&ctx, dcp_profile) }
@@ -160,6 +217,45 @@ mod libraw_loader {
         }
     }
 
+    unsafe fn validate_opened_raw_geometry(ctx: &LibRawContext) -> Result<()> {
+        let raw = &*ctx.raw;
+        let sizes = &raw.rawdata.sizes;
+        let active_width = sizes.width as u32;
+        let active_height = sizes.height as u32;
+        validate_raw_dimensions(active_width, active_height)
+            .context("LibRaw header reports an image too large to unpack safely")?;
+
+        let sensor_width = sizes.raw_width as u32;
+        let sensor_height = sizes.raw_height as u32;
+        anyhow::ensure!(
+            sensor_width > 0 && sensor_height > 0,
+            "LibRaw header reports empty sensor dimensions"
+        );
+        anyhow::ensure!(
+            sensor_width <= MAX_SENSOR_EDGE && sensor_height <= MAX_SENSOR_EDGE,
+            "LibRaw sensor dimensions {sensor_width}x{sensor_height} exceed the {MAX_SENSOR_EDGE}-pixel edge limit"
+        );
+        let sensor_pixels = u64::from(sensor_width)
+            .checked_mul(u64::from(sensor_height))
+            .context("LibRaw sensor pixel count overflow")?;
+        anyhow::ensure!(
+            sensor_pixels <= MAX_SENSOR_PIXELS,
+            "LibRaw sensor dimensions {sensor_width}x{sensor_height} contain {sensor_pixels} pixels; the safe unpack limit is {MAX_SENSOR_PIXELS}"
+        );
+        let minimum_pitch = u64::from(sensor_width)
+            .checked_mul(std::mem::size_of::<u16>() as u64)
+            .context("LibRaw sensor pitch overflow")?;
+        let raw_pitch = u64::from(sizes.raw_pitch);
+        // Some LibRaw decoders leave raw_pitch at zero until unpack. The
+        // sensor pixel cap still bounds that allocation; validate a declared
+        // pitch only when the header actually supplies one.
+        anyhow::ensure!(
+            raw_pitch == 0 || (raw_pitch >= minimum_pitch && raw_pitch <= 1_073_741_824),
+            "LibRaw header reports invalid raw pitch {raw_pitch} for width {sensor_width}"
+        );
+        Ok(())
+    }
+
     unsafe fn loaded_raw_from_context(
         ctx: &LibRawContext,
         dcp_profile: Option<DcpProfile>,
@@ -182,9 +278,8 @@ mod libraw_loader {
         let crop_y = sizes.top_margin as u32;
         let width = sizes.width as u32;
         let height = sizes.height as u32;
-        if width == 0 || height == 0 {
-            return Err(anyhow!("LibRaw reported empty RAW dimensions"));
-        }
+        validate_raw_dimensions(width, height)
+            .context("LibRaw reported an image too large to process safely")?;
         if !sizes.pixel_aspect.is_finite() || sizes.pixel_aspect <= 0.0 {
             return Err(anyhow!(
                 "LibRaw reported invalid pixel aspect ratio {}",
@@ -281,9 +376,16 @@ mod libraw_loader {
         }
         if !color.profile.is_null() && color.profile_length > 0 {
             let length = usize::try_from(color.profile_length).unwrap_or(0);
-            if length <= 64 * 1024 * 1024 {
-                camera_profile.embedded_camera_icc =
-                    Some(std::slice::from_raw_parts(color.profile as *const u8, length).to_vec());
+            if length <= 16 * 1024 * 1024 {
+                let source = std::slice::from_raw_parts(color.profile as *const u8, length);
+                let mut profile = Vec::new();
+                profile
+                    .try_reserve_exact(length)
+                    .context("reserve embedded camera ICC profile")?;
+                profile.extend_from_slice(source);
+                camera_profile.embedded_camera_icc = Some(profile);
+            } else {
+                log::warn!("ignoring embedded camera ICC profile larger than 16 MiB");
             }
         }
 
@@ -356,9 +458,20 @@ mod libraw_loader {
         let output_len = out_width
             .checked_mul(out_height)
             .ok_or_else(|| anyhow!("oriented RAW dimensions overflow"))?;
-        let mut pixels = vec![0; output_len];
-        let mut colors = Vec::with_capacity(output_len);
-        let mut black_map = Vec::with_capacity(output_len);
+        validate_raw_dimensions(out_width as u32, out_height as u32)?;
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(output_len)
+            .context("reserve oriented RAW pixel buffer")?;
+        pixels.resize(output_len, 0);
+        let mut colors = Vec::new();
+        colors
+            .try_reserve_exact(output_len)
+            .context("reserve oriented CFA buffer")?;
+        let mut black_map = Vec::new();
+        black_map
+            .try_reserve_exact(output_len)
+            .context("reserve oriented black-level buffer")?;
 
         for y in 0..out_height {
             for x in 0..out_width {

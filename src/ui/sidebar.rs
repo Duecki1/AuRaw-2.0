@@ -1,7 +1,7 @@
 use crate::app::{AurawApp, SidebarTab, ToneCurveTab};
 use crate::pipeline::{
     BrushMode, DemosaicMode, ExportResizeMode, ExposureParams, MaskCombineMode, MaskGeometry,
-    MaskKind, SigmoidColorProcessing, MAX_LOCAL_MASKS,
+    MaskKind, SigmoidColorProcessing, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS,
 };
 use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::components::tone_curve_editor::tone_curve_editor;
@@ -1008,7 +1008,7 @@ impl Sidebar {
                         ui.label(mode.label());
                         ui.add(
                             egui::DragValue::new(&mut app.export_settings.edge_or_dimension)
-                                .range(64..=65_535)
+                                .range(64..=MAX_EXPORT_EDGE)
                                 .speed(10.0)
                                 .suffix(" px"),
                         );
@@ -1024,11 +1024,16 @@ impl Sidebar {
             }
 
             if let Some((width, height)) = source_dimensions {
-                let (output_width, output_height) =
-                    app.export_settings.output_dimensions(width, height);
-                ui.label(format!(
-                    "Source: {width}×{height}  →  Export: {output_width}×{output_height}"
-                ));
+                match app.export_settings.checked_output_dimensions(width, height) {
+                    Ok((output_width, output_height)) => {
+                        ui.label(format!(
+                            "Source: {width}×{height}  →  Export: {output_width}×{output_height}"
+                        ));
+                    }
+                    Err(error) => {
+                        ui.colored_label(egui::Color32::RED, error.to_string());
+                    }
+                }
             } else {
                 ui.label("Open a RAW file to calculate export dimensions.");
             }
@@ -1045,9 +1050,17 @@ impl Sidebar {
         });
 
         ui.add_space(10.0);
+        let dimensions_valid = source_dimensions.is_some_and(|(width, height)| {
+            app.export_settings
+                .checked_output_dimensions(width, height)
+                .is_ok()
+        });
         let button =
             egui::Button::new("Export PNG…").min_size(egui::vec2(ui.available_width(), 30.0));
-        if ui.add_enabled(app.can_export(), button).clicked() {
+        if ui
+            .add_enabled(app.can_export() && dimensions_valid, button)
+            .clicked()
+        {
             app.export_png(frame);
         }
         if !app.can_export() {

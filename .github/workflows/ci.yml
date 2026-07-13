@@ -58,7 +58,7 @@ jobs:
             --manifest regression/corpus.yaml --verify-files
           python3 scripts/image_regression.py validate-reference-engines \
             --config regression/reference-engines.yaml
-          python3 -m unittest discover -s tests -v
+          python3 -m pytest -q
 
       - name: Install pinned Rust toolchain
         run: |
