@@ -26,9 +26,13 @@ const BRADFORD_TO_XYZ: mat3x3<f32> = mat3x3<f32>(
     vec3<f32>( 0.1599627,  0.0492912,  0.9684867),
 );
 
-fn apply_temperature_tint(rgb: vec3<f32>) -> vec3<f32> {
-    let temperature = clamp(params.temperature / 100.0, -1.0, 1.0);
-    let tint = clamp(params.tint / 100.0, -1.0, 1.0);
+fn apply_temperature_tint_values(
+    rgb: vec3<f32>,
+    temperature_value: f32,
+    tint_value: f32,
+) -> vec3<f32> {
+    let temperature = clamp(temperature_value / 100.0, -1.0, 1.0);
+    let tint = clamp(tint_value / 100.0, -1.0, 1.0);
     if abs(temperature) < 1e-6 && abs(tint) < 1e-6 {
         return rgb;
     }
@@ -49,6 +53,10 @@ fn apply_temperature_tint(rgb: vec3<f32>) -> vec3<f32> {
     let xyz = REC2020_TO_XYZ * rgb;
     let adapted_xyz = BRADFORD_TO_XYZ * ((XYZ_TO_BRADFORD * xyz) * gains);
     return XYZ_TO_REC2020 * adapted_xyz * normalization;
+}
+
+fn apply_temperature_tint(rgb: vec3<f32>) -> vec3<f32> {
+    return apply_temperature_tint_values(rgb, params.temperature, params.tint);
 }
 
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
@@ -136,5 +144,16 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
     }
 
     let adjusted = vec3<f32>(lab.x, lab.yz * saturation_factor * max(vibrance_factor, 0.0));
+    return repair_negative_rec2020(SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted));
+}
+
+fn apply_saturation_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
+    let saturation = clamp(value / 100.0, -1.0, 1.0);
+    if abs(saturation) < 1e-6 {
+        return rgb;
+    }
+    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
+    let factor = max(0.0, 1.0 + saturation);
+    let adjusted = vec3<f32>(lab.x, lab.yz * factor);
     return repair_negative_rec2020(SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted));
 }

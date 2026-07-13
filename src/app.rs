@@ -1,7 +1,9 @@
+use crate::ai_masks::{spawn_subject_mask, SubjectMaskEvent, BIREFNET_MODEL_BYTES};
 use crate::pipeline::{
-    affected_stage, build_proxy, load_raw_file, spawn_tiled_png_export, ExportEvent,
-    ExposureParams, GpuParams, LoadedRaw, ProcessingQuality, ProcessingStage, ProxySpec,
-    RawGpuPipeline, TileSpec,
+    affected_stage, build_proxy, load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent,
+    ExportMetadata, ExportSettings, ExposureParams, GpuParams, LoadedRaw, MaskImage, MaskKind,
+    MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
+    TileSpec, MAX_LOCAL_MASKS,
 };
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::Library;
@@ -22,6 +24,24 @@ pub enum AppTab {
     Settings,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidebarTab {
+    #[default]
+    Adjustments,
+    Masks,
+    Inpainting,
+    Export,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToneCurveTab {
+    #[default]
+    Rgb,
+    Red,
+    Green,
+    Blue,
+}
+
 struct LoadedPreview {
     source_path: Option<PathBuf>,
     label: String,
@@ -35,6 +55,32 @@ enum LoadEvent {
     Finished(Result<LoadedPreview, String>),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MaskDragState {
+    Create([f32; 2]),
+    MoveRadial {
+        pointer: [f32; 2],
+        center: [f32; 2],
+    },
+    ResizeRadial {
+        axis: usize,
+    },
+    MoveLinear {
+        pointer: [f32; 2],
+        start: [f32; 2],
+        end: [f32; 2],
+    },
+    LinearStart,
+    LinearEnd,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MaskOverlayBlink {
+    #[default]
+    GroupTwice,
+    ComponentThenGroup,
+}
+
 pub struct AurawApp {
     pub current_path: Option<PathBuf>,
     pub loaded_raw: Option<Arc<LoadedRaw>>,
@@ -42,7 +88,26 @@ pub struct AurawApp {
     pub gpu_pipeline: Option<RawGpuPipeline>,
     pub exposure: ExposureParams,
     pub active_tab: AppTab,
+    pub sidebar_tab: SidebarTab,
+    pub tone_curve_tab: ToneCurveTab,
+    pub export_settings: ExportSettings,
+    pub masks: MaskStack,
+    pub(crate) active_mask_tool: Option<MaskKind>,
+    pub(crate) brush_mode: BrushMode,
+    pub(crate) mask_drag: Option<MaskDragState>,
+    pub(crate) last_brush_point: Option<[f32; 2]>,
+    pub(crate) mask_overlay_revision: u64,
+    pub(crate) mask_overlay_texture: Option<egui::TextureHandle>,
+    pub(crate) mask_overlay_texture_key: Option<(usize, Option<usize>, u64, u32, u32)>,
+    pub(crate) mask_overlay_blink: Option<(std::time::Instant, MaskOverlayBlink)>,
+    pub(crate) mask_source_cache: Option<MaskRgbImage>,
+    pub(crate) subject_mask_cache: Option<MaskImage>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) onnx_runtime_path: Option<PathBuf>,
     pub status: String,
+    /// Reveals low-level darktable/raw controls. The default Lightroom-like
+    /// interface intentionally keeps these implementation details hidden.
+    pub expert_mode: bool,
 
     egui_ctx: egui::Context,
     target_exposure: ExposureParams,
@@ -53,7 +118,13 @@ pub struct AurawApp {
     export_progress: Option<(usize, usize)>,
     export_publish_pending: bool,
     image_status: String,
+    current_label: Option<String>,
     notice: Option<String>,
+    dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
+    subject_consent_open: bool,
+    subject_receiver: Option<mpsc::Receiver<SubjectMaskEvent>>,
+    subject_download_progress: Option<(&'static str, u64, u64)>,
+    subject_inferencing: bool,
 
     #[cfg(target_os = "android")]
     android_app: android_activity::AndroidApp,
@@ -80,18 +151,15 @@ impl AurawApp {
         ctx.set_visuals(visuals);
 
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
-        style.text_styles.insert(
-            egui::TextStyle::Body,
-            egui::FontId::proportional(13.0),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Button,
-            egui::FontId::proportional(12.5),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Small,
-            egui::FontId::proportional(11.5),
-        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(12.5));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(11.5));
         style.spacing.slider_width = 220.0;
         style.spacing.item_spacing = egui::vec2(7.0, 4.0);
         style.spacing.button_padding = egui::vec2(9.0, 4.0);
@@ -110,7 +178,23 @@ impl AurawApp {
             gpu_pipeline: None,
             exposure,
             active_tab: AppTab::default(),
+            sidebar_tab: SidebarTab::default(),
+            tone_curve_tab: ToneCurveTab::default(),
+            export_settings: ExportSettings::default(),
+            masks: MaskStack::default(),
+            active_mask_tool: None,
+            brush_mode: BrushMode::Paint,
+            mask_drag: None,
+            last_brush_point: None,
+            mask_overlay_revision: 0,
+            mask_overlay_texture: None,
+            mask_overlay_texture_key: None,
+            mask_overlay_blink: None,
+            mask_source_cache: None,
+            subject_mask_cache: None,
+            onnx_runtime_path: Self::load_onnx_runtime_path(),
             status: "Open a RAW file to get started.".to_owned(),
+            expert_mode: false,
             egui_ctx: ctx.clone(),
             target_exposure: exposure,
             pending_stage: None,
@@ -120,7 +204,13 @@ impl AurawApp {
             export_progress: None,
             export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
+            current_label: None,
             notice: None,
+            dirty_mask_layers: [false; MAX_LOCAL_MASKS],
+            subject_consent_open: false,
+            subject_receiver: None,
+            subject_download_progress: None,
+            subject_inferencing: false,
         }
     }
 
@@ -145,7 +235,22 @@ impl AurawApp {
             gpu_pipeline: None,
             exposure,
             active_tab: AppTab::default(),
+            sidebar_tab: SidebarTab::default(),
+            tone_curve_tab: ToneCurveTab::default(),
+            export_settings: ExportSettings::default(),
+            masks: MaskStack::default(),
+            active_mask_tool: None,
+            brush_mode: BrushMode::Paint,
+            mask_drag: None,
+            last_brush_point: None,
+            mask_overlay_revision: 0,
+            mask_overlay_texture: None,
+            mask_overlay_texture_key: None,
+            mask_overlay_blink: None,
+            mask_source_cache: None,
+            subject_mask_cache: None,
             status: "Open a RAW file to get started.".to_owned(),
+            expert_mode: false,
             egui_ctx: cc.egui_ctx.clone(),
             target_exposure: exposure,
             pending_stage: None,
@@ -155,7 +260,13 @@ impl AurawApp {
             export_progress: None,
             export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
+            current_label: None,
             notice: None,
+            dirty_mask_layers: [false; MAX_LOCAL_MASKS],
+            subject_consent_open: false,
+            subject_receiver: None,
+            subject_download_progress: None,
+            subject_inferencing: false,
             android_app,
             picker_pending: false,
         }
@@ -167,8 +278,8 @@ impl AurawApp {
             .add_filter(
                 "RAW images",
                 &[
-                    "cr2", "CR2", "cr3", "CR3", "nef", "NEF", "arw", "ARW", "raf", "RAF",
-                    "rw2", "RW2", "orf", "ORF", "dng", "DNG", "pef", "PEF", "srw", "SRW",
+                    "cr2", "CR2", "cr3", "CR3", "nef", "NEF", "arw", "ARW", "raf", "RAF", "rw2",
+                    "RW2", "orf", "ORF", "dng", "DNG", "pef", "PEF", "srw", "SRW",
                 ],
             )
             .pick_file()
@@ -235,6 +346,22 @@ impl AurawApp {
         let initial_exposure = self.new_image_exposure();
         self.exposure = initial_exposure;
         self.target_exposure = initial_exposure;
+        self.masks.clear();
+        self.active_mask_tool = None;
+        self.brush_mode = BrushMode::Paint;
+        self.mask_drag = None;
+        self.last_brush_point = None;
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
+        self.mask_overlay_texture = None;
+        self.mask_overlay_texture_key = None;
+        self.mask_overlay_blink = None;
+        self.mask_source_cache = None;
+        self.subject_mask_cache = None;
+        self.subject_consent_open = false;
+        self.subject_receiver = None;
+        self.subject_download_progress = None;
+        self.subject_inferencing = false;
+        self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.pending_stage = None;
         let source_path = (!delete_after_decode).then_some(path.clone());
         let repaint = self.egui_ctx.clone();
@@ -258,12 +385,14 @@ impl AurawApp {
                 let result = (|| {
                     let full_raw = Arc::new(decoded.map_err(|error| format!("{error:#}"))?);
                     let preview_spec = ProxySpec::default();
-                    let preview_raw = if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
-                        Arc::clone(&full_raw)
-                    } else {
-                        Arc::new(build_proxy(&full_raw, preview_spec))
-                    };
-                    let params = GpuParams::new(&initial_exposure, &preview_raw);
+                    let preview_raw =
+                        if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
+                            Arc::clone(&full_raw)
+                        } else {
+                            Arc::new(build_proxy(&full_raw, preview_spec))
+                        };
+                    let params =
+                        GpuParams::new(&initial_exposure, &MaskStack::default(), &preview_raw);
                     // Desktop has enough bandwidth for the 32-bit working
                     // path. Keep the half-float preview only on Android, where
                     // memory pressure is materially higher.
@@ -374,6 +503,7 @@ impl AurawApp {
                     preview_height
                 );
                 self.current_path = loaded.source_path;
+                self.current_label = Some(loaded.label.clone());
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
                 self.gpu_pipeline = Some(loaded.pipeline);
@@ -387,6 +517,357 @@ impl AurawApp {
                 self.notice = Some(format!("Failed to decode or render RAW: {error}"));
                 log::error!("RAW load failed: {error}");
             }
+        }
+    }
+
+    pub(crate) fn mark_mask_adjustments_dirty(&mut self) {
+        if self.gpu_pipeline.is_none() {
+            return;
+        }
+        self.pending_stage = Some(match self.pending_stage {
+            Some(existing) => existing.min(ProcessingStage::Output),
+            None => ProcessingStage::Output,
+        });
+        self.notice = None;
+    }
+
+    pub(crate) fn mark_mask_geometry_dirty(&mut self, layer: usize) {
+        if layer < MAX_LOCAL_MASKS {
+            self.dirty_mask_layers[layer] = true;
+        }
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
+        self.mark_mask_adjustments_dirty();
+    }
+
+    pub(crate) fn mark_all_mask_layers_dirty(&mut self) {
+        self.dirty_mask_layers.fill(true);
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
+        self.mark_mask_adjustments_dirty();
+    }
+
+    pub(crate) fn activate_mask_tool(&mut self, kind: MaskKind) {
+        self.active_mask_tool = kind.is_available().then_some(kind);
+        self.mask_drag = None;
+        self.last_brush_point = None;
+        if kind == MaskKind::Brush {
+            self.brush_mode = BrushMode::Paint;
+        }
+    }
+
+    pub(crate) fn select_mask_tool(&mut self, kind: MaskKind) {
+        self.active_mask_tool = kind.is_available().then_some(kind);
+        self.mask_drag = None;
+        self.last_brush_point = None;
+    }
+
+    pub(crate) fn blink_selected_mask(&mut self) {
+        self.mask_overlay_blink = Some((std::time::Instant::now(), MaskOverlayBlink::GroupTwice));
+        self.egui_ctx.request_repaint();
+    }
+
+    pub(crate) fn blink_selected_component(&mut self) {
+        self.mask_overlay_blink = Some((
+            std::time::Instant::now(),
+            MaskOverlayBlink::ComponentThenGroup,
+        ));
+        self.egui_ctx.request_repaint();
+    }
+
+    pub(crate) fn capture_mask_source(&mut self, frame: &eframe::Frame) -> Result<(), String> {
+        if self.mask_source_cache.is_some() {
+            return Ok(());
+        }
+        let render_state = frame
+            .wgpu_render_state()
+            .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
+        let pipeline = self
+            .gpu_pipeline
+            .as_ref()
+            .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
+        let rgba = pipeline
+            .read_output_region_blocking(
+                &render_state.device,
+                &render_state.queue,
+                0,
+                0,
+                pipeline.width,
+                pipeline.height,
+            )
+            .map_err(|error| format!("Could not read the preview for masking: {error:#}"))?;
+        self.mask_source_cache = MaskRgbImage::new(pipeline.width, pipeline.height, rgba);
+        Ok(())
+    }
+
+    pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
+        if let Some(mask) = self.subject_mask_cache.clone() {
+            self.apply_subject_mask(mask);
+            return;
+        }
+        #[cfg(all(not(target_os = "android"), not(target_os = "linux")))]
+        if self.onnx_runtime_path.is_none() {
+            self.notice = Some(
+                "Choose an ONNX Runtime library under Settings before using Subject or Background masks."
+                    .to_owned(),
+            );
+            return;
+        }
+        if let Err(error) = self.capture_mask_source(frame) {
+            self.notice = Some(error);
+            return;
+        }
+        let path = self.birefnet_model_path();
+        if path.exists() {
+            self.start_subject_worker(path);
+        } else {
+            self.subject_consent_open = true;
+        }
+    }
+
+    fn start_subject_worker(&mut self, model_path: PathBuf) {
+        if self.subject_receiver.is_some() {
+            return;
+        }
+        let Some(source) = self.mask_source_cache.clone() else {
+            self.notice =
+                Some("The preview could not be prepared for subject selection.".to_owned());
+            return;
+        };
+        self.subject_download_progress = None;
+        self.subject_inferencing = model_path.exists();
+        #[cfg(not(target_os = "android"))]
+        let runtime_path = self.onnx_runtime_path.clone();
+        #[cfg(target_os = "android")]
+        let runtime_path = None;
+        self.subject_receiver = Some(spawn_subject_mask(
+            model_path,
+            runtime_path,
+            source.width,
+            source.height,
+            source.rgba.to_vec(),
+        ));
+        self.egui_ctx.request_repaint();
+    }
+
+    fn apply_subject_mask(&mut self, mask: MaskImage) {
+        self.subject_mask_cache = Some(mask.clone());
+        for local_mask in &mut self.masks.masks {
+            for component in &mut local_mask.components {
+                if matches!(component.kind, MaskKind::Subject | MaskKind::Background) {
+                    if let crate::pipeline::MaskGeometry::Ai { mask: target, .. } =
+                        &mut component.geometry
+                    {
+                        *target = Some(mask.clone());
+                    }
+                }
+            }
+        }
+        self.mark_all_mask_layers_dirty();
+        self.blink_selected_mask();
+    }
+
+    fn poll_subject_worker(&mut self) {
+        let mut finished = None;
+        if let Some(receiver) = &self.subject_receiver {
+            while let Ok(event) = receiver.try_recv() {
+                match event {
+                    SubjectMaskEvent::DownloadProgress {
+                        label,
+                        downloaded,
+                        total,
+                    } => {
+                        self.subject_download_progress = Some((label, downloaded, total));
+                        self.subject_inferencing = false;
+                    }
+                    SubjectMaskEvent::Inferencing => {
+                        self.subject_download_progress = None;
+                        self.subject_inferencing = true;
+                    }
+                    SubjectMaskEvent::Finished(result) => finished = Some(result),
+                }
+            }
+        }
+        if let Some(result) = finished {
+            self.subject_receiver = None;
+            self.subject_download_progress = None;
+            self.subject_inferencing = false;
+            match result {
+                Ok(result) => {
+                    if let Some(mask) = MaskImage::new(result.width, result.height, result.mask) {
+                        self.apply_subject_mask(mask);
+                    }
+                }
+                Err(error) => self.notice = Some(format!("Subject selection failed: {error}")),
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn birefnet_model_path(&self) -> PathBuf {
+        let root = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(std::env::temp_dir);
+        root.join("auraw/models/birefnet-general-lite.onnx")
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn onnx_runtime_config_path() -> PathBuf {
+        let root = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .unwrap_or_else(std::env::temp_dir);
+        root.join("auraw/onnx-runtime-path")
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn load_onnx_runtime_path() -> Option<PathBuf> {
+        let configured = std::fs::read_to_string(Self::onnx_runtime_config_path()).ok()?;
+        let path = PathBuf::from(configured.trim());
+        path.is_file().then_some(path)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn persist_onnx_runtime_path(path: Option<&std::path::Path>) -> Result<(), String> {
+        let config = Self::onnx_runtime_config_path();
+        if let Some(path) = path {
+            let parent = config
+                .parent()
+                .ok_or_else(|| "invalid AuRaw configuration path".to_owned())?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+            let temporary = config.with_extension("tmp");
+            std::fs::write(&temporary, path.to_string_lossy().as_bytes())
+                .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+            std::fs::rename(&temporary, &config)
+                .map_err(|error| format!("could not publish {}: {error}", config.display()))?;
+        } else if let Err(error) = std::fs::remove_file(&config) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("could not remove {}: {error}", config.display()));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn choose_onnx_runtime(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Select the ONNX Runtime shared library")
+            .pick_file()
+        else {
+            return;
+        };
+        if !path.is_file() {
+            self.notice = Some(format!("{} is not a file.", path.display()));
+            return;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let looks_like_runtime = file_name.contains("onnxruntime")
+            && (file_name.ends_with(".dll")
+                || file_name.ends_with(".dylib")
+                || file_name.contains(".so"));
+        if !looks_like_runtime {
+            self.notice = Some(
+                "Select the ONNX Runtime shared library (onnxruntime.dll, libonnxruntime.so, or libonnxruntime.dylib)."
+                    .to_owned(),
+            );
+            return;
+        }
+        match Self::persist_onnx_runtime_path(Some(&path)) {
+            Ok(()) => {
+                self.onnx_runtime_path = Some(path);
+                self.notice = Some(
+                    "ONNX Runtime selection saved. Restart AuRaw before generating another subject mask."
+                        .to_owned(),
+                );
+            }
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn clear_onnx_runtime(&mut self) {
+        match Self::persist_onnx_runtime_path(None) {
+            Ok(()) => {
+                self.onnx_runtime_path = None;
+                self.notice = Some(
+                    "ONNX Runtime selection cleared. Restart AuRaw to apply the change.".to_owned(),
+                );
+            }
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn birefnet_model_path(&self) -> PathBuf {
+        self.android_app
+            .internal_data_path()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("models/birefnet-general-lite.onnx")
+    }
+
+    fn show_subject_dialogs(&mut self, ctx: &egui::Context) {
+        if self.subject_consent_open {
+            egui::Window::new("Download subject-selection model?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label("Subject and Background masks use the BiRefNet General Lite ONNX model.");
+                    ui.label(format!(
+                        "The first use downloads {:.0} MB from the rembg GitHub release and stores it in AuRaw's cache.",
+                        BIREFNET_MODEL_BYTES as f64 / 1_000_000.0
+                    ));
+                    ui.label("Inference is local. No photograph is uploaded.");
+                    #[cfg(target_os = "linux")]
+                    if self.onnx_runtime_path.is_none() {
+                        ui.label(
+                            "AuRaw will also download and cache the official CPU ONNX Runtime (about 8 MB).",
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Download and continue").clicked() {
+                            self.subject_consent_open = false;
+                            self.start_subject_worker(self.birefnet_model_path());
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.subject_consent_open = false;
+                        }
+                    });
+                });
+        }
+        if self.subject_receiver.is_some() {
+            egui::Window::new("Preparing subject mask")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    if let Some((label, downloaded, total)) = self.subject_download_progress {
+                        let fraction = downloaded as f32 / total.max(1) as f32;
+                        ui.label(format!("Downloading {label}…"));
+                        ui.add(
+                            egui::ProgressBar::new(fraction)
+                                .show_percentage()
+                                .text(format!(
+                                    "{:.1} / {:.1} MB",
+                                    downloaded as f64 / 1_000_000.0,
+                                    total as f64 / 1_000_000.0
+                                )),
+                        );
+                    } else if self.subject_inferencing {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Running high-quality local subject selection…");
+                        });
+                    } else {
+                        ui.spinner();
+                    }
+                });
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 
@@ -418,7 +899,29 @@ impl AurawApp {
             return;
         };
 
-        let params = GpuParams::new(&self.target_exposure, raw);
+        if stage == ProcessingStage::Output && self.dirty_mask_layers.iter().any(|dirty| *dirty) {
+            let edge = pipeline.mask_atlas_edge();
+            let mut upload_error = None;
+            for layer in 0..MAX_LOCAL_MASKS {
+                if !self.dirty_mask_layers[layer] {
+                    continue;
+                }
+                let bytes = self
+                    .masks
+                    .rasterize_layer(layer, edge, edge, raw.width, raw.height);
+                if let Err(error) = pipeline.update_mask_layer(&render_state.queue, layer, &bytes) {
+                    upload_error = Some(format!("Could not update local mask: {error:#}"));
+                    break;
+                }
+                self.dirty_mask_layers[layer] = false;
+            }
+            if let Some(error) = upload_error {
+                self.notice = Some(error);
+                return;
+            }
+        }
+
+        let params = GpuParams::new(&self.target_exposure, &self.masks, raw);
         pipeline.dispatch_stage(&render_state.queue, &render_state.device, &params, stage);
         self.pending_stage = match stage {
             ProcessingStage::Raw => Some(ProcessingStage::Tone),
@@ -502,14 +1005,25 @@ impl AurawApp {
             return;
         };
 
+        let source_file_name = self
+            .current_path
+            .as_ref()
+            .and_then(|source| source.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            .or_else(|| self.current_label.clone());
+        let metadata = ExportMetadata::from_raw(raw, source_file_name);
         self.export_receiver = Some(spawn_tiled_png_export(
             render_state.device.clone(),
             render_state.queue.clone(),
             Arc::clone(raw),
             Arc::clone(preview_raw),
             self.exposure,
+            self.masks.clone(),
             path,
             TileSpec::default(),
+            self.export_settings,
+            metadata,
         ));
         self.export_progress = Some((0, 0));
         self.notice = None;
@@ -612,7 +1126,7 @@ impl AurawApp {
             if total == 0 {
                 "Preparing tiled export…".to_owned()
             } else {
-                format!("Exporting full resolution — tile {completed}/{total}")
+                format!("Exporting PNG — tile {completed}/{total}")
             }
         } else if self.export_publish_pending {
             "Saving to Pictures/AuRaw…".to_owned()
@@ -668,6 +1182,7 @@ impl eframe::App for AurawApp {
 
         self.poll_load_worker(frame);
         self.poll_export_worker();
+        self.poll_subject_worker();
 
         let viewport_size = ui.max_rect().size();
         let layout = ScreenLayout::from_size(viewport_size);
@@ -683,22 +1198,14 @@ impl eframe::App for AurawApp {
                         .resizable(true)
                         .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
                         .default_size(sidebar_size)
-                        .show(ui, |ui| {
-                            egui::ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| Sidebar::show(ui, self, layout));
-                        });
+                        .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
                 }
                 ScreenLayout::Vertical => {
                     egui::Panel::bottom("develop_sidebar_bottom")
                         .resizable(true)
                         .min_size(ScreenLayout::MIN_VERTICAL_SIDEBAR_HEIGHT)
                         .default_size(sidebar_size)
-                        .show(ui, |ui| {
-                            egui::ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| Sidebar::show(ui, self, layout));
-                        });
+                        .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
                 }
             }
         }
@@ -722,5 +1229,6 @@ impl eframe::App for AurawApp {
         if self.export_receiver.is_some() || self.export_publish_pending {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
+        self.show_subject_dialogs(ui.ctx());
     }
 }

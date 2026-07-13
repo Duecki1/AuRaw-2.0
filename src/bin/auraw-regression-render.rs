@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use auraw::pipeline::{
-    load_raw_file, load_raw_file_with_dcp, CfaKind, ExposureParams, GpuParams,
+    load_raw_file, load_raw_file_with_dcp, CfaKind, ExposureParams, GpuParams, MaskStack,
     ProcessingQuality, RawGpuPipeline,
 };
 use auraw::regression::write_linear_rgb_npz;
@@ -82,7 +82,7 @@ fn run() -> Result<()> {
     .context("request a wgpu device")?;
 
     let exposure = ExposureParams::default();
-    let params = GpuParams::new(&exposure, &raw);
+    let params = GpuParams::new(&exposure, &MaskStack::default(), &raw);
     let pipeline = RawGpuPipeline::new_headless_with_quality(
         &device,
         &queue,
@@ -150,16 +150,14 @@ fn next_value(values: &mut impl Iterator<Item = String>, option: &str) -> Result
 }
 
 fn print_help() {
-    println!(
-        concat!(
-            "AuRaw canonical image-regression renderer\n\n",
-            "Usage:\n",
-            "  auraw-regression-render --backend gpu --input FILE --output FILE.npz\n",
-            "  [--dcp PROFILE.dcp]\n\n",
-            "The output is full-resolution scene-linear D65 Rec.2020 RGB float32, before\n",
-            "creative look/tone modules, display encoding, sharpening, or resizing."
-        )
-    );
+    println!(concat!(
+        "AuRaw canonical image-regression renderer\n\n",
+        "Usage:\n",
+        "  auraw-regression-render --backend gpu --input FILE --output FILE.npz\n",
+        "  [--dcp PROFILE.dcp]\n\n",
+        "The output is full-resolution scene-linear D65 Rec.2020 RGB float32, before\n",
+        "creative look/tone modules, display encoding, sharpening, or resizing."
+    ));
 }
 
 fn metadata_json(
