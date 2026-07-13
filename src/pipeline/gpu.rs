@@ -3498,7 +3498,7 @@ mod tests {
 
     #[test]
     fn adjustments_shader_contains_lightroom_style_controls() {
-        assert!(SHADER_ADJUSTMENTS.contains("apply_temperature_tint"));
+        assert!(SHADER_ADJUSTMENTS.contains("apply_camera_temperature_tint"));
         assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast"));
         assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
         assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));

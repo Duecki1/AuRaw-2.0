@@ -1,6 +1,7 @@
 // Scene-linear operations that intentionally happen before the final
-// scene-to-display transform. White balance, exposure, and perceptual
-// colorfulness are kept hue-stable in the Rec.2020 working space.
+// scene-to-display transform. Global white balance is applied separately in
+// camera RGB before the DCP matrix/profile path; the Bradford transform below
+// remains useful for local post-profile temperature/tint adjustments.
 
 const REC2020_TO_XYZ: mat3x3<f32> = mat3x3<f32>(
     vec3<f32>(0.6369580, 0.2627002, 0.0000000),
@@ -55,8 +56,23 @@ fn apply_temperature_tint_values(
     return XYZ_TO_REC2020 * adapted_xyz * normalization;
 }
 
-fn apply_temperature_tint(rgb: vec3<f32>) -> vec3<f32> {
-    return apply_temperature_tint_values(rgb, params.temperature, params.tint);
+fn apply_camera_temperature_tint(camera_rgb: vec3<f32>) -> vec3<f32> {
+    let temperature = clamp(params.temperature / 100.0, -1.0, 1.0);
+    let tint = clamp(params.tint / 100.0, -1.0, 1.0);
+    if abs(temperature) < 1e-6 && abs(tint) < 1e-6 {
+        return camera_rgb;
+    }
+
+    // White balance is a diagonal gain in the camera's native RGB space.
+    // Anchor green so the global control changes chromaticity without adding
+    // an arbitrary exposure shift. This must happen before cam_to_working and
+    // every DCP HueSat/look/tone operation.
+    let gains = exp2(vec3<f32>(
+        0.22 * temperature + 0.08 * tint,
+        -0.24 * tint,
+        -0.34 * temperature + 0.08 * tint,
+    ));
+    return camera_rgb * (gains / max(gains.y, 1e-6));
 }
 
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {

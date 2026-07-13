@@ -60,9 +60,9 @@ fn local_adjustment_mix(pos: vec2<i32>) -> LocalAdjustmentMix {
 
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(scene_tex, clamp_pos(pos), 0).xyz;
-    let working = map_negative_gamut(cam_to_working(camera_rgb));
-    let white_balanced = map_negative_gamut(apply_temperature_tint(working));
-    let profile_corrected = map_negative_gamut(apply_profile_hue_sat(white_balanced));
+    let white_balanced_camera = apply_camera_temperature_tint(camera_rgb);
+    let working = map_negative_gamut(cam_to_working(white_balanced_camera));
+    let profile_corrected = map_negative_gamut(apply_profile_hue_sat(working));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     return profile_corrected * exp2(profile_exposure_ev);
 }
