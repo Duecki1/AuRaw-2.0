@@ -1,6 +1,7 @@
 // Scene-linear operations that intentionally happen before the final
-// scene-to-display transform. White balance, exposure, and perceptual
-// colorfulness are kept hue-stable in the Rec.2020 working space.
+// scene-to-display transform. Global white balance is assembled into the
+// camera/DCP transform on the CPU; the Bradford transform below remains useful
+// for local post-profile temperature/tint adjustments.
 
 const REC2020_TO_XYZ: mat3x3<f32> = mat3x3<f32>(
     vec3<f32>(0.6369580, 0.2627002, 0.0000000),
@@ -53,10 +54,6 @@ fn apply_temperature_tint_values(
     let xyz = REC2020_TO_XYZ * rgb;
     let adapted_xyz = BRADFORD_TO_XYZ * ((XYZ_TO_BRADFORD * xyz) * gains);
     return XYZ_TO_REC2020 * adapted_xyz * normalization;
-}
-
-fn apply_temperature_tint(rgb: vec3<f32>) -> vec3<f32> {
-    return apply_temperature_tint_values(rgb, params.temperature, params.tint);
 }
 
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {

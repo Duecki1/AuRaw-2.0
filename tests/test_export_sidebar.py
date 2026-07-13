@@ -45,8 +45,17 @@ def test_export_resize_modes_and_metadata_controls_are_wired() -> None:
     ):
         assert mode in EXPORT
         assert f"ExportResizeMode::{mode}" in SIDEBAR
-    assert "output_dimensions" in EXPORT
-    assert "resample_raw" in EXPORT
+    assert "checked_output_dimensions" in EXPORT
+    assert "resample_raw" not in EXPORT
+    assert "read_display_linear_region_blocking" in EXPORT
+    assert "LinearLightResizer" in EXPORT
+    assert "vertical_by_source" in EXPORT
+    assert "pending_rows" in EXPORT
+    assert "cached_rows" not in EXPORT
+    assert "IccOutputTransform::srgb" in EXPORT
+    assert "temporary_export_path" in EXPORT
+    assert "publish_completed_export" in EXPORT
+    assert "MAX_EXPORT_PIXELS" in EXPORT
     assert "edge_or_dimension" in SIDEBAR
     assert "percentage" in SIDEBAR
     assert "allow_upscale" in SIDEBAR
@@ -57,11 +66,11 @@ def test_export_resize_modes_and_metadata_controls_are_wired() -> None:
     assert 'add_itxt_chunk("Source"' in EXPORT
 
 
-def test_export_resampler_preserves_cfa_planes() -> None:
-    assert "pub fn resample_raw" in PROCESSING
-    assert "raw.color_indices[index] != cfa" in PROCESSING
-    assert "x_weight * y_weight" in PROCESSING
+def test_raw_mosaic_has_no_final_output_resizer() -> None:
+    assert "pub fn resample_raw" not in PROCESSING
+    assert "build_proxy" in PROCESSING
     assert "nearest_cfa_sample" in PROCESSING
+    assert "read_display_linear_region_blocking" in EXPORT
 
 
 def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
@@ -69,3 +78,32 @@ def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
     assert "self.export_settings," in APP
     assert "ExportMetadata::from_raw" in APP
     assert "settings.keep_metadata" in EXPORT
+
+
+def test_export_halo_covers_cumulative_spatial_support() -> None:
+    shader = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
+    highlight = (ROOT / "src/shaders/highlight_lch_pass.wgsl").read_text(encoding="utf-8")
+    # glow_blur_at spans +/-2 * step_far and glow_source_at reaches one
+    # additional pixel, so the current shader needs a 97-pixel radius.
+    assert "let step_far = min(step_near * 2, 48);" in shader
+    assert "for (var ky = -2; ky <= 2; ky = ky + 1)" in shader
+    assert "for (var kx = -2; kx <= 2; kx = kx + 1)" in shader
+    assert "2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 1 + 1)" in PROCESSING
+    for radius in (16, 8, 4, 2, 1):
+        assert f"run_highlight_guided_pass(gid, {radius}," in highlight
+    assert "const EXPORT_CUMULATIVE_SUPPORT" in PROCESSING
+    assert "EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8" in PROCESSING
+    assert "GLOW_SUPPORT: u32 = 97" in PROCESSING
+    assert "(EXPORT_TILE_HALO..=512).contains(&spec.halo)" in EXPORT
+
+
+def test_export_tone_statistics_cover_native_resolution_tile_cores() -> None:
+    gpu = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+    tone = (ROOT / "src/shaders/tone_analysis.wgsl").read_text(encoding="utf-8")
+    assert "preview_raw" not in EXPORT
+    assert "begin_export_tone_analysis" in EXPORT
+    assert "accumulate_export_tone_tile" in EXPORT
+    assert "finish_export_tone_analysis" in EXPORT
+    assert ".with_tone_histogram_bounds(" in EXPORT
+    assert "tone_histogram_bounds: [u32; 4]" in gpu
+    assert "params.tone_histogram_bounds" in tone

@@ -14,6 +14,7 @@
 @group(0) @binding(26) var final_adjustment_tex: texture_2d<f32>;
 @group(0) @binding(27) var local_mask_tex: texture_2d_array<f32>;
 @group(0) @binding(28) var local_mask_sampler: sampler;
+@group(0) @binding(29) var display_linear_out: texture_storage_2d<rgba16float, write>;
 
 struct LocalAdjustmentMix {
     tone0: vec4<f32>,
@@ -59,9 +60,10 @@ fn local_adjustment_mix(pos: vec2<i32>) -> LocalAdjustmentMix {
 
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(scene_tex, clamp_pos(pos), 0).xyz;
+    // The global white balance and its DCP interpolation are folded into the
+    // camera-specific matrix assembled on the CPU.
     let working = map_negative_gamut(cam_to_working(camera_rgb));
-    let white_balanced = map_negative_gamut(apply_temperature_tint(working));
-    let profile_corrected = map_negative_gamut(apply_profile_hue_sat(white_balanced));
+    let profile_corrected = map_negative_gamut(apply_profile_hue_sat(working));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     return profile_corrected * exp2(profile_exposure_ev);
 }
@@ -859,5 +861,7 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let rgb = textureLoad(final_adjustment_tex, pos, 0).xyz;
     let mixed = apply_color_mixer(pos, rgb);
-    textureStore(out_tex, pos, vec4<f32>(display_render(mixed), 1.0));
+    let display_linear = darktable_sigmoid(mixed);
+    textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
+    textureStore(out_tex, pos, vec4<f32>(apply_output_lut(display_linear), 1.0));
 }

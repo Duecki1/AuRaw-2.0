@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from .manifest import (
     load_thresholds,
     thresholds_for_scene,
     validate_manifest,
+    Scene,
 )
 from .metrics import compare_images
 from .report import SceneResult, evaluate_thresholds, write_html, write_json, write_junit
@@ -247,6 +249,7 @@ def _compare(args: argparse.Namespace) -> int:
     threshold_config = load_thresholds(args.thresholds)
     selected = set(args.scene)
     results: list[SceneResult] = []
+    provenance_rows: list[dict[str, object]] = []
     for scene in manifest.scenes:
         if not scene.enabled or selected and scene.scene_id not in selected:
             continue
@@ -254,7 +257,17 @@ def _compare(args: argparse.Namespace) -> int:
         candidate_path = args.candidate_root / f"{scene.scene_id}.npz"
         reference = load_linear_image(reference_path, color_space=manifest.color_space)
         _require_pinned_reference_metadata(reference.metadata, reference_engine)
+        _require_scene_raw_hash(reference.metadata, scene, "reference")
         candidate = load_linear_image(candidate_path, color_space=manifest.color_space)
+        candidate_provenance = _require_candidate_metadata(
+            candidate.metadata,
+            expected_backend=args.backend,
+            scene=scene,
+            color_space=manifest.color_space,
+        )
+        provenance_rows.append(
+            {"scene": scene.scene_id, "candidate": candidate_provenance}
+        )
         metrics = compare_images(reference, candidate, rois=scene.rois, border=args.border)
         thresholds = thresholds_for_scene(scene, threshold_config, args.backend)
         failures = evaluate_thresholds(metrics, thresholds)
@@ -279,6 +292,7 @@ def _compare(args: argparse.Namespace) -> int:
         "manifest": str(args.manifest),
         "thresholds": str(args.thresholds),
         "border": args.border,
+        "provenance": provenance_rows,
     }
     _write_reports(args.report_dir, results, metadata)
     return 0 if all(result.passed for result in results) else 1
@@ -295,6 +309,19 @@ def _determinism(args: argparse.Namespace) -> int:
         path_b = args.run_b / f"{scene.scene_id}.npz"
         a = load_linear_image(path_a, color_space=manifest.color_space)
         b = load_linear_image(path_b, color_space=manifest.color_space)
+        provenance_a = _require_candidate_metadata(
+            a.metadata,
+            expected_backend=args.backend,
+            scene=scene,
+            color_space=manifest.color_space,
+        )
+        provenance_b = _require_candidate_metadata(
+            b.metadata,
+            expected_backend=args.backend,
+            scene=scene,
+            color_space=manifest.color_space,
+        )
+        _require_matching_provenance(provenance_a, provenance_b, scene.scene_id)
         if a.rgb.shape != b.rgb.shape:
             row = {"scene": scene.scene_id, "failure": "shape mismatch"}
             failures.append(row)
@@ -303,7 +330,12 @@ def _determinism(args: argparse.Namespace) -> int:
         diff = np.abs(np.asarray(a.rgb, dtype=np.float64) - np.asarray(b.rgb, dtype=np.float64))
         max_abs = float(np.max(diff))
         bit_exact = bool(np.array_equal(a.rgb, b.rgb))
-        row = {"scene": scene.scene_id, "max_abs": max_abs, "bit_exact": bit_exact}
+        row = {
+            "scene": scene.scene_id,
+            "max_abs": max_abs,
+            "bit_exact": bit_exact,
+            "provenance": provenance_a,
+        }
         rows.append(row)
         if max_abs > args.max_abs:
             failures.append(row)
@@ -326,6 +358,7 @@ def _cpu_gpu(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest)
     threshold_config = load_thresholds(args.thresholds)
     results: list[SceneResult] = []
+    provenance_rows: list[dict[str, object]] = []
     for scene in manifest.scenes:
         if not scene.enabled:
             continue
@@ -333,6 +366,28 @@ def _cpu_gpu(args: argparse.Namespace) -> int:
         gpu_path = args.gpu_root / f"{scene.scene_id}.npz"
         cpu = load_linear_image(cpu_path, color_space=manifest.color_space)
         gpu = load_linear_image(gpu_path, color_space=manifest.color_space)
+        cpu_provenance = _require_candidate_metadata(
+            cpu.metadata,
+            expected_backend="cpu",
+            scene=scene,
+            color_space=manifest.color_space,
+        )
+        gpu_provenance = _require_candidate_metadata(
+            gpu.metadata,
+            expected_backend="gpu",
+            scene=scene,
+            color_space=manifest.color_space,
+        )
+        _require_independent_backend_provenance(
+            cpu_provenance, gpu_provenance, scene.scene_id
+        )
+        provenance_rows.append(
+            {
+                "scene": scene.scene_id,
+                "cpu": cpu_provenance,
+                "gpu": gpu_provenance,
+            }
+        )
         metrics = compare_images(cpu, gpu, rois=scene.rois, border=args.border)
         thresholds = {
             str(k): float(v)
@@ -356,7 +411,12 @@ def _cpu_gpu(args: argparse.Namespace) -> int:
     _write_reports(
         args.report_dir,
         results,
-        {"backend": "cpu-gpu", "manifest": str(args.manifest), "border": args.border},
+        {
+            "backend": "cpu-gpu",
+            "manifest": str(args.manifest),
+            "border": args.border,
+            "provenance": provenance_rows,
+        },
     )
     return 0 if all(result.passed for result in results) else 1
 
@@ -423,6 +483,19 @@ def _render(args: argparse.Namespace) -> int:
             elapsed = time.monotonic() - started
             if not output.is_file():
                 raise ValueError(f"renderer did not create {output}")
+            provenance: dict[str, object] = {}
+            if args.backend in {"cpu", "gpu"}:
+                if output.suffix.lower() != ".npz":
+                    raise ValueError(
+                        f"{args.backend} renderer output must be a self-describing .npz file"
+                    )
+                rendered = load_linear_image(output, color_space=manifest.color_space)
+                provenance = _require_candidate_metadata(
+                    rendered.metadata,
+                    expected_backend=args.backend,
+                    scene=scene,
+                    color_space=manifest.color_space,
+                )
             metadata_rows.append(
                 {
                     "scene": scene.scene_id,
@@ -430,6 +503,7 @@ def _render(args: argparse.Namespace) -> int:
                     "output": str(output),
                     "sha256": file_sha256(output),
                     "elapsed_seconds": elapsed,
+                    "provenance": provenance,
                 }
             )
             print(f"rendered {scene.scene_id} repeat {repeat + 1} -> {output}")
@@ -467,6 +541,102 @@ def _render(args: argparse.Namespace) -> int:
     )
     return 0
 
+
+
+_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_PROVENANCE_KEYS = (
+    "backend",
+    "implementation",
+    "implementation_fingerprint",
+    "source_revision",
+    "raw_sha256",
+    "renderer_sha256",
+    "color_space",
+    "transfer",
+)
+
+
+def _require_scene_raw_hash(
+    metadata: dict[str, object], scene: Scene, artifact: str
+) -> None:
+    if metadata.get("raw_sha256") != scene.sha256:
+        raise ValueError(
+            f"{scene.scene_id}: {artifact} metadata 'raw_sha256' is "
+            f"{metadata.get('raw_sha256')!r}, expected {scene.sha256!r}"
+        )
+
+
+def _require_candidate_metadata(
+    metadata: dict[str, object],
+    *,
+    expected_backend: str,
+    scene: Scene,
+    color_space: str,
+) -> dict[str, object]:
+    """Validate candidate identity before trusting any image-quality metric."""
+    expected = {
+        "backend": expected_backend,
+        "raw_sha256": scene.sha256,
+        "color_space": color_space,
+        "transfer": "linear",
+    }
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            raise ValueError(
+                f"{scene.scene_id}: candidate metadata {key!r} is "
+                f"{metadata.get(key)!r}, expected {value!r}"
+            )
+
+    for key in ("implementation", "implementation_fingerprint", "source_revision"):
+        value = metadata.get(key)
+        if not isinstance(value, str) or not value.strip() or value.strip().lower() == "unknown":
+            raise ValueError(
+                f"{scene.scene_id}: candidate metadata {key!r} must be a non-empty, "
+                "known string"
+            )
+
+    renderer_sha256 = metadata.get("renderer_sha256")
+    if not isinstance(renderer_sha256, str) or not _HEX_SHA256.fullmatch(renderer_sha256):
+        raise ValueError(
+            f"{scene.scene_id}: candidate metadata 'renderer_sha256' must be "
+            "64 lowercase hexadecimal characters"
+        )
+
+    return {key: metadata[key] for key in _PROVENANCE_KEYS}
+
+
+def _require_matching_provenance(
+    first: dict[str, object], second: dict[str, object], scene_id: str
+) -> None:
+    if first != second:
+        differences = sorted(key for key in _PROVENANCE_KEYS if first.get(key) != second.get(key))
+        raise ValueError(
+            f"{scene_id}: determinism runs have different renderer provenance: "
+            + ", ".join(differences)
+        )
+
+
+def _require_independent_backend_provenance(
+    cpu: dict[str, object], gpu: dict[str, object], scene_id: str
+) -> None:
+    if cpu.get("backend") != "cpu" or gpu.get("backend") != "gpu":
+        raise ValueError(f"{scene_id}: CPU/GPU provenance has incorrect backend identities")
+    if cpu.get("source_revision") != gpu.get("source_revision"):
+        raise ValueError(
+            f"{scene_id}: CPU and GPU outputs were not built from the same source revision"
+        )
+    if cpu.get("implementation") == gpu.get("implementation"):
+        raise ValueError(
+            f"{scene_id}: CPU/GPU parity requires distinct implementation identifiers"
+        )
+    if cpu.get("implementation_fingerprint") == gpu.get("implementation_fingerprint"):
+        raise ValueError(
+            f"{scene_id}: CPU/GPU parity requires distinct implementation fingerprints"
+        )
+    if cpu.get("renderer_sha256") == gpu.get("renderer_sha256"):
+        raise ValueError(
+            f"{scene_id}: CPU/GPU parity requires independently hashed renderer executables"
+        )
 
 def _require_pinned_reference_metadata(
     metadata: dict[str, object], engine: ReferenceEngine

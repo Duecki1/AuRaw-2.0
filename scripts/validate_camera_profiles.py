@@ -240,9 +240,12 @@ def main() -> int:
     rust_fields = rust_struct_fields(gpu, "GpuParams")
     wgsl_fields = wgsl_struct_fields(common, "Params")
     c.check(bool(rust_fields) and rust_fields == wgsl_fields, "Rust/WGSL parameter ABI field order matches")
+    profile_index = rust_fields.index("profile_hue_sat") if "profile_hue_sat" in rust_fields else -1
     c.check(
-        rust_fields[-5:] == ["profile_hue_sat", "profile_look", "profile_tone", "output_lut", "profile_flags"],
-        "DCP/ICC metadata occupies the final five uniform vec4 slots",
+        profile_index >= 0
+        and rust_fields[profile_index:profile_index + 5]
+        == ["profile_hue_sat", "profile_look", "profile_tone", "output_lut", "profile_flags"],
+        "DCP/ICC metadata occupies one contiguous five-vec4 uniform block",
     )
 
     c.require_in_order(
@@ -262,21 +265,24 @@ def main() -> int:
     c.require_in_order(
         adjustments,
         [
-            "apply_temperature_tint(working)",
-            "apply_profile_hue_sat(white_balanced)",
+            "apply_camera_temperature_tint(camera_rgb)",
+            "cam_to_working(white_balanced_camera)",
+            "apply_profile_hue_sat(working)",
             "exp2(profile_exposure_ev)",
             "apply_profile_look(rgb)",
             "apply_profile_tone_curve(rgb)",
             "apply_exposure(rgb)",
             "apply_lightroom_tone(rgb, pos)",
             "apply_saturation_vibrance(rgb)",
-            "display_render",
+            "darktable_sigmoid(mixed)",
         ],
         "render order is WB -> camera profile -> Basic -> point curve -> Color -> display transform",
     )
     c.require_in_order(
         tone_analysis,
         [
+            "apply_camera_temperature_tint(camera_rgb)",
+            "cam_to_working(white_balanced_camera)",
             "apply_profile_hue_sat(working)",
             "exp2(profile_exposure_ev)",
             "apply_profile_look(exposed)",
@@ -342,17 +348,18 @@ def main() -> int:
         "baseline_exposure.is_finite() && baseline_exposure > -999.0" in raw_loader,
         "LibRaw's missing BaselineExposure sentinel cannot black out proprietary RAW previews",
     )
+    compact_gpu = " ".join(gpu.split())
     c.check(
-        "size_of::<super::GpuParams>(), 816" in gpu
-        and "offset_of!(super::GpuParams, sigmoid_curve), 80" in gpu
-        and "offset_of!(super::GpuParams, sigmoid_power), 96" in gpu
-        and "offset_of!(super::GpuParams, tone_curve_0), 192" in gpu
-        and "offset_of!(super::GpuParams, tone_curve_meta), 256" in gpu
-        and "offset_of!(super::GpuParams, tone_curve_red_0), 272" in gpu
-        and "offset_of!(super::GpuParams, tone_curve_green_0), 352" in gpu
-        and "offset_of!(super::GpuParams, tone_curve_blue_0), 432" in gpu
-        and "offset_of!(super::GpuParams, profile_hue_sat), 736" in gpu
-        and "offset_of!(super::GpuParams, profile_flags), 800" in gpu,
+        "size_of::<super::GpuParams>(), 6224" in compact_gpu
+        and "offset_of!(super::GpuParams, sigmoid_curve), 80" in compact_gpu
+        and "offset_of!(super::GpuParams, sigmoid_power), 96" in compact_gpu
+        and "offset_of!(super::GpuParams, tone_curve_0), 192" in compact_gpu
+        and "offset_of!(super::GpuParams, tone_curve_meta), 256" in compact_gpu
+        and "offset_of!(super::GpuParams, tone_curve_red_0), 272" in compact_gpu
+        and "offset_of!(super::GpuParams, tone_curve_green_0), 352" in compact_gpu
+        and "offset_of!(super::GpuParams, tone_curve_blue_0), 432" in compact_gpu
+        and "offset_of!(super::GpuParams, profile_hue_sat), 752" in compact_gpu
+        and "offset_of!(super::GpuParams, profile_flags), 816" in compact_gpu,
         "camera-profile uniform ABI regression test covers the appended metadata block",
     )
 

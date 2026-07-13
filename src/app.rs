@@ -104,6 +104,8 @@ pub struct AurawApp {
     pub(crate) subject_mask_cache: Option<MaskImage>,
     #[cfg(not(target_os = "android"))]
     pub(crate) onnx_runtime_path: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) onnx_runtime_sha256: Option<String>,
     pub status: String,
     /// Reveals low-level darktable/raw controls. The default Lightroom-like
     /// interface intentionally keeps these implementation details hidden.
@@ -171,6 +173,9 @@ impl AurawApp {
     #[cfg(not(target_os = "android"))]
     fn empty(ctx: &egui::Context) -> Self {
         let exposure = ExposureParams::scene_referred_default();
+        let runtime_selection = Self::load_onnx_runtime_selection();
+        let onnx_runtime_path = runtime_selection.as_ref().map(|(path, _)| path.clone());
+        let onnx_runtime_sha256 = runtime_selection.map(|(_, sha256)| sha256);
         Self {
             current_path: None,
             loaded_raw: None,
@@ -192,7 +197,8 @@ impl AurawApp {
             mask_overlay_blink: None,
             mask_source_cache: None,
             subject_mask_cache: None,
-            onnx_runtime_path: Self::load_onnx_runtime_path(),
+            onnx_runtime_path,
+            onnx_runtime_sha256,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
             egui_ctx: ctx.clone(),
@@ -603,8 +609,8 @@ impl AurawApp {
             self.apply_subject_mask(mask);
             return;
         }
-        #[cfg(all(not(target_os = "android"), not(target_os = "linux")))]
-        if self.onnx_runtime_path.is_none() {
+        #[cfg(not(target_os = "android"))]
+        if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
             self.notice = Some(
                 "Choose an ONNX Runtime library under Settings before using Subject or Background masks."
                     .to_owned(),
@@ -636,11 +642,16 @@ impl AurawApp {
         self.subject_inferencing = model_path.exists();
         #[cfg(not(target_os = "android"))]
         let runtime_path = self.onnx_runtime_path.clone();
+        #[cfg(not(target_os = "android"))]
+        let runtime_sha256 = self.onnx_runtime_sha256.clone();
         #[cfg(target_os = "android")]
         let runtime_path = None;
+        #[cfg(target_os = "android")]
+        let runtime_sha256 = None;
         self.subject_receiver = Some(spawn_subject_mask(
             model_path,
             runtime_path,
+            runtime_sha256,
             source.width,
             source.height,
             source.rgba.to_vec(),
@@ -720,24 +731,49 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn load_onnx_runtime_path() -> Option<PathBuf> {
+    fn load_onnx_runtime_selection() -> Option<(PathBuf, String)> {
         let configured = std::fs::read_to_string(Self::onnx_runtime_config_path()).ok()?;
-        let path = PathBuf::from(configured.trim());
-        path.is_file().then_some(path)
+        let mut lines = configured.lines();
+        let sha256 = lines.next()?.strip_prefix("sha256=")?.to_owned();
+        let path = PathBuf::from(lines.next()?.strip_prefix("path=")?);
+        if lines.next().is_some()
+            || sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !path.is_file()
+        {
+            return None;
+        }
+        Some((path, sha256))
     }
 
     #[cfg(not(target_os = "android"))]
-    fn persist_onnx_runtime_path(path: Option<&std::path::Path>) -> Result<(), String> {
+    fn persist_onnx_runtime_selection(
+        selection: Option<(&std::path::Path, &str)>,
+    ) -> Result<(), String> {
         let config = Self::onnx_runtime_config_path();
-        if let Some(path) = path {
+        if let Some((path, sha256)) = selection {
             let parent = config
                 .parent()
                 .ok_or_else(|| "invalid AuRaw configuration path".to_owned())?;
+            let path_text = path
+                .to_str()
+                .ok_or_else(|| "the ONNX Runtime path is not valid UTF-8".to_owned())?;
+            if path_text.contains('\n') || path_text.contains('\r') {
+                return Err("the ONNX Runtime path contains a line break".to_owned());
+            }
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-            let temporary = config.with_extension("tmp");
-            std::fs::write(&temporary, path.to_string_lossy().as_bytes())
+            let temporary = config.with_extension(format!("tmp.{}", std::process::id()));
+            let payload = format!("sha256={sha256}\npath={path_text}\n");
+            std::fs::write(&temporary, payload.as_bytes())
                 .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+            #[cfg(windows)]
+            if config.exists() {
+                std::fs::remove_file(&config)
+                    .map_err(|error| format!("could not replace {}: {error}", config.display()))?;
+            }
             std::fs::rename(&temporary, &config)
                 .map_err(|error| format!("could not publish {}: {error}", config.display()))?;
         } else if let Err(error) = std::fs::remove_file(&config) {
@@ -776,11 +812,19 @@ impl AurawApp {
             );
             return;
         }
-        match Self::persist_onnx_runtime_path(Some(&path)) {
+        let sha256 = match crate::ai_masks::sha256_file_hex(&path) {
+            Ok(sha256) => sha256,
+            Err(error) => {
+                self.notice = Some(format!("Could not hash selected ONNX Runtime: {error:#}"));
+                return;
+            }
+        };
+        match Self::persist_onnx_runtime_selection(Some((&path, &sha256))) {
             Ok(()) => {
                 self.onnx_runtime_path = Some(path);
+                self.onnx_runtime_sha256 = Some(sha256);
                 self.notice = Some(
-                    "ONNX Runtime selection saved. Restart AuRaw before generating another subject mask."
+                    "ONNX Runtime selection and SHA-256 pin saved. Restart AuRaw before generating another subject mask."
                         .to_owned(),
                 );
             }
@@ -790,9 +834,10 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn clear_onnx_runtime(&mut self) {
-        match Self::persist_onnx_runtime_path(None) {
+        match Self::persist_onnx_runtime_selection(None) {
             Ok(()) => {
                 self.onnx_runtime_path = None;
+                self.onnx_runtime_sha256 = None;
                 self.notice = Some(
                     "ONNX Runtime selection cleared. Restart AuRaw to apply the change.".to_owned(),
                 );
@@ -822,10 +867,11 @@ impl AurawApp {
                         BIREFNET_MODEL_BYTES as f64 / 1_000_000.0
                     ));
                     ui.label("Inference is local. No photograph is uploaded.");
-                    #[cfg(target_os = "linux")]
+                    #[cfg(not(target_os = "android"))]
                     if self.onnx_runtime_path.is_none() {
-                        ui.label(
-                            "AuRaw will also download and cache the official CPU ONNX Runtime (about 8 MB).",
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "Select a trusted local ONNX Runtime library in Settings before continuing. AuRaw never downloads native runtime code.",
                         );
                     }
                     ui.add_space(8.0);
@@ -997,7 +1043,7 @@ impl AurawApp {
             return;
         }
 
-        let (Some(raw), Some(preview_raw)) = (&self.loaded_raw, &self.preview_raw) else {
+        let Some(raw) = &self.loaded_raw else {
             return;
         };
         let Some(render_state) = frame.wgpu_render_state() else {
@@ -1017,7 +1063,6 @@ impl AurawApp {
             render_state.device.clone(),
             render_state.queue.clone(),
             Arc::clone(raw),
-            Arc::clone(preview_raw),
             self.exposure,
             self.masks.clone(),
             path,
