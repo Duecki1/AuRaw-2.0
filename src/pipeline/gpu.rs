@@ -357,7 +357,12 @@ impl GpuParams {
         full_width: u32,
         full_height: u32,
     ) -> Self {
-        let profile_layout = raw.camera_profile.gpu_layout();
+        let (camera_transform, profile_weight) = raw.adjusted_camera_transform(
+            exposure.temperature.clamp(-100.0, 100.0),
+            exposure.tint.clamp(-100.0, 100.0),
+        );
+        let mut profile_layout = raw.camera_profile.gpu_layout();
+        profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
         let sigmoid = sigmoid_coefficients(exposure.sigmoid);
         let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
@@ -639,9 +644,9 @@ impl GpuParams {
             hsl_luminance_0: exposure.hsl_luminance[..4].try_into().unwrap(),
             hsl_luminance_1: exposure.hsl_luminance[4..].try_into().unwrap(),
             wb: raw.wb_coeffs,
-            cam_to_srgb_0: raw.cam_to_srgb[0],
-            cam_to_srgb_1: raw.cam_to_srgb[1],
-            cam_to_srgb_2: raw.cam_to_srgb[2],
+            cam_to_srgb_0: camera_transform[0],
+            cam_to_srgb_1: camera_transform[1],
+            cam_to_srgb_2: camera_transform[2],
             black_levels: raw.black_levels,
             white_levels: raw.white_levels,
             width: raw.width,
@@ -3498,7 +3503,8 @@ mod tests {
 
     #[test]
     fn adjustments_shader_contains_lightroom_style_controls() {
-        assert!(SHADER_ADJUSTMENTS.contains("apply_camera_temperature_tint"));
+        assert!(!SHADER_ADJUSTMENTS.contains("apply_camera_temperature_tint"));
+        assert!(SHADER_ADJUSTMENTS.contains("bitcast<f32>(params.profile_flags.w)"));
         assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast"));
         assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
         assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
@@ -3513,6 +3519,46 @@ mod tests {
         assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));
         assert!(!SHADER_ADJUSTMENTS.contains("rgb_to_hsl"));
         assert!(!SHADER_ADJUSTMENTS.contains("hsl_to_rgb"));
+    }
+
+    #[test]
+    fn global_wb_changes_camera_transform_for_dng_metadata() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("regression/raw/synthetic-bayer.dng");
+        let raw = crate::pipeline::load_raw_file(&path).unwrap();
+        let neutral = super::GpuParams::new(
+            &crate::pipeline::ExposureParams::default(),
+            &crate::pipeline::MaskStack::default(),
+            &raw,
+        );
+        let mut adjusted = crate::pipeline::ExposureParams::default();
+        adjusted.temperature = 40.0;
+        adjusted.tint = 20.0;
+        let changed =
+            super::GpuParams::new(&adjusted, &crate::pipeline::MaskStack::default(), &raw);
+        assert_ne!(neutral.cam_to_srgb_0, changed.cam_to_srgb_0);
+        assert_ne!(neutral.cam_to_srgb_1, changed.cam_to_srgb_1);
+        assert_ne!(neutral.cam_to_srgb_2, changed.cam_to_srgb_2);
+
+        let tint_rendition = |tint| {
+            let params = super::GpuParams::new(
+                &crate::pipeline::ExposureParams {
+                    tint,
+                    ..Default::default()
+                },
+                &crate::pipeline::MaskStack::default(),
+                &raw,
+            );
+            [
+                params.cam_to_srgb_0[..3].iter().sum::<f32>(),
+                params.cam_to_srgb_1[..3].iter().sum::<f32>(),
+                params.cam_to_srgb_2[..3].iter().sum::<f32>(),
+            ]
+        };
+        let green = tint_rendition(-20.0);
+        let magenta = tint_rendition(20.0);
+        let magenta_axis = |rgb: [f32; 3]| (rgb[0] + rgb[2]) * 0.5 - rgb[1];
+        assert!(magenta_axis(magenta) > magenta_axis(green));
     }
 
     #[test]
@@ -3580,6 +3626,7 @@ mod tests {
                 black_levels_per_pixel: vec![0.0; (width * height) as usize],
                 white_levels: [4095.0; 4],
                 camera_profile: Default::default(),
+                white_balance_model: None,
             };
             let params = super::GpuParams::new(
                 &ExposureParams::default(),

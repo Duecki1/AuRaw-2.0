@@ -20,9 +20,9 @@ impl ProcessingStage {
 }
 
 /// Returns the earliest affected stage. RAW-space controls invalidate the
-/// cached demosaic result and every downstream stage. Develop controls only
-/// invalidate the final render because the scene texture, tone guide, and
-/// histogram remain valid.
+/// cached demosaic result and every downstream stage. Global white balance
+/// invalidates tone analysis because it changes scene-working luminance;
+/// ordinary Develop controls only invalidate the final render.
 pub fn affected_stage(before: &ExposureParams, after: &ExposureParams) -> Option<ProcessingStage> {
     if before == after {
         return None;
@@ -30,6 +30,8 @@ pub fn affected_stage(before: &ExposureParams, after: &ExposureParams) -> Option
 
     if raw_controls_changed(before, after) {
         Some(ProcessingStage::Raw)
+    } else if before.temperature != after.temperature || before.tint != after.tint {
+        Some(ProcessingStage::Tone)
     } else {
         Some(ProcessingStage::Output)
     }
@@ -147,6 +149,7 @@ pub fn build_proxy(raw: &LoadedRaw, spec: ProxySpec) -> LoadedRaw {
         black_levels_per_pixel,
         white_levels: raw.white_levels,
         camera_profile: raw.camera_profile.clone(),
+        white_balance_model: raw.white_balance_model.clone(),
     }
 }
 
@@ -325,6 +328,7 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
         black_levels_per_pixel,
         white_levels: raw.white_levels,
         camera_profile: raw.camera_profile.clone(),
+        white_balance_model: raw.white_balance_model.clone(),
     }
 }
 
@@ -350,6 +354,23 @@ mod tests {
         let mut after = before;
         after.black_point = 0.01;
         assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Raw));
+    }
+
+    #[test]
+    fn global_wb_invalidates_tone_analysis_and_output() {
+        let before = ExposureParams::default();
+        for after in [
+            ExposureParams {
+                temperature: 1.0,
+                ..before
+            },
+            ExposureParams {
+                tint: 1.0,
+                ..before
+            },
+        ] {
+            assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Tone));
+        }
     }
 
     #[test]
@@ -396,6 +417,7 @@ mod tests {
             black_levels_per_pixel: vec![0.0; (width * height) as usize],
             white_levels: [1023.0; 4],
             camera_profile: CameraProfile::default(),
+            white_balance_model: None,
         };
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 4 });
