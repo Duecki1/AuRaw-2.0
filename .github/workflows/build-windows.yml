@@ -30,10 +30,31 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
 
     steps:
+      # GitHub's Windows Git and MSYS2 Git can otherwise disagree about
+      # CRLF/LF normalization and report every tracked source file as dirty.
+      - name: Configure deterministic Git line endings
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
       - name: Check out source
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: Normalize and verify checkout
+        shell: pwsh
+        run: |
+          git config --local core.autocrlf false
+          git config --local core.eol lf
+          git reset --hard HEAD
+
+          $changes = git status --porcelain=v1 --untracked-files=all
+          if ($changes) {
+            $changes | Write-Host
+            throw "Checkout is dirty before the build starts."
+          }
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -144,4 +165,3 @@ jobs:
           name: AuRaw-windows-x86_64
           path: dist/AuRaw-windows-x86_64.zip
           if-no-files-found: error
-          archive: false
