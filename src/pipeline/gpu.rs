@@ -3416,6 +3416,15 @@ mod tests {
     }
 
     #[test]
+    fn guided_highlight_strength_is_one_continuous_final_blend() {
+        assert!(
+            SHADER_HIGHLIGHTS.contains("output = mix(original, guided, clip_amount * strength)")
+        );
+        assert!(!SHADER_HIGHLIGHTS.contains("0.35 + 0.65 * strength"));
+        assert!(!SHADER_HIGHLIGHTS.contains("output = guided;"));
+    }
+
+    #[test]
     fn demosaic_reference_invariants_are_present() {
         assert!(SHADER_BAYER_RCD_P4.contains("const RCD_MARGIN: i32 = 9"));
         assert!(SHADER_BAYER_RCD_P4.contains("ppg_rgb_at"));
@@ -3597,6 +3606,28 @@ mod tests {
     }
 
     #[test]
+    fn exposure_precedes_bounded_camera_profile_rendering() {
+        let prepare = &SHADER_ADJUSTMENTS[SHADER_ADJUSTMENTS
+            .find("fn prepare_adjustment_base")
+            .unwrap()..];
+        let exposure = prepare.find("var rgb = apply_exposure(").unwrap();
+        let hue_sat = prepare
+            .find("rgb = map_negative_gamut(apply_profile_hue_sat(rgb))")
+            .unwrap();
+        let profile_exposure = prepare.find("let profile_exposure_ev").unwrap();
+        let look = prepare.find("rgb = apply_profile_look(rgb)").unwrap();
+        let curve = prepare.find("rgb = apply_profile_tone_curve(rgb)").unwrap();
+        assert!(
+            exposure < hue_sat
+                && hue_sat < profile_exposure
+                && profile_exposure < look
+                && look < curve
+        );
+        assert!(SHADER_ADJUSTMENTS.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
+        assert!(SHADER_ADJUSTMENTS.contains("return profile_data[offset + maximum].x"));
+    }
+
+    #[test]
     fn global_wb_changes_camera_transform_for_dng_metadata() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("regression/raw/synthetic-bayer.dng");
@@ -3747,6 +3778,355 @@ mod tests {
                 });
             assert_eq!(camera_scene.len(), (width * height * 3) as usize);
             assert!(camera_scene.iter().all(|value| value.is_finite()));
+        }
+    }
+
+    #[test]
+    fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
+        use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
+        use eframe::wgpu;
+
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            return;
+        };
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("auraw clipped-highlight test device"),
+                ..Default::default()
+            }))
+        else {
+            return;
+        };
+
+        let width = 128u32;
+        let height = 128u32;
+        let white = 4095.0f32;
+        let wb = [2.0f32, 1.0, 1.5, 1.0];
+        let mut color_indices = Vec::with_capacity((width * height) as usize);
+        let mut raw_pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let channel = match (x % 2, y % 2) {
+                    (0, 0) => 0,
+                    (1, 1) => 2,
+                    _ => 1,
+                };
+                color_indices.push(channel);
+
+                // A broad neutral light has a fully saturated core and a
+                // smooth, valid neutral shoulder. A real camera records this
+                // as unequal channel plateaus after white balance.
+                let dx = x as f32 - 63.5;
+                let dy = y as f32 - 63.5;
+                let radius = (dx * dx + dy * dy).sqrt();
+                let scene = if radius <= 34.0 {
+                    2.6
+                } else if radius < 50.0 {
+                    0.2 + (2.6 - 0.2) * (50.0 - radius) / 16.0
+                } else {
+                    0.2
+                };
+                let sensor = (scene / wb[channel as usize]).clamp(0.0, 1.0);
+                raw_pixels.push((sensor * white).round() as u16);
+            }
+        }
+
+        let raw = LoadedRaw {
+            width,
+            height,
+            camera_make: "test".to_owned(),
+            camera_model: "clipped-neutral".to_owned(),
+            cfa_kind: CfaKind::Bayer,
+            raw_pixels,
+            color_indices,
+            wb_coeffs: wb,
+            cam_to_srgb: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            black_levels: [0.0; 4],
+            black_levels_per_pixel: vec![0.0; (width * height) as usize],
+            white_levels: [white; 4],
+            camera_profile: Default::default(),
+            white_balance_model: None,
+        };
+        let exposure = ExposureParams::default();
+        let params = super::GpuParams::new(&exposure, &crate::pipeline::MaskStack::default(), &raw);
+        let pipeline = RawGpuPipeline::new_headless_with_quality(
+            &device,
+            &queue,
+            &raw,
+            &params,
+            ProcessingQuality::High,
+        )
+        .unwrap();
+        pipeline.dispatch_stage(
+            &queue,
+            &device,
+            &params,
+            crate::pipeline::ProcessingStage::Raw,
+        );
+        let scene = pipeline
+            .read_scene_texture_blocking(&device, &queue)
+            .unwrap();
+
+        let mut mean = [0.0f32; 3];
+        let mut count = 0.0f32;
+        for y in 60..68 {
+            for x in 60..68 {
+                let index = ((y * width + x) * 3) as usize;
+                for channel in 0..3 {
+                    mean[channel] += scene[index + channel];
+                }
+                count += 1.0;
+            }
+        }
+        for value in &mut mean {
+            *value /= count;
+        }
+        let minimum = mean.into_iter().fold(f32::INFINITY, f32::min);
+        let maximum = mean.into_iter().fold(f32::NEG_INFINITY, f32::max);
+        let average = mean.into_iter().sum::<f32>() / 3.0;
+        let relative_chroma = (maximum - minimum) / average.max(1e-6);
+        assert!(
+            relative_chroma < 0.02,
+            "clipped neutral core became coloured: rgb={mean:?}, relative chroma={relative_chroma}"
+        );
+    }
+
+    #[test]
+    fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
+        use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
+        use eframe::wgpu;
+
+        fn fixture(
+            cfa_kind: CfaKind,
+            scene_scale: f32,
+            coloured_peak: Option<[f32; 3]>,
+        ) -> LoadedRaw {
+            const WIDTH: u32 = 96;
+            const HEIGHT: u32 = 96;
+            const WHITE: f32 = 4095.0;
+            const WB: [f32; 4] = [2.0, 1.0, 1.5, 1.0];
+            const XTRANS: [[u8; 6]; 6] = [
+                [1, 2, 1, 1, 0, 1],
+                [0, 1, 0, 2, 1, 2],
+                [1, 2, 1, 1, 0, 1],
+                [1, 0, 1, 1, 2, 1],
+                [2, 1, 2, 0, 1, 0],
+                [1, 0, 1, 1, 2, 1],
+            ];
+
+            let mut color_indices = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+            let mut raw_pixels = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let channel = match cfa_kind {
+                        CfaKind::Bayer => match (x % 2, y % 2) {
+                            (0, 0) => 0,
+                            (1, 1) => 2,
+                            _ => 1,
+                        },
+                        CfaKind::XTrans => XTRANS[(y % 6) as usize][(x % 6) as usize],
+                    };
+                    color_indices.push(channel);
+
+                    let dx = x as f32 - 48.0;
+                    let dy = y as f32 - 48.0;
+                    let radius = (dx * dx + dy * dy).sqrt();
+                    let shoulder = (1.0 - radius / 24.0).clamp(0.0, 1.0).powf(1.7);
+                    let neutral_scene = scene_scale * (0.55 + 1.30 * shoulder);
+                    let scene = coloured_peak.map_or(neutral_scene, |peak| {
+                        scene_scale * (0.12 + (peak[channel as usize] - 0.12) * shoulder)
+                    });
+                    let sensor = (scene / WB[channel as usize]).clamp(0.0, 1.0);
+                    raw_pixels.push((sensor * WHITE).round() as u16);
+                }
+            }
+
+            LoadedRaw {
+                width: WIDTH,
+                height: HEIGHT,
+                camera_make: "test".to_owned(),
+                camera_model: "selective-neutral-clipping".to_owned(),
+                cfa_kind,
+                raw_pixels,
+                color_indices,
+                wb_coeffs: WB,
+                cam_to_srgb: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                ],
+                black_levels: [0.0; 4],
+                black_levels_per_pixel: vec![0.0; (WIDTH * HEIGHT) as usize],
+                white_levels: [WHITE; 4],
+                camera_profile: Default::default(),
+                white_balance_model: None,
+            }
+        }
+
+        fn percentile(mut values: Vec<f32>, percent: usize) -> f32 {
+            values.sort_by(f32::total_cmp);
+            values[(values.len() - 1) * percent / 100]
+        }
+
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            return;
+        };
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("auraw selective-highlight test device"),
+                ..Default::default()
+            }))
+        else {
+            return;
+        };
+
+        for cfa_kind in [CfaKind::Bayer, CfaKind::XTrans] {
+            let clipped_raw = fixture(cfa_kind, 1.0, None);
+            let unclipped_raw = fixture(cfa_kind, 0.5, None);
+            let clipped_exposure = ExposureParams {
+                exposure: -4.0,
+                ..Default::default()
+            };
+            let clipped_params = super::GpuParams::new(
+                &clipped_exposure,
+                &crate::pipeline::MaskStack::default(),
+                &clipped_raw,
+            );
+            let pipeline = RawGpuPipeline::new_headless_with_quality(
+                &device,
+                &queue,
+                &clipped_raw,
+                &clipped_params,
+                ProcessingQuality::High,
+            )
+            .unwrap();
+            pipeline.recompute(&queue, &device, &clipped_params);
+            let clipped = pipeline
+                .read_display_linear_region_blocking(&device, &queue, 43, 43, 11, 11)
+                .unwrap();
+
+            // Half the source signal at one stop more exposure has identical
+            // intended display energy, while remaining below every sensor
+            // plane's clipping point. It is the recovery-quality oracle.
+            pipeline.upload_raw_tile(&queue, &unclipped_raw).unwrap();
+            let oracle_exposure = ExposureParams {
+                exposure: -3.0,
+                ..Default::default()
+            };
+            let oracle_params = super::GpuParams::new(
+                &oracle_exposure,
+                &crate::pipeline::MaskStack::default(),
+                &unclipped_raw,
+            );
+            pipeline.recompute(&queue, &device, &oracle_params);
+            let oracle = pipeline
+                .read_display_linear_region_blocking(&device, &queue, 43, 43, 11, 11)
+                .unwrap();
+
+            let mut pink = Vec::with_capacity(121);
+            let mut spread = Vec::with_capacity(121);
+            let mut luma_error = Vec::with_capacity(121);
+            let mut luma_ratio = Vec::with_capacity(121);
+            for (candidate, reference) in clipped.chunks_exact(3).zip(oracle.chunks_exact(3)) {
+                assert!(candidate
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0));
+                let mean = ((candidate[0] + candidate[1] + candidate[2]) / 3.0).max(1e-6);
+                pink.push((((candidate[0] + candidate[2]) * 0.5 - candidate[1]) / mean).max(0.0));
+                let minimum = candidate.iter().copied().fold(f32::INFINITY, f32::min);
+                let maximum = candidate.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                spread.push((maximum - minimum) / mean);
+
+                let candidate_y = 0.262_700_2 * candidate[0]
+                    + 0.677_998_1 * candidate[1]
+                    + 0.059_301_7 * candidate[2];
+                let reference_y = 0.262_700_2 * reference[0]
+                    + 0.677_998_1 * reference[1]
+                    + 0.059_301_7 * reference[2];
+                luma_error.push((candidate_y - reference_y).abs() / reference_y.max(1e-6));
+                luma_ratio.push(candidate_y / reference_y.max(1e-6));
+            }
+
+            let pink_p95 = percentile(pink, 95);
+            let spread_p95 = percentile(spread, 95);
+            let luma_error_p95 = percentile(luma_error, 95);
+            let luma_ratio_median = percentile(luma_ratio, 50);
+            assert!(
+                pink_p95 <= 0.05,
+                "{cfa_kind:?} reconstructed neutral is pink: p95={pink_p95}"
+            );
+            assert!(
+                spread_p95 <= 0.10,
+                "{cfa_kind:?} reconstructed neutral has channel spread p95={spread_p95}"
+            );
+            assert!(
+                luma_error_p95 <= 0.15,
+                "{cfa_kind:?} recovered highlight luma error p95={luma_error_p95}"
+            );
+            assert!(
+                (0.85..=1.15).contains(&luma_ratio_median),
+                "{cfa_kind:?} recovered highlight median luma ratio={luma_ratio_median}"
+            );
+
+            // Neutral safety must not turn genuinely coloured clipped lights
+            // white. Each primary clips only its dominant sensor plane; the
+            // two surviving components should keep the reconstructed hue.
+            for (dominant, peak) in [
+                (0usize, [2.50, 0.35, 0.20]),
+                (1usize, [0.30, 2.00, 0.25]),
+                (2usize, [0.20, 0.30, 2.30]),
+            ] {
+                let coloured_raw = fixture(cfa_kind, 1.0, Some(peak));
+                pipeline.upload_raw_tile(&queue, &coloured_raw).unwrap();
+                let coloured_params = super::GpuParams::new(
+                    &ExposureParams::default(),
+                    &crate::pipeline::MaskStack::default(),
+                    &coloured_raw,
+                );
+                pipeline.dispatch_stage(
+                    &queue,
+                    &device,
+                    &coloured_params,
+                    crate::pipeline::ProcessingStage::Raw,
+                );
+                let scene = pipeline
+                    .read_scene_texture_blocking(&device, &queue)
+                    .unwrap();
+                let mut mean = [0.0f32; 3];
+                let mut count = 0.0f32;
+                for y in 46..51 {
+                    for x in 46..51 {
+                        let index = ((y * 96 + x) * 3) as usize;
+                        for channel in 0..3 {
+                            mean[channel] += scene[index + channel];
+                        }
+                        count += 1.0;
+                    }
+                }
+                for value in &mut mean {
+                    *value /= count;
+                }
+                let strongest_other = mean
+                    .iter()
+                    .enumerate()
+                    .filter(|(channel, _)| *channel != dominant)
+                    .map(|(_, value)| *value)
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    mean[dominant] > 2.0 * strongest_other,
+                    "{cfa_kind:?} clipped primary {dominant} lost its hue: rgb={mean:?}"
+                );
+            }
         }
     }
 }
