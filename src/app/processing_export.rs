@@ -1,4 +1,121 @@
 impl AurawApp {
+    pub(crate) fn mark_lens_correction_dirty(&mut self) {
+        if self.original_raw.is_some() {
+            self.lens_correction_dirty = true;
+            self.notice = None;
+        }
+    }
+
+    fn apply_pending_lens_correction(&mut self, frame: &eframe::Frame) {
+        if !self.lens_correction_dirty {
+            return;
+        }
+        self.lens_correction_dirty = false;
+
+        let Some(original_raw) = self.original_raw.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+            return;
+        };
+
+        let mut correction_notice = None;
+        let (full_raw, applied_label) = if self.lens_correction.enabled {
+            let Some(selection) = self.lens_correction.selected_lens() else {
+                self.lens_correction.enabled = false;
+                self.lens_correction.applied = false;
+                self.lens_correction.catalog.status =
+                    "Select a lens profile before enabling correction.".to_owned();
+                return;
+            };
+            match apply_lensfun_correction(&original_raw, &selection) {
+                Ok(corrected) => (Arc::new(corrected), Some(selection.label())),
+                Err(error) => {
+                    self.lens_correction.enabled = false;
+                    self.lens_correction.applied = false;
+                    self.lens_correction.catalog.status =
+                        format!("Could not apply {}: {error:#}", selection.label());
+                    correction_notice = Some("Lens correction failed; restored the original RAW geometry.".to_owned());
+                    (Arc::clone(&original_raw), None)
+                }
+            }
+        } else {
+            (Arc::clone(&original_raw), None)
+        };
+
+        let preview_spec = ProxySpec::default();
+        let preview_raw = if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
+            Arc::clone(&full_raw)
+        } else {
+            Arc::new(build_proxy(&full_raw, preview_spec))
+        };
+        let params = GpuParams::new(&self.exposure, &MaskStack::default(), &preview_raw);
+        let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
+            &render_state.device,
+            &render_state.queue,
+            &preview_raw,
+            &params,
+            ProcessingQuality::Preview,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                self.notice = Some(format!("Could not rebuild the corrected GPU preview: {error:#}"));
+                return;
+            }
+        };
+        pipeline.recompute(&render_state.queue, &render_state.device, &params);
+
+        let mut renderer = render_state.renderer.write();
+        if let Some(old) = self.gpu_pipeline.take() {
+            if let Some(texture_id) = old.egui_texture_id {
+                renderer.free_texture(&texture_id);
+            }
+        }
+        pipeline.register_egui_texture(&render_state.device, &mut renderer);
+        drop(renderer);
+
+        // Existing local masks are tied to the previous image geometry. Clear
+        // them rather than silently applying them to shifted content.
+        self.masks.clear();
+        self.active_mask_tool = None;
+        self.brush_mode = BrushMode::Paint;
+        self.mask_drag = None;
+        self.last_brush_point = None;
+        self.mask_interaction_dirty_layer = None;
+        self.mask_interaction_frame_count = 0;
+        self.mask_interaction_has_uncommitted_change = false;
+        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
+        self.mask_overlay_texture = None;
+        self.mask_overlay_texture_key = None;
+        self.mask_overlay_blink = None;
+        self.mask_thumbnail_group_textures.clear();
+        self.mask_thumbnail_component_mask = None;
+        self.mask_thumbnail_component_textures.clear();
+        self.mask_thumbnail_revision = self.mask_overlay_revision;
+        self.mask_source_cache = None;
+        self.subject_mask_cache = None;
+        self.subject_consent_open = false;
+        self.subject_receiver = None;
+        self.subject_download_progress = None;
+        self.subject_inferencing = false;
+        self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
+
+        self.loaded_raw = Some(full_raw);
+        self.preview_raw = Some(preview_raw);
+        self.gpu_pipeline = Some(pipeline);
+        self.target_exposure = self.exposure;
+        self.pending_stage = None;
+        self.lens_correction.applied = applied_label.is_some();
+        if let Some(label) = applied_label {
+            self.lens_correction.catalog.status = format!("Applied {label}");
+        } else if correction_notice.is_none() {
+            self.lens_correction.catalog.status =
+                "Lens correction disabled; using the original RAW geometry.".to_owned();
+        }
+        self.notice = correction_notice;
+    }
+
     pub(crate) fn mark_pipeline_dirty(&mut self) {
         if self.gpu_pipeline.is_none() {
             self.target_exposure = self.exposure;

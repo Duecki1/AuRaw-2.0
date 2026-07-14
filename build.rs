@@ -42,12 +42,14 @@ fn main() {
         println!("cargo:rerun-if-env-changed={variable}");
     }
     println!("cargo:rustc-check-cfg=cfg(libraw_available)");
+    println!("cargo:rustc-check-cfg=cfg(lensfun_available)");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "android" {
         configure_android_libraw();
     } else {
         configure_desktop_libraw();
+        configure_desktop_lensfun();
     }
 }
 
@@ -168,6 +170,19 @@ fn configure_android_libraw() {
     println!("cargo:rustc-link-lib=android");
 
     generate_bindings(&header, &[root.join("include")]);
+}
+
+fn configure_desktop_lensfun() {
+    for variable in ["LENSFUN_NO_PKG_CONFIG", "PKG_CONFIG_PATH"] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+
+    match pkg_config::Config::new().probe("lensfun") {
+        Ok(_) => println!("cargo:rustc-cfg=lensfun_available"),
+        Err(_) => println!(
+            "cargo:warning=Lensfun was not found through pkg-config; lens correction will be disabled. Install lensfun/lensfun.pc on the target machine to enable it."
+        ),
+    }
 }
 
 fn configure_desktop_libraw() {

@@ -23,3 +23,13 @@ darktable and these adaptations are licensed under the GNU General Public Licens
 Subject and Background selection uses the BiRefNet General Lite (Swin-Tiny) ONNX model by Peng Zheng et al. The model is downloaded only after explicit user consent from the `danielgatis/rembg` release hosting and is licensed under the MIT License.
 
 Local inference uses Microsoft ONNX Runtime through the Rust `ort` bindings. ONNX Runtime is licensed under the MIT License; `ort` is dual-licensed under MIT or Apache-2.0.
+
+## Lensfun
+
+Lens correction uses the Lensfun library and its camera/lens profile database.
+The Lensfun libraries are licensed under the GNU Lesser General Public License,
+version 3. Lensfun's bundled applications are licensed under GPL-3.0, and the
+profile database is licensed under Creative Commons Attribution-ShareAlike 3.0.
+Packaged AuRaw builds may redistribute the Lensfun shared library and database;
+the corresponding license texts and source information remain available from
+the Lensfun project.

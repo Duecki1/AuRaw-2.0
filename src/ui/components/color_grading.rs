@@ -139,7 +139,10 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
         painter.circle_filled(marker, 5.0, Color32::WHITE);
         painter.circle_stroke(marker, 6.5, Stroke::new(1.5, Color32::BLACK));
 
-        if let Some(pointer) = (response.dragged() || response.clicked())
+        if response.double_clicked() {
+            wheel.reset();
+            changed = true;
+        } else if let Some(pointer) = (response.dragged() || response.clicked())
             .then(|| response.interact_pointer_pos())
             .flatten()
         {
@@ -158,8 +161,9 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
             }
         }
 
-        response
-            .on_hover_text("Drag from the center to choose hue and saturation. Double-click numeric values for precise entry.")
+        response.on_hover_text(
+            "Drag from the center to choose hue and saturation. Double-click the wheel to reset it.",
+        )
     });
     let _ = wheel_response;
 

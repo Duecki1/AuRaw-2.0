@@ -200,6 +200,8 @@ unsafe fn loaded_raw_from_context(
     let sizes = &rawdata.sizes;
     let color = &rawdata.color;
     let iparams = &rawdata.iparams;
+    let lens = &raw.lens;
+    let other = &raw.other;
 
     if rawdata.raw_image.is_null() {
         return Err(anyhow!(
@@ -328,6 +330,11 @@ unsafe fn loaded_raw_from_context(
         height,
         camera_make: c_array_to_string(&iparams.make),
         camera_model: c_array_to_string(&iparams.model),
+        lens_make: c_array_to_string(&lens.LensMake),
+        lens_model: c_array_to_string(&lens.Lens),
+        focal_length: finite_positive_or_zero(other.focal_len as f32),
+        aperture: finite_positive_or_zero(other.aperture as f32),
+        focus_distance: 0.0,
         cfa_kind,
         raw_pixels,
         color_indices,
@@ -1769,6 +1776,14 @@ fn c_array_to_string(value: &[c_char]) -> String {
         .map(|value| value as u8)
         .collect();
     String::from_utf8_lossy(&bytes).trim().to_owned()
+}
+
+fn finite_positive_or_zero(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        0.0
+    }
 }
 
 fn check_libraw(err: i32, action: &str) -> Result<()> {
