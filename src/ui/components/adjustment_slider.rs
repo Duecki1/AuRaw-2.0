@@ -69,6 +69,16 @@ where
     let mut changed = false;
 
     ui.push_id(label, |ui| {
+        let reset_id = ui.id().with("reset-value");
+        let reset_value = ui.data_mut(|data| {
+            if let Some(value) = data.get_temp::<f64>(reset_id) {
+                value
+            } else {
+                let value = (*value).to_f64();
+                data.insert_temp(reset_id, value);
+                value
+            }
+        });
         let control_width = ui.available_width().max(VALUE_FIELD_WIDTH + 96.0);
 
         ui.vertical(|ui| {
@@ -79,16 +89,17 @@ where
                 egui::vec2(control_width, HEADER_HEIGHT),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    let label_response = ui.label(RichText::new(label).size(LABEL_SIZE));
-                    if let Some(text) = hover_text {
-                        label_response.on_hover_text(text);
+                    let mut label_response = ui.label(RichText::new(label).size(LABEL_SIZE));
+                    label_response = label_response.on_hover_text(reset_tooltip(hover_text));
+                    if label_response.double_clicked() {
+                        changed |= set_numeric(value, reset_value, decimals);
                     }
 
                     ui.allocate_ui_with_layout(
                         ui.available_size(),
                         Layout::right_to_left(Align::Center),
                         |ui| {
-                            let value_response = if ui.input(|input| input.has_touch_screen()) {
+                            let mut value_response = if ui.input(|input| input.has_touch_screen()) {
                                 touch_value_field(ui, (*value).to_f64(), decimals)
                             } else {
                                 let response = ui.add_sized(
@@ -101,15 +112,26 @@ where
                                 changed |= response.changed();
                                 response
                             };
-                            if let Some(text) = hover_text {
-                                value_response.on_hover_text(text);
+                            value_response =
+                                value_response.on_hover_text(reset_tooltip(hover_text));
+                            if value_response.double_clicked() {
+                                changed |= set_numeric(value, reset_value, decimals);
                             }
                         },
                     );
                 },
             );
 
-            changed |= guarded_slider(ui, value, range, decimals, speed, control_width, hover_text);
+            changed |= guarded_slider(
+                ui,
+                value,
+                range,
+                decimals,
+                speed,
+                control_width,
+                hover_text,
+                reset_value,
+            );
             ui.add_space(ROW_BOTTOM_SPACE);
         });
     });
@@ -119,7 +141,7 @@ where
 
 fn touch_value_field(ui: &mut Ui, value: f64, decimals: usize) -> egui::Response {
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(VALUE_FIELD_WIDTH, HEADER_HEIGHT), Sense::hover());
+        ui.allocate_exact_size(egui::vec2(VALUE_FIELD_WIDTH, HEADER_HEIGHT), Sense::click());
     let visuals = ui.style().interact(&response);
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 3.0, visuals.bg_fill);
@@ -142,6 +164,7 @@ fn guarded_slider<Num>(
     keyboard_step: f64,
     width: f32,
     hover_text: Option<&str>,
+    reset_value: f64,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -186,6 +209,10 @@ where
     }
 
     let mut changed = false;
+    let reset_requested = track_response.double_clicked() || handle_response.double_clicked();
+    if reset_requested {
+        changed |= set_numeric(value, reset_value, decimals);
+    }
     let slider_drag_id = ui.id().with("guarded-slider-drag");
     let pointer = ui.input(|input| {
         (
@@ -197,28 +224,32 @@ where
     let mut slider_drag_active = pointer.2
         && slider_scroll_lock_owner(ui.ctx()).is_some_and(|owner| owner == slider_drag_id);
 
-    if let (Some(origin), Some(position), true) = pointer {
-        if slider_drag_active {
-            // Once a horizontal slider drag has started it keeps ownership even
-            // if the finger moves vertically or leaves the original hit rect.
-            // This prevents the parent ScrollArea from waking up mid-drag.
-            lock_slider_scroll(ui.ctx(), slider_drag_id);
-            changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
-        } else if rect.contains(origin) {
-            let delta = position - origin;
-            let began_on_handle = handle_hit_rect.contains(origin);
-            let threshold = if began_on_handle {
-                HANDLE_DRAG_THRESHOLD
-            } else {
-                TRACK_DRAG_THRESHOLD
-            };
-            let horizontal_intent =
-                delta.x.abs() >= threshold && delta.x.abs() >= delta.y.abs() * 1.15;
-            if horizontal_intent {
-                slider_drag_active = true;
+    if !reset_requested {
+        if let (Some(origin), Some(position), true) = pointer {
+            if slider_drag_active {
+                // Once a horizontal slider drag has started it keeps ownership even
+                // if the finger moves vertically or leaves the original hit rect.
+                // This prevents the parent ScrollArea from waking up mid-drag.
                 lock_slider_scroll(ui.ctx(), slider_drag_id);
-                track_response.request_focus();
-                changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
+                changed |=
+                    set_from_pointer(value, start, end, decimals, track_rect, position.x);
+            } else if rect.contains(origin) {
+                let delta = position - origin;
+                let began_on_handle = handle_hit_rect.contains(origin);
+                let threshold = if began_on_handle {
+                    HANDLE_DRAG_THRESHOLD
+                } else {
+                    TRACK_DRAG_THRESHOLD
+                };
+                let horizontal_intent =
+                    delta.x.abs() >= threshold && delta.x.abs() >= delta.y.abs() * 1.15;
+                if horizontal_intent {
+                    slider_drag_active = true;
+                    lock_slider_scroll(ui.ctx(), slider_drag_id);
+                    track_response.request_focus();
+                    changed |=
+                        set_from_pointer(value, start, end, decimals, track_rect, position.x);
+                }
             }
         }
     }
@@ -277,11 +308,16 @@ where
     let combined = track_response
         .union(handle_response)
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-    if let Some(text) = hover_text {
-        combined.on_hover_text(text);
-    }
+    combined.on_hover_text(reset_tooltip(hover_text));
 
     changed
+}
+
+fn reset_tooltip(hover_text: Option<&str>) -> String {
+    match hover_text {
+        Some(text) => format!("{text}\nDouble-click to reset."),
+        None => "Double-click to reset.".to_owned(),
+    }
 }
 
 fn set_from_pointer<Num>(

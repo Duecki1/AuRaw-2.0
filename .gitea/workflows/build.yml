@@ -66,6 +66,8 @@ jobs:
             libgl1-mesa-dev \
             libjpeg-dev \
             liblcms2-dev \
+            liblensfun-dev \
+            liblensfun-data-v1 \
             libtool \
             libudev-dev \
             libwayland-dev \
@@ -127,6 +129,7 @@ jobs:
           fi
 
           test "$(pkg-config --modversion libraw)" = "0.22.1"
+          pkg-config --modversion lensfun
           REVISION="$(scripts/verify-source-revision.sh)"
           export AURAW_REQUIRE_COMMITTED_SOURCE=1
           export AURAW_SOURCE_REVISION="$REVISION"
@@ -136,6 +139,7 @@ jobs:
 
           ldd target/release/auraw | tee /tmp/auraw-ldd.txt
           grep -Eq 'libraw(_r)?\.so' /tmp/auraw-ldd.txt
+          grep -Eq 'liblensfun\.so' /tmp/auraw-ldd.txt
 
       - name: Package AppImage
         shell: bash
@@ -150,11 +154,19 @@ jobs:
           test -n "$VERSION"
 
           LIBRAW_SO="$(ldd target/release/auraw | awk '/libraw(_r)?\.so/{print $3; exit}')"
+          LENSFUN_SO="$(ldd target/release/auraw | awk '/liblensfun\.so/{print $3; exit}')"
           test -f "$LIBRAW_SO"
+          test -f "$LENSFUN_SO"
           echo "Bundling LibRaw from $LIBRAW_SO"
+          echo "Bundling Lensfun from $LENSFUN_SO"
+
+          LENSFUN_DB="$(find /usr/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
+          test -n "$LENSFUN_DB"
 
           rm -rf AppDir dist packaging squashfs-root
-          mkdir -p dist packaging
+          mkdir -p dist packaging AppDir/usr/share/auraw/lensfun
+          cp -a "$LENSFUN_DB"/. AppDir/usr/share/auraw/lensfun/
+          test -n "$(find AppDir/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
 
           cat > packaging/auraw.desktop <<'DESKTOP'
           [Desktop Entry]
@@ -218,11 +230,14 @@ jobs:
             --appdir AppDir \
             --executable "$PWD/target/release/auraw" \
             --library "$LIBRAW_SO" \
+            --library "$LENSFUN_SO" \
             --desktop-file "$PWD/packaging/auraw.desktop" \
             --icon-file "$PWD/packaging/auraw.png" \
             --output appimage
 
           test -n "$(find AppDir -name 'libraw*.so*' -print -quit)"
+          test -n "$(find AppDir -name 'liblensfun*.so*' -print -quit)"
+          test -n "$(find AppDir/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
 
           mv "$LDAI_OUTPUT" dist/
           chmod +x "dist/$LDAI_OUTPUT"
@@ -231,6 +246,8 @@ jobs:
           unset APPIMAGE_EXTRACT_AND_RUN
           "dist/$LDAI_OUTPUT" --appimage-extract >/dev/null
           test -n "$(find squashfs-root -name 'libraw*.so*' -print -quit)"
+          test -n "$(find squashfs-root -name 'liblensfun*.so*' -print -quit)"
+          test -n "$(find squashfs-root/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
           rm -rf squashfs-root
 
           sha256sum "dist/$LDAI_OUTPUT" > "dist/$LDAI_OUTPUT.sha256"

@@ -42,6 +42,7 @@ impl AurawApp {
         let onnx_runtime_sha256 = runtime_selection.map(|(_, sha256)| sha256);
         Self {
             current_path: None,
+            original_raw: None,
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
@@ -75,9 +76,11 @@ impl AurawApp {
             onnx_runtime_sha256,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
+            lens_correction: LensCorrectionState::default(),
             egui_ctx: ctx.clone(),
             target_exposure: exposure,
             pending_stage: None,
+            lens_correction_dirty: false,
             load_receiver: None,
             loading_label: None,
             export_receiver: None,
@@ -110,6 +113,7 @@ impl AurawApp {
         let exposure = ExposureParams::scene_referred_default();
         Self {
             current_path: None,
+            original_raw: None,
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
@@ -141,9 +145,11 @@ impl AurawApp {
             subject_mask_cache: None,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
+            lens_correction: LensCorrectionState::default(),
             egui_ctx: cc.egui_ctx.clone(),
             target_exposure: exposure,
             pending_stage: None,
+            lens_correction_dirty: false,
             load_receiver: None,
             loading_label: None,
             export_receiver: None,
@@ -260,6 +266,9 @@ impl AurawApp {
         self.subject_inferencing = false;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.pending_stage = None;
+        self.original_raw = None;
+        self.lens_correction = LensCorrectionState::default();
+        self.lens_correction_dirty = false;
         let source_path = (!delete_after_decode).then_some(path.clone());
         let repaint = self.egui_ctx.clone();
         let (sender, receiver) = mpsc::channel();
@@ -280,7 +289,37 @@ impl AurawApp {
                 }
 
                 let result = (|| {
-                    let full_raw = Arc::new(decoded.map_err(|error| format!("{error:#}"))?);
+                    let original_raw = Arc::new(decoded.map_err(|error| format!("{error:#}"))?);
+                    let mut lens_correction =
+                        LensCorrectionState::from_catalog(lensfun_catalog(&original_raw));
+                    let full_raw = if lens_correction.enabled {
+                        if let Some(selection) = lens_correction.selected_lens() {
+                            match apply_lensfun_correction(&original_raw, &selection) {
+                                Ok(corrected) => {
+                                    lens_correction.applied = true;
+                                    lens_correction.catalog.status = format!(
+                                        "Automatically applied {} from RAW metadata",
+                                        selection.label()
+                                    );
+                                    Arc::new(corrected)
+                                }
+                                Err(error) => {
+                                    lens_correction.enabled = false;
+                                    lens_correction.applied = false;
+                                    lens_correction.catalog.status = format!(
+                                        "Matched {}, but correction failed: {error:#}",
+                                        selection.label()
+                                    );
+                                    Arc::clone(&original_raw)
+                                }
+                            }
+                        } else {
+                            lens_correction.enabled = false;
+                            Arc::clone(&original_raw)
+                        }
+                    } else {
+                        Arc::clone(&original_raw)
+                    };
                     let preview_spec = ProxySpec::default();
                     let preview_raw =
                         if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
@@ -307,10 +346,12 @@ impl AurawApp {
                     Ok(LoadedPreview {
                         source_path,
                         label,
+                        original_raw,
                         full_raw,
                         preview_raw,
                         pipeline,
                         rendered_exposure: initial_exposure,
+                        lens_correction,
                     })
                 })();
 
@@ -397,9 +438,12 @@ impl AurawApp {
                 );
                 self.current_path = loaded.source_path;
                 self.current_label = Some(loaded.label.clone());
+                self.original_raw = Some(loaded.original_raw);
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
                 self.gpu_pipeline = Some(loaded.pipeline);
+                self.lens_correction = loaded.lens_correction;
+                self.lens_correction_dirty = false;
                 self.target_exposure = loaded.rendered_exposure;
                 self.pending_stage = affected_stage(&self.target_exposure, &self.exposure);
                 self.target_exposure = self.exposure;

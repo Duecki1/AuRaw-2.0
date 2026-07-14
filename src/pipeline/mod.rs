@@ -3,6 +3,7 @@ mod color_profile;
 mod export;
 mod gpu;
 mod masks;
+mod lensfun;
 mod processing;
 mod raw_loader;
 mod sigmoid;
@@ -20,6 +21,7 @@ pub use export::{
     MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub use gpu::{GpuParams, ProcessingQuality, RawGpuPipeline};
+pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
 pub use masks::{
     ellipse_outline_points, mask_atlas_edge, BrushDab, BrushMode, LocalAdjustments, LocalMask,
     MaskCombineMode, MaskComponent, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,

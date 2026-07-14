@@ -16,6 +16,7 @@ Install the build dependencies:
 ```sh
 sudo apt update
 sudo apt install build-essential pkg-config libclang-dev libraw-dev \
+  liblensfun-dev liblensfun-data-v1 \
   libasound2-dev libdbus-1-dev libegl1-mesa-dev libfontconfig1-dev \
   libgl1-mesa-dev libudev-dev libwayland-dev libx11-dev libxkbcommon-dev
 ```
@@ -59,6 +60,26 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 For additional Android setup details, see [ANDROID.md](ANDROID.md).
+
+## Lens corrections and control reset
+
+The **Adjustments > Optics** section uses Lensfun profiles to correct lens
+distortion, lateral chromatic aberration, and vignetting before the normal RAW
+processing stack. AuRaw reads the camera, lens, focal length, and aperture from
+the RAW metadata. When Lensfun finds one unambiguous lens profile, correction
+is enabled automatically while the RAW is opening. The Brand and Lens menus can
+be used to choose or override the profile, and the Enabled checkbox switches
+between corrected and original RAW geometry. Changing geometry clears local
+masks because their coordinates no longer refer to the same pixels.
+
+Desktop builds discover Lensfun through `pkg-config`. Packaged builds may ship a
+database beside the executable in `lensfun/` or under
+`share/auraw/lensfun/`; `AURAW_LENSFUN_DB` takes priority during database
+discovery. Builds without Lensfun keep the Optics section visible but disabled.
+Android currently builds without native Lensfun support.
+
+Double-click any adjustment slider, its label/value field, or a color wheel to
+restore the value captured when that control was first shown.
 
 ## Perceptual Color Mixer
 

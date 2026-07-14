@@ -76,6 +76,16 @@ pub struct LoadedRaw {
     pub height: u32,
     pub camera_make: String,
     pub camera_model: String,
+    /// Lens manufacturer reported by the RAW metadata, when available.
+    pub lens_make: String,
+    /// Lens model reported by the RAW metadata, when available.
+    pub lens_model: String,
+    /// Capture focal length in millimetres. Zero means unavailable.
+    pub focal_length: f32,
+    /// Capture aperture (f-number). Zero means unavailable.
+    pub aperture: f32,
+    /// Subject distance in metres. Zero means unavailable.
+    pub focus_distance: f32,
     pub cfa_kind: CfaKind,
     pub raw_pixels: Vec<u16>,
     pub color_indices: Vec<u8>,

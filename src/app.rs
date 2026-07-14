@@ -1,9 +1,9 @@
 use crate::ai_masks::{spawn_subject_mask, SubjectMaskEvent, BIREFNET_MODEL_BYTES};
 use crate::pipeline::{
-    affected_stage, build_proxy, load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent,
-    ExportMetadata, ExportSettings, ExposureParams, GpuParams, LoadedRaw, MaskImage, MaskKind,
-    MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
-    TileSpec, MAX_LOCAL_MASKS,
+    affected_stage, apply_lensfun_correction, build_proxy, lensfun_catalog, load_raw_file,
+    spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings, ExposureParams,
+    GpuParams, LensfunCatalog, LensfunLens, LoadedRaw, MaskImage, MaskKind, MaskRgbImage, MaskStack,
+    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, MAX_LOCAL_MASKS,
 };
 use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::layout::ScreenLayout;
@@ -43,6 +43,7 @@ pub enum AdjustmentSection {
     ColorGrading,
     Effects,
     ColorMixer,
+    Optics,
     AdvancedRendering,
     Raw,
 }
@@ -77,13 +78,75 @@ pub enum ColorGradeTab {
     Global,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LensCorrectionState {
+    pub enabled: bool,
+    pub applied: bool,
+    pub catalog: LensfunCatalog,
+    pub selected_maker: String,
+    pub selected_model: String,
+}
+
+impl LensCorrectionState {
+    fn from_catalog(catalog: LensfunCatalog) -> Self {
+        let selected = catalog.auto_match.clone();
+        Self {
+            enabled: catalog.available && selected.is_some(),
+            applied: false,
+            selected_maker: selected
+                .as_ref()
+                .map(|lens| lens.maker.clone())
+                .unwrap_or_default(),
+            selected_model: selected
+                .as_ref()
+                .map(|lens| lens.model.clone())
+                .unwrap_or_default(),
+            catalog,
+        }
+    }
+
+    pub(crate) fn selected_lens(&self) -> Option<LensfunLens> {
+        (!self.selected_model.trim().is_empty()).then(|| LensfunLens {
+            maker: self.selected_maker.clone(),
+            model: self.selected_model.clone(),
+        })
+    }
+
+    pub(crate) fn makers(&self) -> Vec<String> {
+        let mut makers = self
+            .catalog
+            .lenses
+            .iter()
+            .map(|lens| lens.maker.clone())
+            .collect::<Vec<_>>();
+        makers.sort_by_key(|maker| maker.to_lowercase());
+        makers.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        makers
+    }
+
+    pub(crate) fn models_for_maker(&self, maker: &str) -> Vec<String> {
+        let mut models = self
+            .catalog
+            .lenses
+            .iter()
+            .filter(|lens| lens.maker.eq_ignore_ascii_case(maker))
+            .map(|lens| lens.model.clone())
+            .collect::<Vec<_>>();
+        models.sort_by_key(|model| model.to_lowercase());
+        models.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        models
+    }
+}
+
 struct LoadedPreview {
     source_path: Option<PathBuf>,
     label: String,
+    original_raw: Arc<LoadedRaw>,
     full_raw: Arc<LoadedRaw>,
     preview_raw: Arc<LoadedRaw>,
     pipeline: RawGpuPipeline,
     rendered_exposure: ExposureParams,
+    lens_correction: LensCorrectionState,
 }
 
 enum LoadEvent {
@@ -127,6 +190,7 @@ pub(crate) enum MaskOverlayBlink {
 
 pub struct AurawApp {
     pub current_path: Option<PathBuf>,
+    pub(crate) original_raw: Option<Arc<LoadedRaw>>,
     pub loaded_raw: Option<Arc<LoadedRaw>>,
     pub preview_raw: Option<Arc<LoadedRaw>>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
@@ -164,10 +228,12 @@ pub struct AurawApp {
     /// Reveals low-level darktable/raw controls. The default Lightroom-like
     /// interface intentionally keeps these implementation details hidden.
     pub expert_mode: bool,
+    pub(crate) lens_correction: LensCorrectionState,
 
     egui_ctx: egui::Context,
     target_exposure: ExposureParams,
     pending_stage: Option<ProcessingStage>,
+    lens_correction_dirty: bool,
     load_receiver: Option<mpsc::Receiver<LoadEvent>>,
     loading_label: Option<String>,
     export_receiver: Option<mpsc::Receiver<ExportEvent>>,

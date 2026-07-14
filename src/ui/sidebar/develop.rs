@@ -1,4 +1,160 @@
 impl Sidebar {
+    fn show_optics(ui: &mut Ui, app: &mut AurawApp, foldable: bool) -> bool {
+        let mut rebuild = false;
+        let capture = app.original_raw.as_ref().map(|raw| {
+            let lens = match (raw.lens_make.trim(), raw.lens_model.trim()) {
+                ("", "") => "Not reported".to_owned(),
+                ("", model) => model.to_owned(),
+                (maker, "") => maker.to_owned(),
+                (maker, model) => format!("{maker} {model}"),
+            };
+            let focal = (raw.focal_length > 0.0).then(|| format!("{:.1} mm", raw.focal_length));
+            let aperture = (raw.aperture > 0.0).then(|| format!("f/{:.1}", raw.aperture));
+            (lens, focal, aperture)
+        });
+
+        Self::adjustment_section(ui, "Lens Corrections", false, foldable, |ui| {
+            ui.label(
+                egui::RichText::new("Lensfun profile correction for distortion, chromatic aberration, and vignetting")
+                    .size(11.5)
+                    .color(ui.visuals().weak_text_color()),
+            );
+
+            let state = &mut app.lens_correction;
+            let has_selection = state.selected_lens().is_some();
+            let enabled_response = ui.add_enabled(
+                state.catalog.available && has_selection,
+                egui::Checkbox::new(&mut state.enabled, "Enabled"),
+            );
+            if enabled_response.changed() {
+                rebuild = true;
+            }
+            if !state.catalog.available {
+                state.enabled = false;
+                state.applied = false;
+            }
+
+            ui.add_space(2.0);
+            egui::Grid::new("lens-correction-capture-metadata")
+                .num_columns(2)
+                .spacing(egui::vec2(10.0, 3.0))
+                .show(ui, |ui| {
+                    ui.label("Camera");
+                    ui.label(if state.catalog.camera_label.is_empty() {
+                        "Not matched"
+                    } else {
+                        state.catalog.camera_label.as_str()
+                    });
+                    ui.end_row();
+                    if let Some((lens, focal, aperture)) = &capture {
+                        ui.label("RAW lens");
+                        ui.label(lens);
+                        ui.end_row();
+                        if let Some(focal) = focal {
+                            ui.label("Focal length");
+                            ui.label(focal);
+                            ui.end_row();
+                        }
+                        if let Some(aperture) = aperture {
+                            ui.label("Aperture");
+                            ui.label(aperture);
+                            ui.end_row();
+                        }
+                    }
+                });
+
+            ui.add_space(4.0);
+            let makers = state.makers();
+            let previous_maker = state.selected_maker.clone();
+            ui.add_enabled_ui(state.catalog.available && !makers.is_empty(), |ui| {
+                ui.label("Brand");
+                egui::ComboBox::from_id_salt("lens-correction-brand")
+                    .selected_text(if state.selected_maker.is_empty() {
+                        if state.selected_model.is_empty() {
+                            "Select a brand"
+                        } else {
+                            "Unknown"
+                        }
+                    } else {
+                        state.selected_maker.as_str()
+                    })
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for maker in &makers {
+                            ui.selectable_value(
+                                &mut state.selected_maker,
+                                maker.clone(),
+                                if maker.is_empty() { "Unknown" } else { maker },
+                            );
+                        }
+                    });
+            });
+            let mut selection_changed = state.selected_maker != previous_maker;
+            if selection_changed {
+                let first_model = state
+                    .models_for_maker(&state.selected_maker)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                state.selected_model = first_model;
+            }
+
+            let models = state.models_for_maker(&state.selected_maker);
+            let previous_model = state.selected_model.clone();
+            ui.add_enabled_ui(state.catalog.available && !models.is_empty(), |ui| {
+                ui.label("Lens");
+                egui::ComboBox::from_id_salt("lens-correction-model")
+                    .selected_text(if state.selected_model.is_empty() {
+                        "Select a lens"
+                    } else {
+                        state.selected_model.as_str()
+                    })
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for model in &models {
+                            ui.selectable_value(
+                                &mut state.selected_model,
+                                model.clone(),
+                                model,
+                            );
+                        }
+                    });
+            });
+            selection_changed |= state.selected_model != previous_model;
+            if selection_changed {
+                state.applied = false;
+                if let Some(selection) = state.selected_lens() {
+                    state.catalog.status = if state.enabled {
+                        format!("Applying {}…", selection.label())
+                    } else {
+                        format!("Selected {}. Enable correction to apply it.", selection.label())
+                    };
+                }
+                if state.enabled {
+                    rebuild = true;
+                }
+            }
+
+            ui.add_space(4.0);
+            let status_color = if state.applied {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            let status = if state.catalog.status.is_empty() {
+                "Open a RAW file to inspect available lens profiles."
+            } else {
+                state.catalog.status.as_str()
+            };
+            ui.label(
+                egui::RichText::new(status)
+                    .size(11.5)
+                    .color(status_color),
+            );
+        });
+        rebuild
+    }
+
     fn show_basic(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Light", true, foldable, |ui| {

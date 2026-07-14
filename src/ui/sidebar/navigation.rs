@@ -72,6 +72,7 @@ impl Sidebar {
         ui.separator();
 
         let mut changed = false;
+        let mut lens_changed = false;
         if layout == ScreenLayout::Vertical {
             match app.adjustment_section {
                 AdjustmentSection::Light => {
@@ -107,6 +108,9 @@ impl Sidebar {
                 AdjustmentSection::ColorMixer => {
                     changed |= Self::show_hsl(ui, &mut app.exposure, false);
                 }
+                AdjustmentSection::Optics => {
+                    lens_changed |= Self::show_optics(ui, app, false);
+                }
                 AdjustmentSection::AdvancedRendering if app.expert_mode => {
                     changed |= Self::show_rendering(ui, &mut app.exposure, false);
                 }
@@ -132,6 +136,7 @@ impl Sidebar {
             );
             changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, true);
             changed |= Self::show_hsl(ui, &mut app.exposure, true);
+            lens_changed |= Self::show_optics(ui, app, true);
             if app.expert_mode {
                 changed |= Self::show_rendering(ui, &mut app.exposure, true);
                 changed |= Self::show_raw(ui, &mut app.exposure, true);
@@ -141,6 +146,9 @@ impl Sidebar {
         if changed {
             app.exposure.sanitize_tone_curves();
             app.mark_pipeline_dirty();
+        }
+        if lens_changed {
+            app.mark_lens_correction_dirty();
         }
     }
 
@@ -175,6 +183,7 @@ impl Sidebar {
                         (AdjustmentSection::ColorGrading, "Color Grading"),
                         (AdjustmentSection::Effects, "Effects"),
                         (AdjustmentSection::ColorMixer, "Color Mixer"),
+                        (AdjustmentSection::Optics, "Optics"),
                     ] {
                         ui.selectable_value(&mut app.adjustment_section, section, label);
                     }

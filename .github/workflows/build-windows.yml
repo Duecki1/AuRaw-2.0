@@ -80,6 +80,7 @@ jobs:
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-clang
             mingw-w64-x86_64-libraw
+            mingw-w64-x86_64-lensfun
 
       - name: Verify native dependencies
         run: |
@@ -90,6 +91,7 @@ jobs:
           cargo --version
           rustc --version
           pkg-config --modversion libraw || pkg-config --modversion libraw_r
+          pkg-config --modversion lensfun
           test -f /mingw64/bin/libclang.dll
 
       - name: Build release binaries
@@ -128,6 +130,12 @@ jobs:
           cp "$release_dir/auraw-regression-render.exe" "$package_dir/"
           cp COPYING THIRD_PARTY_NOTICES.md README.md "$package_dir/"
 
+          lensfun_db="$(find /mingw64/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
+          test -n "$lensfun_db"
+          mkdir -p "$package_dir/lensfun"
+          cp -a "$lensfun_db"/. "$package_dir/lensfun/"
+          test -n "$(find "$package_dir/lensfun" -name '*.xml' -print -quit)"
+
           # Copy every non-system MinGW DLL needed by the executables and their
           # dependent DLLs. The loop repeats because ldd may expose additional
           # transitive dependencies after each DLL is copied.
@@ -148,12 +156,14 @@ jobs:
           done
 
           libraw_version="$(pkg-config --modversion libraw 2>/dev/null || pkg-config --modversion libraw_r)"
+          lensfun_version="$(pkg-config --modversion lensfun)"
           {
             echo "AuRaw Windows x86_64 build"
             echo "Source revision: $(git rev-parse --verify HEAD)"
             echo "Rust compiler: $(rustc --version)"
             echo "Target: x86_64-pc-windows-gnu"
             echo "LibRaw: $libraw_version"
+            echo "Lensfun: $lensfun_version"
           } > "$package_dir/BUILD-INFO.txt"
 
           (cd dist && zip -9 -r "$package_name.zip" "$package_name")
