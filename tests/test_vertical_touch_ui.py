@@ -104,10 +104,18 @@ def test_mask_cards_and_rows_have_context_menus_for_management() -> None:
 
 
 def test_mask_creation_buttons_are_compact_ascii_plus_buttons() -> None:
-    assert SIDEBAR.count('ui.menu_button("+"') >= 2
+    assert SIDEBAR.count('egui::RichText::new("+")') >= 2
     assert 'ui.menu_button("＋"' not in SIDEBAR
     assert '"+\nCreate\nMask"' not in SIDEBAR
     assert '"+\nSub-mask"' not in SIDEBAR
+
+
+def test_mask_creation_buttons_are_thin_on_the_strip_axis() -> None:
+    assert "fn create_button_size" in SIDEBAR
+    assert "MaskStripOrientation::Horizontal => egui::vec2(THIN_EDGE, card.y)" in SIDEBAR
+    assert "MaskStripOrientation::Vertical => egui::vec2(card.x, THIN_EDGE)" in SIDEBAR
+    assert "MaskCardSize::Group.create_button_size(orientation)" in SIDEBAR
+    assert "MaskCardSize::Submask.create_button_size(orientation)" in SIDEBAR
 
 
 def test_mask_preview_updates_are_throttled_and_committed_on_release() -> None:
@@ -194,14 +202,24 @@ def test_horizontal_masks_use_the_portrait_editor_with_a_left_vertical_strip() -
     ]
 
 
-def test_horizontal_mask_sidebar_reuses_fixed_tabs_and_shared_details() -> None:
+def test_horizontal_mask_sidebar_hides_tabs_and_uses_collapsible_sections() -> None:
     show = SIDEBAR[SIDEBAR.index("pub fn show("):SIDEBAR.index("fn show_adjustments")]
-    assert "else if app.sidebar_tab == SidebarTab::Masks" in show
-    assert "Self::show_mask_tabs(ui, app);" in show
+    assert "else if app.sidebar_tab == SidebarTab::Masks" not in show
+    assert show.count("Self::show_vertical_section_tabs(ui, app);") == 1
 
     mask_body = SIDEBAR[
         SIDEBAR.index("fn show_masks("):SIDEBAR.index("pub(crate) fn show_vertical_mask_strip")
     ]
-    assert "Self::show_masks_vertical_details(ui, app, frame);" in mask_body
-    assert "MaskDragPayload" not in SIDEBAR
-    assert "dnd_set_drag_payload" not in mask_body
+    assert "ScreenLayout::Vertical => Self::show_masks_vertical_details" in mask_body
+    assert "ScreenLayout::Horizontal => Self::show_masks_horizontal_details" in mask_body
+
+    desktop_details = SIDEBAR[
+        SIDEBAR.index("fn show_masks_horizontal_details"):SIDEBAR.index(
+            "fn show_masks_vertical_details"
+        )
+    ]
+    assert 'Self::adjustment_section(ui, "Mask Properties", true, true' in desktop_details
+    assert 'ui.strong("Local Adjustments")' in desktop_details
+    for label in ("Light", "Tone Curve", "Color", "Color Grading", "Effects", "Color Mixer"):
+        assert f'"{label}"' in desktop_details
+    assert "show_mask_tabs" not in desktop_details

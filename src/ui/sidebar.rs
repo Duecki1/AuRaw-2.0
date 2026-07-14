@@ -47,6 +47,19 @@ impl MaskCardSize {
             Self::Submask => 8.5,
         }
     }
+
+    fn create_button_size(self, orientation: MaskStripOrientation) -> egui::Vec2 {
+        const THIN_EDGE: f32 = 26.0;
+        let card = self.card_size();
+        match orientation {
+            // Portrait: the strip runs left-to-right, so creation controls are
+            // narrow columns that keep the full card height.
+            MaskStripOrientation::Horizontal => egui::vec2(THIN_EDGE, card.y),
+            // Wider screens: the strip runs top-to-bottom, so creation controls
+            // become short rows that keep the full card width.
+            MaskStripOrientation::Vertical => egui::vec2(card.x, THIN_EDGE),
+        }
+    }
 }
 
 impl Sidebar {
@@ -87,10 +100,6 @@ impl Sidebar {
 
         if layout == ScreenLayout::Vertical {
             Self::show_vertical_section_tabs(ui, app);
-        } else if app.sidebar_tab == SidebarTab::Masks {
-            // Desktop masking now uses the same fixed section tabs and detail
-            // editor as portrait mode. Only the thumbnail strip changes axis.
-            Self::show_mask_tabs(ui, app);
         }
 
         let sidebar_scroll_source = if slider_scroll_locked(ui.ctx()) {
@@ -296,7 +305,7 @@ impl Sidebar {
     fn show_masks(
         ui: &mut Ui,
         app: &mut AurawApp,
-        _layout: ScreenLayout,
+        layout: ScreenLayout,
         frame: &eframe::Frame,
     ) {
         ui.heading("Masks");
@@ -311,10 +320,13 @@ impl Sidebar {
             return;
         }
 
-        // Both portrait and landscape layouts use one mask-properties and
-        // local-adjustments editor. The separate mask strip owns selection,
-        // creation, rename/enable/invert/delete, and thumbnail navigation.
-        Self::show_masks_vertical_details(ui, app, frame);
+        // Portrait keeps the compact fixed tabs. Wider screens expose all
+        // mask controls as normal collapsible sections, matching the desktop
+        // adjustment sidebar while the thumbnail strip remains beside it.
+        match layout {
+            ScreenLayout::Vertical => Self::show_masks_vertical_details(ui, app, frame),
+            ScreenLayout::Horizontal => Self::show_masks_horizontal_details(ui, app, frame),
+        }
     }
 
     pub(crate) fn show_vertical_mask_strip(
@@ -369,7 +381,7 @@ impl Sidebar {
         {
             let mut show_cards = |ui: &mut Ui| {
                 ui.add_enabled_ui(app.masks.masks.len() < MAX_LOCAL_MASKS, |ui| {
-                    Self::create_mask_group_card(ui, &mut new_mask);
+                    Self::create_mask_group_card(ui, &mut new_mask, orientation);
                 });
                 ui.add_space(2.0);
 
@@ -449,7 +461,7 @@ impl Sidebar {
                                 remove_component = Some((index, component_index));
                             }
                         }
-                        Self::create_submask_card(ui, &mut add_component);
+                        Self::create_submask_card(ui, &mut add_component, orientation);
                         ui.add_space(2.0);
                     }
                 }
@@ -645,35 +657,137 @@ impl Sidebar {
         }
     }
 
-    fn create_mask_group_card(ui: &mut Ui, new_mask: &mut Option<MaskKind>) {
-        ui.scope(|ui| {
-            ui.spacing_mut().interact_size = MaskCardSize::Group.card_size();
-            ui.menu_button("+", |ui| {
-                *new_mask = Self::mask_kind_menu(
-                    ui,
-                    "This mask type is planned but not implemented yet.",
-                );
-            })
-            .response
-            .on_hover_text("Create a new mask group");
-        });
+    fn create_mask_group_card(
+        ui: &mut Ui,
+        new_mask: &mut Option<MaskKind>,
+        orientation: MaskStripOrientation,
+    ) {
+        let size = MaskCardSize::Group.create_button_size(orientation);
+        ui.allocate_ui_with_layout(
+            size,
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            |ui| {
+                ui.spacing_mut().interact_size = size;
+                ui.menu_button(egui::RichText::new("+").size(20.0).strong(), |ui| {
+                    *new_mask = Self::mask_kind_menu(
+                        ui,
+                        "This mask type is planned but not implemented yet.",
+                    );
+                })
+                .response
+                .on_hover_text("Create a new mask group");
+            },
+        );
     }
 
     fn create_submask_card(
         ui: &mut Ui,
         add_component: &mut Option<(MaskKind, MaskCombineMode)>,
+        orientation: MaskStripOrientation,
     ) {
-        ui.scope(|ui| {
-            ui.spacing_mut().interact_size = MaskCardSize::Submask.card_size();
-            ui.menu_button("+", |ui| {
-                *add_component = Self::submask_creation_menu(
+        let size = MaskCardSize::Submask.create_button_size(orientation);
+        ui.allocate_ui_with_layout(
+            size,
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            |ui| {
+                ui.spacing_mut().interact_size = size;
+                ui.menu_button(egui::RichText::new("+").size(18.0).strong(), |ui| {
+                    *add_component = Self::submask_creation_menu(
+                        ui,
+                        "This sub-mask type is planned but not implemented yet.",
+                    );
+                })
+                .response
+                .on_hover_text("Add a sub-mask to the selected group");
+            },
+        );
+    }
+
+    fn show_masks_horizontal_details(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+        let Some(mask_index) = app.masks.selected_mask else {
+            return;
+        };
+        if mask_index >= app.masks.masks.len() {
+            return;
+        }
+
+        ui.label(
+            egui::RichText::new(app.masks.masks[mask_index].name.clone())
+                .strong()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.add_space(5.0);
+
+        let component_index = app
+            .masks
+            .selected_component
+            .unwrap_or(0)
+            .min(app.masks.masks[mask_index].components.len().saturating_sub(1));
+        app.masks.selected_component = Some(component_index);
+
+        let mut geometry_changed = false;
+        let mut adjustments_changed = false;
+        let mut request_subject = false;
+        let mut brush_mode = app.brush_mode;
+        let mut local_curve_tab = app.tone_curve_tab;
+        let mut local_color_grade_tab = app.color_grade_tab;
+
+        {
+            let mask = &mut app.masks.masks[mask_index];
+
+            Self::adjustment_section(ui, "Mask Properties", true, true, |ui| {
+                geometry_changed |= Self::show_vertical_mask_properties(
                     ui,
-                    "This sub-mask type is planned but not implemented yet.",
+                    mask,
+                    component_index,
+                    &mut brush_mode,
+                    &mut request_subject,
                 );
-            })
-            .response
-            .on_hover_text("Add a sub-mask to the selected group");
-        });
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.strong("Local Adjustments");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Reset adjustments").clicked() {
+                        mask.adjustments.reset();
+                        adjustments_changed = true;
+                    }
+                });
+            });
+
+            for (section, label, default_open) in [
+                (MaskSection::Light, "Light", true),
+                (MaskSection::ToneCurve, "Tone Curve", false),
+                (MaskSection::Color, "Color", false),
+                (MaskSection::ColorGrading, "Color Grading", false),
+                (MaskSection::Effects, "Effects", false),
+                (MaskSection::ColorMixer, "Color Mixer", false),
+            ] {
+                Self::adjustment_section(ui, label, default_open, true, |ui| {
+                    adjustments_changed |= Self::show_local_mask_adjustment_section(
+                        ui,
+                        &mut mask.adjustments,
+                        section,
+                        &mut local_curve_tab,
+                        &mut local_color_grade_tab,
+                    );
+                });
+            }
+        }
+
+        app.tone_curve_tab = local_curve_tab;
+        app.color_grade_tab = local_color_grade_tab;
+        app.brush_mode = brush_mode;
+        if request_subject {
+            app.request_subject_mask(frame);
+        }
+        if geometry_changed {
+            app.mark_mask_geometry_dirty(mask_index);
+        }
+        if adjustments_changed {
+            app.mark_mask_adjustments_dirty();
+        }
     }
 
     fn show_masks_vertical_details(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
