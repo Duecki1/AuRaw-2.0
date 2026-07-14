@@ -24,7 +24,7 @@ ring = "0.17.14"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }
 env_logger = "0.11"
-rfd = "0.15"
+rfd = "0.17"
 pollster = "0.4"
 # Exact RC pin: see DEPENDENCIES.md. Replace with stable 2.x when the required APIs are released.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-18"] }
