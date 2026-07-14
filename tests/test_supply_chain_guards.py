@@ -31,4 +31,27 @@ def test_verified_download_rejects_non_hex_digest_before_network_access() -> Non
         text=True,
     )
     assert result.returncode == 2
-    assert "invalid SHA-256" in result.stderr
+    assert "invalid checksum" in result.stderr
+
+
+def test_verified_download_accepts_sha512_digest_for_cached_file(tmp_path) -> None:
+    import hashlib
+
+    output = tmp_path / "cached-download"
+    output.write_bytes(b"verified payload")
+    digest = hashlib.sha512(output.read_bytes()).hexdigest()
+
+    result = subprocess.run(
+        [
+            "sh",
+            str(ROOT / "scripts/verified-download.sh"),
+            "https://example.invalid/file",
+            str(output),
+            f"sha512:{digest}",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "verified cached download" in result.stdout
