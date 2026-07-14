@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "scenes": [
+    "synthetic-bayer-multitarget",
+    "synthetic-xtrans-multitarget"
+  ],
+  "warmup_runs": 1,
+  "measured_runs": 3,
+  "budgets": {
+    "preview_p95_ms": 250,
+    "export_mp_per_second_min": 1.0,
+    "startup_shader_compile_p95_ms": 4000
+  },
+  "note": "Budgets are guardrails for a software-GPU CI smoke run; release hardware baselines belong in benchmark reports."
+}

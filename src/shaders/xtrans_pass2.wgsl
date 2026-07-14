@@ -3,7 +3,7 @@
 // as directional color differences. The ping-pong layout intentionally keeps
 // these operations separate from the homogeneity-selection stage.
 @group(0) @binding(5) var markesteijn_read_13: texture_2d<f32>;
-@group(0) @binding(6) var markesteijn_write_13: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(6) var markesteijn_write_13: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn mark13_load(pos: vec2<i32>) -> vec3<f32> {
     return textureLoad(markesteijn_read_13, clamp_pos(pos), 0).rgb;

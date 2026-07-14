@@ -1,11 +1,12 @@
+from tests.source_helpers import read_source_tree
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = (ROOT / "src/app.rs").read_text(encoding="utf-8")
+APP = read_source_tree(ROOT / "src/app.rs")
 BASIC = (ROOT / "src/pipeline/basicadj.rs").read_text(encoding="utf-8")
-SIDEBAR = (ROOT / "src/ui/sidebar.rs").read_text(encoding="utf-8")
+SIDEBAR = read_source_tree(ROOT / "src/ui/sidebar.rs")
 EDITOR = (ROOT / "src/ui/components/tone_curve_editor.rs").read_text(encoding="utf-8")
-GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+GPU = read_source_tree(ROOT / "src/pipeline/gpu.rs")
 COMMON = (ROOT / "src/shaders/common.wgsl").read_text(encoding="utf-8")
 TONEMAP = (ROOT / "src/shaders/tonemap.wgsl").read_text(encoding="utf-8")
 
@@ -31,7 +32,7 @@ def test_rgb_curve_uniforms_match_between_rust_and_wgsl() -> None:
             field = f"tone_curve_{channel}_{part}"
             assert f"{field}: [f32; 4]" in GPU
             assert f"{field}: vec4<f32>" in COMMON
-    assert "size_of::<super::GpuParams>(), 6944" in GPU
+    assert "size_of::<super::GpuParams>(), 6960" in GPU
 
 
 def test_channel_curves_use_monotone_scene_referred_processing() -> None:

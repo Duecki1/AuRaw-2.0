@@ -9,6 +9,21 @@ use eframe::{egui, egui_wgpu, wgpu};
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
+mod readback;
+mod resources;
+
+use readback::*;
+use resources::*;
+
+#[cfg(test)]
+mod tests;
+
+const GPU_PARAMS_ABI_VERSION: u32 = 1;
+const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 6_960;
+const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
+const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
+const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
+
 const SHADER_HIGHLIGHTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
@@ -282,8 +297,8 @@ pub struct GpuParams {
     tile_origin_y: i32,
     full_width: u32,
     full_height: u32,
-    _pad0: u32,
-    _pad1: u32,
+    abi_version: u32,
+    abi_size_bytes: u32,
     // Local half-open rectangle whose pixels contribute to a tiled export's
     // global histogram. Ordinary preview analysis uses the complete image.
     tone_histogram_bounds: [u32; 4],
@@ -292,6 +307,9 @@ pub struct GpuParams {
     profile_tone: [u32; 4],
     output_lut: [u32; 4],
     profile_flags: [u32; 4],
+    // Explicit processing-formula version. Future formula changes migrate this
+    // value deliberately rather than silently changing existing edits.
+    process_info: [u32; 4],
     // Local mask count followed by reserved values. Each fixed mask index maps
     // directly to one layer in the normalized R8 mask atlas.
     mask_counts: [u32; 4],
@@ -353,6 +371,15 @@ pub struct GpuParams {
     mask_grade_highlights: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_grade_global: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_grade_options: [[f32; 4]; MAX_LOCAL_MASKS],
+}
+
+const _: () = assert!(std::mem::size_of::<GpuParams>() == GPU_PARAMS_ABI_SIZE_BYTES as usize);
+
+fn split_eight(values: [f32; 8]) -> ([f32; 4], [f32; 4]) {
+    (
+        [values[0], values[1], values[2], values[3]],
+        [values[4], values[5], values[6], values[7]],
+    )
 }
 
 fn pack_color_grade_wheel(wheel: crate::pipeline::ColorGradeWheel) -> [f32; 4] {
@@ -461,12 +488,15 @@ impl GpuParams {
                 mask_curves_blue[index][sample / 4][sample % 4] =
                     evaluate_point_curve(&adjustment.tone_curve_blue, x);
             }
-            mask_hsl_hue_0[index] = adjustment.hsl_hue[..4].try_into().unwrap();
-            mask_hsl_hue_1[index] = adjustment.hsl_hue[4..].try_into().unwrap();
-            mask_hsl_saturation_0[index] = adjustment.hsl_saturation[..4].try_into().unwrap();
-            mask_hsl_saturation_1[index] = adjustment.hsl_saturation[4..].try_into().unwrap();
-            mask_hsl_luminance_0[index] = adjustment.hsl_luminance[..4].try_into().unwrap();
-            mask_hsl_luminance_1[index] = adjustment.hsl_luminance[4..].try_into().unwrap();
+            let (hue_0, hue_1) = split_eight(adjustment.hsl_hue);
+            let (saturation_0, saturation_1) = split_eight(adjustment.hsl_saturation);
+            let (luminance_0, luminance_1) = split_eight(adjustment.hsl_luminance);
+            mask_hsl_hue_0[index] = hue_0;
+            mask_hsl_hue_1[index] = hue_1;
+            mask_hsl_saturation_0[index] = saturation_0;
+            mask_hsl_saturation_1[index] = saturation_1;
+            mask_hsl_luminance_0[index] = luminance_0;
+            mask_hsl_luminance_1[index] = luminance_1;
             mask_grade_shadows[index] = pack_color_grade_wheel(adjustment.color_grading.shadows);
             mask_grade_midtones[index] = pack_color_grade_wheel(adjustment.color_grading.midtones);
             mask_grade_highlights[index] =
@@ -474,6 +504,10 @@ impl GpuParams {
             mask_grade_global[index] = pack_color_grade_wheel(adjustment.color_grading.global);
             mask_grade_options[index] = pack_color_grade_options(adjustment.color_grading);
         }
+        let (hsl_hue_0, hsl_hue_1) = split_eight(exposure.hsl_hue);
+        let (hsl_saturation_0, hsl_saturation_1) = split_eight(exposure.hsl_saturation);
+        let (hsl_luminance_0, hsl_luminance_1) = split_eight(exposure.hsl_luminance);
+
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
@@ -679,12 +713,12 @@ impl GpuParams {
                 0.0,
                 0.0,
             ],
-            hsl_hue_0: exposure.hsl_hue[..4].try_into().unwrap(),
-            hsl_hue_1: exposure.hsl_hue[4..].try_into().unwrap(),
-            hsl_saturation_0: exposure.hsl_saturation[..4].try_into().unwrap(),
-            hsl_saturation_1: exposure.hsl_saturation[4..].try_into().unwrap(),
-            hsl_luminance_0: exposure.hsl_luminance[..4].try_into().unwrap(),
-            hsl_luminance_1: exposure.hsl_luminance[4..].try_into().unwrap(),
+            hsl_hue_0,
+            hsl_hue_1,
+            hsl_saturation_0,
+            hsl_saturation_1,
+            hsl_luminance_0,
+            hsl_luminance_1,
             wb: raw.wb_coeffs,
             cam_to_srgb_0: camera_transform[0],
             cam_to_srgb_1: camera_transform[1],
@@ -697,14 +731,15 @@ impl GpuParams {
             tile_origin_y,
             full_width,
             full_height,
-            _pad0: 0,
-            _pad1: 0,
+            abi_version: GPU_PARAMS_ABI_VERSION,
+            abi_size_bytes: GPU_PARAMS_ABI_SIZE_BYTES,
             tone_histogram_bounds: [0, 0, raw.width, raw.height],
             profile_hue_sat: profile_layout.hue_sat,
             profile_look: profile_layout.look,
             profile_tone: profile_layout.tone,
             output_lut: profile_layout.output,
             profile_flags: profile_layout.flags,
+            process_info: [exposure.process_version, 0, 0, 0],
             mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
             mask_meta,
             mask_adjust_0,
@@ -770,6 +805,20 @@ impl GpuParams {
         ];
         self
     }
+
+    fn needs_guided_highlight_passes(&self) -> bool {
+        self.highlight_options[0] >= 1.5 && self.highlight_reconstruction > 1e-6
+    }
+
+    fn needs_intermediate_adjustment_passes(&self) -> bool {
+        let global_presence = self.presence[..3].iter().any(|value| value.abs() > 1e-6);
+        let creative = self.creative_effects[0].abs() > 1e-6 || self.vignette[0].abs() > 1e-6;
+        let local_count = (self.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
+        let local_presence = self.mask_adjust_2[..local_count]
+            .iter()
+            .any(|values| values[1..4].iter().any(|value| value.abs() > 1e-6));
+        global_presence || creative || local_presence
+    }
 }
 
 fn evaluate_point_curve(curve: &PointCurve, input: f32) -> f32 {
@@ -824,6 +873,15 @@ pub struct RawGpuPipeline {
     tone_prepare_pass_index: usize,
     tone_reduce_pass_index: usize,
     tone_stage_end: usize,
+    highlight_guided_start: usize,
+    highlight_guided_end: usize,
+    highlight_finalize_guided_index: usize,
+    highlight_finalize_direct_index: usize,
+    demosaic_start_index: usize,
+    adjustment_prepare_pass_index: usize,
+    adjustment_effects_pass_index: usize,
+    adjustment_creative_pass_index: usize,
+    adjustment_render_pass_index: usize,
     passes: Vec<Pass>,
     raw_texture: wgpu::Texture,
     color_texture: wgpu::Texture,
@@ -841,6 +899,7 @@ pub struct RawGpuPipeline {
     mask_texture: wgpu::Texture,
     mask_atlas_edge: u32,
     profile_buffer: wgpu::Buffer,
+    profile_buffer_size_bytes: u64,
     output_lut_offset_bytes: u64,
     out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
@@ -894,6 +953,7 @@ impl RawGpuPipeline {
         quality: ProcessingQuality,
     ) -> Result<Self> {
         validate_raw(raw)?;
+        validate_gpu_working_set(raw.width, raw.height, quality)?;
 
         let raw_texture = create_raw_texture(device, queue, raw);
         let color_texture = create_color_texture(device, queue, raw);
@@ -1057,6 +1117,15 @@ impl RawGpuPipeline {
 
         let default_output_transform = IccOutputTransform::srgb();
         let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
+        profile_gpu_data.validate()?;
+        let profile_buffer_size_bytes = u64::try_from(
+            profile_gpu_data
+                .words
+                .len()
+                .checked_mul(std::mem::size_of::<[f32; 4]>())
+                .ok_or_else(|| anyhow!("GPU profile buffer size overflows"))?,
+        )
+        .map_err(|_| anyhow!("GPU profile buffer size does not fit in u64"))?;
         let output_lut_offset_bytes =
             u64::from(profile_gpu_data.layout.output[3]) * std::mem::size_of::<[f32; 4]>() as u64;
         let profile_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1903,36 +1972,53 @@ impl RawGpuPipeline {
         let xtrans_p7 = work_shader_source(SHADER_XTRANS_P7, demosaic_format);
         let adjustments_shader = work_shader_source(SHADER_ADJUSTMENTS, work_format);
 
-        let make_pipeline =
-            |source: &str, entry: &str, bgl: &wgpu::BindGroupLayout| -> wgpu::ComputePipeline {
-                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(entry),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                });
-                let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some(&format!("pll_{}", entry)),
-                    bind_group_layouts: &[Some(bgl)],
-                    immediate_size: 0,
-                });
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pll),
-                    module: &shader,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    cache: None,
-                })
-            };
+        let create_shader = |label: &'static str, source: &str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+        // One module per WGSL source. Entry-point pipelines below share these
+        // modules instead of recompiling the same source for every pass.
+        let highlight_module = create_shader("auraw highlight module", highlight_shader.as_ref());
+        let bayer_rcd_p1_module = create_shader("auraw Bayer RCD pass 1", bayer_rcd_p1.as_ref());
+        let bayer_rcd_p2_module = create_shader("auraw Bayer RCD pass 2", bayer_rcd_p2.as_ref());
+        let bayer_rcd_p3_module = create_shader("auraw Bayer RCD pass 3", bayer_rcd_p3.as_ref());
+        let bayer_rcd_p4_module = create_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref());
+        let xtrans_p1_module = create_shader("auraw X-Trans pass 1", xtrans_p1.as_ref());
+        let xtrans_p2_module = create_shader("auraw X-Trans pass 2", xtrans_p2.as_ref());
+        let xtrans_p3_module = create_shader("auraw X-Trans pass 3", xtrans_p3.as_ref());
+        let xtrans_p4_module = create_shader("auraw X-Trans pass 4", xtrans_p4.as_ref());
+        let xtrans_p5_module = create_shader("auraw X-Trans pass 5", xtrans_p5.as_ref());
+        let xtrans_p6_module = create_shader("auraw X-Trans pass 6", xtrans_p6.as_ref());
+        let xtrans_p7_module = create_shader("auraw X-Trans pass 7", xtrans_p7.as_ref());
+        let tone_analysis_module = create_shader("auraw tone analysis", SHADER_TONE_ANALYSIS);
+        let adjustments_module = create_shader("auraw adjustments", adjustments_shader.as_ref());
 
-        let mut passes = Vec::with_capacity(1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 1 + 8 + 7);
+        let make_pipeline = |shader: &wgpu::ShaderModule,
+                             entry: &str,
+                             bgl: &wgpu::BindGroupLayout|
+         -> wgpu::ComputePipeline {
+            let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(&format!("pll_{}", entry)),
+                bind_group_layouts: &[Some(bgl)],
+                immediate_size: 0,
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pll),
+                module: shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+
+        let mut passes = Vec::with_capacity(1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + 8 + 7);
 
         // Prepare writes the initial RGB estimate and reliability into A.
         passes.push(Pass {
-            pipeline: make_pipeline(
-                highlight_shader.as_ref(),
-                "highlight_prepare",
-                &bgl_highlights,
-            ),
+            pipeline: make_pipeline(&highlight_module, "highlight_prepare", &bgl_highlights),
             bind_group: make_highlight_bind_group(
                 "bg highlight prepare",
                 &highlight_work_b_view,
@@ -1942,8 +2028,8 @@ impl RawGpuPipeline {
         });
 
         // The multiscale solver ping-pongs through every declared stage.
-        // Quality levels are handled inside each entry point, so all stages
-        // are dispatched and disabled ones copy read -> write unchanged.
+        // Guided passes are omitted entirely for Off/LCh/zero-strength edits.
+        let highlight_guided_start = passes.len();
         for (index, entry) in HIGHLIGHT_GUIDED_ENTRY_POINTS.iter().enumerate() {
             let (read_slot, write_slot) = highlight_stage_slots(index);
             debug_assert_ne!(read_slot, write_slot);
@@ -1957,14 +2043,16 @@ impl RawGpuPipeline {
             };
             let label = format!("bg {entry}");
             passes.push(Pass {
-                pipeline: make_pipeline(highlight_shader.as_ref(), entry, &bgl_highlights),
+                pipeline: make_pipeline(&highlight_module, entry, &bgl_highlights),
                 bind_group: make_highlight_bind_group(&label, read_view, write_view),
                 workgroups: image_workgroups,
             });
         }
 
-        // Prepare leaves the data in A. The final source is derived from the
-        // same parity helper used by the stage planner and covered by tests.
+        let highlight_guided_end = passes.len();
+
+        // Prepare leaves the data in A. The guided final source is derived from
+        // the same parity helper used by the stage planner and covered by tests.
         let final_read_slot = highlight_final_read_slot(HIGHLIGHT_GUIDED_ENTRY_POINTS.len());
         let final_write_slot = match final_read_slot {
             HighlightWorkSlot::A => HighlightWorkSlot::B,
@@ -1978,20 +2066,31 @@ impl RawGpuPipeline {
             HighlightWorkSlot::A => &highlight_work_a_view,
             HighlightWorkSlot::B => &highlight_work_b_view,
         };
+        let highlight_finalize_guided_index = passes.len();
         passes.push(Pass {
-            pipeline: make_pipeline(
-                highlight_shader.as_ref(),
-                "highlight_finalize",
-                &bgl_highlights,
-            ),
+            pipeline: make_pipeline(&highlight_module, "highlight_finalize", &bgl_highlights),
             bind_group: make_highlight_bind_group(
-                "bg highlight finalize",
+                "bg highlight finalize guided",
                 final_read_view,
                 final_write_view,
             ),
             workgroups: image_workgroups,
         });
 
+        // Off, LCh, and zero-strength guided modes finalize directly from the
+        // prepare texture. This avoids eleven full-frame copy dispatches.
+        let highlight_finalize_direct_index = passes.len();
+        passes.push(Pass {
+            pipeline: make_pipeline(&highlight_module, "highlight_finalize", &bgl_highlights),
+            bind_group: make_highlight_bind_group(
+                "bg highlight finalize direct",
+                &highlight_work_a_view,
+                &highlight_work_b_view,
+            ),
+            workgroups: image_workgroups,
+        });
+
+        let demosaic_start_index = passes.len();
         // Select the demosaic family from LibRaw's CFA classification.
         // Bayer uses the four-stage ratio-corrected reference path. Fuji
         // X-Trans seeds an RGB image, performs three green/chroma refinement
@@ -1999,50 +2098,50 @@ impl RawGpuPipeline {
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p1.as_ref(), "bayer_rcd_directional", &bgl1),
+                    pipeline: make_pipeline(&bayer_rcd_p1_module, "bayer_rcd_directional", &bgl1),
                     bind_group: bg1,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p2.as_ref(), "bayer_rcd_green", &bgl2),
+                    pipeline: make_pipeline(&bayer_rcd_p2_module, "bayer_rcd_green", &bgl2),
                     bind_group: bg2,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p3.as_ref(), "bayer_rcd_chroma", &bgl3),
+                    pipeline: make_pipeline(&bayer_rcd_p3_module, "bayer_rcd_chroma", &bgl3),
                     bind_group: bg3,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p4.as_ref(), "bayer_rcd_output", &bgl4),
+                    pipeline: make_pipeline(&bayer_rcd_p4_module, "bayer_rcd_output", &bgl4),
                     bind_group: bg4,
                     workgroups: image_workgroups,
                 },
             ]),
             CfaKind::XTrans => passes.extend([
                 Pass {
-                    pipeline: make_pipeline(xtrans_p1.as_ref(), "xtrans_seed", &bgl1),
+                    pipeline: make_pipeline(&xtrans_p1_module, "xtrans_seed", &bgl1),
                     bind_group: bg1,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p2.as_ref(), "xtrans_markesteijn_pass1", &bgl2),
+                    pipeline: make_pipeline(&xtrans_p2_module, "xtrans_markesteijn_pass1", &bgl2),
                     bind_group: bg2.clone(),
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p3.as_ref(), "xtrans_markesteijn_pass2", &bgl3),
+                    pipeline: make_pipeline(&xtrans_p3_module, "xtrans_markesteijn_pass2", &bgl3),
                     bind_group: bg3,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p2.as_ref(), "xtrans_markesteijn_pass3", &bgl2),
+                    pipeline: make_pipeline(&xtrans_p2_module, "xtrans_markesteijn_pass3", &bgl2),
                     bind_group: bg2,
                     workgroups: image_workgroups,
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        xtrans_p4.as_ref(),
+                        &xtrans_p4_module,
                         "xtrans_markesteijn_derivatives",
                         &bgl_xtrans_derivatives,
                     ),
@@ -2051,7 +2150,7 @@ impl RawGpuPipeline {
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        xtrans_p5.as_ref(),
+                        &xtrans_p5_module,
                         "xtrans_markesteijn_homogeneity",
                         &bgl_xtrans_homogeneity,
                     ),
@@ -2060,7 +2159,7 @@ impl RawGpuPipeline {
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        xtrans_p6.as_ref(),
+                        &xtrans_p6_module,
                         "xtrans_markesteijn_accumulate",
                         &bgl_xtrans_accumulate,
                     ),
@@ -2069,7 +2168,7 @@ impl RawGpuPipeline {
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        xtrans_p7.as_ref(),
+                        &xtrans_p7_module,
                         "xtrans_demosaic_finish",
                         &bgl_xtrans_finish,
                     ),
@@ -2088,7 +2187,7 @@ impl RawGpuPipeline {
         passes.extend([
             Pass {
                 pipeline: make_pipeline(
-                    SHADER_TONE_ANALYSIS,
+                    &tone_analysis_module,
                     "tone_guide_prepare",
                     &bgl_tone_prepare,
                 ),
@@ -2097,7 +2196,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    SHADER_TONE_ANALYSIS,
+                    &tone_analysis_module,
                     "tone_guide_horizontal",
                     &bgl_tone_blur,
                 ),
@@ -2106,7 +2205,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    SHADER_TONE_ANALYSIS,
+                    &tone_analysis_module,
                     "tone_guide_vertical",
                     &bgl_tone_blur,
                 ),
@@ -2115,7 +2214,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    SHADER_TONE_ANALYSIS,
+                    &tone_analysis_module,
                     "tone_reduce_histogram",
                     &bgl_tone_reduce,
                 ),
@@ -2126,11 +2225,15 @@ impl RawGpuPipeline {
 
         let tone_reduce_pass_index = tone_prepare_pass_index + 3;
         let tone_stage_end = passes.len();
+        let adjustment_prepare_pass_index = passes.len();
+        let adjustment_effects_pass_index = adjustment_prepare_pass_index + 1;
+        let adjustment_creative_pass_index = adjustment_prepare_pass_index + 2;
+        let adjustment_render_pass_index = adjustment_prepare_pass_index + 3;
 
         passes.extend([
             Pass {
                 pipeline: make_pipeline(
-                    adjustments_shader.as_ref(),
+                    &adjustments_module,
                     "prepare_adjustment_base",
                     &bgl_adjust_prepare,
                 ),
@@ -2139,7 +2242,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    adjustments_shader.as_ref(),
+                    &adjustments_module,
                     "apply_lightroom_effects",
                     &bgl_adjust_effects,
                 ),
@@ -2148,7 +2251,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    adjustments_shader.as_ref(),
+                    &adjustments_module,
                     "apply_creative_effects",
                     &bgl_adjust_creative,
                 ),
@@ -2157,7 +2260,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    adjustments_shader.as_ref(),
+                    &adjustments_module,
                     "apply_lightroom_adjustments",
                     &bgl_adjust_render,
                 ),
@@ -2180,6 +2283,15 @@ impl RawGpuPipeline {
             tone_prepare_pass_index,
             tone_reduce_pass_index,
             tone_stage_end,
+            highlight_guided_start,
+            highlight_guided_end,
+            highlight_finalize_guided_index,
+            highlight_finalize_direct_index,
+            demosaic_start_index,
+            adjustment_prepare_pass_index,
+            adjustment_effects_pass_index,
+            adjustment_creative_pass_index,
+            adjustment_render_pass_index,
             passes,
             raw_texture,
             color_texture,
@@ -2197,6 +2309,7 @@ impl RawGpuPipeline {
             mask_texture,
             mask_atlas_edge,
             profile_buffer,
+            profile_buffer_size_bytes,
             output_lut_offset_bytes,
             out_texture,
             _out_view: out_view,
@@ -2301,11 +2414,17 @@ impl RawGpuPipeline {
                 "output ICC LUT edge does not match the GPU profile layout"
             ));
         }
-        queue.write_buffer(
-            &self.profile_buffer,
-            self.output_lut_offset_bytes,
-            bytemuck::cast_slice(transform.entries()),
-        );
+        let bytes = bytemuck::cast_slice(transform.entries());
+        let end = self
+            .output_lut_offset_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| anyhow!("output ICC LUT buffer range overflows"))?;
+        if end > self.profile_buffer_size_bytes {
+            return Err(anyhow!(
+                "output ICC LUT would write past the validated GPU profile buffer"
+            ));
+        }
+        queue.write_buffer(&self.profile_buffer, self.output_lut_offset_bytes, bytes);
         Ok(())
     }
 
@@ -2318,7 +2437,13 @@ impl RawGpuPipeline {
             label: Some("auraw complete recompute encoder"),
         });
         encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
-        self.encode_pass_range(&mut encoder, 0, self.passes.len());
+        self.encode_raw_stage(&mut encoder, params);
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_stage_end,
+        );
+        self.encode_output_stage(&mut encoder, params);
         queue.submit(Some(encoder.finish()));
     }
 
@@ -2337,7 +2462,7 @@ impl RawGpuPipeline {
         });
 
         match stage {
-            ProcessingStage::Raw => self.encode_pass_range(&mut encoder, 0, self.raw_stage_end),
+            ProcessingStage::Raw => self.encode_raw_stage(&mut encoder, params),
             ProcessingStage::Tone => {
                 encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
                 self.encode_pass_range(
@@ -2346,9 +2471,7 @@ impl RawGpuPipeline {
                     self.tone_stage_end,
                 );
             }
-            ProcessingStage::Output => {
-                self.encode_pass_range(&mut encoder, self.tone_stage_end, self.passes.len());
-            }
+            ProcessingStage::Output => self.encode_output_stage(&mut encoder, params),
         }
 
         queue.submit(Some(encoder.finish()));
@@ -2424,7 +2547,7 @@ impl RawGpuPipeline {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw native-resolution export tone tile"),
         });
-        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        self.encode_raw_stage(&mut encoder, params);
         self.encode_pass_range(
             &mut encoder,
             self.tone_prepare_pass_index,
@@ -2460,13 +2583,13 @@ impl RawGpuPipeline {
             label: Some("auraw tiled export encoder"),
         });
 
-        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        self.encode_raw_stage(&mut encoder, params);
         self.encode_pass_range(
             &mut encoder,
             self.tone_prepare_pass_index,
             self.tone_reduce_pass_index,
         );
-        self.encode_pass_range(&mut encoder, self.tone_stage_end, self.passes.len());
+        self.encode_output_stage(&mut encoder, params);
         queue.submit(Some(encoder.finish()));
     }
 
@@ -2724,7 +2847,7 @@ impl RawGpuPipeline {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw regression scene encoder"),
         });
-        self.encode_pass_range(&mut encoder, 0, self.raw_stage_end);
+        self.encode_raw_stage(&mut encoder, params);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("auraw regression scene conversion"),
@@ -2753,1380 +2876,44 @@ impl RawGpuPipeline {
         )
     }
 
+    fn encode_raw_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
+        self.encode_pass(encoder, 0);
+        if params.needs_guided_highlight_passes() {
+            self.encode_pass_range(
+                encoder,
+                self.highlight_guided_start,
+                self.highlight_guided_end,
+            );
+            self.encode_pass(encoder, self.highlight_finalize_guided_index);
+        } else {
+            self.encode_pass(encoder, self.highlight_finalize_direct_index);
+        }
+        self.encode_pass_range(encoder, self.demosaic_start_index, self.raw_stage_end);
+    }
+
+    fn encode_output_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
+        self.encode_pass(encoder, self.adjustment_prepare_pass_index);
+        if params.needs_intermediate_adjustment_passes() {
+            self.encode_pass(encoder, self.adjustment_effects_pass_index);
+            self.encode_pass(encoder, self.adjustment_creative_pass_index);
+        }
+        self.encode_pass(encoder, self.adjustment_render_pass_index);
+    }
+
+    fn encode_pass(&self, encoder: &mut wgpu::CommandEncoder, index: usize) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(&format!("auraw pass {}", index + 1)),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.passes[index].pipeline);
+        pass.set_bind_group(0, &self.passes[index].bind_group, &[]);
+        let workgroups = self.passes[index].workgroups;
+        pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
+    }
+
     fn encode_pass_range(&self, encoder: &mut wgpu::CommandEncoder, start: usize, end: usize) {
-        for i in start..end {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(&format!("auraw pass {}", i + 1)),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.passes[i].pipeline);
-            pass.set_bind_group(0, &self.passes[i].bind_group, &[]);
-            let workgroups = self.passes[i].workgroups;
-            pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
-        }
-    }
-}
-
-fn read_rgba32_texture_region_rgb_blocking(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    texture_width: u32,
-    texture_height: u32,
-    label: &'static str,
-) -> Result<Vec<f32>> {
-    let right = x
-        .checked_add(width)
-        .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
-    let bottom = y
-        .checked_add(height)
-        .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
-    if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
-        return Err(anyhow!("invalid GPU RGBA32F readback rectangle"));
-    }
-
-    let (readback, padded_bytes_per_row) =
-        create_rgba32_readback_buffer(device, width, height, label);
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d { x, y, z: 0 },
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bytes_per_row),
-                rows_per_image: Some(height),
-            },
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    let submission = queue.submit(Some(encoder.finish()));
-    map_rgba32_readback_rgb(
-        device,
-        &readback,
-        submission,
-        width,
-        height,
-        padded_bytes_per_row,
-    )
-}
-
-fn read_rgba32_texture_rgb_blocking(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    width: u32,
-    height: u32,
-    label: &'static str,
-) -> Result<Vec<f32>> {
-    let (readback, padded_bytes_per_row) =
-        create_rgba32_readback_buffer(device, width, height, label);
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-    encode_rgba32_texture_copy(
-        &mut encoder,
-        texture,
-        &readback,
-        width,
-        height,
-        padded_bytes_per_row,
-    );
-    let submission = queue.submit(Some(encoder.finish()));
-    map_rgba32_readback_rgb(
-        device,
-        &readback,
-        submission,
-        width,
-        height,
-        padded_bytes_per_row,
-    )
-}
-
-fn create_rgba32_readback_buffer(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-    label: &'static str,
-) -> (wgpu::Buffer, u32) {
-    let unpadded_bytes_per_row = width * 16;
-    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size: u64::from(padded_bytes_per_row) * u64::from(height),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    (buffer, padded_bytes_per_row)
-}
-
-fn encode_rgba32_texture_copy(
-    encoder: &mut wgpu::CommandEncoder,
-    texture: &wgpu::Texture,
-    readback: &wgpu::Buffer,
-    width: u32,
-    height: u32,
-    padded_bytes_per_row: u32,
-) {
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bytes_per_row),
-                rows_per_image: Some(height),
-            },
-        },
-        texture_size(width, height),
-    );
-}
-
-fn map_rgba32_readback_rgb(
-    device: &wgpu::Device,
-    readback: &wgpu::Buffer,
-    submission: wgpu::SubmissionIndex,
-    width: u32,
-    height: u32,
-    padded_bytes_per_row: u32,
-) -> Result<Vec<f32>> {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    readback.map_async(wgpu::MapMode::Read, .., move |result| {
-        let _ = sender.send(result);
-    });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: None,
-        })
-        .map_err(|error| anyhow!("GPU poll failed during scene readback: {error}"))?;
-    receiver
-        .recv()
-        .map_err(|_| anyhow!("GPU scene readback callback was dropped"))?
-        .map_err(|error| anyhow!("GPU scene readback mapping failed: {error}"))?;
-
-    let mapped = readback.get_mapped_range(..);
-    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-    for row in 0..height as usize {
-        let row_start = row * padded_bytes_per_row as usize;
-        for column in 0..width as usize {
-            let pixel_start = row_start + column * 16;
-            for channel in 0..3 {
-                let offset = pixel_start + channel * 4;
-                let bytes: [u8; 4] = mapped[offset..offset + 4]
-                    .try_into()
-                    .expect("RGBA32Float texel is four aligned f32 values");
-                rgb.push(f32::from_le_bytes(bytes));
-            }
-        }
-    }
-    drop(mapped);
-    readback.unmap();
-    if rgb.iter().any(|value| !value.is_finite()) {
-        return Err(anyhow!("scene texture readback contains NaN or infinity"));
-    }
-    Ok(rgb)
-}
-
-fn tone_analysis_scale() -> u32 {
-    if cfg!(target_os = "android") {
-        8
-    } else {
-        4
-    }
-}
-
-fn tone_guide_format() -> wgpu::TextureFormat {
-    // The guide is reduced-resolution, so R32Float costs little even on
-    // Android and avoids optional R16Float storage-texture support.
-    wgpu::TextureFormat::R32Float
-}
-
-fn default_processing_quality() -> ProcessingQuality {
-    if cfg!(target_os = "android") {
-        ProcessingQuality::Preview
-    } else {
-        ProcessingQuality::High
-    }
-}
-
-fn processing_work_format(quality: ProcessingQuality) -> wgpu::TextureFormat {
-    match quality {
-        ProcessingQuality::Preview => wgpu::TextureFormat::Rgba16Float,
-        ProcessingQuality::High => wgpu::TextureFormat::Rgba32Float,
-    }
-}
-
-fn work_shader_source(source: &str, format: wgpu::TextureFormat) -> Cow<'_, str> {
-    match format {
-        wgpu::TextureFormat::Rgba16Float => Cow::Borrowed(source),
-        wgpu::TextureFormat::Rgba32Float => {
-            Cow::Owned(source.replace("rgba16float", "rgba32float"))
-        }
-        _ => unreachable!("unsupported AuRaw work texture format: {format:?}"),
-    }
-}
-
-fn create_demosaic_texture(
-    device: &wgpu::Device,
-    size: wgpu::Extent3d,
-    format: wgpu::TextureFormat,
-    label: &'static str,
-) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::STORAGE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[format],
-    })
-}
-
-fn create_tone_guide_texture(
-    device: &wgpu::Device,
-    size: wgpu::Extent3d,
-    format: wgpu::TextureFormat,
-    label: &'static str,
-) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-        view_formats: &[format],
-    })
-}
-
-fn create_float_work_texture(
-    device: &wgpu::Device,
-    size: wgpu::Extent3d,
-    format: wgpu::TextureFormat,
-    label: &'static str,
-) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-        view_formats: &[format],
-    })
-}
-
-fn buffer_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-fn storage_buffer_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-fn storage_texture_entry(
-    binding: u32,
-    format: wgpu::TextureFormat,
-    access: wgpu::StorageTextureAccess,
-) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::StorageTexture {
-            access,
-            format,
-            view_dimension: wgpu::TextureViewDimension::D2,
-        },
-        count: None,
-    }
-}
-
-fn validate_raw(raw: &LoadedRaw) -> Result<()> {
-    let pixels = super::raw_loader::validate_raw_dimensions(raw.width, raw.height)?;
-    if raw.raw_pixels.len() != pixels {
-        return Err(anyhow!(
-            "raw pixel count mismatch: got {}, expected {}",
-            raw.raw_pixels.len(),
-            pixels
-        ));
-    }
-    if raw.color_indices.len() != pixels {
-        return Err(anyhow!(
-            "CFA index count mismatch: got {}, expected {}",
-            raw.color_indices.len(),
-            pixels
-        ));
-    }
-    if raw.black_levels_per_pixel.len() != pixels {
-        return Err(anyhow!(
-            "black-level map count mismatch: got {}, expected {}",
-            raw.black_levels_per_pixel.len(),
-            pixels
-        ));
-    }
-    if raw.color_indices.iter().any(|channel| *channel > 3) {
-        return Err(anyhow!("CFA index map contains a channel above 3"));
-    }
-    if raw
-        .wb_coeffs
-        .iter()
-        .any(|value| !value.is_finite() || *value <= 0.0)
-    {
-        return Err(anyhow!(
-            "white-balance coefficients must be finite and positive"
-        ));
-    }
-    if raw
-        .cam_to_srgb
-        .iter()
-        .flatten()
-        .any(|value| !value.is_finite())
-    {
-        return Err(anyhow!(
-            "camera-to-working matrix contains a non-finite value"
-        ));
-    }
-    if raw
-        .cam_to_srgb
-        .iter()
-        .flatten()
-        .all(|value| value.abs() <= 1e-12)
-    {
-        return Err(anyhow!("camera-to-working matrix is empty"));
-    }
-    if raw.black_levels.iter().any(|value| !value.is_finite())
-        || raw.white_levels.iter().any(|value| !value.is_finite())
-    {
-        return Err(anyhow!(
-            "black/white calibration contains a non-finite value"
-        ));
-    }
-
-    for (index, (&black, &channel)) in raw
-        .black_levels_per_pixel
-        .iter()
-        .zip(&raw.color_indices)
-        .enumerate()
-    {
-        let white = raw.white_levels[channel as usize];
-        if !black.is_finite() || white <= black {
-            return Err(anyhow!(
-                "invalid black/white range at pixel {index}: black={black}, white={white}"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn texture_array_entry(
-    binding: u32,
-    sample_type: wgpu::TextureSampleType,
-) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Texture {
-            sample_type,
-            view_dimension: wgpu::TextureViewDimension::D2Array,
-            multisampled: false,
-        },
-        count: None,
-    }
-}
-
-fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-        count: None,
-    }
-}
-
-fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Texture {
-            sample_type,
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    }
-}
-
-fn create_raw_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    raw: &LoadedRaw,
-) -> wgpu::Texture {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("auraw raw mosaic"),
-        size: texture_size(raw.width, raw.height),
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R16Uint,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[wgpu::TextureFormat::R16Uint],
-    });
-    queue.write_texture(
-        copy_texture(&texture),
-        bytemuck::cast_slice(&raw.raw_pixels),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(raw.width * 2),
-            rows_per_image: Some(raw.height),
-        },
-        texture_size(raw.width, raw.height),
-    );
-    texture
-}
-
-fn create_black_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    raw: &LoadedRaw,
-) -> wgpu::Texture {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("auraw per-pixel black levels"),
-        size: texture_size(raw.width, raw.height),
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R32Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[wgpu::TextureFormat::R32Float],
-    });
-    queue.write_texture(
-        copy_texture(&texture),
-        bytemuck::cast_slice(&raw.black_levels_per_pixel),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(raw.width * 4),
-            rows_per_image: Some(raw.height),
-        },
-        texture_size(raw.width, raw.height),
-    );
-    texture
-}
-
-fn create_color_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    raw: &LoadedRaw,
-) -> wgpu::Texture {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("auraw CFA color indices"),
-        size: texture_size(raw.width, raw.height),
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R8Uint,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[wgpu::TextureFormat::R8Uint],
-    });
-    queue.write_texture(
-        copy_texture(&texture),
-        &raw.color_indices,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(raw.width),
-            rows_per_image: Some(raw.height),
-        },
-        texture_size(raw.width, raw.height),
-    );
-    texture
-}
-
-fn copy_texture(texture: &wgpu::Texture) -> wgpu::TexelCopyTextureInfo<'_> {
-    wgpu::TexelCopyTextureInfo {
-        texture,
-        mip_level: 0,
-        origin: wgpu::Origin3d::ZERO,
-        aspect: wgpu::TextureAspect::All,
-    }
-}
-
-fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
-    wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        highlight_final_read_slot, highlight_stage_slots, processing_work_format,
-        work_shader_source, HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS,
-        SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
-        SHADER_BAYER_RCD_P4, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
-        SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5,
-        SHADER_XTRANS_P6, SHADER_XTRANS_P7,
-    };
-
-    #[test]
-    fn compute_shaders_parse_and_validate() {
-        for (name, source) in [
-            ("highlight reconstruction", SHADER_HIGHLIGHTS),
-            ("Bayer RCD pass 1", SHADER_BAYER_RCD_P1),
-            ("Bayer RCD pass 2", SHADER_BAYER_RCD_P2),
-            ("Bayer RCD pass 3", SHADER_BAYER_RCD_P3),
-            ("Bayer RCD pass 4", SHADER_BAYER_RCD_P4),
-            ("X-Trans pass 1", SHADER_XTRANS_P1),
-            ("X-Trans pass 2", SHADER_XTRANS_P2),
-            ("X-Trans pass 3", SHADER_XTRANS_P3),
-            ("X-Trans derivatives", SHADER_XTRANS_P4),
-            ("X-Trans homogeneity", SHADER_XTRANS_P5),
-            ("X-Trans accumulation", SHADER_XTRANS_P6),
-            ("X-Trans finish", SHADER_XTRANS_P7),
-            ("adaptive tone analysis", SHADER_TONE_ANALYSIS),
-            ("regression scene export", SHADER_REGRESSION_SCENE),
-            ("Lightroom adjustments", SHADER_ADJUSTMENTS),
-        ] {
-            let module = naga::front::wgsl::parse_str(source)
-                .unwrap_or_else(|error| panic!("{name} did not parse: {error}"));
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
-        }
-    }
-
-    #[test]
-    fn high_quality_shader_variants_parse_and_use_full_float_storage() {
-        for (name, source) in [
-            (
-                "32-bit highlight reconstruction",
-                work_shader_source(
-                    SHADER_HIGHLIGHTS,
-                    processing_work_format(ProcessingQuality::High),
-                ),
-            ),
-            (
-                "32-bit Bayer pass 1",
-                work_shader_source(
-                    SHADER_BAYER_RCD_P1,
-                    processing_work_format(ProcessingQuality::High),
-                ),
-            ),
-            (
-                "32-bit perceptual color mixer",
-                work_shader_source(
-                    SHADER_ADJUSTMENTS,
-                    processing_work_format(ProcessingQuality::High),
-                ),
-            ),
-        ] {
-            assert!(!source.contains("rgba16float"));
-            assert!(source.contains("rgba32float"));
-            let module = naga::front::wgsl::parse_str(source.as_ref())
-                .unwrap_or_else(|error| panic!("{name} did not parse: {error}"));
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
-        }
-    }
-
-    #[test]
-    fn highlight_ping_pong_plan_is_contiguous_and_finishes_on_expected_slot() {
-        let mut current = HighlightWorkSlot::A;
-        for index in 0..HIGHLIGHT_GUIDED_ENTRY_POINTS.len() {
-            let (read, write) = highlight_stage_slots(index);
-            assert_eq!(read, current, "stage {index} reads the wrong work texture");
-            assert_ne!(read, write, "stage {index} aliases its input and output");
-            current = write;
-        }
-        assert_eq!(
-            current,
-            highlight_final_read_slot(HIGHLIGHT_GUIDED_ENTRY_POINTS.len())
-        );
-        assert_eq!(current, HighlightWorkSlot::B);
-    }
-
-    #[test]
-    fn highlight_shader_exposes_every_dispatched_entry_point() {
-        let module = naga::front::wgsl::parse_str(SHADER_HIGHLIGHTS)
-            .expect("highlight shader did not parse");
-
-        let expected_entry_points = std::iter::once("highlight_prepare")
-            .chain(HIGHLIGHT_GUIDED_ENTRY_POINTS.iter().copied())
-            .chain(std::iter::once("highlight_finalize"));
-
-        for expected in expected_entry_points {
-            assert!(
-                module
-                    .entry_points
-                    .iter()
-                    .any(|entry| entry.name == expected),
-                "highlight shader is missing entry point {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn guided_highlight_strength_is_one_continuous_final_blend() {
-        assert!(
-            SHADER_HIGHLIGHTS.contains("output = mix(original, guided, clip_amount * strength)")
-        );
-        assert!(!SHADER_HIGHLIGHTS.contains("0.35 + 0.65 * strength"));
-        assert!(!SHADER_HIGHLIGHTS.contains("output = guided;"));
-    }
-
-    #[test]
-    fn demosaic_reference_invariants_are_present() {
-        assert!(SHADER_BAYER_RCD_P4.contains("const RCD_MARGIN: i32 = 9"));
-        assert!(SHADER_BAYER_RCD_P4.contains("ppg_rgb_at"));
-        assert!(SHADER_BAYER_RCD_P2.contains("green = mix(vertical.x, horizontal.x, vh)"));
-        assert!(SHADER_BAYER_RCD_P3.contains("return mix(p_est, q_est, pq)"));
-
-        assert!(SHADER_XTRANS_P6.contains("index < 8u"));
-        assert!(SHADER_XTRANS_P5.contains("minimum * 8.0"));
-        assert!(SHADER_XTRANS_P6.contains("mark_homo_sum5"));
-        assert!(SHADER_XTRANS_P6.contains("index + 4u"));
-        assert!(SHADER_XTRANS_P6.contains("MARKESTEIJN3_MARGIN"));
-
-        assert!(SHADER_BAYER_RCD_P4.contains("for (var dy = -6; dy <= 6"));
-        assert!(SHADER_XTRANS_P7.contains("for (var dy = -6; dy <= 6"));
-        assert!(SHADER_BAYER_RCD_P4.contains("detail /= 256.0"));
-        assert!(SHADER_XTRANS_P7.contains("detail /= 256.0"));
-    }
-
-    #[test]
-    fn demosaic_shaders_expose_every_dispatched_entry_point() {
-        for (source, expected) in [
-            (SHADER_BAYER_RCD_P1, "bayer_rcd_directional"),
-            (SHADER_BAYER_RCD_P2, "bayer_rcd_green"),
-            (SHADER_BAYER_RCD_P3, "bayer_rcd_chroma"),
-            (SHADER_BAYER_RCD_P4, "bayer_rcd_output"),
-            (SHADER_XTRANS_P1, "xtrans_seed"),
-            (SHADER_XTRANS_P2, "xtrans_markesteijn_pass1"),
-            (SHADER_XTRANS_P2, "xtrans_markesteijn_pass3"),
-            (SHADER_XTRANS_P3, "xtrans_markesteijn_pass2"),
-            (SHADER_XTRANS_P4, "xtrans_markesteijn_derivatives"),
-            (SHADER_XTRANS_P5, "xtrans_markesteijn_homogeneity"),
-            (SHADER_XTRANS_P6, "xtrans_markesteijn_accumulate"),
-            (SHADER_XTRANS_P7, "xtrans_demosaic_finish"),
-        ] {
-            let module =
-                naga::front::wgsl::parse_str(source).expect("demosaic shader did not parse");
-            assert!(
-                module
-                    .entry_points
-                    .iter()
-                    .any(|entry| entry.name == expected),
-                "demosaic shader is missing entry point {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn tone_analysis_shader_exposes_every_dispatched_entry_point() {
-        let module = naga::front::wgsl::parse_str(SHADER_TONE_ANALYSIS)
-            .expect("adaptive tone-analysis shader did not parse");
-
-        for expected in [
-            "tone_guide_prepare",
-            "tone_guide_horizontal",
-            "tone_guide_vertical",
-            "tone_reduce_histogram",
-        ] {
-            assert!(
-                module
-                    .entry_points
-                    .iter()
-                    .any(|entry| entry.name == expected),
-                "tone-analysis shader is missing entry point {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn gpu_params_follow_the_wgsl_uniform_layout() {
-        // Sixteen scalar values keep the stable 64-byte prefix. The two
-        // darktable sigmoid vec4s follow the local-tone controls, then the
-        // remaining adjustment, camera/raw, dimension and profile blocks.
-        assert_eq!(std::mem::size_of::<super::GpuParams>(), 6944);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, creative_effects),
-            128
-        );
-        assert_eq!(std::mem::offset_of!(super::GpuParams, vignette), 144);
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, vignette_options),
-            160
-        );
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, highlight_options),
-            176
-        );
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 192);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 256);
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, tone_curve_red_0),
-            272
-        );
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, tone_curve_green_0),
-            352
-        );
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, tone_curve_blue_0),
-            432
-        );
-        assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 608);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, width), 704);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 712);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 720);
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, tone_histogram_bounds),
-            736
-        );
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 752);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 816);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 832);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 848);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 976);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1104);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1232);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1360);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2256);
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, mask_curve_red_0),
-            2384
-        );
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, mask_curve_green_0),
-            3408
-        );
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
-            4432
-        );
-        assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5456);
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
-            6096
-        );
-        assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 6224);
-        assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 6288);
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, mask_grade_shadows),
-            6304
-        );
-        assert_eq!(
-            std::mem::offset_of!(super::GpuParams, mask_grade_options),
-            6816
-        );
-    }
-
-    #[test]
-    fn adjustments_shader_contains_darktable_sigmoid_paths() {
-        assert!(SHADER_ADJUSTMENTS.contains("generalized_loglogistic_sigmoid"));
-        assert!(SHADER_ADJUSTMENTS.contains("preserve_hue_and_energy"));
-        assert!(SHADER_ADJUSTMENTS.contains("sigmoid_rgb_ratio"));
-        assert!(SHADER_ADJUSTMENTS.contains("hyperbolic_chroma"));
-    }
-
-    #[test]
-    fn adjustments_shader_contains_lightroom_style_controls() {
-        assert!(!SHADER_ADJUSTMENTS.contains("apply_camera_temperature_tint"));
-        assert!(SHADER_ADJUSTMENTS.contains("bitcast<f32>(params.profile_flags.w)"));
-        assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast"));
-        assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
-        assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
-        assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
-        assert!(SHADER_ADJUSTMENTS.contains("prepare_adjustment_base"));
-        assert!(SHADER_ADJUSTMENTS.contains("apply_lightroom_effects"));
-        assert!(SHADER_ADJUSTMENTS.contains("apply_creative_effects"));
-        assert!(SHADER_ADJUSTMENTS.contains("apply_glow"));
-        assert!(SHADER_ADJUSTMENTS.contains("apply_vignette"));
-        assert!(SHADER_ADJUSTMENTS.contains("stabilized_mixer_sample"));
-        assert!(SHADER_ADJUSTMENTS.contains("positive_rec2020_from_oklab"));
-        assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));
-        assert!(SHADER_ADJUSTMENTS.contains("apply_color_grading_wheels"));
-        assert!(SHADER_ADJUSTMENTS.contains("color_grade_tonal_weights"));
-        assert!(SHADER_ADJUSTMENTS.contains("apply_local_color_grading"));
-        assert!(!SHADER_ADJUSTMENTS.contains("rgb_to_hsl"));
-        assert!(!SHADER_ADJUSTMENTS.contains("hsl_to_rgb"));
-    }
-
-    #[test]
-    fn exposure_precedes_bounded_camera_profile_rendering() {
-        let prepare = &SHADER_ADJUSTMENTS[SHADER_ADJUSTMENTS
-            .find("fn prepare_adjustment_base")
-            .unwrap()..];
-        let exposure = prepare.find("var rgb = apply_exposure(").unwrap();
-        let hue_sat = prepare
-            .find("rgb = map_negative_gamut(apply_profile_hue_sat(rgb))")
-            .unwrap();
-        let profile_exposure = prepare.find("let profile_exposure_ev").unwrap();
-        let look = prepare.find("rgb = apply_profile_look(rgb)").unwrap();
-        let curve = prepare.find("rgb = apply_profile_tone_curve(rgb)").unwrap();
-        assert!(
-            exposure < hue_sat
-                && hue_sat < profile_exposure
-                && profile_exposure < look
-                && look < curve
-        );
-        assert!(SHADER_ADJUSTMENTS.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
-        assert!(SHADER_ADJUSTMENTS.contains("return profile_data[offset + maximum].x"));
-    }
-
-    #[test]
-    fn global_wb_changes_camera_transform_for_dng_metadata() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("regression/raw/synthetic-bayer.dng");
-        let raw = crate::pipeline::load_raw_file(&path).unwrap();
-        let neutral = super::GpuParams::new(
-            &crate::pipeline::ExposureParams::default(),
-            &crate::pipeline::MaskStack::default(),
-            &raw,
-        );
-        let mut adjusted = crate::pipeline::ExposureParams::default();
-        adjusted.temperature = 40.0;
-        adjusted.tint = 20.0;
-        let changed =
-            super::GpuParams::new(&adjusted, &crate::pipeline::MaskStack::default(), &raw);
-        assert_ne!(neutral.cam_to_srgb_0, changed.cam_to_srgb_0);
-        assert_ne!(neutral.cam_to_srgb_1, changed.cam_to_srgb_1);
-        assert_ne!(neutral.cam_to_srgb_2, changed.cam_to_srgb_2);
-
-        let tint_rendition = |tint| {
-            let params = super::GpuParams::new(
-                &crate::pipeline::ExposureParams {
-                    tint,
-                    ..Default::default()
-                },
-                &crate::pipeline::MaskStack::default(),
-                &raw,
-            );
-            [
-                params.cam_to_srgb_0[..3].iter().sum::<f32>(),
-                params.cam_to_srgb_1[..3].iter().sum::<f32>(),
-                params.cam_to_srgb_2[..3].iter().sum::<f32>(),
-            ]
-        };
-        let green = tint_rendition(-20.0);
-        let magenta = tint_rendition(20.0);
-        let magenta_axis = |rgb: [f32; 3]| (rgb[0] + rgb[2]) * 0.5 - rgb[1];
-        assert!(magenta_axis(magenta) > magenta_axis(green));
-    }
-
-    #[test]
-    fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
-        use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
-        use eframe::wgpu;
-
-        let instance = wgpu::Instance::default();
-        let Ok(adapter) =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-        else {
-            // Headless CI runners are allowed to lack a usable GPU. The
-            // parser/validator test above still covers all WGSL in that case.
-            return;
-        };
-        let Ok((device, queue)) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("auraw shader-layout test device"),
-                ..Default::default()
-            }))
-        else {
-            return;
-        };
-
-        let width = 12;
-        let height = 12;
-        let xtrans_pattern: [[u8; 6]; 6] = [
-            [1, 2, 1, 1, 0, 1],
-            [0, 1, 0, 2, 1, 2],
-            [1, 2, 1, 1, 0, 1],
-            [1, 0, 1, 1, 2, 1],
-            [2, 1, 2, 0, 1, 0],
-            [1, 0, 1, 1, 2, 1],
-        ];
-
-        for cfa_kind in [CfaKind::Bayer, CfaKind::XTrans] {
-            let color_indices = (0..height)
-                .flat_map(|y| {
-                    (0..width).map(move |x| match cfa_kind {
-                        CfaKind::Bayer => match (x % 2, y % 2) {
-                            (0, 0) => 0,
-                            (1, 1) => 2,
-                            _ => 1,
-                        },
-                        CfaKind::XTrans => xtrans_pattern[(y % 6) as usize][(x % 6) as usize],
-                    })
-                })
-                .collect();
-
-            let raw = LoadedRaw {
-                width,
-                height,
-                camera_make: "test".to_owned(),
-                camera_model: "test".to_owned(),
-                cfa_kind,
-                raw_pixels: vec![2048; (width * height) as usize],
-                color_indices,
-                wb_coeffs: [1.0; 4],
-                cam_to_srgb: [
-                    [1.0, 0.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, 0.0],
-                ],
-                black_levels: [0.0; 4],
-                black_levels_per_pixel: vec![0.0; (width * height) as usize],
-                white_levels: [4095.0; 4],
-                camera_profile: Default::default(),
-                white_balance_model: None,
-            };
-            let params = super::GpuParams::new(
-                &ExposureParams::default(),
-                &crate::pipeline::MaskStack::default(),
-                &raw,
-            );
-
-            let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let pipeline = RawGpuPipeline::new_headless_with_quality(
-                &device,
-                &queue,
-                &raw,
-                &params,
-                ProcessingQuality::High,
-            );
-            let validation_error = pollster::block_on(validation_scope.pop());
-            let pipeline = pipeline.unwrap_or_else(|error| {
-                panic!("{cfa_kind:?} GPU pipeline creation failed: {error:#}")
-            });
-            assert!(
-                validation_error.is_none(),
-                "{cfa_kind:?} wgpu layout/shader validation failed: {validation_error:?}"
-            );
-
-            let regression_validation_scope =
-                device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let regression = pipeline.render_regression_scene_blocking(&device, &queue, &params);
-            let regression_validation_error = pollster::block_on(regression_validation_scope.pop());
-            let regression = regression.unwrap_or_else(|error| {
-                panic!("{cfa_kind:?} regression scene render failed: {error:#}")
-            });
-            assert!(
-                regression_validation_error.is_none(),
-                "{cfa_kind:?} regression shader validation failed: {regression_validation_error:?}"
-            );
-            assert_eq!(regression.len(), (width * height * 3) as usize);
-            assert!(regression.iter().all(|value| value.is_finite()));
-
-            let camera_scene = pipeline
-                .read_scene_texture_blocking(&device, &queue)
-                .unwrap_or_else(|error| {
-                    panic!("{cfa_kind:?} scene texture readback failed: {error:#}")
-                });
-            assert_eq!(camera_scene.len(), (width * height * 3) as usize);
-            assert!(camera_scene.iter().all(|value| value.is_finite()));
-        }
-    }
-
-    #[test]
-    fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
-        use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
-        use eframe::wgpu;
-
-        let instance = wgpu::Instance::default();
-        let Ok(adapter) =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-        else {
-            return;
-        };
-        let Ok((device, queue)) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("auraw clipped-highlight test device"),
-                ..Default::default()
-            }))
-        else {
-            return;
-        };
-
-        let width = 128u32;
-        let height = 128u32;
-        let white = 4095.0f32;
-        let wb = [2.0f32, 1.0, 1.5, 1.0];
-        let mut color_indices = Vec::with_capacity((width * height) as usize);
-        let mut raw_pixels = Vec::with_capacity((width * height) as usize);
-        for y in 0..height {
-            for x in 0..width {
-                let channel = match (x % 2, y % 2) {
-                    (0, 0) => 0,
-                    (1, 1) => 2,
-                    _ => 1,
-                };
-                color_indices.push(channel);
-
-                // A broad neutral light has a fully saturated core and a
-                // smooth, valid neutral shoulder. A real camera records this
-                // as unequal channel plateaus after white balance.
-                let dx = x as f32 - 63.5;
-                let dy = y as f32 - 63.5;
-                let radius = (dx * dx + dy * dy).sqrt();
-                let scene = if radius <= 34.0 {
-                    2.6
-                } else if radius < 50.0 {
-                    0.2 + (2.6 - 0.2) * (50.0 - radius) / 16.0
-                } else {
-                    0.2
-                };
-                let sensor = (scene / wb[channel as usize]).clamp(0.0, 1.0);
-                raw_pixels.push((sensor * white).round() as u16);
-            }
-        }
-
-        let raw = LoadedRaw {
-            width,
-            height,
-            camera_make: "test".to_owned(),
-            camera_model: "clipped-neutral".to_owned(),
-            cfa_kind: CfaKind::Bayer,
-            raw_pixels,
-            color_indices,
-            wb_coeffs: wb,
-            cam_to_srgb: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-            ],
-            black_levels: [0.0; 4],
-            black_levels_per_pixel: vec![0.0; (width * height) as usize],
-            white_levels: [white; 4],
-            camera_profile: Default::default(),
-            white_balance_model: None,
-        };
-        let exposure = ExposureParams::default();
-        let params = super::GpuParams::new(&exposure, &crate::pipeline::MaskStack::default(), &raw);
-        let pipeline = RawGpuPipeline::new_headless_with_quality(
-            &device,
-            &queue,
-            &raw,
-            &params,
-            ProcessingQuality::High,
-        )
-        .unwrap();
-        pipeline.dispatch_stage(
-            &queue,
-            &device,
-            &params,
-            crate::pipeline::ProcessingStage::Raw,
-        );
-        let scene = pipeline
-            .read_scene_texture_blocking(&device, &queue)
-            .unwrap();
-
-        let mut mean = [0.0f32; 3];
-        let mut count = 0.0f32;
-        for y in 60..68 {
-            for x in 60..68 {
-                let index = ((y * width + x) * 3) as usize;
-                for channel in 0..3 {
-                    mean[channel] += scene[index + channel];
-                }
-                count += 1.0;
-            }
-        }
-        for value in &mut mean {
-            *value /= count;
-        }
-        let minimum = mean.into_iter().fold(f32::INFINITY, f32::min);
-        let maximum = mean.into_iter().fold(f32::NEG_INFINITY, f32::max);
-        let average = mean.into_iter().sum::<f32>() / 3.0;
-        let relative_chroma = (maximum - minimum) / average.max(1e-6);
-        assert!(
-            relative_chroma < 0.02,
-            "clipped neutral core became coloured: rgb={mean:?}, relative chroma={relative_chroma}"
-        );
-    }
-
-    #[test]
-    fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
-        use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
-        use eframe::wgpu;
-
-        fn fixture(
-            cfa_kind: CfaKind,
-            scene_scale: f32,
-            coloured_peak: Option<[f32; 3]>,
-        ) -> LoadedRaw {
-            const WIDTH: u32 = 96;
-            const HEIGHT: u32 = 96;
-            const WHITE: f32 = 4095.0;
-            const WB: [f32; 4] = [2.0, 1.0, 1.5, 1.0];
-            const XTRANS: [[u8; 6]; 6] = [
-                [1, 2, 1, 1, 0, 1],
-                [0, 1, 0, 2, 1, 2],
-                [1, 2, 1, 1, 0, 1],
-                [1, 0, 1, 1, 2, 1],
-                [2, 1, 2, 0, 1, 0],
-                [1, 0, 1, 1, 2, 1],
-            ];
-
-            let mut color_indices = Vec::with_capacity((WIDTH * HEIGHT) as usize);
-            let mut raw_pixels = Vec::with_capacity((WIDTH * HEIGHT) as usize);
-            for y in 0..HEIGHT {
-                for x in 0..WIDTH {
-                    let channel = match cfa_kind {
-                        CfaKind::Bayer => match (x % 2, y % 2) {
-                            (0, 0) => 0,
-                            (1, 1) => 2,
-                            _ => 1,
-                        },
-                        CfaKind::XTrans => XTRANS[(y % 6) as usize][(x % 6) as usize],
-                    };
-                    color_indices.push(channel);
-
-                    let dx = x as f32 - 48.0;
-                    let dy = y as f32 - 48.0;
-                    let radius = (dx * dx + dy * dy).sqrt();
-                    let shoulder = (1.0 - radius / 24.0).clamp(0.0, 1.0).powf(1.7);
-                    let neutral_scene = scene_scale * (0.55 + 1.30 * shoulder);
-                    let scene = coloured_peak.map_or(neutral_scene, |peak| {
-                        scene_scale * (0.12 + (peak[channel as usize] - 0.12) * shoulder)
-                    });
-                    let sensor = (scene / WB[channel as usize]).clamp(0.0, 1.0);
-                    raw_pixels.push((sensor * WHITE).round() as u16);
-                }
-            }
-
-            LoadedRaw {
-                width: WIDTH,
-                height: HEIGHT,
-                camera_make: "test".to_owned(),
-                camera_model: "selective-neutral-clipping".to_owned(),
-                cfa_kind,
-                raw_pixels,
-                color_indices,
-                wb_coeffs: WB,
-                cam_to_srgb: [
-                    [1.0, 0.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, 0.0],
-                ],
-                black_levels: [0.0; 4],
-                black_levels_per_pixel: vec![0.0; (WIDTH * HEIGHT) as usize],
-                white_levels: [WHITE; 4],
-                camera_profile: Default::default(),
-                white_balance_model: None,
-            }
-        }
-
-        fn percentile(mut values: Vec<f32>, percent: usize) -> f32 {
-            values.sort_by(f32::total_cmp);
-            values[(values.len() - 1) * percent / 100]
-        }
-
-        let instance = wgpu::Instance::default();
-        let Ok(adapter) =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-        else {
-            return;
-        };
-        let Ok((device, queue)) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("auraw selective-highlight test device"),
-                ..Default::default()
-            }))
-        else {
-            return;
-        };
-
-        for cfa_kind in [CfaKind::Bayer, CfaKind::XTrans] {
-            let clipped_raw = fixture(cfa_kind, 1.0, None);
-            let unclipped_raw = fixture(cfa_kind, 0.5, None);
-            let clipped_exposure = ExposureParams {
-                exposure: -4.0,
-                ..Default::default()
-            };
-            let clipped_params = super::GpuParams::new(
-                &clipped_exposure,
-                &crate::pipeline::MaskStack::default(),
-                &clipped_raw,
-            );
-            let pipeline = RawGpuPipeline::new_headless_with_quality(
-                &device,
-                &queue,
-                &clipped_raw,
-                &clipped_params,
-                ProcessingQuality::High,
-            )
-            .unwrap();
-            pipeline.recompute(&queue, &device, &clipped_params);
-            let clipped = pipeline
-                .read_display_linear_region_blocking(&device, &queue, 43, 43, 11, 11)
-                .unwrap();
-
-            // Half the source signal at one stop more exposure has identical
-            // intended display energy, while remaining below every sensor
-            // plane's clipping point. It is the recovery-quality oracle.
-            pipeline.upload_raw_tile(&queue, &unclipped_raw).unwrap();
-            let oracle_exposure = ExposureParams {
-                exposure: -3.0,
-                ..Default::default()
-            };
-            let oracle_params = super::GpuParams::new(
-                &oracle_exposure,
-                &crate::pipeline::MaskStack::default(),
-                &unclipped_raw,
-            );
-            pipeline.recompute(&queue, &device, &oracle_params);
-            let oracle = pipeline
-                .read_display_linear_region_blocking(&device, &queue, 43, 43, 11, 11)
-                .unwrap();
-
-            let mut pink = Vec::with_capacity(121);
-            let mut spread = Vec::with_capacity(121);
-            let mut luma_error = Vec::with_capacity(121);
-            let mut luma_ratio = Vec::with_capacity(121);
-            for (candidate, reference) in clipped.chunks_exact(3).zip(oracle.chunks_exact(3)) {
-                assert!(candidate
-                    .iter()
-                    .all(|value| value.is_finite() && *value >= 0.0));
-                let mean = ((candidate[0] + candidate[1] + candidate[2]) / 3.0).max(1e-6);
-                pink.push((((candidate[0] + candidate[2]) * 0.5 - candidate[1]) / mean).max(0.0));
-                let minimum = candidate.iter().copied().fold(f32::INFINITY, f32::min);
-                let maximum = candidate.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                spread.push((maximum - minimum) / mean);
-
-                let candidate_y = 0.262_700_2 * candidate[0]
-                    + 0.677_998_1 * candidate[1]
-                    + 0.059_301_7 * candidate[2];
-                let reference_y = 0.262_700_2 * reference[0]
-                    + 0.677_998_1 * reference[1]
-                    + 0.059_301_7 * reference[2];
-                luma_error.push((candidate_y - reference_y).abs() / reference_y.max(1e-6));
-                luma_ratio.push(candidate_y / reference_y.max(1e-6));
-            }
-
-            let pink_p95 = percentile(pink, 95);
-            let spread_p95 = percentile(spread, 95);
-            let luma_error_p95 = percentile(luma_error, 95);
-            let luma_ratio_median = percentile(luma_ratio, 50);
-            assert!(
-                pink_p95 <= 0.05,
-                "{cfa_kind:?} reconstructed neutral is pink: p95={pink_p95}"
-            );
-            assert!(
-                spread_p95 <= 0.10,
-                "{cfa_kind:?} reconstructed neutral has channel spread p95={spread_p95}"
-            );
-            assert!(
-                luma_error_p95 <= 0.15,
-                "{cfa_kind:?} recovered highlight luma error p95={luma_error_p95}"
-            );
-            assert!(
-                (0.85..=1.15).contains(&luma_ratio_median),
-                "{cfa_kind:?} recovered highlight median luma ratio={luma_ratio_median}"
-            );
-
-            // Neutral safety must not turn genuinely coloured clipped lights
-            // white. Each primary clips only its dominant sensor plane; the
-            // two surviving components should keep the reconstructed hue.
-            for (dominant, peak) in [
-                (0usize, [2.50, 0.35, 0.20]),
-                (1usize, [0.30, 2.00, 0.25]),
-                (2usize, [0.20, 0.30, 2.30]),
-            ] {
-                let coloured_raw = fixture(cfa_kind, 1.0, Some(peak));
-                pipeline.upload_raw_tile(&queue, &coloured_raw).unwrap();
-                let coloured_params = super::GpuParams::new(
-                    &ExposureParams::default(),
-                    &crate::pipeline::MaskStack::default(),
-                    &coloured_raw,
-                );
-                pipeline.dispatch_stage(
-                    &queue,
-                    &device,
-                    &coloured_params,
-                    crate::pipeline::ProcessingStage::Raw,
-                );
-                let scene = pipeline
-                    .read_scene_texture_blocking(&device, &queue)
-                    .unwrap();
-                let mut mean = [0.0f32; 3];
-                let mut count = 0.0f32;
-                for y in 46..51 {
-                    for x in 46..51 {
-                        let index = ((y * 96 + x) * 3) as usize;
-                        for channel in 0..3 {
-                            mean[channel] += scene[index + channel];
-                        }
-                        count += 1.0;
-                    }
-                }
-                for value in &mut mean {
-                    *value /= count;
-                }
-                let strongest_other = mean
-                    .iter()
-                    .enumerate()
-                    .filter(|(channel, _)| *channel != dominant)
-                    .map(|(_, value)| *value)
-                    .fold(0.0f32, f32::max);
-                assert!(
-                    mean[dominant] > 2.0 * strongest_other,
-                    "{cfa_kind:?} clipped primary {dominant} lost its hue: rgb={mean:?}"
-                );
-            }
+        for index in start..end {
+            self.encode_pass(encoder, index);
         }
     }
 }

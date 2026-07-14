@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.source_helpers import read_source_tree
 from pathlib import Path
 import math
 import re
@@ -7,9 +8,9 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
 COMMON = (ROOT / "src/shaders/common.wgsl").read_text(encoding="utf-8")
-GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+GPU = read_source_tree(ROOT / "src/pipeline/gpu.rs")
 BASIC = (ROOT / "src/pipeline/basicadj.rs").read_text(encoding="utf-8")
-SIDEBAR = (ROOT / "src/ui/sidebar.rs").read_text(encoding="utf-8")
+SIDEBAR = read_source_tree(ROOT / "src/ui/sidebar.rs")
 
 
 def smoothstep(edge0: float, edge1: float, value: float) -> float:
@@ -97,7 +98,7 @@ def test_uniform_layout_contains_creative_and_vignette_blocks() -> None:
     assert "creative_effects: [f32; 4]" in GPU
     assert "vignette: [f32; 4]" in GPU
     assert "vignette_options: [f32; 4]" in GPU
-    assert "size_of::<super::GpuParams>(), 6944" in GPU
+    assert "size_of::<super::GpuParams>(), 6960" in GPU
 
 
 def test_default_glow_threshold_rejects_shadows_but_accepts_bright_sources() -> None:

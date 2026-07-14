@@ -51,14 +51,14 @@ impl Settings {
                 if let Some(path) = &app.onnx_runtime_path {
                     ui.label("Selected runtime:");
                     ui.add(
-                        egui::Label::new(egui::RichText::new(path.display().to_string()).monospace())
-                            .wrap(),
+                        egui::Label::new(
+                            egui::RichText::new(path.display().to_string()).monospace(),
+                        )
+                        .wrap(),
                     );
                     if let Some(sha256) = &app.onnx_runtime_sha256 {
                         ui.small("Pinned SHA-256:");
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(sha256).monospace()).wrap(),
-                        );
+                        ui.add(egui::Label::new(egui::RichText::new(sha256).monospace()).wrap());
                     }
                 } else {
                     ui.colored_label(

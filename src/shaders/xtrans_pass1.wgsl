@@ -1,7 +1,7 @@
 // Dedicated Fuji X-Trans seed pass. Unlike the Bayer RCD path, this pass does
 // not assume a 2x2 repeating mosaic. It searches the actual per-pixel CFA map
 // supplied by LibRaw and combines same-colour estimates from four axes.
-@group(0) @binding(4) var xtrans_seed_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var xtrans_seed_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 struct XTransDirectionalEstimate {
     value: f32,

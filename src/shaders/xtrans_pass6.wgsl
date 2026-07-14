@@ -3,7 +3,7 @@
 // average only candidates within one eighth of the maximum map response.
 @group(0) @binding(24) var mark_homo_0_3_read: texture_2d<f32>;
 @group(0) @binding(25) var mark_homo_4_7_read: texture_2d<f32>;
-@group(0) @binding(26) var mark_high_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(26) var mark_high_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn mark_homo(pos: vec2<i32>, index: u32) -> f32 {
     let p = clamp_pos(pos);

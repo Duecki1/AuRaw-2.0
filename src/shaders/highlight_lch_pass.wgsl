@@ -1,6 +1,6 @@
 @group(0) @binding(3) var reconstructed_raw_write: texture_storage_2d<r32float, write>;
 @group(0) @binding(13) var highlight_work_read: texture_2d<f32>;
-@group(0) @binding(14) var highlight_work_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(14) var highlight_work_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn store_highlight_work(pos: vec2<i32>, value: vec4<f32>) {
     textureStore(highlight_work_write, pos, value);

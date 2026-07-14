@@ -3,6 +3,15 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+mod dcp;
+mod icc;
+
+use dcp::{profile_from_tags, TiffReader};
+use icc::MatrixShaperProfile;
+
+#[cfg(test)]
+mod tests;
+
 pub const OUTPUT_LUT_EDGE: u32 = 33;
 const PROFILE_TONE_LUT_SIZE: usize = 4096;
 const MAX_DCP_TAG_BYTES: u64 = 16 * 1024 * 1024;
@@ -545,6 +554,95 @@ impl ProfileGpuData {
         words.extend_from_slice(output.entries());
         Self { layout, words }
     }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.words.is_empty() {
+            bail!("GPU profile buffer must contain its metadata word");
+        }
+
+        let mut cursor = 1usize;
+        cursor = validate_profile_map_region(
+            "primary HueSat map",
+            self.layout.hue_sat,
+            cursor,
+            self.words.len(),
+        )?;
+        cursor = validate_profile_map_region(
+            "secondary HueSat map",
+            self.layout.hue_sat_2,
+            cursor,
+            self.words.len(),
+        )?;
+        cursor =
+            validate_profile_map_region("look table", self.layout.look, cursor, self.words.len())?;
+
+        if self.layout.tone[0] == 0 {
+            if self.layout.tone != [0; 4] {
+                bail!("disabled profile tone curve has non-zero layout metadata");
+            }
+        } else {
+            let offset = self.layout.tone[1] as usize;
+            let count = self.layout.tone[0] as usize;
+            if offset != cursor {
+                bail!("profile tone curve starts at {offset}, expected {cursor}");
+            }
+            cursor = cursor
+                .checked_add(count)
+                .ok_or_else(|| anyhow!("profile tone curve range overflows"))?;
+            if cursor > self.words.len() {
+                bail!("profile tone curve extends past the packed GPU buffer");
+            }
+        }
+
+        let output_offset = self.layout.output[3] as usize;
+        if output_offset != cursor {
+            bail!("output LUT starts at {output_offset}, expected {cursor}");
+        }
+        let output_entries = checked_map_len([
+            self.layout.output[0],
+            self.layout.output[1],
+            self.layout.output[2],
+        ])?;
+        let expected_total = output_offset
+            .checked_add(output_entries)
+            .ok_or_else(|| anyhow!("output LUT range overflows"))?;
+        if expected_total != self.words.len() {
+            bail!(
+                "packed GPU profile contains {} words; layout requires {expected_total}",
+                self.words.len()
+            );
+        }
+        Ok(())
+    }
+}
+
+fn validate_profile_map_region(
+    label: &str,
+    layout: [u32; 4],
+    expected_offset: usize,
+    total_words: usize,
+) -> Result<usize> {
+    if layout[0..3] == [0, 0, 0] {
+        if layout[3] != 0 {
+            bail!("disabled {label} has a non-zero offset");
+        }
+        return Ok(expected_offset);
+    }
+    if layout[0..3].contains(&0) {
+        bail!("{label} has a zero dimension");
+    }
+    let offset = layout[3] as usize;
+    if offset != expected_offset {
+        bail!("{label} starts at {offset}, expected {expected_offset}");
+    }
+    let count = checked_map_len([layout[0], layout[1], layout[2]])?;
+    let end = offset
+        .checked_add(count)
+        .ok_or_else(|| anyhow!("{label} range overflows"))?;
+    if end > total_words {
+        bail!("{label} extends past the packed GPU buffer");
+    }
+    Ok(end)
 }
 
 fn interpolate_optional_matrix_4x3(
@@ -690,912 +788,6 @@ fn sample_natural_cubic(points: &[[f32; 2]], second: &[f64], x: f32) -> f32 {
 }
 
 // DNG/DCP tag constants.
-const COLOR_MATRIX_1: u16 = 50721;
-const COLOR_MATRIX_2: u16 = 50722;
-const CAMERA_CALIBRATION_1: u16 = 50723;
-const CAMERA_CALIBRATION_2: u16 = 50724;
-const CALIBRATION_ILLUMINANT_1: u16 = 50778;
-const CALIBRATION_ILLUMINANT_2: u16 = 50779;
-const CAMERA_CALIBRATION_SIGNATURE: u16 = 50931;
-const PROFILE_CALIBRATION_SIGNATURE: u16 = 50932;
-const PROFILE_NAME: u16 = 50936;
-const PROFILE_HUE_SAT_MAP_DIMS: u16 = 50937;
-const PROFILE_HUE_SAT_MAP_DATA_1: u16 = 50938;
-const PROFILE_HUE_SAT_MAP_DATA_2: u16 = 50939;
-const PROFILE_TONE_CURVE: u16 = 50940;
-const FORWARD_MATRIX_1: u16 = 50964;
-const FORWARD_MATRIX_2: u16 = 50965;
-const PROFILE_LOOK_TABLE_DIMS: u16 = 50981;
-const PROFILE_LOOK_TABLE_DATA: u16 = 50982;
-const PROFILE_HUE_SAT_MAP_ENCODING: u16 = 51107;
-const PROFILE_LOOK_TABLE_ENCODING: u16 = 51108;
-const BASELINE_EXPOSURE_OFFSET: u16 = 51109;
-
-fn profile_from_tags(reader: &mut TiffReader, tags: &[IfdEntry]) -> Result<Option<DcpProfile>> {
-    let has_profile = tags.iter().any(|tag| {
-        matches!(
-            tag.tag,
-            PROFILE_HUE_SAT_MAP_DATA_1
-                | PROFILE_HUE_SAT_MAP_DATA_2
-                | PROFILE_LOOK_TABLE_DATA
-                | PROFILE_TONE_CURVE
-                | PROFILE_NAME
-                | COLOR_MATRIX_1
-                | COLOR_MATRIX_2
-                | FORWARD_MATRIX_1
-                | FORWARD_MATRIX_2
-        )
-    });
-    if !has_profile {
-        return Ok(None);
-    }
-
-    let name = read_ascii_tag(reader, tags, PROFILE_NAME)?;
-    let camera_calibration_signature = read_ascii_tag(reader, tags, CAMERA_CALIBRATION_SIGNATURE)?;
-    let calibration_signature = read_ascii_tag(reader, tags, PROFILE_CALIBRATION_SIGNATURE)?;
-    let hue_dims = read_u32_tag(reader, tags, PROFILE_HUE_SAT_MAP_DIMS)?;
-    let hue_dims = (hue_dims.len() >= 3).then(|| [hue_dims[0], hue_dims[1], hue_dims[2]]);
-    let hue_encoding = ProfileEncoding::from_tag(
-        read_u32_tag(reader, tags, PROFILE_HUE_SAT_MAP_ENCODING)?
-            .first()
-            .copied(),
-    )?;
-    let hue_sat_maps = [
-        read_hsv_map(
-            reader,
-            tags,
-            PROFILE_HUE_SAT_MAP_DATA_1,
-            hue_dims,
-            hue_encoding,
-        )?,
-        read_hsv_map(
-            reader,
-            tags,
-            PROFILE_HUE_SAT_MAP_DATA_2,
-            hue_dims,
-            hue_encoding,
-        )?,
-    ];
-
-    let look_dims = read_u32_tag(reader, tags, PROFILE_LOOK_TABLE_DIMS)?;
-    let look_dims = (look_dims.len() >= 3).then(|| [look_dims[0], look_dims[1], look_dims[2]]);
-    let look_encoding = ProfileEncoding::from_tag(
-        read_u32_tag(reader, tags, PROFILE_LOOK_TABLE_ENCODING)?
-            .first()
-            .copied(),
-    )?;
-    let look_table = read_hsv_map(
-        reader,
-        tags,
-        PROFILE_LOOK_TABLE_DATA,
-        look_dims,
-        look_encoding,
-    )?;
-
-    let tone_values = read_f32_tag(reader, tags, PROFILE_TONE_CURVE)?;
-    let tone_curve = if tone_values.is_empty() {
-        None
-    } else {
-        if tone_values.len() % 2 != 0 {
-            bail!("ProfileToneCurve contains an odd number of values");
-        }
-        let point_count = tone_values.len() / 2;
-        if point_count > MAX_DCP_TONE_POINTS {
-            bail!(
-                "ProfileToneCurve contains {point_count} points; the safe limit is {MAX_DCP_TONE_POINTS}"
-            );
-        }
-        let mut points = Vec::new();
-        points
-            .try_reserve_exact(point_count)
-            .context("reserve DCP tone curve")?;
-        points.extend(tone_values.chunks_exact(2).map(|pair| [pair[0], pair[1]]));
-        Some(ToneCurve::new(points)?)
-    };
-
-    let matrices = [
-        DcpMatrixSet {
-            illuminant: read_u32_tag(reader, tags, CALIBRATION_ILLUMINANT_1)?
-                .first()
-                .copied()
-                .and_then(|v| u16::try_from(v).ok()),
-            color_matrix: read_matrix_4x3(reader, tags, COLOR_MATRIX_1)?,
-            camera_calibration: read_matrix_4x4(reader, tags, CAMERA_CALIBRATION_1)?,
-            forward_matrix: read_matrix_3x4(reader, tags, FORWARD_MATRIX_1)?,
-        },
-        DcpMatrixSet {
-            illuminant: read_u32_tag(reader, tags, CALIBRATION_ILLUMINANT_2)?
-                .first()
-                .copied()
-                .and_then(|v| u16::try_from(v).ok()),
-            color_matrix: read_matrix_4x3(reader, tags, COLOR_MATRIX_2)?,
-            camera_calibration: read_matrix_4x4(reader, tags, CAMERA_CALIBRATION_2)?,
-            forward_matrix: read_matrix_3x4(reader, tags, FORWARD_MATRIX_2)?,
-        },
-    ];
-    let baseline_exposure_offset = read_f32_tag(reader, tags, BASELINE_EXPOSURE_OFFSET)?
-        .first()
-        .copied()
-        .unwrap_or(0.0);
-
-    Ok(Some(DcpProfile {
-        name,
-        camera_calibration_signature,
-        calibration_signature,
-        matrices,
-        hue_sat_maps,
-        look_table,
-        tone_curve,
-        baseline_exposure_offset,
-    }))
-}
-
-fn read_hsv_map(
-    reader: &mut TiffReader,
-    tags: &[IfdEntry],
-    tag: u16,
-    dimensions: Option<[u32; 3]>,
-    encoding: ProfileEncoding,
-) -> Result<Option<HsvMap>> {
-    let values = read_f32_tag(reader, tags, tag)?;
-    if values.is_empty() {
-        return Ok(None);
-    }
-    let dimensions = dimensions.ok_or_else(|| anyhow!("DCP map {tag} has no dimensions tag"))?;
-    let expected = checked_map_len(dimensions)?
-        .checked_mul(3)
-        .ok_or_else(|| anyhow!("DCP map value count overflow"))?;
-    if values.len() != expected {
-        bail!(
-            "DCP map {tag} has {} scalar values, expected {expected}",
-            values.len()
-        );
-    }
-    let entry_count = expected / 3;
-    let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(entry_count)
-        .context("reserve DCP HSV map")?;
-    entries.extend(
-        values
-            .chunks_exact(3)
-            .map(|entry| [entry[0], entry[1], entry[2]]),
-    );
-    Ok(Some(HsvMap::new(dimensions, entries, encoding)?))
-}
-
-fn read_matrix_4x3(
-    reader: &mut TiffReader,
-    tags: &[IfdEntry],
-    tag: u16,
-) -> Result<Option<[[f32; 3]; 4]>> {
-    let values = read_f32_tag(reader, tags, tag)?;
-    if values.is_empty() {
-        return Ok(None);
-    }
-    if values.len() != 9 && values.len() != 12 {
-        bail!(
-            "DCP matrix tag {tag} has {} values, expected 9 or 12",
-            values.len()
-        );
-    }
-    let mut out = [[0.0; 3]; 4];
-    for row in 0..(values.len() / 3) {
-        out[row].copy_from_slice(&values[row * 3..row * 3 + 3]);
-    }
-    Ok(Some(out))
-}
-
-fn read_matrix_3x4(
-    reader: &mut TiffReader,
-    tags: &[IfdEntry],
-    tag: u16,
-) -> Result<Option<[[f32; 4]; 3]>> {
-    let values = read_f32_tag(reader, tags, tag)?;
-    if values.is_empty() {
-        return Ok(None);
-    }
-    if values.len() != 9 && values.len() != 12 {
-        bail!(
-            "DCP matrix tag {tag} has {} values, expected 9 or 12",
-            values.len()
-        );
-    }
-    let planes = values.len() / 3;
-    let mut out = [[0.0; 4]; 3];
-    for row in 0..3 {
-        out[row][..planes].copy_from_slice(&values[row * planes..row * planes + planes]);
-    }
-    Ok(Some(out))
-}
-
-fn read_matrix_4x4(
-    reader: &mut TiffReader,
-    tags: &[IfdEntry],
-    tag: u16,
-) -> Result<Option<[[f32; 4]; 4]>> {
-    let values = read_f32_tag(reader, tags, tag)?;
-    if values.is_empty() {
-        return Ok(None);
-    }
-    if values.len() != 9 && values.len() != 16 {
-        bail!(
-            "DCP matrix tag {tag} has {} values, expected 9 or 16",
-            values.len()
-        );
-    }
-    let planes = if values.len() == 9 { 3 } else { 4 };
-    let mut out = [[0.0; 4]; 4];
-    for row in 0..planes {
-        out[row][..planes].copy_from_slice(&values[row * planes..row * planes + planes]);
-    }
-    // Preserve an unused fourth plane when a normal three-channel profile is
-    // expanded into the fixed-size internal representation.
-    if planes == 3 {
-        out[3][3] = 1.0;
-    }
-    Ok(Some(out))
-}
-
-fn find_tag(tags: &[IfdEntry], tag: u16) -> Option<&IfdEntry> {
-    tags.iter().find(|entry| entry.tag == tag)
-}
-
-fn read_ascii_tag(reader: &mut TiffReader, tags: &[IfdEntry], tag: u16) -> Result<Option<String>> {
-    let Some(entry) = find_tag(tags, tag) else {
-        return Ok(None);
-    };
-    let bytes = reader.entry_bytes(entry)?;
-    let text = String::from_utf8_lossy(&bytes)
-        .trim_end_matches('\0')
-        .trim()
-        .to_owned();
-    Ok((!text.is_empty()).then_some(text))
-}
-
-fn read_u32_tag(reader: &mut TiffReader, tags: &[IfdEntry], tag: u16) -> Result<Vec<u32>> {
-    let Some(entry) = find_tag(tags, tag) else {
-        return Ok(Vec::new());
-    };
-    reader.entry_u32(entry)
-}
-
-fn read_f32_tag(reader: &mut TiffReader, tags: &[IfdEntry], tag: u16) -> Result<Vec<f32>> {
-    let Some(entry) = find_tag(tags, tag) else {
-        return Ok(Vec::new());
-    };
-    reader.entry_f32(entry)
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Endian {
-    Little,
-    Big,
-}
-
-impl Endian {
-    fn u16(self, bytes: [u8; 2]) -> u16 {
-        match self {
-            Self::Little => u16::from_le_bytes(bytes),
-            Self::Big => u16::from_be_bytes(bytes),
-        }
-    }
-    fn u32(self, bytes: [u8; 4]) -> u32 {
-        match self {
-            Self::Little => u32::from_le_bytes(bytes),
-            Self::Big => u32::from_be_bytes(bytes),
-        }
-    }
-    fn i32(self, bytes: [u8; 4]) -> i32 {
-        match self {
-            Self::Little => i32::from_le_bytes(bytes),
-            Self::Big => i32::from_be_bytes(bytes),
-        }
-    }
-    fn u64(self, bytes: [u8; 8]) -> u64 {
-        match self {
-            Self::Little => u64::from_le_bytes(bytes),
-            Self::Big => u64::from_be_bytes(bytes),
-        }
-    }
-    fn f32(self, bytes: [u8; 4]) -> f32 {
-        f32::from_bits(self.u32(bytes))
-    }
-    fn f64(self, bytes: [u8; 8]) -> f64 {
-        f64::from_bits(self.u64(bytes))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct IfdEntry {
-    tag: u16,
-    field_type: u16,
-    count: u64,
-    value_or_offset: u64,
-    inline: [u8; 8],
-}
-
-struct TiffReader {
-    file: File,
-    endian: Endian,
-    big_tiff: bool,
-    first_ifd: u64,
-    file_len: u64,
-}
-
-impl TiffReader {
-    fn new(mut file: File) -> Result<Self> {
-        let file_len = file.metadata()?.len();
-        let mut byte_order = [0; 2];
-        file.read_exact(&mut byte_order)?;
-        let endian = match &byte_order {
-            b"II" => Endian::Little,
-            b"MM" => Endian::Big,
-            _ => bail!("not a TIFF/DCP byte-order signature"),
-        };
-        let magic = read_u16(&mut file, endian)?;
-        let (big_tiff, first_ifd) = match magic {
-            42 | 0x4352 => (false, read_u32(&mut file, endian)? as u64),
-            43 => {
-                let offset_size = read_u16(&mut file, endian)?;
-                let reserved = read_u16(&mut file, endian)?;
-                if offset_size != 8 || reserved != 0 {
-                    bail!("unsupported BigTIFF offset format");
-                }
-                (true, read_u64(&mut file, endian)?)
-            }
-            _ => bail!("not a TIFF, BigTIFF, or standalone DCP file"),
-        };
-        Ok(Self {
-            file,
-            endian,
-            big_tiff,
-            first_ifd,
-            file_len,
-        })
-    }
-
-    fn read_primary_ifd(&mut self) -> Result<Vec<IfdEntry>> {
-        if self.first_ifd == 0 || self.first_ifd >= self.file_len {
-            bail!("invalid TIFF first-IFD offset {}", self.first_ifd);
-        }
-        self.file.seek(SeekFrom::Start(self.first_ifd))?;
-        let count = if self.big_tiff {
-            read_u64(&mut self.file, self.endian)?
-        } else {
-            read_u16(&mut self.file, self.endian)? as u64
-        };
-        if count > 65_536 {
-            bail!("unreasonable TIFF IFD entry count {count}");
-        }
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(count as usize)
-            .context("reserve TIFF IFD entries")?;
-        for _ in 0..count {
-            let tag = read_u16(&mut self.file, self.endian)?;
-            let field_type = read_u16(&mut self.file, self.endian)?;
-            if self.big_tiff {
-                let count = read_u64(&mut self.file, self.endian)?;
-                let mut inline = [0; 8];
-                self.file.read_exact(&mut inline)?;
-                entries.push(IfdEntry {
-                    tag,
-                    field_type,
-                    count,
-                    value_or_offset: self.endian.u64(inline),
-                    inline,
-                });
-            } else {
-                let count = read_u32(&mut self.file, self.endian)? as u64;
-                let mut small = [0; 4];
-                self.file.read_exact(&mut small)?;
-                let mut inline = [0; 8];
-                inline[..4].copy_from_slice(&small);
-                entries.push(IfdEntry {
-                    tag,
-                    field_type,
-                    count,
-                    value_or_offset: self.endian.u32(small) as u64,
-                    inline,
-                });
-            }
-        }
-        Ok(entries)
-    }
-
-    fn entry_bytes(&mut self, entry: &IfdEntry) -> Result<Vec<u8>> {
-        let type_size = tiff_type_size(entry.field_type)
-            .ok_or_else(|| anyhow!("unsupported TIFF field type {}", entry.field_type))?;
-        let byte_len = entry
-            .count
-            .checked_mul(type_size)
-            .ok_or_else(|| anyhow!("TIFF field size overflow"))?;
-        if byte_len > MAX_DCP_TAG_BYTES {
-            bail!(
-                "refusing to allocate oversized TIFF profile tag ({byte_len} bytes; limit {MAX_DCP_TAG_BYTES})"
-            );
-        }
-        let inline_size = if self.big_tiff { 8 } else { 4 };
-        if byte_len as usize <= inline_size {
-            return Ok(entry.inline[..byte_len as usize].to_vec());
-        }
-        let end = entry
-            .value_or_offset
-            .checked_add(byte_len)
-            .ok_or_else(|| anyhow!("TIFF tag offset overflow"))?;
-        if end > self.file_len {
-            bail!("TIFF tag {} points outside the file", entry.tag);
-        }
-        let return_pos = self.file.stream_position()?;
-        self.file.seek(SeekFrom::Start(entry.value_or_offset))?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(byte_len as usize)
-            .context("reserve TIFF profile tag")?;
-        bytes.resize(byte_len as usize, 0);
-        self.file.read_exact(&mut bytes)?;
-        self.file.seek(SeekFrom::Start(return_pos))?;
-        Ok(bytes)
-    }
-
-    fn entry_u32(&mut self, entry: &IfdEntry) -> Result<Vec<u32>> {
-        let bytes = self.entry_bytes(entry)?;
-        let stride = match entry.field_type {
-            1 | 6 | 7 => 1,
-            3 => 2,
-            4 | 13 => 4,
-            16 | 18 => 8,
-            _ => bail!("TIFF tag {} is not an integer field", entry.tag),
-        };
-        anyhow::ensure!(
-            bytes.len() % stride == 0,
-            "TIFF integer tag {} has a truncated value",
-            entry.tag
-        );
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(bytes.len() / stride)
-            .context("reserve TIFF integer values")?;
-        for chunk in bytes.chunks_exact(stride) {
-            let value = match entry.field_type {
-                1 | 6 | 7 => u32::from(chunk[0]),
-                3 => self.endian.u16([chunk[0], chunk[1]]) as u32,
-                4 | 13 => self.endian.u32(chunk.try_into().unwrap()),
-                16 | 18 => u32::try_from(self.endian.u64(chunk.try_into().unwrap()))
-                    .context("TIFF integer does not fit in u32")?,
-                _ => unreachable!(),
-            };
-            values.push(value);
-        }
-        Ok(values)
-    }
-
-    fn entry_f32(&mut self, entry: &IfdEntry) -> Result<Vec<f32>> {
-        let bytes = self.entry_bytes(entry)?;
-        let stride = match entry.field_type {
-            3 => 2,
-            4 | 11 => 4,
-            5 | 10 | 12 => 8,
-            _ => bail!("TIFF tag {} is not a numeric profile field", entry.tag),
-        };
-        anyhow::ensure!(
-            bytes.len() % stride == 0,
-            "TIFF numeric tag {} has a truncated value",
-            entry.tag
-        );
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(bytes.len() / stride)
-            .context("reserve TIFF numeric values")?;
-        for chunk in bytes.chunks_exact(stride) {
-            let value = match entry.field_type {
-                3 => self.endian.u16([chunk[0], chunk[1]]) as f32,
-                4 => self.endian.u32(chunk.try_into().unwrap()) as f32,
-                5 => {
-                    let numerator = self.endian.u32(chunk[0..4].try_into().unwrap());
-                    let denominator = self.endian.u32(chunk[4..8].try_into().unwrap());
-                    if denominator == 0 {
-                        f32::NAN
-                    } else {
-                        numerator as f32 / denominator as f32
-                    }
-                }
-                10 => {
-                    let numerator = self.endian.i32(chunk[0..4].try_into().unwrap());
-                    let denominator = self.endian.i32(chunk[4..8].try_into().unwrap());
-                    if denominator == 0 {
-                        f32::NAN
-                    } else {
-                        numerator as f32 / denominator as f32
-                    }
-                }
-                11 => self.endian.f32(chunk.try_into().unwrap()),
-                12 => self.endian.f64(chunk.try_into().unwrap()) as f32,
-                _ => unreachable!(),
-            };
-            if !value.is_finite() {
-                bail!("TIFF profile tag {} contains non-finite values", entry.tag);
-            }
-            values.push(value);
-        }
-        Ok(values)
-    }
-}
-
-fn tiff_type_size(field_type: u16) -> Option<u64> {
-    match field_type {
-        1 | 2 | 6 | 7 => Some(1),
-        3 | 8 => Some(2),
-        4 | 9 | 11 | 13 => Some(4),
-        5 | 10 | 12 | 16 | 17 | 18 => Some(8),
-        _ => None,
-    }
-}
-
-fn read_u16(reader: &mut File, endian: Endian) -> Result<u16> {
-    let mut bytes = [0; 2];
-    reader.read_exact(&mut bytes)?;
-    Ok(endian.u16(bytes))
-}
-fn read_u32(reader: &mut File, endian: Endian) -> Result<u32> {
-    let mut bytes = [0; 4];
-    reader.read_exact(&mut bytes)?;
-    Ok(endian.u32(bytes))
-}
-fn read_u64(reader: &mut File, endian: Endian) -> Result<u64> {
-    let mut bytes = [0; 8];
-    reader.read_exact(&mut bytes)?;
-    Ok(endian.u64(bytes))
-}
-
-#[derive(Clone, Debug)]
-enum TransferCurve {
-    Identity,
-    Gamma(f32),
-    Sampled(Vec<f32>),
-    Parametric { kind: u16, params: Vec<f32> },
-}
-
-impl TransferCurve {
-    /// ICC TRCs encode device -> PCS. Output conversion needs the inverse.
-    fn inverse(&self, linear: f32) -> f32 {
-        let target = linear.clamp(0.0, 1.0);
-        match self {
-            Self::Identity => target,
-            Self::Gamma(gamma) => target.powf(1.0 / gamma.max(1e-6)),
-            _ => {
-                let mut lo = 0.0;
-                let mut hi = 1.0;
-                for _ in 0..20 {
-                    let mid = 0.5 * (lo + hi);
-                    if self.forward(mid) < target {
-                        lo = mid;
-                    } else {
-                        hi = mid;
-                    }
-                }
-                0.5 * (lo + hi)
-            }
-        }
-    }
-
-    fn forward(&self, x: f32) -> f32 {
-        let x = x.clamp(0.0, 1.0);
-        match self {
-            Self::Identity => x,
-            Self::Gamma(gamma) => x.powf(*gamma),
-            Self::Sampled(values) => {
-                if values.is_empty() {
-                    return x;
-                }
-                let location = x * (values.len() - 1) as f32;
-                let i = location.floor() as usize;
-                let j = (i + 1).min(values.len() - 1);
-                values[i] + (values[j] - values[i]) * (location - i as f32)
-            }
-            Self::Parametric { kind, params } => parametric_curve(*kind, params, x),
-        }
-    }
-
-    fn validate(&self) -> Result<()> {
-        let first = self.forward(0.0);
-        let mut previous = first;
-        if !previous.is_finite() {
-            bail!("ICC transfer curve produces a non-finite value");
-        }
-        for step in 1..=256 {
-            let value = self.forward(step as f32 / 256.0);
-            if !value.is_finite() {
-                bail!("ICC transfer curve produces a non-finite value");
-            }
-            if value + 1e-6 < previous {
-                bail!("ICC transfer curve must be monotonic");
-            }
-            previous = value;
-        }
-        if previous <= first + 1e-6 {
-            bail!("ICC transfer curve has no usable dynamic range");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct MatrixShaperProfile {
-    pcs_to_device_linear: [[f32; 3]; 3],
-    curves: [TransferCurve; 3],
-    media_white: [f32; 3],
-}
-
-impl MatrixShaperProfile {
-    fn parse(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 132 || &bytes[36..40] != b"acsp" {
-            bail!("invalid ICC profile header");
-        }
-        if !matches!(bytes[8], 2 | 4) {
-            bail!("ICC output profile must be version 2 or version 4");
-        }
-        let profile_class = &bytes[12..16];
-        if profile_class != b"mntr" && profile_class != b"prtr" && profile_class != b"spac" {
-            bail!("ICC profile class must be display, output, or color-space");
-        }
-        if &bytes[16..20] != b"RGB " || &bytes[20..24] != b"XYZ " {
-            bail!("ICC output profile must use RGB device space and XYZ PCS");
-        }
-        let declared = be_u32(&bytes[0..4]) as usize;
-        if declared > bytes.len() || declared < 132 {
-            bail!("ICC profile size field is invalid");
-        }
-        let count = be_u32(&bytes[128..132]) as usize;
-        let table_end = 132usize
-            .checked_add(
-                count
-                    .checked_mul(12)
-                    .ok_or_else(|| anyhow!("ICC tag table overflow"))?,
-            )
-            .ok_or_else(|| anyhow!("ICC tag table overflow"))?;
-        if table_end > declared {
-            bail!("ICC tag table extends outside the profile");
-        }
-        let mut tags = Vec::with_capacity(count);
-        for index in 0..count {
-            let base = 132 + index * 12;
-            let signature: [u8; 4] = bytes[base..base + 4].try_into().unwrap();
-            let offset = be_u32(&bytes[base + 4..base + 8]) as usize;
-            let size = be_u32(&bytes[base + 8..base + 12]) as usize;
-            let end = offset
-                .checked_add(size)
-                .ok_or_else(|| anyhow!("ICC tag overflow"))?;
-            if offset < table_end || end > declared {
-                bail!("ICC tag {:?} points outside the profile", signature);
-            }
-            tags.push((signature, &bytes[offset..end]));
-        }
-        if tags
-            .iter()
-            .any(|(signature, _)| is_icc_lut_transform_signature(signature))
-        {
-            bail!("LUT-based ICC output profiles are not supported by the built-in matrix-shaper engine");
-        }
-        let r_xyz = parse_icc_xyz(find_icc_tag(&tags, b"rXYZ")?)?;
-        let g_xyz = parse_icc_xyz(find_icc_tag(&tags, b"gXYZ")?)?;
-        let b_xyz = parse_icc_xyz(find_icc_tag(&tags, b"bXYZ")?)?;
-        let device_to_pcs = [
-            [r_xyz[0], g_xyz[0], b_xyz[0]],
-            [r_xyz[1], g_xyz[1], b_xyz[1]],
-            [r_xyz[2], g_xyz[2], b_xyz[2]],
-        ];
-        let pcs_to_device_linear =
-            invert3(device_to_pcs).ok_or_else(|| anyhow!("ICC RGB colorant matrix is singular"))?;
-        let curves = [
-            parse_icc_curve(find_icc_tag(&tags, b"rTRC")?)?,
-            parse_icc_curve(find_icc_tag(&tags, b"gTRC")?)?,
-            parse_icc_curve(find_icc_tag(&tags, b"bTRC")?)?,
-        ];
-        curves.iter().try_for_each(TransferCurve::validate)?;
-        let media_white = find_icc_tag_optional(&tags, b"wtpt")
-            .map(parse_icc_xyz)
-            .transpose()?
-            .unwrap_or(D50_XYZ);
-        if media_white.iter().any(|value| *value <= 0.0) {
-            bail!("ICC media white point must contain positive XYZ values");
-        }
-        Ok(Self {
-            pcs_to_device_linear,
-            curves,
-            media_white,
-        })
-    }
-
-    fn transform(&self, rec2020: [f32; 3], intent: RenderingIntent) -> [f32; 3] {
-        const REC2020_TO_XYZ_D65: [[f32; 3]; 3] = [
-            [0.636_958_06, 0.144_616_9, 0.168_880_98],
-            [0.262_700_2, 0.677_998_07, 0.059_301_72],
-            [0.0, 0.028_072_693, 1.060_985_1],
-        ];
-        const D65_TO_D50: [[f32; 3]; 3] = [
-            [1.047_929_8, 0.022_946_8, -0.050_192_2],
-            [0.029_627_8, 0.990_434_5, -0.017_073_8],
-            [-0.009_243, 0.015_055_2, 0.751_874_3],
-        ];
-        let mut xyz = mul3(D65_TO_D50, mul3(REC2020_TO_XYZ_D65, rec2020));
-        if intent == RenderingIntent::AbsoluteColorimetric {
-            for channel in 0..3 {
-                xyz[channel] *= self.media_white[channel] / D50_XYZ[channel];
-            }
-        }
-        let mut linear = mul3(self.pcs_to_device_linear, xyz);
-        linear = match intent {
-            RenderingIntent::Perceptual => perceptual_gamut_compress(linear),
-            RenderingIntent::Saturation => saturation_gamut_compress(linear),
-            RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => {
-                linear.map(|v| v.clamp(0.0, 1.0))
-            }
-        };
-        [
-            self.curves[0].inverse(linear[0]),
-            self.curves[1].inverse(linear[1]),
-            self.curves[2].inverse(linear[2]),
-        ]
-    }
-}
-
-fn is_icc_lut_transform_signature(signature: &[u8; 4]) -> bool {
-    matches!(
-        signature,
-        b"A2B0"
-            | b"A2B1"
-            | b"A2B2"
-            | b"A2B3"
-            | b"B2A0"
-            | b"B2A1"
-            | b"B2A2"
-            | b"B2A3"
-            | b"D2B0"
-            | b"D2B1"
-            | b"D2B2"
-            | b"D2B3"
-            | b"B2D0"
-            | b"B2D1"
-            | b"B2D2"
-            | b"B2D3"
-    )
-}
-
-fn find_icc_tag<'a>(tags: &'a [([u8; 4], &'a [u8])], signature: &[u8; 4]) -> Result<&'a [u8]> {
-    find_icc_tag_optional(tags, signature).ok_or_else(|| {
-        anyhow!(
-            "ICC profile is missing tag {}",
-            String::from_utf8_lossy(signature)
-        )
-    })
-}
-
-fn find_icc_tag_optional<'a>(
-    tags: &'a [([u8; 4], &'a [u8])],
-    signature: &[u8; 4],
-) -> Option<&'a [u8]> {
-    tags.iter()
-        .find(|(candidate, _)| candidate == signature)
-        .map(|(_, data)| *data)
-}
-
-fn parse_icc_xyz(data: &[u8]) -> Result<[f32; 3]> {
-    if data.len() < 20 || &data[0..4] != b"XYZ " {
-        bail!("invalid ICC XYZ tag");
-    }
-    Ok([
-        s15_fixed16(&data[8..12]),
-        s15_fixed16(&data[12..16]),
-        s15_fixed16(&data[16..20]),
-    ])
-}
-
-fn parse_icc_curve(data: &[u8]) -> Result<TransferCurve> {
-    if data.len() < 12 {
-        bail!("truncated ICC TRC tag");
-    }
-    match &data[0..4] {
-        b"curv" => {
-            let count = be_u32(&data[8..12]) as usize;
-            if count == 0 {
-                return Ok(TransferCurve::Identity);
-            }
-            let end = 12usize
-                .checked_add(
-                    count
-                        .checked_mul(2)
-                        .ok_or_else(|| anyhow!("ICC curve overflow"))?,
-                )
-                .ok_or_else(|| anyhow!("ICC curve overflow"))?;
-            if end > data.len() {
-                bail!("truncated ICC sampled curve");
-            }
-            if count == 1 {
-                let gamma = be_u16(&data[12..14]) as f32 / 256.0;
-                if gamma <= 0.0 {
-                    bail!("ICC gamma curve must be positive");
-                }
-                return Ok(TransferCurve::Gamma(gamma));
-            }
-            Ok(TransferCurve::Sampled(
-                data[12..end]
-                    .chunks_exact(2)
-                    .map(|chunk| be_u16(chunk) as f32 / 65_535.0)
-                    .collect(),
-            ))
-        }
-        b"para" => {
-            let kind = be_u16(&data[8..10]);
-            let count = match kind {
-                0 => 1,
-                1 => 3,
-                2 => 4,
-                3 => 5,
-                4 => 7,
-                _ => bail!("unsupported ICC parametric curve type {kind}"),
-            };
-            let end = 12 + count * 4;
-            if end > data.len() {
-                bail!("truncated ICC parametric curve");
-            }
-            let params = data[12..end].chunks_exact(4).map(s15_fixed16).collect();
-            Ok(TransferCurve::Parametric { kind, params })
-        }
-        signature => bail!("unsupported ICC TRC tag type {signature:?}"),
-    }
-}
-
-fn parametric_curve(kind: u16, p: &[f32], x: f32) -> f32 {
-    match kind {
-        0 => x.max(0.0).powf(p[0]),
-        1 => {
-            let [g, a, b] = [p[0], p[1], p[2]];
-            if x >= -b / a {
-                (a * x + b).powf(g)
-            } else {
-                0.0
-            }
-        }
-        2 => {
-            let [g, a, b, c] = [p[0], p[1], p[2], p[3]];
-            if x >= -b / a {
-                (a * x + b).powf(g) + c
-            } else {
-                c
-            }
-        }
-        3 => {
-            let [g, a, b, c, d] = [p[0], p[1], p[2], p[3], p[4]];
-            if x >= d {
-                (a * x + b).powf(g)
-            } else {
-                c * x
-            }
-        }
-        4 => {
-            let [g, a, b, c, d, e, f] = [p[0], p[1], p[2], p[3], p[4], p[5], p[6]];
-            if x >= d {
-                (a * x + b).powf(g) + e
-            } else {
-                c * x + f
-            }
-        }
-        _ => x,
-    }
-}
-
-fn be_u16(bytes: &[u8]) -> u16 {
-    u16::from_be_bytes(bytes.try_into().unwrap())
-}
-fn be_u32(bytes: &[u8]) -> u32 {
-    u32::from_be_bytes(bytes.try_into().unwrap())
-}
-fn s15_fixed16(bytes: &[u8]) -> f32 {
-    i32::from_be_bytes(bytes.try_into().unwrap()) as f32 / 65_536.0
-}
-
 fn mul3(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
     matrix.map(|row| row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2])
 }
@@ -1696,70 +888,4 @@ fn sample_rgb_lut(entries: &[[f32; 4]], size: u32, rgb: [f32; 3]) -> [f32; 3] {
     let c0 = lerp(c00, c10, f[1]);
     let c1 = lerp(c01, c11, f[1]);
     lerp(c0, c1, f[2])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CameraProfile, HsvMap, IccOutputTransform, ProfileEncoding, ToneCurve};
-
-    #[test]
-    fn dual_illuminant_maps_interpolate_entrywise() {
-        let a = HsvMap::new(
-            [1, 2, 1],
-            vec![[0.0, 1.0, 1.0], [10.0, 0.5, 1.0]],
-            ProfileEncoding::Linear,
-        )
-        .unwrap();
-        let b = HsvMap::new(
-            [1, 2, 1],
-            vec![[20.0, 2.0, 1.0], [30.0, 1.5, 2.0]],
-            ProfileEncoding::Linear,
-        )
-        .unwrap();
-        let mixed = HsvMap::interpolate(&a, &b, 0.25).unwrap();
-        assert_eq!(mixed.entries[0], [5.0, 1.25, 1.0]);
-    }
-
-    #[test]
-    fn tone_curve_sampling_is_monotonic_for_monotonic_points() {
-        let curve = ToneCurve::new(vec![[0.0, 0.0], [0.2, 0.08], [0.7, 0.82], [1.0, 1.0]]).unwrap();
-        let lut = curve.sampled_lut(256);
-        assert!(lut.windows(2).all(|pair| pair[1] >= pair[0] - 1e-6));
-    }
-
-    #[test]
-    fn default_srgb_output_lut_preserves_neutral_order() {
-        let lut = IccOutputTransform::srgb();
-        let low = lut.transform_rgb([0.1; 3]);
-        let high = lut.transform_rgb([0.5; 3]);
-        assert!(low[0] < high[0]);
-        assert!((low[0] - low[1]).abs() < 0.02);
-    }
-
-    #[test]
-    fn gpu_layout_offsets_are_contiguous() {
-        let profile = CameraProfile {
-            hue_sat_maps: [
-                Some(
-                    HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear)
-                        .unwrap(),
-                ),
-                Some(
-                    HsvMap::new([1, 2, 1], vec![[0.0, 1.0, 1.0]; 2], ProfileEncoding::Linear)
-                        .unwrap(),
-                ),
-            ],
-            tone_curve: Some(ToneCurve::new(vec![[0.0, 0.0], [1.0, 1.0]]).unwrap()),
-            ..Default::default()
-        };
-        let data = profile.gpu_data(&IccOutputTransform::srgb());
-        assert_eq!(data.layout.hue_sat[3], 1);
-        assert_eq!(data.layout.hue_sat_2[3], 3);
-        assert_eq!(data.words[0].map(f32::to_bits), data.layout.hue_sat_2);
-        assert_eq!(data.layout.tone[1], 5);
-        assert_eq!(
-            data.words.len(),
-            data.layout.output[3] as usize + 33usize.pow(3)
-        );
-    }
 }

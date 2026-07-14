@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from tests.source_helpers import read_source_tree
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASIC = (ROOT / "src/pipeline/basicadj.rs").read_text(encoding="utf-8")
 MASKS = (ROOT / "src/pipeline/masks.rs").read_text(encoding="utf-8")
-GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+GPU = read_source_tree(ROOT / "src/pipeline/gpu.rs")
 COMMON = (ROOT / "src/shaders/common.wgsl").read_text(encoding="utf-8")
 ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
-SIDEBAR = (ROOT / "src/ui/sidebar.rs").read_text(encoding="utf-8")
+SIDEBAR = read_source_tree(ROOT / "src/ui/sidebar.rs")
 WHEEL = (ROOT / "src/ui/components/color_grading.rs").read_text(encoding="utf-8")
 
 
@@ -52,7 +53,7 @@ def test_uniform_abi_carries_global_and_local_grading() -> None:
     ):
         assert f"{field}: [[f32; 4]; MAX_LOCAL_MASKS]" in GPU
         assert f"{field}: array<vec4<f32>, 8>" in COMMON
-    assert "size_of::<super::GpuParams>(), 6944" in GPU
+    assert "size_of::<super::GpuParams>(), 6960" in GPU
 
 
 def test_grading_is_scene_referred_perceptual_and_gamut_safe() -> None:

@@ -1,9 +1,7 @@
 use crate::app::ColorGradeTab;
 use crate::pipeline::{ColorGradeWheel, ColorGrading};
 use crate::ui::components::adjustment_slider::adjustment_slider;
-use eframe::egui::{
-    self, Color32, DragValue, Mesh, Pos2, Sense, Shape, Stroke, Ui,
-};
+use eframe::egui::{self, Color32, DragValue, Mesh, Pos2, Sense, Shape, Stroke, Ui};
 
 const WHEEL_MAX_SIZE: f32 = 190.0;
 const WHEEL_MIN_SIZE: f32 = 150.0;
@@ -29,8 +27,16 @@ pub fn color_grading_editor(
 
     ui.horizontal_wrapped(|ui| {
         for (tab, label, tooltip) in [
-            (ColorGradeTab::Shadows, "Shadows", "Grade the darker tonal range"),
-            (ColorGradeTab::Midtones, "Midtones", "Grade the middle tonal range"),
+            (
+                ColorGradeTab::Shadows,
+                "Shadows",
+                "Grade the darker tonal range",
+            ),
+            (
+                ColorGradeTab::Midtones,
+                "Midtones",
+                "Grade the middle tonal range",
+            ),
             (
                 ColorGradeTab::Highlights,
                 "Highlights",
@@ -79,10 +85,7 @@ pub fn color_grading_editor(
 
 fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     let mut changed = false;
-    let size = ui
-        .available_width()
-        .min(WHEEL_MAX_SIZE)
-        .max(WHEEL_MIN_SIZE);
+    let size = ui.available_width().min(WHEEL_MAX_SIZE).max(WHEEL_MIN_SIZE);
 
     ui.horizontal(|ui| {
         ui.strong("Hue / Saturation");
@@ -136,10 +139,10 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
         painter.circle_filled(marker, 5.0, Color32::WHITE);
         painter.circle_stroke(marker, 6.5, Stroke::new(1.5, Color32::BLACK));
 
-        if (response.dragged() || response.clicked())
-            && response.interact_pointer_pos().is_some()
+        if let Some(pointer) = (response.dragged() || response.clicked())
+            .then(|| response.interact_pointer_pos())
+            .flatten()
         {
-            let pointer = response.interact_pointer_pos().unwrap();
             let offset = pointer - center;
             let distance = offset.length().min(radius);
             let new_saturation = (distance / radius * 100.0).clamp(0.0, 100.0);

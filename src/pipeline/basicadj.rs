@@ -184,8 +184,13 @@ impl ColorGrading {
     }
 }
 
+pub const CURRENT_PROCESS_VERSION: u32 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExposureParams {
+    /// Version of the processing formulas used by this edit. Saved edits must
+    /// migrate deliberately instead of silently adopting new shader behavior.
+    pub process_version: u32,
     /// Additional normalized sensor-space black-point correction. It is applied
     /// per CFA plane before white balance and demosaic, and is deliberately
     /// separate from the creative `blacks` control in the Basic panel.
@@ -268,6 +273,19 @@ pub struct ExposureParams {
 pub const DEFAULT_SCENE_EXPOSURE_EV: f32 = 0.7;
 
 impl ExposureParams {
+    pub fn migrate_to_current_process(&mut self) {
+        // Version 1 and unversioned edits use the same formulas as version 2;
+        // the explicit assignment makes future migrations a reviewed branch.
+        match self.process_version {
+            0 | 1 => self.process_version = CURRENT_PROCESS_VERSION,
+            CURRENT_PROCESS_VERSION => {}
+            // Preserve unknown future versions. Callers can reject them or
+            // load them in a compatibility mode, but must not silently
+            // reinterpret them with older formulas.
+            _ => {}
+        }
+    }
+
     pub fn sanitize_tone_curves(&mut self) {
         self.tone_curve.sanitize();
         self.tone_curve_red.sanitize();
@@ -293,6 +311,7 @@ impl ExposureParams {
 impl Default for ExposureParams {
     fn default() -> Self {
         Self {
+            process_version: CURRENT_PROCESS_VERSION,
             black_point: 0.0,
             exposure: 0.0,
             contrast: 0.0,
