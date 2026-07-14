@@ -206,7 +206,7 @@ jobs:
           PY
 
           # Digest from the successful upstream release build artifact.
-          LINUXDEPLOY_SHA256=df2e0f88e160e6886ba311f80be1fda21ff329caf7d45a609316c97cda3818c9
+          LINUXDEPLOY_SHA256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
           download_verified \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
             /tmp/linuxdeploy-x86_64.AppImage "$LINUXDEPLOY_SHA256"

@@ -77,11 +77,22 @@ command -v "$checksum_command" >/dev/null 2>&1 || {
     exit 1
 }
 
+# Normalize once so uppercase digests are accepted and diagnostics are stable.
+expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
+
 verify_file() {
-    printf '%s  %s\n' "$expected" "$1" | "$checksum_command" --check --status
+    actual="$("$checksum_command" "$1" | awk '{print $1}')" || return 1
+    if [ "$actual" != "$expected" ]; then
+        echo "$algorithm checksum mismatch for $1" >&2
+        echo "expected: $expected" >&2
+        echo "actual:   $actual" >&2
+        return 1
+    fi
 }
 
-if [ -f "$output" ] && verify_file "$output"; then
+# A stale or corrupt cache entry should trigger a fresh download without making
+# a successful recovery look like a failed build.
+if [ -f "$output" ] && verify_file "$output" 2>/dev/null; then
     echo "verified cached download: $output"
     exit 0
 fi
