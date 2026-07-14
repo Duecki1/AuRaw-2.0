@@ -40,7 +40,7 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "
 
 # THIS SECTION IS REQUIRED FOR build.rs:
 [build-dependencies]
-bindgen = "0.70"
+bindgen = "0.72"
 pkg-config = "0.3"
 
 [dev-dependencies]
