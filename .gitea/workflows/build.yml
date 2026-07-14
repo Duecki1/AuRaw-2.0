@@ -11,11 +11,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
   DEBIAN_FRONTEND: noninteractive
-  # Non-secret repository variables. Builds fail closed when a checksum is absent.
-  RUSTUP_INIT_SHA256: ${{ vars.RUSTUP_INIT_SHA256 }}
-  LINUXDEPLOY_SHA256: ${{ vars.LINUXDEPLOY_SHA256 }}
-  ANDROID_CMDLINE_TOOLS_SHA256: ${{ vars.ANDROID_CMDLINE_TOOLS_SHA256 }}
-  GRADLE_8_11_1_SHA256: ${{ vars.GRADLE_8_11_1_SHA256 }}
 
 jobs:
   linux-appimage:
@@ -93,8 +88,9 @@ jobs:
           }
 
           download_verified \
-            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
-            /tmp/rustup-init "$RUSTUP_INIT_SHA256"
+            https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
+            /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init.sha256
           chmod +x /tmp/rustup-init
           /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
@@ -209,6 +205,8 @@ jobs:
               handle.write(png)
           PY
 
+          # Digest from the successful upstream release build artifact.
+          LINUXDEPLOY_SHA256=df2e0f88e160e6886ba311f80be1fda21ff329caf7d45a609316c97cda3818c9
           download_verified \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
             /tmp/linuxdeploy-x86_64.AppImage "$LINUXDEPLOY_SHA256"
@@ -344,9 +342,12 @@ jobs:
           if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
             rm -rf /tmp/android-command-line-tools
             mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-command-line-tools
+            # Raw archive SHA-512 from the Gentoo Manifest for this exact Google artifact.
+            ANDROID_CMDLINE_TOOLS_SHA512=b65e830d7655fb39cc9eee669806977f462c49375807ef2c6487fabcc9afdbc210465ce6a1e2429ff95c74ca519d1239daf9a403c30b8d0bdb7a0962af656c8e
             download_verified \
               https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip \
-              /tmp/android-command-line-tools.zip "$ANDROID_CMDLINE_TOOLS_SHA256"
+              /tmp/android-command-line-tools.zip \
+              "sha512:$ANDROID_CMDLINE_TOOLS_SHA512"
             unzip -q /tmp/android-command-line-tools.zip -d /tmp/android-command-line-tools
             rm -rf "$ANDROID_HOME/cmdline-tools/latest"
             mv /tmp/android-command-line-tools/cmdline-tools \
@@ -360,8 +361,9 @@ jobs:
           export PATH="$ANDROID_HOME/cmake/$ANDROID_CMAKE_VERSION/bin:$PATH"
 
           download_verified \
-            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
-            /tmp/rustup-init "$RUSTUP_INIT_SHA256"
+            https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
+            /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init.sha256
           chmod +x /tmp/rustup-init
           /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
@@ -378,7 +380,8 @@ jobs:
           if [ ! -x "$HOME/gradle-${GRADLE_VERSION}/bin/gradle" ]; then
             download_verified \
               "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-              /tmp/gradle.zip "$GRADLE_8_11_1_SHA256"
+              /tmp/gradle.zip \
+              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip.sha256"
             rm -rf "$HOME/gradle-${GRADLE_VERSION}"
             unzip -q /tmp/gradle.zip -d "$HOME"
           fi
