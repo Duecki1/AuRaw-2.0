@@ -1,6 +1,6 @@
 [package]
 name = "auraw"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.92.0"
 authors = ["Duecki <dueckis@dueckis.de>"]
@@ -12,7 +12,6 @@ default-run = "auraw"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts"] }
 bytemuck = { version = "1.16", features = ["derive"] }
 rayon = "1.10"
 log = "0.4"
@@ -27,6 +26,7 @@ eframe = { version = "0.35", default-features = false, features = ["accesskit", 
 env_logger = "0.11"
 rfd = "0.15"
 pollster = "0.4"
+# Exact RC pin: see DEPENDENCIES.md. Replace with stable 2.x when the required APIs are released.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-18"] }
 
 
@@ -35,6 +35,7 @@ eframe = { version = "0.35", default-features = false, features = ["wgpu", "defa
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 jni = "0.22"
+# Exact RC pin: see DEPENDENCIES.md. Replace with stable 2.x when the required APIs are released.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-18", "xnnpack"] }
 
 # THIS SECTION IS REQUIRED FOR build.rs:
@@ -49,7 +50,7 @@ naga = { version = "29", features = ["wgsl-in"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 
 [profile.dev]
 opt-level = 1

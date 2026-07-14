@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from tests.source_helpers import read_source_tree
 from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
 AI = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
-APP = (ROOT / "src/app.rs").read_text(encoding="utf-8")
-RAW = (ROOT / "src/pipeline/raw_loader.rs").read_text(encoding="utf-8")
-COLOR_PROFILE = (ROOT / "src/pipeline/color_profile.rs").read_text(encoding="utf-8")
+APP = read_source_tree(ROOT / "src/app.rs")
+RAW = read_source_tree(ROOT / "src/pipeline/raw_loader.rs")
+COLOR_PROFILE = read_source_tree(ROOT / "src/pipeline/color_profile.rs")
 CARGO = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
 CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 ANDROID_ACTIVITY = (ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java").read_text(encoding="utf-8")
@@ -96,7 +97,7 @@ def test_global_white_balance_rebuilds_camera_and_dcp_transforms() -> None:
     adjustments = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
     tone = (ROOT / "src/shaders/tone_analysis.wgsl").read_text(encoding="utf-8")
     basic = (ROOT / "src/shaders/basic_adjustments.wgsl").read_text(encoding="utf-8")
-    gpu = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+    gpu = read_source_tree(ROOT / "src/pipeline/gpu.rs")
     profile = (ROOT / "src/shaders/profile.wgsl").read_text(encoding="utf-8")
     assert "apply_camera_temperature_tint" not in basic
     assert "raw.adjusted_camera_transform(" in gpu
@@ -110,3 +111,21 @@ def test_global_white_balance_rebuilds_camera_and_dcp_transforms() -> None:
     matrix = tone.index("cam_to_working(camera_rgb)")
     hue_sat = tone.index("apply_profile_hue_sat(working)")
     assert matrix < hue_sat
+
+
+def test_rust_compile_surface_regressions_are_absent() -> None:
+    gpu_tests = (ROOT / "src/pipeline/gpu/tests.rs").read_text(encoding="utf-8")
+    gpu_resources = (ROOT / "src/pipeline/gpu/resources.rs").read_text(encoding="utf-8")
+    icc = (ROOT / "src/pipeline/color_profile/icc.rs").read_text(encoding="utf-8")
+    raw_loader = (ROOT / "src/pipeline/raw_loader.rs").read_text(encoding="utf-8")
+    sidebar = (ROOT / "src/ui/sidebar.rs").read_text(encoding="utf-8")
+
+    assert "&tone_analysis_module" not in gpu_tests
+    assert "SHADER_TONE_ANALYSIS" in gpu_tests
+    assert "crate::pipeline::raw_loader::validate_raw_dimensions" in gpu_resources
+    assert "super::raw_loader::validate_raw_dimensions" not in gpu_resources
+    assert "#[derive(Clone, Debug)]\nenum TransferCurve" in icc
+    assert '#[cfg(not(libraw_available))]\nuse anyhow::anyhow;' in raw_loader
+    assert "use crate::ui::mask_component_color;" not in sidebar
+    assert "offset_of!(super::GpuParams, process_info), 832" in gpu_tests
+    assert "offset_of!(super::GpuParams, mask_counts), 848" in gpu_tests

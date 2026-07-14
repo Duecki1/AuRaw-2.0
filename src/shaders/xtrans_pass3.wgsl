@@ -1,7 +1,7 @@
 // Markesteijn X-Trans pass 2: recalculate green from the closer interpolated
 // values created by pass 1, then refresh missing chroma around that green.
 @group(0) @binding(7) var markesteijn_read_2: texture_2d<f32>;
-@group(0) @binding(8) var markesteijn_write_2: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(8) var markesteijn_write_2: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn mark2_load(pos: vec2<i32>) -> vec3<f32> {
     return textureLoad(markesteijn_read_2, clamp_pos(pos), 0).rgb;

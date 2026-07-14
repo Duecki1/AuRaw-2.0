@@ -1,8 +1,8 @@
 // Markesteijn directional derivative stage. Eight RGB candidates are converted
 // to perceptual YUV and differentiated along the four reference axes. The
 // scalar derivatives fit in two RGBA scratch textures.
-@group(0) @binding(20) var mark_drv_0_3_write: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(21) var mark_drv_4_7_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(20) var mark_drv_0_3_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
+@group(0) @binding(21) var mark_drv_4_7_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn mark_derivative(pos: vec2<i32>, index: u32) -> f32 {
     let axis = mark_axis(index);

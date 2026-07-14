@@ -6,15 +6,15 @@
 
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(21) var adjustment_base_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(21) var adjustment_base_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(22) var adjustment_base_tex: texture_2d<f32>;
-@group(0) @binding(23) var local_effects_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(23) var local_effects_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(24) var local_effects_tex: texture_2d<f32>;
-@group(0) @binding(25) var creative_effects_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(25) var creative_effects_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(26) var final_adjustment_tex: texture_2d<f32>;
 @group(0) @binding(27) var local_mask_tex: texture_2d_array<f32>;
 @group(0) @binding(28) var local_mask_sampler: sampler;
-@group(0) @binding(29) var display_linear_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(29) var display_linear_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 struct LocalAdjustmentMix {
     tone0: vec4<f32>,

@@ -1,7 +1,7 @@
 // Bayer RCD stage 2. This follows darktable's ratio-corrected green stage:
 // directional HPF discrimination, low-pass ratios, then diagonal P/Q HPFs.
 @group(0) @binding(5) var tex1_read: texture_2d<f32>;
-@group(0) @binding(6) var tex2_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(6) var tex2_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn rcd_axis_hpf(pos: vec2<i32>, axis: vec2<i32>) -> f32 {
     let c = raw_cfa_at(pos);

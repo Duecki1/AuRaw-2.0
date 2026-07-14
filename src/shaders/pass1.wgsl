@@ -1,6 +1,6 @@
 // Bayer RCD stage 1: chromatic-aberration-invariant directional statistics
 // and the stable 1-2-1 / 2-4-2 / 1-2-1 low-pass guide.
-@group(0) @binding(4) var tex1_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var tex1_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 @compute @workgroup_size(8, 8, 1)
 fn bayer_rcd_directional(@builtin(global_invocation_id) gid: vec3<u32>) {

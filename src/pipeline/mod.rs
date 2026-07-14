@@ -9,7 +9,7 @@ mod sigmoid;
 
 pub use basicadj::{
     ColorGradeWheel, ColorGrading, DemosaicMode, ExposureParams, HighlightReconstructionMethod,
-    PointCurve, MAX_POINT_CURVE_POINTS,
+    PointCurve, CURRENT_PROCESS_VERSION, MAX_POINT_CURVE_POINTS,
 };
 pub use color_profile::{
     CameraProfile, DcpMatrixSet, DcpProfile, HsvMap, IccOutputTransform, ProfileEncoding,

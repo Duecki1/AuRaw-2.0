@@ -227,8 +227,8 @@ impl Preview {
                     }) => {
                         let center_screen = normalized_to_screen(image_rect, *center);
                         let current_angle = angle_from(center_screen, pointer);
-                        *rotation = original_rotation
-                            + shortest_angle_delta(pointer_angle, current_angle);
+                        *rotation =
+                            original_rotation + shortest_angle_delta(pointer_angle, current_angle);
                         changed = true;
                     }
                     _ => {}
@@ -284,8 +284,8 @@ impl Preview {
                         let original_vector = b - a;
                         let original_angle = original_vector.y.atan2(original_vector.x);
                         let current_angle = angle_from(midpoint, pointer);
-                        let angle = original_angle
-                            + shortest_angle_delta(pointer_angle, current_angle);
+                        let angle =
+                            original_angle + shortest_angle_delta(pointer_angle, current_angle);
                         let half_length = original_vector.length() * 0.5;
                         let half_vector = egui::vec2(angle.cos(), angle.sin()) * half_length;
                         *start = screen_to_normalized(image_rect, midpoint - half_vector);
@@ -416,13 +416,8 @@ impl Preview {
                     feather,
                     initialized: true,
                 } => {
-                    let outer = radial_outline_screen_points(
-                        image_rect,
-                        *center,
-                        *radius,
-                        *rotation,
-                        72,
-                    );
+                    let outer =
+                        radial_outline_screen_points(image_rect, *center, *radius, *rotation, 72);
                     painter.add(egui::Shape::line(outer, Stroke::new(2.0, color)));
                     let inner_scale = 1.0 - feather.clamp(0.0, 1.0) * 0.98;
                     let inner = radial_outline_screen_points(
@@ -443,12 +438,8 @@ impl Preview {
                     }
                     let major_handle =
                         radial_handles_screen(image_rect, *center, *radius, *rotation)[0];
-                    let rotation_handle = radial_rotation_handle(
-                        image_rect,
-                        *center,
-                        *radius,
-                        *rotation,
-                    );
+                    let rotation_handle =
+                        radial_rotation_handle(image_rect, *center, *radius, *rotation);
                     painter.line_segment(
                         [major_handle, rotation_handle],
                         Stroke::new(1.0, color.gamma_multiply(0.72)),

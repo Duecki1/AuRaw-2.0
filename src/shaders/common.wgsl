@@ -81,8 +81,8 @@ struct Params {
     tile_origin_y: i32,
     full_width: u32,
     full_height: u32,
-    _pad0: u32,
-    _pad1: u32,
+    abi_version: u32,
+    abi_size_bytes: u32,
     // Local half-open rectangle included in a tiled full-resolution histogram.
     tone_histogram_bounds: vec4<u32>,
     // DCP/ICC LUT metadata: dimensions and packed-buffer offset.
@@ -93,6 +93,8 @@ struct Params {
     // HueSat encoding, LookTable encoding, default exposure EV bits, and the
     // live DCP dual-illuminant interpolation weight as f32 bits.
     profile_flags: vec4<u32>,
+    // Explicit processing-formula version; remaining lanes are reserved.
+    process_info: vec4<u32>,
     // Local adjustments. Each mask index maps directly to one layer in the
     // normalized R8 array texture sampled by adjustments.wgsl. mask_meta.w is
     // a feature bitset: bit 0 color mixer, bit 1 color grading.

@@ -11,6 +11,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
   DEBIAN_FRONTEND: noninteractive
+  # Non-secret repository variables. Builds fail closed when a checksum is absent.
+  RUSTUP_INIT_SHA256: ${{ vars.RUSTUP_INIT_SHA256 }}
+  LINUXDEPLOY_SHA256: ${{ vars.LINUXDEPLOY_SHA256 }}
+  ANDROID_CMDLINE_TOOLS_SHA256: ${{ vars.ANDROID_CMDLINE_TOOLS_SHA256 }}
+  GRADLE_8_11_1_SHA256: ${{ vars.GRADLE_8_11_1_SHA256 }}
 
 jobs:
   linux-appimage:
@@ -23,10 +28,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Restore Linux build cache
-        uses: actions/cache@v3
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
         with:
           path: |
             ~/.cargo/registry
@@ -83,37 +88,31 @@ jobs:
         run: |
           set -euxo pipefail
 
-          download() {
-            local url="$1"
-            local output="$2"
-            rm -f "$output"
-            curl --http1.1 \
-              --fail --location --show-error \
-              --retry 8 --retry-all-errors --retry-delay 3 \
-              --connect-timeout 30 \
-              "$url" -o "$output"
+          download_verified() {
+            scripts/verified-download.sh "$1" "$2" "$3"
           }
 
-          download \
+          download_verified \
             https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
-            /tmp/rustup-init
+            /tmp/rustup-init "$RUSTUP_INIT_SHA256"
           chmod +x /tmp/rustup-init
           /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
 
           # Match the LibRaw checkout and default Autotools configuration
           # installed in /usr/local on the development PC.
-          LIBRAW_REVISION=823f25dae9b86bf4504511ee42252ebc8d5513b1
+          LIBRAW_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
+          LIBRAW_ARCHIVE_SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
           if [ -f "$LIBRAW_PREFIX/lib/pkgconfig/libraw.pc" ] \
             && [ -f "$LIBRAW_PREFIX/lib/libraw.so" ] \
-            && [ "$(pkg-config --modversion libraw)" = "0.22.0" ]; then
+            && [ "$(pkg-config --modversion libraw)" = "0.22.1" ]; then
             echo "Using cached desktop LibRaw $LIBRAW_REVISION"
           else
             rm -rf /tmp/auraw-libraw-src "$LIBRAW_PREFIX"
             mkdir -p /tmp/auraw-libraw-src
-            download \
+            download_verified \
               "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_REVISION.tar.gz" \
-              /tmp/auraw-libraw.tar.gz
+              /tmp/auraw-libraw.tar.gz "$LIBRAW_ARCHIVE_SHA256"
             tar -xzf /tmp/auraw-libraw.tar.gz \
               --strip-components=1 \
               -C /tmp/auraw-libraw-src
@@ -131,7 +130,7 @@ jobs:
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          test "$(pkg-config --modversion libraw)" = "0.22.0"
+          test "$(pkg-config --modversion libraw)" = "0.22.1"
           REVISION="$(scripts/verify-source-revision.sh)"
           export AURAW_REQUIRE_COMMITTED_SOURCE=1
           export AURAW_SOURCE_REVISION="$REVISION"
@@ -147,15 +146,8 @@ jobs:
         run: |
           set -euxo pipefail
 
-          download() {
-            local url="$1"
-            local output="$2"
-            rm -f "$output"
-            curl --http1.1 \
-              --fail --location --show-error \
-              --retry 8 --retry-all-errors --retry-delay 3 \
-              --connect-timeout 30 \
-              "$url" -o "$output"
+          download_verified() {
+            scripts/verified-download.sh "$1" "$2" "$3"
           }
 
           VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
@@ -217,12 +209,10 @@ jobs:
               handle.write(png)
           PY
 
-          if [ ! -x /tmp/linuxdeploy-x86_64.AppImage ]; then
-            download \
-              https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
-              /tmp/linuxdeploy-x86_64.AppImage
-            chmod +x /tmp/linuxdeploy-x86_64.AppImage
-          fi
+          download_verified \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
+            /tmp/linuxdeploy-x86_64.AppImage "$LINUXDEPLOY_SHA256"
+          chmod +x /tmp/linuxdeploy-x86_64.AppImage
 
           export APPIMAGE_EXTRACT_AND_RUN=1
           export LDAI_OUTPUT="AuRaw-${VERSION}-x86_64.AppImage"
@@ -248,7 +238,7 @@ jobs:
           sha256sum "dist/$LDAI_OUTPUT" > "dist/$LDAI_OUTPUT.sha256"
 
       - name: Upload AppImage
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5 # v3
         with:
           name: auraw-linux-appimage
           path: dist/*
@@ -260,10 +250,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Restore pinned Android toolchains
-        uses: actions/cache@v3
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
         with:
           path: |
             ~/android-sdk
@@ -276,7 +266,7 @@ jobs:
           key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-ndk-27.0.12077973-cmake-3.22.1-gradle-8.11.1-cargo-ndk-4.1.2-libraw-0.22.1-v1
 
       - name: Restore Android dependency and build cache
-        uses: actions/cache@v3
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
         with:
           path: |
             ~/.cargo/registry
@@ -290,7 +280,7 @@ jobs:
             auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
           java-version: "17"
@@ -323,15 +313,8 @@ jobs:
         run: |
           set -euxo pipefail
 
-          download() {
-            local url="$1"
-            local output="$2"
-            rm -f "$output"
-            curl --http1.1 \
-              --fail --location --show-error \
-              --retry 8 --retry-all-errors --retry-delay 3 \
-              --connect-timeout 30 \
-              "$url" -o "$output"
+          download_verified() {
+            scripts/verified-download.sh "$1" "$2" "$3"
           }
 
           install_sdk_packages() {
@@ -361,9 +344,9 @@ jobs:
           if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
             rm -rf /tmp/android-command-line-tools
             mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-command-line-tools
-            download \
+            download_verified \
               https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip \
-              /tmp/android-command-line-tools.zip
+              /tmp/android-command-line-tools.zip "$ANDROID_CMDLINE_TOOLS_SHA256"
             unzip -q /tmp/android-command-line-tools.zip -d /tmp/android-command-line-tools
             rm -rf "$ANDROID_HOME/cmdline-tools/latest"
             mv /tmp/android-command-line-tools/cmdline-tools \
@@ -376,9 +359,9 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
           export PATH="$ANDROID_HOME/cmake/$ANDROID_CMAKE_VERSION/bin:$PATH"
 
-          download \
+          download_verified \
             https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
-            /tmp/rustup-init
+            /tmp/rustup-init "$RUSTUP_INIT_SHA256"
           chmod +x /tmp/rustup-init
           /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
@@ -393,9 +376,9 @@ jobs:
           fi
 
           if [ ! -x "$HOME/gradle-${GRADLE_VERSION}/bin/gradle" ]; then
-            download \
+            download_verified \
               "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-              /tmp/gradle.zip
+              /tmp/gradle.zip "$GRADLE_8_11_1_SHA256"
             rm -rf "$HOME/gradle-${GRADLE_VERSION}"
             unzip -q /tmp/gradle.zip -d "$HOME"
           fi
@@ -419,7 +402,7 @@ jobs:
             > dist/AuRaw-debug-arm64-v8a.apk.sha256
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5 # v3
         with:
           name: auraw-android-debug-arm64-v8a
           path: dist/*

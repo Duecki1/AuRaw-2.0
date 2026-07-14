@@ -185,18 +185,22 @@ pub fn spawn_tiled_png_export(
                 let tile_spec = bounded_tile_spec(tile_spec, raw.width)?;
                 let temporary = temporary_export_path(&worker_path)?;
                 let export_result = export_tiled_png(
-                    &device,
-                    &queue,
-                    &raw,
-                    &exposure,
-                    &masks,
-                    &temporary,
-                    tile_spec,
-                    output_width,
-                    output_height,
-                    settings.keep_metadata,
-                    &metadata,
-                    &worker_sender,
+                    ExportContext {
+                        device: &device,
+                        queue: &queue,
+                        events: &worker_sender,
+                    },
+                    ExportRequest {
+                        raw: &raw,
+                        exposure: &exposure,
+                        masks: &masks,
+                        path: &temporary,
+                        tile_spec,
+                        output_width,
+                        output_height,
+                        keep_metadata: settings.keep_metadata,
+                        metadata: &metadata,
+                    },
                 );
                 if let Err(error) = export_result {
                     let _ = std::fs::remove_file(&temporary);
@@ -224,21 +228,41 @@ pub fn spawn_tiled_png_export(
     receiver
 }
 
-#[allow(clippy::too_many_arguments)]
-fn export_tiled_png(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    raw: &LoadedRaw,
-    exposure: &ExposureParams,
-    masks: &MaskStack,
-    path: &Path,
+struct ExportContext<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    events: &'a mpsc::Sender<ExportEvent>,
+}
+
+struct ExportRequest<'a> {
+    raw: &'a LoadedRaw,
+    exposure: &'a ExposureParams,
+    masks: &'a MaskStack,
+    path: &'a Path,
     tile_spec: TileSpec,
     output_width: u32,
     output_height: u32,
     keep_metadata: bool,
-    metadata: &ExportMetadata,
-    events: &mpsc::Sender<ExportEvent>,
-) -> Result<()> {
+    metadata: &'a ExportMetadata,
+}
+
+fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
+    let ExportContext {
+        device,
+        queue,
+        events,
+    } = context;
+    let ExportRequest {
+        raw,
+        exposure,
+        masks,
+        path,
+        tile_spec,
+        output_width,
+        output_height,
+        keep_metadata,
+        metadata,
+    } = request;
     validate_export_dimensions(output_width, output_height)?;
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
     let first = *plan
@@ -509,7 +533,9 @@ impl LinearLightResizer {
                     row.resize(row_values, 0.0f32);
                     *slot = Some(row);
                 }
-                let row = slot.as_mut().expect("pending output row was initialized");
+                let row = slot
+                    .as_mut()
+                    .context("pending output row failed to initialize")?;
                 for (destination, value) in row.iter_mut().zip(&horizontal) {
                     *destination += *value * contribution.weight;
                 }

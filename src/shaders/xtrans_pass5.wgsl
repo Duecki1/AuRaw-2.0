@@ -3,8 +3,8 @@
 // accumulation pass performs the reference 5x5 sum over these maps.
 @group(0) @binding(20) var mark_drv_0_3_read: texture_2d<f32>;
 @group(0) @binding(21) var mark_drv_4_7_read: texture_2d<f32>;
-@group(0) @binding(24) var mark_homo_0_3_write: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(25) var mark_homo_4_7_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(24) var mark_homo_0_3_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
+@group(0) @binding(25) var mark_homo_4_7_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 const MARK_HOMO_MARGIN: i32 = 15;
 

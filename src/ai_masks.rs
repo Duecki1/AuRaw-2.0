@@ -347,11 +347,14 @@ fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, Str
 
     let mut source = File::open(path)
         .with_context(|| format!("open selected ONNX Runtime {}", path.display()))?;
-    let name = CString::new("auraw-verified-onnx-runtime").expect("literal has no NUL");
+    let name = CString::new("auraw-verified-onnx-runtime")
+        .map_err(|_| anyhow::anyhow!("internal ONNX Runtime memfd name contains a NUL byte"))?;
+    // SAFETY: `name` is a valid NUL-terminated CString and the flags are accepted by Linux memfd_create.
     let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC | MFD_ALLOW_SEALING) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error()).context("create sealed runtime file");
     }
+    // SAFETY: `fd` was just returned as an owned descriptor and is transferred exactly once into `File`.
     let mut sealed = unsafe { File::from_raw_fd(fd) };
     let mut hasher = Sha256Context::new(&SHA256);
     let mut buffer = [0u8; 256 * 1024];
@@ -378,6 +381,7 @@ fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, Str
         .collect::<String>();
 
     let seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
+    // SAFETY: the descriptor remains open for the call and `F_ADD_SEALS` consumes the integer bitmask by value.
     if unsafe { fcntl(sealed.as_raw_fd(), F_ADD_SEALS, seals) } < 0 {
         return Err(std::io::Error::last_os_error()).context("seal verified ONNX Runtime bytes");
     }
@@ -525,7 +529,10 @@ fn infer_subject(
         if session.is_none() {
             *session = Some(create_session(model_path)?);
         }
-        run_subject_session(session.as_mut().expect("session was initialized"), input)?
+        let session = session.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("BiRefNet session initialization produced no session")
+        })?;
+        run_subject_session(session, input)?
     };
 
     let mask = restore_from_letterbox(

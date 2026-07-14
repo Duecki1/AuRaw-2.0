@@ -1,10 +1,11 @@
+from tests.source_helpers import read_source_tree
 from pathlib import Path
 import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
-GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+GPU = read_source_tree(ROOT / "src/pipeline/gpu.rs")
 
 
 def test_color_mixer_does_not_process_in_mathematical_hsl() -> None:

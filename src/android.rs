@@ -65,9 +65,11 @@ pub fn take_export_publish_result() -> Option<ExportPublishResult> {
 }
 
 pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
+    // SAFETY: Android owns the JavaVM for the process lifetime; `JavaVM` is a non-owning handle and does not destroy the VM on drop.
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
     vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        // SAFETY: `raw_activity` is the live NativeActivity object for this callback; converting it to a JNI global reference extends its lifetime safely.
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
         env.call_method(
             activity,
@@ -88,9 +90,11 @@ pub fn publish_png(
     let path = path
         .to_str()
         .ok_or_else(|| "Android export cache path is not valid UTF-8".to_owned())?;
+    // SAFETY: Android owns the JavaVM for the process lifetime; `JavaVM` is a non-owning handle and does not destroy the VM on drop.
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
     vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        // SAFETY: `raw_activity` is the live NativeActivity object for this callback; converting it to a JNI global reference extends its lifetime safely.
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
         let path = env.new_string(path)?;
         let display_name = env.new_string(display_name)?;

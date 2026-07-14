@@ -3,7 +3,7 @@
 // coordinates. The same reference result feeds optional FDC and dual modes.
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(9) var tex3_read: texture_2d<f32>;
-@group(0) @binding(10) var scene_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(10) var scene_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 const RCD_MARGIN: i32 = 9;
 

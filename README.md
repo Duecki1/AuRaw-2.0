@@ -1,6 +1,13 @@
 # AuRaw
 
-GPU-based RAW image editor for Linux and Android.
+GPU-based RAW image editor for Linux, Windows, and Android.
+
+
+## Platform support
+
+- **Linux (supported):** primary desktop development and AppImage packaging target.
+- **Windows (supported):** x86_64 GNU build with LibRaw, produced by the Windows workflow.
+- **Android (experimental):** arm64 application build; device GPU and camera compatibility vary.
 
 ## Linux (Debian/Ubuntu)
 
@@ -119,7 +126,7 @@ and applies a hue-preserving scene-linear gain. See
 The Develop sidebar is divided into four tabs:
 
 - **Adjustments** contains the complete photographic processing stack.
-- **Masks** provides Lightroom-style Brush, Radial Gradient, and Linear Gradient masks with add, subtract, and intersect submasks. Brush includes paint/erase modes, size, and feather; local adjustments are applied in the scene-linear GPU pipeline. Subject, Background, Object, Landscape, Luminance Range, Color Range, and Depth Range appear as future-tool placeholders.
+- **Masks** provides Lightroom-style Brush, Radial Gradient, and Linear Gradient masks with add, subtract, and intersect submasks. Brush includes paint/erase modes, size, and feather; local adjustments are applied in the scene-linear GPU pipeline. Subject, Background, Luminance Range, and Color Range are implemented. Object, Landscape, and Depth Range remain future tools. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
 - **Inpainting** is reserved for future healing and object removal.
 - **Export** contains the PNG export action and all output options.
 
@@ -150,3 +157,8 @@ RAW dimensions, sensor dimensions, file size, embedded ICC data, model input,
 model output, export dimensions, export pixels, and export row buffers are
 checked before allocation or unpacking. Oversized or inconsistent inputs fail
 with an error rather than allowing unbounded memory or storage growth.
+
+
+## Development quality gates
+
+Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `regression/README.md`, `benchmarks/README.md`, [ARCHITECTURE.md](ARCHITECTURE.md), and [AUDIT_REMEDIATION.md](AUDIT_REMEDIATION.md). Supply-chain and dependency policies are in [SUPPLY_CHAIN.md](SUPPLY_CHAIN.md) and [DEPENDENCIES.md](DEPENDENCIES.md).

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.source_helpers import read_source_tree
 from pathlib import Path
 import re
 
@@ -7,10 +8,10 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
 TONEMAP = (ROOT / "src/shaders/tonemap.wgsl").read_text(encoding="utf-8")
-GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+GPU = read_source_tree(ROOT / "src/pipeline/gpu.rs")
 BASIC = (ROOT / "src/pipeline/basicadj.rs").read_text(encoding="utf-8")
-APP = (ROOT / "src/app.rs").read_text(encoding="utf-8")
-SIDEBAR = (ROOT / "src/ui/sidebar.rs").read_text(encoding="utf-8")
+APP = read_source_tree(ROOT / "src/app.rs")
+SIDEBAR = read_source_tree(ROOT / "src/ui/sidebar.rs")
 SETTINGS = (ROOT / "src/ui/settings.rs").read_text(encoding="utf-8")
 ALL_SHADERS = "\n".join(
     path.read_text(encoding="utf-8") for path in (ROOT / "src/shaders").glob("*.wgsl")
@@ -124,7 +125,8 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
     # Color Mixer arrays, advanced rendering, and RAW expert controls.
     for name in ("hsl_hue", "hsl_saturation", "hsl_luminance"):
         assert f"&mut exposure.{name}[index]" in SIDEBAR
-        assert f"exposure.{name}[..4]" in GPU
+        assert f"split_eight(exposure.{name})" in GPU
+        assert f"split_eight(adjustment.{name})" in GPU
         assert f"params.{name}_0" in ALL_SHADERS
         assert f"params.{name}_1" in ALL_SHADERS
 

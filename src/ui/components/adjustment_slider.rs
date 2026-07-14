@@ -118,10 +118,8 @@ where
 }
 
 fn touch_value_field(ui: &mut Ui, value: f64, decimals: usize) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(VALUE_FIELD_WIDTH, HEADER_HEIGHT),
-        Sense::hover(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(VALUE_FIELD_WIDTH, HEADER_HEIGHT), Sense::hover());
     let visuals = ui.style().interact(&response);
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 3.0, visuals.bg_fill);
@@ -229,16 +227,14 @@ where
     if focused {
         let (decrease, increase) = ui.input(|input| {
             (
-                input.key_pressed(egui::Key::ArrowLeft)
-                    || input.key_pressed(egui::Key::ArrowDown),
-                input.key_pressed(egui::Key::ArrowRight)
-                    || input.key_pressed(egui::Key::ArrowUp),
+                input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowUp),
             )
         });
         let direction = (increase as i8 - decrease as i8) as f64;
         if direction != 0.0 {
-            let next = (value.to_f64() + direction * keyboard_step)
-                .clamp(start.min(end), start.max(end));
+            let next =
+                (value.to_f64() + direction * keyboard_step).clamp(start.min(end), start.max(end));
             changed |= set_numeric(value, next, decimals);
         }
     }
@@ -257,12 +253,20 @@ where
     };
 
     let painter = ui.painter();
-    painter.rect_filled(track_rect, TRACK_HEIGHT * 0.5, ui.visuals().widgets.inactive.bg_fill);
+    painter.rect_filled(
+        track_rect,
+        TRACK_HEIGHT * 0.5,
+        ui.visuals().widgets.inactive.bg_fill,
+    );
     let fill_rect = egui::Rect::from_min_max(
         track_rect.left_top(),
         egui::pos2(handle_x, track_rect.bottom()),
     );
-    painter.rect_filled(fill_rect, TRACK_HEIGHT * 0.5, ui.visuals().selection.bg_fill);
+    painter.rect_filled(
+        fill_rect,
+        TRACK_HEIGHT * 0.5,
+        ui.visuals().selection.bg_fill,
+    );
     painter.circle_filled(handle_center, HANDLE_RADIUS, widget_visuals.bg_fill);
     painter.circle_stroke(
         handle_center,
@@ -291,8 +295,7 @@ fn set_from_pointer<Num>(
 where
     Num: egui::emath::Numeric + Copy,
 {
-    let fraction =
-        ((pointer_x - track_rect.left()) / track_rect.width().max(1.0)).clamp(0.0, 1.0);
+    let fraction = ((pointer_x - track_rect.left()) / track_rect.width().max(1.0)).clamp(0.0, 1.0);
     set_numeric(value, start + (end - start) * fraction as f64, decimals)
 }
 

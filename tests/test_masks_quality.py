@@ -1,11 +1,12 @@
+from tests.source_helpers import read_source_tree
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MASKS = (ROOT / "src/pipeline/masks.rs").read_text(encoding="utf-8")
-APP = (ROOT / "src/app.rs").read_text(encoding="utf-8")
+APP = read_source_tree(ROOT / "src/app.rs")
 PREVIEW = (ROOT / "src/ui/preview.rs").read_text(encoding="utf-8")
-SIDEBAR = (ROOT / "src/ui/sidebar.rs").read_text(encoding="utf-8")
-GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+SIDEBAR = read_source_tree(ROOT / "src/ui/sidebar.rs")
+GPU = read_source_tree(ROOT / "src/pipeline/gpu.rs")
 COMMON = (ROOT / "src/shaders/common.wgsl").read_text(encoding="utf-8")
 ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
 EXPORT = (ROOT / "src/pipeline/export.rs").read_text(encoding="utf-8")

@@ -14,9 +14,51 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+_INCLUDE_RE = re.compile(r'\binclude!\(\s*"([^"]+)"\s*\)\s*;')
+_MODULE_RE = re.compile(
+    r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+
+
+def _module_file(parent: Path, module_name: str) -> Path | None:
+    if parent.name in {"lib.rs", "main.rs", "mod.rs"}:
+        module_root = parent.parent
+    else:
+        module_root = parent.parent / parent.stem
+    direct = module_root / f"{module_name}.rs"
+    nested = module_root / module_name / "mod.rs"
+    if direct.is_file():
+        return direct
+    if nested.is_file():
+        return nested
+    return None
+
+
+def _read_rust_tree(path: Path) -> str:
+    chunks: list[str] = []
+    visited: set[Path] = set()
+
+    def visit(candidate: Path) -> None:
+        resolved = candidate.resolve()
+        if resolved in visited or not resolved.is_file():
+            return
+        visited.add(resolved)
+        text = resolved.read_text(encoding="utf-8")
+        chunks.append(f"\n// SOURCE FILE: {resolved.relative_to(ROOT)}\n{text}")
+        for include_path in _INCLUDE_RE.findall(text):
+            visit(resolved.parent / include_path)
+        for module_name in _MODULE_RE.findall(text):
+            module_path = _module_file(resolved, module_name)
+            if module_path is not None:
+                visit(module_path)
+
+    visit(path)
+    return "\n".join(chunks)
+
 
 def read(relative: str) -> str:
-    return (ROOT / relative).read_text(encoding="utf-8")
+    path = ROOT / relative
+    return _read_rust_tree(path) if path.suffix == ".rs" else path.read_text(encoding="utf-8")
 
 
 class Checks:
@@ -265,24 +307,22 @@ def main() -> int:
     c.require_in_order(
         adjustments,
         [
-            "apply_camera_temperature_tint(camera_rgb)",
-            "cam_to_working(white_balanced_camera)",
-            "apply_profile_hue_sat(working)",
+            "cam_to_working(camera_rgb)",
+            "apply_exposure(scene_working_at(pos))",
+            "apply_profile_hue_sat(rgb)",
             "exp2(profile_exposure_ev)",
             "apply_profile_look(rgb)",
             "apply_profile_tone_curve(rgb)",
-            "apply_exposure(rgb)",
             "apply_lightroom_tone(rgb, pos)",
             "apply_saturation_vibrance(rgb)",
-            "darktable_sigmoid(mixed)",
+            "darktable_sigmoid(graded)",
         ],
-        "render order is WB -> camera profile -> Basic -> point curve -> Color -> display transform",
+        "render order is camera/WB transform -> exposure -> DCP -> tone/color -> display transform",
     )
     c.require_in_order(
         tone_analysis,
         [
-            "apply_camera_temperature_tint(camera_rgb)",
-            "cam_to_working(white_balanced_camera)",
+            "cam_to_working(camera_rgb)",
             "apply_profile_hue_sat(working)",
             "exp2(profile_exposure_ev)",
             "apply_profile_look(exposed)",
@@ -350,7 +390,7 @@ def main() -> int:
     )
     compact_gpu = " ".join(gpu.split())
     c.check(
-        "size_of::<super::GpuParams>(), 6224" in compact_gpu
+        "size_of::<super::GpuParams>(), 6960" in compact_gpu
         and "offset_of!(super::GpuParams, sigmoid_curve), 80" in compact_gpu
         and "offset_of!(super::GpuParams, sigmoid_power), 96" in compact_gpu
         and "offset_of!(super::GpuParams, tone_curve_0), 192" in compact_gpu

@@ -4,7 +4,7 @@
 // radius-2 Gaussian-smoothed Scharr mask, matching darktable's dual-demosaic
 // threshold mapping.
 @group(0) @binding(26) var mark_high_read: texture_2d<f32>;
-@group(0) @binding(10) var xtrans_scene_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(10) var xtrans_scene_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn xt_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
