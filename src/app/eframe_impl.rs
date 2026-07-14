@@ -78,7 +78,9 @@ impl eframe::App for AurawApp {
         });
 
         self.apply_pending_lens_correction(frame);
+        self.apply_pending_preview_quality(frame);
         self.advance_processing(frame);
+        self.advance_preview_detail(frame);
         self.refresh_status();
 
         if self.pending_stage.is_some() {

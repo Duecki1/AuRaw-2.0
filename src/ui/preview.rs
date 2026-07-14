@@ -7,52 +7,178 @@ pub struct Preview;
 
 impl Preview {
     pub fn show(ui: &mut Ui, app: &mut AurawApp) {
-        let Some(pipeline) = &app.gpu_pipeline else {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.heading("No image open");
-                    ui.label("Use Open RAW… to load an image.");
+        let Some((texture_id, pipeline_width, pipeline_height)) = app
+            .gpu_pipeline
+            .as_ref()
+            .and_then(|pipeline| {
+                pipeline
+                    .egui_texture_id
+                    .map(|texture_id| (texture_id, pipeline.width, pipeline.height))
+            })
+        else {
+            if app.gpu_pipeline.is_some() {
+                ui.centered_and_justified(|ui| {
+                    ui.spinner();
+                    ui.label("Preparing preview…");
                 });
-            });
-            return;
-        };
-        let Some(texture_id) = pipeline.egui_texture_id else {
-            ui.centered_and_justified(|ui| {
-                ui.spinner();
-                ui.label("Preparing preview…");
-            });
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.heading("No image open");
+                        ui.label("Use Open RAW… to load an image.");
+                    });
+                });
+            }
             return;
         };
 
         let available = ui.available_size();
-        if available.x <= 0.0 || available.y <= 0.0 || pipeline.height == 0 {
+        if available.x <= 0.0 || available.y <= 0.0 || pipeline_height == 0 {
             return;
         }
 
-        let image_aspect = pipeline.width as f32 / pipeline.height as f32;
-        let available_aspect = available.x / available.y;
-        let size = if available_aspect > image_aspect {
-            egui::vec2(available.y * image_aspect, available.y)
-        } else {
-            egui::vec2(available.x, available.x / image_aspect)
-        };
-
         let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
-        let image_rect = Rect::from_center_size(outer_rect.center(), size);
-        let response = ui.interact(
-            image_rect,
-            ui.id().with("develop-preview-mask-interaction"),
-            // Drag-only sensing starts immediately on touch-down. This avoids
-            // the click-vs-drag threshold that otherwise makes Android masks
-            // begin several pixels away from the user's finger.
-            Sense::drag(),
+        let base_size = fitted_image_size(
+            outer_rect.size(),
+            pipeline_width as f32 / pipeline_height as f32,
         );
+        app.preview_zoom = app.preview_zoom.clamp(1.0, 32.0);
+        clamp_preview_center(
+            &mut app.preview_center,
+            outer_rect.size(),
+            base_size * app.preview_zoom,
+        );
+        let mut image_rect = zoomed_image_rect(
+            outer_rect,
+            base_size,
+            app.preview_zoom,
+            app.preview_center,
+        );
+        let mut interaction_rect = outer_rect.intersect(image_rect);
+        if interaction_rect.width() <= 0.0 || interaction_rect.height() <= 0.0 {
+            interaction_rect = outer_rect;
+        }
+        let interaction_id = if app.sidebar_tab == SidebarTab::Masks {
+            ui.id().with("develop-preview-mask-interaction")
+        } else {
+            ui.id().with("develop-preview-interaction")
+        };
+        let interaction_sense = if app.sidebar_tab == SidebarTab::Masks {
+            Sense::drag()
+        } else {
+            Sense::click_and_drag()
+        };
+        let response = ui.interact(interaction_rect, interaction_id, interaction_sense);
+
+        let mut moved = false;
+        if response.hovered() {
+            let scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll_y.abs() > 0.01 {
+                let pointer = ui
+                    .input(|input| input.pointer.hover_pos())
+                    .unwrap_or(outer_rect.center());
+                let anchor = [
+                    (pointer.x - image_rect.left()) / image_rect.width().max(1.0),
+                    (pointer.y - image_rect.top()) / image_rect.height().max(1.0),
+                ];
+                let previous_zoom = app.preview_zoom;
+                app.preview_zoom = (previous_zoom * (scroll_y * 0.0018).exp()).clamp(1.0, 32.0);
+                if (app.preview_zoom - previous_zoom).abs() > f32::EPSILON {
+                    let new_size = base_size * app.preview_zoom;
+                    let new_min = Pos2::new(
+                        pointer.x - anchor[0] * new_size.x,
+                        pointer.y - anchor[1] * new_size.y,
+                    );
+                    app.preview_center = [
+                        (outer_rect.center().x - new_min.x) / new_size.x.max(1.0),
+                        (outer_rect.center().y - new_min.y) / new_size.y.max(1.0),
+                    ];
+                    clamp_preview_center(&mut app.preview_center, outer_rect.size(), new_size);
+                    moved = true;
+                }
+            }
+        }
+
+        let pan_with_primary = app.sidebar_tab != SidebarTab::Masks
+            && response.dragged_by(egui::PointerButton::Primary);
+        let pan_with_middle = response.dragged_by(egui::PointerButton::Middle);
+        if pan_with_primary || pan_with_middle {
+            let delta = ui.input(|input| input.pointer.delta());
+            let image_size = base_size * app.preview_zoom;
+            app.preview_center[0] -= delta.x / image_size.x.max(1.0);
+            app.preview_center[1] -= delta.y / image_size.y.max(1.0);
+            clamp_preview_center(&mut app.preview_center, outer_rect.size(), image_size);
+            moved |= delta.length_sq() > 0.0;
+        }
+
+        if response.double_clicked() {
+            app.preview_zoom = 1.0;
+            app.preview_center = [0.5, 0.5];
+            moved = true;
+        }
+
+        image_rect = zoomed_image_rect(
+            outer_rect,
+            base_size,
+            app.preview_zoom,
+            app.preview_center,
+        );
+        let visible_screen = outer_rect.intersect(image_rect);
+        let visible_uv = crate::app::PreviewUvRect {
+            min: [
+                ((visible_screen.left() - image_rect.left()) / image_rect.width().max(1.0))
+                    .clamp(0.0, 1.0),
+                ((visible_screen.top() - image_rect.top()) / image_rect.height().max(1.0))
+                    .clamp(0.0, 1.0),
+            ],
+            max: [
+                ((visible_screen.right() - image_rect.left()) / image_rect.width().max(1.0))
+                    .clamp(0.0, 1.0),
+                ((visible_screen.bottom() - image_rect.top()) / image_rect.height().max(1.0))
+                    .clamp(0.0, 1.0),
+            ],
+        };
+        if preview_uv_changed(app.preview_visible_uv, visible_uv) {
+            app.preview_visible_uv = visible_uv;
+            moved = true;
+        }
+        if moved {
+            app.note_preview_motion();
+        }
+
         let painter = ui.painter_at(outer_rect);
         painter.image(
             texture_id,
             image_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
+        );
+
+        if let Some(detail) = app
+            .preview_detail
+            .as_ref()
+            .filter(|detail| detail.revision == app.preview_revision)
+        {
+            if let Some(detail_texture_id) = detail.pipeline.egui_texture_id {
+                let detail_rect = Rect::from_min_max(
+                    normalized_to_screen(image_rect, detail.uv_rect.min),
+                    normalized_to_screen(image_rect, detail.uv_rect.max),
+                );
+                painter.image(
+                    detail_texture_id,
+                    detail_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        }
+
+        painter.text(
+            outer_rect.left_top() + egui::vec2(10.0, 10.0),
+            egui::Align2::LEFT_TOP,
+            format!("{:.0}% · scroll to zoom · double-click to fit", app.preview_zoom * 100.0),
+            egui::FontId::proportional(11.0),
+            Color32::from_white_alpha(180),
         );
 
         if app.sidebar_tab == SidebarTab::Masks {
@@ -96,7 +222,8 @@ impl Preview {
         }
         app.active_mask_tool = Some(kind);
         let pointer = response.interact_pointer_pos();
-        let primary_down = response.is_pointer_button_down_on();
+        let primary_down = response.is_pointer_button_down_on()
+            && ui.input(|input| input.pointer.primary_down());
         if !primary_down {
             app.finish_mask_geometry_interaction();
             app.last_brush_point = None;
@@ -793,6 +920,50 @@ fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
     }
     let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
     point.distance(start + segment * t)
+}
+
+fn fitted_image_size(available: egui::Vec2, image_aspect: f32) -> egui::Vec2 {
+    let available_aspect = available.x / available.y.max(1.0);
+    if available_aspect > image_aspect {
+        egui::vec2(available.y * image_aspect, available.y)
+    } else {
+        egui::vec2(available.x, available.x / image_aspect.max(f32::EPSILON))
+    }
+}
+
+fn zoomed_image_rect(
+    outer_rect: Rect,
+    base_size: egui::Vec2,
+    zoom: f32,
+    center: [f32; 2],
+) -> Rect {
+    let size = base_size * zoom;
+    let min = Pos2::new(
+        outer_rect.center().x - center[0] * size.x,
+        outer_rect.center().y - center[1] * size.y,
+    );
+    Rect::from_min_size(min, size)
+}
+
+fn clamp_preview_center(center: &mut [f32; 2], viewport: egui::Vec2, image: egui::Vec2) {
+    for axis in 0..2 {
+        let viewport_axis = if axis == 0 { viewport.x } else { viewport.y };
+        let image_axis = if axis == 0 { image.x } else { image.y };
+        if image_axis <= viewport_axis + 0.5 {
+            center[axis] = 0.5;
+        } else {
+            let half_visible = (viewport_axis / (2.0 * image_axis)).clamp(0.0, 0.5);
+            center[axis] = center[axis].clamp(half_visible, 1.0 - half_visible);
+        }
+    }
+}
+
+fn preview_uv_changed(left: crate::app::PreviewUvRect, right: crate::app::PreviewUvRect) -> bool {
+    left.min
+        .into_iter()
+        .chain(left.max)
+        .zip(right.min.into_iter().chain(right.max))
+        .any(|(left, right)| (left - right).abs() > 0.0005)
 }
 
 fn painter_image(ui: &Ui, texture_id: egui::TextureId, rect: Rect) {

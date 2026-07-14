@@ -46,6 +46,17 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            preview_quality: PreviewQuality::default(),
+            preview_zoom: 1.0,
+            preview_center: [0.5, 0.5],
+            preview_visible_uv: PreviewUvRect {
+                min: [0.0, 0.0],
+                max: [1.0, 1.0],
+            },
+            preview_motion_at: None,
+            preview_revision: 0,
+            preview_detail: None,
+            preview_quality_dirty: false,
             exposure,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
@@ -117,6 +128,17 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            preview_quality: PreviewQuality::default(),
+            preview_zoom: 1.0,
+            preview_center: [0.5, 0.5],
+            preview_visible_uv: PreviewUvRect {
+                min: [0.0, 0.0],
+                max: [1.0, 1.0],
+            },
+            preview_motion_at: None,
+            preview_revision: 0,
+            preview_detail: None,
+            preview_quality_dirty: false,
             exposure,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
@@ -240,6 +262,7 @@ impl AurawApp {
         let device = render_state.device.clone();
         let queue = render_state.queue.clone();
         let initial_exposure = self.new_image_exposure();
+        let preview_quality_setting = self.preview_quality;
         self.exposure = initial_exposure;
         self.target_exposure = initial_exposure;
         self.masks.clear();
@@ -266,6 +289,14 @@ impl AurawApp {
         self.subject_inferencing = false;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.pending_stage = None;
+        self.preview_zoom = 1.0;
+        self.preview_center = [0.5, 0.5];
+        self.preview_visible_uv = PreviewUvRect {
+            min: [0.0, 0.0],
+            max: [1.0, 1.0],
+        };
+        self.preview_motion_at = None;
+        self.preview_revision = self.preview_revision.wrapping_add(1);
         self.original_raw = None;
         self.lens_correction = LensCorrectionState::default();
         self.lens_correction_dirty = false;
@@ -320,7 +351,9 @@ impl AurawApp {
                     } else {
                         Arc::clone(&original_raw)
                     };
-                    let preview_spec = ProxySpec::default();
+                    let preview_spec = ProxySpec {
+                        max_edge: preview_quality_setting.proxy_edge(),
+                    };
                     let preview_raw =
                         if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
                             Arc::clone(&full_raw)
@@ -419,6 +452,11 @@ impl AurawApp {
                         renderer.free_texture(&texture_id);
                     }
                 }
+                if let Some(old) = self.preview_detail.take() {
+                    if let Some(texture_id) = old.pipeline.egui_texture_id {
+                        renderer.free_texture(&texture_id);
+                    }
+                }
                 loaded
                     .pipeline
                     .register_egui_texture(&render_state.device, &mut renderer);
@@ -428,13 +466,14 @@ impl AurawApp {
                 let preview_width = loaded.preview_raw.width;
                 let preview_height = loaded.preview_raw.height;
                 self.image_status = format!(
-                    "{} {} — full {}×{}, preview {}×{}",
+                    "{} {} — full {}×{}, preview {}×{} ({})",
                     loaded.full_raw.camera_make,
                     loaded.full_raw.camera_model,
                     full_width,
                     full_height,
                     preview_width,
-                    preview_height
+                    preview_height,
+                    self.preview_quality.label(),
                 );
                 self.current_path = loaded.source_path;
                 self.current_label = Some(loaded.label.clone());
@@ -442,6 +481,15 @@ impl AurawApp {
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
                 self.gpu_pipeline = Some(loaded.pipeline);
+                self.preview_zoom = 1.0;
+                self.preview_center = [0.5, 0.5];
+                self.preview_visible_uv = PreviewUvRect {
+                    min: [0.0, 0.0],
+                    max: [1.0, 1.0],
+                };
+                self.preview_motion_at = None;
+                self.preview_revision = self.preview_revision.wrapping_add(1);
+                self.preview_detail = None;
                 self.lens_correction = loaded.lens_correction;
                 self.lens_correction_dirty = false;
                 self.target_exposure = loaded.rendered_exposure;

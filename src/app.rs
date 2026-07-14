@@ -1,6 +1,6 @@
 use crate::ai_masks::{spawn_subject_mask, SubjectMaskEvent, BIREFNET_MODEL_BYTES};
 use crate::pipeline::{
-    affected_stage, apply_lensfun_correction, build_proxy, lensfun_catalog, load_raw_file,
+    affected_stage, apply_lensfun_correction, build_proxy, crop_raw, lensfun_catalog, load_raw_file,
     spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings, ExposureParams,
     GpuParams, LensfunCatalog, LensfunLens, LoadedRaw, MaskImage, MaskKind, MaskRgbImage, MaskStack,
     ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, MAX_LOCAL_MASKS,
@@ -12,10 +12,62 @@ use crate::ui::preview::Preview;
 use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::top_bar::TopBar;
-use eframe::egui;
+use eframe::{egui, wgpu};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PreviewQuality {
+    Fast,
+    #[default]
+    Balanced,
+    High,
+}
+
+impl PreviewQuality {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "Fast",
+            Self::Balanced => "Balanced",
+            Self::High => "High",
+        }
+    }
+
+    pub const fn proxy_edge(self) -> u32 {
+        match (self, cfg!(target_os = "android")) {
+            (Self::Fast, true) => 960,
+            (Self::Balanced, true) => 1280,
+            (Self::High, true) => 1600,
+            (Self::Fast, false) => 1280,
+            (Self::Balanced, false) => 2048,
+            (Self::High, false) => 2560,
+        }
+    }
+
+    pub const fn detail_edge(self) -> u32 {
+        match (self, cfg!(target_os = "android")) {
+            (Self::Fast, true) => 1280,
+            (Self::Balanced, true) => 1920,
+            (Self::High, true) => 2560,
+            (Self::Fast, false) => 1920,
+            (Self::Balanced, false) => 2560,
+            (Self::High, false) => 3072,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PreviewUvRect {
+    pub min: [f32; 2],
+    pub max: [f32; 2],
+}
+
+pub(crate) struct PreviewDetail {
+    pub pipeline: RawGpuPipeline,
+    pub uv_rect: PreviewUvRect,
+    pub revision: u64,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AppTab {
@@ -194,6 +246,14 @@ pub struct AurawApp {
     pub loaded_raw: Option<Arc<LoadedRaw>>,
     pub preview_raw: Option<Arc<LoadedRaw>>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
+    pub(crate) preview_quality: PreviewQuality,
+    pub(crate) preview_zoom: f32,
+    pub(crate) preview_center: [f32; 2],
+    pub(crate) preview_visible_uv: PreviewUvRect,
+    pub(crate) preview_motion_at: Option<Instant>,
+    pub(crate) preview_revision: u64,
+    pub(crate) preview_detail: Option<PreviewDetail>,
+    preview_quality_dirty: bool,
     pub exposure: ExposureParams,
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,

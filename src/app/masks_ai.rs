@@ -8,6 +8,7 @@ impl AurawApp {
             None => ProcessingStage::Output,
         });
         self.notice = None;
+        self.note_preview_motion();
     }
 
     pub(crate) fn mark_mask_geometry_dirty(&mut self, layer: usize) {
@@ -32,6 +33,7 @@ impl AurawApp {
         }
 
         self.mask_interaction_has_uncommitted_change = true;
+        self.note_preview_motion();
         self.mask_interaction_frame_count = self.mask_interaction_frame_count.saturating_add(1);
         if self.mask_interaction_frame_count >= UPDATE_EVERY_CHANGED_FRAMES {
             self.mark_mask_geometry_dirty(layer);

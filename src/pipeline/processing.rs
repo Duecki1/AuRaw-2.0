@@ -69,6 +69,48 @@ impl Default for ProxySpec {
     }
 }
 
+/// Copies a rectangular RAW region while retaining camera metadata and the
+/// explicit CFA/black-level maps. Coordinates are clamped to the source image.
+pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> LoadedRaw {
+    let x = x.min(raw.width.saturating_sub(1));
+    let y = y.min(raw.height.saturating_sub(1));
+    let width = width.max(1).min(raw.width - x);
+    let height = height.max(1).min(raw.height - y);
+    let mut raw_pixels = Vec::with_capacity((width * height) as usize);
+    let mut color_indices = Vec::with_capacity((width * height) as usize);
+    let mut black_levels_per_pixel = Vec::with_capacity((width * height) as usize);
+
+    for row in y..y + height {
+        let start = (row * raw.width + x) as usize;
+        let end = start + width as usize;
+        raw_pixels.extend_from_slice(&raw.raw_pixels[start..end]);
+        color_indices.extend_from_slice(&raw.color_indices[start..end]);
+        black_levels_per_pixel.extend_from_slice(&raw.black_levels_per_pixel[start..end]);
+    }
+
+    LoadedRaw {
+        width,
+        height,
+        camera_make: raw.camera_make.clone(),
+        camera_model: raw.camera_model.clone(),
+        lens_make: raw.lens_make.clone(),
+        lens_model: raw.lens_model.clone(),
+        focal_length: raw.focal_length,
+        aperture: raw.aperture,
+        focus_distance: raw.focus_distance,
+        cfa_kind: raw.cfa_kind,
+        raw_pixels,
+        color_indices,
+        wb_coeffs: raw.wb_coeffs,
+        cam_to_srgb: raw.cam_to_srgb,
+        black_levels: raw.black_levels,
+        black_levels_per_pixel,
+        white_levels: raw.white_levels,
+        camera_profile: raw.camera_profile.clone(),
+        white_balance_model: raw.white_balance_model.clone(),
+    }
+}
+
 /// Builds a compact RAW proxy while preserving the explicit per-pixel CFA
 /// map. Each proxy photosite averages only source samples from the same CFA
 /// plane, preventing colour-plane cross-contamination before demosaic.
@@ -344,7 +386,9 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
 
 #[cfg(test)]
 mod tests {
-    use super::{affected_stage, build_proxy, ProcessingStage, ProxySpec, TilePlan, TileSpec};
+    use super::{
+        affected_stage, build_proxy, crop_raw, ProcessingStage, ProxySpec, TilePlan, TileSpec,
+    };
     use crate::pipeline::{CameraProfile, CfaKind, ExposureParams, LoadedRaw};
 
     #[test]
@@ -396,6 +440,40 @@ mod tests {
         assert_eq!(plan.tile_count(), 6);
         assert_eq!(plan.tiles.last().unwrap().core_width, 452);
         assert_eq!(plan.tiles.last().unwrap().core_height, 276);
+    }
+
+    #[test]
+    fn crop_raw_copies_only_the_requested_sensor_region() {
+        let width = 4;
+        let height = 3;
+        let raw = LoadedRaw {
+            width,
+            height,
+            camera_make: "Test".to_owned(),
+            camera_model: String::new(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            focal_length: 0.0,
+            aperture: 0.0,
+            focus_distance: 0.0,
+            cfa_kind: CfaKind::Bayer,
+            raw_pixels: (0..width * height).map(|value| value as u16).collect(),
+            color_indices: (0..width * height).map(|value| (value % 4) as u8).collect(),
+            wb_coeffs: [1.0; 4],
+            cam_to_srgb: [[0.0; 4]; 3],
+            black_levels: [0.0; 4],
+            black_levels_per_pixel: (0..width * height).map(|value| value as f32).collect(),
+            white_levels: [1023.0; 4],
+            camera_profile: CameraProfile::default(),
+            white_balance_model: None,
+        };
+
+        let cropped = crop_raw(&raw, 1, 1, 2, 2);
+        assert_eq!((cropped.width, cropped.height), (2, 2));
+        assert_eq!(cropped.raw_pixels, vec![5, 6, 9, 10]);
+        assert_eq!(cropped.color_indices, vec![1, 2, 1, 2]);
+        assert_eq!(cropped.black_levels_per_pixel, vec![5.0, 6.0, 9.0, 10.0]);
+        assert_eq!(cropped.camera_make, "Test");
     }
 
     #[test]

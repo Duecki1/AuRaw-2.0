@@ -1,4 +1,4 @@
-use crate::app::AurawApp;
+use crate::app::{AurawApp, PreviewQuality};
 use crate::pipeline::HighlightReconstructionMethod;
 use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::layout::ScreenLayout;
@@ -31,6 +31,29 @@ impl Settings {
             ui.add(
                 egui::Label::new(
                     "The standard Develop view keeps only Lightroom-style photographic controls visible.",
+                )
+                .wrap(),
+            );
+
+            ui.separator();
+            let previous_quality = app.preview_quality;
+            ComboBox::from_label("Preview quality")
+                .selected_text(app.preview_quality.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Fast, "Fast");
+                    ui.selectable_value(
+                        &mut app.preview_quality,
+                        PreviewQuality::Balanced,
+                        "Balanced",
+                    );
+                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::High, "High");
+                });
+            if app.preview_quality != previous_quality {
+                app.preview_quality_changed();
+            }
+            ui.add(
+                egui::Label::new(
+                    "Controls the normal proxy and the detailed visible-region render created about one second after zooming stops.",
                 )
                 .wrap(),
             );

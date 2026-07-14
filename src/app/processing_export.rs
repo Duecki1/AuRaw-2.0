@@ -44,7 +44,9 @@ impl AurawApp {
             (Arc::clone(&original_raw), None)
         };
 
-        let preview_spec = ProxySpec::default();
+        let preview_spec = ProxySpec {
+            max_edge: self.preview_quality.proxy_edge(),
+        };
         let preview_raw = if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
             Arc::clone(&full_raw)
         } else {
@@ -60,7 +62,8 @@ impl AurawApp {
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
-                self.notice = Some(format!("Could not rebuild the corrected GPU preview: {error:#}"));
+                self.notice =
+                    Some(format!("Could not rebuild the corrected GPU preview: {error:#}"));
                 return;
             }
         };
@@ -69,6 +72,11 @@ impl AurawApp {
         let mut renderer = render_state.renderer.write();
         if let Some(old) = self.gpu_pipeline.take() {
             if let Some(texture_id) = old.egui_texture_id {
+                renderer.free_texture(&texture_id);
+            }
+        }
+        if let Some(old) = self.preview_detail.take() {
+            if let Some(texture_id) = old.pipeline.egui_texture_id {
                 renderer.free_texture(&texture_id);
             }
         }
@@ -104,6 +112,14 @@ impl AurawApp {
         self.loaded_raw = Some(full_raw);
         self.preview_raw = Some(preview_raw);
         self.gpu_pipeline = Some(pipeline);
+        self.preview_zoom = 1.0;
+        self.preview_center = [0.5, 0.5];
+        self.preview_visible_uv = PreviewUvRect {
+            min: [0.0, 0.0],
+            max: [1.0, 1.0],
+        };
+        self.preview_motion_at = None;
+        self.preview_revision = self.preview_revision.wrapping_add(1);
         self.target_exposure = self.exposure;
         self.pending_stage = None;
         self.lens_correction.applied = applied_label.is_some();
@@ -114,6 +130,280 @@ impl AurawApp {
                 "Lens correction disabled; using the original RAW geometry.".to_owned();
         }
         self.notice = correction_notice;
+    }
+
+    pub(crate) fn note_preview_motion(&mut self) {
+        self.preview_revision = self.preview_revision.wrapping_add(1);
+        self.preview_motion_at = Some(Instant::now());
+        self.egui_ctx
+            .request_repaint_after(Duration::from_millis(1_000));
+    }
+
+    pub(crate) fn preview_quality_changed(&mut self) {
+        if self.loaded_raw.is_some() || self.load_receiver.is_some() {
+            self.preview_quality_dirty = true;
+            self.note_preview_motion();
+        }
+    }
+
+    fn upload_preview_masks(
+        pipeline: &RawGpuPipeline,
+        queue: &wgpu::Queue,
+        masks: &MaskStack,
+        raw: &LoadedRaw,
+    ) -> Result<(), String> {
+        let edge = pipeline.mask_atlas_edge();
+        for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {
+            let bytes = masks.rasterize_layer(layer, edge, edge, raw.width, raw.height);
+            pipeline
+                .update_mask_layer(queue, layer, &bytes)
+                .map_err(|error| format!("Could not update preview mask: {error:#}"))?;
+        }
+        Ok(())
+    }
+
+    fn apply_pending_preview_quality(&mut self, frame: &eframe::Frame) {
+        if !self.preview_quality_dirty || self.load_receiver.is_some() {
+            return;
+        }
+        let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
+            self.preview_quality_dirty = false;
+            return;
+        };
+        self.preview_quality_dirty = false;
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+            return;
+        };
+
+        let spec = ProxySpec {
+            max_edge: self.preview_quality.proxy_edge(),
+        };
+        let preview_raw = if full_raw.width.max(full_raw.height) <= spec.max_edge {
+            Arc::clone(&full_raw)
+        } else {
+            Arc::new(build_proxy(&full_raw, spec))
+        };
+        let params = GpuParams::new(&self.exposure, &self.masks, &preview_raw);
+        let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
+            &render_state.device,
+            &render_state.queue,
+            &preview_raw,
+            &params,
+            ProcessingQuality::Preview,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                self.notice = Some(format!("Could not rebuild the GPU preview: {error:#}"));
+                return;
+            }
+        };
+        if let Err(error) = Self::upload_preview_masks(
+            &pipeline,
+            &render_state.queue,
+            &self.masks,
+            &preview_raw,
+        ) {
+            self.notice = Some(error);
+            return;
+        }
+        pipeline.recompute(&render_state.queue, &render_state.device, &params);
+
+        let mut renderer = render_state.renderer.write();
+        if let Some(old) = self.gpu_pipeline.take() {
+            if let Some(texture_id) = old.egui_texture_id {
+                renderer.free_texture(&texture_id);
+            }
+        }
+        if let Some(old) = self.preview_detail.take() {
+            if let Some(texture_id) = old.pipeline.egui_texture_id {
+                renderer.free_texture(&texture_id);
+            }
+        }
+        pipeline.register_egui_texture(&render_state.device, &mut renderer);
+        drop(renderer);
+
+        self.preview_raw = Some(preview_raw);
+        self.gpu_pipeline = Some(pipeline);
+        self.target_exposure = self.exposure;
+        self.pending_stage = None;
+        self.dirty_mask_layers.fill(false);
+        self.preview_revision = self.preview_revision.wrapping_add(1);
+        self.preview_motion_at = (self.preview_zoom > 1.01).then(Instant::now);
+        if self.preview_motion_at.is_some() {
+            self.egui_ctx
+                .request_repaint_after(Duration::from_millis(1_000));
+        }
+        if let Some(raw) = &self.preview_raw {
+            if let Some(full) = &self.loaded_raw {
+                self.image_status = format!(
+                    "{} {} — full {}×{}, preview {}×{} ({})",
+                    full.camera_make,
+                    full.camera_model,
+                    full.width,
+                    full.height,
+                    raw.width,
+                    raw.height,
+                    self.preview_quality.label(),
+                );
+            }
+        }
+    }
+
+    fn advance_preview_detail(&mut self, frame: &eframe::Frame) {
+        const IDLE_DELAY: Duration = Duration::from_millis(1_000);
+        if self.preview_zoom <= 1.01 {
+            if let Some(render_state) = frame.wgpu_render_state() {
+                if let Some(old) = self.preview_detail.take() {
+                    if let Some(texture_id) = old.pipeline.egui_texture_id {
+                        render_state.renderer.write().free_texture(&texture_id);
+                    }
+                }
+            }
+            self.preview_motion_at = None;
+            return;
+        }
+        if self.active_tab != AppTab::Develop
+            || self.pending_stage.is_some()
+            || self.preview_quality_dirty
+            || self.lens_correction_dirty
+            || self.load_receiver.is_some()
+        {
+            return;
+        }
+        if self
+            .preview_detail
+            .as_ref()
+            .is_some_and(|detail| detail.revision == self.preview_revision)
+        {
+            return;
+        }
+        let Some(motion_at) = self.preview_motion_at else {
+            return;
+        };
+        let elapsed = motion_at.elapsed();
+        if elapsed < IDLE_DELAY {
+            self.egui_ctx.request_repaint_after(IDLE_DELAY - elapsed);
+            return;
+        }
+        // Avoid retrying every frame if allocation fails. A later zoom, edit,
+        // or quality change schedules a fresh attempt.
+        self.preview_motion_at = None;
+
+        let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let visible = self.preview_visible_uv;
+        let visible_width = (visible.max[0] - visible.min[0]).max(1.0 / full_raw.width as f32);
+        let visible_height = (visible.max[1] - visible.min[1]).max(1.0 / full_raw.height as f32);
+        let pad_u = (visible_width * 0.04).max(32.0 / full_raw.width.max(1) as f32);
+        let pad_v = (visible_height * 0.04).max(32.0 / full_raw.height.max(1) as f32);
+        let min_u = (visible.min[0] - pad_u).clamp(0.0, 1.0);
+        let min_v = (visible.min[1] - pad_v).clamp(0.0, 1.0);
+        let max_u = (visible.max[0] + pad_u).clamp(0.0, 1.0);
+        let max_v = (visible.max[1] + pad_v).clamp(0.0, 1.0);
+
+        let x0 = ((min_u * full_raw.width as f32).floor() as u32)
+            .min(full_raw.width.saturating_sub(1));
+        let y0 = ((min_v * full_raw.height as f32).floor() as u32)
+            .min(full_raw.height.saturating_sub(1));
+        let x1 = ((max_u * full_raw.width as f32).ceil() as u32)
+            .clamp(x0 + 1, full_raw.width);
+        let y1 = ((max_v * full_raw.height as f32).ceil() as u32)
+            .clamp(y0 + 1, full_raw.height);
+        let crop_width = x1 - x0;
+        let crop_height = y1 - y0;
+        let crop = crop_raw(&full_raw, x0, y0, crop_width, crop_height);
+        let detail_spec = ProxySpec {
+            max_edge: self.preview_quality.detail_edge(),
+        };
+        let detail_raw = if crop.width.max(crop.height) <= detail_spec.max_edge {
+            Arc::new(crop)
+        } else {
+            Arc::new(build_proxy(&crop, detail_spec))
+        };
+        let detail_masks = self.masks.cropped_for_region(
+            x0,
+            y0,
+            crop_width,
+            crop_height,
+            full_raw.width,
+            full_raw.height,
+        );
+        let virtual_full_width = ((detail_raw.width as f64 * full_raw.width as f64
+            / crop_width as f64)
+            .round() as u32)
+            .max(detail_raw.width);
+        let virtual_full_height = ((detail_raw.height as f64 * full_raw.height as f64
+            / crop_height as f64)
+            .round() as u32)
+            .max(detail_raw.height);
+        let virtual_origin_x = (x0 as f64 / full_raw.width as f64
+            * virtual_full_width as f64)
+            .round() as i32;
+        let virtual_origin_y = (y0 as f64 / full_raw.height as f64
+            * virtual_full_height as f64)
+            .round() as i32;
+        let params = GpuParams::new_for_tile(
+            &self.exposure,
+            &detail_masks,
+            &detail_raw,
+            virtual_origin_x,
+            virtual_origin_y,
+            virtual_full_width,
+            virtual_full_height,
+        );
+        let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
+            &render_state.device,
+            &render_state.queue,
+            &detail_raw,
+            &params,
+            ProcessingQuality::Preview,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                self.notice = Some(format!("Could not render the zoomed preview: {error:#}"));
+                return;
+            }
+        };
+        if let Err(error) = Self::upload_preview_masks(
+            &pipeline,
+            &render_state.queue,
+            &detail_masks,
+            &detail_raw,
+        ) {
+            self.notice = Some(error);
+            return;
+        }
+        pipeline.recompute(&render_state.queue, &render_state.device, &params);
+
+        let mut renderer = render_state.renderer.write();
+        if let Some(old) = self.preview_detail.take() {
+            if let Some(texture_id) = old.pipeline.egui_texture_id {
+                renderer.free_texture(&texture_id);
+            }
+        }
+        pipeline.register_egui_texture(&render_state.device, &mut renderer);
+        drop(renderer);
+
+        self.preview_detail = Some(PreviewDetail {
+            pipeline,
+            uv_rect: PreviewUvRect {
+                min: [
+                    x0 as f32 / full_raw.width as f32,
+                    y0 as f32 / full_raw.height as f32,
+                ],
+                max: [
+                    x1 as f32 / full_raw.width as f32,
+                    y1 as f32 / full_raw.height as f32,
+                ],
+            },
+            revision: self.preview_revision,
+        });
+        self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn mark_pipeline_dirty(&mut self) {
@@ -129,6 +419,7 @@ impl AurawApp {
             });
             self.target_exposure = self.exposure;
             self.notice = None;
+            self.note_preview_motion();
         }
     }
 
