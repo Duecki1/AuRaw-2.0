@@ -224,3 +224,20 @@ def test_horizontal_mask_sidebar_hides_tabs_and_uses_collapsible_sections() -> N
     for label in ("Light", "Tone Curve", "Color", "Color Grading", "Effects", "Color Mixer"):
         assert f'"{label}"' in desktop_details
     assert "show_mask_tabs" not in desktop_details
+
+
+def test_preview_supports_touch_pinch_zoom_and_two_finger_pan() -> None:
+    preview = (ROOT / "src/ui/preview.rs").read_text(encoding="utf-8")
+    assert "input.multi_touch()" in preview
+    assert "multi_touch.zoom_delta" in preview
+    assert "multi_touch.translation_delta" in preview
+    assert "multi_touch.center_pos" in preview
+    assert "multi_touch.start_pos" in preview
+    assert "previous_touch_center" in preview
+    assert "transform_preview_about_screen_points" in preview
+    assert "input.any_touches()" in preview
+    assert "preview_touch_navigation_active" in preview
+    assert "let touch_navigation = app.preview_touch_navigation_active" in preview
+    assert "if !touch_navigation && !fit_gesture" in preview
+    assert "pinch/scroll zoom" in preview
+    assert "double-tap/click fit" in preview

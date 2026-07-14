@@ -3,16 +3,13 @@ impl AurawApp {
         if self.gpu_pipeline.is_none() {
             return;
         }
-        self.pending_stage = Some(match self.pending_stage {
-            Some(existing) => existing.min(ProcessingStage::Output),
-            None => ProcessingStage::Output,
-        });
-        self.notice = None;
+        self.queue_preview_processing(ProcessingStage::Output);
     }
 
     pub(crate) fn mark_mask_geometry_dirty(&mut self, layer: usize) {
         if layer < MAX_LOCAL_MASKS {
             self.dirty_mask_layers[layer] = true;
+            self.detail_dirty_mask_layers[layer] = true;
         }
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mark_mask_adjustments_dirty();
@@ -54,6 +51,7 @@ impl AurawApp {
 
     pub(crate) fn mark_all_mask_layers_dirty(&mut self) {
         self.dirty_mask_layers.fill(true);
+        self.detail_dirty_mask_layers.fill(true);
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mark_mask_adjustments_dirty();
     }

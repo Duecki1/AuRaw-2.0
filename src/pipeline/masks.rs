@@ -387,6 +387,71 @@ impl MaskStack {
         *self = Self::default();
     }
 
+    /// Returns a mask stack remapped to a cropped image region. The region is
+    /// expressed in full-image pixels, so geometric masks and cached AI/range
+    /// sources continue to line up with a zoomed detail preview.
+    pub fn cropped_for_region(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        full_width: u32,
+        full_height: u32,
+    ) -> Self {
+        let mut cropped = self.clone();
+        let full_width = full_width.max(1);
+        let full_height = full_height.max(1);
+        let width = width.max(1);
+        let height = height.max(1);
+        let u0 = x as f32 / full_width as f32;
+        let v0 = y as f32 / full_height as f32;
+        let du = width as f32 / full_width as f32;
+        let dv = height as f32 / full_height as f32;
+        let image_scale = full_width.min(full_height) as f32 / width.min(height) as f32;
+
+        let remap_point = |point: &mut [f32; 2]| {
+            point[0] = (point[0] - u0) / du.max(f32::EPSILON);
+            point[1] = (point[1] - v0) / dv.max(f32::EPSILON);
+        };
+
+        for mask in &mut cropped.masks {
+            for component in &mut mask.components {
+                match &mut component.geometry {
+                    MaskGeometry::Brush { size, dabs, .. } => {
+                        *size *= image_scale;
+                        for dab in dabs {
+                            remap_point(&mut dab.center);
+                            dab.size *= image_scale;
+                        }
+                    }
+                    MaskGeometry::Radial { center, radius, .. } => {
+                        remap_point(center);
+                        radius[0] /= du.max(f32::EPSILON);
+                        radius[1] /= dv.max(f32::EPSILON);
+                    }
+                    MaskGeometry::Linear { start, end, .. } => {
+                        remap_point(start);
+                        remap_point(end);
+                    }
+                    MaskGeometry::Ai { mask, .. } => {
+                        *mask = mask
+                            .as_ref()
+                            .map(|source| crop_mask_image(source, u0, v0, du, dv));
+                    }
+                    MaskGeometry::LuminanceRange { source, .. }
+                    | MaskGeometry::ColorRange { source, .. } => {
+                        *source = source
+                            .as_ref()
+                            .map(|source| crop_rgb_image(source, u0, v0, du, dv));
+                    }
+                    MaskGeometry::Placeholder => {}
+                }
+            }
+        }
+        cropped
+    }
+
     pub fn add_mask(&mut self, kind: MaskKind) -> Option<(usize, usize)> {
         if self.masks.len() >= MAX_LOCAL_MASKS || !kind.is_available() {
             return None;
@@ -596,6 +661,58 @@ impl MaskStack {
             .map(|value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
             .collect()
     }
+}
+
+fn crop_mask_image(source: &MaskImage, u0: f32, v0: f32, du: f32, dv: f32) -> MaskImage {
+    if source.width == 0 || source.height == 0 {
+        return source.clone();
+    }
+    let x0 = (u0 * source.width as f32)
+        .floor()
+        .clamp(0.0, source.width.saturating_sub(1) as f32) as u32;
+    let y0 = (v0 * source.height as f32)
+        .floor()
+        .clamp(0.0, source.height.saturating_sub(1) as f32) as u32;
+    let x1 = ((u0 + du) * source.width as f32)
+        .ceil()
+        .clamp((x0 + 1) as f32, source.width as f32) as u32;
+    let y1 = ((v0 + dv) * source.height as f32)
+        .ceil()
+        .clamp((y0 + 1) as f32, source.height as f32) as u32;
+    let width = x1 - x0;
+    let height = y1 - y0;
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for row in y0..y1 {
+        let start = (row * source.width + x0) as usize;
+        pixels.extend_from_slice(&source.pixels[start..start + width as usize]);
+    }
+    MaskImage::new(width, height, pixels).expect("cropped mask image dimensions are valid")
+}
+
+fn crop_rgb_image(source: &MaskRgbImage, u0: f32, v0: f32, du: f32, dv: f32) -> MaskRgbImage {
+    if source.width == 0 || source.height == 0 {
+        return source.clone();
+    }
+    let x0 = (u0 * source.width as f32)
+        .floor()
+        .clamp(0.0, source.width.saturating_sub(1) as f32) as u32;
+    let y0 = (v0 * source.height as f32)
+        .floor()
+        .clamp(0.0, source.height.saturating_sub(1) as f32) as u32;
+    let x1 = ((u0 + du) * source.width as f32)
+        .ceil()
+        .clamp((x0 + 1) as f32, source.width as f32) as u32;
+    let y1 = ((v0 + dv) * source.height as f32)
+        .ceil()
+        .clamp((y0 + 1) as f32, source.height as f32) as u32;
+    let width = x1 - x0;
+    let height = y1 - y0;
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for row in y0..y1 {
+        let start = ((row * source.width + x0) * 4) as usize;
+        rgba.extend_from_slice(&source.rgba[start..start + width as usize * 4]);
+    }
+    MaskRgbImage::new(width, height, rgba).expect("cropped RGB mask dimensions are valid")
 }
 
 fn moved_index(selected: usize, from: usize, to: usize) -> usize {
@@ -846,8 +963,8 @@ fn rasterize_brush(
         // UV coordinates describe continuous image space; texel samples live
         // at x + 0.5/y + 0.5. Keeping the center in continuous texel space
         // makes even-sized atlases symmetric around a centered brush dab.
-        let center_x = dab.center[0].clamp(0.0, 1.0) * width as f32;
-        let center_y = dab.center[1].clamp(0.0, 1.0) * height as f32;
+        let center_x = dab.center[0] * width as f32;
+        let center_y = dab.center[1] * height as f32;
         let min_x = (center_x.floor() as i32 - bbox_x).max(0);
         let max_x = (center_x.ceil() as i32 + bbox_x).min(width as i32 - 1);
         let min_y = (center_y.floor() as i32 - bbox_y).max(0);
@@ -981,6 +1098,34 @@ mod tests {
             stack.selected_component().unwrap().geometry,
             MaskGeometry::Brush { .. }
         ));
+    }
+
+    #[test]
+    fn cropped_mask_remaps_geometry_to_the_visible_region() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Radial);
+        if let MaskGeometry::Radial {
+            center,
+            radius,
+            initialized,
+            ..
+        } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *center = [0.75, 0.5];
+            *radius = [0.1, 0.2];
+            *initialized = true;
+        }
+
+        let cropped = stack.cropped_for_region(50, 0, 50, 100, 100, 100);
+        let MaskGeometry::Radial { center, radius, .. } =
+            &cropped.selected_component().unwrap().geometry
+        else {
+            panic!("expected radial mask");
+        };
+        assert!((center[0] - 0.5).abs() < 1e-6);
+        assert!((center[1] - 0.5).abs() < 1e-6);
+        assert!((radius[0] - 0.2).abs() < 1e-6);
+        assert!((radius[1] - 0.2).abs() < 1e-6);
     }
 
     #[test]
