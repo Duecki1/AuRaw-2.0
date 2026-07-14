@@ -5,6 +5,7 @@ use crate::pipeline::{
     MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
     TileSpec, MAX_LOCAL_MASKS,
 };
+use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::Library;
 use crate::ui::preview::Preview;
@@ -31,6 +32,31 @@ pub enum SidebarTab {
     Masks,
     Inpainting,
     Export,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdjustmentSection {
+    #[default]
+    Light,
+    ToneCurve,
+    Color,
+    ColorGrading,
+    Effects,
+    ColorMixer,
+    AdvancedRendering,
+    Raw,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MaskSection {
+    #[default]
+    Properties,
+    Light,
+    ToneCurve,
+    Color,
+    ColorGrading,
+    Effects,
+    ColorMixer,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,6 +100,10 @@ pub(crate) enum MaskDragState {
     ResizeRadial {
         axis: usize,
     },
+    RotateRadial {
+        pointer_angle: f32,
+        rotation: f32,
+    },
     MoveLinear {
         pointer: [f32; 2],
         start: [f32; 2],
@@ -81,6 +111,11 @@ pub(crate) enum MaskDragState {
     },
     LinearStart,
     LinearEnd,
+    RotateLinear {
+        pointer_angle: f32,
+        start: [f32; 2],
+        end: [f32; 2],
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -98,6 +133,8 @@ pub struct AurawApp {
     pub exposure: ExposureParams,
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
+    pub adjustment_section: AdjustmentSection,
+    pub mask_section: MaskSection,
     pub tone_curve_tab: ToneCurveTab,
     pub color_grade_tab: ColorGradeTab,
     pub export_settings: ExportSettings,
@@ -106,10 +143,17 @@ pub struct AurawApp {
     pub(crate) brush_mode: BrushMode,
     pub(crate) mask_drag: Option<MaskDragState>,
     pub(crate) last_brush_point: Option<[f32; 2]>,
+    mask_interaction_dirty_layer: Option<usize>,
+    mask_interaction_frame_count: u8,
+    mask_interaction_has_uncommitted_change: bool,
     pub(crate) mask_overlay_revision: u64,
     pub(crate) mask_overlay_texture: Option<egui::TextureHandle>,
     pub(crate) mask_overlay_texture_key: Option<(usize, Option<usize>, u64, u32, u32)>,
     pub(crate) mask_overlay_blink: Option<(std::time::Instant, MaskOverlayBlink)>,
+    pub(crate) mask_thumbnail_revision: u64,
+    pub(crate) mask_thumbnail_group_textures: Vec<egui::TextureHandle>,
+    pub(crate) mask_thumbnail_component_mask: Option<usize>,
+    pub(crate) mask_thumbnail_component_textures: Vec<egui::TextureHandle>,
     pub(crate) mask_source_cache: Option<MaskRgbImage>,
     pub(crate) subject_mask_cache: Option<MaskImage>,
     #[cfg(not(target_os = "android"))]
@@ -194,6 +238,8 @@ impl AurawApp {
             exposure,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
+            adjustment_section: AdjustmentSection::default(),
+            mask_section: MaskSection::default(),
             tone_curve_tab: ToneCurveTab::default(),
             color_grade_tab: ColorGradeTab::default(),
             export_settings: ExportSettings::default(),
@@ -202,10 +248,17 @@ impl AurawApp {
             brush_mode: BrushMode::Paint,
             mask_drag: None,
             last_brush_point: None,
+            mask_interaction_dirty_layer: None,
+            mask_interaction_frame_count: 0,
+            mask_interaction_has_uncommitted_change: false,
             mask_overlay_revision: 0,
             mask_overlay_texture: None,
             mask_overlay_texture_key: None,
             mask_overlay_blink: None,
+            mask_thumbnail_revision: 0,
+            mask_thumbnail_group_textures: Vec::new(),
+            mask_thumbnail_component_mask: None,
+            mask_thumbnail_component_textures: Vec::new(),
             mask_source_cache: None,
             subject_mask_cache: None,
             onnx_runtime_path,
@@ -253,6 +306,8 @@ impl AurawApp {
             exposure,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
+            adjustment_section: AdjustmentSection::default(),
+            mask_section: MaskSection::default(),
             tone_curve_tab: ToneCurveTab::default(),
             color_grade_tab: ColorGradeTab::default(),
             export_settings: ExportSettings::default(),
@@ -261,10 +316,17 @@ impl AurawApp {
             brush_mode: BrushMode::Paint,
             mask_drag: None,
             last_brush_point: None,
+            mask_interaction_dirty_layer: None,
+            mask_interaction_frame_count: 0,
+            mask_interaction_has_uncommitted_change: false,
             mask_overlay_revision: 0,
             mask_overlay_texture: None,
             mask_overlay_texture_key: None,
             mask_overlay_blink: None,
+            mask_thumbnail_revision: 0,
+            mask_thumbnail_group_textures: Vec::new(),
+            mask_thumbnail_component_mask: None,
+            mask_thumbnail_component_textures: Vec::new(),
             mask_source_cache: None,
             subject_mask_cache: None,
             status: "Open a RAW file to get started.".to_owned(),
@@ -369,10 +431,17 @@ impl AurawApp {
         self.brush_mode = BrushMode::Paint;
         self.mask_drag = None;
         self.last_brush_point = None;
+        self.mask_interaction_dirty_layer = None;
+        self.mask_interaction_frame_count = 0;
+        self.mask_interaction_has_uncommitted_change = false;
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mask_overlay_texture = None;
         self.mask_overlay_texture_key = None;
         self.mask_overlay_blink = None;
+        self.mask_thumbnail_group_textures.clear();
+        self.mask_thumbnail_component_mask = None;
+        self.mask_thumbnail_component_textures.clear();
+        self.mask_thumbnail_revision = self.mask_overlay_revision;
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
         self.subject_consent_open = false;
@@ -557,6 +626,40 @@ impl AurawApp {
         self.mark_mask_adjustments_dirty();
     }
 
+    /// Interactive brush and geometry edits can produce one expensive mask
+    /// rasterization and preview dispatch per display frame. Keep handles and
+    /// geometry responsive, but only refresh the rendered mask every tenth
+    /// changed frame. Releasing the pointer always commits the newest shape.
+    pub(crate) fn note_mask_geometry_interaction(&mut self, layer: usize) {
+        const UPDATE_EVERY_CHANGED_FRAMES: u8 = 10;
+
+        if self.mask_interaction_dirty_layer != Some(layer) {
+            self.finish_mask_geometry_interaction();
+            self.mask_interaction_dirty_layer = Some(layer);
+            self.mask_interaction_frame_count = 0;
+        }
+
+        self.mask_interaction_has_uncommitted_change = true;
+        self.mask_interaction_frame_count = self.mask_interaction_frame_count.saturating_add(1);
+        if self.mask_interaction_frame_count >= UPDATE_EVERY_CHANGED_FRAMES {
+            self.mark_mask_geometry_dirty(layer);
+            self.mask_interaction_frame_count = 0;
+            self.mask_interaction_has_uncommitted_change = false;
+        }
+    }
+
+    pub(crate) fn finish_mask_geometry_interaction(&mut self) {
+        let layer = self.mask_interaction_dirty_layer.take();
+        let should_commit = self.mask_interaction_has_uncommitted_change;
+        self.mask_interaction_frame_count = 0;
+        self.mask_interaction_has_uncommitted_change = false;
+        if should_commit {
+            if let Some(layer) = layer {
+                self.mark_mask_geometry_dirty(layer);
+            }
+        }
+    }
+
     pub(crate) fn mark_all_mask_layers_dirty(&mut self) {
         self.dirty_mask_layers.fill(true);
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
@@ -564,6 +667,7 @@ impl AurawApp {
     }
 
     pub(crate) fn activate_mask_tool(&mut self, kind: MaskKind) {
+        self.finish_mask_geometry_interaction();
         self.active_mask_tool = kind.is_available().then_some(kind);
         self.mask_drag = None;
         self.last_brush_point = None;
@@ -573,6 +677,7 @@ impl AurawApp {
     }
 
     pub(crate) fn select_mask_tool(&mut self, kind: MaskKind) {
+        self.finish_mask_geometry_interaction();
         self.active_mask_tool = kind.is_available().then_some(kind);
         self.mask_drag = None;
         self.last_brush_point = None;
@@ -1256,6 +1361,18 @@ impl eframe::App for AurawApp {
                         .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
                         .default_size(sidebar_size)
                         .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
+
+                    // As with the portrait bottom panels, panel call order keeps
+                    // the fixed strip immediately beside the resizable sidebar.
+                    // This second right panel is therefore placed to its left.
+                    if self.sidebar_tab == SidebarTab::Masks {
+                        egui::Panel::right("develop_horizontal_mask_strip")
+                            .resizable(false)
+                            .exact_size(Sidebar::HORIZONTAL_MASK_STRIP_WIDTH)
+                            .show(ui, |ui| {
+                                Sidebar::show_horizontal_mask_strip(ui, self, frame)
+                            });
+                    }
                 }
                 ScreenLayout::Vertical => {
                     egui::Panel::bottom("develop_sidebar_bottom")
@@ -1263,6 +1380,19 @@ impl eframe::App for AurawApp {
                         .min_size(ScreenLayout::MIN_VERTICAL_SIDEBAR_HEIGHT)
                         .default_size(sidebar_size)
                         .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
+
+                    // Panels are laid out in call order. Showing this fixed-height
+                    // panel after the resizable bottom sidebar places it directly
+                    // above that sidebar, leaving the full sidebar height available
+                    // for sliders and mask properties.
+                    if self.sidebar_tab == SidebarTab::Masks {
+                        egui::Panel::bottom("develop_vertical_mask_strip")
+                            .resizable(false)
+                            .exact_size(Sidebar::VERTICAL_MASK_STRIP_HEIGHT)
+                            .show(ui, |ui| {
+                                Sidebar::show_vertical_mask_strip(ui, self, frame)
+                            });
+                    }
                 }
             }
         }
@@ -1271,9 +1401,15 @@ impl eframe::App for AurawApp {
             AppTab::Library => Library::show(ui),
             AppTab::Develop => Preview::show(ui, self),
             AppTab::Settings => {
+                let settings_scroll_source = if slider_scroll_locked(ui.ctx()) {
+                    egui::scroll_area::ScrollSource::NONE
+                } else {
+                    egui::scroll_area::ScrollSource::default()
+                };
                 egui::ScrollArea::vertical()
+                    .scroll_source(settings_scroll_source)
                     .auto_shrink([false, false])
-                    .show(ui, |ui| Settings::show(ui, self));
+                    .show(ui, |ui| Settings::show(ui, self, layout));
             }
         });
 

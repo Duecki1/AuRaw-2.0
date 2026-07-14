@@ -1,43 +1,64 @@
 use crate::app::AurawApp;
 use crate::pipeline::HighlightReconstructionMethod;
 use crate::ui::components::adjustment_slider::adjustment_slider;
-use eframe::egui::{ComboBox, Ui};
+use crate::ui::layout::ScreenLayout;
+use eframe::egui::{self, ComboBox, Ui};
 
 pub struct Settings;
 
 impl Settings {
-    pub fn show(ui: &mut Ui, app: &mut AurawApp) {
+    pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
+        let content_width = match layout {
+            ScreenLayout::Horizontal => ui.available_width().min(720.0),
+            ScreenLayout::Vertical => ui.available_width(),
+        }
+        .max(1.0);
+        ui.set_width(content_width);
+        ui.set_max_width(content_width);
+        if layout == ScreenLayout::Vertical {
+            ui.spacing_mut().item_spacing = egui::vec2(7.0, 6.0);
+        }
+
         ui.heading("Settings");
         ui.add_space(4.0);
 
-        ui.group(|ui| {
-            ui.set_max_width(720.0);
+        Self::group(ui, content_width, |ui| {
             ui.heading("Interface");
             ui.checkbox(&mut app.expert_mode, "Expert mode")
                 .on_hover_text(
                     "Show detailed creative-effect tuning, darktable-style rendering internals, and RAW reconstruction controls. Disabled by default.",
                 );
-            ui.label(
-                "The standard Develop view keeps only Lightroom-style photographic controls visible.",
+            ui.add(
+                egui::Label::new(
+                    "The standard Develop view keeps only Lightroom-style photographic controls visible.",
+                )
+                .wrap(),
             );
         });
 
         #[cfg(not(target_os = "android"))]
         {
             ui.add_space(8.0);
-            ui.group(|ui| {
-                ui.set_max_width(720.0);
+            Self::group(ui, content_width, |ui| {
                 ui.heading("Subject selection runtime");
-                ui.label(
-                    "Choose a trusted ONNX Runtime 1.18 or newer shared library built for your hardware. AuRaw never downloads or dynamically loads a native runtime without this explicit selection. GPU provider libraries and their dependencies must remain beside it.",
+                ui.add(
+                    egui::Label::new(
+                        "Choose a trusted ONNX Runtime 1.18 or newer shared library built for your hardware. AuRaw never downloads or dynamically loads a native runtime without this explicit selection. GPU provider libraries and their dependencies must remain beside it.",
+                    )
+                    .wrap(),
                 );
                 ui.add_space(4.0);
                 if let Some(path) = &app.onnx_runtime_path {
                     ui.label("Selected runtime:");
-                    ui.monospace(path.display().to_string());
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(path.display().to_string()).monospace())
+                            .wrap(),
+                    );
                     if let Some(sha256) = &app.onnx_runtime_sha256 {
                         ui.small("Pinned SHA-256:");
-                        ui.monospace(sha256);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(sha256).monospace()).wrap(),
+                        );
                     }
                 } else {
                     ui.colored_label(
@@ -45,7 +66,7 @@ impl Settings {
                         "No runtime selected. Subject and Background masks cannot run yet.",
                     );
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Choose ONNX Runtime…").clicked() {
                         app.choose_onnx_runtime();
                     }
@@ -59,7 +80,15 @@ impl Settings {
                         app.clear_onnx_runtime();
                     }
                 });
-                ui.small("Restart AuRaw after changing this library. The runtime is loaded once per process.");
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "Restart AuRaw after changing this library. The runtime is loaded once per process.",
+                        )
+                        .small(),
+                    )
+                    .wrap(),
+                );
             });
         }
 
@@ -70,11 +99,13 @@ impl Settings {
         ui.add_space(8.0);
         let mut changed = false;
 
-        ui.group(|ui| {
-            ui.set_max_width(720.0);
+        Self::group(ui, content_width, |ui| {
             ui.heading("Highlight reconstruction");
-            ui.label(
-                "Reconstruct clipped sensor channels before demosaicing to avoid pink or grey highlights.",
+            ui.add(
+                egui::Label::new(
+                    "Reconstruct clipped sensor channels before demosaicing to avoid pink or grey highlights.",
+                )
+                .wrap(),
             );
             ui.add_space(4.0);
 
@@ -164,5 +195,14 @@ impl Settings {
         if changed {
             app.mark_pipeline_dirty();
         }
+    }
+
+    fn group(ui: &mut Ui, total_width: f32, contents: impl FnOnce(&mut Ui)) {
+        let inner_width = (total_width - 16.0).max(1.0);
+        ui.group(|ui| {
+            ui.set_width(inner_width);
+            ui.set_max_width(inner_width);
+            contents(ui);
+        });
     }
 }

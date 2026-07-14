@@ -1,7 +1,5 @@
 use crate::app::{AurawApp, MaskDragState, MaskOverlayBlink, SidebarTab};
-use crate::pipeline::{
-    ellipse_outline_points, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
-};
+use crate::pipeline::{BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind};
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui};
 
@@ -73,10 +71,12 @@ impl Preview {
         response: &egui::Response,
     ) {
         let Some(mask_index) = app.masks.selected_mask else {
+            app.finish_mask_geometry_interaction();
             app.active_mask_tool = None;
             return;
         };
         let Some(component_index) = app.masks.selected_component else {
+            app.finish_mask_geometry_interaction();
             app.active_mask_tool = None;
             return;
         };
@@ -87,6 +87,7 @@ impl Preview {
             .and_then(|mask| mask.components.get(component_index))
             .map(|component| component.kind)
         else {
+            app.finish_mask_geometry_interaction();
             app.active_mask_tool = None;
             return;
         };
@@ -97,6 +98,7 @@ impl Preview {
         let pointer = response.interact_pointer_pos();
         let primary_down = response.is_pointer_button_down_on();
         if !primary_down {
+            app.finish_mask_geometry_interaction();
             app.last_brush_point = None;
             app.mask_drag = None;
             return;
@@ -204,15 +206,29 @@ impl Preview {
                         changed = true;
                     }
                     Some(MaskDragState::ResizeRadial { axis }) => {
-                        let dx = uv[0] - center[0];
-                        let dy = uv[1] - center[1];
+                        let center_screen = normalized_to_screen(image_rect, *center);
+                        let delta = pointer - center_screen;
                         let cos_r = rotation.cos();
                         let sin_r = rotation.sin();
                         if axis == 0 {
-                            radius[0] = (cos_r * dx + sin_r * dy).abs().max(0.005);
+                            radius[0] = ((cos_r * delta.x + sin_r * delta.y).abs()
+                                / image_rect.width().max(1.0))
+                            .max(0.005);
                         } else {
-                            radius[1] = (-sin_r * dx + cos_r * dy).abs().max(0.005);
+                            radius[1] = ((-sin_r * delta.x + cos_r * delta.y).abs()
+                                / image_rect.height().max(1.0))
+                            .max(0.005);
                         }
+                        changed = true;
+                    }
+                    Some(MaskDragState::RotateRadial {
+                        pointer_angle,
+                        rotation: original_rotation,
+                    }) => {
+                        let center_screen = normalized_to_screen(image_rect, *center);
+                        let current_angle = angle_from(center_screen, pointer);
+                        *rotation = original_rotation
+                            + shortest_angle_delta(pointer_angle, current_angle);
                         changed = true;
                     }
                     _ => {}
@@ -257,6 +273,25 @@ impl Preview {
                         *end = [original_end[0] + dx, original_end[1] + dy];
                         changed = true;
                     }
+                    Some(MaskDragState::RotateLinear {
+                        pointer_angle,
+                        start: original_start,
+                        end: original_end,
+                    }) => {
+                        let a = normalized_to_screen(image_rect, original_start);
+                        let b = normalized_to_screen(image_rect, original_end);
+                        let midpoint = a + (b - a) * 0.5;
+                        let original_vector = b - a;
+                        let original_angle = original_vector.y.atan2(original_vector.x);
+                        let current_angle = angle_from(midpoint, pointer);
+                        let angle = original_angle
+                            + shortest_angle_delta(pointer_angle, current_angle);
+                        let half_length = original_vector.length() * 0.5;
+                        let half_vector = egui::vec2(angle.cos(), angle.sin()) * half_length;
+                        *start = screen_to_normalized(image_rect, midpoint - half_vector);
+                        *end = screen_to_normalized(image_rect, midpoint + half_vector);
+                        changed = true;
+                    }
                     _ => {}
                 },
                 (
@@ -284,7 +319,7 @@ impl Preview {
         }
 
         if changed {
-            app.mark_mask_geometry_dirty(mask_index);
+            app.note_mask_geometry_interaction(mask_index);
             if kind == MaskKind::ColorRange && !color_was_sampled {
                 app.blink_selected_component();
             }
@@ -381,30 +416,44 @@ impl Preview {
                     feather,
                     initialized: true,
                 } => {
-                    let outer = ellipse_outline_points(*center, *radius, *rotation, 72)
-                        .into_iter()
-                        .map(|point| normalized_to_screen(image_rect, point))
-                        .collect::<Vec<_>>();
+                    let outer = radial_outline_screen_points(
+                        image_rect,
+                        *center,
+                        *radius,
+                        *rotation,
+                        72,
+                    );
                     painter.add(egui::Shape::line(outer, Stroke::new(2.0, color)));
                     let inner_scale = 1.0 - feather.clamp(0.0, 1.0) * 0.98;
-                    let inner = ellipse_outline_points(
+                    let inner = radial_outline_screen_points(
+                        image_rect,
                         *center,
                         [radius[0] * inner_scale, radius[1] * inner_scale],
                         *rotation,
                         72,
-                    )
-                    .into_iter()
-                    .map(|point| normalized_to_screen(image_rect, point))
-                    .collect::<Vec<_>>();
+                    );
                     painter.add(egui::Shape::line(
                         inner,
                         Stroke::new(1.0, color.gamma_multiply(0.65)),
                     ));
                     let center_screen = normalized_to_screen(image_rect, *center);
                     painter.circle_filled(center_screen, 5.0, color);
-                    for handle in radial_handles(*center, *radius, *rotation) {
-                        painter.circle_filled(normalized_to_screen(image_rect, handle), 4.0, color);
+                    for handle in radial_handles_screen(image_rect, *center, *radius, *rotation) {
+                        painter.circle_filled(handle, 4.0, color);
                     }
+                    let major_handle =
+                        radial_handles_screen(image_rect, *center, *radius, *rotation)[0];
+                    let rotation_handle = radial_rotation_handle(
+                        image_rect,
+                        *center,
+                        *radius,
+                        *rotation,
+                    );
+                    painter.line_segment(
+                        [major_handle, rotation_handle],
+                        Stroke::new(1.0, color.gamma_multiply(0.72)),
+                    );
+                    painter.circle_stroke(rotation_handle, 6.0, Stroke::new(2.0, color));
                 }
                 MaskGeometry::Linear {
                     start,
@@ -420,8 +469,14 @@ impl Preview {
                     let direction = b - a;
                     let length = direction.length().max(1.0);
                     let normal = egui::vec2(-direction.y, direction.x) / length;
-                    let span = image_rect.width().max(image_rect.height());
+                    let rotation_handle = linear_rotation_handle(a, b);
                     let middle = a + direction * 0.5;
+                    painter.line_segment(
+                        [middle, rotation_handle],
+                        Stroke::new(1.0, color.gamma_multiply(0.72)),
+                    );
+                    painter.circle_stroke(rotation_handle, 6.0, Stroke::new(2.0, color));
+                    let span = image_rect.width().max(image_rect.height());
                     let half_transition = direction * (0.5 * feather.clamp(0.02, 1.0));
                     for center in [middle - half_transition, middle + half_transition] {
                         painter.line_segment(
@@ -587,21 +642,30 @@ fn begin_mask_drag(
             if !initialized {
                 return Some(MaskDragState::Create(uv));
             }
-            for (index, handle) in radial_handles(*center, *radius, *rotation)
+            let rotation_handle = radial_rotation_handle(image_rect, *center, *radius, *rotation);
+            if rotation_handle.distance(pointer) <= 24.0 {
+                return Some(MaskDragState::RotateRadial {
+                    pointer_angle: angle_from(normalized_to_screen(image_rect, *center), pointer),
+                    rotation: *rotation,
+                });
+            }
+            for (index, handle) in radial_handles_screen(image_rect, *center, *radius, *rotation)
                 .into_iter()
                 .enumerate()
             {
-                if normalized_to_screen(image_rect, handle).distance(pointer) <= 22.0 {
+                if handle.distance(pointer) <= 22.0 {
                     return Some(MaskDragState::ResizeRadial { axis: index / 2 });
                 }
             }
 
-            let dx = uv[0] - center[0];
-            let dy = uv[1] - center[1];
+            let center_screen = normalized_to_screen(image_rect, *center);
+            let delta = pointer - center_screen;
             let cos_r = rotation.cos();
             let sin_r = rotation.sin();
-            let local_x = (cos_r * dx + sin_r * dy) / radius[0].abs().max(0.005);
-            let local_y = (-sin_r * dx + cos_r * dy) / radius[1].abs().max(0.005);
+            let local_x = (cos_r * delta.x + sin_r * delta.y)
+                / (radius[0].abs().max(0.005) * image_rect.width().max(1.0));
+            let local_y = (-sin_r * delta.x + cos_r * delta.y)
+                / (radius[1].abs().max(0.005) * image_rect.height().max(1.0));
             if local_x * local_x + local_y * local_y <= 1.0 {
                 Some(MaskDragState::MoveRadial {
                     pointer: uv,
@@ -622,7 +686,14 @@ fn begin_mask_drag(
             }
             let a = normalized_to_screen(image_rect, *start);
             let b = normalized_to_screen(image_rect, *end);
-            if a.distance(pointer) <= 22.0 {
+            let rotation_handle = linear_rotation_handle(a, b);
+            if rotation_handle.distance(pointer) <= 24.0 {
+                Some(MaskDragState::RotateLinear {
+                    pointer_angle: angle_from(a + (b - a) * 0.5, pointer),
+                    start: *start,
+                    end: *end,
+                })
+            } else if a.distance(pointer) <= 22.0 {
                 Some(MaskDragState::LinearStart)
             } else if b.distance(pointer) <= 22.0 {
                 Some(MaskDragState::LinearEnd)
@@ -640,15 +711,87 @@ fn begin_mask_drag(
     }
 }
 
-fn radial_handles(center: [f32; 2], radius: [f32; 2], rotation: f32) -> [[f32; 2]; 4] {
+fn angle_from(center: Pos2, pointer: Pos2) -> f32 {
+    let delta = pointer - center;
+    delta.y.atan2(delta.x)
+}
+
+fn shortest_angle_delta(from: f32, to: f32) -> f32 {
+    let mut delta = to - from;
+    while delta > std::f32::consts::PI {
+        delta -= std::f32::consts::TAU;
+    }
+    while delta < -std::f32::consts::PI {
+        delta += std::f32::consts::TAU;
+    }
+    delta
+}
+
+fn radial_rotation_handle(
+    image_rect: Rect,
+    center: [f32; 2],
+    radius: [f32; 2],
+    rotation: f32,
+) -> Pos2 {
+    let center_screen = normalized_to_screen(image_rect, center);
+    let major_screen = radial_handles_screen(image_rect, center, radius, rotation)[0];
+    let direction = (major_screen - center_screen).normalized();
+    major_screen + direction * 30.0
+}
+
+fn linear_rotation_handle(start: Pos2, end: Pos2) -> Pos2 {
+    let direction = end - start;
+    let length = direction.length().max(1.0);
+    let normal = egui::vec2(-direction.y, direction.x) / length;
+    start + direction * 0.5 + normal * 34.0
+}
+
+fn radial_handles_screen(
+    image_rect: Rect,
+    center: [f32; 2],
+    radius: [f32; 2],
+    rotation: f32,
+) -> [Pos2; 4] {
+    let center = normalized_to_screen(image_rect, center);
     let cos_r = rotation.cos();
     let sin_r = rotation.sin();
+    let major = egui::vec2(
+        cos_r * radius[0] * image_rect.width(),
+        sin_r * radius[0] * image_rect.width(),
+    );
+    let minor = egui::vec2(
+        -sin_r * radius[1] * image_rect.height(),
+        cos_r * radius[1] * image_rect.height(),
+    );
     [
-        [center[0] + cos_r * radius[0], center[1] + sin_r * radius[0]],
-        [center[0] - cos_r * radius[0], center[1] - sin_r * radius[0]],
-        [center[0] - sin_r * radius[1], center[1] + cos_r * radius[1]],
-        [center[0] + sin_r * radius[1], center[1] - cos_r * radius[1]],
+        center + major,
+        center - major,
+        center + minor,
+        center - minor,
     ]
+}
+
+fn radial_outline_screen_points(
+    image_rect: Rect,
+    center: [f32; 2],
+    radius: [f32; 2],
+    rotation: f32,
+    segments: usize,
+) -> Vec<Pos2> {
+    let center = normalized_to_screen(image_rect, center);
+    let radius_x = radius[0] * image_rect.width();
+    let radius_y = radius[1] * image_rect.height();
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    let segments = segments.max(12);
+    (0..=segments)
+        .map(|index| {
+            let angle = std::f32::consts::TAU * index as f32 / segments as f32;
+            let x = radius_x * angle.cos();
+            let y = radius_y * angle.sin();
+            center + egui::vec2(cos_r * x - sin_r * y, sin_r * x + cos_r * y)
+        })
+        .collect()
 }
 
 fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
