@@ -373,11 +373,9 @@ mod imp {
             .unwrap_or_else(|| all_lenses(&database));
         sort_and_deduplicate_lenses(&mut lenses);
 
-        let auto_match = find_auto_lens(&database, camera, raw).or_else(|| {
-            (raw.lens_model.trim().is_empty() && lenses.len() == 1).then(|| lenses[0].clone())
-        });
+        let auto_match = find_auto_lens(&database, camera, raw);
         let status = if let Some(found) = &auto_match {
-            format!("Matched {}", found.label())
+            format!("Auto-detected {} from RAW metadata", found.label())
         } else if raw.lens_model.trim().is_empty() {
             "The RAW file does not identify a lens. Select one manually.".to_owned()
         } else if camera.is_none() {
@@ -745,9 +743,14 @@ mod imp {
         if raw.lens_model.trim().is_empty() {
             return None;
         }
-        let candidates = if let Some(camera) = camera {
-            let maker = CString::new(raw.lens_make.as_str()).ok();
-            let model = CString::new(raw.lens_model.as_str()).ok()?;
+
+        let mut candidates = if let Some(camera) = camera {
+            let maker = if raw.lens_make.trim().is_empty() {
+                None
+            } else {
+                CString::new(raw.lens_make.trim()).ok()
+            };
+            let model = CString::new(raw.lens_model.trim()).ok()?;
             // SAFETY: all pointers remain valid during the search.
             let list = OwnedPointerList {
                 pointer: unsafe {
@@ -765,30 +768,267 @@ mod imp {
                 .filter_map(lens_name)
                 .collect::<Vec<_>>()
         } else {
-            all_lenses(database)
+            Vec::new()
         };
 
-        let normalized_model = raw.lens_model.trim();
-        let normalized_maker = raw.lens_make.trim();
+        // Some cameras write punctuation, marketing suffixes, or a maker prefix
+        // differently from Lensfun. If Lensfun's loose query returns nothing,
+        // score every camera-compatible profile instead of silently giving up.
+        if candidates.is_empty() {
+            candidates = camera
+                .map(|camera| compatible_lenses(database, camera))
+                .unwrap_or_else(|| all_lenses(database));
+        }
+        sort_and_deduplicate_lenses(&mut candidates);
+
         let exact = candidates
             .iter()
-            .filter(|candidate| {
-                candidate.model.trim().eq_ignore_ascii_case(normalized_model)
-                    && (normalized_maker.is_empty()
-                        || candidate
-                            .maker
-                            .trim()
-                            .eq_ignore_ascii_case(normalized_maker))
-            })
+            .filter(|candidate| lens_metadata_is_exact(raw, candidate))
             .cloned()
             .collect::<Vec<_>>();
         if exact.len() == 1 {
-            exact.into_iter().next()
-        } else if camera.is_some() && candidates.len() == 1 {
-            candidates.into_iter().next()
-        } else {
-            None
+            return exact.into_iter().next();
         }
+
+        // A camera-constrained Lensfun search that yields one profile is itself
+        // an unambiguous metadata match, provided the capture focal length does
+        // not contradict that profile's calibrated range.
+        if camera.is_some()
+            && candidates.len() == 1
+            && profile_supports_capture(database, camera, raw, &candidates[0])
+        {
+            return candidates.into_iter().next();
+        }
+
+        let mut ranked = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                automatic_match_score(database, camera, raw, &candidate)
+                    .map(|score| (score, candidate))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .0
+                .partial_cmp(&left.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let (best_score, best) = ranked.first()?;
+        if *best_score < 0.90 {
+            return None;
+        }
+        if let Some((runner_up, _)) = ranked.get(1) {
+            if *best_score - *runner_up < 0.08 {
+                return None;
+            }
+        }
+        Some(best.clone())
+    }
+
+    fn lens_metadata_is_exact(raw: &LoadedRaw, candidate: &LensfunLens) -> bool {
+        if !maker_is_compatible(&raw.lens_make, &raw.lens_model, &candidate.maker) {
+            return false;
+        }
+        canonical_lens_model(
+            &raw.lens_model,
+            &[raw.lens_make.as_str(), candidate.maker.as_str()],
+        ) == canonical_lens_model(
+            &candidate.model,
+            &[candidate.maker.as_str(), raw.lens_make.as_str()],
+        )
+    }
+
+    fn automatic_match_score(
+        database: &Database,
+        camera: Option<*const lfCamera>,
+        raw: &LoadedRaw,
+        candidate: &LensfunLens,
+    ) -> Option<f32> {
+        if !maker_is_compatible(&raw.lens_make, &raw.lens_model, &candidate.maker)
+            || !profile_supports_capture(database, camera, raw, candidate)
+        {
+            return None;
+        }
+
+        let raw_model = canonical_lens_model(
+            &raw.lens_model,
+            &[raw.lens_make.as_str(), candidate.maker.as_str()],
+        );
+        let candidate_model = canonical_lens_model(
+            &candidate.model,
+            &[candidate.maker.as_str(), raw.lens_make.as_str()],
+        );
+        if raw_model.is_empty() || candidate_model.is_empty() {
+            return None;
+        }
+        if raw_model == candidate_model {
+            return Some(1.0);
+        }
+
+        // Camera metadata often reports a compact mount-prefixed description,
+        // while Lensfun stores the full retail name. For example, Sony writes
+        // “E 28-75mm F2.8 A063” for Lensfun's “Tamron 28-75mm F2.8 Di III
+        // VXD G2 (A063)”. A shared manufacturer model code is substantially
+        // more identifying than the surrounding marketing words. Camera/mount
+        // compatibility and focal-range validation have already succeeded
+        // above, so one shared code is a safe high-confidence match.
+        let raw_codes = lens_model_codes(&raw.lens_model);
+        let candidate_codes = lens_model_codes(&candidate.model);
+        if raw_codes
+            .iter()
+            .any(|code| candidate_codes.iter().any(|other| other == code))
+        {
+            return Some(0.995);
+        }
+
+        if raw_model.len().min(candidate_model.len()) >= 8
+            && (raw_model.contains(&candidate_model) || candidate_model.contains(&raw_model))
+        {
+            return Some(0.96);
+        }
+
+        let raw_tokens = lens_tokens(&raw.lens_model, &raw.lens_make, &candidate.maker);
+        let candidate_tokens = lens_tokens(&candidate.model, &candidate.maker, &raw.lens_make);
+        if raw_tokens.is_empty() || candidate_tokens.is_empty() {
+            return None;
+        }
+        let numeric_tokens = raw_tokens
+            .iter()
+            .filter(|token| token.chars().any(|character| character.is_ascii_digit()))
+            .collect::<Vec<_>>();
+        if !numeric_tokens.is_empty()
+            && !numeric_tokens
+                .iter()
+                .all(|token| candidate_tokens.iter().any(|other| other == *token))
+        {
+            return None;
+        }
+        let shared = raw_tokens
+            .iter()
+            .filter(|token| candidate_tokens.iter().any(|other| other == *token))
+            .count();
+        let similarity = shared as f32 / raw_tokens.len().max(candidate_tokens.len()) as f32;
+        (similarity >= 0.75).then_some(0.78 + similarity * 0.18)
+    }
+
+    fn profile_supports_capture(
+        database: &Database,
+        camera: Option<*const lfCamera>,
+        raw: &LoadedRaw,
+        candidate: &LensfunLens,
+    ) -> bool {
+        // Without a camera match, resolving each candidate back through the
+        // complete database would be quadratic. The normalized metadata score
+        // remains conservative in that case; focal-range validation is added
+        // whenever Lensfun identified the camera and mount.
+        if camera.is_none() {
+            return true;
+        }
+        let Some(focal) = positive(raw.focal_length) else {
+            return true;
+        };
+        let Some(lens) = find_lens(database, camera, candidate) else {
+            return true;
+        };
+        // SAFETY: `lens` is database-owned and remains valid for this scope.
+        let (min_focal, max_focal) = unsafe { ((*lens).min_focal, (*lens).max_focal) };
+        if !min_focal.is_finite()
+            || !max_focal.is_finite()
+            || min_focal <= 0.0
+            || max_focal < min_focal
+        {
+            return true;
+        }
+        let tolerance = (0.03 * max_focal).max(0.75);
+        focal >= min_focal - tolerance && focal <= max_focal + tolerance
+    }
+
+    fn maker_is_compatible(raw_maker: &str, raw_model: &str, candidate_maker: &str) -> bool {
+        let raw = canonical_text(raw_maker);
+        if raw.is_empty() {
+            return true;
+        }
+        let candidate = canonical_text(candidate_maker);
+        if candidate.is_empty() {
+            return true;
+        }
+        raw == candidate
+            || raw.contains(&candidate)
+            || candidate.contains(&raw)
+            || canonical_text(raw_model).starts_with(&candidate)
+    }
+
+    fn canonical_lens_model(model: &str, makers: &[&str]) -> String {
+        let mut canonical = canonical_text(model);
+        for maker in makers {
+            let maker = canonical_text(maker);
+            if !maker.is_empty()
+                && canonical.starts_with(&maker)
+                && canonical.len() > maker.len()
+            {
+                canonical = canonical[maker.len()..].to_owned();
+            }
+        }
+        canonical
+    }
+
+    fn canonical_text(value: &str) -> String {
+        value
+            .chars()
+            .flat_map(char::to_lowercase)
+            .filter(|character| character.is_alphanumeric())
+            .collect()
+    }
+
+    fn lens_model_codes(model: &str) -> Vec<String> {
+        let mut codes = tokenized(model)
+            .into_iter()
+            .filter(|token| token.len() >= 3)
+            .filter(|token| token.chars().any(|character| character.is_ascii_alphabetic()))
+            .filter(|token| token.chars().any(|character| character.is_ascii_digit()))
+            // Optical specifications are not manufacturer identifiers.
+            .filter(|token| !token.ends_with("mm"))
+            .filter(|token| {
+                !token.strip_prefix('f').is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
+                })
+            })
+            .collect::<Vec<_>>();
+        codes.sort();
+        codes.dedup();
+        codes
+    }
+
+    fn lens_tokens(model: &str, primary_maker: &str, alternate_maker: &str) -> Vec<String> {
+        let maker_tokens = tokenized(primary_maker)
+            .into_iter()
+            .chain(tokenized(alternate_maker))
+            .collect::<Vec<_>>();
+        let mut tokens = tokenized(model)
+            .into_iter()
+            .filter(|token| token != "lens")
+            .filter(|token| !maker_tokens.iter().any(|maker| maker == token))
+            .collect::<Vec<_>>();
+        tokens.sort();
+        tokens.dedup();
+        tokens
+    }
+
+    fn tokenized(value: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut token = String::new();
+        for character in value.chars().flat_map(char::to_lowercase) {
+            if character.is_alphanumeric() {
+                token.push(character);
+            } else if !token.is_empty() {
+                result.push(std::mem::take(&mut token));
+            }
+        }
+        if !token.is_empty() {
+            result.push(token);
+        }
+        result
     }
 
     fn find_lens(

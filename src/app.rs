@@ -91,7 +91,7 @@ impl LensCorrectionState {
     fn from_catalog(catalog: LensfunCatalog) -> Self {
         let selected = catalog.auto_match.clone();
         Self {
-            enabled: catalog.auto_match.is_some(),
+            enabled: catalog.available && selected.is_some(),
             applied: false,
             selected_maker: selected
                 .as_ref()

@@ -297,8 +297,10 @@ impl AurawApp {
                             match apply_lensfun_correction(&original_raw, &selection) {
                                 Ok(corrected) => {
                                     lens_correction.applied = true;
-                                    lens_correction.catalog.status =
-                                        format!("Automatically applied {}", selection.label());
+                                    lens_correction.catalog.status = format!(
+                                        "Automatically applied {} from RAW metadata",
+                                        selection.label()
+                                    );
                                     Arc::new(corrected)
                                 }
                                 Err(error) => {

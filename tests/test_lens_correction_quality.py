@@ -48,8 +48,23 @@ def test_raw_metadata_drives_automatic_lensfun_application() -> None:
     assert "LensCorrectionState::from_catalog(lensfun_catalog(&original_raw))" in APP
     assert "if lens_correction.enabled" in APP
     assert "apply_lensfun_correction(&original_raw, &selection)" in APP
-    assert 'format!("Automatically applied {}", selection.label())' in APP
+    assert "Automatically applied {} from RAW metadata" in APP
+    assert "enabled: catalog.available && selected.is_some()" in APP
 
+
+def test_automatic_lens_matching_is_metadata_tolerant_and_conservative() -> None:
+    assert "fn canonical_lens_model" in LENSFUN
+    assert "fn maker_is_compatible" in LENSFUN
+    assert "fn profile_supports_capture" in LENSFUN
+    assert "compatible_lenses(database, camera)" in LENSFUN
+    assert "if *best_score < 0.90" in LENSFUN
+    assert "if *best_score - *runner_up < 0.08" in LENSFUN
+    assert "Auto-detected {} from RAW metadata" in LENSFUN
+    assert "let auto_match = find_auto_lens(&database, camera, raw);" in LENSFUN
+    assert "raw.lens_model.trim().is_empty() && lenses.len() == 1" not in LENSFUN
+    assert "fn lens_model_codes" in LENSFUN
+    assert "return Some(0.995);" in LENSFUN
+    assert '“E 28-75mm F2.8 A063”' in LENSFUN
 
 def test_lensfun_uses_stable_03_database_and_modifier_abi() -> None:
     for symbol in (
