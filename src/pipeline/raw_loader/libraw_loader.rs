@@ -1,4 +1,3 @@
-
 use super::{
     validate_raw_dimensions, CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind,
     DngColorEndpoint, LoadedRaw, MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,

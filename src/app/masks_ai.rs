@@ -121,7 +121,7 @@ impl AurawApp {
         #[cfg(not(target_os = "android"))]
         if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
             self.notice = Some(
-                "Choose an ONNX Runtime library under Settings before using Subject or Background masks."
+                "Choose an ONNX Runtime library under Settings before using Subject or Not Subject masks."
                     .to_owned(),
             );
             return;
@@ -370,7 +370,7 @@ impl AurawApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    ui.label("Subject and Background masks use the BiRefNet General Lite ONNX model.");
+                    ui.label("Subject masks use BiRefNet; Not Subject is the inverse of that probability map, not an independent background model.");
                     ui.label(format!(
                         "The first use downloads {:.0} MB from the rembg GitHub release and stores it in AuRaw's cache.",
                         BIREFNET_MODEL_BYTES as f64 / 1_000_000.0

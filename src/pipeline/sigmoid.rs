@@ -87,19 +87,104 @@ fn generalized_loglogistic_sigmoid(
     let film_response = (film_fog + clamped_value).powf(film_power);
     let paper_response =
         magnitude * (film_response / (paper_exposure + film_response)).powf(paper_power);
-    if paper_response.is_nan() {
-        magnitude
-    } else {
+    if paper_response.is_finite() {
         paper_response
+    } else if magnitude.is_finite() {
+        magnitude.max(0.0)
+    } else {
+        1.0
     }
 }
 
-/// Exact coefficient construction used by darktable 5.6.0's `commit_params`.
+const DEFAULT_SIGMOID_COEFFICIENTS: SigmoidCoefficients = SigmoidCoefficients {
+    white_target: 1.0,
+    black_target: 0.000151999993,
+    paper_exposure: 0.359695464,
+    film_fog: 0.00138432207,
+    film_power: 1.4909091,
+    paper_power: 1.0,
+    hue_preservation: 1.0,
+    color_processing: 0.0,
+};
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn coefficients_are_valid(coefficients: SigmoidCoefficients) -> bool {
+    let values = [
+        coefficients.white_target,
+        coefficients.black_target,
+        coefficients.paper_exposure,
+        coefficients.film_fog,
+        coefficients.film_power,
+        coefficients.paper_power,
+        coefficients.hue_preservation,
+        coefficients.color_processing,
+    ];
+    if !values.into_iter().all(f32::is_finite)
+        || coefficients.white_target <= 0.0
+        || coefficients.black_target < 0.0
+        || coefficients.black_target >= coefficients.white_target
+        || coefficients.paper_exposure <= 0.0
+        || coefficients.film_fog < 0.0
+        || coefficients.film_power <= 0.0
+        || coefficients.paper_power <= 0.0
+    {
+        return false;
+    }
+
+    let black = generalized_loglogistic_sigmoid(
+        0.0,
+        coefficients.white_target,
+        coefficients.paper_exposure,
+        coefficients.film_fog,
+        coefficients.film_power,
+        coefficients.paper_power,
+    );
+    let grey = generalized_loglogistic_sigmoid(
+        MIDDLE_GREY,
+        coefficients.white_target,
+        coefficients.paper_exposure,
+        coefficients.film_fog,
+        coefficients.film_power,
+        coefficients.paper_power,
+    );
+    let bright = generalized_loglogistic_sigmoid(
+        1.0e6,
+        coefficients.white_target,
+        coefficients.paper_exposure,
+        coefficients.film_fog,
+        coefficients.film_power,
+        coefficients.paper_power,
+    );
+    black.is_finite()
+        && grey.is_finite()
+        && bright.is_finite()
+        && black <= grey
+        && grey <= bright
+        && (grey - MIDDLE_GREY).abs() <= 5e-3
+}
+
+/// Exact coefficient construction used by darktable 5.6.0's `commit_params`
+/// for valid UI values. Corrupt/non-finite preset values are sanitized, and a
+/// known-good curve is used if the constructed coefficients violate the curve
+/// invariants required by the shader.
 pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
-    let contrast = params.contrast.clamp(0.1, 10.0);
-    let skew = params.skew.clamp(-1.0, 1.0);
-    let display_white_target = params.display_white_target.clamp(20.0, 1600.0);
-    let display_black_target = params.display_black_target.clamp(0.0, 15.0);
+    let defaults = SigmoidParams::default();
+    let contrast = finite_or(params.contrast, defaults.contrast).clamp(0.1, 10.0);
+    let skew = finite_or(params.skew, defaults.skew).clamp(-1.0, 1.0);
+    let display_white_target =
+        finite_or(params.display_white_target, defaults.display_white_target).clamp(20.0, 1600.0);
+    let display_black_target =
+        finite_or(params.display_black_target, defaults.display_black_target).clamp(0.0, 15.0);
+    let hue_preservation =
+        (0.01 * finite_or(params.hue_preservation, defaults.hue_preservation)).clamp(0.0, 1.0);
+    let color_processing = params.color_processing.shader_value();
 
     let ref_film_power = contrast;
     let ref_paper_power = 1.0;
@@ -159,15 +244,24 @@ pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
             - white_grey_relation.powf(1.0 / film_power));
     let paper_exposure = (film_fog + MIDDLE_GREY).powf(film_power) * white_grey_relation;
 
-    SigmoidCoefficients {
+    let candidate = SigmoidCoefficients {
         white_target,
         black_target,
         paper_exposure,
         film_fog,
         film_power,
         paper_power,
-        hue_preservation: (0.01 * params.hue_preservation).clamp(0.0, 1.0),
-        color_processing: params.color_processing.shader_value(),
+        hue_preservation,
+        color_processing,
+    };
+    if coefficients_are_valid(candidate) {
+        candidate
+    } else {
+        SigmoidCoefficients {
+            hue_preservation,
+            color_processing,
+            ..DEFAULT_SIGMOID_COEFFICIENTS
+        }
     }
 }
 
@@ -259,6 +353,30 @@ mod tests {
                     previous = y;
                 }
             }
+        }
+    }
+
+    #[test]
+    fn corrupt_non_finite_params_fall_back_to_finite_coefficients() {
+        let c = coefficients(SigmoidParams {
+            contrast: f32::NAN,
+            skew: f32::INFINITY,
+            display_white_target: f32::NEG_INFINITY,
+            display_black_target: f32::NAN,
+            hue_preservation: f32::INFINITY,
+            ..SigmoidParams::default()
+        });
+        for value in [
+            c.white_target,
+            c.black_target,
+            c.paper_exposure,
+            c.film_fog,
+            c.film_power,
+            c.paper_power,
+            c.hue_preservation,
+            c.color_processing,
+        ] {
+            assert!(value.is_finite());
         }
     }
 }

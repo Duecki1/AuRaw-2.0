@@ -1,4 +1,3 @@
-
 use super::{
     highlight_final_read_slot, highlight_stage_slots, processing_work_format, work_shader_source,
     HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS,
@@ -291,7 +290,7 @@ fn adjustments_shader_contains_lightroom_style_controls() {
     assert!(SHADER_ADJUSTMENTS.contains("apply_glow"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_vignette"));
     assert!(SHADER_ADJUSTMENTS.contains("stabilized_mixer_sample"));
-    assert!(SHADER_ADJUSTMENTS.contains("positive_rec2020_from_oklab"));
+    assert!(SHADER_ADJUSTMENTS.contains("nonnegative_rec2020_from_oklab"));
     assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_color_grading_wheels"));
     assert!(SHADER_ADJUSTMENTS.contains("color_grade_tonal_weights"));
