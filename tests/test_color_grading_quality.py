@@ -59,7 +59,7 @@ def test_uniform_abi_carries_global_and_local_grading() -> None:
 def test_grading_is_scene_referred_perceptual_and_gamut_safe() -> None:
     assert "fn apply_color_grading_wheels" in ADJUSTMENTS
     assert "linear_srgb_to_oklab(REC2020_TO_SRGB * rgb)" in ADJUSTMENTS
-    assert "positive_rec2020_from_oklab" in ADJUSTMENTS
+    assert "nonnegative_rec2020_from_oklab" in ADJUSTMENTS
     assert "target_ab / target_chroma" in ADJUSTMENTS
     assert "adjusted = adjusted * exp2(mixer_luminance_ev" in ADJUSTMENTS
     assert "let display_linear = darktable_sigmoid(graded)" in ADJUSTMENTS
@@ -68,7 +68,7 @@ def test_grading_is_scene_referred_perceptual_and_gamut_safe() -> None:
 
 def test_tonal_ranges_overlap_smoothly_and_protect_fragile_pixels() -> None:
     assert "fn color_grade_tonal_weights" in ADJUSTMENTS
-    assert "log2(max(luminance, 1e-7) / 0.18)" in ADJUSTMENTS
+    assert "log2(max(luminance, 1e-7) / SCENE_MIDDLE_GREY)" in ADJUSTMENTS
     assert "mix(0.60, 2.80" in ADJUSTMENTS
     assert "smoothstep(" in ADJUSTMENTS
     assert "smoothstep(0.025, 0.115" in ADJUSTMENTS

@@ -6,12 +6,9 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{mpsc, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{mpsc, Mutex, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-#[cfg(not(target_os = "android"))]
-use std::sync::Mutex;
 
 pub const BIREFNET_MODEL_BYTES: u64 = 224_005_088;
 pub const BIREFNET_MODEL_URL: &str = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
@@ -29,7 +26,8 @@ const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 #[cfg(not(target_os = "android"))]
 static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
-static RUNTIME_INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
+static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
+static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug)]
 pub enum SubjectMaskEvent {
@@ -195,7 +193,15 @@ fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Resul
         .as_nanos();
     let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
     let result = (|| -> Result<()> {
-        let mut response = ureq::get(BIREFNET_MODEL_URL)
+        let config = ureq::Agent::config_builder()
+            .https_only(true)
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .timeout_recv_body(Some(Duration::from_secs(10 * 60)))
+            .build();
+        let agent: ureq::Agent = config.into();
+        let mut response = agent
+            .get(BIREFNET_MODEL_URL)
             .call()
             .context("download BiRefNet ONNX model")?;
         if let Some(length) = response.body().content_length() {
@@ -295,25 +301,27 @@ fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: Option<&str>
             "a different ONNX Runtime is already active in this process; restart AuRaw before changing the pinned runtime"
         );
     }
-    let initialized = RUNTIME_INITIALIZED.get_or_init(|| match ort::init_from(&runtime_load_path) {
-        Ok(builder) => {
-            if builder.with_name("AuRaw").commit() {
-                let _ =
-                    DESKTOP_RUNTIME_IDENTITY.set((runtime_path.clone(), actual_sha256.clone()));
-                Ok(())
-            } else {
-                Err(
-                    "ONNX Runtime was already initialized before the selected pinned library could be committed"
-                        .to_owned(),
-                )
-            }
-        }
-        Err(error) => Err(format!(
-            "could not load ONNX Runtime from {}: {error}",
-            runtime_path.display()
-        )),
-    });
-    initialized.clone().map_err(anyhow::Error::msg)?;
+    let _init_guard = RUNTIME_INIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("ONNX Runtime initialization lock was poisoned"))?;
+    if RUNTIME_INITIALIZED.get().is_none() {
+        let builder = ort::init_from(&runtime_load_path).map_err(|error| {
+            anyhow::anyhow!(
+                "could not load ONNX Runtime from {}: {error}",
+                runtime_path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            builder.with_name("AuRaw").commit(),
+            "ONNX Runtime was already initialized before the selected pinned library could be committed"
+        );
+        DESKTOP_RUNTIME_IDENTITY
+            .set((runtime_path.clone(), actual_sha256.clone()))
+            .map_err(|_| anyhow::anyhow!("ONNX Runtime identity was initialized concurrently"))?;
+        RUNTIME_INITIALIZED
+            .set(())
+            .map_err(|_| anyhow::anyhow!("ONNX Runtime state was initialized concurrently"))?;
+    }
     let (loaded_path, loaded_sha256) = DESKTOP_RUNTIME_IDENTITY
         .get()
         .context("ONNX Runtime initialized without a pinned desktop identity")?;
@@ -397,11 +405,22 @@ fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, Str
 
 #[cfg(target_os = "android")]
 fn initialize_runtime(_runtime_path: Option<&Path>, _expected_sha256: Option<&str>) -> Result<()> {
-    let initialized = RUNTIME_INITIALIZED.get_or_init(|| {
-        ort::init().with_name("AuRaw").commit();
-        Ok(())
-    });
-    initialized.clone().map_err(anyhow::Error::msg)
+    if RUNTIME_INITIALIZED.get().is_some() {
+        return Ok(());
+    }
+    let _init_guard = RUNTIME_INIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("ONNX Runtime initialization lock was poisoned"))?;
+    if RUNTIME_INITIALIZED.get().is_none() {
+        anyhow::ensure!(
+            ort::init().with_name("AuRaw").commit(),
+            "ONNX Runtime was already initialized before AuRaw could configure it"
+        );
+        RUNTIME_INITIALIZED
+            .set(())
+            .map_err(|_| anyhow::anyhow!("ONNX Runtime state was initialized concurrently"))?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "android")]
@@ -554,28 +573,56 @@ fn run_subject_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32
     let outputs = session
         .run(ort::inputs![input])
         .context("run BiRefNet ONNX inference")?;
-    let (shape, logits) = outputs[0]
+    let output = outputs
+        .values()
+        .next()
+        .context("BiRefNet returned no output tensors")?;
+    let (shape, logits) = output
         .try_extract_tensor::<f32>()
         .context("read BiRefNet output tensor")?;
-    anyhow::ensure!(shape.len() >= 2, "unexpected BiRefNet output shape {shape}");
-    let output_height = shape[shape.len() - 2] as usize;
-    let output_width = shape[shape.len() - 1] as usize;
-    let output_elements = output_width
-        .checked_mul(output_height)
-        .context("BiRefNet output dimensions overflow")?;
+    let (output_width, output_height, output_elements) =
+        validate_birefnet_output_shape(&**shape, logits.len())?;
     anyhow::ensure!(
-        output_width > 0
-            && output_height > 0
-            && output_elements <= (MODEL_SIZE as usize * MODEL_SIZE as usize * 4)
-            && logits.len() >= output_elements,
-        "invalid BiRefNet output shape {shape}"
+        logits.iter().all(|value| value.is_finite()),
+        "BiRefNet output contains non-finite logits"
     );
     let mut owned_logits = Vec::new();
     owned_logits
         .try_reserve_exact(output_elements)
         .context("reserve BiRefNet output logits")?;
-    owned_logits.extend_from_slice(&logits[..output_elements]);
-    Ok((output_width as u32, output_height as u32, owned_logits))
+    owned_logits.extend_from_slice(logits);
+    Ok((output_width, output_height, owned_logits))
+}
+
+fn validate_birefnet_output_shape(shape: &[i64], logits_len: usize) -> Result<(u32, u32, usize)> {
+    anyhow::ensure!(
+        shape.len() == 4 && shape[0] == 1 && shape[1] == 1,
+        "unexpected BiRefNet output shape {shape:?}; expected [1, 1, H, W]"
+    );
+    let output_height =
+        usize::try_from(shape[2]).context("BiRefNet output height is negative or too large")?;
+    let output_width =
+        usize::try_from(shape[3]).context("BiRefNet output width is negative or too large")?;
+    anyhow::ensure!(
+        output_width > 0 && output_height > 0,
+        "BiRefNet output dimensions must be positive: {shape:?}"
+    );
+    let output_elements = output_width
+        .checked_mul(output_height)
+        .context("BiRefNet output dimensions overflow")?;
+    anyhow::ensure!(
+        output_elements <= MODEL_SIZE as usize * MODEL_SIZE as usize * 4,
+        "BiRefNet output is implausibly large: {shape:?}"
+    );
+    anyhow::ensure!(
+        logits_len == output_elements,
+        "BiRefNet output shape {shape:?} describes {output_elements} values, but the tensor contains {logits_len}"
+    );
+    Ok((
+        u32::try_from(output_width).context("BiRefNet output width exceeds u32")?,
+        u32::try_from(output_height).context("BiRefNet output height exceeds u32")?,
+        output_elements,
+    ))
 }
 
 fn normalized_letterbox(
@@ -626,30 +673,24 @@ fn restore_from_letterbox(
                 .and_then(|height| width.checked_mul(height))
         })
         .context("BiRefNet output dimensions overflow")?;
+    anyhow::ensure!(
+        logits.len() == output_elements,
+        "BiRefNet logits do not match the declared output dimensions"
+    );
     let mut probabilities = Vec::new();
     probabilities
         .try_reserve_exact(output_elements)
         .context("reserve BiRefNet probability map")?;
-    let mut minimum = f32::INFINITY;
-    let mut maximum = f32::NEG_INFINITY;
-    for &logit in logits.iter().take(output_elements) {
-        let probability = if logit >= 0.0 {
-            1.0 / (1.0 + (-logit).exp())
-        } else {
-            let exponential = logit.exp();
-            exponential / (1.0 + exponential)
-        };
-        minimum = minimum.min(probability);
-        maximum = maximum.max(probability);
-        probabilities.push(probability);
+    for &logit in logits {
+        anyhow::ensure!(
+            logit.is_finite(),
+            "BiRefNet output contains a non-finite logit"
+        );
+        probabilities.push(sigmoid_probability(logit));
     }
-    let range = (maximum - minimum).max(1e-6);
-    let pixels = probabilities
-        .into_iter()
-        .map(|value| (((value - minimum) / range).clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-        .collect();
-    let output = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(output_width, output_height, pixels)
-        .context("invalid BiRefNet output buffer")?;
+    let output =
+        ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, probabilities)
+            .context("invalid BiRefNet output buffer")?;
 
     let scale_x = output_width as f64 / MODEL_SIZE as f64;
     let scale_y = output_height as f64 / MODEL_SIZE as f64;
@@ -662,15 +703,27 @@ fn restore_from_letterbox(
     anyhow::ensure!(crop_width > 0 && crop_height > 0, "invalid letterbox crop");
     let cropped =
         image::imageops::crop_imm(&output, crop_x, crop_y, crop_width, crop_height).to_image();
-    Ok(
-        image::imageops::resize(&cropped, target_width, target_height, FilterType::Lanczos3)
-            .into_raw(),
-    )
+    let resized =
+        image::imageops::resize(&cropped, target_width, target_height, FilterType::Lanczos3);
+    Ok(resized
+        .into_raw()
+        .into_iter()
+        .map(|probability| (probability.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+        .collect())
+}
+
+fn sigmoid_probability(logit: f32) -> f32 {
+    if logit >= 0.0 {
+        1.0 / (1.0 + (-logit).exp())
+    } else {
+        let exponential = logit.exp();
+        exponential / (1.0 + exponential)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Letterbox, MODEL_SIZE};
+    use super::{sigmoid_probability, validate_birefnet_output_shape, Letterbox, MODEL_SIZE};
 
     #[test]
     fn letterbox_preserves_landscape_aspect_ratio() {
@@ -688,5 +741,20 @@ mod tests {
         assert_eq!(box_.height, MODEL_SIZE);
         assert_eq!(box_.offset_x, 256);
         assert_eq!(box_.offset_y, 0);
+    }
+
+    #[test]
+    fn birefnet_output_requires_single_batch_and_channel() {
+        assert!(validate_birefnet_output_shape(&[1, 1, 1024, 1024], 1024 * 1024).is_ok());
+        assert!(validate_birefnet_output_shape(&[1, 2, 1024, 1024], 2 * 1024 * 1024).is_err());
+        assert!(validate_birefnet_output_shape(&[1, 1, -1, 1024], 0).is_err());
+        assert!(validate_birefnet_output_shape(&[1, 1, 2, 2], 5).is_err());
+    }
+
+    #[test]
+    fn sigmoid_probabilities_keep_model_calibration() {
+        assert!((sigmoid_probability(0.0) - 0.5).abs() < f32::EPSILON);
+        assert!((sigmoid_probability(2.0) - 0.880797).abs() < 1e-6);
+        assert!((sigmoid_probability(-2.0) - 0.119203).abs() < 1e-6);
     }
 }

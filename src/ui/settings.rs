@@ -63,7 +63,7 @@ impl Settings {
                 } else {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
-                        "No runtime selected. Subject and Background masks cannot run yet.",
+                        "No runtime selected. Subject and Not Subject masks cannot run yet.",
                     );
                 }
                 ui.horizontal_wrapped(|ui| {

@@ -35,7 +35,7 @@ impl MaskKind {
             Self::Radial => "Radial Gradient",
             Self::Linear => "Linear Gradient",
             Self::Subject => "Select Subject",
-            Self::Background => "Select Background",
+            Self::Background => "Select Not Subject",
             Self::Object => "Select Object",
             Self::Landscape => "Select Landscape",
             Self::LuminanceRange => "Luminance Range",

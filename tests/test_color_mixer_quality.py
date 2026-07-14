@@ -37,7 +37,7 @@ def test_selector_is_spatially_stable_but_center_detail_is_not_blurred() -> None
 
 def test_luminance_is_ratio_preserving_and_gamut_mapping_is_constant_hue() -> None:
     assert "adjusted = adjusted * exp2(mixer_luminance_ev" in ADJUSTMENTS
-    assert "fn positive_rec2020_from_oklab" in ADJUSTMENTS
+    assert "fn nonnegative_rec2020_from_oklab" in ADJUSTMENTS
     assert "binary search" in ADJUSTMENTS
     assert "clamp(hsl.z" not in ADJUSTMENTS
 

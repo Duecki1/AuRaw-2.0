@@ -109,7 +109,7 @@ def test_default_glow_threshold_rejects_shadows_but_accepts_bright_sources() -> 
         if linear_luma <= 1.0:
             perceptual = max(linear_luma, 0.0) ** (1.0 / 2.2)
         else:
-            perceptual = 1.0 + (linear_luma - 1.0) ** (1.0 / 2.2)
+            perceptual = 1.0 + (1.0 / 2.2) * math.log(linear_luma)
         cutoff_fade = smoothstep(cutoff, cutoff + 0.16, perceptual)
         black_gate = smoothstep(0.0, 0.42, linear_luma) ** 0.5
         return cutoff_fade * black_gate

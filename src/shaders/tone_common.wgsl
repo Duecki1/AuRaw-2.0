@@ -1,8 +1,8 @@
 // Shared data for image-adaptive tonal controls. The histogram is calculated
 // from unexposed scene-linear luminance, so the Exposure slider remains a true
 // exposure control instead of being normalized away by the analysis pass.
-const SCENE_MIDDLE_GREY: f32 = 0.1842;
-const DISPLAY_MIDDLE_GREY: f32 = 0.1842;
+const SCENE_MIDDLE_GREY: f32 = 0.1845;
+const DISPLAY_MIDDLE_GREY: f32 = 0.1845;
 
 const TONE_HISTOGRAM_BIN_COUNT: u32 = 256u;
 const TONE_EV_MIN: f32 = -16.0;

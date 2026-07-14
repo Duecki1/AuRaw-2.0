@@ -48,7 +48,7 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var log_sum = 0.0;
     var count = 0.0;
-    var brightest_ev = TONE_EV_MIN;
+    var brightest = vec4<f32>(TONE_EV_MIN);
     var y = cell_min.y;
     loop {
         if y >= min(cell_max.y, source_size.y) { break; }
@@ -62,7 +62,15 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
                 TONE_EV_MAX,
             );
             log_sum = log_sum + ev;
-            brightest_ev = max(brightest_ev, ev);
+            if ev > brightest.x {
+                brightest = vec4<f32>(ev, brightest.x, brightest.y, brightest.z);
+            } else if ev > brightest.y {
+                brightest = vec4<f32>(brightest.x, ev, brightest.y, brightest.z);
+            } else if ev > brightest.z {
+                brightest = vec4<f32>(brightest.x, brightest.y, ev, brightest.z);
+            } else if ev > brightest.w {
+                brightest = vec4<f32>(brightest.x, brightest.y, brightest.z, ev);
+            }
             count = count + 1.0;
 
             // Histogram every source pixel rather than the cell average. This
@@ -81,9 +89,16 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let average_ev = log_sum / max(count, 1.0);
 
-    // The local guide should remain stable for broad tonal masks, but retain a
-    // bounded trace of a sub-cell highlight instead of averaging it away.
-    let guide_ev = max(average_ev, brightest_ev - 1.5);
+    // Retain a bounded trace of small highlights without allowing one hot
+    // pixel to lift the entire guide cell. Average up to the four brightest
+    // samples, then cap their influence relative to the cell mean.
+    let bright_count = min(count, 4.0);
+    var bright_sum = brightest.x;
+    if bright_count > 1.0 { bright_sum = bright_sum + brightest.y; }
+    if bright_count > 2.0 { bright_sum = bright_sum + brightest.z; }
+    if bright_count > 3.0 { bright_sum = bright_sum + brightest.w; }
+    let robust_bright_ev = bright_sum / max(bright_count, 1.0);
+    let guide_ev = max(average_ev, robust_bright_ev - 1.5);
     textureStore(tone_guide_write, vec2<i32>(gid.xy), vec4<f32>(guide_ev, 0.0, 0.0, 1.0));
 }
 

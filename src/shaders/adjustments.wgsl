@@ -149,8 +149,11 @@ fn apply_texture_and_clarity_values(
 
     let center_ev = log_luminance(rgb);
     let fine_base_ev = bilateral_log_luminance(pos, 1, 8.0);
-    let clarity_step = select(3, 4, params.tone_guide_radius > 3.5);
-    let broad_base_ev = atrous_log_luminance(pos, clarity_step, 1.35);
+    var broad_base_ev = fine_base_ev;
+    if abs(clarity) >= 1e-6 {
+        let clarity_step = select(3, 4, params.tone_guide_radius > 3.5);
+        broad_base_ev = atrous_log_luminance(pos, clarity_step, 1.35);
+    }
 
     // Two true band-pass residuals. Because every term comes from the same
     // developed texture, a flat field produces exactly zero effect instead of
@@ -176,10 +179,6 @@ fn apply_texture_and_clarity_values(
     let clarity_ev = clarity * selected_mid * 2.00 * midtone_gate;
     let delta_ev = clamp(texture_ev + clarity_ev, -1.25, 1.25);
     return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
-}
-
-fn apply_texture_and_clarity(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    return apply_texture_and_clarity_values(pos, rgb, params.presence.x, params.presence.y);
 }
 
 fn local_dark_channel(pos: vec2<i32>, radius: i32) -> f32 {
@@ -222,16 +221,13 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
     return mix(rgb, airlight, clamp(haze_mix, 0.0, 0.60));
 }
 
-fn apply_dehaze(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    return apply_dehaze_value(pos, rgb, params.presence.z);
-}
-
-
 fn extended_perceptual_luminance(linear_luma: f32) -> f32 {
     if linear_luma <= 1.0 {
         return pow(max(linear_luma, 0.0), 1.0 / 2.2);
     }
-    return 1.0 + pow(linear_luma - 1.0, 1.0 / 2.2);
+    // C1-continuous extension: value and derivative match the 1/2.2 power
+    // curve at one, while logarithmic growth avoids an HDR threshold cusp.
+    return 1.0 + (1.0 / 2.2) * log(linear_luma);
 }
 
 fn glow_emission(rgb: vec3<f32>, cutoff: f32) -> vec3<f32> {
@@ -281,7 +277,7 @@ fn glow_source_at(pos: vec2<i32>, cutoff: f32) -> vec3<f32> {
 fn glow_blur_at(pos: vec2<i32>, step: i32, cutoff: f32) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     var sum_weight = 0.0;
-    // A separable B3-spline kernel written as one 5x5 gather. The glow source
+    // A 2-D B3-spline 5x5 gather. The glow source
     // has already been prefiltered, so the large-radius gathers stay smooth
     // instead of turning isolated bright pixels into repeated dot artefacts.
     for (var ky = -2; ky <= 2; ky = ky + 1) {
@@ -563,7 +559,7 @@ fn stabilized_mixer_sample(pos: vec2<i32>, center_rgb: vec3<f32>) -> MixerSample
     return MixerSample(center.lab, center.chroma, stable_hue, center.confidence);
 }
 
-fn positive_rec2020_from_oklab(lightness: f32, hue_vector: vec2<f32>, requested_chroma: f32) -> vec3<f32> {
+fn nonnegative_rec2020_from_oklab(lightness: f32, hue_vector: vec2<f32>, requested_chroma: f32) -> vec3<f32> {
     // Hue/saturation moves can leave the positive Rec.2020 working gamut.
     // Compress chroma at constant OKLab lightness and hue instead of clipping
     // RGB channels, which would visibly change hue and create hard boundaries.
@@ -581,7 +577,7 @@ fn positive_rec2020_from_oklab(lightness: f32, hue_vector: vec2<f32>, requested_
     var candidate = SRGB_TO_REC2020 * oklab_to_linear_srgb(
         vec3<f32>(lightness, vec2<f32>(0.0)),
     );
-    for (var iteration = 0; iteration < 6; iteration = iteration + 1) {
+    for (var iteration = 0; iteration < 10; iteration = iteration + 1) {
         let middle = 0.5 * (low + high);
         let probe = SRGB_TO_REC2020 * oklab_to_linear_srgb(
             vec3<f32>(lightness, hue_vector * middle),
@@ -637,7 +633,7 @@ fn color_grade_tonal_weights(luminance: f32, options: vec4<f32>) -> vec3<f32> {
     // Evaluate ranges in exposure space around photographic middle gray.
     // Wider blending produces Lightroom-like overlap without hard range
     // boundaries. Balance shifts the shared pivot by up to 1.5 stops.
-    let ev = log2(max(luminance, 1e-7) / 0.18);
+    let ev = log2(max(luminance, 1e-7) / SCENE_MIDDLE_GREY);
     let width = mix(0.60, 2.80, clamp(options.x, 0.0, 1.0));
     let pivot = -clamp(options.y, -1.0, 1.0) * 1.5;
     let shadows = 1.0 - smoothstep(
@@ -690,7 +686,7 @@ fn apply_color_grading_wheels(
         let target_ab = lab.yz + grade_vector * (0.135 * signal * hdr_guard * saturation_guard);
         let target_chroma = length(target_ab);
         if target_chroma > 1e-8 {
-            adjusted = positive_rec2020_from_oklab(
+            adjusted = nonnegative_rec2020_from_oklab(
                 lab.x,
                 target_ab / target_chroma,
                 target_chroma,
@@ -819,7 +815,7 @@ fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
                 let luminance = mixer_band_value(bands, params.mask_hsl_luminance_0[index], params.mask_hsl_luminance_1[index]) / 100.0 * sample.confidence;
                 if abs(hue_shift) > 1e-7 || abs(saturation) > 1e-7 {
                     let angle = atan2(sample.lab.z, sample.lab.y) + hue_shift * 2.0 * 3.14159265359;
-                    adjusted = positive_rec2020_from_oklab(
+                    adjusted = nonnegative_rec2020_from_oklab(
                         sample.lab.x,
                         vec2<f32>(cos(angle), sin(angle)),
                         sample.chroma * mixer_saturation_factor(saturation),
@@ -897,7 +893,7 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         let target_angle = center_angle + hue_shift * 2.0 * 3.14159265359;
         let target_hue = vec2<f32>(cos(target_angle), sin(target_angle));
         let target_chroma = sample.chroma * mixer_saturation_factor(saturation_amount);
-        adjusted = positive_rec2020_from_oklab(sample.lab.x, target_hue, target_chroma);
+        adjusted = nonnegative_rec2020_from_oklab(sample.lab.x, target_hue, target_chroma);
     }
 
     if abs(luminance_amount) > 1e-7 {

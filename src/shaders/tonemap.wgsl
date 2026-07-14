@@ -118,8 +118,8 @@ fn apply_basic_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
 
     let luminance = safe_luma(max(rgb, vec3<f32>(0.0)));
     let contrast_power = exp2(amount);
-    let scene_ev = log2(luminance / 0.1845);
-    let adjusted_luminance = 0.1845 * exp2(scene_ev * contrast_power);
+    let scene_ev = log2(luminance / SCENE_MIDDLE_GREY);
+    let adjusted_luminance = SCENE_MIDDLE_GREY * exp2(scene_ev * contrast_power);
     return rgb * clamp(adjusted_luminance / luminance, 0.0, 64.0);
 }
 
@@ -250,12 +250,12 @@ fn point_curve_value(curve: u32, input: f32) -> f32 {
 
 fn scene_curve_encode(value: f32) -> f32 {
     let positive = max(value, 0.0);
-    return positive / (positive + 0.1845);
+    return positive / (positive + SCENE_MIDDLE_GREY);
 }
 
 fn scene_curve_decode(value: f32) -> f32 {
     let bounded = clamp(value, 0.0, 0.999999);
-    return 0.1845 * bounded / max(1.0 - bounded, 1e-6);
+    return SCENE_MIDDLE_GREY * bounded / max(1.0 - bounded, 1e-6);
 }
 
 fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
@@ -291,18 +291,38 @@ fn apply_lightroom_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     return apply_rgb_point_curves(apply_point_tone_curve(basic));
 }
 
+fn finite_scalar(value: f32) -> bool {
+    return value == value && abs(value) < 3.0e38;
+}
+
 fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
     let white_target = params.sigmoid_curve.x;
     let paper_exposure = params.sigmoid_curve.z;
     let film_fog = params.sigmoid_curve.w;
     let film_power = params.sigmoid_power.x;
     let paper_power = params.sigmoid_power.y;
+    let fallback = clamp(max(value, 0.0), 0.0, 1.0);
 
-    let clamped_value = max(value, 0.0);
-    let film_response = pow(film_fog + clamped_value, film_power);
+    if !finite_scalar(white_target) || white_target <= 0.0
+        || !finite_scalar(paper_exposure) || paper_exposure <= 0.0
+        || !finite_scalar(film_fog) || film_fog < 0.0
+        || !finite_scalar(film_power) || film_power <= 0.0
+        || !finite_scalar(paper_power) || paper_power <= 0.0 {
+        return fallback;
+    }
+
+    let film_base = film_fog + max(value, 0.0);
+    if !finite_scalar(film_base) || film_base < 0.0 {
+        return fallback;
+    }
+    let film_response = pow(film_base, film_power);
+    let denominator = paper_exposure + film_response;
+    if !finite_scalar(film_response) || !finite_scalar(denominator) || denominator <= 0.0 {
+        return fallback;
+    }
     let paper_response = white_target
-        * pow(film_response / (paper_exposure + film_response), paper_power);
-    return select(paper_response, white_target, paper_response != paper_response);
+        * pow(clamp(film_response / denominator, 0.0, 1.0), paper_power);
+    return select(fallback, paper_response, finite_scalar(paper_response));
 }
 
 fn desaturate_negative_values(rgb: vec3<f32>) -> vec3<f32> {
@@ -453,6 +473,3 @@ fn darktable_sigmoid(rgb: vec3<f32>) -> vec3<f32> {
     return sigmoid_rgb_ratio(rgb);
 }
 
-fn display_render(rgb: vec3<f32>) -> vec3<f32> {
-    return apply_output_lut(darktable_sigmoid(rgb));
-}

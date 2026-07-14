@@ -1,4 +1,3 @@
-
 use super::{CameraProfile, HsvMap, IccOutputTransform, ProfileEncoding, ToneCurve};
 
 #[test]
