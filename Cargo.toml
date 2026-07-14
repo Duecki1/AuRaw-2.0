@@ -44,7 +44,7 @@ bindgen = "0.70"
 pkg-config = "0.3"
 
 [dev-dependencies]
-naga = { version = "29", features = ["wgsl-in"] }
+naga = { version = "30", features = ["wgsl-in"] }
 
 [profile.release]
 opt-level = 3
