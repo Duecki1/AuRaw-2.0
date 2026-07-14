@@ -41,6 +41,12 @@ def test_submasks_support_lightroom_style_boolean_composition() -> None:
     assert "*dst *= src" in MASKS
 
 
+def test_submasks_have_user_renameable_names() -> None:
+    assert "pub name: String" in MASKS
+    assert "name: kind.label().to_owned()" in MASKS
+    assert "component.name" in SIDEBAR
+
+
 def test_mask_atlas_is_shared_by_preview_and_export() -> None:
     assert "R8Unorm" in GPU
     assert "TextureViewDimension::D2Array" in GPU

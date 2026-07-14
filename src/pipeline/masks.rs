@@ -258,6 +258,7 @@ impl MaskGeometry {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaskComponent {
+    pub name: String,
     pub kind: MaskKind,
     pub combine: MaskCombineMode,
     pub enabled: bool,
@@ -268,6 +269,7 @@ pub struct MaskComponent {
 impl MaskComponent {
     pub fn new(kind: MaskKind, combine: MaskCombineMode) -> Self {
         Self {
+            name: kind.label().to_owned(),
             kind,
             combine,
             enabled: true,
