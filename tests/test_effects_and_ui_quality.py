@@ -32,19 +32,32 @@ def test_effects_are_a_dedicated_same_stage_pass() -> None:
     assert prepare < effects < creative < render
 
 
+
+
+def test_saturation_and_vibrance_keep_the_effects_pass_enabled() -> None:
+    gate = GPU[GPU.index("fn needs_intermediate_adjustment_passes"):GPU.index("fn evaluate_point_curve")]
+    assert "self.saturation.abs() > 1e-6" in gate
+    assert "self.vibrance.abs() > 1e-6" in gate
+    assert "mask_adjust_2" in gate
+    assert "params.needs_intermediate_adjustment_passes()" in GPU
+
 def test_texture_and_clarity_are_band_pass_not_global_exposure() -> None:
     assert "fine_detail_ev = center_ev - fine_base_ev" in ADJUSTMENTS
-    assert "mid_detail_ev = fine_base_ev - broad_base_ev" in ADJUSTMENTS
+    assert "mid_detail_ev = center_ev - broad_base_ev - fine_detail_ev * 0.24" in ADJUSTMENTS
     assert "atrous_log_luminance" in ADJUSTMENTS
     assert "soft_detail_threshold" in ADJUSTMENTS
     assert "rgb * exp2(delta_ev)" in ADJUSTMENTS
-    assert "flat field produces exactly zero effect" in ADJUSTMENTS
+    assert "if abs(texture) < 1e-6 && abs(clarity) < 1e-6" in ADJUSTMENTS
+    assert "texture_strength = select(1.75, 2.65" in ADJUSTMENTS
+    assert "clarity_strength = select(2.20, 3.25" in ADJUSTMENTS
 
 
 def test_dehaze_uses_airlight_and_transmission() -> None:
-    assert "local_dark_channel" in ADJUSTMENTS
+    assert "haze_neighborhood" in ADJUSTMENTS
+    assert "dark_ratio" in ADJUSTMENTS
     assert "transmission" in ADJUSTMENTS
     assert "airlight" in ADJUSTMENTS
+    assert "(rgb - airlight * (1.0 - transmission)) / transmission" in ADJUSTMENTS
     assert "mix(rgb, airlight" in ADJUSTMENTS
 
 
@@ -143,3 +156,25 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
     ):
         assert f"exposure.{name}" in GPU
         assert f"params.{name}" in ALL_SHADERS or name == "highlight_color_adaptation"
+
+
+def test_revised_adjustment_formulas_increment_the_process_version() -> None:
+    assert "CURRENT_PROCESS_VERSION: u32 = 4" in BASIC
+    assert "0 | 1 | 2 | 3 => self.process_version = CURRENT_PROCESS_VERSION" in BASIC
+
+
+def test_presence_and_color_controls_use_perceptual_bounded_mappings() -> None:
+    assert "fn perceptual_control" in ALL_SHADERS
+    assert "muted_weight" in ALL_SHADERS
+    assert "neutral_guard" in ALL_SHADERS
+    assert "edge_guard" in ADJUSTMENTS
+    assert "negative_fine" in ADJUSTMENTS
+    assert "dark_ratio" in ADJUSTMENTS
+    assert "hue_safe" in ADJUSTMENTS
+    assert "chroma_boost" in ADJUSTMENTS
+
+
+def test_global_temperature_has_an_extended_metadata_aware_range() -> None:
+    assert "GLOBAL_TEMPERATURE_LIMIT: f32 = 150.0" in BASIC
+    assert "-crate::pipeline::GLOBAL_TEMPERATURE_LIMIT" in SIDEBAR
+    assert "GLOBAL_TEMPERATURE_LIMIT" in GPU

@@ -82,6 +82,26 @@ fn requested_detail_edge(
         .clamp(256.0, quality.detail_edge() as f32) as u32
 }
 
+fn navigation_proxy_edge() -> u32 {
+    if cfg!(target_os = "android") { 384 } else { 512 }
+}
+
+fn navigation_mask_edge() -> u32 {
+    if cfg!(target_os = "android") { 256 } else { 384 }
+}
+
+/// Start a detailed crop for every real zoom level above fit. The previous
+/// 1.01 cutoff excluded an exact 101% zoom and, together with the former
+/// proxy-texel shortcut, kept the tiny navigation image visible until much deeper
+/// zoom levels.
+const DETAIL_ZOOM_START: f32 = 1.0005;
+
+fn zoom_detail_idle_delay() -> Duration {
+    // Wait only long enough to coalesce wheel/pinch events. A full second made
+    // the navigation proxy look like the final preview after zooming stopped.
+    Duration::from_millis(if cfg!(target_os = "android") { 220 } else { 140 })
+}
+
 impl AurawApp {
     pub(crate) fn mark_lens_correction_dirty(&mut self) {
         if self.original_raw.is_some() {
@@ -164,6 +184,11 @@ impl AurawApp {
                 renderer.free_texture(&texture_id);
             }
         }
+        if let Some(old) = self.preview_navigation.take() {
+            if let Some(texture_id) = old.pipeline.egui_texture_id {
+                renderer.free_texture(&texture_id);
+            }
+        }
         pipeline.register_egui_texture(&render_state.device, &mut renderer);
         drop(renderer);
 
@@ -175,7 +200,7 @@ impl AurawApp {
         self.mask_drag = None;
         self.last_brush_point = None;
         self.mask_interaction_dirty_layer = None;
-        self.mask_interaction_frame_count = 0;
+        self.mask_interaction_last_upload = None;
         self.mask_interaction_has_uncommitted_change = false;
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mask_overlay_texture = None;
@@ -193,6 +218,7 @@ impl AurawApp {
         self.subject_inferencing = false;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
+        self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
 
         self.loaded_raw = Some(full_raw);
         self.preview_raw = Some(preview_raw);
@@ -208,6 +234,7 @@ impl AurawApp {
         self.preview_touch_navigation_active = false;
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.preview_detail_pending_stage = None;
+        self.navigation_pending_stage = None;
         self.preview_detail_urgent = false;
         self.target_exposure = self.exposure;
         self.pending_stage = None;
@@ -226,21 +253,20 @@ impl AurawApp {
         self.preview_detail_pending_stage = None;
         self.preview_detail_urgent = false;
         self.preview_motion_at = Some(Instant::now());
-        self.egui_ctx
-            .request_repaint_after(Duration::from_millis(1_000));
+        self.egui_ctx.request_repaint_after(zoom_detail_idle_delay());
     }
 
-    /// Queue a processing stage for the full proxy and, while zoomed, for the
-    /// visible detail crop. The full-frame work is deliberately deferred until
-    /// the user returns to fit view; interactive edits therefore only dispatch
-    /// the viewport-sized detail pipeline.
+    /// Queue processing for the full proxy and, while zoomed, both the visible
+    /// high-resolution crop and the tiny adjusted full-frame navigation proxy.
+    /// The normal full-frame proxy is still deferred until fit view, but zoom
+    /// and pan never fall back to an unedited/stale RAW rendition.
     pub(crate) fn queue_preview_processing(&mut self, stage: ProcessingStage) {
         self.pending_stage = Some(match self.pending_stage {
             Some(existing) => existing.min(stage),
             None => stage,
         });
 
-        if self.preview_zoom > 1.01 {
+        if self.preview_zoom > DETAIL_ZOOM_START {
             self.preview_detail_pending_stage = Some(match self.preview_detail_pending_stage {
                 Some(existing) => existing.min(stage),
                 None => stage,
@@ -248,8 +274,28 @@ impl AurawApp {
             self.preview_detail_urgent = true;
         }
 
+        if self.preview_zoom > DETAIL_ZOOM_START || self.preview_navigation.is_some() {
+            self.navigation_pending_stage = Some(match self.navigation_pending_stage {
+                Some(existing) => existing.min(stage),
+                None => stage,
+            });
+        }
+
         self.notice = None;
         self.egui_ctx.request_repaint();
+    }
+
+    pub(crate) fn preview_base_pipeline(&self) -> Option<&RawGpuPipeline> {
+        // Keep the normal adjusted full-frame proxy as the zoom backing while
+        // it is current. The tiny navigation proxy is only needed after an edit
+        // makes that normal proxy stale; otherwise selecting it here needlessly
+        // downgrades 101-150% zoom even before the detail crop is ready.
+        let use_navigation = self.preview_navigation.is_some() && self.pending_stage.is_some();
+        if use_navigation {
+            self.preview_navigation.as_ref().map(|preview| &preview.pipeline)
+        } else {
+            self.gpu_pipeline.as_ref()
+        }
     }
 
     pub(crate) fn preview_quality_changed(&mut self) {
@@ -333,6 +379,11 @@ impl AurawApp {
                 renderer.free_texture(&texture_id);
             }
         }
+        if let Some(old) = self.preview_navigation.take() {
+            if let Some(texture_id) = old.pipeline.egui_texture_id {
+                renderer.free_texture(&texture_id);
+            }
+        }
         pipeline.register_egui_texture(&render_state.device, &mut renderer);
         drop(renderer);
 
@@ -341,14 +392,15 @@ impl AurawApp {
         self.target_exposure = self.exposure;
         self.pending_stage = None;
         self.preview_detail_pending_stage = None;
+        self.navigation_pending_stage = None;
         self.preview_detail_urgent = false;
         self.dirty_mask_layers.fill(false);
         self.detail_dirty_mask_layers.fill(false);
+        self.navigation_dirty_mask_layers.fill(false);
         self.preview_revision = self.preview_revision.wrapping_add(1);
-        self.preview_motion_at = (self.preview_zoom > 1.01).then(Instant::now);
+        self.preview_motion_at = (self.preview_zoom > DETAIL_ZOOM_START).then(Instant::now);
         if self.preview_motion_at.is_some() {
-            self.egui_ctx
-                .request_repaint_after(Duration::from_millis(1_000));
+            self.egui_ctx.request_repaint_after(zoom_detail_idle_delay());
         }
         if let Some(raw) = &self.preview_raw {
             if let Some(full) = &self.loaded_raw {
@@ -367,8 +419,8 @@ impl AurawApp {
     }
 
     fn advance_preview_detail(&mut self, frame: &eframe::Frame) {
-        const IDLE_DELAY: Duration = Duration::from_millis(1_000);
-        if self.preview_zoom <= 1.01 {
+        let idle_delay = zoom_detail_idle_delay();
+        if self.preview_zoom <= DETAIL_ZOOM_START {
             if let Some(render_state) = frame.wgpu_render_state() {
                 if let Some(old) = self.preview_detail.take() {
                     if let Some(texture_id) = old.pipeline.egui_texture_id {
@@ -405,8 +457,8 @@ impl AurawApp {
                 return;
             };
             let elapsed = motion_at.elapsed();
-            if elapsed < IDLE_DELAY {
-                self.egui_ctx.request_repaint_after(IDLE_DELAY - elapsed);
+            if elapsed < idle_delay {
+                self.egui_ctx.request_repaint_after(idle_delay - elapsed);
                 return;
             }
         }
@@ -424,25 +476,11 @@ impl AurawApp {
             return;
         };
         let visible = self.preview_visible_uv;
-        if !urgent && self.pending_stage.is_none() {
-            if let Some(proxy) = self.preview_raw.as_ref() {
-                let visible_proxy_width = proxy.width as f32
-                    * (visible.max[0] - visible.min[0]).clamp(0.0, 1.0);
-                let visible_proxy_height = proxy.height as f32
-                    * (visible.max[1] - visible.min[1]).clamp(0.0, 1.0);
-                let requested_visible_width = self.preview_viewport_pixels[0].max(1) as f32
-                    * self.preview_quality.detail_pixel_scale();
-                let requested_visible_height = self.preview_viewport_pixels[1].max(1) as f32
-                    * self.preview_quality.detail_pixel_scale();
-                if requested_visible_width <= visible_proxy_width * 1.05
-                    && requested_visible_height <= visible_proxy_height * 1.05
-                {
-                    // When there are no deferred edits, the existing full-image
-                    // proxy already supplies enough texels at shallow zoom.
-                    return;
-                }
-            }
-        }
+        // Always build the visible detail crop above fit view. The old
+        // "full proxy has enough texels" shortcut compared against preview_raw,
+        // but the UI may actually be displaying the 384/512-pixel adjusted
+        // navigation proxy. That mismatch is what delayed high-quality output
+        // until roughly 140-160% zoom.
 
         let cfa_period = match full_raw.cfa_kind {
             crate::pipeline::CfaKind::Bayer => 2,
@@ -496,14 +534,11 @@ impl AurawApp {
             crop_height,
             detail_spec,
         ));
-        let detail_masks = self.masks.cropped_for_region(
-            x0,
-            y0,
-            crop_width,
-            crop_height,
-            full_raw.width,
-            full_raw.height,
-        );
+        // The adjustment shader samples the mask atlas with normalized
+        // full-image coordinates (tile origin + local pixel divided by the
+        // virtual full size). Keep the atlas in that same coordinate space.
+        // Cropping/remapping the mask stack here double-transforms every mask
+        // once the crop moves away from the image origin.
         let virtual_full_width = ((detail_raw.width as f64 * full_raw.width as f64
             / crop_width as f64)
             .round() as u32)
@@ -520,7 +555,7 @@ impl AurawApp {
             .round() as i32;
         let params = GpuParams::new_for_tile(
             &self.target_exposure,
-            &detail_masks,
+            &self.masks,
             &detail_raw,
             virtual_origin_x,
             virtual_origin_y,
@@ -540,14 +575,34 @@ impl AurawApp {
                 ));
                 return;
             }
-            if let Err(error) = Self::upload_preview_masks(
-                &detail.pipeline,
-                &render_state.queue,
-                &detail_masks,
-                &detail_raw,
-            ) {
-                self.notice = Some(error);
-                return;
+            // A reused detail pipeline already owns the invariant full-frame
+            // mask atlas. Panning only replaces the RAW crop, so do not
+            // rerasterize every AI/brush mask unless its geometry changed.
+            if self.detail_dirty_mask_layers.iter().any(|dirty| *dirty) {
+                let edge = detail.pipeline.mask_atlas_edge();
+                for layer in 0..MAX_LOCAL_MASKS {
+                    if !self.detail_dirty_mask_layers[layer] {
+                        continue;
+                    }
+                    let bytes = self.masks.rasterize_layer(
+                        layer,
+                        edge,
+                        edge,
+                        full_raw.width,
+                        full_raw.height,
+                    );
+                    if let Err(error) = detail.pipeline.update_mask_layer(
+                        &render_state.queue,
+                        layer,
+                        &bytes,
+                    ) {
+                        self.notice = Some(format!(
+                            "Could not update the zoomed local mask: {error:#}"
+                        ));
+                        return;
+                    }
+                    self.detail_dirty_mask_layers[layer] = false;
+                }
             }
             detail
                 .pipeline
@@ -585,8 +640,8 @@ impl AurawApp {
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,
-            &detail_masks,
-            &detail_raw,
+            &self.masks,
+            &full_raw,
         ) {
             self.notice = Some(error);
             return;
@@ -614,6 +669,135 @@ impl AurawApp {
             virtual_full_size: [virtual_full_width, virtual_full_height],
         });
         self.detail_dirty_mask_layers.fill(false);
+        self.egui_ctx.request_repaint();
+    }
+
+    fn advance_navigation_preview(&mut self, frame: &eframe::Frame) {
+        let should_exist = self.preview_zoom > DETAIL_ZOOM_START;
+        let should_update = self.navigation_pending_stage.is_some();
+        if !should_exist && !should_update {
+            return;
+        }
+        let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
+            self.navigation_pending_stage = None;
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+
+        if self.preview_navigation.is_none() {
+            if !should_exist {
+                self.navigation_pending_stage = None;
+                return;
+            }
+            let raw = if full_raw.width.max(full_raw.height) <= navigation_proxy_edge() {
+                Arc::clone(&full_raw)
+            } else {
+                Arc::new(build_proxy(
+                    &full_raw,
+                    ProxySpec {
+                        max_edge: navigation_proxy_edge(),
+                    },
+                ))
+            };
+            let params = GpuParams::new(&self.target_exposure, &self.masks, &raw);
+            let Some(template) = self.gpu_pipeline.as_ref() else {
+                return;
+            };
+            let mut pipeline = match RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
+                &render_state.device,
+                &render_state.queue,
+                &raw,
+                &params,
+                ProcessingQuality::Preview,
+                template,
+                navigation_mask_edge(),
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    self.notice = Some(format!(
+                        "Could not prepare the adjusted navigation preview: {error:#}"
+                    ));
+                    return;
+                }
+            };
+            if let Err(error) = Self::upload_preview_masks(
+                &pipeline,
+                &render_state.queue,
+                &self.masks,
+                &raw,
+            ) {
+                self.notice = Some(error);
+                return;
+            }
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            let mut renderer = render_state.renderer.write();
+            pipeline.register_egui_texture(&render_state.device, &mut renderer);
+            drop(renderer);
+            self.preview_navigation = Some(PreviewNavigation { pipeline, raw });
+            self.navigation_pending_stage = None;
+            self.navigation_dirty_mask_layers.fill(false);
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        let Some(stage) = self.navigation_pending_stage else {
+            return;
+        };
+        let Some(preview) = self.preview_navigation.as_mut() else {
+            return;
+        };
+        if self
+            .navigation_dirty_mask_layers
+            .iter()
+            .any(|dirty| *dirty)
+        {
+            let edge = preview.pipeline.mask_atlas_edge();
+            for layer in 0..MAX_LOCAL_MASKS {
+                if !self.navigation_dirty_mask_layers[layer] {
+                    continue;
+                }
+                let bytes = self.masks.rasterize_layer(
+                    layer,
+                    edge,
+                    edge,
+                    preview.raw.width,
+                    preview.raw.height,
+                );
+                if let Err(error) =
+                    preview
+                        .pipeline
+                        .update_mask_layer(&render_state.queue, layer, &bytes)
+                {
+                    self.notice = Some(format!(
+                        "Could not update the navigation local mask: {error:#}"
+                    ));
+                    return;
+                }
+                self.navigation_dirty_mask_layers[layer] = false;
+            }
+        }
+
+        let params = GpuParams::new(&self.target_exposure, &self.masks, &preview.raw);
+        let stages = match stage {
+            ProcessingStage::Raw => &[
+                ProcessingStage::Raw,
+                ProcessingStage::Tone,
+                ProcessingStage::Output,
+            ][..],
+            ProcessingStage::Tone => &[ProcessingStage::Tone, ProcessingStage::Output][..],
+            ProcessingStage::Output => &[ProcessingStage::Output][..],
+        };
+        for stage in stages {
+            preview.pipeline.dispatch_stage(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                *stage,
+            );
+        }
+        self.navigation_pending_stage = None;
         self.egui_ctx.request_repaint();
     }
 
@@ -651,21 +835,11 @@ impl AurawApp {
         };
 
         let detail_raw = Arc::clone(&detail.raw);
-        let source_origin = detail.source_origin;
-        let source_size = detail.source_size;
         let virtual_origin = detail.virtual_origin;
         let virtual_full_size = detail.virtual_full_size;
-        let detail_masks = self.masks.cropped_for_region(
-            source_origin[0],
-            source_origin[1],
-            source_size[0],
-            source_size[1],
-            full_raw.width,
-            full_raw.height,
-        );
         let params = GpuParams::new_for_tile(
             &self.target_exposure,
-            &detail_masks,
+            &self.masks,
             &detail_raw,
             virtual_origin[0],
             virtual_origin[1],
@@ -684,12 +858,16 @@ impl AurawApp {
                 if !self.detail_dirty_mask_layers[layer] {
                     continue;
                 }
-                let bytes = detail_masks.rasterize_layer(
+                // The detail shader addresses this atlas in full-image UVs,
+                // so dirty layers must stay full-frame as well. Rasterizing a
+                // crop-local atlas makes masks slide, repeat, or disappear
+                // while panning.
+                let bytes = self.masks.rasterize_layer(
                     layer,
                     edge,
                     edge,
-                    detail_raw.width,
-                    detail_raw.height,
+                    full_raw.width,
+                    full_raw.height,
                 );
                 if let Err(error) =
                     detail.pipeline.update_mask_layer(&render_state.queue, layer, &bytes)
@@ -720,7 +898,7 @@ impl AurawApp {
     }
 
     fn advance_processing(&mut self, frame: &eframe::Frame) {
-        if self.preview_zoom > 1.01 {
+        if self.preview_zoom > DETAIL_ZOOM_START {
             self.advance_zoomed_processing(frame);
             return;
         }
@@ -966,7 +1144,7 @@ impl AurawApp {
             }
         } else if self.export_publish_pending {
             "Saving to Pictures/AuRaw…".to_owned()
-        } else if self.preview_zoom > 1.01 {
+        } else if self.preview_zoom > DETAIL_ZOOM_START {
             if let Some(stage) = self.preview_detail_pending_stage {
                 format!("Updating visible zoom crop — {}…", stage.label())
             } else if let Some(notice) = &self.notice {

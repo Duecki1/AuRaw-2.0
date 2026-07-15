@@ -1,7 +1,7 @@
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
-    ProcessingStage, RenderingIntent, MAX_LOCAL_MASKS,
+    ProcessingStage, RenderingIntent, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -425,7 +425,10 @@ impl GpuParams {
         full_height: u32,
     ) -> Self {
         let (camera_transform, profile_weight) = raw.adjusted_camera_transform(
-            exposure.temperature.clamp(-100.0, 100.0),
+            exposure.temperature.clamp(
+                -GLOBAL_TEMPERATURE_LIMIT,
+                GLOBAL_TEMPERATURE_LIMIT,
+            ),
             exposure.tint.clamp(-100.0, 100.0),
         );
         let mut profile_layout = raw.camera_profile.gpu_layout();
@@ -521,7 +524,10 @@ impl GpuParams {
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
-            temperature: exposure.temperature.clamp(-100.0, 100.0),
+            temperature: exposure.temperature.clamp(
+                -GLOBAL_TEMPERATURE_LIMIT,
+                GLOBAL_TEMPERATURE_LIMIT,
+            ),
             saturation: exposure.saturation,
             vibrance: exposure.vibrance,
             highlight_clip: exposure.highlight_clip,
@@ -821,13 +827,19 @@ impl GpuParams {
     }
 
     fn needs_intermediate_adjustment_passes(&self) -> bool {
-        let global_presence = self.presence[..3].iter().any(|value| value.abs() > 1e-6);
+        // Saturation and Vibrance live in apply_lightroom_effects alongside the
+        // presence controls. They must therefore keep the intermediate passes
+        // enabled even when Texture, Clarity, Dehaze, Glow, and Vignette are all
+        // neutral. Omitting them made both global color sliders a no-op.
+        let global_effects = self.saturation.abs() > 1e-6
+            || self.vibrance.abs() > 1e-6
+            || self.presence[..3].iter().any(|value| value.abs() > 1e-6);
         let creative = self.creative_effects[0].abs() > 1e-6 || self.vignette[0].abs() > 1e-6;
         let local_count = (self.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
-        let local_presence = self.mask_adjust_2[..local_count]
+        let local_effects = self.mask_adjust_2[..local_count]
             .iter()
-            .any(|values| values[1..4].iter().any(|value| value.abs() > 1e-6));
-        global_presence || creative || local_presence
+            .any(|values| values.iter().any(|value| value.abs() > 1e-6));
+        global_effects || creative || local_effects
     }
 }
 
@@ -943,7 +955,7 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(device, queue, Some(renderer), None, raw, params, quality)
+        Self::new_internal(device, queue, Some(renderer), None, raw, params, quality, None)
     }
 
     pub fn new_headless_with_quality(
@@ -953,7 +965,7 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(device, queue, None, None, raw, params, quality)
+        Self::new_internal(device, queue, None, None, raw, params, quality, None)
     }
 
     /// Allocates a new set of textures and bind groups while reusing the
@@ -976,6 +988,31 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
+            None,
+        )
+    }
+
+    /// Reuses compiled programs while allocating a smaller local-mask atlas.
+    /// This is intended for the very-low-resolution full-frame navigation proxy,
+    /// where a 2048px atlas would cost more CPU/GPU work than the image itself.
+    pub fn new_headless_reusing_programs_with_mask_edge(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+        template: &Self,
+        mask_edge: u32,
+    ) -> Result<Self> {
+        Self::new_internal(
+            device,
+            queue,
+            None,
+            Some(template),
+            raw,
+            params,
+            quality,
+            Some(mask_edge),
         )
     }
 
@@ -987,6 +1024,7 @@ impl RawGpuPipeline {
         raw: &LoadedRaw,
         params: &GpuParams,
         quality: ProcessingQuality,
+        mask_atlas_edge_override: Option<u32>,
     ) -> Result<Self> {
         validate_raw(raw)?;
         validate_gpu_working_set(raw.width, raw.height, quality)?;
@@ -1091,7 +1129,10 @@ impl RawGpuPipeline {
             tone_format,
             "auraw adaptive tone guide B",
         );
-        let mask_atlas_edge = mask_atlas_edge();
+        let default_mask_atlas_edge = mask_atlas_edge();
+        let mask_atlas_edge = mask_atlas_edge_override
+            .unwrap_or(default_mask_atlas_edge)
+            .clamp(64, default_mask_atlas_edge);
         let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw normalized local-mask atlas"),
             size: wgpu::Extent3d {

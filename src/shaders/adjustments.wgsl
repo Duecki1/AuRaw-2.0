@@ -141,84 +141,146 @@ fn apply_texture_and_clarity_values(
     texture_value: f32,
     clarity_value: f32,
 ) -> vec3<f32> {
-    let texture = clamp(texture_value / 100.0, -1.0, 1.0);
-    let clarity = clamp(clarity_value / 100.0, -1.0, 1.0);
+    let texture = perceptual_control(texture_value);
+    let clarity = perceptual_control(clarity_value);
     if abs(texture) < 1e-6 && abs(clarity) < 1e-6 {
         return rgb;
     }
 
     let center_ev = log_luminance(rgb);
-    let fine_base_ev = bilateral_log_luminance(pos, 1, 8.0);
+    // Texture uses a compact 5x5 edge-aware base. The previous 3x3 residual
+    // combined with a large threshold rejected most real surface detail.
+    let fine_base_ev = bilateral_log_luminance(pos, 2, 9.5);
     var broad_base_ev = fine_base_ev;
     if abs(clarity) >= 1e-6 {
-        let clarity_step = select(3, 4, params.tone_guide_radius > 3.5);
-        broad_base_ev = atrous_log_luminance(pos, clarity_step, 1.35);
+        let clarity_step = select(4, 5, params.tone_guide_radius > 3.5);
+        broad_base_ev = atrous_log_luminance(pos, clarity_step, 0.82);
     }
 
-    // Two true band-pass residuals. Because every term comes from the same
-    // developed texture, a flat field produces exactly zero effect instead of
-    // a global exposure offset.
     let fine_detail_ev = center_ev - fine_base_ev;
-    let mid_detail_ev = fine_base_ev - broad_base_ev;
+    // Keep most of the medium-scale center-to-base residual while subtracting a
+    // little fine detail. This is visibly stronger than fine_base-broad_base but
+    // still avoids turning Clarity into ordinary sharpening.
+    let mid_detail_ev = center_ev - broad_base_ev - fine_detail_ev * 0.24;
 
-    // Fine-detail enhancement is noise-aware. At low signal, positive Texture
-    // ignores tiny residuals that are more likely sensor/demosaic noise than
-    // surface structure; negative Texture can still smooth them naturally.
-    let signal_gate = smoothstep(-7.5, -2.5, center_ev);
-    let fine_threshold = mix(0.070, 0.016, signal_gate);
+    let signal_gate = smoothstep(-7.6, -2.5, center_ev);
+    let fine_threshold = mix(0.040, 0.0035, signal_gate);
     let positive_fine = soft_detail_threshold(fine_detail_ev, fine_threshold);
-    let selected_fine = select(fine_detail_ev, positive_fine, texture >= 0.0);
+    let negative_fine = clamp(fine_detail_ev, -0.28, 0.28);
+    let selected_fine = select(negative_fine, positive_fine, texture >= 0.0);
 
-    // Clarity is restricted to midtones and a broader spatial band. The soft
-    // shoulder avoids halos around deep silhouettes and specular highlights.
-    let midtone_gate = smoothstep(-6.0, -2.0, center_ev)
-        * (1.0 - smoothstep(0.7, 3.5, center_ev));
-    let selected_mid = soft_detail_threshold(mid_detail_ev, 0.010);
+    let midtone_gate = smoothstep(-7.0, -2.35, center_ev)
+        * (1.0 - 0.72 * smoothstep(0.85, 3.5, center_ev));
+    let selected_mid = soft_detail_threshold(mid_detail_ev, 0.0035);
+    let edge_guard = 1.0 - 0.48 * smoothstep(0.22, 0.92, abs(fine_detail_ev));
+    let clarity_band = selected_mid * edge_guard;
 
-    let texture_ev = texture * selected_fine * 0.85;
-    let clarity_ev = clarity * selected_mid * 2.00 * midtone_gate;
-    let delta_ev = clamp(texture_ev + clarity_ev, -1.25, 1.25);
+    let texture_strength = select(1.75, 2.65, texture >= 0.0)
+        * mix(0.86, 1.18, abs(texture));
+    let clarity_strength = select(2.20, 3.25, clarity >= 0.0)
+        * mix(0.88, 1.14, abs(clarity));
+    let texture_ev = texture * selected_fine * texture_strength;
+    let clarity_ev = clarity * clarity_band * clarity_strength * midtone_gate;
+    let delta_ev = clamp(texture_ev + clarity_ev, -1.35, 1.50);
     return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
 }
 
-fn local_dark_channel(pos: vec2<i32>, radius: i32) -> f32 {
+struct HazeNeighborhood {
+    dark: f32,
+    airlight: vec3<f32>,
+    airlight_luma: f32,
+}
+
+fn haze_neighborhood(pos: vec2<i32>, step: i32) -> HazeNeighborhood {
     var dark = 1e20;
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            if abs(dx) > radius || abs(dy) > radius { continue; }
-            let sample = adjustment_base_at(pos + vec2<i32>(dx, dy));
+    var brightest = adjustment_base_at(pos);
+    var brightest_luma = safe_luma(brightest);
+    // A sparse wide 5x5 neighbourhood is substantially closer to a dark-channel
+    // prior than the old five-pixel radius, while keeping preview cost bounded.
+    for (var ky = -2; ky <= 2; ky = ky + 1) {
+        for (var kx = -2; kx <= 2; kx = kx + 1) {
+            let sample = adjustment_base_at(pos + vec2<i32>(kx * step, ky * step));
             dark = min(dark, min(sample.r, min(sample.g, sample.b)));
+            let luminance = safe_luma(sample);
+            if luminance > brightest_luma {
+                brightest = sample;
+                brightest_luma = luminance;
+            }
         }
     }
-    return max(dark, 0.0);
+    return HazeNeighborhood(max(dark, 0.0), brightest, brightest_luma);
 }
 
 fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
-    let amount = clamp(value / 100.0, -1.0, 1.0);
+    let amount = perceptual_control(value);
     if abs(amount) < 1e-6 {
         return rgb;
     }
 
-    // Estimate atmospheric veil from the same developed image used by the
-    // other Effects. The neutral airlight model changes local contrast and
-    // saturation together, rather than behaving like another Exposure slider.
     let center_lum = safe_luma(rgb);
-    let broad_ev = bilateral_log_luminance(pos, 2, 1.6);
+    let center_ev = log2(center_lum);
+    let broad_ev = bilateral_log_luminance(pos, 2, 0.95);
     let broad_lum = exp2(broad_ev);
-    let dark = local_dark_channel(pos, 2);
-    let veil = clamp(dark / max(broad_lum, 1e-6), 0.0, 1.0);
-    let airlight_lum = max(center_lum, broad_lum);
-    let airlight = vec3<f32>(airlight_lum);
+    let haze_step = select(4, 6, params.tone_guide_radius > 3.5);
+    let neighborhood = haze_neighborhood(pos, haze_step);
+
+    let airlight_luma = max(
+        max(neighborhood.airlight_luma, broad_lum * 1.12),
+        center_lum,
+    );
+    let airlight_colour = neighborhood.airlight
+        / max(neighborhood.airlight_luma, 1e-6) * airlight_luma;
+    // Mostly neutral atmospheric light with enough sampled colour retained for
+    // blue sky, sunset, and warm indoor haze.
+    let airlight = max(
+        mix(vec3<f32>(airlight_luma), airlight_colour, 0.34),
+        vec3<f32>(airlight_luma * 0.28),
+    );
+    let dark_ratio = clamp(neighborhood.dark / max(airlight_luma, 1e-6), 0.0, 1.0);
+    let veil = smoothstep(0.018, 0.66, dark_ratio);
+    let low_contrast = 1.0 - smoothstep(0.10, 0.72, abs(center_ev - broad_ev));
+    let haze_likelihood = clamp(veil * (0.58 + 0.42 * low_contrast), 0.0, 1.0);
 
     if amount > 0.0 {
-        let transmission = clamp(1.0 - amount * veil * 0.72, 0.38, 1.0);
-        let restored = (rgb - airlight * (1.0 - transmission)) / transmission;
-        return max(restored, vec3<f32>(0.0));
+        // Dark-channel transmission recovery. Even relatively clear regions get
+        // a modest contrast response, while detected veil receives the stronger
+        // atmospheric-light subtraction expected from a real Dehaze control.
+        let transmission = clamp(
+            1.0 - amount * (0.24 + 0.68 * haze_likelihood),
+            0.22,
+            1.0,
+        );
+        let physical = max(
+            (rgb - airlight * (1.0 - transmission)) / transmission,
+            vec3<f32>(0.0),
+        );
+        let restored_lum = safe_luma(physical);
+        let luminance_gain = clamp(restored_lum / max(center_lum, 1e-6), 0.28, 4.5);
+        let hue_safe = rgb * luminance_gain;
+        var restored = mix(hue_safe, physical, 0.34 + 0.22 * haze_likelihood);
+
+        let local_detail = clamp(center_ev - broad_ev, -1.2, 1.2);
+        restored = restored * exp2(amount * local_detail * 0.22);
+        let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * restored);
+        let chroma = length(lab.yz);
+        let content_saturation = clamp(chroma / max(0.045 + 0.38 * lab.x, 0.06), 0.0, 1.0);
+        let chroma_boost = 1.0
+            + amount * (0.10 + 0.30 * haze_likelihood)
+                * (1.0 - 0.38 * content_saturation);
+        restored = SRGB_TO_REC2020 * oklab_to_linear_srgb(
+            vec3<f32>(lab.x, lab.yz * chroma_boost),
+        );
+        return repair_negative_rec2020(restored);
     }
 
     let haze = -amount;
-    let haze_mix = haze * (0.22 + 0.38 * (1.0 - veil));
-    return mix(rgb, airlight, clamp(haze_mix, 0.0, 0.60));
+    let haze_mix = clamp(haze * (0.14 + 0.38 * (1.0 - haze_likelihood)), 0.0, 0.58);
+    let hazed = mix(rgb, airlight, haze_mix);
+    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * hazed);
+    let desaturation = 1.0 - haze * (0.12 + 0.20 * (1.0 - haze_likelihood));
+    return repair_negative_rec2020(
+        SRGB_TO_REC2020 * oklab_to_linear_srgb(vec3<f32>(lab.x, lab.yz * desaturation)),
+    );
 }
 
 fn extended_perceptual_luminance(linear_luma: f32) -> f32 {
@@ -365,33 +427,45 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let feather = clamp(params.vignette.w / 100.0, 0.0, 1.0);
     let distance = vignette_distance(pos, roundness);
 
-    // Midpoint controls where the vignette is centred. Feather should then
-    // spread the transition across a long distance instead of compressing most
-    // of the darkening into the final few pixels near the edge.
-    let midpoint_shaped = pow(midpoint, 0.80);
-    let transition_center = mix(0.18, 0.992, midpoint_shaped);
-    let inward_softness = mix(0.010, 0.72, feather)
-        * mix(1.0, 0.62, midpoint_shaped * midpoint_shaped);
-    let outward_softness = mix(0.020, 0.46, feather)
-        * mix(1.0, 0.80, midpoint_shaped * midpoint_shaped);
+    // Midpoint places the optical falloff; Feather controls both the inward
+    // reach and the outer shoulder. A second smooth polynomial removes the
+    // visibly cubic ring that a single smoothstep can leave on flat skies.
+    let midpoint_shaped = pow(midpoint, 0.82);
+    let transition_center = mix(0.20, 0.982, midpoint_shaped);
+    let inward_softness = mix(0.012, 0.58, feather)
+        * mix(1.0, 0.50, midpoint_shaped * midpoint_shaped);
+    let outward_softness = mix(0.018, 0.34, feather)
+        * mix(1.0, 0.72, midpoint_shaped * midpoint_shaped);
     let transition_start = max(transition_center - inward_softness, 0.0);
     let transition_end = min(
-        max(transition_center + outward_softness, transition_start + 0.02),
+        max(transition_center + outward_softness, transition_start + 0.018),
         1.0,
     );
-    let mask = smoothstep(transition_start, transition_end, distance);
+    let transition = smoothstep(transition_start, transition_end, distance);
+    let smoother = transition * transition * (3.0 - 2.0 * transition);
+    let mask = pow(smoother, mix(1.28, 0.88, feather));
 
-    // Lightroom-style negative vignettes are stronger than positive edge
-    // brightening. Highlights restores bright edge detail only for a dark
-    // vignette and never changes hue because the operation is a scalar gain.
-    let edge_ev = select(amount * 2.45, amount * 1.55, amount > 0.0);
+    // Exposure-domain gain preserves hue. Dark vignettes protect both deep
+    // shadows and user-selected highlights, avoiding crushed corners and the
+    // gray highlight rings produced by RGB subtraction. Positive vignettes get
+    // a gentler shoulder to keep bright edges photographic rather than glowing.
+    let edge_ev = select(amount * 2.20, amount * 1.28, amount > 0.0);
+    let luminance = safe_luma(rgb);
     var highlight_protection = 1.0;
+    var tonal_protection = 1.0;
     if amount < 0.0 {
         let highlights = clamp(params.vignette_options.x / 100.0, 0.0, 1.0);
         highlight_protection = 1.0
-            - highlights * smoothstep(0.50, 2.4, safe_luma(rgb));
+            - highlights * smoothstep(0.48, 2.3, luminance);
+        tonal_protection = mix(0.58, 1.0, smoothstep(0.012, 0.20, luminance));
+    } else {
+        tonal_protection = 1.0 - 0.68 * smoothstep(0.75, 3.0, luminance);
     }
-    let delta_ev = clamp(edge_ev * mask * highlight_protection, -3.0, 2.0);
+    let delta_ev = clamp(
+        edge_ev * mask * highlight_protection * tonal_protection,
+        -2.7,
+        1.35,
+    );
     return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
 }
 

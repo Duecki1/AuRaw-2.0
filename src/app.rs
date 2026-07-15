@@ -75,6 +75,13 @@ pub(crate) struct PreviewUvRect {
     pub max: [f32; 2],
 }
 
+pub(crate) struct PreviewNavigation {
+    pub pipeline: RawGpuPipeline,
+    /// Very-low-resolution full-frame RAW proxy used as the adjusted backing
+    /// image while the high-resolution visible crop is rebuilt or moved.
+    raw: Arc<LoadedRaw>,
+}
+
 pub(crate) struct PreviewDetail {
     pub pipeline: RawGpuPipeline,
     /// Full-image UV rectangle covered on screen by the detail texture.
@@ -278,7 +285,9 @@ pub struct AurawApp {
     pub(crate) preview_touch_navigation_active: bool,
     pub(crate) preview_revision: u64,
     pub(crate) preview_detail: Option<PreviewDetail>,
+    pub(crate) preview_navigation: Option<PreviewNavigation>,
     preview_detail_pending_stage: Option<ProcessingStage>,
+    navigation_pending_stage: Option<ProcessingStage>,
     preview_detail_urgent: bool,
     preview_quality_dirty: bool,
     pub exposure: ExposureParams,
@@ -295,7 +304,7 @@ pub struct AurawApp {
     pub(crate) mask_drag: Option<MaskDragState>,
     pub(crate) last_brush_point: Option<[f32; 2]>,
     mask_interaction_dirty_layer: Option<usize>,
-    mask_interaction_frame_count: u8,
+    mask_interaction_last_upload: Option<Instant>,
     mask_interaction_has_uncommitted_change: bool,
     pub(crate) mask_overlay_revision: u64,
     pub(crate) mask_overlay_texture: Option<egui::TextureHandle>,
@@ -331,6 +340,7 @@ pub struct AurawApp {
     notice: Option<String>,
     dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
     detail_dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
+    navigation_dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
     subject_consent_open: bool,
     subject_receiver: Option<mpsc::Receiver<SubjectMaskEvent>>,
     subject_download_progress: Option<(&'static str, u64, u64)>,

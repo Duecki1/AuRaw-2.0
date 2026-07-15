@@ -81,10 +81,12 @@ impl eframe::App for AurawApp {
         self.apply_pending_preview_quality(frame);
         self.advance_processing(frame);
         self.advance_preview_detail(frame);
+        self.advance_navigation_preview(frame);
         self.refresh_status();
 
         if self.preview_detail_pending_stage.is_some()
-            || (self.preview_zoom <= 1.01 && self.pending_stage.is_some())
+            || self.navigation_pending_stage.is_some()
+            || (self.preview_zoom <= DETAIL_ZOOM_START && self.pending_stage.is_some())
         {
             ui.ctx().request_repaint();
         }
