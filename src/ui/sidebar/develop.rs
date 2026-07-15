@@ -497,7 +497,7 @@ impl Sidebar {
                         ui,
                         "Hue",
                         &mut exposure.hsl_hue[index],
-                        -100.0..=100.0,
+                        -HSL_HUE_LIMIT..=HSL_HUE_LIMIT,
                         0,
                         1.0,
                         None,

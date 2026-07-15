@@ -84,3 +84,13 @@ def test_named_channels_are_calibrated_in_oklab_not_hsl_angles() -> None:
     for index, hue in enumerate(anchors):
         weights = [bell(hue, anchor, width) for anchor, width in pairs]
         assert weights[index] == max(weights)
+
+
+def test_hue_sliders_have_extended_range_without_changing_old_edits() -> None:
+    basic = (ROOT / "src/pipeline/basicadj.rs").read_text(encoding="utf-8")
+    sidebar = read_source_tree(ROOT / "src/ui/sidebar.rs")
+    assert "HSL_HUE_LIMIT: f32 = 200.0" in basic
+    assert sidebar.count("-HSL_HUE_LIMIT..=HSL_HUE_LIMIT") == 2
+    assert "clamp(value / 100.0, -2.0, 2.0)" in ADJUSTMENTS
+    assert "Preserve the historical +/-100 response exactly" in ADJUSTMENTS
+
