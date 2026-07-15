@@ -189,6 +189,10 @@ pub const CURRENT_PROCESS_VERSION: u32 = 5;
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
 pub const GLOBAL_TEMPERATURE_LIMIT: f32 = 150.0;
+/// Extended Color Mixer hue range. Values through +/-100 retain the original
+/// response for sidecar compatibility, while the extra travel allows stronger
+/// creative shifts toward and beyond the neighbouring named hue.
+pub const HSL_HUE_LIMIT: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ExposureParams {
