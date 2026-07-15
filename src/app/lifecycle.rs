@@ -27,7 +27,10 @@ fn raw_cache_key_for_target(target: &crate::sidecar::SidecarTarget) -> String {
     match target {
         crate::sidecar::SidecarTarget::Desktop { raw_path } => {
             let metadata = std::fs::metadata(raw_path).ok();
-            let bytes = metadata.as_ref().map(std::fs::Metadata::len).unwrap_or_default();
+            let bytes = metadata
+                .as_ref()
+                .map(std::fs::Metadata::len)
+                .unwrap_or_default();
             let modified = metadata
                 .and_then(|metadata| metadata.modified().ok())
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
@@ -52,13 +55,14 @@ fn append_notice(notice: &mut Option<String>, message: &str) {
     }
 }
 
-fn has_missing_range_sources(masks: &MaskStack) -> bool {
+fn needs_canonical_mask_source(masks: &MaskStack) -> bool {
     masks.masks.iter().any(|mask| {
         mask.components.iter().any(|component| {
             matches!(
                 &component.geometry,
                 MaskGeometry::LuminanceRange { source: None, .. }
                     | MaskGeometry::ColorRange { source: None, .. }
+                    | MaskGeometry::Object { .. }
             )
         })
     })
@@ -168,6 +172,7 @@ impl AurawApp {
             brush_mode: BrushMode::Paint,
             mask_drag: None,
             last_brush_point: None,
+            mask_touch_gesture_backup: None,
             mask_interaction_dirty_layer: None,
             mask_interaction_last_upload: None,
             mask_interaction_has_uncommitted_change: false,
@@ -218,6 +223,16 @@ impl AurawApp {
             subject_receiver: None,
             subject_download_progress: None,
             subject_inferencing: false,
+            object_consent_open: false,
+            object_pending_target: None,
+            object_receiver: None,
+            object_download_progress: None,
+            object_inferencing: false,
+            object_decoder_only: false,
+            object_generation: 0,
+            object_job_generation: 0,
+            object_job_target: None,
+            object_cache: None,
         };
         if let Some(folder) = last_library_folder.filter(|folder| folder.is_dir()) {
             app.library.open_folder(folder, ctx);
@@ -290,6 +305,7 @@ impl AurawApp {
             brush_mode: BrushMode::Paint,
             mask_drag: None,
             last_brush_point: None,
+            mask_touch_gesture_backup: None,
             mask_interaction_dirty_layer: None,
             mask_interaction_last_upload: None,
             mask_interaction_has_uncommitted_change: false,
@@ -338,6 +354,16 @@ impl AurawApp {
             subject_receiver: None,
             subject_download_progress: None,
             subject_inferencing: false,
+            object_consent_open: false,
+            object_pending_target: None,
+            object_receiver: None,
+            object_download_progress: None,
+            object_inferencing: false,
+            object_decoder_only: false,
+            object_generation: 0,
+            object_job_generation: 0,
+            object_job_target: None,
+            object_cache: None,
             android_app,
             picker_pending: false,
         }
@@ -378,7 +404,7 @@ impl AurawApp {
             Ok(()) => {
                 self.picker_pending = true;
                 self.notice = None;
-                self.status = "Choose a RAW file…".to_owned();
+                self.status = "Choose one or more RAW files…".to_owned();
             }
             Err(error) => self.notice = Some(error),
         }
@@ -443,10 +469,9 @@ impl AurawApp {
             last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
             ..Default::default()
         };
-        if let Err(error) = crate::performance_settings::save(
-            self.performance_settings_path.as_deref(),
-            settings,
-        ) {
+        if let Err(error) =
+            crate::performance_settings::save(self.performance_settings_path.as_deref(), settings)
+        {
             log::warn!("{error}");
         }
     }
@@ -566,6 +591,7 @@ impl AurawApp {
         self.brush_mode = BrushMode::Paint;
         self.mask_drag = None;
         self.last_brush_point = None;
+        self.mask_touch_gesture_backup = None;
         self.mask_interaction_dirty_layer = None;
         self.mask_interaction_last_upload = None;
         self.mask_interaction_has_uncommitted_change = false;
@@ -583,6 +609,16 @@ impl AurawApp {
         self.subject_receiver = None;
         self.subject_download_progress = None;
         self.subject_inferencing = false;
+        self.object_consent_open = false;
+        self.object_pending_target = None;
+        self.object_receiver = None;
+        self.object_download_progress = None;
+        self.object_inferencing = false;
+        self.object_decoder_only = false;
+        self.object_generation = self.object_generation.wrapping_add(1);
+        self.object_job_generation = 0;
+        self.object_job_target = None;
+        self.object_cache = None;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
@@ -742,10 +778,11 @@ impl AurawApp {
                     )
                     .map_err(|error| format!("GPU preview setup failed: {error:#}"))?;
 
-                    // Range-mask source images are canonical RAW renditions,
+                    // Range and promptable-object source images are canonical RAW renditions,
                     // not user edit data. Sidecars omit these large shared
                     // caches and reconstruct one source on this decode worker.
-                    if has_missing_range_sources(&rendered_masks) {
+                    let mut mask_source = None;
+                    if needs_canonical_mask_source(&rendered_masks) {
                         let source_edge = if cfg!(target_os = "android") {
                             1600
                         } else {
@@ -796,6 +833,7 @@ impl AurawApp {
                         )
                         .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
                         install_missing_range_sources(&mut rendered_masks, &source);
+                        mask_source = Some(source);
                     }
 
                     let params =
@@ -818,6 +856,7 @@ impl AurawApp {
                         pipeline,
                         rendered_exposure,
                         rendered_masks,
+                        mask_source,
                         lens_correction,
                         sidecar_target,
                         sidecar_generation,
@@ -860,8 +899,36 @@ impl AurawApp {
                         frame,
                     )
                 }
+                crate::android::PickerResult::BatchImported {
+                    imported,
+                    failed,
+                    errors,
+                } => {
+                    self.active_tab = AppTab::Library;
+                    self.library.refresh(&self.egui_ctx);
+                    self.status = match (imported, failed) {
+                        (0, 0) => "No RAW files were imported.".to_owned(),
+                        (_, 0) => format!(
+                            "Imported {imported} RAW {}.",
+                            if imported == 1 { "file" } else { "files" }
+                        ),
+                        _ => format!(
+                            "Imported {imported} RAW {}; {failed} failed.",
+                            if imported == 1 { "file" } else { "files" }
+                        ),
+                    };
+                    self.notice = if failed > 0 {
+                        Some(if errors.is_empty() {
+                            format!("{failed} selected RAW imports failed.")
+                        } else {
+                            format!("Some RAW files could not be imported:\n{errors}")
+                        })
+                    } else {
+                        None
+                    };
+                }
                 crate::android::PickerResult::Cancelled => {
-                    self.notice = Some("No RAW file selected.".to_owned());
+                    self.notice = Some("No RAW files selected.".to_owned());
                 }
                 crate::android::PickerResult::Failed(error) => {
                     self.notice = Some(format!("Could not import the selected file: {error}"));
@@ -934,10 +1001,7 @@ impl AurawApp {
                 );
                 self.current_path = loaded.source_path;
                 self.current_label = Some(loaded.label.clone());
-                self.cache_raw_decode(
-                    loaded.raw_cache_key,
-                    Arc::clone(&loaded.original_raw),
-                );
+                self.cache_raw_decode(loaded.raw_cache_key, Arc::clone(&loaded.original_raw));
                 self.original_raw = Some(loaded.original_raw);
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
@@ -945,6 +1009,9 @@ impl AurawApp {
                 self.exposure = loaded.rendered_exposure;
                 self.masks = loaded.rendered_masks;
                 self.rehydrate_restored_mask_state();
+                if loaded.mask_source.is_some() {
+                    self.mask_source_cache = loaded.mask_source;
+                }
                 self.preview_zoom = 1.0;
                 self.preview_center = [0.5, 0.5];
                 self.preview_visible_uv = PreviewUvRect {

@@ -24,6 +24,12 @@ Subject and Background selection uses the BiRefNet General Lite (Swin-Tiny) ONNX
 
 Local inference uses Microsoft ONNX Runtime through the Rust `ort` bindings. ONNX Runtime is licensed under the MIT License; `ort` is dual-licensed under MIT or Apache-2.0.
 
+## Segment Anything 2.1
+
+Promptable Object selection uses the SAM 2.1 Hiera Tiny image encoder and mask decoder originally developed by Meta AI Research. AuRaw downloads ONNX exports from the `akiyamanx/sam2.1-hiera-tiny-onnx` Hugging Face repository only after explicit user consent. The files are verified against pinned SHA-256 digests before use. SAM 2.1 and the redistributed ONNX weights are licensed under the Apache License 2.0.
+
+The object-mask implementation follows the public SAM 2.1 point-prompt interface used by AnyLabeling: normalized RGB encoder input, cached high-resolution/image embedding outputs, foreground/background point prompts, previous-mask logits, and candidate mask scores.
+
 ## Lensfun
 
 Lens correction uses the Lensfun library and its camera/lens profile database.

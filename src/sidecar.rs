@@ -1,9 +1,9 @@
+#[cfg(not(target_os = "android"))]
+use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
     ExposureParams, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION, MAX_LOCAL_MASKS,
     MAX_MASK_COMPONENTS,
 };
-#[cfg(not(target_os = "android"))]
-use crate::pipeline::RawThumbnail;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt;
@@ -31,6 +31,8 @@ pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
 
 const SIDECAR_FORMAT: &str = "AuRaw edit sidecar";
 const MAX_BRUSH_DABS: usize = 1_000_000;
+const MAX_OBJECT_STROKES: usize = 4096;
+const MAX_OBJECT_STROKE_POINTS: usize = 1_000_000;
 const MAX_MASK_IMAGE_EDGE: u32 = 8192;
 const MAX_EDIT_NAME_BYTES: usize = 4096;
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
@@ -295,12 +297,9 @@ pub fn save_developed_thumbnail_cache(
     if desktop_sidecar_fingerprint(raw_path)? != Some(expected_sidecar_fingerprint) {
         return Err("edit sidecar changed while its thumbnail was rendering".to_owned());
     }
-    let image = image::RgbaImage::from_raw(
-        thumbnail.width,
-        thumbnail.height,
-        thumbnail.rgba.clone(),
-    )
-    .ok_or_else(|| "developed thumbnail has an invalid byte count".to_owned())?;
+    let image =
+        image::RgbaImage::from_raw(thumbnail.width, thumbnail.height, thumbnail.rgba.clone())
+            .ok_or_else(|| "developed thumbnail has an invalid byte count".to_owned())?;
     let mut encoded = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(image)
         .write_to(&mut encoded, image::ImageFormat::Png)
@@ -723,6 +722,47 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                         validate_image(image.width, image.height, image.pixels.len(), 1)?;
                     }
                 }
+                MaskGeometry::Object {
+                    mask,
+                    feather,
+                    brush_size,
+                    brush_feather,
+                    edge_refine,
+                    strokes,
+                    ..
+                } => {
+                    finite(
+                        "object mask settings",
+                        &[*feather, *brush_size, *brush_feather, *edge_refine],
+                    )?;
+                    bounded("object mask feather", *feather, 0.0, 1.0)?;
+                    bounded("object brush size", *brush_size, 0.0, 16.0)?;
+                    bounded("object brush feather", *brush_feather, 0.0, 1.0)?;
+                    bounded("object edge refine", *edge_refine, 0.0, 1.0)?;
+                    if strokes.len() > MAX_OBJECT_STROKES {
+                        return invalid("object mask contains too many strokes");
+                    }
+                    let mut point_count = 0usize;
+                    for stroke in strokes {
+                        point_count =
+                            point_count
+                                .checked_add(stroke.points.len())
+                                .ok_or_else(|| {
+                                    SidecarError::Invalid("object prompt count overflow".to_owned())
+                                })?;
+                        if point_count > MAX_OBJECT_STROKE_POINTS {
+                            return invalid("object mask contains too many prompt points");
+                        }
+                        for point in &stroke.points {
+                            finite("object prompt", point)?;
+                            bounded("object prompt x", point[0], -16.0, 16.0)?;
+                            bounded("object prompt y", point[1], -16.0, 16.0)?;
+                        }
+                    }
+                    if let Some(image) = mask {
+                        validate_image(image.width, image.height, image.pixels.len(), 1)?;
+                    }
+                }
                 MaskGeometry::LuminanceRange {
                     source,
                     low,
@@ -810,6 +850,9 @@ fn preflight_encoded_images(edits: &EditState) -> Result<(), SidecarError> {
             let image_bytes = match &component.geometry {
                 MaskGeometry::Ai {
                     mask: Some(image), ..
+                }
+                | MaskGeometry::Object {
+                    mask: Some(image), ..
                 } => Some(image.pixels.len()),
                 _ => None,
             };
@@ -843,13 +886,14 @@ fn geometry_matches_kind(kind: MaskKind, geometry: &MaskGeometry) -> bool {
                 MaskKind::Subject | MaskKind::Background,
                 MaskGeometry::Ai { .. }
             )
+            | (MaskKind::Object, MaskGeometry::Object { .. })
             | (
                 MaskKind::LuminanceRange,
                 MaskGeometry::LuminanceRange { .. }
             )
             | (MaskKind::ColorRange, MaskGeometry::ColorRange { .. })
             | (
-                MaskKind::Object | MaskKind::Landscape | MaskKind::DepthRange,
+                MaskKind::Landscape | MaskKind::DepthRange,
                 MaskGeometry::Placeholder
             )
     )
@@ -1182,6 +1226,43 @@ mod tests {
     }
 
     #[test]
+    fn object_mask_round_trip_preserves_prompts_and_soft_mask() {
+        use crate::pipeline::{MaskCombineMode, MaskComponent, MaskImage, ObjectStroke};
+
+        let mut edits = sample_edits();
+        let object = MaskComponent {
+            name: "Object".to_owned(),
+            kind: MaskKind::Object,
+            combine: MaskCombineMode::Add,
+            enabled: true,
+            invert: false,
+            geometry: MaskGeometry::Object {
+                mask: Some(MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap()),
+                feather: 0.1,
+                brush_size: 0.08,
+                brush_feather: 0.45,
+                edge_refine: 0.7,
+                detailed_edges: true,
+                strokes: vec![
+                    ObjectStroke {
+                        points: vec![[0.25, 0.25], [0.5, 0.5]],
+                        positive: true,
+                    },
+                    ObjectStroke {
+                        points: vec![[0.75, 0.75]],
+                        positive: false,
+                    },
+                ],
+            },
+        };
+        Arc::make_mut(&mut edits.masks).masks[0].components = vec![object];
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+    }
+
+    #[test]
     fn repeated_shared_range_sources_stay_small() {
         use crate::pipeline::{MaskCombineMode, MaskComponent, MaskRgbImage};
 
@@ -1234,8 +1315,7 @@ mod tests {
             rgba: vec![10, 20, 30, 255, 40, 50, 60, 255],
         };
 
-        let cache_path =
-            save_developed_thumbnail_cache(&raw, &thumbnail, fingerprint).unwrap();
+        let cache_path = save_developed_thumbnail_cache(&raw, &thumbnail, fingerprint).unwrap();
         assert_eq!(
             cache_path.parent().unwrap().file_name(),
             Some(std::ffi::OsStr::new(DEVELOPED_THUMBNAIL_CACHE_DIR))

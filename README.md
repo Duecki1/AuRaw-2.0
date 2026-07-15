@@ -173,7 +173,7 @@ and applies a hue-preserving scene-linear gain. See
 The Develop sidebar is divided into four tabs:
 
 - **Adjustments** contains the complete photographic processing stack.
-- **Masks** provides Lightroom-style Brush, Radial Gradient, and Linear Gradient masks with add, subtract, and intersect submasks. Brush includes paint/erase modes, size, and feather; local adjustments are applied in the scene-linear GPU pipeline. Subject, Background, Luminance Range, and Color Range are implemented. Object, Landscape, and Depth Range remain future tools. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
+- **Masks** provides Lightroom-style Brush, Radial Gradient, Linear Gradient, Subject, Background, Object, Luminance Range, and Color Range masks with add, subtract, and intersect submasks. Object selection uses the same soft Size/Feather brush as regular mask painting, a brush-footprint focus box with automatic background guards, adaptive crop expansion, cached SAM 2.1 image embeddings, clean replacement strokes after refinement, connected-component cleanup, touch-safe pinch cancellation, and edge-aware fine-detail refinement. See [OBJECT_MASKS.md](OBJECT_MASKS.md) for the runtime, model, cache, and interaction details. Landscape and Depth Range remain future tools. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
 - **Inpainting** is reserved for future healing and object removal.
 - **Export** contains the PNG export action and all output options.
 
@@ -188,14 +188,15 @@ option embeds the available source filename, camera make/model, original
 dimensions, output dimensions, software, and normalized orientation in PNG iTXt
 and eXIf metadata.
 
-## Subject-selection runtime trust
+## AI-mask runtime trust
 
-Desktop subject selection never downloads or extracts native runtime code.
+Desktop Subject and Object selection never download or extract native runtime code.
 Choose a local ONNX Runtime library in Settings; AuRaw records its SHA-256 and
-revalidates that exact file before every dynamic load. The segmentation model
-is separately pinned by exact byte length and SHA-256, downloaded through a
-bounded temporary file, revalidated on cache hits, and atomically moved into
-the cache only after verification. On Linux, subject selection stays disabled
+revalidates that exact file before every dynamic load. Each segmentation model is separately pinned by SHA-256, downloaded through a
+temporary file, revalidated on cache hits, and atomically moved into the cache
+only after verification. Subject selection uses BiRefNet; Object selection uses
+the separate SAM 2.1 Hiera Tiny encoder and prompt decoder ONNX files. On Linux,
+AI selection stays disabled
 until a local runtime has been selected and pinned.
 
 ## Resource limits
