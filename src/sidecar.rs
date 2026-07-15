@@ -1,5 +1,6 @@
 use crate::pipeline::{
     ExposureParams, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION, MAX_LOCAL_MASKS,
+    MAX_MASK_COMPONENTS,
 };
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
@@ -29,7 +30,6 @@ pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
 };
 
 const SIDECAR_FORMAT: &str = "AuRaw edit sidecar";
-const MAX_MASK_COMPONENTS: usize = 64;
 const MAX_BRUSH_DABS: usize = 1_000_000;
 const MAX_MASK_IMAGE_EDGE: u32 = 8192;
 const MAX_EDIT_NAME_BYTES: usize = 4096;
@@ -338,6 +338,26 @@ pub fn save_developed_thumbnail_cache(
         return Err("edit sidecar changed while its thumbnail was being cached".to_owned());
     }
     Ok(cache_path)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn remove_desktop_edits(raw_path: &Path) -> Result<bool, String> {
+    let paths = [
+        sidecar_path_for_raw(raw_path),
+        developed_thumbnail_path_for_raw(raw_path),
+        developed_thumbnail_fingerprint_path_for_raw(raw_path),
+    ];
+    let mut removed_any = false;
+    for path in paths {
+        match fs::remove_file(&path) {
+            Ok(()) => removed_any = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("could not remove {}: {error}", path.display()));
+            }
+        }
+    }
+    Ok(removed_any)
 }
 
 pub fn encode(edits: EditState) -> Result<Vec<u8>, SidecarError> {

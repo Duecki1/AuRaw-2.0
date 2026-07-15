@@ -192,6 +192,30 @@ impl AurawApp {
         self.start_next_sidecar_save();
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn detach_current_file_for_library_action(
+        &mut self,
+        raw_path: &std::path::Path,
+    ) -> bool {
+        if self.current_path.as_deref() != Some(raw_path) {
+            return false;
+        }
+
+        // Finish any immutable save request before the caller removes or
+        // replaces the files. Detaching the target then prevents autosave from
+        // recreating the deleted sidecar while the Library tab remains open.
+        self.flush_sidecar_on_exit();
+        let detached_generation = self.sidecar_generation;
+        self.sidecar_generation = self.sidecar_generation.wrapping_add(1);
+        self.sidecar_target = None;
+        self.sidecar_saved_revision = None;
+        self.sidecar_failed_revision = None;
+        self.sidecar_autosave_deadline = None;
+        self.sidecar_pending
+            .retain(|request| request.generation != detached_generation);
+        true
+    }
+
     pub(crate) fn can_save_edits(&self) -> bool {
         self.loaded_raw.is_some() && self.sidecar_target.is_some()
     }

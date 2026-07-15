@@ -1,3 +1,19 @@
+#[derive(Clone, Debug)]
+enum MaskRenameTarget {
+    Group(usize),
+    Component {
+        mask_index: usize,
+        component_index: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct MaskRenameDialog {
+    target: MaskRenameTarget,
+    name: String,
+    request_focus: bool,
+}
+
 impl Sidebar {
     fn show_masks(
         ui: &mut Ui,
@@ -72,9 +88,13 @@ impl Sidebar {
         let mut add_component = None;
         let mut remove_mask = None;
         let mut remove_component = None;
+        let mut duplicate_mask = None;
+        let mut paste_mask = None;
+        let mut duplicate_component = None;
+        let mut paste_component = None;
         let mut group_enabled_changed = false;
+        let mut group_geometry_dirty = None;
         let mut component_dirty_mask = None;
-        let mut mask_metadata_changed = false;
 
         {
             let mut show_cards = |ui: &mut Ui| {
@@ -100,15 +120,23 @@ impl Sidebar {
                     if response.clicked() {
                         select_mask = Some(index);
                     }
+                    let can_add_group = app.masks.masks.len() < MAX_LOCAL_MASKS;
                     response.context_menu(|ui| {
+                        let mut geometry_changed = false;
                         Self::mask_group_context_menu(
                             ui,
                             &mut app.masks.masks[index],
-                            &mut mask_metadata_changed,
+                            can_add_group,
                             &mut group_enabled_changed,
+                            &mut geometry_changed,
+                            &mut duplicate_mask,
+                            &mut paste_mask,
                             &mut remove_mask,
                             index,
                         );
+                        if geometry_changed {
+                            group_geometry_dirty = Some(index);
+                        }
                     });
 
                     // The selected group's sub-masks are inserted directly
@@ -148,9 +176,12 @@ impl Sidebar {
                                     ui,
                                     &mut app.masks.masks[index].components[component_index],
                                     component_count > 1,
-                                    &mut mask_metadata_changed,
+                                    component_count < MAX_MASK_COMPONENTS,
                                     &mut menu_geometry_changed,
+                                    &mut duplicate_component,
+                                    &mut paste_component,
                                     &mut menu_remove_component,
+                                    index,
                                     component_index,
                                 );
                             });
@@ -196,8 +227,8 @@ impl Sidebar {
         if group_enabled_changed {
             app.mark_mask_adjustments_dirty();
         }
-        if mask_metadata_changed {
-            app.note_mask_edit_changed();
+        if let Some(mask_index) = group_geometry_dirty {
+            app.mark_mask_geometry_dirty(mask_index);
         }
         if let Some(mask_index) = component_dirty_mask {
             app.mark_mask_geometry_dirty(mask_index);
@@ -214,6 +245,14 @@ impl Sidebar {
                 app.active_mask_tool = None;
             }
             Self::refresh_mask_thumbnails(ui, app);
+        } else if let Some((index, invert)) = duplicate_mask {
+            if Self::duplicate_mask_group(app, index, invert) {
+                Self::refresh_mask_thumbnails(ui, app);
+            }
+        } else if let Some(index) = paste_mask {
+            if Self::paste_mask_group(ui.ctx(), app, index) {
+                Self::refresh_mask_thumbnails(ui, app);
+            }
         } else if let Some((mask_index, component_index)) = remove_component {
             app.masks.selected_mask = Some(mask_index);
             app.masks.selected_component = Some(component_index);
@@ -223,6 +262,14 @@ impl Sidebar {
                 if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
                     app.select_mask_tool(kind);
                 }
+                Self::refresh_mask_thumbnails(ui, app);
+            }
+        } else if let Some((mask_index, component_index, invert)) = duplicate_component {
+            if Self::duplicate_mask_component(app, mask_index, component_index, invert) {
+                Self::refresh_mask_thumbnails(ui, app);
+            }
+        } else if let Some((mask_index, component_index)) = paste_component {
+            if Self::paste_mask_component(ui.ctx(), app, mask_index, component_index) {
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some(kind) = new_mask {
@@ -259,6 +306,8 @@ impl Sidebar {
             }
             app.blink_selected_component();
         }
+
+        Self::show_mask_rename_dialog(ui.ctx(), app);
     }
 
     fn mask_kind_menu(ui: &mut Ui, unavailable_message: &str) -> Option<MaskKind> {
@@ -314,21 +363,60 @@ impl Sidebar {
 
     fn mask_group_context_menu(
         ui: &mut Ui,
-        mask: &mut crate::pipeline::LocalMask,
-        metadata_changed: &mut bool,
+        mask: &mut LocalMask,
+        can_add_group: bool,
         enabled_changed: &mut bool,
+        geometry_changed: &mut bool,
+        duplicate_mask: &mut Option<(usize, bool)>,
+        paste_mask: &mut Option<usize>,
         remove_mask: &mut Option<usize>,
         mask_index: usize,
     ) {
-        ui.label(egui::RichText::new("Rename mask group").weak());
-        *metadata_changed |= ui
-            .add_sized(
-                [190.0, ui.spacing().interact_size.y],
-                egui::TextEdit::singleline(&mut mask.name),
-            )
-            .changed();
+        if ui.button("Rename…").clicked() {
+            Self::open_mask_rename_dialog(
+                ui.ctx(),
+                MaskRenameTarget::Group(mask_index),
+                mask.name.clone(),
+            );
+            ui.close();
+        }
         ui.separator();
         *enabled_changed |= ui.checkbox(&mut mask.enabled, "Enabled").changed();
+        if ui
+            .add_enabled(can_add_group, egui::Button::new("Duplicate"))
+            .clicked()
+        {
+            *duplicate_mask = Some((mask_index, false));
+            ui.close();
+        }
+        if ui.selectable_label(mask.invert, "Invert").clicked() {
+            mask.invert = !mask.invert;
+            *geometry_changed = true;
+            ui.close();
+        }
+        if ui
+            .add_enabled(can_add_group, egui::Button::new("Duplicate & Invert"))
+            .clicked()
+        {
+            *duplicate_mask = Some((mask_index, true));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Copy Mask Group").clicked() {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(Self::mask_group_clipboard_id(), mask.clone());
+            });
+            ui.close();
+        }
+        let can_paste = can_add_group && Self::copied_mask_group(ui.ctx()).is_some();
+        if ui
+            .add_enabled(can_paste, egui::Button::new("Paste Mask Group"))
+            .on_disabled_hover_text("Copy a mask group first")
+            .clicked()
+        {
+            *paste_mask = Some(mask_index);
+            ui.close();
+        }
         ui.separator();
         if ui.button("Delete mask group").clicked() {
             *remove_mask = Some(mask_index);
@@ -338,23 +426,67 @@ impl Sidebar {
 
     fn submask_context_menu(
         ui: &mut Ui,
-        component: &mut crate::pipeline::MaskComponent,
+        component: &mut MaskComponent,
         can_delete: bool,
-        metadata_changed: &mut bool,
+        can_add_component: bool,
         geometry_changed: &mut bool,
+        duplicate_component: &mut Option<(usize, usize, bool)>,
+        paste_component: &mut Option<(usize, usize)>,
         remove_component: &mut Option<usize>,
+        mask_index: usize,
         component_index: usize,
     ) {
-        ui.label(egui::RichText::new("Rename sub-mask").weak());
-        *metadata_changed |= ui
-            .add_sized(
-                [190.0, ui.spacing().interact_size.y],
-                egui::TextEdit::singleline(&mut component.name),
-            )
-            .changed();
+        if ui.button("Rename…").clicked() {
+            Self::open_mask_rename_dialog(
+                ui.ctx(),
+                MaskRenameTarget::Component {
+                    mask_index,
+                    component_index,
+                },
+                component.name.clone(),
+            );
+            ui.close();
+        }
         ui.separator();
         *geometry_changed |= ui.checkbox(&mut component.enabled, "Enabled").changed();
-        *geometry_changed |= ui.checkbox(&mut component.invert, "Invert").changed();
+        if ui
+            .add_enabled(can_add_component, egui::Button::new("Duplicate"))
+            .clicked()
+        {
+            *duplicate_component = Some((mask_index, component_index, false));
+            ui.close();
+        }
+        if ui.selectable_label(component.invert, "Invert").clicked() {
+            component.invert = !component.invert;
+            *geometry_changed = true;
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                can_add_component,
+                egui::Button::new("Duplicate & Invert"),
+            )
+            .clicked()
+        {
+            *duplicate_component = Some((mask_index, component_index, true));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Copy Component").clicked() {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(Self::mask_component_clipboard_id(), component.clone());
+            });
+            ui.close();
+        }
+        let can_paste = can_add_component && Self::copied_mask_component(ui.ctx()).is_some();
+        if ui
+            .add_enabled(can_paste, egui::Button::new("Paste Component"))
+            .on_disabled_hover_text("Copy a component first")
+            .clicked()
+        {
+            *paste_component = Some((mask_index, component_index));
+            ui.close();
+        }
         ui.separator();
         if ui
             .add_enabled(can_delete, egui::Button::new("Delete sub-mask"))
@@ -364,6 +496,262 @@ impl Sidebar {
             *remove_component = Some(component_index);
             ui.close();
         }
+    }
+
+    fn mask_group_clipboard_id() -> egui::Id {
+        egui::Id::new("mask-group-clipboard")
+    }
+
+    fn mask_component_clipboard_id() -> egui::Id {
+        egui::Id::new("mask-component-clipboard")
+    }
+
+    fn mask_rename_dialog_id() -> egui::Id {
+        egui::Id::new("mask-rename-dialog-state")
+    }
+
+    fn copied_mask_group(ctx: &egui::Context) -> Option<LocalMask> {
+        ctx.data(|data| data.get_temp::<LocalMask>(Self::mask_group_clipboard_id()))
+    }
+
+    fn copied_mask_component(ctx: &egui::Context) -> Option<MaskComponent> {
+        ctx.data(|data| data.get_temp::<MaskComponent>(Self::mask_component_clipboard_id()))
+    }
+
+    fn open_mask_rename_dialog(
+        ctx: &egui::Context,
+        target: MaskRenameTarget,
+        name: String,
+    ) {
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                Self::mask_rename_dialog_id(),
+                MaskRenameDialog {
+                    target,
+                    name,
+                    request_focus: true,
+                },
+            );
+        });
+    }
+
+    fn show_mask_rename_dialog(ctx: &egui::Context, app: &mut AurawApp) {
+        let Some(mut dialog) = ctx.data(|data| {
+            data.get_temp::<MaskRenameDialog>(Self::mask_rename_dialog_id())
+        }) else {
+            return;
+        };
+
+        let title = match &dialog.target {
+            MaskRenameTarget::Group(_) => "Rename mask group",
+            MaskRenameTarget::Component { .. } => "Rename sub-mask",
+        };
+        let mut save = false;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .id(egui::Id::new("mask-rename-dialog-window"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                let response = ui.add_sized(
+                    [280.0, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut dialog.name),
+                );
+                if dialog.request_focus {
+                    response.request_focus();
+                    dialog.request_focus = false;
+                }
+                let trimmed_is_empty = dialog.name.trim().is_empty();
+                let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
+                let escape_pressed = ui.input(|input| input.key_pressed(egui::Key::Escape));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!trimmed_is_empty, egui::Button::new("Rename"))
+                        .clicked()
+                        || (enter_pressed && !trimmed_is_empty)
+                    {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() || escape_pressed {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if save {
+            let name = dialog.name.trim().to_owned();
+            let changed = match dialog.target {
+                MaskRenameTarget::Group(mask_index) => app
+                    .masks
+                    .masks
+                    .get_mut(mask_index)
+                    .is_some_and(|mask| {
+                        if mask.name == name {
+                            false
+                        } else {
+                            mask.name = name.clone();
+                            true
+                        }
+                    }),
+                MaskRenameTarget::Component {
+                    mask_index,
+                    component_index,
+                } => app
+                    .masks
+                    .masks
+                    .get_mut(mask_index)
+                    .and_then(|mask| mask.components.get_mut(component_index))
+                    .is_some_and(|component| {
+                        if component.name == name {
+                            false
+                        } else {
+                            component.name = name.clone();
+                            true
+                        }
+                    }),
+            };
+            if changed {
+                app.note_mask_edit_changed();
+            }
+            ctx.data_mut(|data| data.remove::<MaskRenameDialog>(Self::mask_rename_dialog_id()));
+        } else if cancel {
+            ctx.data_mut(|data| data.remove::<MaskRenameDialog>(Self::mask_rename_dialog_id()));
+        } else {
+            ctx.data_mut(|data| data.insert_temp(Self::mask_rename_dialog_id(), dialog));
+        }
+    }
+
+    fn duplicate_mask_group(app: &mut AurawApp, mask_index: usize, invert: bool) -> bool {
+        let Some(mask) = app.masks.masks.get(mask_index).cloned() else {
+            return false;
+        };
+        Self::insert_mask_group_copy(app, mask_index, mask, invert)
+    }
+
+    fn paste_mask_group(ctx: &egui::Context, app: &mut AurawApp, mask_index: usize) -> bool {
+        let Some(mask) = Self::copied_mask_group(ctx) else {
+            return false;
+        };
+        Self::insert_mask_group_copy(app, mask_index, mask, false)
+    }
+
+    fn insert_mask_group_copy(
+        app: &mut AurawApp,
+        mask_index: usize,
+        mut mask: LocalMask,
+        invert: bool,
+    ) -> bool {
+        if app.masks.masks.len() >= MAX_LOCAL_MASKS || mask_index >= app.masks.masks.len() {
+            return false;
+        }
+        mask.name = Self::copied_mask_name(&app.masks.masks, &mask.name);
+        if invert {
+            mask.invert = !mask.invert;
+        }
+        let insert_at = mask_index + 1;
+        app.masks.masks.insert(insert_at, mask);
+        app.masks.selected_mask = Some(insert_at);
+        app.masks.selected_component = Some(0);
+        app.mask_thumbnail_component_mask = None;
+        app.mark_all_mask_layers_dirty();
+        if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
+            app.select_mask_tool(kind);
+        }
+        app.blink_selected_mask();
+        true
+    }
+
+    fn duplicate_mask_component(
+        app: &mut AurawApp,
+        mask_index: usize,
+        component_index: usize,
+        invert: bool,
+    ) -> bool {
+        let Some(component) = app
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .cloned()
+        else {
+            return false;
+        };
+        Self::insert_mask_component_copy(app, mask_index, component_index, component, invert)
+    }
+
+    fn paste_mask_component(
+        ctx: &egui::Context,
+        app: &mut AurawApp,
+        mask_index: usize,
+        component_index: usize,
+    ) -> bool {
+        let Some(component) = Self::copied_mask_component(ctx) else {
+            return false;
+        };
+        Self::insert_mask_component_copy(app, mask_index, component_index, component, false)
+    }
+
+    fn insert_mask_component_copy(
+        app: &mut AurawApp,
+        mask_index: usize,
+        component_index: usize,
+        mut component: MaskComponent,
+        invert: bool,
+    ) -> bool {
+        let Some(mask) = app.masks.masks.get_mut(mask_index) else {
+            return false;
+        };
+        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len() {
+            return false;
+        }
+        component.name = Self::copied_component_name(&mask.components, &component.name);
+        if invert {
+            component.invert = !component.invert;
+        }
+        let insert_at = component_index + 1;
+        mask.components.insert(insert_at, component);
+        app.masks.selected_mask = Some(mask_index);
+        app.masks.selected_component = Some(insert_at);
+        app.mask_thumbnail_component_mask = None;
+        app.mark_mask_geometry_dirty(mask_index);
+        if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
+            app.select_mask_tool(kind);
+        }
+        app.blink_selected_component();
+        true
+    }
+
+    fn copied_mask_name(masks: &[LocalMask], base: &str) -> String {
+        for number in 1..=10_000usize {
+            let candidate = if number == 1 {
+                format!("{base} Copy")
+            } else {
+                format!("{base} Copy {number}")
+            };
+            if masks.iter().all(|mask| mask.name != candidate) {
+                return candidate;
+            }
+        }
+        format!("{base} Copy")
+    }
+
+    fn copied_component_name(components: &[MaskComponent], base: &str) -> String {
+        for number in 1..=10_000usize {
+            let candidate = if number == 1 {
+                format!("{base} Copy")
+            } else {
+                format!("{base} Copy {number}")
+            };
+            if components
+                .iter()
+                .all(|component| component.name != candidate)
+            {
+                return candidate;
+            }
+        }
+        format!("{base} Copy")
     }
 
     fn create_mask_group_card(

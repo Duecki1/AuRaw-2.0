@@ -3,6 +3,7 @@ use std::f32::consts::TAU;
 use std::sync::Arc;
 
 pub const MAX_LOCAL_MASKS: usize = 8;
+pub const MAX_MASK_COMPONENTS: usize = 64;
 pub const MASK_ATLAS_EDGE_DESKTOP: u32 = 2048;
 pub const MASK_ATLAS_EDGE_ANDROID: u32 = 1024;
 
@@ -390,6 +391,8 @@ impl LocalAdjustments {
 pub struct LocalMask {
     pub name: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub invert: bool,
     pub opacity: f32,
     pub components: Vec<MaskComponent>,
     pub adjustments: LocalAdjustments,
@@ -400,6 +403,7 @@ impl LocalMask {
         Self {
             name: format!("Mask {number}"),
             enabled: true,
+            invert: false,
             opacity: 1.0,
             components: vec![MaskComponent::new(kind, MaskCombineMode::Add)],
             adjustments: LocalAdjustments::default(),
@@ -505,6 +509,9 @@ impl MaskStack {
         }
         let mask_index = self.selected_mask?;
         let mask = self.masks.get_mut(mask_index)?;
+        if mask.components.len() >= MAX_MASK_COMPONENTS {
+            return None;
+        }
         let component_index = mask.components.len();
         mask.components.push(MaskComponent::new(kind, combine));
         self.selected_component = Some(component_index);
@@ -665,7 +672,10 @@ impl MaskStack {
         let opacity = mask.opacity.clamp(0.0, 1.0);
         combined
             .into_par_iter()
-            .map(|value| (value.clamp(0.0, 1.0) * opacity * 255.0 + 0.5) as u8)
+            .map(|value| {
+                let value = if mask.invert { 1.0 - value } else { value };
+                (value.clamp(0.0, 1.0) * opacity * 255.0 + 0.5) as u8
+            })
             .collect()
     }
 
@@ -1442,6 +1452,24 @@ mod tests {
         let color = stack.rasterize_layer(1, 2, 1, 2, 1);
         assert!(color[0] < 8);
         assert!(color[1] > 240);
+    }
+
+    #[test]
+    fn group_invert_is_the_exact_final_mask_complement() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Radial);
+        if let MaskGeometry::Radial { initialized, .. } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *initialized = true;
+        }
+        let normal = stack.rasterize_layer(0, 64, 64, 100, 100);
+        stack.masks[0].invert = true;
+        let inverted = stack.rasterize_layer(0, 64, 64, 100, 100);
+        assert!(normal
+            .iter()
+            .zip(inverted.iter())
+            .all(|(normal, inverted)| *normal as u16 + *inverted as u16 == 255));
     }
 
     #[test]
