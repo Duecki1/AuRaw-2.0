@@ -1,5 +1,5 @@
 use crate::app::{AurawApp, MaskDragState, MaskOverlayBlink, SidebarTab};
-use crate::pipeline::{BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind};
+use crate::pipeline::{BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind, ObjectStroke};
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui};
 
@@ -23,7 +23,7 @@ impl Preview {
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.heading("No image open");
-                        ui.label("Use Open RAW… to load an image.");
+                        ui.label("Open a RAW from the Library to start developing.");
                     });
                 });
             }
@@ -100,11 +100,9 @@ impl Preview {
                 zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
 
             // A second finger switches a mask gesture into viewport navigation.
-            // Commit any pending mask update and prevent this frame from painting.
+            // Roll back any pending mask stroke and prevent this frame from painting.
             if app.sidebar_tab == SidebarTab::Masks {
-                app.finish_mask_geometry_interaction();
-                app.last_brush_point = None;
-                app.mask_drag = None;
+                app.cancel_mask_touch_gesture();
             }
         }
 
@@ -225,12 +223,14 @@ impl Preview {
 
         if app.sidebar_tab == SidebarTab::Masks {
             if !touch_navigation && !fit_gesture {
-                Self::handle_mask_interaction(ui, app, image_rect, &response);
+                Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response);
             }
-            // Keep the selected mask's handles visible even when the colored
-            // coverage overlay is hidden.
-            Self::paint_mask_overlay(ui, app, image_rect);
-            Self::paint_tool_hint(ui, app, image_rect);
+            // Keep every mask interaction and overlay clipped to the visible
+            // preview. A zoomed image rect can extend behind the sidebar, and
+            // touch input reports a pointer position there even though that
+            // area belongs to the UI rather than the canvas.
+            Self::paint_mask_overlay(ui, app, image_rect, visible_screen);
+            Self::paint_tool_hint(ui, app, visible_screen);
         }
     }
 
@@ -238,6 +238,7 @@ impl Preview {
         ui: &Ui,
         app: &mut AurawApp,
         image_rect: Rect,
+        preview_rect: Rect,
         response: &egui::Response,
     ) {
         let Some(mask_index) = app.masks.selected_mask else {
@@ -265,18 +266,29 @@ impl Preview {
             return;
         }
         app.active_mask_tool = Some(kind);
-        let pointer = response.interact_pointer_pos();
-        let primary_down =
-            response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
+        let pointer = response
+            .interact_pointer_pos()
+            .filter(|position| preview_rect.contains(*position));
+        let primary_down = pointer.is_some()
+            && response.is_pointer_button_down_on()
+            && ui.input(|input| input.pointer.primary_down());
         if !primary_down {
+            let object_stroke_finished = kind == MaskKind::Object && app.last_brush_point.is_some();
             app.finish_mask_geometry_interaction();
             app.last_brush_point = None;
             app.mask_drag = None;
+            app.commit_mask_touch_gesture();
+            if object_stroke_finished {
+                app.request_object_mask(mask_index, component_index);
+            }
             return;
         }
         let Some(pointer) = pointer else {
             return;
         };
+        if ui.input(|input| input.any_touches()) {
+            app.begin_mask_touch_gesture(mask_index, component_index);
+        }
         let uv = screen_to_normalized(image_rect, pointer);
         let color_was_sampled = app
             .masks
@@ -290,12 +302,16 @@ impl Preview {
                 )
             });
 
-        if app.mask_drag.is_none() && kind != MaskKind::Brush {
+        if app.mask_drag.is_none() && kind != MaskKind::Brush && kind != MaskKind::Object {
             let geometry = &app.masks.masks[mask_index].components[component_index].geometry;
             app.mask_drag = begin_mask_drag(geometry, uv, pointer, image_rect);
         }
 
         let mut changed = false;
+
+        if kind == MaskKind::Object && app.last_brush_point.is_none() {
+            changed |= app.restart_refined_object_mask_for_stroke(mask_index, component_index);
+        }
 
         if let Some(component) = app
             .masks
@@ -489,6 +505,51 @@ impl Preview {
                     _ => {}
                 },
                 (
+                    MaskGeometry::Object {
+                        brush_size,
+                        strokes,
+                        ..
+                    },
+                    MaskKind::Object,
+                ) => {
+                    // Object strokes always start a new positive selection. A
+                    // refined mask was cleared above on the first pointer-down.
+                    let positive = true;
+                    let first_point = app.last_brush_point.is_none();
+                    let previous = app.last_brush_point.unwrap_or(uv);
+                    let dx = uv[0] - previous[0];
+                    let dy = uv[1] - previous[1];
+                    let distance_px = ((dx * image_rect.width()).powi(2)
+                        + (dy * image_rect.height()).powi(2))
+                    .sqrt();
+                    let radius_px = *brush_size * image_rect.width().min(image_rect.height());
+                    let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
+                    if first_point {
+                        strokes.push(ObjectStroke {
+                            points: vec![uv],
+                            positive,
+                        });
+                        changed = true;
+                    } else if distance_px >= spacing_px * 0.75 {
+                        if let Some(stroke) = strokes.last_mut() {
+                            let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
+                            for step in 1..=steps {
+                                if stroke.points.len() >= 8192 {
+                                    break;
+                                }
+                                let t = step as f32 / steps as f32;
+                                stroke
+                                    .points
+                                    .push([previous[0] + dx * t, previous[1] + dy * t]);
+                            }
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        app.last_brush_point = Some(uv);
+                    }
+                }
+                (
                     MaskGeometry::ColorRange {
                         source: Some(source),
                         sample,
@@ -521,7 +582,7 @@ impl Preview {
         }
     }
 
-    fn paint_mask_overlay(ui: &Ui, app: &mut AurawApp, image_rect: Rect) {
+    fn paint_mask_overlay(ui: &Ui, app: &mut AurawApp, image_rect: Rect, preview_rect: Rect) {
         let Some(mask_index) = app.masks.selected_mask else {
             return;
         };
@@ -534,7 +595,7 @@ impl Preview {
             .map(mask_component_color)
             .unwrap_or(Color32::from_rgb(78, 163, 255));
         let subtract = Color32::from_rgb(255, 105, 105);
-        let painter = ui.painter_at(image_rect);
+        let painter = ui.painter_at(preview_rect);
 
         // An untouched mask remains visible after its selection flashes. Once
         // local adjustments exist, selection still flashes for orientation but
@@ -568,7 +629,7 @@ impl Preview {
             && ui
                 .ctx()
                 .pointer_interact_pos()
-                .is_some_and(|position| image_rect.contains(position));
+                .is_some_and(|position| preview_rect.contains(position));
         if pointer_editing {
             let editing_live_mask = neutral
                 && selected_component.is_some_and(|index| {
@@ -587,7 +648,14 @@ impl Preview {
         }
         if mask.enabled {
             if let Some(component) = coverage_target {
-                Self::paint_coverage_texture(ui, app, image_rect, mask_index, component);
+                Self::paint_coverage_texture(
+                    ui,
+                    app,
+                    image_rect,
+                    preview_rect,
+                    mask_index,
+                    component,
+                );
             }
         }
 
@@ -674,24 +742,35 @@ impl Preview {
             }
         }
 
-        if app
-            .masks
-            .selected_component()
-            .is_some_and(|component| component.kind == MaskKind::Brush && component.enabled)
-        {
+        if app.masks.selected_component().is_some_and(|component| {
+            matches!(component.kind, MaskKind::Brush | MaskKind::Object) && component.enabled
+        }) {
             if let Some(pointer) = ui
                 .ctx()
                 .pointer_hover_pos()
-                .filter(|p| image_rect.contains(*p))
+                .filter(|position| preview_rect.contains(*position))
             {
                 if let Some(component) = app.masks.selected_component() {
-                    if let MaskGeometry::Brush { size, .. } = &component.geometry {
-                        let radius = *size * image_rect.width().min(image_rect.height());
-                        let cursor_color = match app.brush_mode {
-                            BrushMode::Paint => Color32::WHITE,
-                            BrushMode::Erase => subtract,
-                        };
-                        painter.circle_stroke(pointer, radius, Stroke::new(1.5, cursor_color));
+                    let cursor_color = match app.brush_mode {
+                        BrushMode::Paint => Color32::WHITE,
+                        BrushMode::Erase => subtract,
+                    };
+                    match &component.geometry {
+                        MaskGeometry::Brush { size, .. } => {
+                            let radius = *size * image_rect.width().min(image_rect.height());
+                            painter.circle_stroke(pointer, radius, Stroke::new(1.5, cursor_color));
+                        }
+                        MaskGeometry::Object {
+                            mask, brush_size, ..
+                        } if mask.is_none() => {
+                            let radius = *brush_size * image_rect.width().min(image_rect.height());
+                            painter.circle_stroke(
+                                pointer,
+                                radius.max(1.5),
+                                Stroke::new(1.5, cursor_color),
+                            );
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -702,6 +781,7 @@ impl Preview {
         ui: &Ui,
         app: &mut AurawApp,
         image_rect: Rect,
+        preview_rect: Rect,
         mask_index: usize,
         component_index: Option<usize>,
     ) {
@@ -760,16 +840,23 @@ impl Preview {
         }
 
         if let Some(texture) = &app.mask_overlay_texture {
-            painter_image(ui, texture.id(), image_rect);
+            painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
         }
     }
 
-    fn paint_tool_hint(ui: &Ui, app: &AurawApp, image_rect: Rect) {
+    fn paint_tool_hint(ui: &Ui, app: &AurawApp, preview_rect: Rect) {
         let Some(kind) = app.active_mask_tool else {
             return;
         };
         let text = match kind {
             MaskKind::Brush => return,
+            MaskKind::Object
+                if app.masks.selected_component().is_some_and(|component| {
+                    matches!(&component.geometry, MaskGeometry::Object { mask: None, .. })
+                }) =>
+            {
+                "Paint through the middle of the object part"
+            }
             MaskKind::Radial
                 if !app
                     .masks
@@ -798,8 +885,8 @@ impl Preview {
             }
             _ => return,
         };
-        let painter = ui.painter_at(image_rect);
-        let position = image_rect.left_top() + egui::vec2(12.0, 12.0);
+        let painter = ui.painter_at(preview_rect);
+        let position = preview_rect.left_top() + egui::vec2(12.0, 12.0);
         painter.text(
             position,
             egui::Align2::LEFT_TOP,
@@ -1062,8 +1149,8 @@ fn preview_uv_changed(left: crate::app::PreviewUvRect, right: crate::app::Previe
         .any(|(left, right)| (left - right).abs() > 0.0005)
 }
 
-fn painter_image(ui: &Ui, texture_id: egui::TextureId, rect: Rect) {
-    ui.painter_at(rect).image(
+fn painter_image_clipped(ui: &Ui, texture_id: egui::TextureId, rect: Rect, clip_rect: Rect) {
+    ui.painter_at(clip_rect).image(
         texture_id,
         rect,
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),

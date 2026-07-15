@@ -200,7 +200,67 @@ impl AurawApp {
         if self.current_path.as_deref() != Some(raw_path) {
             return false;
         }
+        self.detach_current_sidecar_target_for_library_action()
+    }
 
+    #[cfg(target_os = "android")]
+    fn detach_current_android_document_for_library_action(
+        &mut self,
+        raw_uri: &str,
+        display_name: &str,
+    ) -> bool {
+        let is_current = matches!(
+            self.sidecar_target.as_ref(),
+            Some(crate::sidecar::SidecarTarget::Android {
+                raw_uri: current_uri,
+                display_name: current_name,
+            }) if current_uri == raw_uri && current_name == display_name
+        );
+        if !is_current {
+            return false;
+        }
+        self.detach_current_sidecar_target_for_library_action()
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn reset_android_library_adjustments(
+        &mut self,
+        raw_uri: &str,
+        display_name: &str,
+    ) -> Result<(), String> {
+        let was_current =
+            self.detach_current_android_document_for_library_action(raw_uri, display_name);
+        let result = crate::android::remove_raw_sidecar(
+            &self.android_app,
+            raw_uri,
+            display_name,
+        );
+        if was_current {
+            self.open_android_library_document(raw_uri, display_name);
+        }
+        result
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn delete_android_library_item(
+        &mut self,
+        raw_uri: &str,
+        display_name: &str,
+    ) -> Result<(), String> {
+        let was_current =
+            self.detach_current_android_document_for_library_action(raw_uri, display_name);
+        let result = crate::android::delete_library_document(
+            &self.android_app,
+            raw_uri,
+            display_name,
+        );
+        if result.is_err() && was_current {
+            self.open_android_library_document(raw_uri, display_name);
+        }
+        result
+    }
+
+    fn detach_current_sidecar_target_for_library_action(&mut self) -> bool {
         // Finish any immutable save request before the caller removes or
         // replaces the files. Detaching the target then prevents autosave from
         // recreating the deleted sidecar while the Library tab remains open.

@@ -15,12 +15,7 @@ struct MaskRenameDialog {
 }
 
 impl Sidebar {
-    fn show_masks(
-        ui: &mut Ui,
-        app: &mut AurawApp,
-        layout: ScreenLayout,
-        frame: &eframe::Frame,
-    ) {
+    fn show_masks(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
         ui.heading("Masks");
         ui.add_space(4.0);
 
@@ -42,11 +37,7 @@ impl Sidebar {
         }
     }
 
-    pub(crate) fn show_vertical_mask_strip(
-        ui: &mut Ui,
-        app: &mut AurawApp,
-        frame: &eframe::Frame,
-    ) {
+    pub(crate) fn show_vertical_mask_strip(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         Self::show_mask_strip(ui, app, frame, MaskStripOrientation::Horizontal);
     }
 
@@ -202,9 +193,7 @@ impl Sidebar {
                 MaskStripOrientation::Horizontal => {
                     egui::ScrollArea::horizontal()
                         .id_salt("vertical-mask-card-strip")
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                        )
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.horizontal(|ui| show_cards(ui));
@@ -213,9 +202,7 @@ impl Sidebar {
                 MaskStripOrientation::Vertical => {
                     egui::ScrollArea::vertical()
                         .id_salt("horizontal-mask-card-strip")
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                        )
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.vertical_centered(|ui| show_cards(ui));
@@ -239,7 +226,11 @@ impl Sidebar {
             app.masks.remove_selected_mask();
             app.mark_all_mask_layers_dirty();
             app.mask_thumbnail_component_mask = None;
-            if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
+            if let Some(kind) = app
+                .masks
+                .selected_component()
+                .map(|component| component.kind)
+            {
                 app.select_mask_tool(kind);
             } else {
                 app.active_mask_tool = None;
@@ -259,7 +250,11 @@ impl Sidebar {
             if app.masks.remove_selected_component().is_some() {
                 app.mark_mask_geometry_dirty(mask_index);
                 app.mask_thumbnail_component_mask = None;
-                if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
+                if let Some(kind) = app
+                    .masks
+                    .selected_component()
+                    .map(|component| component.kind)
+                {
                     app.select_mask_tool(kind);
                 }
                 Self::refresh_mask_thumbnails(ui, app);
@@ -294,14 +289,22 @@ impl Sidebar {
             app.masks.selected_mask = Some(index);
             app.masks.selected_component = Some(0);
             app.mask_thumbnail_component_mask = None;
-            if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
+            if let Some(kind) = app
+                .masks
+                .selected_component()
+                .map(|component| component.kind)
+            {
                 app.select_mask_tool(kind);
             }
             app.blink_selected_mask();
             Self::refresh_mask_thumbnails(ui, app);
         } else if let Some(component_index) = select_component {
             app.masks.selected_component = Some(component_index);
-            if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
+            if let Some(kind) = app
+                .masks
+                .selected_component()
+                .map(|component| component.kind)
+            {
                 app.select_mask_tool(kind);
             }
             app.blink_selected_component();
@@ -462,10 +465,7 @@ impl Sidebar {
             ui.close();
         }
         if ui
-            .add_enabled(
-                can_add_component,
-                egui::Button::new("Duplicate & Invert"),
-            )
+            .add_enabled(can_add_component, egui::Button::new("Duplicate & Invert"))
             .clicked()
         {
             *duplicate_component = Some((mask_index, component_index, true));
@@ -518,11 +518,7 @@ impl Sidebar {
         ctx.data(|data| data.get_temp::<MaskComponent>(Self::mask_component_clipboard_id()))
     }
 
-    fn open_mask_rename_dialog(
-        ctx: &egui::Context,
-        target: MaskRenameTarget,
-        name: String,
-    ) {
+    fn open_mask_rename_dialog(ctx: &egui::Context, target: MaskRenameTarget, name: String) {
         ctx.data_mut(|data| {
             data.insert_temp(
                 Self::mask_rename_dialog_id(),
@@ -536,9 +532,9 @@ impl Sidebar {
     }
 
     fn show_mask_rename_dialog(ctx: &egui::Context, app: &mut AurawApp) {
-        let Some(mut dialog) = ctx.data(|data| {
-            data.get_temp::<MaskRenameDialog>(Self::mask_rename_dialog_id())
-        }) else {
+        let Some(mut dialog) =
+            ctx.data(|data| data.get_temp::<MaskRenameDialog>(Self::mask_rename_dialog_id()))
+        else {
             return;
         };
 
@@ -583,18 +579,16 @@ impl Sidebar {
         if save {
             let name = dialog.name.trim().to_owned();
             let changed = match dialog.target {
-                MaskRenameTarget::Group(mask_index) => app
-                    .masks
-                    .masks
-                    .get_mut(mask_index)
-                    .is_some_and(|mask| {
+                MaskRenameTarget::Group(mask_index) => {
+                    app.masks.masks.get_mut(mask_index).is_some_and(|mask| {
                         if mask.name == name {
                             false
                         } else {
                             mask.name = name.clone();
                             true
                         }
-                    }),
+                    })
+                }
                 MaskRenameTarget::Component {
                     mask_index,
                     component_index,
@@ -656,7 +650,11 @@ impl Sidebar {
         app.masks.selected_component = Some(0);
         app.mask_thumbnail_component_mask = None;
         app.mark_all_mask_layers_dirty();
-        if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
+        if let Some(kind) = app
+            .masks
+            .selected_component()
+            .map(|component| component.kind)
+        {
             app.select_mask_tool(kind);
         }
         app.blink_selected_mask();
@@ -703,7 +701,8 @@ impl Sidebar {
         let Some(mask) = app.masks.masks.get_mut(mask_index) else {
             return false;
         };
-        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len() {
+        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len()
+        {
             return false;
         }
         component.name = Self::copied_component_name(&mask.components, &component.name);
@@ -716,7 +715,11 @@ impl Sidebar {
         app.masks.selected_component = Some(insert_at);
         app.mask_thumbnail_component_mask = None;
         app.mark_mask_geometry_dirty(mask_index);
-        if let Some(kind) = app.masks.selected_component().map(|component| component.kind) {
+        if let Some(kind) = app
+            .masks
+            .selected_component()
+            .map(|component| component.kind)
+        {
             app.select_mask_tool(kind);
         }
         app.blink_selected_component();
@@ -815,16 +818,18 @@ impl Sidebar {
         );
         ui.add_space(5.0);
 
-        let component_index = app
-            .masks
-            .selected_component
-            .unwrap_or(0)
-            .min(app.masks.masks[mask_index].components.len().saturating_sub(1));
+        let component_index = app.masks.selected_component.unwrap_or(0).min(
+            app.masks.masks[mask_index]
+                .components
+                .len()
+                .saturating_sub(1),
+        );
         app.masks.selected_component = Some(component_index);
 
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
         let mut request_subject = false;
+        let mut request_object = false;
         let mut brush_mode = app.brush_mode;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
@@ -839,6 +844,7 @@ impl Sidebar {
                     component_index,
                     &mut brush_mode,
                     &mut request_subject,
+                    &mut request_object,
                 );
             });
 
@@ -879,6 +885,9 @@ impl Sidebar {
         if request_subject {
             app.request_subject_mask(frame);
         }
+        if request_object {
+            app.request_object_mask(mask_index, component_index);
+        }
         if geometry_changed {
             app.mark_mask_geometry_dirty(mask_index);
         }
@@ -903,16 +912,18 @@ impl Sidebar {
         ui.add_space(5.0);
 
         let mask_section = app.mask_section;
-        let component_index = app
-            .masks
-            .selected_component
-            .unwrap_or(0)
-            .min(app.masks.masks[mask_index].components.len().saturating_sub(1));
+        let component_index = app.masks.selected_component.unwrap_or(0).min(
+            app.masks.masks[mask_index]
+                .components
+                .len()
+                .saturating_sub(1),
+        );
         app.masks.selected_component = Some(component_index);
 
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
         let mut request_subject = false;
+        let mut request_object = false;
         let mut brush_mode = app.brush_mode;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
@@ -927,6 +938,7 @@ impl Sidebar {
                         component_index,
                         &mut brush_mode,
                         &mut request_subject,
+                        &mut request_object,
                     );
                 }
                 section => {
@@ -965,6 +977,9 @@ impl Sidebar {
         if request_subject {
             app.request_subject_mask(frame);
         }
+        if request_object {
+            app.request_object_mask(mask_index, component_index);
+        }
         if geometry_changed {
             app.mark_mask_geometry_dirty(mask_index);
         }
@@ -979,6 +994,7 @@ impl Sidebar {
         component_index: usize,
         brush_mode: &mut BrushMode,
         request_subject: &mut bool,
+        request_object: &mut bool,
     ) -> bool {
         let mut geometry_changed = adjustment_slider(
             ui,
@@ -1097,6 +1113,85 @@ impl Sidebar {
                         Some("Softens the BiRefNet subject boundary."),
                     );
                 }
+                MaskGeometry::Object {
+                    mask: generated_mask,
+                    feather,
+                    brush_size,
+                    brush_feather,
+                    edge_refine,
+                    detailed_edges,
+                    strokes,
+                } => {
+                    *brush_mode = BrushMode::Paint;
+                    ui.label(if generated_mask.is_some() {
+                        "Draw again on the image to replace this object selection from scratch."
+                    } else {
+                        "Paint through the middle of the object part you want to select."
+                    });
+                    ui.strong("Selection brush");
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Size",
+                        brush_size,
+                        0.0025..=0.25,
+                        3,
+                        0.0025,
+                        Some("Uses the same radius and on-canvas falloff as a regular Brush mask."),
+                    );
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Feather",
+                        brush_feather,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Uses the same soft brush edge as a regular Brush mask. It only guides object selection."),
+                    );
+                    ui.add_space(4.0);
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Mask feather",
+                        feather,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Softens the final object mask after SAM selection."),
+                    );
+                    let refine_changed = adjustment_slider(
+                        ui,
+                        "Edge refine",
+                        edge_refine,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Aligns uncertain SAM boundaries to local image edges."),
+                    );
+                    geometry_changed |= refine_changed;
+                    if refine_changed && !strokes.is_empty() {
+                        *request_object = true;
+                    }
+                    let detailed_changed = ui
+                        .checkbox(detailed_edges, "Enhanced fine edges")
+                        .on_hover_text(
+                            "Runs a stronger edge-aware pass for hair and fur in the uncertain boundary band. This is not alpha matting.",
+                        )
+                        .changed();
+                    geometry_changed |= detailed_changed;
+                    if detailed_changed && !strokes.is_empty() {
+                        *request_object = true;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.small_button("Recalculate object").clicked() {
+                            *request_object = true;
+                        }
+                        if ui.small_button("Clear selection").clicked() {
+                            strokes.clear();
+                            *generated_mask = None;
+                            geometry_changed = true;
+                        }
+                    });
+                    ui.small(format!("{} selection stroke(s)", strokes.len()));
+                }
                 MaskGeometry::LuminanceRange {
                     low,
                     high,
@@ -1203,12 +1298,7 @@ impl Sidebar {
                         image_width,
                         image_height,
                     );
-                    Self::gray_thumbnail_image(
-                        gray,
-                        thumbnail_width,
-                        thumbnail_height,
-                        edge,
-                    )
+                    Self::gray_thumbnail_image(gray, thumbnail_width, thumbnail_height, edge)
                 })
                 .collect();
             Self::update_thumbnail_textures(
@@ -1274,12 +1364,7 @@ impl Sidebar {
         }
     }
 
-    fn gray_thumbnail_image(
-        gray: Vec<u8>,
-        width: u32,
-        height: u32,
-        edge: u32,
-    ) -> egui::ColorImage {
+    fn gray_thumbnail_image(gray: Vec<u8>, width: u32, height: u32, edge: u32) -> egui::ColorImage {
         let width = width.min(edge) as usize;
         let height = height.min(edge) as usize;
         let edge = edge as usize;
@@ -1419,6 +1504,11 @@ impl Sidebar {
     fn prepare_content_mask(app: &mut AurawApp, frame: &eframe::Frame, kind: MaskKind) {
         match kind {
             MaskKind::Subject | MaskKind::Background => app.request_subject_mask(frame),
+            MaskKind::Object => {
+                if let Err(error) = app.capture_mask_source(frame) {
+                    app.status = error;
+                }
+            }
             MaskKind::LuminanceRange | MaskKind::ColorRange => {
                 if let Err(error) = app.capture_mask_source(frame) {
                     app.status = error;
@@ -1596,11 +1686,7 @@ impl Sidebar {
         adjustment: &mut crate::pipeline::LocalAdjustments,
         selected_grade_tab: &mut ColorGradeTab,
     ) -> bool {
-        color_grading_editor(
-            ui,
-            &mut adjustment.color_grading,
-            selected_grade_tab,
-        )
+        color_grading_editor(ui, &mut adjustment.color_grading, selected_grade_tab)
     }
 
     fn show_local_mask_tone_curve(
@@ -1624,11 +1710,7 @@ impl Sidebar {
                     egui::Color32::from_rgb(88, 150, 245),
                 ),
             ] {
-                ui.selectable_value(
-                    selected_tab,
-                    tab,
-                    egui::RichText::new(label).color(color),
-                );
+                ui.selectable_value(selected_tab, tab, egui::RichText::new(label).color(color));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Reset curve").clicked() {
@@ -1747,8 +1829,7 @@ impl Sidebar {
         egui::CollapsingHeader::new("Color Grading")
             .default_open(false)
             .show(ui, |ui| {
-                changed |=
-                    Self::show_local_mask_color_grading(ui, adjustment, selected_grade_tab);
+                changed |= Self::show_local_mask_color_grading(ui, adjustment, selected_grade_tab);
             });
         egui::CollapsingHeader::new("Tone Curve")
             .default_open(false)
