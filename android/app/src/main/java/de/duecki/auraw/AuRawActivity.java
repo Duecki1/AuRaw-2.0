@@ -269,6 +269,37 @@ public final class AuRawActivity extends NativeActivity {
                 "AuRaw library open").start();
     }
 
+    /** Removes the visible edit sidecar belonging to one library RAW. */
+    public void removeRawSidecar(String rawUriText, String displayName) throws Exception {
+        Uri rawUri = Uri.parse(rawUriText);
+        verifyRawLibraryIdentity(rawUri, displayName);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            for (Uri sidecarUri : scopedSidecarUris(displayName)) {
+                getContentResolver().delete(sidecarUri, null, null);
+            }
+        } else {
+            File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
+            if (sidecar.exists() && !sidecar.delete()) {
+                throw new IllegalStateException("Could not delete the RAW sidecar");
+            }
+        }
+    }
+
+    /** Deletes a library RAW and its sidecar after validating AuRaw ownership. */
+    public void deleteRawLibraryDocument(String rawUriText, String displayName) throws Exception {
+        Uri rawUri = Uri.parse(rawUriText);
+        verifyRawLibraryIdentity(rawUri, displayName);
+        removeRawSidecar(rawUriText, displayName);
+        if (ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
+            File raw = new File(rawUri.getPath());
+            if (raw.exists() && !raw.delete()) {
+                throw new IllegalStateException("Could not delete the RAW file");
+            }
+        } else if (getContentResolver().delete(rawUri, null, null) <= 0) {
+            throw new IllegalStateException("Android storage could not delete the RAW file");
+        }
+    }
+
     /**
      * Copies an existing visible sibling sidecar into private cache. Rust calls
      * this only from its decode worker, then removes the returned cache file.

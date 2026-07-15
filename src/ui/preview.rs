@@ -223,12 +223,14 @@ impl Preview {
 
         if app.sidebar_tab == SidebarTab::Masks {
             if !touch_navigation && !fit_gesture {
-                Self::handle_mask_interaction(ui, app, image_rect, &response);
+                Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response);
             }
-            // Keep the selected mask's handles visible even when the colored
-            // coverage overlay is hidden.
-            Self::paint_mask_overlay(ui, app, image_rect);
-            Self::paint_tool_hint(ui, app, image_rect);
+            // Keep every mask interaction and overlay clipped to the visible
+            // preview. A zoomed image rect can extend behind the sidebar, and
+            // touch input reports a pointer position there even though that
+            // area belongs to the UI rather than the canvas.
+            Self::paint_mask_overlay(ui, app, image_rect, visible_screen);
+            Self::paint_tool_hint(ui, app, visible_screen);
         }
     }
 
@@ -236,6 +238,7 @@ impl Preview {
         ui: &Ui,
         app: &mut AurawApp,
         image_rect: Rect,
+        preview_rect: Rect,
         response: &egui::Response,
     ) {
         let Some(mask_index) = app.masks.selected_mask else {
@@ -263,9 +266,12 @@ impl Preview {
             return;
         }
         app.active_mask_tool = Some(kind);
-        let pointer = response.interact_pointer_pos();
-        let primary_down =
-            response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
+        let pointer = response
+            .interact_pointer_pos()
+            .filter(|position| preview_rect.contains(*position));
+        let primary_down = pointer.is_some()
+            && response.is_pointer_button_down_on()
+            && ui.input(|input| input.pointer.primary_down());
         if !primary_down {
             let object_stroke_finished = kind == MaskKind::Object && app.last_brush_point.is_some();
             app.finish_mask_geometry_interaction();
@@ -576,7 +582,12 @@ impl Preview {
         }
     }
 
-    fn paint_mask_overlay(ui: &Ui, app: &mut AurawApp, image_rect: Rect) {
+    fn paint_mask_overlay(
+        ui: &Ui,
+        app: &mut AurawApp,
+        image_rect: Rect,
+        preview_rect: Rect,
+    ) {
         let Some(mask_index) = app.masks.selected_mask else {
             return;
         };
@@ -589,7 +600,7 @@ impl Preview {
             .map(mask_component_color)
             .unwrap_or(Color32::from_rgb(78, 163, 255));
         let subtract = Color32::from_rgb(255, 105, 105);
-        let painter = ui.painter_at(image_rect);
+        let painter = ui.painter_at(preview_rect);
 
         // An untouched mask remains visible after its selection flashes. Once
         // local adjustments exist, selection still flashes for orientation but
@@ -623,7 +634,7 @@ impl Preview {
             && ui
                 .ctx()
                 .pointer_interact_pos()
-                .is_some_and(|position| image_rect.contains(position));
+                .is_some_and(|position| preview_rect.contains(position));
         if pointer_editing {
             let editing_live_mask = neutral
                 && selected_component.is_some_and(|index| {
@@ -642,7 +653,14 @@ impl Preview {
         }
         if mask.enabled {
             if let Some(component) = coverage_target {
-                Self::paint_coverage_texture(ui, app, image_rect, mask_index, component);
+                Self::paint_coverage_texture(
+                    ui,
+                    app,
+                    image_rect,
+                    preview_rect,
+                    mask_index,
+                    component,
+                );
             }
         }
 
@@ -735,7 +753,7 @@ impl Preview {
             if let Some(pointer) = ui
                 .ctx()
                 .pointer_hover_pos()
-                .filter(|p| image_rect.contains(*p))
+                .filter(|position| preview_rect.contains(*position))
             {
                 if let Some(component) = app.masks.selected_component() {
                     let cursor_color = match app.brush_mode {
@@ -768,6 +786,7 @@ impl Preview {
         ui: &Ui,
         app: &mut AurawApp,
         image_rect: Rect,
+        preview_rect: Rect,
         mask_index: usize,
         component_index: Option<usize>,
     ) {
@@ -826,11 +845,11 @@ impl Preview {
         }
 
         if let Some(texture) = &app.mask_overlay_texture {
-            painter_image(ui, texture.id(), image_rect);
+            painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
         }
     }
 
-    fn paint_tool_hint(ui: &Ui, app: &AurawApp, image_rect: Rect) {
+    fn paint_tool_hint(ui: &Ui, app: &AurawApp, preview_rect: Rect) {
         let Some(kind) = app.active_mask_tool else {
             return;
         };
@@ -871,8 +890,8 @@ impl Preview {
             }
             _ => return,
         };
-        let painter = ui.painter_at(image_rect);
-        let position = image_rect.left_top() + egui::vec2(12.0, 12.0);
+        let painter = ui.painter_at(preview_rect);
+        let position = preview_rect.left_top() + egui::vec2(12.0, 12.0);
         painter.text(
             position,
             egui::Align2::LEFT_TOP,
@@ -1135,8 +1154,8 @@ fn preview_uv_changed(left: crate::app::PreviewUvRect, right: crate::app::Previe
         .any(|(left, right)| (left - right).abs() > 0.0005)
 }
 
-fn painter_image(ui: &Ui, texture_id: egui::TextureId, rect: Rect) {
-    ui.painter_at(rect).image(
+fn painter_image_clipped(ui: &Ui, texture_id: egui::TextureId, rect: Rect, clip_rect: Rect) {
+    ui.painter_at(clip_rect).image(
         texture_id,
         rect,
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),

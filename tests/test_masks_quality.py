@@ -106,3 +106,12 @@ def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
     assert "let top = sample(x0, y0)" in MASKS
     assert "let bottom = sample(x0, y1)" in MASKS
     assert "*value = top + (bottom - top) * fy" in MASKS
+
+
+def test_mask_input_and_cursor_are_clipped_to_the_visible_preview() -> None:
+    assert "Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response)" in PREVIEW
+    assert ".filter(|position| preview_rect.contains(*position))" in PREVIEW
+    assert "let primary_down = pointer.is_some()" in PREVIEW
+    assert "Self::paint_mask_overlay(ui, app, image_rect, visible_screen)" in PREVIEW
+    assert "let painter = ui.painter_at(preview_rect);" in PREVIEW
+    assert "painter_image_clipped" in PREVIEW
