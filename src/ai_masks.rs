@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
+use image::{ImageBuffer, Luma, Rgba, imageops::FilterType};
 use ort::{session::Session, value::Tensor};
 use rayon::prelude::*;
 use ring::digest::{Context as Sha256Context, SHA256};
@@ -7,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex, OnceLock},
+    sync::{Mutex, OnceLock, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -724,7 +724,7 @@ fn sigmoid_probability(logit: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{sigmoid_probability, validate_birefnet_output_shape, Letterbox, MODEL_SIZE};
+    use super::{Letterbox, MODEL_SIZE, sigmoid_probability, validate_birefnet_output_shape};
 
     #[test]
     fn letterbox_preserves_landscape_aspect_ratio() {
@@ -812,6 +812,7 @@ pub struct ObjectInferenceCache {
     /// reused for any prompts in the same crop, while prior logits are only
     /// valid when the new prompt list extends this one.
     pub prompt_strokes: Vec<crate::pipeline::ObjectStroke>,
+    pub prompt_brush_size: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -820,6 +821,7 @@ pub struct ObjectMaskRequest {
     pub source_height: u32,
     pub source_rgba: Vec<u8>,
     pub strokes: Vec<crate::pipeline::ObjectStroke>,
+    pub brush_size: f32,
     pub edge_refine: f32,
     pub detailed_edges: bool,
     pub cache: Option<ObjectInferenceCache>,
@@ -1083,7 +1085,14 @@ fn infer_object_mask(
     )
     .context("invalid canonical image for object selection")?;
 
-    let prompts = sampled_object_prompts(&request.strokes, SAM21_MAX_PROMPTS);
+    let prompt_set = sampled_object_prompts(
+        &request.strokes,
+        request.brush_size,
+        request.source_width,
+        request.source_height,
+        SAM21_MAX_PROMPTS,
+    );
+    let prompts = &prompt_set.prompts;
     let supplied_cache = request.cache;
     let mut last_result = None;
 
@@ -1091,7 +1100,7 @@ fn infer_object_mask(
         let crop = object_crop_for_prompts(
             request.source_width,
             request.source_height,
-            &prompts,
+            prompt_set.focus,
             expansion,
         );
         let cached = supplied_cache
@@ -1112,7 +1121,8 @@ fn infer_object_mask(
         );
 
         let (features, previous_logits) = if let Some(cache) = cached {
-            let can_reuse_logits = strokes_extend(&cache.prompt_strokes, &request.strokes);
+            let can_reuse_logits = strokes_extend(&cache.prompt_strokes, &request.strokes)
+                && (cache.prompt_brush_size - request.brush_size).abs() <= f32::EPSILON;
             (cache, can_reuse_logits)
         } else {
             (
@@ -1126,7 +1136,7 @@ fn infer_object_mask(
                 false,
             )
         };
-        let decoded = decode_sam_mask(decoder_path, &features, &prompts, previous_logits)?;
+        let decoded = decode_sam_mask(decoder_path, &features, &prompt_set, previous_logits)?;
         let touches_border =
             mask_touches_crop_border(&decoded.probabilities, decoded.width, decoded.height);
         last_result = Some((crop, resized, features, decoded));
@@ -1144,7 +1154,7 @@ fn infer_object_mask(
         decoded.probabilities,
         decoded.width,
         decoded.height,
-        &prompts,
+        prompts,
         request.source_width,
         request.source_height,
         crop,
@@ -1192,6 +1202,7 @@ fn infer_object_mask(
     )
     .into();
     cache.prompt_strokes = request.strokes.clone();
+    cache.prompt_brush_size = request.brush_size;
 
     Ok(ObjectMaskResult {
         width: request.source_width,
@@ -1212,53 +1223,192 @@ fn strokes_extend(
             .all(|(previous, current)| previous == current)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObjectPromptKind {
+    Foreground,
+    Background,
+    BoxTopLeft,
+    BoxBottomRight,
+}
+
+impl ObjectPromptKind {
+    const fn sam_label(self) -> f32 {
+        match self {
+            Self::Foreground => 1.0,
+            Self::Background => 0.0,
+            Self::BoxTopLeft => 2.0,
+            Self::BoxBottomRight => 3.0,
+        }
+    }
+
+    const fn is_foreground(self) -> bool {
+        matches!(self, Self::Foreground)
+    }
+
+    const fn is_background(self) -> bool {
+        matches!(self, Self::Background)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct ObjectPrompt {
     point: [f32; 2],
-    positive: bool,
+    kind: ObjectPromptKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ObjectPromptFocus {
+    min: [f32; 2],
+    max: [f32; 2],
+}
+
+impl ObjectPromptFocus {
+    fn contains(self, point: [f32; 2]) -> bool {
+        point[0] >= self.min[0]
+            && point[0] <= self.max[0]
+            && point[1] >= self.min[1]
+            && point[1] <= self.max[1]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ObjectPromptSet {
+    prompts: Vec<ObjectPrompt>,
+    focus: ObjectPromptFocus,
 }
 
 fn sampled_object_prompts(
     strokes: &[crate::pipeline::ObjectStroke],
+    brush_size: f32,
+    source_width: u32,
+    source_height: u32,
     limit: usize,
-) -> Vec<ObjectPrompt> {
-    let mut all = Vec::new();
+) -> ObjectPromptSet {
+    let mut foreground_points = Vec::new();
+    let mut explicit_background_points = Vec::new();
     for stroke in strokes {
-        if stroke.points.is_empty() {
-            continue;
+        let target = if stroke.positive {
+            &mut foreground_points
+        } else {
+            &mut explicit_background_points
+        };
+        target.extend(
+            stroke
+                .points
+                .iter()
+                .map(|point| [point[0].clamp(0.0, 1.0), point[1].clamp(0.0, 1.0)]),
+        );
+    }
+
+    let focus = object_prompt_focus(&foreground_points, brush_size, source_width, source_height);
+    let foreground_budget = limit.saturating_sub(10).clamp(1, 16);
+    let background_budget = limit.saturating_sub(foreground_budget + 2).min(6);
+    let mut prompts = evenly_sample(&foreground_points, foreground_budget)
+        .into_iter()
+        .map(|point| ObjectPrompt {
+            point,
+            kind: ObjectPromptKind::Foreground,
+        })
+        .collect::<Vec<_>>();
+    prompts.extend(
+        evenly_sample(&explicit_background_points, background_budget)
+            .into_iter()
+            .map(|point| ObjectPrompt {
+                point,
+                kind: ObjectPromptKind::Background,
+            }),
+    );
+
+    // A box tells SAM that the painted region is the intended object part,
+    // rather than merely one foreground sample somewhere on a larger person or
+    // connected object. Labels 2 and 3 are SAM's top-left/bottom-right box
+    // prompts.
+    if prompts.len() + 2 <= limit {
+        prompts.push(ObjectPrompt {
+            point: focus.min,
+            kind: ObjectPromptKind::BoxTopLeft,
+        });
+        prompts.push(ObjectPrompt {
+            point: focus.max,
+            kind: ObjectPromptKind::BoxBottomRight,
+        });
+    }
+
+    // Automatic background guards just outside the brush-sized focus box make
+    // a stroke through an arm prefer the arm instead of the nearby shoulder and
+    // torso. They remain outside the painted area and are omitted at image
+    // boundaries where clamping would move them back into the focus region.
+    let width = source_width.max(1) as f32;
+    let height = source_height.max(1) as f32;
+    let image_min = source_width.min(source_height).max(1) as f32;
+    let radius_x = brush_size.clamp(0.0025, 0.5) * image_min / width;
+    let radius_y = brush_size.clamp(0.0025, 0.5) * image_min / height;
+    let gap_x = (radius_x * 0.85).max(6.0 / width);
+    let gap_y = (radius_y * 0.85).max(6.0 / height);
+    let center = [
+        (focus.min[0] + focus.max[0]) * 0.5,
+        (focus.min[1] + focus.max[1]) * 0.5,
+    ];
+    let guards = [
+        [focus.min[0] - gap_x, focus.min[1] - gap_y],
+        [center[0], focus.min[1] - gap_y],
+        [focus.max[0] + gap_x, focus.min[1] - gap_y],
+        [focus.min[0] - gap_x, center[1]],
+        [focus.max[0] + gap_x, center[1]],
+        [focus.min[0] - gap_x, focus.max[1] + gap_y],
+        [center[0], focus.max[1] + gap_y],
+        [focus.max[0] + gap_x, focus.max[1] + gap_y],
+    ];
+    for guard in guards {
+        if prompts.len() >= limit {
+            break;
         }
-        let budget = if stroke.positive { 12 } else { 8 };
-        let count = budget.min(stroke.points.len()).max(1);
-        for index in 0..count {
-            let source_index = if count == 1 {
-                stroke.points.len() / 2
-            } else {
-                index * (stroke.points.len() - 1) / (count - 1)
-            };
-            all.push(ObjectPrompt {
-                point: stroke.points[source_index],
-                positive: stroke.positive,
+        let point = [guard[0].clamp(0.0, 1.0), guard[1].clamp(0.0, 1.0)];
+        if !focus.contains(point) {
+            prompts.push(ObjectPrompt {
+                point,
+                kind: ObjectPromptKind::Background,
             });
         }
     }
-    if all.len() > limit {
-        let positive = all
-            .iter()
-            .copied()
-            .filter(|prompt| prompt.positive)
-            .collect::<Vec<_>>();
-        let negative = all
-            .iter()
-            .copied()
-            .filter(|prompt| !prompt.positive)
-            .collect::<Vec<_>>();
-        let positive_budget = limit.saturating_sub(negative.len().min(limit / 3)).max(1);
-        let mut reduced = evenly_sample(&positive, positive_budget);
-        let remaining = limit.saturating_sub(reduced.len());
-        reduced.extend(evenly_sample(&negative, remaining));
-        reduced
-    } else {
-        all
+
+    ObjectPromptSet { prompts, focus }
+}
+
+fn object_prompt_focus(
+    foreground_points: &[[f32; 2]],
+    brush_size: f32,
+    source_width: u32,
+    source_height: u32,
+) -> ObjectPromptFocus {
+    let mut min = [1.0f32, 1.0f32];
+    let mut max = [0.0f32, 0.0f32];
+    for point in foreground_points {
+        min[0] = min[0].min(point[0]);
+        min[1] = min[1].min(point[1]);
+        max[0] = max[0].max(point[0]);
+        max[1] = max[1].max(point[1]);
+    }
+    if foreground_points.is_empty() {
+        min = [0.45, 0.45];
+        max = [0.55, 0.55];
+    }
+
+    let width = source_width.max(1) as f32;
+    let height = source_height.max(1) as f32;
+    let image_min = source_width.min(source_height).max(1) as f32;
+    let radius = brush_size.clamp(0.0025, 0.5) * image_min;
+    let padding_x = (radius * 1.35 + 8.0) / width;
+    let padding_y = (radius * 1.35 + 8.0) / height;
+    ObjectPromptFocus {
+        min: [
+            (min[0] - padding_x).clamp(0.0, 1.0),
+            (min[1] - padding_y).clamp(0.0, 1.0),
+        ],
+        max: [
+            (max[0] + padding_x).clamp(0.0, 1.0),
+            (max[1] + padding_y).clamp(0.0, 1.0),
+        ],
     }
 }
 
@@ -1277,7 +1427,7 @@ fn evenly_sample<T: Copy>(values: &[T], count: usize) -> Vec<T> {
 fn object_crop_for_prompts(
     width: u32,
     height: u32,
-    prompts: &[ObjectPrompt],
+    focus: ObjectPromptFocus,
     expansion: usize,
 ) -> ObjectCropRect {
     if expansion >= 2 {
@@ -1288,24 +1438,12 @@ fn object_crop_for_prompts(
             height,
         };
     }
-    let mut min_x = 1.0f32;
-    let mut min_y = 1.0f32;
-    let mut max_x = 0.0f32;
-    let mut max_y = 0.0f32;
-    // Include subtract prompts in the crop so corrections painted just outside
-    // the current object are not clamped onto the crop edge.
-    for prompt in prompts {
-        min_x = min_x.min(prompt.point[0]);
-        min_y = min_y.min(prompt.point[1]);
-        max_x = max_x.max(prompt.point[0]);
-        max_y = max_y.max(prompt.point[1]);
-    }
-    let center_x = ((min_x + max_x) * 0.5 * width as f32).clamp(0.0, width as f32);
-    let center_y = ((min_y + max_y) * 0.5 * height as f32).clamp(0.0, height as f32);
-    let bounds_w = (max_x - min_x).max(0.0) * width as f32;
-    let bounds_h = (max_y - min_y).max(0.0) * height as f32;
+    let center_x = ((focus.min[0] + focus.max[0]) * 0.5 * width as f32).clamp(0.0, width as f32);
+    let center_y = ((focus.min[1] + focus.max[1]) * 0.5 * height as f32).clamp(0.0, height as f32);
+    let bounds_w = (focus.max[0] - focus.min[0]).max(0.0) * width as f32;
+    let bounds_h = (focus.max[1] - focus.min[1]).max(0.0) * height as f32;
     let minimum = width.min(height) as f32 * 0.16;
-    let factor = if expansion == 0 { 1.7 } else { 2.5 };
+    let factor = if expansion == 0 { 1.5 } else { 2.3 };
     let mut edge = bounds_w.max(bounds_h).max(minimum).max(96.0) * factor;
     edge = edge.min(width.max(height) as f32);
     let crop_width = edge.round().clamp(1.0, width as f32) as u32;
@@ -1390,6 +1528,7 @@ fn encode_sam_image(
         image_embedding: tensors.2,
         low_res_logits: vec![0.0; (SAM21_MASK_INPUT_SIZE * SAM21_MASK_INPUT_SIZE) as usize].into(),
         prompt_strokes: Vec::new(),
+        prompt_brush_size: 0.0,
     })
 }
 
@@ -1452,9 +1591,10 @@ struct DecodedSamMask {
 fn decode_sam_mask(
     decoder_path: &Path,
     cache: &ObjectInferenceCache,
-    prompts: &[ObjectPrompt],
+    prompt_set: &ObjectPromptSet,
     use_previous_mask: bool,
 ) -> Result<DecodedSamMask> {
+    let prompts = &prompt_set.prompts;
     anyhow::ensure!(!prompts.is_empty(), "SAM 2.1 requires at least one prompt");
     anyhow::ensure!(
         prompts.len() <= SAM21_MAX_PROMPTS,
@@ -1474,7 +1614,7 @@ fn decode_sam_mask(
             / cache.crop.height.max(1) as f32
             * SAM21_MODEL_SIZE as f32)
             .clamp(0.0, SAM21_MODEL_SIZE as f32 - 1.0);
-        labels[index] = if prompt.positive { 1.0 } else { 0.0 };
+        labels[index] = prompt.kind.sam_label();
     }
 
     let image_embedding = tensor_from_sam_data(&cache.image_embedding, "image embedding")?;
@@ -1538,7 +1678,7 @@ fn decode_sam_mask(
             has_mask,
         )?
     };
-    select_sam_candidate(masks, scores, prompts, cache)
+    select_sam_candidate(masks, scores, prompt_set, cache)
 }
 
 fn tensor_from_sam_data(data: &SamTensorData, label: &str) -> Result<Tensor<f32>> {
@@ -1577,9 +1717,10 @@ fn run_sam_decoder(
 fn select_sam_candidate(
     masks: SamTensorData,
     scores: SamTensorData,
-    prompts: &[ObjectPrompt],
+    prompt_set: &ObjectPromptSet,
     cache: &ObjectInferenceCache,
 ) -> Result<DecodedSamMask> {
+    let prompts = &prompt_set.prompts;
     anyhow::ensure!(
         masks.shape.len() == 4 && masks.shape[0] == 1,
         "unexpected SAM mask shape {:?}",
@@ -1610,6 +1751,9 @@ fn select_sam_candidate(
         let logits = &masks.values[candidate * plane..(candidate + 1) * plane];
         let mut score = scores.values[candidate];
         for prompt in prompts {
+            if !prompt.kind.is_foreground() && !prompt.kind.is_background() {
+                continue;
+            }
             let source_x = prompt.point[0].clamp(0.0, 1.0) * cache.source_width as f32;
             let source_y = prompt.point[1].clamp(0.0, 1.0) * cache.source_height as f32;
             let px = (((source_x - cache.crop.x as f32) / cache.crop.width.max(1) as f32)
@@ -1621,14 +1765,19 @@ fn select_sam_candidate(
                 .round()
                 .clamp(0.0, height.saturating_sub(1) as f32) as usize;
             let probability = sigmoid(logits[py * width + px]);
-            score += if prompt.positive {
-                probability * 0.12
+            score += if prompt.kind.is_foreground() {
+                probability * 0.14
             } else {
-                (1.0 - probability) * 0.12
+                (1.0 - probability) * 0.16
             };
         }
+        let (outside_focus, focus_fill, area_ratio) =
+            candidate_focus_statistics(logits, width, height, prompt_set.focus, cache);
+        score -= outside_focus * 0.95;
+        score += focus_fill.min(0.75) * 0.22;
+        score -= (area_ratio - 2.0).max(0.0).min(5.0) * 0.10;
         let border = candidate_border_fraction(logits, width, height);
-        score -= border * 0.18;
+        score -= border * 0.20;
         if score > best_score {
             best_score = score;
             best_index = candidate;
@@ -1645,6 +1794,55 @@ fn select_sam_candidate(
         probabilities,
         selected_logits,
     })
+}
+
+fn candidate_focus_statistics(
+    logits: &[f32],
+    width: usize,
+    height: usize,
+    focus: ObjectPromptFocus,
+    cache: &ObjectInferenceCache,
+) -> (f32, f32, f32) {
+    let to_output_x = |normalized: f32| {
+        ((normalized.clamp(0.0, 1.0) * cache.source_width as f32 - cache.crop.x as f32)
+            / cache.crop.width.max(1) as f32
+            * width as f32)
+            .clamp(0.0, width as f32)
+    };
+    let to_output_y = |normalized: f32| {
+        ((normalized.clamp(0.0, 1.0) * cache.source_height as f32 - cache.crop.y as f32)
+            / cache.crop.height.max(1) as f32
+            * height as f32)
+            .clamp(0.0, height as f32)
+    };
+    let min_x = to_output_x(focus.min[0]);
+    let max_x = to_output_x(focus.max[0]);
+    let min_y = to_output_y(focus.min[1]);
+    let max_y = to_output_y(focus.max[1]);
+    let focus_area = ((max_x - min_x).max(1.0) * (max_y - min_y).max(1.0)).max(1.0);
+
+    let mut active = 0usize;
+    let mut inside = 0usize;
+    for y in 0..height {
+        for x in 0..width {
+            if logits[y * width + x] <= 0.0 {
+                continue;
+            }
+            active += 1;
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            if px >= min_x && px <= max_x && py >= min_y && py <= max_y {
+                inside += 1;
+            }
+        }
+    }
+    if active == 0 {
+        return (1.0, 0.0, 0.0);
+    }
+    let outside_fraction = (active - inside) as f32 / active as f32;
+    let focus_fill = inside as f32 / focus_area;
+    let area_ratio = active as f32 / focus_area;
+    (outside_fraction, focus_fill, area_ratio)
 }
 
 fn sigmoid(value: f32) -> f32 {
@@ -1697,7 +1895,7 @@ fn keep_prompt_connected_component(
     let mut keep = vec![false; probabilities.len()];
     let mut stack = Vec::new();
 
-    for prompt in prompts.iter().filter(|prompt| prompt.positive) {
+    for prompt in prompts.iter().filter(|prompt| prompt.kind.is_foreground()) {
         let sx = (prompt.point[0].clamp(0.0, 1.0) * source_width as f32 - crop.x as f32)
             / crop.width.max(1) as f32
             * width as f32;
@@ -1999,34 +2197,48 @@ mod object_mask_tests {
     }
 
     #[test]
-    fn prompt_sampling_keeps_foreground_and_background_within_limit() {
+    fn prompt_sampling_adds_box_and_background_guards_within_limit() {
         let strokes = vec![
             stroke(&[[0.1, 0.1], [0.2, 0.2], [0.3, 0.3], [0.4, 0.4]], true),
             stroke(&[[0.8, 0.8], [0.7, 0.7], [0.6, 0.6]], false),
         ];
-        let prompts = sampled_object_prompts(&strokes, 5);
-        assert!(prompts.len() <= 5);
-        assert!(prompts.iter().any(|prompt| prompt.positive));
-        assert!(prompts.iter().any(|prompt| !prompt.positive));
+        let set = sampled_object_prompts(&strokes, 0.04, 1000, 600, SAM21_MAX_PROMPTS);
+        assert!(set.prompts.len() <= SAM21_MAX_PROMPTS);
+        assert!(
+            set.prompts
+                .iter()
+                .any(|prompt| prompt.kind == ObjectPromptKind::Foreground)
+        );
+        assert!(
+            set.prompts
+                .iter()
+                .any(|prompt| prompt.kind == ObjectPromptKind::Background)
+        );
+        assert!(
+            set.prompts
+                .iter()
+                .any(|prompt| prompt.kind == ObjectPromptKind::BoxTopLeft)
+        );
+        assert!(
+            set.prompts
+                .iter()
+                .any(|prompt| prompt.kind == ObjectPromptKind::BoxBottomRight)
+        );
     }
 
     #[test]
-    fn subtract_prompts_are_inside_the_adaptive_crop() {
-        let prompts = vec![
-            ObjectPrompt {
-                point: [0.50, 0.50],
-                positive: true,
-            },
-            ObjectPrompt {
-                point: [0.72, 0.50],
-                positive: false,
-            },
-        ];
-        let crop = object_crop_for_prompts(1000, 600, &prompts, 0);
-        let negative_x = (prompts[1].point[0] * 1000.0) as u32;
-        assert!(negative_x >= crop.x && negative_x < crop.x + crop.width);
+    fn focus_and_guard_prompts_are_inside_the_adaptive_crop() {
+        let strokes = vec![stroke(&[[0.50, 0.50], [0.62, 0.50]], true)];
+        let set = sampled_object_prompts(&strokes, 0.035, 1000, 600, SAM21_MAX_PROMPTS);
+        let crop = object_crop_for_prompts(1000, 600, set.focus, 0);
+        for prompt in &set.prompts {
+            let x = (prompt.point[0] * 1000.0) as u32;
+            let y = (prompt.point[1] * 600.0) as u32;
+            assert!(x >= crop.x && x <= crop.x + crop.width);
+            assert!(y >= crop.y && y <= crop.y + crop.height);
+        }
         assert_eq!(
-            object_crop_for_prompts(1000, 600, &prompts, 2),
+            object_crop_for_prompts(1000, 600, set.focus, 2),
             ObjectCropRect {
                 x: 0,
                 y: 0,
@@ -2063,7 +2275,7 @@ mod object_mask_tests {
         probabilities[2 * width + 4] = 0.35;
         let prompts = [ObjectPrompt {
             point: [2.0 / width as f32, 2.0 / height as f32],
-            positive: true,
+            kind: ObjectPromptKind::Foreground,
         }];
         let cleaned = keep_prompt_connected_component(
             probabilities,
