@@ -46,9 +46,15 @@ def test_desktop_requires_runtime_before_model_download() -> None:
 
 
 def test_raw_geometry_is_rejected_before_unpack() -> None:
-    opened = RAW.index("validate_opened_raw_geometry(&ctx)")
-    unpack = RAW.index("libraw_unpack")
+    full_decode = RAW.index("fn load_raw_file_with_selected_profile")
+    opened = RAW.index("validate_opened_raw_geometry(&ctx)", full_decode)
+    unpack = RAW.index("ffi::libraw_unpack(ctx.raw)", full_decode)
     assert opened < unpack
+
+    thumbnail_decode = RAW.index("fn load_embedded_thumbnail")
+    thumbnail_guard = RAW.index("validate_opened_thumbnail_geometry(&ctx)")
+    thumbnail_unpack = RAW.index("ffi::libraw_unpack_thumb(ctx.raw)", thumbnail_decode)
+    assert thumbnail_guard < thumbnail_unpack
     assert "MAX_RAW_FILE_BYTES" in RAW
     assert "MAX_SENSOR_PIXELS" in RAW
     assert "validate_raw_dimensions" in RAW

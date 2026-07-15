@@ -104,6 +104,7 @@ impl eframe::App for AurawApp {
         // interaction can be coalesced to its final committed value before
         // the next worker starts.
         self.poll_sidecar_save();
+        self.poll_developed_thumbnail(frame);
     }
 
     fn on_exit(&mut self) {

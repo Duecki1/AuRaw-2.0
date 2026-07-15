@@ -227,6 +227,7 @@ impl LensCorrectionState {
 
 struct LoadedPreview {
     source_path: Option<PathBuf>,
+    raw_cache_key: String,
     label: String,
     original_raw: Arc<LoadedRaw>,
     full_raw: Arc<LoadedRaw>,
@@ -266,6 +267,18 @@ struct SidecarSaveEvent {
     result: Result<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DevelopedThumbnailJob {
+    target: crate::sidecar::SidecarTarget,
+    generation: u64,
+    revision: u64,
+}
+
+struct DevelopedThumbnailEvent {
+    job: DevelopedThumbnailJob,
+    result: Result<crate::pipeline::RawThumbnail, String>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SidecarAutosaveDeadline {
     generation: u64,
@@ -300,6 +313,28 @@ pub(crate) enum MaskDragState {
     },
 }
 
+
+pub(crate) const MAX_DESKTOP_RAW_CACHE_FILES: usize = 8;
+pub(crate) const MAX_ANDROID_RAW_CACHE_FILES: usize = 3;
+
+pub(crate) const fn default_raw_cache_limit() -> usize {
+    if cfg!(target_os = "android") { 1 } else { 2 }
+}
+
+pub(crate) const fn maximum_raw_cache_limit() -> usize {
+    if cfg!(target_os = "android") {
+        MAX_ANDROID_RAW_CACHE_FILES
+    } else {
+        MAX_DESKTOP_RAW_CACHE_FILES
+    }
+}
+
+#[derive(Clone)]
+struct CachedRawDecode {
+    key: String,
+    raw: Arc<LoadedRaw>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum MaskOverlayBlink {
     #[default]
@@ -329,6 +364,9 @@ pub struct AurawApp {
     preview_quality_dirty: bool,
     pub exposure: ExposureParams,
     pub(crate) library: LibraryState,
+    raw_cache: VecDeque<CachedRawDecode>,
+    raw_cache_limit: usize,
+    performance_settings_path: Option<PathBuf>,
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
     pub adjustment_section: AdjustmentSection,
@@ -375,6 +413,9 @@ pub struct AurawApp {
     sidecar_in_flight: Option<SidecarSaveJob>,
     sidecar_receiver: Option<mpsc::Receiver<SidecarSaveEvent>>,
     sidecar_autosave_deadline: Option<SidecarAutosaveDeadline>,
+    developed_thumbnail_pending: Option<DevelopedThumbnailJob>,
+    developed_thumbnail_in_flight: Option<DevelopedThumbnailJob>,
+    developed_thumbnail_receiver: Option<mpsc::Receiver<DevelopedThumbnailEvent>>,
 
     egui_ctx: egui::Context,
     target_exposure: ExposureParams,

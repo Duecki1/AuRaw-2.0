@@ -79,6 +79,19 @@ impl AurawApp {
         if needs_rewrite {
             self.queue_current_sidecar_save(false);
             self.start_next_sidecar_save();
+        } else {
+            #[cfg(not(target_os = "android"))]
+            if self
+                .sidecar_target
+                .as_ref()
+                .is_some_and(|target| match target {
+                    crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+                        crate::sidecar::sidecar_path_for_raw(raw_path).is_file()
+                    }
+                })
+            {
+                self.queue_developed_thumbnail_refresh(generation, self.edit_commit_revision());
+            }
         }
     }
 
@@ -301,6 +314,10 @@ impl AurawApp {
                 Ok(location) => {
                     let recovered_from_failure = self.sidecar_failed_revision.take().is_some();
                     self.sidecar_saved_revision = Some(event.job.revision);
+                    self.queue_developed_thumbnail_refresh(
+                        event.job.generation,
+                        event.job.revision,
+                    );
                     if event.job.explicit || recovered_from_failure {
                         self.notice = Some(format!("Edits saved to {location}."));
                     }
@@ -312,6 +329,252 @@ impl AurawApp {
             }
         } else if let Err(error) = event.result {
             log::warn!("sidecar save for an old RAW failed: {error}");
+        }
+    }
+
+    fn install_developed_thumbnail_result(
+        &mut self,
+        target: &crate::sidecar::SidecarTarget,
+        thumbnail: crate::pipeline::RawThumbnail,
+        revision: u64,
+    ) {
+        match target {
+            #[cfg(not(target_os = "android"))]
+            crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+                self.library.install_developed_thumbnail(
+                    raw_path,
+                    thumbnail,
+                    &self.egui_ctx,
+                    revision,
+                );
+            }
+            #[cfg(target_os = "android")]
+            crate::sidecar::SidecarTarget::Desktop { .. } => {}
+            #[cfg(target_os = "android")]
+            crate::sidecar::SidecarTarget::Android { raw_uri, .. } => {
+                self.library.install_android_developed_thumbnail(
+                    raw_uri,
+                    thumbnail,
+                    &self.egui_ctx,
+                    revision,
+                );
+            }
+        }
+    }
+
+    fn load_developed_thumbnail_for_target(
+        &self,
+        target: &crate::sidecar::SidecarTarget,
+    ) -> Result<Option<crate::pipeline::RawThumbnail>, String> {
+        match target {
+            #[cfg(not(target_os = "android"))]
+            crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+                crate::sidecar::load_developed_thumbnail_cache(raw_path, 512)
+            }
+            #[cfg(target_os = "android")]
+            crate::sidecar::SidecarTarget::Desktop { .. } => Ok(None),
+            #[cfg(target_os = "android")]
+            crate::sidecar::SidecarTarget::Android {
+                raw_uri,
+                display_name,
+            } => crate::android::load_developed_thumbnail_cache(
+                &self.android_app,
+                raw_uri,
+                display_name,
+                512,
+            ),
+        }
+    }
+
+    fn queue_developed_thumbnail_refresh(&mut self, generation: u64, revision: u64) {
+        if generation != self.sidecar_generation {
+            return;
+        }
+        let Some(target) = self.sidecar_target.clone() else {
+            return;
+        };
+        let job = DevelopedThumbnailJob {
+            target,
+            generation,
+            revision,
+        };
+
+        // Explicitly saving an unchanged revision must not perform another GPU
+        // readback. The exact sidecar fingerprint makes this reuse safe even on
+        // filesystems whose modification timestamps have coarse resolution.
+        match self.load_developed_thumbnail_for_target(&job.target) {
+            Ok(Some(thumbnail)) => {
+                self.install_developed_thumbnail_result(
+                    &job.target,
+                    thumbnail,
+                    revision,
+                );
+                if self.developed_thumbnail_pending.as_ref() == Some(&job) {
+                    self.developed_thumbnail_pending = None;
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("could not validate developed thumbnail cache: {error}");
+            }
+        }
+
+        if self.developed_thumbnail_in_flight.as_ref() == Some(&job)
+            || self.developed_thumbnail_pending.as_ref() == Some(&job)
+        {
+            return;
+        }
+        self.developed_thumbnail_pending = Some(job);
+        self.egui_ctx.request_repaint();
+    }
+
+    fn poll_developed_thumbnail(&mut self, frame: &eframe::Frame) {
+        let received = self
+            .developed_thumbnail_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match received {
+            Some(Ok(event)) => {
+                self.developed_thumbnail_receiver = None;
+                self.developed_thumbnail_in_flight = None;
+                match event.result {
+                    Ok(thumbnail) => self.install_developed_thumbnail_result(
+                        &event.job.target,
+                        thumbnail,
+                        event.job.revision,
+                    ),
+                    Err(error) => {
+                        // A changed sidecar is an expected race: the newer save
+                        // queues another capture. Other failures are still useful
+                        // diagnostics but should not interrupt editing.
+                        if error.contains("sidecar changed") {
+                            log::debug!("discarded stale developed thumbnail: {error}");
+                        } else {
+                            log::warn!("could not refresh developed thumbnail: {error}");
+                        }
+                    }
+                }
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.developed_thumbnail_receiver = None;
+                self.developed_thumbnail_in_flight = None;
+                log::warn!("developed-thumbnail worker stopped unexpectedly");
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+
+        if self.developed_thumbnail_in_flight.is_some() {
+            return;
+        }
+        let Some(job) = self.developed_thumbnail_pending.clone() else {
+            return;
+        };
+        if job.generation != self.sidecar_generation
+            || self.sidecar_target.as_ref() != Some(&job.target)
+        {
+            self.developed_thumbnail_pending = None;
+            return;
+        }
+        let current_revision = self.edit_commit_revision();
+        if current_revision != job.revision || self.sidecar_saved_revision != Some(job.revision) {
+            self.developed_thumbnail_pending = None;
+            return;
+        }
+        if self.preview_quality_dirty || self.lens_correction_dirty {
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        // Prefer the normal full-frame preview. While zoomed, edits deliberately
+        // leave that proxy pending; the current tiny navigation pipeline is still
+        // a complete adjusted full-frame image and is sufficient for a 512px card.
+        let snapshot = if self.pending_stage.is_none() {
+            self.gpu_pipeline
+                .as_ref()
+                .map(RawGpuPipeline::output_snapshot)
+        } else if self.navigation_pending_stage.is_none() {
+            self.preview_navigation
+                .as_ref()
+                .map(|preview| preview.pipeline.output_snapshot())
+        } else {
+            None
+        };
+        let Some(snapshot) = snapshot else {
+            self.egui_ctx.request_repaint();
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.developed_thumbnail_pending = None;
+            log::warn!("cannot cache developed thumbnail without the wgpu backend");
+            return;
+        };
+        let device = render_state.device.clone();
+        let queue = render_state.queue.clone();
+        let repaint = self.egui_ctx.clone();
+        let worker_job = job.clone();
+        let worker_target = job.target.clone();
+        #[cfg(target_os = "android")]
+        let android_app = self.android_app.clone();
+        let (sender, receiver) = mpsc::channel();
+        let spawn = std::thread::Builder::new()
+            .name("auraw-developed-thumbnail".to_owned())
+            .spawn(move || {
+                let result = (|| {
+                    let thumbnail = snapshot
+                        .read_thumbnail_blocking(&device, &queue, 512)
+                        .map_err(|error| format!("GPU thumbnail readback failed: {error:#}"))?;
+                    match &worker_target {
+                        #[cfg(not(target_os = "android"))]
+                        crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+                            let fingerprint =
+                                crate::sidecar::desktop_sidecar_fingerprint(raw_path)?.ok_or_else(
+                                    || {
+                                        "edit sidecar disappeared before thumbnail capture"
+                                            .to_owned()
+                                    },
+                                )?;
+                            crate::sidecar::save_developed_thumbnail_cache(
+                                raw_path,
+                                &thumbnail,
+                                fingerprint,
+                            )?;
+                        }
+                        #[cfg(target_os = "android")]
+                        crate::sidecar::SidecarTarget::Desktop { .. } => {
+                            return Err(
+                                "desktop sidecar target is unavailable on Android".to_owned(),
+                            );
+                        }
+                        #[cfg(target_os = "android")]
+                        crate::sidecar::SidecarTarget::Android {
+                            raw_uri,
+                            display_name,
+                        } => crate::android::save_developed_thumbnail_cache(
+                            &android_app,
+                            raw_uri,
+                            display_name,
+                            &thumbnail,
+                        )?,
+                    }
+                    Ok(thumbnail)
+                })();
+                let _ = sender.send(DevelopedThumbnailEvent {
+                    job: worker_job,
+                    result,
+                });
+                repaint.request_repaint();
+            });
+        match spawn {
+            Ok(_) => {
+                self.developed_thumbnail_pending = None;
+                self.developed_thumbnail_in_flight = Some(job);
+                self.developed_thumbnail_receiver = Some(receiver);
+            }
+            Err(error) => {
+                self.developed_thumbnail_pending = None;
+                log::warn!("could not start developed-thumbnail worker: {error}");
+            }
         }
     }
 

@@ -39,6 +39,7 @@ public final class AuRawActivity extends NativeActivity {
     private static final long MAX_RAW_IMPORT_BYTES = 2_000_000_000L;
     private static final long MAX_SIDECAR_BYTES = 32L * 1024L * 1024L;
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
+    private static final int MAX_THUMBNAIL_CACHE_FILES = 512;
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
     private static final String RAW_LIBRARY_RELATIVE_PATH =
             Environment.DIRECTORY_DOWNLOADS + "/AuRaw/";
@@ -66,7 +67,8 @@ public final class AuRawActivity extends NativeActivity {
         File[] cachedFiles = getCacheDir().listFiles((directory, name) ->
                 name.startsWith("auraw-library-")
                         || name.startsWith("auraw-import-")
-                        || name.startsWith("auraw-sidecar-"));
+                        || name.startsWith("auraw-sidecar-")
+                        || name.startsWith("auraw-thumbnail-"));
         deleteStaleFiles(cachedFiles);
 
         File[] partialImports = legacyRawLibraryDirectory().listFiles((directory, name) ->
@@ -157,6 +159,11 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
+    /** Private persistent path used for small application preferences. */
+    public String performanceSettingsPath() {
+        return new File(getFilesDir(), "auraw-performance.json").getAbsolutePath();
+    }
+
     /** Human-readable storage location shown by the Rust library UI. */
     public String rawLibraryLocation() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -194,6 +201,59 @@ public final class AuRawActivity extends NativeActivity {
             throw new IllegalStateException("The RAW library returned no file descriptor");
         }
         return descriptor.detachFd();
+    }
+
+    /**
+     * Returns a persistent private PNG path for an unedited RAW thumbnail. The
+     * RAW identity is part of the key, so replacing a MediaStore item never
+     * reuses pixels from the older file.
+     */
+    public String rawThumbnailCachePath(
+            String uriText,
+            long bytes,
+            long modifiedSeconds,
+            int maximumEdge) throws Exception {
+        return thumbnailCachePath(
+                "raw\n" + uriText + "\n" + bytes + "\n" + modifiedSeconds
+                        + "\n" + maximumEdge,
+                ".raw.png").getAbsolutePath();
+    }
+
+    /** Edited thumbnails are validated by Rust against the exact sidecar bytes. */
+    public String developedThumbnailCachePath(String uriText) throws Exception {
+        return thumbnailCachePath("developed\n" + uriText, ".developed.png").getAbsolutePath();
+    }
+
+    /**
+     * Slow compatibility fallback for providers/LibRaw builds that cannot seek
+     * through /proc/self/fd. The first successful decode is cached as PNG, so
+     * this full RAW copy is not repeated when the library is reopened.
+     */
+    public String materializeRawLibraryThumbnail(String uriText, String displayName)
+            throws Exception {
+        Uri uri = Uri.parse(uriText);
+        verifyRawLibraryIdentity(uri, displayName);
+        String safeName = safeRawName(displayName);
+        int dot = safeName.lastIndexOf('.');
+        String suffix = dot >= 0 ? safeName.substring(dot) : ".raw";
+        File cached = File.createTempFile("auraw-thumbnail-", suffix, getCacheDir());
+        boolean completed = false;
+        try {
+            try (InputStream input = openLibraryInput(uri);
+                 FileOutputStream output = new FileOutputStream(cached)) {
+                if (input == null) {
+                    throw new IllegalStateException("Android storage returned no RAW stream");
+                }
+                copy(input, output, MAX_RAW_IMPORT_BYTES);
+                output.getFD().sync();
+            }
+            completed = true;
+            return cached.getAbsolutePath();
+        } finally {
+            if (!completed && !cached.delete() && cached.exists()) {
+                cached.deleteOnExit();
+            }
+        }
     }
 
     /** Called when a library thumbnail is selected in Rust. */
@@ -471,6 +531,39 @@ public final class AuRawActivity extends NativeActivity {
             throw new IllegalArgumentException("The RAW name cannot be used for a sidecar");
         }
         return name + ".auraw";
+    }
+
+    private File thumbnailCachePath(String identity, String suffix) throws Exception {
+        File directory = new File(getCacheDir(), "library-thumbnails");
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IllegalStateException("Could not create the thumbnail cache");
+        }
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(
+                identity.getBytes(StandardCharsets.UTF_8));
+        StringBuilder name = new StringBuilder();
+        for (byte value : digest) {
+            name.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+        }
+        File cached = new File(directory, name.append(suffix).toString());
+        if (cached.isFile()) {
+            cached.setLastModified(System.currentTimeMillis());
+        }
+        trimThumbnailCache(directory);
+        return cached;
+    }
+
+    private static void trimThumbnailCache(File directory) {
+        File[] files = directory.listFiles(File::isFile);
+        if (files == null || files.length <= MAX_THUMBNAIL_CACHE_FILES) {
+            return;
+        }
+        Arrays.sort(files, (left, right) -> Long.compare(left.lastModified(), right.lastModified()));
+        int remove = files.length - MAX_THUMBNAIL_CACHE_FILES;
+        for (int index = 0; index < remove; index++) {
+            if (!files[index].delete() && files[index].exists()) {
+                files[index].deleteOnExit();
+            }
+        }
     }
 
     private static String sidecarStagePrefix(String rawDisplayName) {

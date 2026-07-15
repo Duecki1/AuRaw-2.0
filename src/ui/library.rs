@@ -16,30 +16,55 @@ use std::path::Path;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::Duration;
 #[cfg(not(target_os = "android"))]
 use std::time::SystemTime;
 
 const THUMBNAIL_EDGE: u32 = 512;
 const MAX_LIBRARY_FILES: usize = 20_000;
-#[cfg(not(target_os = "android"))]
-const MAX_DIRECTORY_DEPTH: usize = 64;
 const MAX_EVENTS_PER_FRAME: usize = 12;
-const MAX_PENDING_THUMBNAIL_RESULTS: usize = 8;
-const MAX_PENDING_THUMBNAILS: usize = 24;
+const MAX_PENDING_THUMBNAIL_RESULTS: usize = 32;
+const MAX_PENDING_THUMBNAILS: usize = 64;
 const DESKTOP_TEXTURE_CACHE_LIMIT: usize = 128;
 const ANDROID_TEXTURE_CACHE_LIMIT: usize = 48;
 #[cfg(target_os = "android")]
 const ANDROID_DEVELOP_TEXTURE_CACHE_LIMIT: usize = 10;
 const THUMBNAIL_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const THUMBNAIL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(8);
+pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 16;
+pub(crate) const MAX_ANDROID_THUMBNAIL_WORKERS: usize = 4;
+
+pub(crate) fn default_thumbnail_worker_count() -> usize {
+    if cfg!(target_os = "android") {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(2)
+            .clamp(1, 4)
+    }
+}
+
+pub(crate) fn maximum_thumbnail_worker_count() -> usize {
+    if cfg!(target_os = "android") {
+        MAX_ANDROID_THUMBNAIL_WORKERS
+    } else {
+        MAX_DESKTOP_THUMBNAIL_WORKERS
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum LibrarySource {
     #[cfg(not(target_os = "android"))]
     File(PathBuf),
     #[cfg(target_os = "android")]
-    Android { uri: String },
+    Android {
+        uri: String,
+        display_name: String,
+        bytes: u64,
+        modified_seconds: u64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -59,7 +84,13 @@ pub(crate) struct LibraryEntry {
     thumbnail_size: Option<[u32; 2]>,
     thumbnail_error: Option<String>,
     thumbnail_queued: bool,
+    developed_thumbnail: bool,
     last_used: u64,
+}
+
+struct LoadedLibraryThumbnail {
+    thumbnail: RawThumbnail,
+    developed: bool,
 }
 
 #[derive(Clone)]
@@ -78,7 +109,7 @@ enum ScanEvent {
     Thumbnail {
         generation: u64,
         source: LibrarySource,
-        result: Result<RawThumbnail, String>,
+        result: Result<LoadedLibraryThumbnail, String>,
     },
     Failed {
         generation: u64,
@@ -93,7 +124,7 @@ struct ThumbnailWorker {
     generation: u64,
     cancellation: Arc<AtomicU64>,
     decoding_paused: Arc<AtomicBool>,
-    decode_gate: Arc<Mutex<()>>,
+    decode_gate: Arc<RwLock<()>>,
     event_sender: mpsc::SyncSender<ScanEvent>,
     request_receiver: mpsc::Receiver<ThumbnailRequest>,
     repaint: egui::Context,
@@ -111,16 +142,22 @@ pub(crate) struct LibraryState {
     request_sender: Option<mpsc::SyncSender<ThumbnailRequest>>,
     generation: Arc<AtomicU64>,
     decoding_paused: Arc<AtomicBool>,
-    decode_gate: Arc<Mutex<()>>,
+    decode_gate: Arc<RwLock<()>>,
     scanning: bool,
     catalog_ready: bool,
     status: String,
     usage_clock: u64,
+    thumbnail_workers: usize,
 }
 
 impl LibraryState {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn new(context: &egui::Context) -> Self {
+        Self::new_with_workers(context, default_thumbnail_worker_count())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn new_with_workers(context: &egui::Context, workers: usize) -> Self {
         let _ = context;
         Self {
             location: None,
@@ -131,11 +168,12 @@ impl LibraryState {
             request_sender: None,
             generation: Arc::new(AtomicU64::new(0)),
             decoding_paused: Arc::new(AtomicBool::new(false)),
-            decode_gate: Arc::new(Mutex::new(())),
+            decode_gate: Arc::new(RwLock::new(())),
             scanning: false,
             catalog_ready: false,
             status: "Open a folder to build your RAW library.".to_owned(),
             usage_clock: 0,
+            thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
         }
     }
 
@@ -143,6 +181,19 @@ impl LibraryState {
     pub(crate) fn new_android(
         android_app: android_activity::AndroidApp,
         context: &egui::Context,
+    ) -> Self {
+        Self::new_android_with_workers(
+            android_app,
+            context,
+            default_thumbnail_worker_count(),
+        )
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn new_android_with_workers(
+        android_app: android_activity::AndroidApp,
+        context: &egui::Context,
+        workers: usize,
     ) -> Self {
         let location = crate::android::library_location(&android_app).unwrap_or_else(|error| {
             log::warn!("{error}");
@@ -157,11 +208,12 @@ impl LibraryState {
             request_sender: None,
             generation: Arc::new(AtomicU64::new(0)),
             decoding_paused: Arc::new(AtomicBool::new(false)),
-            decode_gate: Arc::new(Mutex::new(())),
+            decode_gate: Arc::new(RwLock::new(())),
             scanning: false,
             catalog_ready: false,
             status: String::new(),
             usage_clock: 0,
+            thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
         };
         state.refresh(context);
         state
@@ -169,6 +221,25 @@ impl LibraryState {
 
     pub(crate) fn location(&self) -> Option<&str> {
         self.location.as_deref()
+    }
+
+    pub(crate) fn thumbnail_worker_count(&self) -> usize {
+        self.thumbnail_workers
+    }
+
+    pub(crate) fn set_thumbnail_worker_count(
+        &mut self,
+        workers: usize,
+        context: &egui::Context,
+    ) {
+        let workers = workers.clamp(1, maximum_thumbnail_worker_count());
+        if self.thumbnail_workers == workers {
+            return;
+        }
+        self.thumbnail_workers = workers;
+        if self.location.is_some() {
+            self.refresh(context);
+        }
     }
 
     /// Stops the thumbnail worker from beginning another decode while a full
@@ -182,7 +253,7 @@ impl LibraryState {
 
     /// Returns the gate shared by all thumbnail generations. Full RAW workers
     /// use the same gate so a sensor decode cannot overlap a preview decode.
-    pub(crate) fn decode_gate(&self) -> Arc<Mutex<()>> {
+    pub(crate) fn decode_gate(&self) -> Arc<RwLock<()>> {
         Arc::clone(&self.decode_gate)
     }
 
@@ -192,8 +263,14 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn open_folder(&mut self, folder: PathBuf, context: &egui::Context) {
+        let folder_changed = self.folder.as_ref() != Some(&folder);
         self.location = Some(folder.display().to_string());
         self.folder = Some(folder);
+        if folder_changed {
+            self.entries.clear();
+            self.entry_indices.clear();
+            self.catalog_ready = false;
+        }
         self.refresh(context);
     }
 
@@ -202,15 +279,22 @@ impl LibraryState {
         let cancellation = Arc::clone(&self.generation);
         let decoding_paused = Arc::clone(&self.decoding_paused);
         let decode_gate = Arc::clone(&self.decode_gate);
+        let thumbnail_workers = self.thumbnail_workers;
         let repaint = context.clone();
         let (event_sender, event_receiver) = mpsc::sync_channel(MAX_PENDING_THUMBNAIL_RESULTS);
         let (request_sender, request_receiver) = mpsc::sync_channel(MAX_PENDING_THUMBNAILS);
         self.event_receiver = Some(event_receiver);
         self.request_sender = Some(request_sender);
-        self.entries.clear();
-        self.entry_indices.clear();
+        // Keep already decoded GPU textures visible while the same folder is
+        // rescanned. Catalog reconciliation below reuses only entries whose
+        // RAW identity is unchanged, so reopening/refreshing a folder does not
+        // flash every card back to a placeholder or decode cached PNGs again.
+        for entry in &mut self.entries {
+            entry.thumbnail_queued = false;
+            entry.thumbnail_error = None;
+        }
         self.scanning = true;
-        self.catalog_ready = false;
+        self.catalog_ready = !self.entries.is_empty();
         self.usage_clock = 0;
 
         #[cfg(not(target_os = "android"))]
@@ -238,7 +322,7 @@ impl LibraryState {
                     let Some((files, warning_count, truncated)) = scan else {
                         return;
                     };
-                    run_thumbnail_worker(
+                    run_thumbnail_workers(
                         ThumbnailWorker {
                             files,
                             warning_count,
@@ -251,10 +335,8 @@ impl LibraryState {
                             request_receiver,
                             repaint,
                         },
-                        |source| match source {
-                            LibrarySource::File(path) => load_raw_thumbnail(path, THUMBNAIL_EDGE)
-                                .map_err(|error| format!("{error:#}")),
-                        },
+                        thumbnail_workers,
+                        Arc::new(load_desktop_library_thumbnail),
                     );
                 })
         };
@@ -283,7 +365,12 @@ impl LibraryState {
                                 .map(|parent| parent.display().to_string())
                                 .unwrap_or_default();
                             LibraryFileInfo {
-                                source: LibrarySource::Android { uri: document.uri },
+                                source: LibrarySource::Android {
+                                    uri: document.uri,
+                                    display_name: document.display_name.clone(),
+                                    bytes: document.bytes,
+                                    modified_seconds: document.modified_seconds,
+                                },
                                 display_path: document.display_path,
                                 name: document.display_name,
                                 parent,
@@ -292,7 +379,7 @@ impl LibraryState {
                         })
                         .collect();
                     let thumbnail_app = android_app.clone();
-                    run_thumbnail_worker(
+                    run_thumbnail_workers(
                         ThumbnailWorker {
                             files,
                             warning_count: 0,
@@ -305,15 +392,10 @@ impl LibraryState {
                             request_receiver,
                             repaint,
                         },
-                        move |source| match source {
-                            LibrarySource::Android { uri } => {
-                                crate::android::load_library_thumbnail(
-                                    &thumbnail_app,
-                                    uri,
-                                    THUMBNAIL_EDGE,
-                                )
-                            }
-                        },
+                        thumbnail_workers,
+                        Arc::new(move |source| {
+                            load_android_library_thumbnail(&thumbnail_app, source)
+                        }),
                     );
                 })
         };
@@ -351,15 +433,23 @@ impl LibraryState {
                     warning_count,
                     truncated,
                 } if generation == self.generation.load(Ordering::Acquire) => {
+                    let mut previous = std::mem::take(&mut self.entries)
+                        .into_iter()
+                        .map(|entry| (entry.info.source.clone(), entry))
+                        .collect::<HashMap<_, _>>();
                     self.entries = files
                         .into_iter()
-                        .map(|info| LibraryEntry {
-                            info,
-                            texture: None,
-                            thumbnail_size: None,
-                            thumbnail_error: None,
-                            thumbnail_queued: false,
-                            last_used: 0,
+                        .map(|info| {
+                            if let Some(mut entry) = previous.remove(&info.source) {
+                                if same_library_file_identity(&entry.info, &info) {
+                                    entry.info = info;
+                                    entry.thumbnail_error = None;
+                                    entry.thumbnail_queued = false;
+                                    entry.last_used = 0;
+                                    return entry;
+                                }
+                            }
+                            new_library_entry(info)
                         })
                         .collect();
                     self.entry_indices = self
@@ -382,7 +472,11 @@ impl LibraryState {
                     };
                     self.entries[index].thumbnail_queued = false;
                     match result {
-                        Ok(thumbnail) => {
+                        Ok(loaded) => {
+                            if self.entries[index].developed_thumbnail && !loaded.developed {
+                                continue;
+                            }
+                            let thumbnail = loaded.thumbnail;
                             let image = egui::ColorImage::from_rgba_unmultiplied(
                                 [thumbnail.width as usize, thumbnail.height as usize],
                                 &thumbnail.rgba,
@@ -395,8 +489,13 @@ impl LibraryState {
                             self.entries[index].thumbnail_size =
                                 Some([thumbnail.width, thumbnail.height]);
                             self.entries[index].thumbnail_error = None;
+                            self.entries[index].developed_thumbnail = loaded.developed;
                         }
-                        Err(error) => self.entries[index].thumbnail_error = Some(error),
+                        Err(error) => {
+                            if !self.entries[index].developed_thumbnail {
+                                self.entries[index].thumbnail_error = Some(error);
+                            }
+                        }
                     }
                 }
                 ScanEvent::Failed { generation, error }
@@ -437,6 +536,62 @@ impl LibraryState {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn install_developed_thumbnail(
+        &mut self,
+        raw_path: &Path,
+        thumbnail: RawThumbnail,
+        context: &egui::Context,
+        revision: u64,
+    ) {
+        let source = LibrarySource::File(raw_path.to_owned());
+        let Some(index) = self.entry_indices.get(&source).copied() else {
+            return;
+        };
+        self.install_developed_thumbnail_at(index, thumbnail, context, revision);
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn install_android_developed_thumbnail(
+        &mut self,
+        raw_uri: &str,
+        thumbnail: RawThumbnail,
+        context: &egui::Context,
+        revision: u64,
+    ) {
+        let Some(index) = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.info.source,
+                LibrarySource::Android { uri, .. } if uri == raw_uri
+            )
+        }) else {
+            return;
+        };
+        self.install_developed_thumbnail_at(index, thumbnail, context, revision);
+    }
+
+    fn install_developed_thumbnail_at(
+        &mut self,
+        index: usize,
+        thumbnail: RawThumbnail,
+        context: &egui::Context,
+        revision: u64,
+    ) {
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [thumbnail.width as usize, thumbnail.height as usize],
+            &thumbnail.rgba,
+        );
+        self.entries[index].texture = Some(context.load_texture(
+            format!("library-developed-thumbnail-{index}-{revision}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        ));
+        self.entries[index].thumbnail_size = Some([thumbnail.width, thumbnail.height]);
+        self.entries[index].thumbnail_error = None;
+        self.entries[index].thumbnail_queued = false;
+        self.entries[index].developed_thumbnail = true;
+    }
+
     fn evict_old_textures(&mut self) {
         let limit = if cfg!(target_os = "android") {
             ANDROID_TEXTURE_CACHE_LIMIT
@@ -470,10 +625,125 @@ impl LibraryState {
     }
 }
 
-fn run_thumbnail_worker(
-    worker: ThumbnailWorker,
-    load: impl Fn(&LibrarySource) -> Result<RawThumbnail, String>,
-) {
+fn new_library_entry(info: LibraryFileInfo) -> LibraryEntry {
+    LibraryEntry {
+        info,
+        texture: None,
+        thumbnail_size: None,
+        thumbnail_error: None,
+        thumbnail_queued: false,
+        developed_thumbnail: false,
+        last_used: 0,
+    }
+}
+
+fn same_library_file_identity(left: &LibraryFileInfo, right: &LibraryFileInfo) -> bool {
+    if left.source != right.source || left.bytes != right.bytes {
+        return false;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        left.modified == right.modified
+    }
+    #[cfg(target_os = "android")]
+    {
+        true
+    }
+}
+
+type ThumbnailLoader = Arc<
+    dyn Fn(&LibrarySource) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static,
+>;
+
+#[cfg(not(target_os = "android"))]
+fn load_desktop_library_thumbnail(
+    source: &LibrarySource,
+) -> Result<LoadedLibraryThumbnail, String> {
+    let LibrarySource::File(path) = source;
+    match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
+        Ok(Some(thumbnail)) => {
+            return Ok(LoadedLibraryThumbnail {
+                thumbnail,
+                developed: true,
+            })
+        }
+        Ok(None) => {}
+        Err(error) => log::warn!(
+            "could not use developed thumbnail cache for {}: {error}",
+            path.display()
+        ),
+    }
+    match crate::thumbnail_cache::load_desktop_raw_thumbnail(path, THUMBNAIL_EDGE) {
+        Ok(Some(thumbnail)) => {
+            return Ok(LoadedLibraryThumbnail {
+                thumbnail,
+                developed: false,
+            })
+        }
+        Ok(None) => {}
+        Err(error) => log::warn!(
+            "could not use RAW thumbnail cache for {}: {error}",
+            path.display()
+        ),
+    }
+
+    let thumbnail = load_raw_thumbnail(path, THUMBNAIL_EDGE)
+        .map_err(|error| format!("{error:#}"))?;
+    if let Err(error) = crate::thumbnail_cache::save_desktop_raw_thumbnail(path, &thumbnail) {
+        log::warn!(
+            "could not persist RAW thumbnail cache for {}: {error}",
+            path.display()
+        );
+    }
+    Ok(LoadedLibraryThumbnail {
+        thumbnail,
+        developed: false,
+    })
+}
+
+#[cfg(target_os = "android")]
+fn load_android_library_thumbnail(
+    app: &android_activity::AndroidApp,
+    source: &LibrarySource,
+) -> Result<LoadedLibraryThumbnail, String> {
+    let LibrarySource::Android {
+        uri,
+        display_name,
+        bytes,
+        modified_seconds,
+    } = source;
+    match crate::android::load_developed_thumbnail_cache(
+        app,
+        uri,
+        display_name,
+        THUMBNAIL_EDGE,
+    ) {
+        Ok(Some(thumbnail)) => {
+            return Ok(LoadedLibraryThumbnail {
+                thumbnail,
+                developed: true,
+            })
+        }
+        Ok(None) => {}
+        Err(error) => log::warn!(
+            "could not use Android developed-thumbnail cache for {display_name}: {error}"
+        ),
+    }
+    crate::android::load_library_thumbnail(
+        app,
+        uri,
+        display_name,
+        *bytes,
+        *modified_seconds,
+        THUMBNAIL_EDGE,
+    )
+    .map(|thumbnail| LoadedLibraryThumbnail {
+        thumbnail,
+        developed: false,
+    })
+}
+
+fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize, load: ThumbnailLoader) {
     let ThumbnailWorker {
         files,
         warning_count,
@@ -502,19 +772,82 @@ fn run_thumbnail_worker(
     }
     repaint.request_repaint();
 
+    let request_receiver = Arc::new(Mutex::new(request_receiver));
+    let worker_count = worker_count.clamp(1, maximum_thumbnail_worker_count());
+    let mut handles = Vec::with_capacity(worker_count);
+    for worker_index in 0..worker_count {
+        let cancellation = Arc::clone(&cancellation);
+        let decoding_paused = Arc::clone(&decoding_paused);
+        let decode_gate = Arc::clone(&decode_gate);
+        let event_sender = event_sender.clone();
+        let request_receiver = Arc::clone(&request_receiver);
+        let repaint = repaint.clone();
+        let load = Arc::clone(&load);
+        let spawn = std::thread::Builder::new()
+            .name(format!("auraw-thumbnail-{worker_index}"))
+            .spawn(move || {
+                run_one_thumbnail_worker(
+                    generation,
+                    cancellation,
+                    decoding_paused,
+                    decode_gate,
+                    event_sender,
+                    request_receiver,
+                    repaint,
+                    load,
+                )
+            });
+        match spawn {
+            Ok(handle) => handles.push(handle),
+            Err(error) => log::warn!("could not start thumbnail worker {worker_index}: {error}"),
+        }
+    }
+
+    if handles.is_empty() {
+        send_scan_failure(
+            &event_sender,
+            generation,
+            "Could not start any thumbnail workers.".to_owned(),
+            &repaint,
+        );
+        return;
+    }
+    for handle in handles {
+        if handle.join().is_err() {
+            log::warn!("a thumbnail worker panicked");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_one_thumbnail_worker(
+    generation: u64,
+    cancellation: Arc<AtomicU64>,
+    decoding_paused: Arc<AtomicBool>,
+    decode_gate: Arc<RwLock<()>>,
+    event_sender: mpsc::SyncSender<ScanEvent>,
+    request_receiver: Arc<Mutex<mpsc::Receiver<ThumbnailRequest>>>,
+    repaint: egui::Context,
+    load: ThumbnailLoader,
+) {
     while cancellation.load(Ordering::Acquire) == generation {
-        let request = match request_receiver.recv_timeout(Duration::from_millis(250)) {
+        let received = request_receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_recv();
+        let request = match received {
             Ok(request) => request,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(THUMBNAIL_QUEUE_POLL_INTERVAL);
+                continue;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => break,
         };
         if request.generation != generation {
             continue;
         }
         let result = loop {
-            // Hold on to the received request while Develop owns the decoder.
-            // Pulling and discarding it would leave the entry permanently
-            // marked as queued, so pause before taking the shared gate instead.
+            // Keep the request while Develop owns the exclusive writer lock.
             while decoding_paused.load(Ordering::Acquire) {
                 if cancellation.load(Ordering::Acquire) != generation {
                     return;
@@ -522,11 +855,11 @@ fn run_thumbnail_worker(
                 std::thread::sleep(THUMBNAIL_PAUSE_POLL_INTERVAL);
             }
 
-            // Refresh cannot interrupt a LibRaw decode already in progress, so
-            // share this gate across worker generations. Recheck both state
-            // flags after acquisition: either can change while waiting.
+            // Thumbnail workers share read access with one another. A full RAW
+            // decode takes the writer lock, so it remains exclusive and gets a
+            // clean memory budget even when many thumbnail workers are enabled.
             let decode_guard = decode_gate
-                .lock()
+                .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if cancellation.load(Ordering::Acquire) != generation {
                 return;
@@ -565,7 +898,7 @@ fn catalog_status(count: usize, warning_count: usize, truncated: bool) -> String
     let warnings = if warning_count == 0 {
         String::new()
     } else {
-        format!(" · {warning_count} unreadable folders")
+        format!(" · {warning_count} unreadable items")
     };
     let truncated = if truncated {
         format!(" · newest {MAX_LIBRARY_FILES} shown")
@@ -653,7 +986,7 @@ impl Library {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
                     ui.heading("Choose a photo folder");
-                    ui.label("AuRaw finds RAW files recursively and builds previews as they become visible.");
+                    ui.label("AuRaw shows RAW files directly inside the selected folder and builds previews as they become visible.");
                     ui.add_space(8.0);
                     #[cfg(not(target_os = "android"))]
                     if ui.button("Open Folder…").clicked() {
@@ -755,7 +1088,7 @@ impl Library {
                     app.open_path(path, frame);
                 }
                 #[cfg(target_os = "android")]
-                LibrarySource::Android { uri } => {
+                LibrarySource::Android { uri, .. } => {
                     app.open_android_library_document(&uri, &display_name);
                 }
             }
@@ -937,80 +1270,55 @@ fn scan_folder_with_limit(
     }
 
     let mut files = BinaryHeap::with_capacity(maximum_files);
-    let mut stack = vec![(folder.to_owned(), 0usize)];
     let mut warning_count = 0usize;
     let mut truncated = false;
-    while let Some((directory, depth)) = stack.pop() {
+    let entries = std::fs::read_dir(folder)
+        .map_err(|error| format!("Could not scan {}: {error}", folder.display()))?;
+    for entry in entries {
         if is_cancelled() {
             return Ok(None);
         }
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
+        let entry = match entry {
+            Ok(entry) => entry,
             Err(error) => {
                 warning_count += 1;
-                log::warn!(
-                    "could not scan library folder {}: {error}",
-                    directory.display()
-                );
+                log::warn!("could not read a library directory entry: {error}");
                 continue;
             }
         };
-        for entry in entries {
-            if is_cancelled() {
-                return Ok(None);
-            }
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    warning_count += 1;
-                    log::warn!("could not read a library directory entry: {error}");
-                    continue;
-                }
-            };
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(error) => {
-                    warning_count += 1;
-                    log::warn!("could not inspect {}: {error}", entry.path().display());
-                    continue;
-                }
-            };
-            // Do not follow symlinks. Besides avoiding cycles, a chosen folder
-            // should not silently expand into unrelated storage trees.
-            if file_type.is_dir() && depth < MAX_DIRECTORY_DEPTH {
-                stack.push((entry.path(), depth + 1));
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                warning_count += 1;
+                log::warn!("could not inspect {}: {error}", entry.path().display());
                 continue;
             }
-            if !file_type.is_file() || !is_supported_raw_path(&entry.path()) {
-                continue;
-            }
-            let path = entry.path();
-            let file_metadata = entry.metadata().ok();
-            let parent = path
-                .parent()
-                .and_then(|parent| parent.strip_prefix(folder).ok())
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .map(|parent| parent.display().to_string())
-                .unwrap_or_default();
-            let candidate = RankedLibraryFile::new(LibraryFileInfo {
-                source: LibrarySource::File(path.clone()),
-                display_path: path.display().to_string(),
-                name: entry.file_name().to_string_lossy().into_owned(),
-                parent,
-                bytes: file_metadata.as_ref().map_or(0, std::fs::Metadata::len),
-                modified: file_metadata.and_then(|metadata| metadata.modified().ok()),
-            });
-            if files.len() < maximum_files {
+        };
+        // Only direct children of the selected folder belong to this view.
+        // Symlinks and subdirectories are deliberately ignored.
+        if !file_type.is_file() || !is_supported_raw_path(&entry.path()) {
+            continue;
+        }
+        let path = entry.path();
+        let file_metadata = entry.metadata().ok();
+        let candidate = RankedLibraryFile::new(LibraryFileInfo {
+            source: LibrarySource::File(path.clone()),
+            display_path: path.display().to_string(),
+            name: entry.file_name().to_string_lossy().into_owned(),
+            parent: String::new(),
+            bytes: file_metadata.as_ref().map_or(0, std::fs::Metadata::len),
+            modified: file_metadata.and_then(|metadata| metadata.modified().ok()),
+        });
+        if files.len() < maximum_files {
+            files.push(candidate);
+        } else {
+            truncated = true;
+            if files
+                .peek()
+                .is_some_and(|worst_retained| candidate < *worst_retained)
+            {
+                files.pop();
                 files.push(candidate);
-            } else {
-                truncated = true;
-                if files
-                    .peek()
-                    .is_some_and(|worst_retained| candidate < *worst_retained)
-                {
-                    files.pop();
-                    files.push(candidate);
-                }
             }
         }
     }
@@ -1049,8 +1357,8 @@ mod tests {
     #[cfg(unix)]
     use super::LibrarySource;
     use super::{
-        elide_middle, format_file_size, run_thumbnail_worker, scan_folder, scan_folder_with_limit,
-        LibraryState, ScanEvent, ThumbnailRequest, ThumbnailWorker,
+        elide_middle, format_file_size, run_thumbnail_workers, scan_folder, scan_folder_with_limit,
+        LibraryState, LoadedLibraryThumbnail, ScanEvent, ThumbnailRequest, ThumbnailWorker,
     };
     use crate::pipeline::RawThumbnail;
     #[cfg(unix)]
@@ -1058,7 +1366,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex, RwLock};
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -1086,7 +1394,7 @@ mod tests {
         let (decode_started_sender, decode_started_receiver) = mpsc::sync_channel(1);
         let worker_pause = Arc::clone(&decoding_paused);
         let worker = std::thread::spawn(move || {
-            run_thumbnail_worker(
+            run_thumbnail_workers(
                 ThumbnailWorker {
                     files: Vec::new(),
                     warning_count: 0,
@@ -1094,19 +1402,23 @@ mod tests {
                     generation,
                     cancellation,
                     decoding_paused: worker_pause,
-                    decode_gate: Arc::new(Mutex::new(())),
+                    decode_gate: Arc::new(RwLock::new(())),
                     event_sender,
                     request_receiver,
                     repaint: eframe::egui::Context::default(),
                 },
-                move |_| {
+                1,
+                Arc::new(move |_| {
                     decode_started_sender.send(()).unwrap();
-                    Ok(RawThumbnail {
-                        width: 1,
-                        height: 1,
-                        rgba: vec![0, 0, 0, 255],
+                    Ok(LoadedLibraryThumbnail {
+                        thumbnail: RawThumbnail {
+                            width: 1,
+                            height: 1,
+                            rgba: vec![0, 0, 0, 255],
+                        },
+                        developed: false,
                     })
-                },
+                }),
             );
         });
 
@@ -1137,11 +1449,14 @@ mod tests {
             Ok(ScanEvent::Thumbnail {
                 generation: event_generation,
                 source: event_source,
-                result: Ok(thumbnail),
+                result: Ok(loaded),
             }) => {
                 assert_eq!(event_generation, generation);
                 assert_eq!(event_source, source);
-                assert_eq!((thumbnail.width, thumbnail.height), (1, 1));
+                assert_eq!(
+                    (loaded.thumbnail.width, loaded.thumbnail.height),
+                    (1, 1)
+                );
             }
             _ => panic!("thumbnail worker did not preserve the paused request"),
         }
@@ -1179,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_scan_is_recursive_raw_only_and_does_not_follow_symlinks() {
+    fn folder_scan_only_includes_direct_raw_children() {
         let root = std::env::temp_dir().join(format!(
             "auraw-library-test-{}-{}",
             std::process::id(),
@@ -1204,8 +1519,8 @@ mod tests {
         assert_eq!(warnings, 0);
         assert!(!truncated);
         assert!(names.contains(&"one.DNG"));
-        assert!(names.contains(&"two.nef"));
-        assert_eq!(files.len(), 2);
+        assert!(!names.contains(&"two.nef"));
+        assert_eq!(files.len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

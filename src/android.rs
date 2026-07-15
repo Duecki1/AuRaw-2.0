@@ -7,7 +7,7 @@ use jni::{
 };
 use std::{
     collections::VecDeque,
-    fs::File,
+    fs::{self, File},
     os::fd::FromRawFd,
     path::PathBuf,
     sync::{Mutex, OnceLock},
@@ -27,6 +27,7 @@ pub struct LibraryDocument {
     pub display_name: String,
     pub display_path: String,
     pub bytes: u64,
+    pub modified_seconds: u64,
 }
 
 #[derive(Debug)]
@@ -94,6 +95,27 @@ pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
     .map_err(|error| format!("could not open Android's file picker: {error:#}"))
 }
 
+pub fn performance_settings_path(app: &AndroidApp) -> Result<PathBuf, String> {
+    let path = with_activity(app, |env, activity| {
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("performanceSettingsPath"),
+                jni::jni_sig!(() -> JString),
+                &[],
+            )?
+            .l()?;
+        let path = env.cast_local::<JString>(object)?;
+        Ok(path.to_string())
+    })
+    .map_err(|error| format!("could not locate Android performance settings: {error:#}"))?;
+    if path.is_empty() {
+        Err("Android returned no performance settings path".to_owned())
+    } else {
+        Ok(PathBuf::from(path))
+    }
+}
+
 pub fn library_location(app: &AndroidApp) -> Result<String, String> {
     with_activity(app, |env, activity| {
         let object = env
@@ -137,7 +159,7 @@ pub fn list_library_documents(app: &AndroidApp) -> Result<Vec<LibraryDocument>, 
                 .ok_or_else(|| "Android library record has no byte size".to_owned())?
                 .parse::<u64>()
                 .map_err(|error| format!("invalid Android library byte size: {error}"))?;
-            let _modified_seconds = fields
+            let modified_seconds = fields
                 .next()
                 .ok_or_else(|| "Android library record has no modification time".to_owned())?
                 .parse::<u64>()
@@ -150,12 +172,59 @@ pub fn list_library_documents(app: &AndroidApp) -> Result<Vec<LibraryDocument>, 
                 display_name,
                 display_path,
                 bytes,
+                modified_seconds,
             })
         })
         .collect()
 }
 
 pub fn load_library_thumbnail(
+    app: &AndroidApp,
+    uri: &str,
+    display_name: &str,
+    bytes: u64,
+    modified_seconds: u64,
+    maximum_edge: u32,
+) -> Result<crate::pipeline::RawThumbnail, String> {
+    let cache_path = raw_thumbnail_cache_path(
+        app,
+        uri,
+        bytes,
+        modified_seconds,
+        maximum_edge,
+    )?;
+    match crate::thumbnail_cache::load_png(&cache_path, maximum_edge) {
+        Ok(Some(thumbnail)) => return Ok(thumbnail),
+        Ok(None) => {}
+        Err(error) => log::warn!("discarding Android RAW thumbnail cache: {error}"),
+    }
+
+    let direct = load_library_thumbnail_from_fd(app, uri, maximum_edge);
+    let thumbnail = match direct {
+        Ok(thumbnail) => thumbnail,
+        Err(direct_error) => {
+            log::warn!(
+                "direct Android RAW thumbnail extraction failed; retrying from private cache: {direct_error}"
+            );
+            let temporary = materialize_library_thumbnail(app, uri, display_name)?;
+            let result = crate::pipeline::load_raw_thumbnail(&temporary, maximum_edge)
+                .map_err(|error| format!("{error:#}"));
+            if let Err(error) = fs::remove_file(&temporary) {
+                log::warn!(
+                    "could not remove Android thumbnail staging file {}: {error}",
+                    temporary.display()
+                );
+            }
+            result?
+        }
+    };
+    if let Err(error) = crate::thumbnail_cache::save_png(&cache_path, &thumbnail) {
+        log::warn!("could not persist Android RAW thumbnail: {error}");
+    }
+    Ok(thumbnail)
+}
+
+fn load_library_thumbnail_from_fd(
     app: &AndroidApp,
     uri: &str,
     maximum_edge: u32,
@@ -184,6 +253,183 @@ pub fn load_library_thumbnail(
         .map_err(|error| format!("{error:#}"));
     drop(descriptor);
     result
+}
+
+fn raw_thumbnail_cache_path(
+    app: &AndroidApp,
+    uri: &str,
+    bytes: u64,
+    modified_seconds: u64,
+    maximum_edge: u32,
+) -> Result<PathBuf, String> {
+    let uri = uri.to_owned();
+    let path = with_activity(app, |env, activity| {
+        let uri = env.new_string(&uri)?;
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("rawThumbnailCachePath"),
+                jni::jni_sig!((JString, i64, i64, i32) -> JString),
+                &[
+                    JValue::Object(&uri),
+                    JValue::Long(bytes as i64),
+                    JValue::Long(modified_seconds as i64),
+                    JValue::Int(maximum_edge as i32),
+                ],
+            )?
+            .l()?;
+        let path = env.cast_local::<JString>(object)?;
+        Ok(path.to_string())
+    })
+    .map_err(|error| format!("could not locate Android thumbnail cache: {error:#}"))?;
+    if path.is_empty() {
+        Err("Android returned no thumbnail cache path".to_owned())
+    } else {
+        Ok(PathBuf::from(path))
+    }
+}
+
+fn developed_thumbnail_cache_path(app: &AndroidApp, uri: &str) -> Result<PathBuf, String> {
+    let uri = uri.to_owned();
+    let path = with_activity(app, |env, activity| {
+        let uri = env.new_string(&uri)?;
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("developedThumbnailCachePath"),
+                jni::jni_sig!((JString) -> JString),
+                &[JValue::Object(&uri)],
+            )?
+            .l()?;
+        let path = env.cast_local::<JString>(object)?;
+        Ok(path.to_string())
+    })
+    .map_err(|error| format!("could not locate Android developed-thumbnail cache: {error:#}"))?;
+    if path.is_empty() {
+        Err("Android returned no developed-thumbnail cache path".to_owned())
+    } else {
+        Ok(PathBuf::from(path))
+    }
+}
+
+fn developed_thumbnail_fingerprint_path(cache_path: &std::path::Path) -> PathBuf {
+    let mut path = cache_path.as_os_str().to_owned();
+    path.push(".fingerprint");
+    PathBuf::from(path)
+}
+
+pub fn load_developed_thumbnail_cache(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+    maximum_edge: u32,
+) -> Result<Option<crate::pipeline::RawThumbnail>, String> {
+    let cache_path = developed_thumbnail_cache_path(app, raw_uri)?;
+    let fingerprint_path = developed_thumbnail_fingerprint_path(&cache_path);
+    if !cache_path.is_file() || !fingerprint_path.is_file() {
+        return Ok(None);
+    }
+    let Some(sidecar_path) = materialize_raw_sidecar(app, raw_uri, display_name)? else {
+        let _ = fs::remove_file(&cache_path);
+        let _ = fs::remove_file(&fingerprint_path);
+        return Ok(None);
+    };
+    let fingerprint = crate::thumbnail_cache::fingerprint_file(
+        &sidecar_path,
+        crate::sidecar::MAX_SIDECAR_BYTES,
+    );
+    let _ = fs::remove_file(&sidecar_path);
+    let fingerprint = fingerprint?;
+    let cached = fs::read_to_string(&fingerprint_path).map_err(|error| {
+        format!(
+            "could not read Android developed-thumbnail fingerprint {}: {error}",
+            fingerprint_path.display()
+        )
+    })?;
+    if cached.trim() != format!("{fingerprint:016x}") {
+        let _ = fs::remove_file(&cache_path);
+        let _ = fs::remove_file(&fingerprint_path);
+        return Ok(None);
+    }
+    crate::thumbnail_cache::load_png(&cache_path, maximum_edge)
+}
+
+pub fn save_developed_thumbnail_cache(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+    thumbnail: &crate::pipeline::RawThumbnail,
+) -> Result<(), String> {
+    let Some(sidecar_path) = materialize_raw_sidecar(app, raw_uri, display_name)? else {
+        return Err("edit sidecar disappeared before thumbnail capture".to_owned());
+    };
+    let fingerprint = crate::thumbnail_cache::fingerprint_file(
+        &sidecar_path,
+        crate::sidecar::MAX_SIDECAR_BYTES,
+    );
+    let _ = fs::remove_file(&sidecar_path);
+    let fingerprint = fingerprint?;
+    let cache_path = developed_thumbnail_cache_path(app, raw_uri)?;
+    let fingerprint_path = developed_thumbnail_fingerprint_path(&cache_path);
+    crate::thumbnail_cache::save_png(&cache_path, thumbnail)?;
+    crate::thumbnail_cache::write_bytes_atomic(
+        &fingerprint_path,
+        format!("{fingerprint:016x}\n").as_bytes(),
+    )
+    .map_err(|error| {
+        format!(
+            "could not write Android developed-thumbnail fingerprint {}: {error}",
+            fingerprint_path.display()
+        )
+    })?;
+
+    // Re-read after both files are published so a newer sidecar can never keep
+    // an older developed preview alive.
+    let Some(sidecar_path) = materialize_raw_sidecar(app, raw_uri, display_name)? else {
+        let _ = fs::remove_file(&cache_path);
+        let _ = fs::remove_file(&fingerprint_path);
+        return Err("edit sidecar changed while its thumbnail was being cached".to_owned());
+    };
+    let latest = crate::thumbnail_cache::fingerprint_file(
+        &sidecar_path,
+        crate::sidecar::MAX_SIDECAR_BYTES,
+    );
+    let _ = fs::remove_file(&sidecar_path);
+    if latest? != fingerprint {
+        let _ = fs::remove_file(&cache_path);
+        let _ = fs::remove_file(&fingerprint_path);
+        return Err("edit sidecar changed while its thumbnail was being cached".to_owned());
+    }
+    Ok(())
+}
+
+fn materialize_library_thumbnail(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+) -> Result<PathBuf, String> {
+    let raw_uri = raw_uri.to_owned();
+    let display_name = display_name.to_owned();
+    let path = with_activity(app, |env, activity| {
+        let raw_uri = env.new_string(&raw_uri)?;
+        let display_name = env.new_string(&display_name)?;
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("materializeRawLibraryThumbnail"),
+                jni::jni_sig!((JString, JString) -> JString),
+                &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
+            )?
+            .l()?;
+        let path = env.cast_local::<JString>(object)?;
+        Ok(path.to_string())
+    })
+    .map_err(|error| format!("could not materialize Android RAW thumbnail: {error:#}"))?;
+    if path.is_empty() {
+        Err("Android returned no RAW thumbnail staging path".to_owned())
+    } else {
+        Ok(PathBuf::from(path))
+    }
 }
 
 pub fn open_library_document(

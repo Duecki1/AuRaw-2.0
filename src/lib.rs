@@ -2,9 +2,11 @@ mod ai_masks;
 #[cfg(target_os = "android")]
 mod android;
 mod app;
+mod performance_settings;
 pub mod pipeline;
 pub mod regression;
 pub mod sidecar;
+mod thumbnail_cache;
 mod ui;
 
 pub use app::AurawApp;
