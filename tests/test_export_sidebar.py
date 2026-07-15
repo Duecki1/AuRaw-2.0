@@ -83,9 +83,10 @@ def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
 def test_export_halo_covers_cumulative_spatial_support() -> None:
     shader = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
     highlight = (ROOT / "src/shaders/highlight_lch_pass.wgsl").read_text(encoding="utf-8")
-    # glow_blur_at spans +/-2 * step_far and glow_source_at reaches one
-    # additional pixel, so the current shader needs a 97-pixel radius.
-    assert "let step_far = min(step_near * 2, 48);" in shader
+    # Glow's five B3 stages accumulate steps 3+3+6+12+24 at maximum
+    # resolution scale, with +/-2*step support in every stage.
+    assert "2 * (3 + 3 + 6 + 12 + 24)" in shader
+    assert "fn glow_diffuse_at" in shader
     assert "for (var ky = -2; ky <= 2; ky = ky + 1)" in shader
     assert "for (var kx = -2; kx <= 2; kx = kx + 1)" in shader
     assert "2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 1 + 1)" in PROCESSING
@@ -93,7 +94,9 @@ def test_export_halo_covers_cumulative_spatial_support() -> None:
         assert f"run_highlight_guided_pass(gid, {radius}," in highlight
     assert "const EXPORT_CUMULATIVE_SUPPORT" in PROCESSING
     assert "EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8" in PROCESSING
-    assert "GLOW_SUPPORT: u32 = 97" in PROCESSING
+    assert 'TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 }' in PROCESSING
+    assert "LOCAL_EFFECTS_SUPPORT: u32 = 24" in PROCESSING
+    assert "GLOW_SUPPORT: u32 = 96" in PROCESSING
     assert "(EXPORT_TILE_HALO..=512).contains(&spec.halo)" in EXPORT
 
 

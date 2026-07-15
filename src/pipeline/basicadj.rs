@@ -1,6 +1,6 @@
 use super::sigmoid::SigmoidParams;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum DemosaicMode {
     /// Reference high-detail demosaic: RCD for Bayer and Markesteijn 3-pass
     /// for Fuji X-Trans.
@@ -31,7 +31,7 @@ impl DemosaicMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum HighlightReconstructionMethod {
     Off,
     Lch,
@@ -54,7 +54,7 @@ impl HighlightReconstructionMethod {
 /// shaper, so the neutral diagonal is an exact no-op for HDR scene values.
 pub const MAX_POINT_CURVE_POINTS: usize = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct PointCurve {
     pub points: [[f32; 2]; MAX_POINT_CURVE_POINTS],
     pub len: u32,
@@ -118,7 +118,7 @@ impl Default for PointCurve {
 /// and numeric entry remain intuitive; saturation and luminance use the
 /// familiar -/0..100 editing domains. A zero-saturation wheel is an exact
 /// chromatic no-op regardless of its remembered hue.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ColorGradeWheel {
     pub hue: f32,
     pub saturation: f32,
@@ -148,7 +148,7 @@ impl ColorGradeWheel {
 /// Scene-referred four-way grading inspired by Lightroom Color Grading and
 /// darktable color balance rgb. Tonal ranges overlap smoothly in log-luminance
 /// space; `blending` controls that overlap and `balance` moves the pivot.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ColorGrading {
     pub shadows: ColorGradeWheel,
     pub midtones: ColorGradeWheel,
@@ -184,13 +184,13 @@ impl ColorGrading {
     }
 }
 
-pub const CURRENT_PROCESS_VERSION: u32 = 4;
+pub const CURRENT_PROCESS_VERSION: u32 = 5;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
 pub const GLOBAL_TEMPERATURE_LIMIT: f32 = 150.0;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ExposureParams {
     /// Version of the processing formulas used by this edit. Saved edits must
     /// migrate deliberately instead of silently adopting new shader behavior.
@@ -206,7 +206,8 @@ pub struct ExposureParams {
     pub contrast: f32,
     /// darktable-compatible sigmoid scene-to-display transform.
     pub sigmoid: SigmoidParams,
-    /// Relative metadata-aware white balance in familiar -100..100 domains.
+    /// Relative metadata-aware white balance. Temperature uses the extended
+    /// +/-150 mired domain while tint retains the familiar -100..100 domain.
     /// Temperature is a mired displacement and tint is a Planckian-normal Duv
     /// displacement; zero preserves the camera's as-shot neutral exactly.
     pub temperature: f32,
@@ -278,11 +279,12 @@ pub const DEFAULT_SCENE_EXPOSURE_EV: f32 = 0.7;
 
 impl ExposureParams {
     pub fn migrate_to_current_process(&mut self) {
-        // Version 3 introduces the revised perceptual color, presence, dehaze,
-        // and vignette mappings. Older edits are migrated explicitly so saved
-        // processing state never adopts a new formula version accidentally.
+        // Version 5 introduces scale-aware presence kernels, global-airlight
+        // Dehaze, and the cascaded Glow diffusion. Older edits are migrated
+        // explicitly so saved processing state never adopts a new formula
+        // version accidentally.
         match self.process_version {
-            0 | 1 | 2 | 3 => self.process_version = CURRENT_PROCESS_VERSION,
+            0..=4 => self.process_version = CURRENT_PROCESS_VERSION,
             CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently
@@ -365,7 +367,10 @@ impl Default for ExposureParams {
 
 #[cfg(test)]
 mod tests {
-    use super::{DemosaicMode, ExposureParams, PointCurve, DEFAULT_SCENE_EXPOSURE_EV};
+    use super::{
+        DemosaicMode, ExposureParams, PointCurve, CURRENT_PROCESS_VERSION,
+        DEFAULT_SCENE_EXPOSURE_EV,
+    };
     use crate::pipeline::SigmoidParams;
 
     #[test]
@@ -410,5 +415,15 @@ mod tests {
         assert_eq!(DemosaicMode::Reference.shader_value(), 0.0);
         assert_eq!(DemosaicMode::FrequencyDomainChroma.shader_value(), 1.0);
         assert_eq!(DemosaicMode::Dual.shader_value(), 2.0);
+    }
+
+    #[test]
+    fn older_presence_formulas_migrate_to_the_current_version() {
+        let mut params = ExposureParams {
+            process_version: 4,
+            ..ExposureParams::default()
+        };
+        params.migrate_to_current_process();
+        assert_eq!(params.process_version, CURRENT_PROCESS_VERSION);
     }
 }

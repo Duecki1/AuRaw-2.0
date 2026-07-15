@@ -297,14 +297,17 @@ fn finite_scalar(value: f32) -> bool {
 
 fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
     let white_target = params.sigmoid_curve.x;
-    let paper_exposure = params.sigmoid_curve.z;
+    // The ABI slot stores log2(paper_exposure). Steep but valid curves can
+    // overflow both the film response and paper exposure in linear form even
+    // though their ratio remains perfectly well behaved.
+    let log2_paper_exposure = params.sigmoid_curve.z;
     let film_fog = params.sigmoid_curve.w;
     let film_power = params.sigmoid_power.x;
     let paper_power = params.sigmoid_power.y;
     let fallback = clamp(max(value, 0.0), 0.0, 1.0);
 
     if !finite_scalar(white_target) || white_target <= 0.0
-        || !finite_scalar(paper_exposure) || paper_exposure <= 0.0
+        || !finite_scalar(log2_paper_exposure)
         || !finite_scalar(film_fog) || film_fog < 0.0
         || !finite_scalar(film_power) || film_power <= 0.0
         || !finite_scalar(paper_power) || paper_power <= 0.0 {
@@ -315,13 +318,24 @@ fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
     if !finite_scalar(film_base) || film_base < 0.0 {
         return fallback;
     }
-    let film_response = pow(film_base, film_power);
-    let denominator = paper_exposure + film_response;
-    if !finite_scalar(film_response) || !finite_scalar(denominator) || denominator <= 0.0 {
-        return fallback;
+    if film_base == 0.0 {
+        return 0.0;
+    }
+
+    // Stable base-2 logistic for F / (P + F), evaluated from log2(F/P).
+    // Both exp2 calls receive a non-positive argument and therefore cannot
+    // overflow. The exact zero/zero-fog case was handled above.
+    let log2_film_response = film_power * log2(film_base);
+    let log2_ratio = log2_film_response - log2_paper_exposure;
+    var ratio = 0.0;
+    if log2_ratio >= 0.0 {
+        ratio = 1.0 / (1.0 + exp2(-log2_ratio));
+    } else {
+        let scaled = exp2(log2_ratio);
+        ratio = scaled / (1.0 + scaled);
     }
     let paper_response = white_target
-        * pow(clamp(film_response / denominator, 0.0, 1.0), paper_power);
+        * pow(clamp(ratio, 0.0, 1.0), paper_power);
     return select(fallback, paper_response, finite_scalar(paper_response));
 }
 
@@ -472,4 +486,3 @@ fn darktable_sigmoid(rgb: vec3<f32>) -> vec3<f32> {
     }
     return sigmoid_rgb_ratio(rgb);
 }
-

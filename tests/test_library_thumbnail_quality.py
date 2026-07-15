@@ -1,0 +1,44 @@
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+LIBRARY = (ROOT / "src/ui/library.rs").read_text(encoding="utf-8")
+SIDECAR = (ROOT / "src/sidecar.rs").read_text(encoding="utf-8")
+APP = (ROOT / "src/app.rs").read_text(encoding="utf-8")
+PERSISTENCE = (ROOT / "src/app/sidecar_persistence.rs").read_text(encoding="utf-8")
+EFRAME = (ROOT / "src/app/eframe_impl.rs").read_text(encoding="utf-8")
+GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
+
+
+def test_desktop_library_scan_is_strictly_non_recursive() -> None:
+    scan = LIBRARY[LIBRARY.index("fn scan_folder_with_limit"):]
+    assert "std::fs::read_dir(folder)" in scan
+    assert "stack.push" not in scan
+    assert "MAX_DIRECTORY_DEPTH" not in LIBRARY
+    assert "Only direct children of the selected folder" in scan
+    assert "directly inside the selected folder" in LIBRARY
+
+
+def test_developed_thumbnails_are_cached_and_sidecar_invalidated() -> None:
+    assert 'DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png"' in SIDECAR
+    assert "developed_thumbnail_cache_is_fresh" in SIDECAR
+    assert "desktop_sidecar_fingerprint" in SIDECAR
+    assert "save_developed_thumbnail_cache" in SIDECAR
+    assert "atomic_write(&cache_path" in SIDECAR
+    assert "sidecar changed while its thumbnail" in SIDECAR
+
+
+def test_saved_gpu_preview_refreshes_the_visible_library_entry() -> None:
+    assert "pub struct GpuOutputSnapshot" in GPU
+    assert "read_thumbnail_blocking" in GPU
+    assert "DevelopedThumbnailJob" in APP
+    assert 'name("auraw-developed-thumbnail"' in PERSISTENCE
+    assert "output_snapshot" in PERSISTENCE
+    assert "install_developed_thumbnail" in LIBRARY
+    assert "self.poll_developed_thumbnail(frame);" in EFRAME
+
+
+def test_library_prefers_cached_developed_thumbnail_over_embedded_raw_preview() -> None:
+    cache = LIBRARY.index("load_developed_thumbnail_cache")
+    raw = LIBRARY.index("load_raw_thumbnail(path, THUMBNAIL_EDGE)", cache)
+    assert cache < raw
+    assert "developed_thumbnail && !loaded.developed" in LIBRARY

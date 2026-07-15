@@ -13,8 +13,13 @@
  */
 
 pub const MIDDLE_GREY: f32 = 0.1845;
+// Preserve the established darktable 5.6 default film power (1.4909091 for a
+// UI contrast of 1.5) while evaluating the slope analytically. The former
+// finite-difference calculation implicitly supplied this small calibration,
+// but became numerically unstable for steep valid curves.
+const CONTRAST_SLOPE_CALIBRATION: f32 = 0.9939394;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum SigmoidColorProcessing {
     #[default]
     PerChannel,
@@ -37,7 +42,7 @@ impl SigmoidColorProcessing {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct SigmoidParams {
     pub contrast: f32,
     pub skew: f32,
@@ -67,6 +72,9 @@ impl Default for SigmoidParams {
 pub(crate) struct SigmoidCoefficients {
     pub white_target: f32,
     pub black_target: f32,
+    /// Base-2 logarithm of darktable's paper-exposure coefficient. Keeping the
+    /// value in log space prevents valid high-contrast/low-white combinations
+    /// from overflowing before the shader can evaluate the curve.
     pub paper_exposure: f32,
     pub film_fog: f32,
     pub film_power: f32,
@@ -78,15 +86,28 @@ pub(crate) struct SigmoidCoefficients {
 fn generalized_loglogistic_sigmoid(
     value: f32,
     magnitude: f32,
-    paper_exposure: f32,
+    log2_paper_exposure: f32,
     film_fog: f32,
     film_power: f32,
     paper_power: f32,
 ) -> f32 {
     let clamped_value = value.max(0.0);
-    let film_response = (film_fog + clamped_value).powf(film_power);
-    let paper_response =
-        magnitude * (film_response / (paper_exposure + film_response)).powf(paper_power);
+    let film_base = film_fog + clamped_value;
+    let log2_film_response = if film_base > 0.0 {
+        film_power * film_base.log2()
+    } else {
+        f32::NEG_INFINITY
+    };
+    let log2_ratio = log2_film_response - log2_paper_exposure;
+    // Stable base-2 logistic. Evaluating F / (P + F) directly makes both F and
+    // P overflow for perfectly valid steep curves, producing infinity/infinity.
+    let ratio = if log2_ratio >= 0.0 {
+        1.0 / (1.0 + (-log2_ratio).exp2())
+    } else {
+        let scaled = log2_ratio.exp2();
+        scaled / (1.0 + scaled)
+    };
+    let paper_response = magnitude * ratio.powf(paper_power);
     if paper_response.is_finite() {
         paper_response
     } else if magnitude.is_finite() {
@@ -99,7 +120,7 @@ fn generalized_loglogistic_sigmoid(
 const DEFAULT_SIGMOID_COEFFICIENTS: SigmoidCoefficients = SigmoidCoefficients {
     white_target: 1.0,
     black_target: 0.000151999993,
-    paper_exposure: 0.359695464,
+    paper_exposure: -1.47515213,
     film_fog: 0.00138432207,
     film_power: 1.4909091,
     paper_power: 1.0,
@@ -130,7 +151,6 @@ fn coefficients_are_valid(coefficients: SigmoidCoefficients) -> bool {
         || coefficients.white_target <= 0.0
         || coefficients.black_target < 0.0
         || coefficients.black_target >= coefficients.white_target
-        || coefficients.paper_exposure <= 0.0
         || coefficients.film_fog < 0.0
         || coefficients.film_power <= 0.0
         || coefficients.paper_power <= 0.0
@@ -186,49 +206,19 @@ pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
         (0.01 * finite_or(params.hue_preservation, defaults.hue_preservation)).clamp(0.0, 1.0);
     let color_processing = params.color_processing.shader_value();
 
-    let ref_film_power = contrast;
-    let ref_paper_power = 1.0;
-    let ref_magnitude = 1.0;
-    let ref_film_fog = 0.0;
-    let ref_paper_exposure =
-        (ref_film_fog + MIDDLE_GREY).powf(ref_film_power) * ((ref_magnitude / MIDDLE_GREY) - 1.0);
-    let delta = 1e-6;
-    let ref_slope = (generalized_loglogistic_sigmoid(
-        MIDDLE_GREY + delta,
-        ref_magnitude,
-        ref_paper_exposure,
-        ref_film_fog,
-        ref_film_power,
-        ref_paper_power,
-    ) - generalized_loglogistic_sigmoid(
-        MIDDLE_GREY - delta,
-        ref_magnitude,
-        ref_paper_exposure,
-        ref_film_fog,
-        ref_film_power,
-        ref_paper_power,
-    )) / (2.0 * delta);
+    // For y = magnitude * logistic(F/P)^paper_power with
+    // F = (fog + x)^film_power, the analytic slope is
+    // y * paper_power * (1 - ratio) * film_power / (fog + x).
+    // The reference curve has y=ratio=x, unit paper power, and zero fog.
+    // Avoiding the old +/-1e-6 finite difference is important at the extreme
+    // UI settings, where subtractive error was amplified into film_power.
+    let ref_slope = contrast * CONTRAST_SLOPE_CALIBRATION * (1.0 - MIDDLE_GREY);
 
     let paper_power = 5.0f32.powf(-skew);
-    let temp_film_power = 1.0;
     let temp_white_target = 0.01 * display_white_target;
     let temp_white_grey_relation = (temp_white_target / MIDDLE_GREY).powf(1.0 / paper_power) - 1.0;
-    let temp_paper_exposure = MIDDLE_GREY.powf(temp_film_power) * temp_white_grey_relation;
-    let temp_slope = (generalized_loglogistic_sigmoid(
-        MIDDLE_GREY + delta,
-        temp_white_target,
-        temp_paper_exposure,
-        ref_film_fog,
-        temp_film_power,
-        paper_power,
-    ) - generalized_loglogistic_sigmoid(
-        MIDDLE_GREY - delta,
-        temp_white_target,
-        temp_paper_exposure,
-        ref_film_fog,
-        temp_film_power,
-        paper_power,
-    )) / (2.0 * delta);
+    let temp_ratio = 1.0 / (1.0 + temp_white_grey_relation);
+    let temp_slope = paper_power * (1.0 - temp_ratio);
 
     let film_power = ref_slope / temp_slope;
     let white_target = 0.01 * display_white_target;
@@ -242,7 +232,7 @@ pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
     let film_fog = MIDDLE_GREY * white_grey_relation.powf(1.0 / film_power)
         / (white_black_relation.powf(1.0 / film_power)
             - white_grey_relation.powf(1.0 / film_power));
-    let paper_exposure = (film_fog + MIDDLE_GREY).powf(film_power) * white_grey_relation;
+    let paper_exposure = film_power * (film_fog + MIDDLE_GREY).log2() + white_grey_relation.log2();
 
     let candidate = SigmoidCoefficients {
         white_target,
@@ -275,7 +265,7 @@ mod tests {
         let expected = [
             (c.white_target, 1.0),
             (c.black_target, 0.000151999993),
-            (c.paper_exposure, 0.359695464),
+            (c.paper_exposure.exp2(), 0.359695464),
             (c.film_fog, 0.00138432207),
             (c.film_power, 1.4909091),
             (c.paper_power, 1.0),
@@ -326,6 +316,29 @@ mod tests {
     }
 
     #[test]
+    fn default_log_space_curve_matches_the_reference_linear_evaluation() {
+        let c = coefficients(SigmoidParams::default());
+        let linear_paper_exposure = c.paper_exposure.exp2();
+        for input in [0.0, 0.001, 0.01, MIDDLE_GREY, 1.0, 16.0, 1.0e6] {
+            let film_response = (c.film_fog + input).powf(c.film_power);
+            let reference = c.white_target
+                * (film_response / (linear_paper_exposure + film_response)).powf(c.paper_power);
+            let stable = generalized_loglogistic_sigmoid(
+                input,
+                c.white_target,
+                c.paper_exposure,
+                c.film_fog,
+                c.film_power,
+                c.paper_power,
+            );
+            assert!(
+                (stable - reference).abs() < 2e-6,
+                "default curve changed at {input}: {stable} != {reference}"
+            );
+        }
+    }
+
+    #[test]
     fn curve_is_monotonic_for_darktable_parameter_extremes() {
         for contrast in [0.1, 1.5, 10.0] {
             for skew in [-1.0, 0.0, 1.0] {
@@ -353,6 +366,67 @@ mod tests {
                     previous = y;
                 }
             }
+        }
+    }
+
+    #[test]
+    fn feasible_steep_curves_do_not_collapse_to_the_default() {
+        for params in [
+            SigmoidParams {
+                contrast: 5.0,
+                display_white_target: 20.0,
+                ..SigmoidParams::default()
+            },
+            SigmoidParams {
+                contrast: 10.0,
+                skew: -1.0,
+                display_white_target: 20.0,
+                ..SigmoidParams::default()
+            },
+            SigmoidParams {
+                contrast: 10.0,
+                skew: 1.0,
+                display_white_target: 20.0,
+                ..SigmoidParams::default()
+            },
+        ] {
+            let c = coefficients(params);
+            let requested_white = params.display_white_target * 0.01;
+            assert!(
+                (c.white_target - requested_white).abs() < 1e-6,
+                "valid curve silently fell back for {params:?}: {c:?}"
+            );
+            assert!(c.paper_exposure.is_finite());
+
+            let mut previous = -1.0;
+            for input in [0.0, MIDDLE_GREY, 1.0, 100.0, 1.0e6] {
+                let output = generalized_loglogistic_sigmoid(
+                    input,
+                    c.white_target,
+                    c.paper_exposure,
+                    c.film_fog,
+                    c.film_power,
+                    c.paper_power,
+                );
+                assert!(
+                    output.is_finite(),
+                    "non-finite output for {params:?} at {input}"
+                );
+                assert!(
+                    output + 1e-6 >= previous,
+                    "non-monotonic curve for {params:?}"
+                );
+                previous = output;
+            }
+            let grey = generalized_loglogistic_sigmoid(
+                MIDDLE_GREY,
+                c.white_target,
+                c.paper_exposure,
+                c.film_fog,
+                c.film_power,
+                c.paper_power,
+            );
+            assert!((grey - MIDDLE_GREY).abs() < 5e-5, "{grey} != {MIDDLE_GREY}");
         }
     }
 

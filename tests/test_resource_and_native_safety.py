@@ -46,9 +46,15 @@ def test_desktop_requires_runtime_before_model_download() -> None:
 
 
 def test_raw_geometry_is_rejected_before_unpack() -> None:
-    opened = RAW.index("validate_opened_raw_geometry(&ctx)")
-    unpack = RAW.index("libraw_unpack")
+    full_decode = RAW.index("fn load_raw_file_with_selected_profile")
+    opened = RAW.index("validate_opened_raw_geometry(&ctx)", full_decode)
+    unpack = RAW.index("ffi::libraw_unpack(ctx.raw)", full_decode)
     assert opened < unpack
+
+    thumbnail_decode = RAW.index("fn load_embedded_thumbnail")
+    thumbnail_guard = RAW.index("validate_opened_thumbnail_geometry(&ctx)")
+    thumbnail_unpack = RAW.index("ffi::libraw_unpack_thumb(ctx.raw)", thumbnail_decode)
+    assert thumbnail_guard < thumbnail_unpack
     assert "MAX_RAW_FILE_BYTES" in RAW
     assert "MAX_SENSOR_PIXELS" in RAW
     assert "validate_raw_dimensions" in RAW
@@ -67,6 +73,32 @@ def test_android_stream_import_is_bounded_and_makes_progress() -> None:
     assert "int value = input.read()" in ANDROID_ACTIVITY
     android_export = APP[APP.index('let export_dir = data_dir.join("cache").join("exports")'):]
     assert "std::fs::read_dir(&export_dir)" not in android_export
+
+
+def test_android_sidecars_are_complete_discoverable_generations() -> None:
+    assert "MAX_SIDECAR_BYTES = 32L * 1024L * 1024L" in ANDROID_ACTIVITY
+    assert 'values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")' in ANDROID_ACTIVITY
+    assert "values.put(MediaStore.Downloads.IS_PENDING, 1)" in ANDROID_ACTIVITY
+    assert "sidecarStagePrefix(rawDisplayName)" in ANDROID_ACTIVITY
+    assert "contentPublished = true" in ANDROID_ACTIVITY
+    assert "removedOldRows &= resolver.delete" in ANDROID_ACTIVITY
+    assert "queryStoredDisplayName(destination)" in ANDROID_ACTIVITY
+    assert "String storedDisplayName = queryStoredDisplayName(destination);" in ANDROID_ACTIVITY
+    raw_store = ANDROID_ACTIVITY.index("private StoredRaw storeRawScoped")
+    assert ANDROID_ACTIVITY.index(
+        "String storedDisplayName = queryStoredDisplayName(destination);", raw_store
+    ) < ANDROID_ACTIVITY.index("published = true;", raw_store)
+    assert "return new StoredRaw(destination, storedDisplayName)" in ANDROID_ACTIVITY
+
+
+def test_sidecar_serialization_and_io_stay_off_the_render_thread() -> None:
+    sidecar = (ROOT / "src/sidecar.rs").read_text(encoding="utf-8")
+    persistence = (ROOT / "src/app/sidecar_persistence.rs").read_text(encoding="utf-8")
+    assert "struct CappedVec" in sidecar
+    assert "serde_json::to_writer(&mut writer" in sidecar
+    assert "preflight_encoded_images(&edits)" in sidecar
+    assert 'name("auraw-sidecar-save"' in persistence
+    assert "save_sidecar_request(" in persistence
 
 
 def test_downloaded_build_inputs_and_actions_are_immutable() -> None:
