@@ -404,7 +404,7 @@ impl AurawApp {
             Ok(()) => {
                 self.picker_pending = true;
                 self.notice = None;
-                self.status = "Choose a RAW file…".to_owned();
+                self.status = "Choose one or more RAW files…".to_owned();
             }
             Err(error) => self.notice = Some(error),
         }
@@ -899,8 +899,36 @@ impl AurawApp {
                         frame,
                     )
                 }
+                crate::android::PickerResult::BatchImported {
+                    imported,
+                    failed,
+                    errors,
+                } => {
+                    self.active_tab = AppTab::Library;
+                    self.library.refresh(&self.egui_ctx);
+                    self.status = match (imported, failed) {
+                        (0, 0) => "No RAW files were imported.".to_owned(),
+                        (_, 0) => format!(
+                            "Imported {imported} RAW {}.",
+                            if imported == 1 { "file" } else { "files" }
+                        ),
+                        _ => format!(
+                            "Imported {imported} RAW {}; {failed} failed.",
+                            if imported == 1 { "file" } else { "files" }
+                        ),
+                    };
+                    self.notice = if failed > 0 {
+                        Some(if errors.is_empty() {
+                            format!("{failed} selected RAW imports failed.")
+                        } else {
+                            format!("Some RAW files could not be imported:\n{errors}")
+                        })
+                    } else {
+                        None
+                    };
+                }
                 crate::android::PickerResult::Cancelled => {
-                    self.notice = Some("No RAW file selected.".to_owned());
+                    self.notice = Some("No RAW files selected.".to_owned());
                 }
                 crate::android::PickerResult::Failed(error) => {
                     self.notice = Some(format!("Could not import the selected file: {error}"));

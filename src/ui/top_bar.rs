@@ -4,7 +4,7 @@ use eframe::egui::{self, Ui};
 pub struct TopBar;
 
 impl TopBar {
-    pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+    pub fn show(ui: &mut Ui, app: &mut AurawApp, _frame: &eframe::Frame) {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
 
         ui.horizontal_wrapped(|ui| {
@@ -31,11 +31,7 @@ impl TopBar {
                 }
                 #[cfg(target_os = "android")]
                 AppTab::Library => {}
-                AppTab::Develop | AppTab::Settings => {
-                    if ui.button("Open RAW…").clicked() {
-                        app.open_file_dialog(frame);
-                    }
-                }
+                AppTab::Develop | AppTab::Settings => {}
             }
 
             if app.active_tab == AppTab::Develop {

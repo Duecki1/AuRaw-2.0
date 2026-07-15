@@ -2,6 +2,7 @@ package de.duecki.auraw;
 
 import android.Manifest;
 import android.app.NativeActivity;
+import android.content.ClipData;
 import android.content.ContentUris;
 import android.content.ContentResolver;
 import android.content.ContentValues;
@@ -100,6 +101,11 @@ public final class AuRawActivity extends NativeActivity {
             String error,
             boolean temporary);
 
+    private static native void nativeOnImportBatchFinished(
+            int importedCount,
+            int failedCount,
+            String errors);
+
     private static native void nativeOnExportPublished(
             String location,
             String error);
@@ -113,6 +119,7 @@ public final class AuRawActivity extends NativeActivity {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivityForResult(intent, OPEN_RAW_DOCUMENT);
     }
@@ -123,33 +130,77 @@ public final class AuRawActivity extends NativeActivity {
         if (requestCode != OPEN_RAW_DOCUMENT) {
             return;
         }
-        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+        if (resultCode != RESULT_OK || data == null) {
             nativeOnFilePicked("", "", "", "", false);
             return;
         }
 
-        Uri uri = data.getData();
-        String displayName = queryDisplayName(uri);
+        ArrayList<Uri> uris = selectedDocumentUris(data);
+        if (uris.isEmpty()) {
+            nativeOnFilePicked("", "", "", "", false);
+            return;
+        }
         new Thread(
-                () -> importDocument(uri, displayName),
-                "AuRaw document import").start();
+                () -> importDocuments(uris),
+                uris.size() == 1 ? "AuRaw document import" : "AuRaw document batch import")
+                .start();
     }
 
-    private void importDocument(Uri uri, String displayName) {
+    private static ArrayList<Uri> selectedDocumentUris(Intent data) {
+        ArrayList<Uri> uris = new ArrayList<>();
+        HashSet<String> seen = new HashSet<>();
+        ClipData clipData = data.getClipData();
+        if (clipData != null) {
+            for (int index = 0; index < clipData.getItemCount(); index++) {
+                Uri uri = clipData.getItemAt(index).getUri();
+                if (uri != null && seen.add(uri.toString())) {
+                    uris.add(uri);
+                }
+            }
+        }
+        Uri single = data.getData();
+        if (single != null && seen.add(single.toString())) {
+            uris.add(single);
+        }
+        return uris;
+    }
+
+    private void importDocuments(ArrayList<Uri> uris) {
+        if (uris.size() == 1) {
+            Uri uri = uris.get(0);
+            importSingleDocument(uri, queryDisplayName(uri));
+            return;
+        }
+
+        int imported = 0;
+        int failed = 0;
+        ArrayList<String> errors = new ArrayList<>();
+        for (Uri uri : uris) {
+            String displayName = queryDisplayName(uri);
+            StoredRaw stored = null;
+            try {
+                stored = importDocumentIntoLibrary(uri, displayName);
+                imported++;
+            } catch (Exception error) {
+                if (stored != null) {
+                    deleteStoredRaw(stored.uri);
+                }
+                failed++;
+                if (errors.size() < 4) {
+                    errors.add(displayName + ": " + error);
+                }
+            }
+        }
+        if (failed > errors.size()) {
+            errors.add((failed - errors.size()) + " additional import(s) failed");
+        }
+        nativeOnImportBatchFinished(imported, failed, String.join("\n", errors));
+    }
+
+    private void importSingleDocument(Uri uri, String displayName) {
         StoredRaw stored = null;
         try {
-            if (!isRawName(displayName)) {
-                throw new IllegalArgumentException(
-                        "Choose a supported RAW file (for example DNG, CR3, NEF, ARW, RAF, or RW2)");
-            }
-            Long declaredSize = queryDocumentSize(uri);
-            if (declaredSize != null && declaredSize > MAX_RAW_IMPORT_BYTES) {
-                throw new IllegalStateException(
-                        "The selected RAW is " + declaredSize
-                                + " bytes; the Android import limit is "
-                                + MAX_RAW_IMPORT_BYTES);
-            }
-            stored = storeRawInLibrary(uri, displayName);
+            stored = importDocumentIntoLibrary(uri, displayName);
             materializeLibraryRaw(stored.uri, stored.displayName);
         } catch (Exception error) {
             if (stored != null) {
@@ -157,6 +208,21 @@ public final class AuRawActivity extends NativeActivity {
             }
             nativeOnFilePicked("", displayName, "", error.toString(), false);
         }
+    }
+
+    private StoredRaw importDocumentIntoLibrary(Uri uri, String displayName) throws Exception {
+        if (!isRawName(displayName)) {
+            throw new IllegalArgumentException(
+                    "Choose a supported RAW file (for example DNG, CR3, NEF, ARW, RAF, or RW2)");
+        }
+        Long declaredSize = queryDocumentSize(uri);
+        if (declaredSize != null && declaredSize > MAX_RAW_IMPORT_BYTES) {
+            throw new IllegalStateException(
+                    "The selected RAW is " + declaredSize
+                            + " bytes; the Android import limit is "
+                            + MAX_RAW_IMPORT_BYTES);
+        }
+        return storeRawInLibrary(uri, displayName);
     }
 
     /** Private persistent path used for small application preferences. */
