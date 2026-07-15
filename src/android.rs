@@ -33,6 +33,11 @@ pub struct LibraryDocument {
 #[derive(Debug)]
 pub enum PickerResult {
     Picked(PickedDocument),
+    BatchImported {
+        imported: usize,
+        failed: usize,
+        errors: String,
+    },
     Cancelled,
     Failed(String),
 }
@@ -186,13 +191,7 @@ pub fn load_library_thumbnail(
     modified_seconds: u64,
     maximum_edge: u32,
 ) -> Result<crate::pipeline::RawThumbnail, String> {
-    let cache_path = raw_thumbnail_cache_path(
-        app,
-        uri,
-        bytes,
-        modified_seconds,
-        maximum_edge,
-    )?;
+    let cache_path = raw_thumbnail_cache_path(app, uri, bytes, modified_seconds, maximum_edge)?;
     match crate::thumbnail_cache::load_png(&cache_path, maximum_edge) {
         Ok(Some(thumbnail)) => return Ok(thumbnail),
         Ok(None) => {}
@@ -334,10 +333,8 @@ pub fn load_developed_thumbnail_cache(
         let _ = fs::remove_file(&fingerprint_path);
         return Ok(None);
     };
-    let fingerprint = crate::thumbnail_cache::fingerprint_file(
-        &sidecar_path,
-        crate::sidecar::MAX_SIDECAR_BYTES,
-    );
+    let fingerprint =
+        crate::thumbnail_cache::fingerprint_file(&sidecar_path, crate::sidecar::MAX_SIDECAR_BYTES);
     let _ = fs::remove_file(&sidecar_path);
     let fingerprint = fingerprint?;
     let cached = fs::read_to_string(&fingerprint_path).map_err(|error| {
@@ -363,10 +360,8 @@ pub fn save_developed_thumbnail_cache(
     let Some(sidecar_path) = materialize_raw_sidecar(app, raw_uri, display_name)? else {
         return Err("edit sidecar disappeared before thumbnail capture".to_owned());
     };
-    let fingerprint = crate::thumbnail_cache::fingerprint_file(
-        &sidecar_path,
-        crate::sidecar::MAX_SIDECAR_BYTES,
-    );
+    let fingerprint =
+        crate::thumbnail_cache::fingerprint_file(&sidecar_path, crate::sidecar::MAX_SIDECAR_BYTES);
     let _ = fs::remove_file(&sidecar_path);
     let fingerprint = fingerprint?;
     let cache_path = developed_thumbnail_cache_path(app, raw_uri)?;
@@ -390,10 +385,8 @@ pub fn save_developed_thumbnail_cache(
         let _ = fs::remove_file(&fingerprint_path);
         return Err("edit sidecar changed while its thumbnail was being cached".to_owned());
     };
-    let latest = crate::thumbnail_cache::fingerprint_file(
-        &sidecar_path,
-        crate::sidecar::MAX_SIDECAR_BYTES,
-    );
+    let latest =
+        crate::thumbnail_cache::fingerprint_file(&sidecar_path, crate::sidecar::MAX_SIDECAR_BYTES);
     let _ = fs::remove_file(&sidecar_path);
     if latest? != fingerprint {
         let _ = fs::remove_file(&cache_path);
@@ -699,6 +692,32 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePicked<'lo
         })
         .resolve_with::<LogContextErrorAndDefault, _>(|| {
             "AuRawActivity.nativeOnFilePicked".to_owned()
+        });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnImportBatchFinished<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    imported_count: jni::sys::jint,
+    failed_count: jni::sys::jint,
+    errors: JString<'local>,
+) {
+    unowned_env
+        .with_env(|_env| -> jni::errors::Result<()> {
+            let result = PickerResult::BatchImported {
+                imported: usize::try_from(imported_count.max(0)).unwrap_or(0),
+                failed: usize::try_from(failed_count.max(0)).unwrap_or(0),
+                errors: errors.to_string(),
+            };
+            if let Ok(mut queue) = results().lock() {
+                queue.push_back(result);
+            }
+            request_repaint();
+            Ok(())
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "AuRawActivity.nativeOnImportBatchFinished".to_owned()
         });
 }
 

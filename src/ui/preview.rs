@@ -23,7 +23,7 @@ impl Preview {
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.heading("No image open");
-                        ui.label("Use Open RAW… to load an image.");
+                        ui.label("Open a RAW from the Library to start developing.");
                     });
                 });
             }
@@ -582,12 +582,7 @@ impl Preview {
         }
     }
 
-    fn paint_mask_overlay(
-        ui: &Ui,
-        app: &mut AurawApp,
-        image_rect: Rect,
-        preview_rect: Rect,
-    ) {
+    fn paint_mask_overlay(ui: &Ui, app: &mut AurawApp, image_rect: Rect, preview_rect: Rect) {
         let Some(mask_index) = app.masks.selected_mask else {
             return;
         };

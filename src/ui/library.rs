@@ -10,14 +10,14 @@ use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui}
 #[cfg(not(target_os = "android"))]
 use std::cmp::Ordering as CmpOrdering;
 #[cfg(not(target_os = "android"))]
+use std::collections::BinaryHeap;
+use std::collections::HashMap;
+#[cfg(not(target_os = "android"))]
 use std::ffi::OsString;
 #[cfg(not(target_os = "android"))]
 use std::fs::{self, OpenOptions};
 #[cfg(not(target_os = "android"))]
 use std::io;
-#[cfg(not(target_os = "android"))]
-use std::collections::BinaryHeap;
-use std::collections::HashMap;
 use std::path::Path;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
@@ -191,11 +191,7 @@ impl LibraryState {
         android_app: android_activity::AndroidApp,
         context: &egui::Context,
     ) -> Self {
-        Self::new_android_with_workers(
-            android_app,
-            context,
-            default_thumbnail_worker_count(),
-        )
+        Self::new_android_with_workers(android_app, context, default_thumbnail_worker_count())
     }
 
     #[cfg(target_os = "android")]
@@ -241,11 +237,7 @@ impl LibraryState {
         self.thumbnail_workers
     }
 
-    pub(crate) fn set_thumbnail_worker_count(
-        &mut self,
-        workers: usize,
-        context: &egui::Context,
-    ) {
+    pub(crate) fn set_thumbnail_worker_count(&mut self, workers: usize, context: &egui::Context) {
         let workers = workers.clamp(1, maximum_thumbnail_worker_count());
         if self.thumbnail_workers == workers {
             return;
@@ -718,9 +710,8 @@ fn same_library_file_identity(left: &LibraryFileInfo, right: &LibraryFileInfo) -
     }
 }
 
-type ThumbnailLoader = Arc<
-    dyn Fn(&LibrarySource) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static,
->;
+type ThumbnailLoader =
+    Arc<dyn Fn(&LibrarySource) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static>;
 
 #[cfg(not(target_os = "android"))]
 fn load_desktop_library_thumbnail(
@@ -754,8 +745,8 @@ fn load_desktop_library_thumbnail(
         ),
     }
 
-    let thumbnail = load_raw_thumbnail(path, THUMBNAIL_EDGE)
-        .map_err(|error| format!("{error:#}"))?;
+    let thumbnail =
+        load_raw_thumbnail(path, THUMBNAIL_EDGE).map_err(|error| format!("{error:#}"))?;
     if let Err(error) = crate::thumbnail_cache::save_desktop_raw_thumbnail(path, &thumbnail) {
         log::warn!(
             "could not persist RAW thumbnail cache for {}: {error}",
@@ -779,12 +770,7 @@ fn load_android_library_thumbnail(
         bytes,
         modified_seconds,
     } = source;
-    match crate::android::load_developed_thumbnail_cache(
-        app,
-        uri,
-        display_name,
-        THUMBNAIL_EDGE,
-    ) {
+    match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => {
             return Ok(LoadedLibraryThumbnail {
                 thumbnail,
@@ -987,14 +973,8 @@ enum LibraryCardAction {
 
 #[cfg(target_os = "android")]
 enum LibraryCardAction {
-    ResetAdjustments {
-        uri: String,
-        display_name: String,
-    },
-    Delete {
-        uri: String,
-        display_name: String,
-    },
+    ResetAdjustments { uri: String, display_name: String },
+    Delete { uri: String, display_name: String },
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1139,9 +1119,9 @@ impl Library {
                 .location()
                 .is_some_and(|location| location.starts_with("Download/"))
             {
-                "Imports stay in the visible Download/AuRaw folder. Tap + to import."
+                "Imports stay in the visible Download/AuRaw folder. Tap + to import one or more RAW files."
             } else {
-                "Android 8–9 stores imports in the shown app folder without requesting storage permission. Tap + to import."
+                "Android 8–9 stores imports in the shown app folder without requesting storage permission. Tap + to import one or more RAW files."
             })
             .small(),
         );
@@ -1166,7 +1146,7 @@ impl Library {
                     #[cfg(not(target_os = "android"))]
                     ui.label("Choose another folder or add RAW files to this folder.");
                     #[cfg(target_os = "android")]
-                    ui.label("Tap + to import a RAW.");
+                    ui.label("Tap + to import one or more RAW files.");
                 });
             });
         } else {
@@ -1269,12 +1249,11 @@ impl Library {
                                             ui.close();
                                         }
                                         if ui.button("Reset all adjustments").clicked() {
-                                            library_action = Some(
-                                                LibraryCardAction::ResetAdjustments {
+                                            library_action =
+                                                Some(LibraryCardAction::ResetAdjustments {
                                                     uri: uri.clone(),
                                                     display_name: display_name.clone(),
-                                                },
-                                            );
+                                                });
                                             ui.close();
                                         }
                                         ui.separator();
@@ -1426,12 +1405,7 @@ fn thumbnail_card_height(width: f32) -> f32 {
     (width - 14.0).max(80.0) + 54.0
 }
 
-fn thumbnail_card(
-    ui: &mut Ui,
-    entry: &LibraryEntry,
-    width: f32,
-    selected: bool,
-) -> egui::Response {
+fn thumbnail_card(ui: &mut Ui, entry: &LibraryEntry, width: f32, selected: bool) -> egui::Response {
     let image_edge = (width - 14.0).max(80.0);
     let height = thumbnail_card_height(width);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
@@ -1783,10 +1757,7 @@ mod tests {
             }) => {
                 assert_eq!(event_generation, generation);
                 assert_eq!(event_source, source);
-                assert_eq!(
-                    (loaded.thumbnail.width, loaded.thumbnail.height),
-                    (1, 1)
-                );
+                assert_eq!((loaded.thumbnail.width, loaded.thumbnail.height), (1, 1));
             }
             _ => panic!("thumbnail worker did not preserve the paused request"),
         }

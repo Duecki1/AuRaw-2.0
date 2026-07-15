@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 
 const MAX_DCP_FILE_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "android")]
-const MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 32 * 1024 * 1024;
+const MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(target_os = "android")]
@@ -28,7 +28,9 @@ const MAX_THUMBNAIL_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_THUMBNAIL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 #[cfg(target_os = "android")]
-const MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS: u64 = 12_000_000;
+static ANDROID_PROCESSED_THUMBNAIL_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(target_os = "android")]
+const MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS: u64 = MAX_SENSOR_PIXELS;
 
 // Rec.2020 and the camera profiles used here are D65-referred. Normalizing
 // XYZ -> camera rows against equal-energy XYZ (1, 1, 1) makes an otherwise
@@ -197,19 +199,25 @@ fn validate_embedded_thumbnail_metadata(
 }
 
 fn load_processed_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+    #[cfg(target_os = "android")]
+    let _android_memory_gate = ANDROID_PROCESSED_THUMBNAIL_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let ctx = open_libraw(path)?;
     #[cfg(target_os = "android")]
     {
-        // Even half-size dcraw processing first unpacks the full sensor. Keep
-        // this rare preview-less path tightly bounded on memory-constrained
-        // devices; normal camera RAWs use their embedded JPEG above.
+        // Even half-size dcraw processing first unpacks the full sensor. The
+        // memory gate above prevents multiple preview-less RAWs from taking
+        // this path concurrently. Permit the same sensor safety ceiling as a
+        // normal Android RAW decode so imported modern-camera files can still
+        // receive a library preview when their embedded preview is unsupported.
         let sizes = unsafe { &(*ctx.raw).rawdata.sizes };
         let sensor_pixels = u64::from(sizes.raw_width)
             .checked_mul(u64::from(sizes.raw_height))
             .context("RAW thumbnail fallback sensor dimensions overflow")?;
         anyhow::ensure!(
             sensor_pixels <= MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS,
-            "embedded preview is unavailable and the {sensor_pixels}-pixel sensor exceeds the Android thumbnail fallback limit"
+            "embedded preview is unavailable and the {sensor_pixels}-pixel sensor exceeds the Android sensor safety limit"
         );
     }
     // SAFETY: this context is exclusively owned and its params are initialized by libraw_init.

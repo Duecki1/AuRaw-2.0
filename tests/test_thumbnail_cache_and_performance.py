@@ -66,3 +66,30 @@ def test_reopening_the_same_folder_keeps_live_thumbnail_textures() -> None:
     assert "Keep already decoded GPU textures visible" in refresh
     assert "std::mem::take(&mut self.entries)" in LIBRARY
     assert "same_library_file_identity" in LIBRARY
+
+
+def test_android_import_picker_supports_single_and_batch_selection() -> None:
+    lifecycle = (ROOT / "src/app/lifecycle.rs").read_text()
+    top_bar = (ROOT / "src/ui/top_bar.rs").read_text()
+    assert "Intent.EXTRA_ALLOW_MULTIPLE" in ACTIVITY
+    assert "selectedDocumentUris" in ACTIVITY
+    assert "importSingleDocument" in ACTIVITY
+    assert "nativeOnImportBatchFinished" in ACTIVITY
+    assert "Java_de_duecki_auraw_AuRawActivity_nativeOnImportBatchFinished" in ANDROID
+    assert "BatchImported" in ANDROID
+    assert "BatchImported" in lifecycle
+    assert "self.active_tab = AppTab::Library" in lifecycle
+    assert 'button("Open RAW…")' not in top_bar
+    batch = ACTIVITY[ACTIVITY.index("private void importDocuments"):ACTIVITY.index("private void importSingleDocument")]
+    single = ACTIVITY[ACTIVITY.index("private void importSingleDocument"):ACTIVITY.index("private StoredRaw importDocumentIntoLibrary")]
+    assert "materializeLibraryRaw" not in batch
+    assert "nativeOnImportBatchFinished" in batch
+    assert "materializeLibraryRaw" in single
+
+
+def test_android_previewless_raw_fallback_handles_modern_sensors_serially() -> None:
+    assert "ANDROID_PROCESSED_THUMBNAIL_GATE" in RAW
+    assert "MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS: u64 = MAX_SENSOR_PIXELS" in RAW
+    assert "MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 64 * 1024 * 1024" in RAW
+    fallback = RAW[RAW.index("fn load_processed_thumbnail"):RAW.index("fn embedded_thumbnail_orientation")]
+    assert fallback.index("ANDROID_PROCESSED_THUMBNAIL_GATE") < fallback.index("open_libraw(path)")
