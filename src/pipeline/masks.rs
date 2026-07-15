@@ -65,6 +65,7 @@ impl MaskKind {
                 | Self::Linear
                 | Self::Subject
                 | Self::Background
+                | Self::Object
                 | Self::LuminanceRange
                 | Self::ColorRange
         )
@@ -114,6 +115,14 @@ pub struct BrushDab {
     /// previous strokes. Radius is relative to the shorter image edge.
     pub size: f32,
     pub feather: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ObjectStroke {
+    /// Normalized full-image coordinates. Positive strokes add foreground;
+    /// negative strokes explicitly mark background.
+    pub points: Vec<[f32; 2]>,
+    pub positive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -215,6 +224,16 @@ pub enum MaskGeometry {
         mask: Option<MaskImage>,
         feather: f32,
     },
+    Object {
+        mask: Option<MaskImage>,
+        feather: f32,
+        #[serde(default = "default_object_edge_refine")]
+        edge_refine: f32,
+        #[serde(default)]
+        detailed_edges: bool,
+        #[serde(default)]
+        strokes: Vec<ObjectStroke>,
+    },
     LuminanceRange {
         #[serde(default, skip_serializing)]
         source: Option<MaskRgbImage>,
@@ -231,6 +250,10 @@ pub enum MaskGeometry {
         sampled: bool,
     },
     Placeholder,
+}
+
+fn default_object_edge_refine() -> f32 {
+    0.55
 }
 
 impl MaskGeometry {
@@ -258,6 +281,13 @@ impl MaskGeometry {
                 mask: None,
                 feather: 0.0,
             },
+            MaskKind::Object => Self::Object {
+                mask: None,
+                feather: 0.0,
+                edge_refine: default_object_edge_refine(),
+                detailed_edges: false,
+                strokes: Vec::new(),
+            },
             MaskKind::LuminanceRange => Self::LuminanceRange {
                 source: None,
                 low: 0.2,
@@ -279,7 +309,7 @@ impl MaskGeometry {
         match self {
             Self::Brush { dabs, .. } => !dabs.is_empty(),
             Self::Radial { initialized, .. } | Self::Linear { initialized, .. } => *initialized,
-            Self::Ai { mask, .. } => mask.is_some(),
+            Self::Ai { mask, .. } | Self::Object { mask, .. } => mask.is_some(),
             Self::LuminanceRange { source, .. } => source.is_some(),
             Self::ColorRange {
                 source, sampled, ..
@@ -474,6 +504,16 @@ impl MaskStack {
                         *mask = mask
                             .as_ref()
                             .map(|source| crop_mask_image(source, u0, v0, du, dv));
+                    }
+                    MaskGeometry::Object { mask, strokes, .. } => {
+                        *mask = mask
+                            .as_ref()
+                            .map(|source| crop_mask_image(source, u0, v0, du, dv));
+                        for stroke in strokes {
+                            for point in &mut stroke.points {
+                                remap_point(point);
+                            }
+                        }
                     }
                     MaskGeometry::LuminanceRange { source, .. }
                     | MaskGeometry::ColorRange { source, .. } => {
@@ -827,6 +867,15 @@ fn rasterize_component(
                     .par_iter_mut()
                     .for_each(|value| *value = 1.0 - *value);
             }
+            coverage
+        }
+        MaskGeometry::Object {
+            mask: Some(mask),
+            feather,
+            ..
+        } => {
+            let mut coverage = rasterize_mask_image(width, height, mask);
+            feather_probability_mask(&mut coverage, width, height, *feather);
             coverage
         }
         MaskGeometry::LuminanceRange {
@@ -1489,5 +1538,35 @@ mod tests {
         }
         let layer = stack.rasterize_layer(0, 64, 64, 100, 100);
         assert!(layer[32 * 64 + 32] < 32);
+    }
+    #[test]
+    fn object_masks_are_available_and_rasterize_soft_probabilities() {
+        let mut stack = MaskStack::default();
+        assert!(MaskKind::Object.is_available());
+        stack.add_mask(MaskKind::Object);
+        if let MaskGeometry::Object {
+            mask,
+            feather,
+            strokes,
+            ..
+        } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = MaskImage::new(2, 1, vec![0, 255]);
+            *feather = 0.0;
+            strokes.push(ObjectStroke {
+                points: vec![[0.75, 0.5]],
+                positive: true,
+            });
+        } else {
+            panic!("object mask used unexpected geometry");
+        }
+        assert!(stack
+            .selected_component()
+            .unwrap()
+            .geometry
+            .is_initialized());
+        let layer = stack.rasterize_layer(0, 2, 1, 2, 1);
+        assert!(layer[0] < 0.01);
+        assert!(layer[1] > 0.99);
     }
 }

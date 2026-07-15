@@ -1,4 +1,7 @@
-use crate::ai_masks::{spawn_subject_mask, SubjectMaskEvent, BIREFNET_MODEL_BYTES};
+use crate::ai_masks::{
+    spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent,
+    ObjectMaskRequest, SubjectMaskEvent, BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE,
+};
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
     load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings,
@@ -235,6 +238,7 @@ struct LoadedPreview {
     pipeline: RawGpuPipeline,
     rendered_exposure: ExposureParams,
     rendered_masks: MaskStack,
+    mask_source: Option<MaskRgbImage>,
     lens_correction: LensCorrectionState,
     sidecar_target: crate::sidecar::SidecarTarget,
     sidecar_generation: u64,
@@ -312,7 +316,6 @@ pub(crate) enum MaskDragState {
         end: [f32; 2],
     },
 }
-
 
 pub(crate) const MAX_DESKTOP_RAW_CACHE_FILES: usize = 8;
 pub(crate) const MAX_ANDROID_RAW_CACHE_FILES: usize = 3;
@@ -436,6 +439,16 @@ pub struct AurawApp {
     subject_receiver: Option<mpsc::Receiver<SubjectMaskEvent>>,
     subject_download_progress: Option<(&'static str, u64, u64)>,
     subject_inferencing: bool,
+    object_consent_open: bool,
+    object_pending_target: Option<(usize, usize)>,
+    object_receiver: Option<mpsc::Receiver<ObjectMaskEvent>>,
+    object_download_progress: Option<(&'static str, u64, u64)>,
+    object_inferencing: bool,
+    object_decoder_only: bool,
+    object_generation: u64,
+    object_job_generation: u64,
+    object_job_target: Option<(usize, usize)>,
+    object_cache: Option<((usize, usize), ObjectInferenceCache)>,
 
     #[cfg(target_os = "android")]
     android_app: android_activity::AndroidApp,
