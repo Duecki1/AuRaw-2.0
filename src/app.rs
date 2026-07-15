@@ -2,9 +2,9 @@ use crate::ai_masks::{spawn_subject_mask, SubjectMaskEvent, BIREFNET_MODEL_BYTES
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
     load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings,
-    ExposureParams, GpuParams, LensfunCatalog, LensfunLens, LoadedRaw, MaskImage, MaskKind,
-    MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
-    TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    ExposureParams, GpuParams, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage,
+    MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
+    RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{EditState as SidecarEditState, LensEditState as SidecarLensEditState};
 use crate::ui::components::adjustment_slider::slider_scroll_locked;

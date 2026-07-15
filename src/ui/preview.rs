@@ -124,8 +124,6 @@ impl Preview {
                     pointer,
                     (scroll_y * 0.0018).exp(),
                 );
-                image_rect =
-                    zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
             }
         }
 
