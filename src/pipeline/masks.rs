@@ -14,7 +14,7 @@ pub const fn mask_atlas_edge() -> u32 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum MaskKind {
     #[default]
     Brush,
@@ -70,7 +70,7 @@ impl MaskKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum MaskCombineMode {
     #[default]
     Add,
@@ -104,7 +104,7 @@ impl BrushMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct BrushDab {
     pub center: [f32; 2],
     /// Positive dabs paint; negative dabs erase.
@@ -115,10 +115,11 @@ pub struct BrushDab {
     pub feather: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskImage {
     pub width: u32,
     pub height: u32,
+    #[serde(with = "base64_arc_bytes")]
     pub pixels: Arc<[u8]>,
 }
 
@@ -132,10 +133,11 @@ impl MaskImage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskRgbImage {
     pub width: u32,
     pub height: u32,
+    #[serde(with = "base64_arc_bytes")]
     pub rgba: Arc<[u8]>,
 }
 
@@ -146,6 +148,33 @@ impl MaskRgbImage {
             height,
             rgba: rgba.into(),
         })
+    }
+}
+
+mod base64_arc_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&base64::display::Base64Display::new(
+            bytes.as_ref(),
+            &base64::engine::general_purpose::STANDARD,
+        ))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map(Arc::from)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -160,7 +189,7 @@ impl Default for BrushDab {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum MaskGeometry {
     Brush {
         /// Radius as a fraction of the image's shorter edge.
@@ -186,12 +215,14 @@ pub enum MaskGeometry {
         feather: f32,
     },
     LuminanceRange {
+        #[serde(default, skip_serializing)]
         source: Option<MaskRgbImage>,
         low: f32,
         high: f32,
         feather: f32,
     },
     ColorRange {
+        #[serde(default, skip_serializing)]
         source: Option<MaskRgbImage>,
         sample: [f32; 3],
         tolerance: f32,
@@ -257,7 +288,7 @@ impl MaskGeometry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskComponent {
     pub name: String,
     pub kind: MaskKind,
@@ -280,7 +311,7 @@ impl MaskComponent {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LocalAdjustments {
     pub exposure: f32,
     pub contrast: f32,
@@ -355,7 +386,7 @@ impl LocalAdjustments {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LocalMask {
     pub name: String,
     pub enabled: bool,
@@ -376,7 +407,7 @@ impl LocalMask {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskStack {
     pub masks: Vec<LocalMask>,
     pub selected_mask: Option<usize>,
@@ -782,7 +813,9 @@ fn rasterize_component(
             // feather value instead of separately blurring an inverted map.
             feather_probability_mask(&mut coverage, width, height, *feather);
             if component.kind == MaskKind::Background {
-                coverage.par_iter_mut().for_each(|value| *value = 1.0 - *value);
+                coverage
+                    .par_iter_mut()
+                    .for_each(|value| *value = 1.0 - *value);
             }
             coverage
         }
@@ -908,8 +941,8 @@ fn feather_probability_mask(mask: &mut [f32], width: u32, height: u32, feather: 
 
     mask.par_iter_mut().enumerate().for_each(|(index, value)| {
         let confidence_offset = (*value - 0.5) * 1.5;
-        let signed_distance = distance_to_outside[index] - distance_to_inside[index]
-            + confidence_offset;
+        let signed_distance =
+            distance_to_outside[index] - distance_to_inside[index] + confidence_offset;
         *value = smoothstep(-radius, radius, signed_distance);
     });
 }
@@ -1096,15 +1129,12 @@ fn rasterize_brush(
                         if distance >= 1.0 + spec.antialias {
                             continue;
                         }
-                        let coverage =
-                            1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
+                        let coverage = 1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
                         let index = row_offset + x as usize;
                         if spec.opacity >= 0.0 {
-                            band[index] =
-                                band[index].max(coverage * spec.opacity.clamp(0.0, 1.0));
+                            band[index] = band[index].max(coverage * spec.opacity.clamp(0.0, 1.0));
                         } else {
-                            band[index] *=
-                                1.0 - coverage * (-spec.opacity).clamp(0.0, 1.0);
+                            band[index] *= 1.0 - coverage * (-spec.opacity).clamp(0.0, 1.0);
                         }
                     }
                 }

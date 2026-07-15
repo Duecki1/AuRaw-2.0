@@ -1,5 +1,6 @@
 impl AurawApp {
     pub(crate) fn mark_mask_adjustments_dirty(&mut self) {
+        self.note_mask_edit_changed();
         if self.gpu_pipeline.is_none() {
             return;
         }

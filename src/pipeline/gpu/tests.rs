@@ -473,6 +473,403 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
 }
 
 #[test]
+fn reused_gpu_program_layouts_match_fresh_glow_for_bayer_and_xtrans() {
+    use super::{ExposureParams, ProcessingQuality, RawGpuPipeline};
+    use crate::pipeline::{
+        build_proxy, crop_raw, load_raw_file, HighlightReconstructionMethod, MaskStack, ProxySpec,
+    };
+    use eframe::wgpu;
+
+    let instance = wgpu::Instance::default();
+    let Ok(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        // Headless CI runners are allowed to lack a usable GPU. Shader parsing
+        // and static pass-plan tests still run on those hosts.
+        return;
+    };
+    let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("auraw reused-program layout test device"),
+        ..Default::default()
+    })) else {
+        return;
+    };
+
+    let exposure = ExposureParams {
+        highlight_method: HighlightReconstructionMethod::Off,
+        texture: 35.0,
+        clarity: 30.0,
+        dehaze: 40.0,
+        glow_amount: 80.0,
+        glow_radius: 75.0,
+        glow_threshold: 35.0,
+        ..ExposureParams::default()
+    };
+    let masks = MaskStack::default();
+
+    for fixture_name in ["synthetic-bayer.dng", "synthetic-xtrans.dng"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("regression/raw")
+            .join(fixture_name);
+        let full_raw = load_raw_file(&path)
+            .unwrap_or_else(|error| panic!("load {fixture_name} for program reuse: {error:#}"));
+        let template_raw = build_proxy(&full_raw, ProxySpec { max_edge: 128 });
+        // Differing texture dimensions are the zoom/navigation reuse case that
+        // can expose a stale pass-layout index after inserting a GPU pass.
+        let target_raw = crop_raw(&full_raw, 12, 12, 192, 180);
+        assert_ne!(
+            (template_raw.width, template_raw.height),
+            (target_raw.width, target_raw.height)
+        );
+
+        let template_params = super::GpuParams::new(&exposure, &masks, &template_raw);
+        let target_params = super::GpuParams::new(&exposure, &masks, &target_raw);
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let template = RawGpuPipeline::new_headless_with_quality(
+            &device,
+            &queue,
+            &template_raw,
+            &template_params,
+            ProcessingQuality::Preview,
+        )
+        .unwrap_or_else(|error| {
+            panic!("{fixture_name} template pipeline creation failed: {error:#}")
+        });
+
+        let render = |pipeline: &RawGpuPipeline| {
+            pipeline.recompute(&queue, &device, &target_params);
+            pipeline
+                .read_output_region_blocking(
+                    &device,
+                    &queue,
+                    0,
+                    0,
+                    target_raw.width,
+                    target_raw.height,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{fixture_name} reused-program readback failed: {error:#}")
+                })
+        };
+
+        let reused_output = {
+            let pipeline = RawGpuPipeline::new_headless_reusing_programs(
+                &device,
+                &queue,
+                &target_raw,
+                &target_params,
+                ProcessingQuality::Preview,
+                &template,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{fixture_name} reused pipeline creation failed: {error:#}")
+            });
+            render(&pipeline)
+        };
+        let reduced_atlas_output = {
+            let pipeline = RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
+                &device,
+                &queue,
+                &target_raw,
+                &target_params,
+                ProcessingQuality::Preview,
+                &template,
+                128,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{fixture_name} reduced-atlas pipeline creation failed: {error:#}")
+            });
+            render(&pipeline)
+        };
+        let fresh_output = {
+            let pipeline = RawGpuPipeline::new_headless_with_quality(
+                &device,
+                &queue,
+                &target_raw,
+                &target_params,
+                ProcessingQuality::Preview,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{fixture_name} fresh pipeline creation failed: {error:#}")
+            });
+            render(&pipeline)
+        };
+
+        let validation_error = pollster::block_on(validation_scope.pop());
+        assert!(
+            validation_error.is_none(),
+            "{fixture_name} reused-program validation failed: {validation_error:?}"
+        );
+        assert_eq!(
+            reused_output, fresh_output,
+            "{fixture_name} reused program layouts changed Glow output"
+        );
+        assert_eq!(
+            reduced_atlas_output, fresh_output,
+            "{fixture_name} reduced-atlas program layouts changed Glow output"
+        );
+    }
+}
+
+#[test]
+fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
+    use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
+    use crate::pipeline::{HighlightReconstructionMethod, MaskStack};
+    use eframe::wgpu;
+
+    fn fixture(width: u32, height: u32, signal: impl Fn(u32, u32) -> f32) -> LoadedRaw {
+        let white = 4095.0f32;
+        let mut raw_pixels = Vec::with_capacity((width * height) as usize);
+        let mut color_indices = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                color_indices.push(match (x % 2, y % 2) {
+                    (0, 0) => 0,
+                    (1, 1) => 2,
+                    _ => 1,
+                });
+                raw_pixels.push((signal(x, y).clamp(0.0, 1.0) * white).round() as u16);
+            }
+        }
+        LoadedRaw {
+            width,
+            height,
+            camera_make: "test".to_owned(),
+            camera_model: "adjustment-behavior".to_owned(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            focal_length: 0.0,
+            aperture: 0.0,
+            focus_distance: 0.0,
+            cfa_kind: CfaKind::Bayer,
+            raw_pixels,
+            color_indices,
+            wb_coeffs: [1.0; 4],
+            cam_to_srgb: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            black_levels: [0.0; 4],
+            black_levels_per_pixel: vec![0.0; (width * height) as usize],
+            white_levels: [white; 4],
+            camera_profile: Default::default(),
+            white_balance_model: None,
+        }
+    }
+
+    fn luma(pixel: &[f32]) -> f32 {
+        0.262_700_2 * pixel[0] + 0.677_998_1 * pixel[1] + 0.059_301_7 * pixel[2]
+    }
+
+    fn mean_luma_in(
+        pixels: &[f32],
+        width: u32,
+        height: u32,
+        predicate: impl Fn(f32, f32) -> bool,
+    ) -> f32 {
+        let mut sum = 0.0;
+        let mut count = 0u32;
+        for y in 0..height {
+            for x in 0..width {
+                if predicate(x as f32, y as f32) {
+                    let index = ((y * width + x) * 3) as usize;
+                    sum += luma(&pixels[index..index + 3]);
+                    count += 1;
+                }
+            }
+        }
+        sum / count.max(1) as f32
+    }
+
+    let instance = wgpu::Instance::default();
+    let Ok(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        return;
+    };
+    let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("auraw adjustment behavior test device"),
+        ..Default::default()
+    })) else {
+        return;
+    };
+
+    const WIDTH: u32 = 128;
+    const HEIGHT: u32 = 128;
+    let masks = MaskStack::default();
+    let neutral = ExposureParams {
+        highlight_method: HighlightReconstructionMethod::Off,
+        ..ExposureParams::default()
+    };
+    let flat = fixture(WIDTH, HEIGHT, |_, _| 0.30);
+    let initial_params = super::GpuParams::new(&neutral, &masks, &flat);
+    let pipeline = RawGpuPipeline::new_headless_with_quality(
+        &device,
+        &queue,
+        &flat,
+        &initial_params,
+        ProcessingQuality::High,
+    )
+    .unwrap();
+
+    let render = |raw: &LoadedRaw, exposure: &ExposureParams| {
+        pipeline.upload_raw_tile(&queue, raw).unwrap();
+        let params = super::GpuParams::new(exposure, &masks, raw);
+        pipeline.recompute(&queue, &device, &params);
+        pipeline
+            .read_display_linear_region_blocking(&device, &queue, 0, 0, WIDTH, HEIGHT)
+            .unwrap()
+    };
+
+    // Band-pass presence controls must be exact no-ops on a flat field. This
+    // catches accidental global exposure offsets in Texture/Clarity.
+    let flat_neutral = render(&flat, &neutral);
+    let flat_presence = render(
+        &flat,
+        &ExposureParams {
+            texture: 100.0,
+            clarity: 100.0,
+            ..neutral
+        },
+    );
+    let flat_max_delta = flat_neutral
+        .iter()
+        .zip(&flat_presence)
+        .map(|(before, after)| (after - before).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        flat_max_delta <= 2e-5,
+        "flat Texture/Clarity changed pixels by {flat_max_delta}"
+    );
+
+    // Real fine and medium detail must move visibly; source-string wiring
+    // checks cannot detect a skipped intermediate effects pass.
+    let detailed = fixture(WIDTH, HEIGHT, |x, y| {
+        let gradient = 0.16 + 0.34 * x as f32 / (WIDTH - 1) as f32;
+        let checker = if (x / 2 + y / 2) % 2 == 0 {
+            0.026
+        } else {
+            -0.026
+        };
+        let dx = x as f32 - 64.0;
+        let dy = y as f32 - 64.0;
+        gradient + checker - 0.07 * (1.0 - (dx * dx + dy * dy).sqrt() / 42.0).clamp(0.0, 1.0)
+    });
+    let detail_neutral = render(&detailed, &neutral);
+    for (label, exposure) in [
+        (
+            "Texture",
+            ExposureParams {
+                texture: 70.0,
+                ..neutral
+            },
+        ),
+        (
+            "Clarity",
+            ExposureParams {
+                clarity: 70.0,
+                ..neutral
+            },
+        ),
+    ] {
+        let adjusted = render(&detailed, &exposure);
+        let mean_delta = detail_neutral
+            .iter()
+            .zip(adjusted)
+            .map(|(before, after)| (after - before).abs())
+            .sum::<f32>()
+            / detail_neutral.len() as f32;
+        assert!(
+            mean_delta > 1e-4,
+            "{label} is effectively a no-op: {mean_delta}"
+        );
+    }
+
+    // Positive Dehaze must expand a low-contrast veil/object separation while
+    // keeping the scene finite and non-negative.
+    let hazy = fixture(WIDTH, HEIGHT, |x, y| {
+        let base = 0.48 + 0.05 * x as f32 / (WIDTH - 1) as f32;
+        let object = (38..90).contains(&x) && (38..90).contains(&y);
+        base - if object { 0.10 } else { 0.0 }
+    });
+    let haze_neutral = render(&hazy, &neutral);
+    let dehazed = render(
+        &hazy,
+        &ExposureParams {
+            dehaze: 70.0,
+            ..neutral
+        },
+    );
+    assert!(dehazed
+        .iter()
+        .all(|value| value.is_finite() && *value >= 0.0));
+    let object = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (50.0..78.0).contains(&x) && (50.0..78.0).contains(&y)
+        })
+    };
+    let background = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (8.0..28.0).contains(&x) && (48.0..80.0).contains(&y)
+        })
+    };
+    let neutral_separation = (background(&haze_neutral) - object(&haze_neutral)).abs();
+    let dehazed_separation = (background(&dehazed) - object(&dehazed)).abs();
+    assert!(
+        dehazed_separation > neutral_separation * 1.05,
+        "Dehaze did not expand contrast: {neutral_separation} -> {dehazed_separation}"
+    );
+
+    // Glow should create a smooth halo outside a compact bright source while
+    // leaving remote shadows essentially unchanged.
+    let glow_source = fixture(WIDTH, HEIGHT, |x, y| {
+        let dx = x as f32 - 64.0;
+        let dy = y as f32 - 64.0;
+        if dx * dx + dy * dy <= 25.0 {
+            1.0
+        } else {
+            0.02
+        }
+    });
+    let glow_neutral = render(&glow_source, &neutral);
+    let glowed = render(
+        &glow_source,
+        &ExposureParams {
+            glow_amount: 85.0,
+            glow_radius: 80.0,
+            glow_threshold: 40.0,
+            ..neutral
+        },
+    );
+    assert!(glowed
+        .iter()
+        .all(|value| value.is_finite() && *value >= 0.0));
+    let ring = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            let dx = x - 64.0;
+            let dy = y - 64.0;
+            let radius_squared = dx * dx + dy * dy;
+            (100.0..484.0).contains(&radius_squared)
+        })
+    };
+    let far = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            let dx = x - 64.0;
+            let dy = y - 64.0;
+            dx * dx + dy * dy > 2_500.0
+        })
+    };
+    let ring_lift = ring(&glowed) - ring(&glow_neutral);
+    let far_lift = (far(&glowed) - far(&glow_neutral)).abs();
+    assert!(ring_lift > 1e-4, "Glow produced no halo: {ring_lift}");
+    assert!(
+        far_lift < ring_lift * 0.12 + 2e-5,
+        "Glow lifted remote shadows: ring={ring_lift}, far={far_lift}"
+    );
+}
+
+#[test]
 fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use eframe::wgpu;

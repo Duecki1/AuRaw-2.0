@@ -4,6 +4,7 @@ mod android;
 mod app;
 pub mod pipeline;
 pub mod regression;
+pub mod sidecar;
 mod ui;
 
 pub use app::AurawApp;

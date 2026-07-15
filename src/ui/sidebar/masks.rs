@@ -74,6 +74,7 @@ impl Sidebar {
         let mut remove_component = None;
         let mut group_enabled_changed = false;
         let mut component_dirty_mask = None;
+        let mut mask_metadata_changed = false;
 
         {
             let mut show_cards = |ui: &mut Ui| {
@@ -103,6 +104,7 @@ impl Sidebar {
                         Self::mask_group_context_menu(
                             ui,
                             &mut app.masks.masks[index],
+                            &mut mask_metadata_changed,
                             &mut group_enabled_changed,
                             &mut remove_mask,
                             index,
@@ -146,6 +148,7 @@ impl Sidebar {
                                     ui,
                                     &mut app.masks.masks[index].components[component_index],
                                     component_count > 1,
+                                    &mut mask_metadata_changed,
                                     &mut menu_geometry_changed,
                                     &mut menu_remove_component,
                                     component_index,
@@ -192,6 +195,9 @@ impl Sidebar {
 
         if group_enabled_changed {
             app.mark_mask_adjustments_dirty();
+        }
+        if mask_metadata_changed {
+            app.note_mask_edit_changed();
         }
         if let Some(mask_index) = component_dirty_mask {
             app.mark_mask_geometry_dirty(mask_index);
@@ -309,15 +315,18 @@ impl Sidebar {
     fn mask_group_context_menu(
         ui: &mut Ui,
         mask: &mut crate::pipeline::LocalMask,
+        metadata_changed: &mut bool,
         enabled_changed: &mut bool,
         remove_mask: &mut Option<usize>,
         mask_index: usize,
     ) {
         ui.label(egui::RichText::new("Rename mask group").weak());
-        ui.add_sized(
-            [190.0, ui.spacing().interact_size.y],
-            egui::TextEdit::singleline(&mut mask.name),
-        );
+        *metadata_changed |= ui
+            .add_sized(
+                [190.0, ui.spacing().interact_size.y],
+                egui::TextEdit::singleline(&mut mask.name),
+            )
+            .changed();
         ui.separator();
         *enabled_changed |= ui.checkbox(&mut mask.enabled, "Enabled").changed();
         ui.separator();
@@ -331,15 +340,18 @@ impl Sidebar {
         ui: &mut Ui,
         component: &mut crate::pipeline::MaskComponent,
         can_delete: bool,
+        metadata_changed: &mut bool,
         geometry_changed: &mut bool,
         remove_component: &mut Option<usize>,
         component_index: usize,
     ) {
         ui.label(egui::RichText::new("Rename sub-mask").weak());
-        ui.add_sized(
-            [190.0, ui.spacing().interact_size.y],
-            egui::TextEdit::singleline(&mut component.name),
-        );
+        *metadata_changed |= ui
+            .add_sized(
+                [190.0, ui.spacing().interact_size.y],
+                egui::TextEdit::singleline(&mut component.name),
+            )
+            .changed();
         ui.separator();
         *geometry_changed |= ui.checkbox(&mut component.enabled, "Enabled").changed();
         *geometry_changed |= ui.checkbox(&mut component.invert, "Invert").changed();

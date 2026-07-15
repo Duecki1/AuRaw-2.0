@@ -1,7 +1,7 @@
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
-    ProcessingStage, RenderingIntent, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
+    ProcessingStage, RawThumbnail, RenderingIntent, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -21,6 +21,7 @@ mod tests;
 const GPU_PARAMS_ABI_VERSION: u32 = 1;
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 6_960;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
+const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
 
@@ -86,8 +87,10 @@ fn expected_pass_count(cfa_kind: CfaKind) -> usize {
         CfaKind::XTrans => 8,
     };
     // Highlight prepare + guided stages + two finalize variants, followed by
-    // demosaic, four tone-analysis passes, and four adjustment/output passes.
-    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + demosaic_passes + 4 + 4
+    // demosaic, four tone-analysis passes, and ten adjustment/output passes
+    // (base, local effects, Glow extraction + five diffusion stages, creative
+    // composite, and final render).
+    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + demosaic_passes + 4 + 10
 }
 
 const SHADER_BAYER_RCD_P1: &str = concat!(
@@ -425,10 +428,9 @@ impl GpuParams {
         full_height: u32,
     ) -> Self {
         let (camera_transform, profile_weight) = raw.adjusted_camera_transform(
-            exposure.temperature.clamp(
-                -GLOBAL_TEMPERATURE_LIMIT,
-                GLOBAL_TEMPERATURE_LIMIT,
-            ),
+            exposure
+                .temperature
+                .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
             exposure.tint.clamp(-100.0, 100.0),
         );
         let mut profile_layout = raw.camera_profile.gpu_layout();
@@ -524,10 +526,9 @@ impl GpuParams {
         Self {
             black_point: exposure.black_point,
             exposure: exposure.exposure,
-            temperature: exposure.temperature.clamp(
-                -GLOBAL_TEMPERATURE_LIMIT,
-                GLOBAL_TEMPERATURE_LIMIT,
-            ),
+            temperature: exposure
+                .temperature
+                .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
             saturation: exposure.saturation,
             vibrance: exposure.vibrance,
             highlight_clip: exposure.highlight_clip,
@@ -841,6 +842,10 @@ impl GpuParams {
             .any(|values| values.iter().any(|value| value.abs() > 1e-6));
         global_effects || creative || local_effects
     }
+
+    fn needs_glow_passes(&self) -> bool {
+        self.creative_effects[0].abs() > 1e-6
+    }
 }
 
 fn evaluate_point_curve(curve: &PointCurve, input: f32) -> f32 {
@@ -893,6 +898,7 @@ pub struct RawGpuPipeline {
     processing_quality: ProcessingQuality,
     params_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
+    tone_stats_buffer: wgpu::Buffer,
     raw_stage_end: usize,
     tone_prepare_pass_index: usize,
     tone_reduce_pass_index: usize,
@@ -904,6 +910,9 @@ pub struct RawGpuPipeline {
     demosaic_start_index: usize,
     adjustment_prepare_pass_index: usize,
     adjustment_effects_pass_index: usize,
+    glow_prepare_pass_index: usize,
+    glow_blur_start_index: usize,
+    glow_blur_end_index: usize,
     adjustment_creative_pass_index: usize,
     adjustment_render_pass_index: usize,
     passes: Vec<Pass>,
@@ -929,7 +938,60 @@ pub struct RawGpuPipeline {
     _out_view: wgpu::TextureView,
 }
 
+/// A cheap, thread-safe handle to one completed display output. Reading it on
+/// a worker keeps thumbnail cache refreshes off the render thread.
+#[derive(Clone)]
+pub struct GpuOutputSnapshot {
+    texture: wgpu::Texture,
+    width: u32,
+    height: u32,
+}
+
+impl GpuOutputSnapshot {
+    pub fn read_thumbnail_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        maximum_edge: u32,
+    ) -> Result<RawThumbnail> {
+        if maximum_edge == 0 {
+            return Err(anyhow!("thumbnail edge must be non-zero"));
+        }
+        let rgba = read_rgba8_texture_region_blocking(
+            device,
+            queue,
+            &self.texture,
+            0,
+            0,
+            self.width,
+            self.height,
+            self.width,
+            self.height,
+            "auraw developed thumbnail readback",
+        )?;
+        let image = image::RgbaImage::from_raw(self.width, self.height, rgba)
+            .ok_or_else(|| anyhow!("developed thumbnail readback has an invalid byte count"))?;
+        let image = image::DynamicImage::ImageRgba8(image)
+            .thumbnail(maximum_edge, maximum_edge)
+            .to_rgba8();
+        let (width, height) = image.dimensions();
+        Ok(RawThumbnail {
+            width,
+            height,
+            rgba: image.into_raw(),
+        })
+    }
+}
+
 impl RawGpuPipeline {
+    pub fn output_snapshot(&self) -> GpuOutputSnapshot {
+        GpuOutputSnapshot {
+            texture: self.out_texture.clone(),
+            width: self.width,
+            height: self.height,
+        }
+    }
+
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -955,7 +1017,16 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(device, queue, Some(renderer), None, raw, params, quality, None)
+        Self::new_internal(
+            device,
+            queue,
+            Some(renderer),
+            None,
+            raw,
+            params,
+            quality,
+            None,
+        )
     }
 
     pub fn new_headless_with_quality(
@@ -1235,7 +1306,7 @@ impl RawGpuPipeline {
         });
         let tone_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("auraw tone statistics"),
-            size: 2 * std::mem::size_of::<[f32; 4]>() as u64,
+            size: TONE_STATS_SIZE_BYTES,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
@@ -1264,81 +1335,107 @@ impl RawGpuPipeline {
             })
         };
 
-        let bgl_highlights = reused_layout(0).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl highlights"),
-            entries: &[
-                common_entries[0].clone(),
-                common_entries[1].clone(),
-                common_entries[2].clone(),
-                common_entries[3].clone(),
-                storage_texture_entry(
-                    3,
-                    wgpu::TextureFormat::R32Float,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
-                texture_entry(13, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    14,
-                    highlight_work_format,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
-            ],
-        }));
+        let bgl_highlights = reused_layout(0).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl highlights"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    storage_texture_entry(
+                        3,
+                        wgpu::TextureFormat::R32Float,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                    texture_entry(13, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        14,
+                        highlight_work_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
 
-        let bgl1 = reused_layout(demosaic_start_for_programs).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl1"),
-            entries: &[
-                common_entries[0].clone(),
-                common_entries[1].clone(),
-                common_entries[2].clone(),
-                common_entries[3].clone(),
-                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(4, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
-            ],
-        }));
+        let bgl1 = reused_layout(demosaic_start_for_programs).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl1"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        4,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
 
-        let bgl2 = reused_layout(demosaic_start_for_programs + 1).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl2"),
-            entries: &[
-                common_entries[0].clone(),
-                common_entries[1].clone(),
-                common_entries[2].clone(),
-                common_entries[3].clone(),
-                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(6, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
-            ],
-        }));
+        let bgl2 = reused_layout(demosaic_start_for_programs + 1).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl2"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        6,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
 
-        let bgl3 = reused_layout(demosaic_start_for_programs + 2).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl3"),
-            entries: &[
-                common_entries[0].clone(),
-                common_entries[1].clone(),
-                common_entries[2].clone(),
-                common_entries[3].clone(),
-                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(8, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
-            ],
-        }));
+        let bgl3 = reused_layout(demosaic_start_for_programs + 2).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl3"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        8,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
 
         let bgl4 = (matches!(raw.cfa_kind, CfaKind::Bayer)
             .then(|| reused_layout(demosaic_start_for_programs + 3))
             .flatten())
-        .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl4"),
-            entries: &[
-                common_entries[0].clone(),
-                common_entries[1].clone(),
-                common_entries[2].clone(),
-                common_entries[3].clone(),
-                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(10, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
-            ],
-        }));
+        .unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl4"),
+                entries: &[
+                    common_entries[0].clone(),
+                    common_entries[1].clone(),
+                    common_entries[2].clone(),
+                    common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        10,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
 
         // X-Trans Markesteijn-3 uses the two highlight work textures as
         // derivative scratch after highlight reconstruction has finalized.
@@ -1347,7 +1444,8 @@ impl RawGpuPipeline {
         let bgl_xtrans_derivatives = (matches!(raw.cfa_kind, CfaKind::XTrans)
             .then(|| reused_layout(demosaic_start_for_programs + 4))
             .flatten())
-            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        .unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans derivatives"),
                 entries: &[
                     common_entries[0].clone(),
@@ -1367,12 +1465,14 @@ impl RawGpuPipeline {
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
                 ],
-            }));
+            })
+        });
 
         let bgl_xtrans_homogeneity = (matches!(raw.cfa_kind, CfaKind::XTrans)
             .then(|| reused_layout(demosaic_start_for_programs + 5))
             .flatten())
-            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        .unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans homogeneity"),
                 entries: &[
                     common_entries[0].clone(),
@@ -1393,12 +1493,14 @@ impl RawGpuPipeline {
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
                 ],
-            }));
+            })
+        });
 
         let bgl_xtrans_accumulate = (matches!(raw.cfa_kind, CfaKind::XTrans)
             .then(|| reused_layout(demosaic_start_for_programs + 6))
             .flatten())
-            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        .unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans accumulate"),
                 entries: &[
                     common_entries[0].clone(),
@@ -1415,91 +1517,162 @@ impl RawGpuPipeline {
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
                 ],
-            }));
+            })
+        });
 
         let bgl_xtrans_finish = (matches!(raw.cfa_kind, CfaKind::XTrans)
             .then(|| reused_layout(demosaic_start_for_programs + 7))
             .flatten())
-        .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl X-Trans finish"),
-            entries: &[
-                common_entries[0].clone(),
-                common_entries[1].clone(),
-                common_entries[2].clone(),
-                common_entries[3].clone(),
-                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(10, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
-            ],
-        }));
-
-        let bgl_tone_prepare = reused_layout(tone_prepare_for_programs).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl tone prepare"),
-            entries: &[
-                buffer_entry(0),
-                texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_buffer_entry(15, false),
-                storage_buffer_entry(20, true),
-                storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
-            ],
-        }));
-
-        let bgl_tone_blur = reused_layout(tone_prepare_for_programs + 1).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl tone guide blur"),
-            entries: &[
-                buffer_entry(0),
-                texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
-            ],
-        }));
-
-        let bgl_tone_reduce = reused_layout(tone_prepare_for_programs + 3).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl tone histogram reduction"),
-            entries: &[
-                storage_buffer_entry(15, false),
-                storage_buffer_entry(16, false),
-            ],
-        }));
-
-        let bgl_adjust_prepare = reused_layout(adjustment_prepare_for_programs)
-            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl adjustment preparation"),
+        .unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl X-Trans finish"),
                 entries: &[
                     common_entries[0].clone(),
                     common_entries[1].clone(),
                     common_entries[2].clone(),
                     common_entries[3].clone(),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        10,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
+
+        let bgl_tone_prepare = reused_layout(tone_prepare_for_programs).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl tone prepare"),
+                entries: &[
+                    buffer_entry(0),
                     texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(21, work_format, wgpu::StorageTextureAccess::WriteOnly),
-                    storage_buffer_entry(16, true),
-                    texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_buffer_entry(15, false),
                     storage_buffer_entry(20, true),
-                    texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
-                    sampler_entry(28),
+                    storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
                 ],
-            }));
+            })
+        });
 
-        let bgl_adjust_effects = reused_layout(adjustment_prepare_for_programs + 1)
-            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl Lightroom local effects"),
+        let bgl_tone_blur = reused_layout(tone_prepare_for_programs + 1).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl tone guide blur"),
                 entries: &[
                     buffer_entry(0),
-                    texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(23, work_format, wgpu::StorageTextureAccess::WriteOnly),
-                    texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
-                    sampler_entry(28),
+                    texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
                 ],
-            }));
+            })
+        });
 
-        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 2)
-            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl creative glow and vignette"),
+        let bgl_tone_reduce = reused_layout(tone_prepare_for_programs + 3).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl tone histogram reduction"),
                 entries: &[
-                    buffer_entry(0),
-                    texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(25, work_format, wgpu::StorageTextureAccess::WriteOnly),
+                    storage_buffer_entry(15, false),
+                    storage_buffer_entry(16, false),
                 ],
-            }));
+            })
+        });
+
+        let bgl_adjust_prepare =
+            reused_layout(adjustment_prepare_for_programs).unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl adjustment preparation"),
+                    entries: &[
+                        common_entries[0].clone(),
+                        common_entries[1].clone(),
+                        common_entries[2].clone(),
+                        common_entries[3].clone(),
+                        texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_texture_entry(
+                            21,
+                            work_format,
+                            wgpu::StorageTextureAccess::WriteOnly,
+                        ),
+                        storage_buffer_entry(16, true),
+                        texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_buffer_entry(20, true),
+                        texture_array_entry(
+                            27,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
+                        sampler_entry(28),
+                    ],
+                })
+            });
+
+        let bgl_adjust_effects =
+            reused_layout(adjustment_prepare_for_programs + 1).unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl Lightroom local effects"),
+                    entries: &[
+                        buffer_entry(0),
+                        texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_texture_entry(
+                            23,
+                            work_format,
+                            wgpu::StorageTextureAccess::WriteOnly,
+                        ),
+                        storage_buffer_entry(16, true),
+                        texture_array_entry(
+                            27,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
+                        sampler_entry(28),
+                    ],
+                })
+            });
+
+        let bgl_glow_prepare =
+            reused_layout(adjustment_prepare_for_programs + 2).unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl Glow source extraction"),
+                    entries: &[
+                        buffer_entry(0),
+                        texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_texture_entry(
+                            31,
+                            work_format,
+                            wgpu::StorageTextureAccess::WriteOnly,
+                        ),
+                    ],
+                })
+            });
+
+        let bgl_glow_blur =
+            reused_layout(adjustment_prepare_for_programs + 3).unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl Glow diffusion"),
+                    entries: &[
+                        buffer_entry(0),
+                        texture_entry(30, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_texture_entry(
+                            31,
+                            work_format,
+                            wgpu::StorageTextureAccess::WriteOnly,
+                        ),
+                    ],
+                })
+            });
+
+        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 8)
+            .unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl creative glow and vignette"),
+                    entries: &[
+                        buffer_entry(0),
+                        texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_texture_entry(
+                            25,
+                            work_format,
+                            wgpu::StorageTextureAccess::WriteOnly,
+                        ),
+                        texture_entry(30, wgpu::TextureSampleType::Float { filterable: false }),
+                    ],
+                })
+            });
 
         let bgl_adjust_render = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl perceptual color mixer and render"),
@@ -1517,8 +1690,8 @@ impl RawGpuPipeline {
                 storage_texture_entry(29, work_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
-        let bgl_adjust_render = reused_layout(adjustment_prepare_for_programs + 3)
-            .unwrap_or(bgl_adjust_render);
+        let bgl_adjust_render =
+            reused_layout(adjustment_prepare_for_programs + 9).unwrap_or(bgl_adjust_render);
 
         let make_highlight_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
@@ -2004,6 +2177,10 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&tex2_view),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: tone_stats_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
                     binding: 27,
                     resource: wgpu::BindingResource::TextureView(&mask_view),
                 },
@@ -2014,9 +2191,64 @@ impl RawGpuPipeline {
             ],
         });
 
-        // The local-effects result is read from tex2 and the creative pass
-        // writes back into tex1. This reuses the existing ping-pong textures
-        // while ensuring Glow samples the exact same developed stage it adds to.
+        // Glow is extracted from the completed local-effects image in tex2.
+        // Five adjacent B3-spline diffusion stages then ping-pong through tex1
+        // and the display-linear surface. The latter is safe scratch here: the
+        // final render overwrites it only after the creative composite.
+        let bg_glow_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg Glow source extraction"),
+            layout: &bgl_glow_prepare,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 31,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+            ],
+        });
+
+        let make_glow_blur_bind_group =
+            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_glow_blur,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: params_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 30,
+                            resource: wgpu::BindingResource::TextureView(read_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 31,
+                            resource: wgpu::BindingResource::TextureView(write_view),
+                        },
+                    ],
+                })
+            };
+        let bg_glow_blur_0 =
+            make_glow_blur_bind_group("bg Glow diffusion 0", &tex1_view, &display_linear_view);
+        let bg_glow_blur_1 =
+            make_glow_blur_bind_group("bg Glow diffusion 1", &display_linear_view, &tex1_view);
+        let bg_glow_blur_2 =
+            make_glow_blur_bind_group("bg Glow diffusion 2", &tex1_view, &display_linear_view);
+        let bg_glow_blur_3 =
+            make_glow_blur_bind_group("bg Glow diffusion 3", &display_linear_view, &tex1_view);
+        let bg_glow_blur_4 =
+            make_glow_blur_bind_group("bg Glow diffusion 4", &tex1_view, &display_linear_view);
+
+        // The creative pass keeps the untouched local-effects result in tex2,
+        // composites the final Glow diffusion from display_linear, applies the
+        // post-crop vignette, and writes the complete result back into tex1.
         let bg_adjust_creative = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg creative glow and vignette"),
             layout: &bgl_adjust_creative,
@@ -2032,6 +2264,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 25,
                     resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 30,
+                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
                 },
             ],
         });
@@ -2165,11 +2401,15 @@ impl RawGpuPipeline {
             })
         };
 
-        let mut passes = Vec::with_capacity(1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + 8 + 7);
+        let mut passes = Vec::with_capacity(expected_pass_count(raw.cfa_kind));
 
         // Prepare writes the initial RGB estimate and reliability into A.
         passes.push(Pass {
-            pipeline: make_pipeline(highlight_module.as_ref(), "highlight_prepare", &bgl_highlights),
+            pipeline: make_pipeline(
+                highlight_module.as_ref(),
+                "highlight_prepare",
+                &bgl_highlights,
+            ),
             bind_group: make_highlight_bind_group(
                 "bg highlight prepare",
                 &highlight_work_b_view,
@@ -2219,7 +2459,11 @@ impl RawGpuPipeline {
         };
         let highlight_finalize_guided_index = passes.len();
         passes.push(Pass {
-            pipeline: make_pipeline(highlight_module.as_ref(), "highlight_finalize", &bgl_highlights),
+            pipeline: make_pipeline(
+                highlight_module.as_ref(),
+                "highlight_finalize",
+                &bgl_highlights,
+            ),
             bind_group: make_highlight_bind_group(
                 "bg highlight finalize guided",
                 final_read_view,
@@ -2232,7 +2476,11 @@ impl RawGpuPipeline {
         // prepare texture. This avoids eleven full-frame copy dispatches.
         let highlight_finalize_direct_index = passes.len();
         passes.push(Pass {
-            pipeline: make_pipeline(highlight_module.as_ref(), "highlight_finalize", &bgl_highlights),
+            pipeline: make_pipeline(
+                highlight_module.as_ref(),
+                "highlight_finalize",
+                &bgl_highlights,
+            ),
             bind_group: make_highlight_bind_group(
                 "bg highlight finalize direct",
                 &highlight_work_a_view,
@@ -2249,7 +2497,11 @@ impl RawGpuPipeline {
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p1_module.as_ref(), "bayer_rcd_directional", &bgl1),
+                    pipeline: make_pipeline(
+                        bayer_rcd_p1_module.as_ref(),
+                        "bayer_rcd_directional",
+                        &bgl1,
+                    ),
                     bind_group: bg1,
                     workgroups: image_workgroups,
                 },
@@ -2259,12 +2511,20 @@ impl RawGpuPipeline {
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p3_module.as_ref(), "bayer_rcd_chroma", &bgl3),
+                    pipeline: make_pipeline(
+                        bayer_rcd_p3_module.as_ref(),
+                        "bayer_rcd_chroma",
+                        &bgl3,
+                    ),
                     bind_group: bg3,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(bayer_rcd_p4_module.as_ref(), "bayer_rcd_output", &bgl4),
+                    pipeline: make_pipeline(
+                        bayer_rcd_p4_module.as_ref(),
+                        "bayer_rcd_output",
+                        &bgl4,
+                    ),
                     bind_group: bg4,
                     workgroups: image_workgroups,
                 },
@@ -2276,17 +2536,29 @@ impl RawGpuPipeline {
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p2_module.as_ref(), "xtrans_markesteijn_pass1", &bgl2),
+                    pipeline: make_pipeline(
+                        xtrans_p2_module.as_ref(),
+                        "xtrans_markesteijn_pass1",
+                        &bgl2,
+                    ),
                     bind_group: bg2.clone(),
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p3_module.as_ref(), "xtrans_markesteijn_pass2", &bgl3),
+                    pipeline: make_pipeline(
+                        xtrans_p3_module.as_ref(),
+                        "xtrans_markesteijn_pass2",
+                        &bgl3,
+                    ),
                     bind_group: bg3,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(xtrans_p2_module.as_ref(), "xtrans_markesteijn_pass3", &bgl2),
+                    pipeline: make_pipeline(
+                        xtrans_p2_module.as_ref(),
+                        "xtrans_markesteijn_pass3",
+                        &bgl2,
+                    ),
                     bind_group: bg2,
                     workgroups: image_workgroups,
                 },
@@ -2378,8 +2650,11 @@ impl RawGpuPipeline {
         let tone_stage_end = passes.len();
         let adjustment_prepare_pass_index = passes.len();
         let adjustment_effects_pass_index = adjustment_prepare_pass_index + 1;
-        let adjustment_creative_pass_index = adjustment_prepare_pass_index + 2;
-        let adjustment_render_pass_index = adjustment_prepare_pass_index + 3;
+        let glow_prepare_pass_index = adjustment_prepare_pass_index + 2;
+        let glow_blur_start_index = adjustment_prepare_pass_index + 3;
+        let glow_blur_end_index = glow_blur_start_index + 5;
+        let adjustment_creative_pass_index = glow_blur_end_index;
+        let adjustment_render_pass_index = adjustment_creative_pass_index + 1;
 
         passes.extend([
             Pass {
@@ -2398,6 +2673,60 @@ impl RawGpuPipeline {
                     &bgl_adjust_effects,
                 ),
                 bind_group: bg_adjust_effects,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
+                    "prepare_glow_source",
+                    &bgl_glow_prepare,
+                ),
+                bind_group: bg_glow_prepare,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
+                    "diffuse_glow_0",
+                    &bgl_glow_blur,
+                ),
+                bind_group: bg_glow_blur_0,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
+                    "diffuse_glow_1",
+                    &bgl_glow_blur,
+                ),
+                bind_group: bg_glow_blur_1,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
+                    "diffuse_glow_2",
+                    &bgl_glow_blur,
+                ),
+                bind_group: bg_glow_blur_2,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
+                    "diffuse_glow_3",
+                    &bgl_glow_blur,
+                ),
+                bind_group: bg_glow_blur_3,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
+                    "diffuse_glow_4",
+                    &bgl_glow_blur,
+                ),
+                bind_group: bg_glow_blur_4,
                 workgroups: image_workgroups,
             },
             Pass {
@@ -2434,6 +2763,7 @@ impl RawGpuPipeline {
             processing_quality: quality,
             params_buffer,
             tone_histogram_buffer,
+            tone_stats_buffer,
             raw_stage_end,
             tone_prepare_pass_index,
             tone_reduce_pass_index,
@@ -2445,6 +2775,9 @@ impl RawGpuPipeline {
             demosaic_start_index,
             adjustment_prepare_pass_index,
             adjustment_effects_pass_index,
+            glow_prepare_pass_index,
+            glow_blur_start_index,
+            glow_blur_end_index,
             adjustment_creative_pass_index,
             adjustment_render_pass_index,
             passes,
@@ -2686,6 +3019,29 @@ impl RawGpuPipeline {
             label: Some("auraw export tone histogram clear"),
         });
         encoder.clear_buffer(&self.tone_histogram_buffer, 0, None);
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Copies the full-frame adaptive tone anchors into a crop/detail pipeline.
+    /// Spatial guides remain crop-local, but global percentiles (including the
+    /// Dehaze ambient-light anchor) must not change while the user pans or
+    /// zooms. Call this after the detail Tone stage and before its Output stage.
+    pub fn inherit_tone_statistics(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        full_frame: &Self,
+    ) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw inherit full-frame tone statistics"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &full_frame.tone_stats_buffer,
+            0,
+            &self.tone_stats_buffer,
+            0,
+            TONE_STATS_SIZE_BYTES,
+        );
         queue.submit(Some(encoder.finish()));
     }
 
@@ -3050,6 +3406,14 @@ impl RawGpuPipeline {
         self.encode_pass(encoder, self.adjustment_prepare_pass_index);
         if params.needs_intermediate_adjustment_passes() {
             self.encode_pass(encoder, self.adjustment_effects_pass_index);
+            if params.needs_glow_passes() {
+                self.encode_pass(encoder, self.glow_prepare_pass_index);
+                self.encode_pass_range(
+                    encoder,
+                    self.glow_blur_start_index,
+                    self.glow_blur_end_index,
+                );
+            }
             self.encode_pass(encoder, self.adjustment_creative_pass_index);
         }
         self.encode_pass(encoder, self.adjustment_render_pass_index);
