@@ -6,17 +6,22 @@ use crate::pipeline::{
     MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
     TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
+use crate::sidecar::{EditState as SidecarEditState, LensEditState as SidecarLensEditState};
 use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::layout::ScreenLayout;
-use crate::ui::library::Library;
+use crate::ui::library::{Library, LibraryState};
 use crate::ui::preview::Preview;
 use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::top_bar::TopBar;
 use eframe::{egui, wgpu};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+
+mod edit_history;
+use edit_history::EditHistory;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum PreviewQuality {
@@ -101,8 +106,8 @@ pub(crate) struct PreviewDetail {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AppTab {
-    Library,
     #[default]
+    Library,
     Develop,
     Settings,
 }
@@ -228,11 +233,43 @@ struct LoadedPreview {
     preview_raw: Arc<LoadedRaw>,
     pipeline: RawGpuPipeline,
     rendered_exposure: ExposureParams,
+    rendered_masks: MaskStack,
     lens_correction: LensCorrectionState,
+    sidecar_target: crate::sidecar::SidecarTarget,
+    sidecar_generation: u64,
+    sidecar_warning: Option<String>,
+    sidecar_needs_rewrite: bool,
 }
 
 enum LoadEvent {
     Finished(Result<LoadedPreview, String>),
+}
+
+#[derive(Clone)]
+struct SidecarSaveRequest {
+    target: crate::sidecar::SidecarTarget,
+    generation: u64,
+    revision: u64,
+    explicit: bool,
+    edits: SidecarEditState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SidecarSaveJob {
+    generation: u64,
+    revision: u64,
+    explicit: bool,
+}
+
+struct SidecarSaveEvent {
+    job: SidecarSaveJob,
+    result: Result<String, String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SidecarAutosaveDeadline {
+    generation: u64,
+    due_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -291,6 +328,7 @@ pub struct AurawApp {
     preview_detail_urgent: bool,
     preview_quality_dirty: bool,
     pub exposure: ExposureParams,
+    pub(crate) library: LibraryState,
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
     pub adjustment_section: AdjustmentSection,
@@ -325,6 +363,18 @@ pub struct AurawApp {
     /// interface intentionally keeps these implementation details hidden.
     pub expert_mode: bool,
     pub(crate) lens_correction: LensCorrectionState,
+    edit_history: EditHistory,
+    /// A history restore across a lens-geometry change must put back the masks
+    /// associated with that historical geometry after the normal lens rebuild.
+    history_lens_restore_masks: Option<MaskStack>,
+    sidecar_target: Option<crate::sidecar::SidecarTarget>,
+    sidecar_generation: u64,
+    sidecar_saved_revision: Option<u64>,
+    sidecar_failed_revision: Option<u64>,
+    sidecar_pending: VecDeque<SidecarSaveRequest>,
+    sidecar_in_flight: Option<SidecarSaveJob>,
+    sidecar_receiver: Option<mpsc::Receiver<SidecarSaveEvent>>,
+    sidecar_autosave_deadline: Option<SidecarAutosaveDeadline>,
 
     egui_ctx: egui::Context,
     target_exposure: ExposureParams,
@@ -355,4 +405,5 @@ pub struct AurawApp {
 include!("app/lifecycle.rs");
 include!("app/masks_ai.rs");
 include!("app/processing_export.rs");
+include!("app/sidecar_persistence.rs");
 include!("app/eframe_impl.rs");

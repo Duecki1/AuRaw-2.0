@@ -1,8 +1,33 @@
+use super::basicadj::GLOBAL_TEMPERATURE_LIMIT;
 use super::color_profile::CameraProfile;
 #[cfg(not(libraw_available))]
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use std::path::Path;
+
+pub const SUPPORTED_RAW_EXTENSIONS: &[&str] = &[
+    "3fr", "ari", "arw", "bay", "bmq", "cap", "cine", "cr2", "cr3", "crw", "cs1", "dc2", "dcr",
+    "dcs", "dng", "drf", "eip", "erf", "fff", "gpr", "iiq", "k25", "kc2", "kdc", "mdc", "mef",
+    "mos", "mrw", "nef", "nrw", "obm", "orf", "pef", "ptx", "pxn", "qtk", "r3d", "raf", "raw",
+    "rdc", "rw2", "rwl", "rwz", "sr2", "srf", "srw", "sti", "x3f",
+];
+
+pub fn is_supported_raw_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            SUPPORTED_RAW_EXTENSIONS
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
+}
+
+#[derive(Clone, Debug)]
+pub struct RawThumbnail {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
 
 pub const MAX_RAW_EDGE: u32 = 32_768;
 #[cfg(target_os = "android")]
@@ -121,7 +146,7 @@ impl LoadedRaw {
         if let Some(model) = &self.white_balance_model {
             if let Some(adjusted) = libraw_loader::adjusted_camera_transform(
                 model,
-                temperature.clamp(-100.0, 100.0),
+                temperature.clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
                 tint.clamp(-100.0, 100.0),
             ) {
                 return adjusted;
@@ -135,6 +160,13 @@ impl LoadedRaw {
 pub fn load_raw_file(_path: &Path) -> Result<LoadedRaw> {
     Err(anyhow!(
         "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
+    ))
+}
+
+#[cfg(not(libraw_available))]
+pub fn load_raw_thumbnail(_path: &Path, _maximum_edge: u32) -> Result<RawThumbnail> {
+    Err(anyhow!(
+        "this build was compiled without LibRaw, so RAW thumbnails are unavailable"
     ))
 }
 
@@ -156,4 +188,78 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
 }
 
 #[cfg(libraw_available)]
+pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+    libraw_loader::load_raw_thumbnail(path, maximum_edge)
+}
+
+#[cfg(libraw_available)]
 mod libraw_loader;
+
+#[cfg(all(test, libraw_available))]
+mod tests {
+    use super::{
+        CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, LoadedRaw,
+        GLOBAL_TEMPERATURE_LIMIT,
+    };
+
+    fn raw_with_white_balance_model() -> LoadedRaw {
+        LoadedRaw {
+            width: 1,
+            height: 1,
+            camera_make: "Test".to_owned(),
+            camera_model: "Matrix".to_owned(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            focal_length: 0.0,
+            aperture: 0.0,
+            focus_distance: 0.0,
+            cfa_kind: CfaKind::Bayer,
+            raw_pixels: vec![0],
+            color_indices: vec![0],
+            wb_coeffs: [2.0, 1.0, 1.5, 1.0],
+            cam_to_srgb: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            black_levels: [0.0; 4],
+            black_levels_per_pixel: vec![0.0],
+            white_levels: [1.0; 4],
+            camera_profile: CameraProfile::default(),
+            white_balance_model: Some(CameraWhiteBalanceModel {
+                base_wb: [2.0, 1.0, 1.5, 1.0],
+                cdesc: *b"RGBG",
+                base_cct: 5_000.0,
+                color: CameraColorModel::Matrix {
+                    xyz_to_camera: [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                        [0.0, 1.0, 0.0],
+                    ],
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn extended_temperature_range_reaches_beyond_the_old_hundred_mired_clamp() {
+        let raw = raw_with_white_balance_model();
+        let positive_hundred = raw.adjusted_camera_transform(100.0, 0.0).0;
+        let positive_limit = raw
+            .adjusted_camera_transform(GLOBAL_TEMPERATURE_LIMIT, 0.0)
+            .0;
+        let negative_hundred = raw.adjusted_camera_transform(-100.0, 0.0).0;
+        let negative_limit = raw
+            .adjusted_camera_transform(-GLOBAL_TEMPERATURE_LIMIT, 0.0)
+            .0;
+
+        assert_ne!(positive_hundred, positive_limit);
+        assert_ne!(negative_hundred, negative_limit);
+        assert_eq!(
+            positive_limit,
+            raw.adjusted_camera_transform(GLOBAL_TEMPERATURE_LIMIT + 50.0, 0.0)
+                .0
+        );
+    }
+}

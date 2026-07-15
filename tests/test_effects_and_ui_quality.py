@@ -50,6 +50,8 @@ def test_texture_and_clarity_are_band_pass_not_global_exposure() -> None:
     assert "if abs(texture) < 1e-6 && abs(clarity) < 1e-6" in ADJUSTMENTS
     assert "texture_strength = select(1.75, 2.65" in ADJUSTMENTS
     assert "clarity_strength = select(2.20, 3.25" in ADJUSTMENTS
+    assert "fn presence_reference_scale" in ADJUSTMENTS
+    assert "presence_step(clarity_reference, 12)" in ADJUSTMENTS
 
 
 def test_dehaze_uses_airlight_and_transmission() -> None:
@@ -59,6 +61,10 @@ def test_dehaze_uses_airlight_and_transmission() -> None:
     assert "airlight" in ADJUSTMENTS
     assert "(rgb - airlight * (1.0 - transmission)) / transmission" in ADJUSTMENTS
     assert "mix(rgb, airlight" in ADJUSTMENTS
+    assert "tone_stats.percentiles_1.x + params.exposure" in ADJUSTMENTS
+    assert "SCENE_MIDDLE_GREY * exp2(ambient_ev)" in ADJUSTMENTS
+    assert "normalized_dark_ratio" in ADJUSTMENTS
+    assert "presence_step(2.0, 6)" in ADJUSTMENTS
 
 
 def test_blacks_has_a_visible_lower_tonal_range() -> None:
@@ -129,9 +135,10 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
 
     # Global WB is camera/profile metadata-driven on the CPU; its result reaches
     # shaders through the live camera matrix and DCP interpolation weight.
+    compact_gpu = re.sub(r"\s+", "", GPU)
     for ui_field in ("exposure.temperature", "exposure.tint"):
         assert f"&mut {ui_field}" in SIDEBAR, ui_field
-        assert f"{ui_field}.clamp" in GPU, ui_field
+        assert f"{ui_field}.clamp" in compact_gpu, ui_field
     assert "raw.adjusted_camera_transform(" in GPU
     assert "cam_to_working(camera_rgb)" in ALL_SHADERS
 
@@ -159,8 +166,8 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
 
 
 def test_revised_adjustment_formulas_increment_the_process_version() -> None:
-    assert "CURRENT_PROCESS_VERSION: u32 = 4" in BASIC
-    assert "0 | 1 | 2 | 3 => self.process_version = CURRENT_PROCESS_VERSION" in BASIC
+    assert "CURRENT_PROCESS_VERSION: u32 = 5" in BASIC
+    assert "0..=4 => self.process_version = CURRENT_PROCESS_VERSION" in BASIC
 
 
 def test_presence_and_color_controls_use_perceptual_bounded_mappings() -> None:

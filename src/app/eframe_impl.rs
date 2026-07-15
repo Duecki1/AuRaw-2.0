@@ -9,6 +9,8 @@ impl eframe::App for AurawApp {
         self.poll_load_worker(frame);
         self.poll_export_worker();
         self.poll_subject_worker();
+        self.handle_edit_history_shortcuts(ui.ctx());
+        self.handle_sidecar_shortcut(ui.ctx());
 
         let viewport_size = ui.max_rect().size();
         let layout = ScreenLayout::from_size(viewport_size);
@@ -53,16 +55,14 @@ impl eframe::App for AurawApp {
                         egui::Panel::bottom("develop_vertical_mask_strip")
                             .resizable(false)
                             .exact_size(Sidebar::VERTICAL_MASK_STRIP_HEIGHT)
-                            .show(ui, |ui| {
-                                Sidebar::show_vertical_mask_strip(ui, self, frame)
-                            });
+                            .show(ui, |ui| Sidebar::show_vertical_mask_strip(ui, self, frame));
                     }
                 }
             }
         }
 
         egui::CentralPanel::default().show(ui, |ui| match self.active_tab {
-            AppTab::Library => Library::show(ui),
+            AppTab::Library => Library::show(ui, self, frame),
             AppTab::Develop => Preview::show(ui, self),
             AppTab::Settings => {
                 let settings_scroll_source = if slider_scroll_locked(ui.ctx()) {
@@ -79,9 +79,12 @@ impl eframe::App for AurawApp {
 
         self.apply_pending_lens_correction(frame);
         self.apply_pending_preview_quality(frame);
-        self.advance_processing(frame);
-        self.advance_preview_detail(frame);
+        // Keep the tiny full-frame navigation proxy current before rendering a
+        // visible high-resolution crop. Detail Dehaze/adaptive-tone output can
+        // then inherit one stable set of full-image statistics while panning.
         self.advance_navigation_preview(frame);
+        self.advance_preview_detail(frame);
+        self.advance_processing(frame);
         self.refresh_status();
 
         if self.preview_detail_pending_stage.is_some()
@@ -94,5 +97,16 @@ impl eframe::App for AurawApp {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
         self.show_subject_dialogs(ui.ctx());
+        let edit_interaction_active = sidecar_interaction_active(ui.ctx());
+        self.observe_edit_history(ui.ctx());
+        self.schedule_sidecar_autosave(ui.ctx(), edit_interaction_active);
+        // Poll after edit observation so an autosave that waited behind an
+        // interaction can be coalesced to its final committed value before
+        // the next worker starts.
+        self.poll_sidecar_save();
+    }
+
+    fn on_exit(&mut self) {
+        self.flush_sidecar_on_exit();
     }
 }

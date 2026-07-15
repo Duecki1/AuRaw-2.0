@@ -231,8 +231,7 @@ where
                 // if the finger moves vertically or leaves the original hit rect.
                 // This prevents the parent ScrollArea from waking up mid-drag.
                 lock_slider_scroll(ui.ctx(), slider_drag_id);
-                changed |=
-                    set_from_pointer(value, start, end, decimals, track_rect, position.x);
+                changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
             } else if rect.contains(origin) {
                 let delta = position - origin;
                 let began_on_handle = handle_hit_rect.contains(origin);

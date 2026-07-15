@@ -9,6 +9,29 @@ GPU-based RAW image editor for Linux, Windows, and Android.
 - **Windows (supported):** x86_64 GNU build with LibRaw, produced by the Windows workflow.
 - **Android (experimental):** arm64 application build; device GPU and camera compatibility vary.
 
+## RAW library
+
+AuRaw opens on the Library tab. On desktop, choose **Open Folder…** to scan a
+folder recursively; embedded LibRaw previews are decoded in the background as
+their rows become visible. Selecting a thumbnail opens that RAW in Develop.
+The catalog, visible rows, pending preview work, and GPU thumbnail cache are
+bounded so large photo folders do not need to be loaded into memory at once.
+
+On Android, the floating **+** button imports through the system document
+picker. Android 10 and newer keep imported RAW files in the user-visible
+`Download/AuRaw` collection without requesting broad storage permission. See
+[ANDROID.md](ANDROID.md) for the Android 8–9 fallback and scoped-storage details.
+
+Develop edits are non-destructive. AuRaw restores exposure, color, effects,
+local masks, and lens selection from a versioned `<raw filename>.auraw`
+sidecar, then saves committed edits in the background. **Save Edits** (or
+Ctrl/Cmd+S) forces an immediate retry without modifying the RAW. Automatic
+saves use a short 0.9-second, non-sliding coalescing interval and wait for the
+current interaction to finish; snapshotting is O(1), while serialization and
+storage I/O stay on a worker. Desktop
+sidecars sit beside the source file; Android sidecars are visible siblings in
+the AuRaw library folder.
+
 ## Linux (Debian/Ubuntu)
 
 Install the build dependencies:
@@ -121,8 +144,10 @@ Texture, Clarity, and Dehaze run in a dedicated local-effects pass after the
 Light and point-curve controls. The pass reads a full-precision developed base
 texture, so local residuals are never calculated against an earlier/raw stage.
 Texture uses a noise-aware fine-detail band, Clarity uses an edge-aware
-mid-scale à-trous band, and Dehaze uses a local dark-channel/airlight model.
-Flat fields are an exact no-op for Texture and Clarity.
+mid-scale à-trous band, and Dehaze uses a scale-aware dark channel with a
+stable full-image ambient-light estimate. Flat fields are an exact no-op for
+Texture and Clarity, and zoom crops inherit the full-frame tonal anchors so
+adaptive controls do not change merely because the image is panned.
 
 The standard interface shows Light, Tone Curve, Color, Effects, and Color
 Mixer. Settings contains an **Expert mode** checkbox, disabled by default.
@@ -133,9 +158,10 @@ two endpoints; users add interior points explicitly.
 ## Creative effects
 
 The Effects panel also contains a highlight-aware **Glow** and a post-crop
-**Vignette**. Glow blooms bright sources from the completed developed image
-without lifting flat shadows. Standard mode exposes Glow Amount; Expert mode
-adds Radius and Threshold.
+**Vignette**. Glow extracts bright sources from the completed developed image
+and spreads them through a continuous five-stage diffusion cascade without
+lifting flat shadows or producing sparse sampling rings. Standard mode exposes
+Glow Amount; Expert mode adds Radius and Threshold.
 
 Vignette exposes Amount, Midpoint, Roundness, Feather, and Highlights. It uses
 full-image coordinates for stable geometry across previews and tiled exports,

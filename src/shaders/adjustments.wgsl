@@ -15,6 +15,8 @@
 @group(0) @binding(27) var local_mask_tex: texture_2d_array<f32>;
 @group(0) @binding(28) var local_mask_sampler: sampler;
 @group(0) @binding(29) var display_linear_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
+@group(0) @binding(30) var glow_work_tex: texture_2d<f32>;
+@group(0) @binding(31) var glow_work_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 struct LocalAdjustmentMix {
     tone0: vec4<f32>,
@@ -77,7 +79,31 @@ fn log_luminance(rgb: vec3<f32>) -> f32 {
     return log2(safe_luma(max(rgb, vec3<f32>(0.0))));
 }
 
-fn bilateral_log_luminance(pos: vec2<i32>, radius: i32, range_strength: f32) -> f32 {
+fn presence_reference_scale() -> f32 {
+    // Spatial presence controls are authored relative to a 1080-pixel short
+    // edge. Scaling their sample steps makes the preview proxy, zoom detail,
+    // and full-resolution export operate on comparable subject detail.
+    return clamp(
+        f32(min(params.full_width, params.full_height)) / 1080.0,
+        0.55,
+        3.0,
+    );
+}
+
+fn presence_step(reference_pixels: f32, maximum: i32) -> i32 {
+    return clamp(
+        i32(round(reference_pixels * presence_reference_scale())),
+        1,
+        maximum,
+    );
+}
+
+fn bilateral_log_luminance(
+    pos: vec2<i32>,
+    radius: i32,
+    step: i32,
+    range_strength: f32,
+) -> f32 {
     let center = log_luminance(adjustment_base_at(pos));
     let sigma = max(f32(radius) * 0.72, 0.85);
     var sum = 0.0;
@@ -88,7 +114,9 @@ fn bilateral_log_luminance(pos: vec2<i32>, radius: i32, range_strength: f32) -> 
     for (var dy = -3; dy <= 3; dy = dy + 1) {
         for (var dx = -3; dx <= 3; dx = dx + 1) {
             if abs(dx) > radius || abs(dy) > radius { continue; }
-            let sample_ev = log_luminance(adjustment_base_at(pos + vec2<i32>(dx, dy)));
+            let sample_ev = log_luminance(
+                adjustment_base_at(pos + vec2<i32>(dx * step, dy * step)),
+            );
             let distance_squared = f32(dx * dx + dy * dy);
             let spatial = exp(-0.5 * distance_squared / (sigma * sigma));
             let delta = sample_ev - center;
@@ -150,10 +178,12 @@ fn apply_texture_and_clarity_values(
     let center_ev = log_luminance(rgb);
     // Texture uses a compact 5x5 edge-aware base. The previous 3x3 residual
     // combined with a large threshold rejected most real surface detail.
-    let fine_base_ev = bilateral_log_luminance(pos, 2, 9.5);
+    let fine_step = presence_step(1.0, 3);
+    let fine_base_ev = bilateral_log_luminance(pos, 2, fine_step, 9.5);
     var broad_base_ev = fine_base_ev;
     if abs(clarity) >= 1e-6 {
-        let clarity_step = select(4, 5, params.tone_guide_radius > 3.5);
+        let clarity_reference = select(4.0, 5.0, params.tone_guide_radius > 3.5);
+        let clarity_step = presence_step(clarity_reference, 12);
         broad_base_ev = atrous_log_luminance(pos, clarity_step, 0.82);
     }
 
@@ -186,29 +216,43 @@ fn apply_texture_and_clarity_values(
 }
 
 struct HazeNeighborhood {
-    dark: f32,
+    dark_ratio: f32,
     airlight: vec3<f32>,
     airlight_luma: f32,
 }
 
-fn haze_neighborhood(pos: vec2<i32>, step: i32) -> HazeNeighborhood {
-    var dark = 1e20;
+fn normalized_dark_ratio(rgb: vec3<f32>, airlight_luma: f32) -> f32 {
+    let normalized = max(rgb, vec3<f32>(0.0)) / max(airlight_luma, 1e-6);
+    return clamp(min(normalized.r, min(normalized.g, normalized.b)), 0.0, 1.0);
+}
+
+fn haze_neighborhood(pos: vec2<i32>, step: i32, airlight_luma: f32) -> HazeNeighborhood {
+    var dark_ratio = 1.0;
     var brightest = adjustment_base_at(pos);
     var brightest_luma = safe_luma(brightest);
-    // A sparse wide 5x5 neighbourhood is substantially closer to a dark-channel
-    // prior than the old five-pixel radius, while keeping preview cost bounded.
-    for (var ky = -2; ky <= 2; ky = ky + 1) {
-        for (var kx = -2; kx <= 2; kx = kx + 1) {
+    var haziest_ratio = normalized_dark_ratio(brightest, airlight_luma);
+    // A scale-aware 7x7 dark-channel stencil tracks a similar subject-space
+    // footprint in previews and exports. The denser stencil avoids the phase
+    // holes produced by the previous sparse 5x5 gather.
+    for (var ky = -3; ky <= 3; ky = ky + 1) {
+        for (var kx = -3; kx <= 3; kx = kx + 1) {
             let sample = adjustment_base_at(pos + vec2<i32>(kx * step, ky * step));
-            dark = min(dark, min(sample.r, min(sample.g, sample.b)));
+            let sample_dark_ratio = normalized_dark_ratio(sample, airlight_luma);
+            dark_ratio = min(dark_ratio, sample_dark_ratio);
             let luminance = safe_luma(sample);
-            if luminance > brightest_luma {
+            // The colour hint comes from the locally haziest candidate, not
+            // simply the brightest edge/specular. Its energy is replaced by
+            // the image-global ambient estimate below.
+            if sample_dark_ratio > haziest_ratio
+                || (abs(sample_dark_ratio - haziest_ratio) < 1e-5
+                    && luminance > brightest_luma) {
                 brightest = sample;
                 brightest_luma = luminance;
+                haziest_ratio = sample_dark_ratio;
             }
         }
     }
-    return HazeNeighborhood(max(dark, 0.0), brightest, brightest_luma);
+    return HazeNeighborhood(dark_ratio, brightest, brightest_luma);
 }
 
 fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
@@ -219,34 +263,46 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
 
     let center_lum = safe_luma(rgb);
     let center_ev = log2(center_lum);
-    let broad_ev = bilateral_log_luminance(pos, 2, 0.95);
-    let broad_lum = exp2(broad_ev);
-    let haze_step = select(4, 6, params.tone_guide_radius > 3.5);
-    let neighborhood = haze_neighborhood(pos, haze_step);
-
-    let airlight_luma = max(
-        max(neighborhood.airlight_luma, broad_lum * 1.12),
-        center_lum,
+    let broad_ev = bilateral_log_luminance(
+        pos,
+        2,
+        presence_step(1.0, 3),
+        0.95,
     );
+    // Darktable estimates one ambient A0 for the complete image before it
+    // builds the transmission map. ToneStats already contains the full-image
+    // 99.5th-percentile luminance in pre-user-exposure EV, which is a stable,
+    // tile-safe approximation of that global ambient energy. The old shader
+    // promoted each pixel's local brightest neighbour to A, causing colour and
+    // contrast to pump across edges and export tiles.
+    let ambient_ev = clamp(tone_stats.percentiles_1.x + params.exposure, -16.0, 16.0);
+    let airlight_luma = max(SCENE_MIDDLE_GREY * exp2(ambient_ev), 1e-5);
+    let haze_step = presence_step(2.0, 6);
+    let neighborhood = haze_neighborhood(pos, haze_step, airlight_luma);
+
     let airlight_colour = neighborhood.airlight
         / max(neighborhood.airlight_luma, 1e-6) * airlight_luma;
-    // Mostly neutral atmospheric light with enough sampled colour retained for
-    // blue sky, sunset, and warm indoor haze.
+    // Keep ambient energy global and retain only a restrained local colour
+    // hint. This stays seam-safe while avoiding a forced neutral cast in blue
+    // sky, sunset, and warm indoor haze.
     let airlight = max(
-        mix(vec3<f32>(airlight_luma), airlight_colour, 0.34),
+        mix(vec3<f32>(airlight_luma), airlight_colour, 0.14),
         vec3<f32>(airlight_luma * 0.28),
     );
-    let dark_ratio = clamp(neighborhood.dark / max(airlight_luma, 1e-6), 0.0, 1.0);
-    let veil = smoothstep(0.018, 0.66, dark_ratio);
+    let dark_ratio = neighborhood.dark_ratio;
+    let veil = smoothstep(0.025, 0.78, dark_ratio);
     let low_contrast = 1.0 - smoothstep(0.10, 0.72, abs(center_ev - broad_ev));
-    let haze_likelihood = clamp(veil * (0.58 + 0.42 * low_contrast), 0.0, 1.0);
+    // The edge-aware broad guide refines the raw dark-channel estimate in the
+    // same spirit as Darktable's guided transmission filter: real edges are
+    // protected while low-contrast veil receives the stronger correction.
+    let haze_likelihood = clamp(veil * (0.52 + 0.48 * low_contrast), 0.0, 1.0);
 
     if amount > 0.0 {
         // Dark-channel transmission recovery. Even relatively clear regions get
         // a modest contrast response, while detected veil receives the stronger
         // atmospheric-light subtraction expected from a real Dehaze control.
         let transmission = clamp(
-            1.0 - amount * (0.24 + 0.68 * haze_likelihood),
+            1.0 - amount * (0.20 + 0.70 * haze_likelihood),
             0.22,
             1.0,
         );
@@ -312,45 +368,68 @@ fn glow_emission(rgb: vec3<f32>, cutoff: f32) -> vec3<f32> {
         * intensity * pow(linear_luma, 0.62) * cutoff_fade * black_gate;
 }
 
-fn glow_source_at(pos: vec2<i32>, cutoff: f32) -> vec3<f32> {
-    var sum = vec3<f32>(0.0);
-    var sum_weight = 0.0;
-    let center_luma = safe_luma(local_effects_at(pos));
-
-    // A small, edge-aware prefilter suppresses isolated sparkle pixels and
-    // demosaic specks before the larger bloom blur is applied. This keeps Glow
-    // smooth and photographic instead of producing pointillist dots.
-    for (var ky = -1; ky <= 1; ky = ky + 1) {
-        for (var kx = -1; kx <= 1; kx = kx + 1) {
-            let sample_pos = pos + vec2<i32>(kx, ky);
-            let sample_rgb = local_effects_at(sample_pos);
-            let sample_luma = safe_luma(sample_rgb);
-            let spatial = select(2.0, 4.0, kx == 0 && ky == 0)
-                * select(1.0, 2.0, kx == 0 || ky == 0);
-            let range = exp(-8.0 * abs(sample_luma - center_luma));
-            let weight = spatial * range;
-            sum = sum + glow_emission(sample_rgb, cutoff) * weight;
-            sum_weight = sum_weight + weight;
-        }
-    }
-    return sum / max(sum_weight, 1e-6);
+fn glow_cutoff() -> f32 {
+    let threshold = clamp(params.creative_effects.z / 100.0, 0.0, 1.0);
+    return mix(0.06, 0.92, pow(threshold, 1.12));
 }
 
-fn glow_blur_at(pos: vec2<i32>, step: i32, cutoff: f32) -> vec3<f32> {
+fn glow_work_at(pos: vec2<i32>) -> vec3<f32> {
+    return max(textureLoad(glow_work_tex, clamp_pos(pos), 0).xyz, vec3<f32>(0.0));
+}
+
+fn glow_stage_step(stage: u32) -> i32 {
+    // The cascade has a maximum cumulative support of 96 pixels:
+    // 2 * (3 + 3 + 6 + 12 + 24) at the capped 3x reference scale.
+    // That bound is mirrored by GLOW_SUPPORT in processing.rs.
+    var reference_step = 1.0;
+    switch stage {
+        case 2u: { reference_step = 2.0; }
+        case 3u: { reference_step = 4.0; }
+        case 4u: { reference_step = 8.0; }
+        default: {}
+    }
+    let scale = clamp(
+        f32(min(params.full_width, params.full_height)) / 1080.0,
+        0.45,
+        3.0,
+    );
+    return max(i32(round(reference_step * scale)), 1);
+}
+
+fn glow_stage_mix(stage: u32) -> f32 {
+    let radius = clamp(params.creative_effects.y / 100.0, 0.0, 1.0);
+    switch stage {
+        case 0u: { return 1.0; }
+        case 1u: { return smoothstep(0.0, 0.20, radius); }
+        case 2u: { return smoothstep(0.15, 0.45, radius); }
+        case 3u: { return smoothstep(0.40, 0.75, radius); }
+        default: { return smoothstep(0.70, 1.0, radius); }
+    }
+}
+
+fn glow_diffuse_at(pos: vec2<i32>, stage: u32) -> vec3<f32> {
+    let center = glow_work_at(pos);
+    let stage_mix = glow_stage_mix(stage);
+    if stage_mix < 1e-6 {
+        return center;
+    }
+
+    let step = glow_stage_step(stage);
     var sum = vec3<f32>(0.0);
     var sum_weight = 0.0;
-    // A 2-D B3-spline 5x5 gather. The glow source
-    // has already been prefiltered, so the large-radius gathers stay smooth
-    // instead of turning isolated bright pixels into repeated dot artefacts.
+    // Each pass is one normalized B3-spline diffusion step. Cascading adjacent
+    // scales gives every source a continuous path to every halo pixel. The old
+    // direct +/-step lattice could only see highlights whose phase happened to
+    // align with one of its sparse taps, producing dotted/ringed Glow.
     for (var ky = -2; ky <= 2; ky = ky + 1) {
         for (var kx = -2; kx <= 2; kx = kx + 1) {
             let weight = atrous_kernel_weight(kx) * atrous_kernel_weight(ky);
             let sample_pos = pos + vec2<i32>(kx * step, ky * step);
-            sum = sum + glow_source_at(sample_pos, cutoff) * weight;
+            sum = sum + glow_work_at(sample_pos) * weight;
             sum_weight = sum_weight + weight;
         }
     }
-    return sum / max(sum_weight, 1e-6);
+    return mix(center, sum / max(sum_weight, 1e-6), stage_mix);
 }
 
 fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
@@ -359,32 +438,14 @@ fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         return rgb;
     }
 
-    let radius = clamp(params.creative_effects.y / 100.0, 0.0, 1.0);
-    let threshold = clamp(params.creative_effects.z / 100.0, 0.0, 1.0);
-    let cutoff = mix(0.06, 0.92, pow(threshold, 1.12));
-    let reference_scale = clamp(
-        f32(min(params.full_width, params.full_height)) / 1080.0,
-        0.45,
-        3.0,
-    );
-    let step_f = mix(1.0, 9.0, pow(radius, 1.35)) * reference_scale;
-    let step_core = i32(clamp(round(max(step_f * 0.5, 1.0)), 1.0, 16.0));
-    let step_near = i32(clamp(round(step_f), 1.0, 28.0));
-    let step_far = min(step_near * 2, 48);
-
-    let core_bloom = glow_blur_at(pos, step_core, cutoff);
-    let near_bloom = glow_blur_at(pos, step_near, cutoff);
-    let far_bloom = glow_blur_at(pos, step_far, cutoff);
-    let bloom = core_bloom * 0.26
-        + near_bloom * (0.48 - radius * 0.08)
-        + far_bloom * (0.26 + radius * 0.08);
+    let bloom = glow_work_at(pos);
 
     // Very bright cores already carry their own energy. Protecting them keeps
     // Glow from clipping the light source while the blurred halo expands into
     // the surrounding darker pixels.
     let current_luma = safe_luma(rgb);
     let core_protection = 1.0 - 0.72 * smoothstep(1.0, 3.2, current_luma);
-    return max(rgb + bloom * amount * 3.0 * core_protection, vec3<f32>(0.0));
+    return max(rgb + bloom * amount * 2.8 * core_protection, vec3<f32>(0.0));
 }
 
 fn full_image_uv(pos: vec2<i32>) -> vec2<f32> {
@@ -1030,6 +1091,45 @@ fn apply_lightroom_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_saturation_vibrance(rgb);
     rgb = apply_saturation_value(rgb, local.effects.x);
     textureStore(local_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn prepare_glow_source(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    let emission = glow_emission(local_effects_at(pos), glow_cutoff());
+    textureStore(glow_work_out, pos, vec4<f32>(emission, 1.0));
+}
+
+fn store_glow_stage(gid: vec3<u32>, stage: u32) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    textureStore(glow_work_out, pos, vec4<f32>(glow_diffuse_at(pos, stage), 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn diffuse_glow_0(@builtin(global_invocation_id) gid: vec3<u32>) {
+    store_glow_stage(gid, 0u);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn diffuse_glow_1(@builtin(global_invocation_id) gid: vec3<u32>) {
+    store_glow_stage(gid, 1u);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn diffuse_glow_2(@builtin(global_invocation_id) gid: vec3<u32>) {
+    store_glow_stage(gid, 2u);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn diffuse_glow_3(@builtin(global_invocation_id) gid: vec3<u32>) {
+    store_glow_stage(gid, 3u);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn diffuse_glow_4(@builtin(global_invocation_id) gid: vec3<u32>) {
+    store_glow_stage(gid, 4u);
 }
 
 @compute @workgroup_size(8, 8, 1)

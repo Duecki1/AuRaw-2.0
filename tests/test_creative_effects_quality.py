@@ -18,28 +18,37 @@ def smoothstep(edge0: float, edge1: float, value: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-def test_glow_is_highlight_aware_multiscale_and_same_stage() -> None:
+def test_glow_is_highlight_aware_cascaded_and_same_stage() -> None:
     assert "fn glow_emission" in ADJUSTMENTS
     assert "extended_perceptual_luminance" in ADJUSTMENTS
     assert "cutoff_fade" in ADJUSTMENTS
     assert "black_gate" in ADJUSTMENTS
     assert "colour_ratio" in ADJUSTMENTS
     assert "warm_tint" in ADJUSTMENTS
-    assert "core_bloom" in ADJUSTMENTS and "near_bloom" in ADJUSTMENTS and "far_bloom" in ADJUSTMENTS
+    assert "fn glow_diffuse_at" in ADJUSTMENTS
+    for stage in range(5):
+        assert f"fn diffuse_glow_{stage}" in ADJUSTMENTS
     assert "core_protection" in ADJUSTMENTS
-    assert "fn glow_source_at" in ADJUSTMENTS
-    assert "glow_emission(sample_rgb, cutoff)" in ADJUSTMENTS
+    assert "fn prepare_glow_source" in ADJUSTMENTS
+    assert "glow_emission(local_effects_at(pos), glow_cutoff())" in ADJUSTMENTS
+    assert "sum = sum + glow_work_at(sample_pos) * weight" in ADJUSTMENTS
+    assert "return mix(center, sum / max(sum_weight, 1e-6), stage_mix)" in ADJUSTMENTS
     assert "scene_working_at(sample_pos)" not in ADJUSTMENTS
 
 
 def test_creative_pass_ping_pongs_before_color_mixer() -> None:
     local_pass = GPU.index('"apply_lightroom_effects"')
-    creative_pass = GPU.index('"apply_creative_effects"', local_pass)
+    glow_source = GPU.index('"prepare_glow_source"', local_pass)
+    glow_start = GPU.index('"diffuse_glow_0"', glow_source)
+    glow_end = GPU.index('"diffuse_glow_4"', glow_start)
+    creative_pass = GPU.index('"apply_creative_effects"', glow_end)
     render_pass = GPU.index('"apply_lightroom_adjustments"', creative_pass)
-    assert local_pass < creative_pass < render_pass
+    assert local_pass < glow_source < glow_start < glow_end < creative_pass < render_pass
     assert "binding: 24" in GPU and "TextureView(&tex2_view)" in GPU
     assert "binding: 25" in GPU and "TextureView(&tex1_view)" in GPU
     assert "binding: 26" in GPU and "TextureView(&tex1_view)" in GPU
+    assert "binding: 30" in GPU and "TextureView(&display_linear_view)" in GPU
+    assert "binding: 31" in GPU
     assert "textureLoad(final_adjustment_tex" in ADJUSTMENTS
 
 

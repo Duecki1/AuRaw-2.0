@@ -207,7 +207,10 @@ mod imp {
                 }
                 let database = Self::create()?;
                 if load_database_directory(&database, &candidate) {
-                    log::info!("loaded bundled Lensfun database from {}", candidate.display());
+                    log::info!(
+                        "loaded bundled Lensfun database from {}",
+                        candidate.display()
+                    );
                     return Ok(database);
                 }
             }
@@ -277,7 +280,11 @@ mod imp {
     }
 
     fn push_database_candidates(candidates: &mut Vec<PathBuf>, root: &Path) {
-        for candidate in [root.join("version_2"), root.join("version_1"), root.to_owned()] {
+        for candidate in [
+            root.join("version_2"),
+            root.join("version_1"),
+            root.to_owned(),
+        ] {
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);
             }
@@ -384,7 +391,10 @@ mod imp {
                 raw.lens_model
             )
         } else {
-            format!("No Lensfun profile matched ‘{}’. Select one manually.", raw.lens_model)
+            format!(
+                "No Lensfun profile matched ‘{}’. Select one manually.",
+                raw.lens_model
+            )
         };
 
         Ok(LensfunCatalog {
@@ -452,16 +462,22 @@ mod imp {
             let scale = unsafe { lf_modifier_get_auto_scale(modifier.0, 0) };
             if scale.is_finite() && scale > 0.0 {
                 // SAFETY: the callback is added to the same initialized modifier.
-                let scaling_added = unsafe {
-                    lf_modifier_add_coord_callback_scale(modifier.0, scale, 0)
-                };
+                let scaling_added =
+                    unsafe { lf_modifier_add_coord_callback_scale(modifier.0, scale, 0) };
                 if scaling_added != 0 {
                     flags |= LF_MODIFY_SCALE;
                 }
             }
         }
 
-        if flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_TCA | LF_MODIFY_SCALE | LF_MODIFY_VIGNETTING) == 0 {
+        if flags
+            & (LF_MODIFY_DISTORTION
+                | LF_MODIFY_GEOMETRY
+                | LF_MODIFY_TCA
+                | LF_MODIFY_SCALE
+                | LF_MODIFY_VIGNETTING)
+            == 0
+        {
             return Err(anyhow!(
                 "the selected Lensfun profile contains no applicable correction data"
             ));
@@ -553,10 +569,8 @@ mod imp {
     fn build_vignette_gain_map(raw: &LoadedRaw, modifier: &Modifier) -> Result<Vec<f32>> {
         let width = raw.width as usize;
         let height = raw.height as usize;
-        let row_stride = c_int::try_from(
-            width.saturating_mul(std::mem::size_of::<AlignedRgba>()),
-        )
-        .context("Lensfun vignette row stride overflow")?;
+        let row_stride = c_int::try_from(width.saturating_mul(std::mem::size_of::<AlignedRgba>()))
+            .context("Lensfun vignette row stride overflow")?;
         let mut rgba_gains = vec![AlignedRgba([1.0; 4]); width];
         let mut gains = vec![1.0f32; raw.raw_pixels.len()];
 
@@ -963,10 +977,7 @@ mod imp {
         let mut canonical = canonical_text(model);
         for maker in makers {
             let maker = canonical_text(maker);
-            if !maker.is_empty()
-                && canonical.starts_with(&maker)
-                && canonical.len() > maker.len()
-            {
+            if !maker.is_empty() && canonical.starts_with(&maker) && canonical.len() > maker.len() {
                 canonical = canonical[maker.len()..].to_owned();
             }
         }
@@ -985,7 +996,11 @@ mod imp {
         let mut codes = tokenized(model)
             .into_iter()
             .filter(|token| token.len() >= 3)
-            .filter(|token| token.chars().any(|character| character.is_ascii_alphabetic()))
+            .filter(|token| {
+                token
+                    .chars()
+                    .any(|character| character.is_ascii_alphabetic())
+            })
             .filter(|token| token.chars().any(|character| character.is_ascii_digit()))
             // Optical specifications are not manufacturer identifiers.
             .filter(|token| !token.ends_with("mm"))
@@ -1119,12 +1134,14 @@ mod imp {
         if localized.is_null() {
             String::new()
         } else {
-            CStr::from_ptr(localized).to_string_lossy().trim().to_owned()
+            CStr::from_ptr(localized)
+                .to_string_lossy()
+                .trim()
+                .to_owned()
         }
     }
 
     fn positive(value: f32) -> Option<f32> {
         (value.is_finite() && value > 0.0).then_some(value)
     }
-
 }

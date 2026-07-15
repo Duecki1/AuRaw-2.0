@@ -69,6 +69,32 @@ def test_android_stream_import_is_bounded_and_makes_progress() -> None:
     assert "std::fs::read_dir(&export_dir)" not in android_export
 
 
+def test_android_sidecars_are_complete_discoverable_generations() -> None:
+    assert "MAX_SIDECAR_BYTES = 32L * 1024L * 1024L" in ANDROID_ACTIVITY
+    assert 'values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")' in ANDROID_ACTIVITY
+    assert "values.put(MediaStore.Downloads.IS_PENDING, 1)" in ANDROID_ACTIVITY
+    assert "sidecarStagePrefix(rawDisplayName)" in ANDROID_ACTIVITY
+    assert "contentPublished = true" in ANDROID_ACTIVITY
+    assert "removedOldRows &= resolver.delete" in ANDROID_ACTIVITY
+    assert "queryStoredDisplayName(destination)" in ANDROID_ACTIVITY
+    assert "String storedDisplayName = queryStoredDisplayName(destination);" in ANDROID_ACTIVITY
+    raw_store = ANDROID_ACTIVITY.index("private StoredRaw storeRawScoped")
+    assert ANDROID_ACTIVITY.index(
+        "String storedDisplayName = queryStoredDisplayName(destination);", raw_store
+    ) < ANDROID_ACTIVITY.index("published = true;", raw_store)
+    assert "return new StoredRaw(destination, storedDisplayName)" in ANDROID_ACTIVITY
+
+
+def test_sidecar_serialization_and_io_stay_off_the_render_thread() -> None:
+    sidecar = (ROOT / "src/sidecar.rs").read_text(encoding="utf-8")
+    persistence = (ROOT / "src/app/sidecar_persistence.rs").read_text(encoding="utf-8")
+    assert "struct CappedVec" in sidecar
+    assert "serde_json::to_writer(&mut writer" in sidecar
+    assert "preflight_encoded_images(&edits)" in sidecar
+    assert 'name("auraw-sidecar-save"' in persistence
+    assert "save_sidecar_request(" in persistence
+
+
 def test_downloaded_build_inputs_and_actions_are_immutable() -> None:
     assert "LIBRAW_ARCHIVE_SHA256=" in LIBRAW_BUILD
     assert "LIBRAW_CMAKE_ARCHIVE_SHA256=" in LIBRAW_BUILD
