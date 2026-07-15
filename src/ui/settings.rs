@@ -1,4 +1,5 @@
-use crate::app::{AurawApp, PreviewQuality};
+use crate::app::{maximum_raw_cache_limit, AurawApp, PreviewQuality};
+use crate::ui::library::maximum_thumbnail_worker_count;
 use crate::pipeline::HighlightReconstructionMethod;
 use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::layout::ScreenLayout;
@@ -54,6 +55,60 @@ impl Settings {
             ui.add(
                 egui::Label::new(
                     "Controls the normal proxy and the detailed visible-region render created about one second after zooming stops.",
+                )
+                .wrap(),
+            );
+
+            ui.separator();
+            ui.strong("Library performance");
+            let mut raw_cache_files = app.raw_cache_limit();
+            if ui
+                .add(
+                    egui::Slider::new(
+                        &mut raw_cache_files,
+                        0..=maximum_raw_cache_limit(),
+                    )
+                    .integer()
+                    .text("Decoded RAW cache"),
+                )
+                .on_hover_text(
+                    "Number of fully decoded RAW files kept in memory for faster switching. Zero disables the cache. The default is 2 on desktop and 1 on Android.",
+                )
+                .changed()
+            {
+                app.set_raw_cache_limit(raw_cache_files);
+            }
+            let raw_cache_description = if raw_cache_files == 0 {
+                "Decoded RAW reuse is disabled; only the image currently being edited stays loaded."
+                    .to_owned()
+            } else {
+                format!(
+                    "Keeps up to {raw_cache_files} decoded RAW {} in memory, including the current image, for faster switching back to recent files.",
+                    if raw_cache_files == 1 { "file" } else { "files" }
+                )
+            };
+            ui.add(egui::Label::new(raw_cache_description).wrap());
+
+            let mut thumbnail_workers = app.thumbnail_worker_count();
+            if ui
+                .add(
+                    egui::Slider::new(
+                        &mut thumbnail_workers,
+                        1..=maximum_thumbnail_worker_count(),
+                    )
+                    .integer()
+                    .text("Thumbnail workers"),
+                )
+                .on_hover_text(
+                    "Parallel background thumbnail decoders. More workers fill the library faster but use more CPU and memory. Full RAW loading remains exclusive.",
+                )
+                .changed()
+            {
+                app.set_thumbnail_worker_count(thumbnail_workers);
+            }
+            ui.add(
+                egui::Label::new(
+                    "Changing this restarts the current library thumbnail queue. The setting is saved across restarts.",
                 )
                 .wrap(),
             );

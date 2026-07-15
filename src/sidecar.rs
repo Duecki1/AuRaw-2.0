@@ -1,10 +1,14 @@
 use crate::pipeline::{
     ExposureParams, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION, MAX_LOCAL_MASKS,
 };
+#[cfg(not(target_os = "android"))]
+use crate::pipeline::RawThumbnail;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
+#[cfg(not(target_os = "android"))]
+use std::io::Cursor;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,6 +16,12 @@ use std::sync::Arc;
 
 pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
+#[cfg(not(target_os = "android"))]
+pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
+#[cfg(not(target_os = "android"))]
+pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str = ".auraw-cache";
+#[cfg(not(target_os = "android"))]
+const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-thumb.fingerprint";
 pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
     32 * 1024 * 1024
 } else {
@@ -115,6 +125,219 @@ pub fn sidecar_path_for_raw(raw_path: &Path) -> PathBuf {
     let mut path: OsString = raw_path.as_os_str().to_owned();
     path.push(SIDECAR_SUFFIX);
     PathBuf::from(path)
+}
+
+/// Places the preview in a hidden sibling cache directory while preserving the
+/// complete RAW filename: `photos/photo.CR3` becomes
+/// `photos/.auraw-cache/photo.CR3.auraw-thumb.png`.
+#[cfg(not(target_os = "android"))]
+pub fn developed_thumbnail_path_for_raw(raw_path: &Path) -> PathBuf {
+    let parent = raw_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut file_name = raw_path
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("raw"));
+    file_name.push(DEVELOPED_THUMBNAIL_SUFFIX);
+    parent.join(DEVELOPED_THUMBNAIL_CACHE_DIR).join(file_name)
+}
+
+#[cfg(not(target_os = "android"))]
+fn developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
+    let parent = raw_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut file_name = raw_path
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("raw"));
+    file_name.push(DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX);
+    parent.join(DEVELOPED_THUMBNAIL_CACHE_DIR).join(file_name)
+}
+
+/// Returns a stable fingerprint of the current edit sidecar. Thumbnail workers
+/// compare this before and after GPU readback so an older render can never
+/// overwrite the cache for a newer save.
+#[cfg(not(target_os = "android"))]
+pub fn desktop_sidecar_fingerprint(raw_path: &Path) -> Result<Option<u64>, String> {
+    let path = sidecar_path_for_raw(raw_path);
+    let bytes = match read_bounded(&path) {
+        Ok(bytes) => bytes,
+        Err(SidecarError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None)
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not fingerprint edit sidecar {}: {error}",
+                path.display()
+            ))
+        }
+    };
+
+    // FNV-1a is deliberately simple and deterministic. This is an invalidation
+    // token, not a cryptographic integrity check.
+    let mut fingerprint = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        fingerprint ^= u64::from(byte);
+        fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Ok(Some(fingerprint))
+}
+
+/// Loads a developed thumbnail only when it is newer than the RAW and its
+/// stored sidecar fingerprint exactly matches the current edit file. Missing or
+/// stale caches intentionally fall back to the embedded RAW thumbnail.
+#[cfg(not(target_os = "android"))]
+pub fn load_developed_thumbnail_cache(
+    raw_path: &Path,
+    maximum_edge: u32,
+) -> Result<Option<RawThumbnail>, String> {
+    if maximum_edge == 0 {
+        return Err("thumbnail edge must be non-zero".to_owned());
+    }
+    if !developed_thumbnail_cache_is_fresh(raw_path)? {
+        return Ok(None);
+    }
+    let cache_path = developed_thumbnail_path_for_raw(raw_path);
+    let image = match image::open(&cache_path) {
+        Ok(image) => image,
+        Err(error) => {
+            let _ = fs::remove_file(&cache_path);
+            let _ = fs::remove_file(developed_thumbnail_fingerprint_path_for_raw(raw_path));
+            return Err(format!(
+                "could not decode developed thumbnail {}: {error}",
+                cache_path.display()
+            ));
+        }
+    }
+    .thumbnail(maximum_edge, maximum_edge)
+    .to_rgba8();
+    let (width, height) = image.dimensions();
+    Ok(Some(RawThumbnail {
+        width,
+        height,
+        rgba: image.into_raw(),
+    }))
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn developed_thumbnail_cache_is_fresh(raw_path: &Path) -> Result<bool, String> {
+    let sidecar_path = sidecar_path_for_raw(raw_path);
+    let cache_path = developed_thumbnail_path_for_raw(raw_path);
+    let fingerprint_path = developed_thumbnail_fingerprint_path_for_raw(raw_path);
+    let cache_metadata = match fs::metadata(&cache_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "could not inspect developed thumbnail {}: {error}",
+                cache_path.display()
+            ))
+        }
+    };
+    let _sidecar_metadata = match fs::metadata(&sidecar_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "could not inspect edit sidecar {}: {error}",
+                sidecar_path.display()
+            ))
+        }
+    };
+    let raw_metadata = fs::metadata(raw_path).map_err(|error| {
+        format!(
+            "could not inspect RAW while validating its thumbnail {}: {error}",
+            raw_path.display()
+        )
+    })?;
+
+    let Ok(cache_modified) = cache_metadata.modified() else {
+        return Ok(false);
+    };
+    let Ok(raw_modified) = raw_metadata.modified() else {
+        return Ok(false);
+    };
+    if cache_modified < raw_modified {
+        return Ok(false);
+    }
+
+    // Hash the sidecar only after the cheap existence and timestamp checks.
+    // Missing/stale caches therefore never pay to read a potentially large
+    // sidecar containing raster masks.
+    let cached_fingerprint = match fs::read_to_string(&fingerprint_path) {
+        Ok(value) => match u64::from_str_radix(value.trim(), 16) {
+            Ok(value) => value,
+            Err(_) => return Ok(false),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "could not read developed thumbnail fingerprint {}: {error}",
+                fingerprint_path.display()
+            ))
+        }
+    };
+    Ok(desktop_sidecar_fingerprint(raw_path)? == Some(cached_fingerprint))
+}
+
+/// Atomically stores a GPU-rendered thumbnail, but only if the sidecar still
+/// has the fingerprint that was current when the render began.
+#[cfg(not(target_os = "android"))]
+pub fn save_developed_thumbnail_cache(
+    raw_path: &Path,
+    thumbnail: &RawThumbnail,
+    expected_sidecar_fingerprint: u64,
+) -> Result<PathBuf, String> {
+    if desktop_sidecar_fingerprint(raw_path)? != Some(expected_sidecar_fingerprint) {
+        return Err("edit sidecar changed while its thumbnail was rendering".to_owned());
+    }
+    let image = image::RgbaImage::from_raw(
+        thumbnail.width,
+        thumbnail.height,
+        thumbnail.rgba.clone(),
+    )
+    .ok_or_else(|| "developed thumbnail has an invalid byte count".to_owned())?;
+    let mut encoded = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .map_err(|error| format!("could not encode developed thumbnail: {error}"))?;
+    let cache_path = developed_thumbnail_path_for_raw(raw_path);
+    let fingerprint_path = developed_thumbnail_fingerprint_path_for_raw(raw_path);
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "could not create developed thumbnail cache {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    atomic_write(&cache_path, encoded.get_ref()).map_err(|error| {
+        format!(
+            "could not cache developed thumbnail {}: {error}",
+            cache_path.display()
+        )
+    })?;
+    atomic_write(
+        &fingerprint_path,
+        format!("{expected_sidecar_fingerprint:016x}\n").as_bytes(),
+    )
+    .map_err(|error| {
+        format!(
+            "could not cache developed thumbnail fingerprint {}: {error}",
+            fingerprint_path.display()
+        )
+    })?;
+
+    if desktop_sidecar_fingerprint(raw_path)? != Some(expected_sidecar_fingerprint) {
+        let _ = fs::remove_file(&cache_path);
+        let _ = fs::remove_file(&fingerprint_path);
+        return Err("edit sidecar changed while its thumbnail was being cached".to_owned());
+    }
+    Ok(cache_path)
 }
 
 pub fn encode(edits: EditState) -> Result<Vec<u8>, SidecarError> {
@@ -966,6 +1189,47 @@ mod tests {
         };
         Arc::make_mut(&mut edits.masks).masks[0].components = vec![component; 3];
         assert!(encode(edits).unwrap().len() < 64 * 1024);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn developed_thumbnail_cache_uses_hidden_sibling_directory() {
+        assert_eq!(
+            developed_thumbnail_path_for_raw(Path::new("photos/photo.CR3")),
+            Path::new("photos/.auraw-cache/photo.CR3.auraw-thumb.png")
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn developed_thumbnail_cache_round_trips_and_tracks_sidecar_content() {
+        let directory = temporary_directory("developed-thumbnail");
+        let raw = directory.join("photo.CR3");
+        fs::write(&raw, b"raw").unwrap();
+        fs::write(sidecar_path_for_raw(&raw), b"edit-one").unwrap();
+        let fingerprint = desktop_sidecar_fingerprint(&raw).unwrap().unwrap();
+        let thumbnail = RawThumbnail {
+            width: 2,
+            height: 1,
+            rgba: vec![10, 20, 30, 255, 40, 50, 60, 255],
+        };
+
+        let cache_path =
+            save_developed_thumbnail_cache(&raw, &thumbnail, fingerprint).unwrap();
+        assert_eq!(
+            cache_path.parent().unwrap().file_name(),
+            Some(std::ffi::OsStr::new(DEVELOPED_THUMBNAIL_CACHE_DIR))
+        );
+        let loaded = load_developed_thumbnail_cache(&raw, 512)
+            .unwrap()
+            .expect("developed thumbnail cache should load");
+        assert_eq!(loaded.width, thumbnail.width);
+        assert_eq!(loaded.height, thumbnail.height);
+        assert_eq!(loaded.rgba, thumbnail.rgba);
+
+        fs::write(sidecar_path_for_raw(&raw), b"edit-two").unwrap();
+        assert!(!developed_thumbnail_cache_is_fresh(&raw).unwrap());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]

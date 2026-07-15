@@ -97,8 +97,11 @@ fn open_libraw(path: &Path) -> Result<LibRawContext> {
         unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
         "open RAW thumbnail",
     )?;
-    // SAFETY: opening the file initialized the dimensions read by this helper.
-    unsafe { validate_opened_raw_geometry(&ctx) }?;
+    // Embedded preview extraction does not allocate the full active sensor.
+    // Enforce conservative header edge/overflow limits here, but leave the
+    // stricter platform pixel budget to full RAW decode and the fallback path.
+    // This lets Android show embedded previews from modern 60–100 MP cameras.
+    unsafe { validate_opened_thumbnail_geometry(&ctx) }?;
     Ok(ctx)
 }
 
@@ -507,6 +510,46 @@ impl Drop for LibRawContext {
             ffi::libraw_close(self.raw);
         }
     }
+}
+
+unsafe fn validate_opened_thumbnail_geometry(ctx: &LibRawContext) -> Result<()> {
+    let raw = &*ctx.raw;
+    let sizes = &raw.rawdata.sizes;
+    let active_width = u32::from(sizes.width);
+    let active_height = u32::from(sizes.height);
+    if active_width != 0 || active_height != 0 {
+        anyhow::ensure!(
+            active_width > 0
+                && active_height > 0
+                && active_width <= MAX_SENSOR_EDGE
+                && active_height <= MAX_SENSOR_EDGE,
+            "LibRaw header reports active dimensions {active_width}x{active_height} outside the thumbnail safety limit"
+        );
+        active_width
+            .checked_mul(active_height)
+            .context("RAW thumbnail active pixel count overflow")?;
+    }
+
+    // A few containers expose embedded-preview metadata before LibRaw has
+    // populated raw sensor geometry. That is safe for `unpack_thumb`: payload
+    // dimensions and bytes are independently bounded below. Validate sensor
+    // geometry when present, but do not reject an otherwise valid preview just
+    // because those unrelated fields are zero.
+    let sensor_width = u32::from(sizes.raw_width);
+    let sensor_height = u32::from(sizes.raw_height);
+    if sensor_width != 0 || sensor_height != 0 {
+        anyhow::ensure!(
+            sensor_width > 0
+                && sensor_height > 0
+                && sensor_width <= MAX_SENSOR_EDGE
+                && sensor_height <= MAX_SENSOR_EDGE,
+            "LibRaw header reports sensor dimensions {sensor_width}x{sensor_height} outside the thumbnail safety limit"
+        );
+        sensor_width
+            .checked_mul(sensor_height)
+            .context("RAW thumbnail header pixel count overflow")?;
+    }
+    Ok(())
 }
 
 unsafe fn validate_opened_raw_geometry(ctx: &LibRawContext) -> Result<()> {
