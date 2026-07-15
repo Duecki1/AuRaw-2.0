@@ -223,6 +223,11 @@ impl LibraryState {
         self.location.as_deref()
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn folder(&self) -> Option<&Path> {
+        self.folder.as_deref()
+    }
+
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
         self.thumbnail_workers
     }
