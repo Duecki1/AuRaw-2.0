@@ -83,7 +83,9 @@ impl eframe::App for AurawApp {
         self.advance_preview_detail(frame);
         self.refresh_status();
 
-        if self.pending_stage.is_some() {
+        if self.preview_detail_pending_stage.is_some()
+            || (self.preview_zoom <= 1.01 && self.pending_stage.is_some())
+        {
             ui.ctx().request_repaint();
         }
         if self.export_receiver.is_some() || self.export_publish_pending {

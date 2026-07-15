@@ -80,6 +80,16 @@ fn highlight_final_read_slot(stage_count: usize) -> HighlightWorkSlot {
     }
 }
 
+fn expected_pass_count(cfa_kind: CfaKind) -> usize {
+    let demosaic_passes = match cfa_kind {
+        CfaKind::Bayer => 4,
+        CfaKind::XTrans => 8,
+    };
+    // Highlight prepare + guided stages + two finalize variants, followed by
+    // demosaic, four tone-analysis passes, and four adjustment/output passes.
+    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + demosaic_passes + 4 + 4
+}
+
 const SHADER_BAYER_RCD_P1: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
@@ -867,6 +877,8 @@ pub struct RawGpuPipeline {
     pub egui_texture_id: Option<egui::TextureId>,
     pub width: u32,
     pub height: u32,
+    cfa_kind: CfaKind,
+    processing_quality: ProcessingQuality,
     params_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
     raw_stage_end: usize,
@@ -931,7 +943,7 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(device, queue, Some(renderer), raw, params, quality)
+        Self::new_internal(device, queue, Some(renderer), None, raw, params, quality)
     }
 
     pub fn new_headless_with_quality(
@@ -941,19 +953,53 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(device, queue, None, raw, params, quality)
+        Self::new_internal(device, queue, None, None, raw, params, quality)
+    }
+
+    /// Allocates a new set of textures and bind groups while reusing the
+    /// already-compiled compute programs from another pipeline with the same
+    /// CFA family and processing quality. This avoids recompiling the complete
+    /// RAW pipeline whenever the zoomed preview moves to a new crop.
+    pub fn new_headless_reusing_programs(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+        template: &Self,
+    ) -> Result<Self> {
+        Self::new_internal(
+            device,
+            queue,
+            None,
+            Some(template),
+            raw,
+            params,
+            quality,
+        )
     }
 
     fn new_internal(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: Option<&mut egui_wgpu::Renderer>,
+        program_template: Option<&Self>,
         raw: &LoadedRaw,
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
         validate_raw(raw)?;
         validate_gpu_working_set(raw.width, raw.height, quality)?;
+        if let Some(template) = program_template {
+            if template.cfa_kind != raw.cfa_kind
+                || template.processing_quality != quality
+                || template.passes.len() != expected_pass_count(raw.cfa_kind)
+            {
+                return Err(anyhow!(
+                    "cannot reuse GPU programs from an incompatible pipeline"
+                ));
+            }
+        }
 
         let raw_texture = create_raw_texture(device, queue, raw);
         let color_texture = create_color_texture(device, queue, raw);
@@ -1162,7 +1208,22 @@ impl RawGpuPipeline {
             texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
         ];
 
-        let bgl_highlights = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let demosaic_start_for_programs = 1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2;
+        let demosaic_pass_count = match raw.cfa_kind {
+            CfaKind::Bayer => 4,
+            CfaKind::XTrans => 8,
+        };
+        let tone_prepare_for_programs = demosaic_start_for_programs + demosaic_pass_count;
+        let adjustment_prepare_for_programs = tone_prepare_for_programs + 4;
+        let reused_layout = |pass_index: usize| {
+            program_template.map(|template| {
+                template.passes[pass_index]
+                    .pipeline
+                    .get_bind_group_layout(0)
+            })
+        };
+
+        let bgl_highlights = reused_layout(0).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl highlights"),
             entries: &[
                 common_entries[0].clone(),
@@ -1181,9 +1242,9 @@ impl RawGpuPipeline {
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
             ],
-        });
+        }));
 
-        let bgl1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl1 = reused_layout(demosaic_start_for_programs).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl1"),
             entries: &[
                 common_entries[0].clone(),
@@ -1193,9 +1254,9 @@ impl RawGpuPipeline {
                 texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(4, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
-        });
+        }));
 
-        let bgl2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl2 = reused_layout(demosaic_start_for_programs + 1).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl2"),
             entries: &[
                 common_entries[0].clone(),
@@ -1206,9 +1267,9 @@ impl RawGpuPipeline {
                 texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(6, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
-        });
+        }));
 
-        let bgl3 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl3 = reused_layout(demosaic_start_for_programs + 2).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl3"),
             entries: &[
                 common_entries[0].clone(),
@@ -1219,9 +1280,12 @@ impl RawGpuPipeline {
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(8, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
-        });
+        }));
 
-        let bgl4 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl4 = (matches!(raw.cfa_kind, CfaKind::Bayer)
+            .then(|| reused_layout(demosaic_start_for_programs + 3))
+            .flatten())
+        .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl4"),
             entries: &[
                 common_entries[0].clone(),
@@ -1233,14 +1297,16 @@ impl RawGpuPipeline {
                 texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(10, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
-        });
+        }));
 
         // X-Trans Markesteijn-3 uses the two highlight work textures as
         // derivative scratch after highlight reconstruction has finalized.
         // This retains the reference eight-direction homogeneity stages without
         // allocating eight full-resolution RGB candidate images.
-        let bgl_xtrans_derivatives =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_xtrans_derivatives = (matches!(raw.cfa_kind, CfaKind::XTrans)
+            .then(|| reused_layout(demosaic_start_for_programs + 4))
+            .flatten())
+            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans derivatives"),
                 entries: &[
                     common_entries[0].clone(),
@@ -1260,10 +1326,12 @@ impl RawGpuPipeline {
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
                 ],
-            });
+            }));
 
-        let bgl_xtrans_homogeneity =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_xtrans_homogeneity = (matches!(raw.cfa_kind, CfaKind::XTrans)
+            .then(|| reused_layout(demosaic_start_for_programs + 5))
+            .flatten())
+            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans homogeneity"),
                 entries: &[
                     common_entries[0].clone(),
@@ -1284,10 +1352,12 @@ impl RawGpuPipeline {
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
                 ],
-            });
+            }));
 
-        let bgl_xtrans_accumulate =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_xtrans_accumulate = (matches!(raw.cfa_kind, CfaKind::XTrans)
+            .then(|| reused_layout(demosaic_start_for_programs + 6))
+            .flatten())
+            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans accumulate"),
                 entries: &[
                     common_entries[0].clone(),
@@ -1304,9 +1374,12 @@ impl RawGpuPipeline {
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
                 ],
-            });
+            }));
 
-        let bgl_xtrans_finish = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_xtrans_finish = (matches!(raw.cfa_kind, CfaKind::XTrans)
+            .then(|| reused_layout(demosaic_start_for_programs + 7))
+            .flatten())
+        .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl X-Trans finish"),
             entries: &[
                 common_entries[0].clone(),
@@ -1317,9 +1390,9 @@ impl RawGpuPipeline {
                 texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(10, demosaic_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
-        });
+        }));
 
-        let bgl_tone_prepare = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_tone_prepare = reused_layout(tone_prepare_for_programs).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl tone prepare"),
             entries: &[
                 buffer_entry(0),
@@ -1328,27 +1401,27 @@ impl RawGpuPipeline {
                 storage_buffer_entry(20, true),
                 storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
-        });
+        }));
 
-        let bgl_tone_blur = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_tone_blur = reused_layout(tone_prepare_for_programs + 1).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl tone guide blur"),
             entries: &[
                 buffer_entry(0),
                 texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
-        });
+        }));
 
-        let bgl_tone_reduce = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_tone_reduce = reused_layout(tone_prepare_for_programs + 3).unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl tone histogram reduction"),
             entries: &[
                 storage_buffer_entry(15, false),
                 storage_buffer_entry(16, false),
             ],
-        });
+        }));
 
-        let bgl_adjust_prepare =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_adjust_prepare = reused_layout(adjustment_prepare_for_programs)
+            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl adjustment preparation"),
                 entries: &[
                     common_entries[0].clone(),
@@ -1363,10 +1436,10 @@ impl RawGpuPipeline {
                     texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
                     sampler_entry(28),
                 ],
-            });
+            }));
 
-        let bgl_adjust_effects =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_adjust_effects = reused_layout(adjustment_prepare_for_programs + 1)
+            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl Lightroom local effects"),
                 entries: &[
                     buffer_entry(0),
@@ -1375,17 +1448,17 @@ impl RawGpuPipeline {
                     texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
                     sampler_entry(28),
                 ],
-            });
+            }));
 
-        let bgl_adjust_creative =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 2)
+            .unwrap_or_else(|| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl creative glow and vignette"),
                 entries: &[
                     buffer_entry(0),
                     texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(25, work_format, wgpu::StorageTextureAccess::WriteOnly),
                 ],
-            });
+            }));
 
         let bgl_adjust_render = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bgl perceptual color mixer and render"),
@@ -1403,6 +1476,8 @@ impl RawGpuPipeline {
                 storage_texture_entry(29, work_format, wgpu::StorageTextureAccess::WriteOnly),
             ],
         });
+        let bgl_adjust_render = reused_layout(adjustment_prepare_for_programs + 3)
+            .unwrap_or(bgl_adjust_render);
 
         let make_highlight_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
@@ -1980,25 +2055,60 @@ impl RawGpuPipeline {
         };
         // One module per WGSL source. Entry-point pipelines below share these
         // modules instead of recompiling the same source for every pass.
-        let highlight_module = create_shader("auraw highlight module", highlight_shader.as_ref());
-        let bayer_rcd_p1_module = create_shader("auraw Bayer RCD pass 1", bayer_rcd_p1.as_ref());
-        let bayer_rcd_p2_module = create_shader("auraw Bayer RCD pass 2", bayer_rcd_p2.as_ref());
-        let bayer_rcd_p3_module = create_shader("auraw Bayer RCD pass 3", bayer_rcd_p3.as_ref());
-        let bayer_rcd_p4_module = create_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref());
-        let xtrans_p1_module = create_shader("auraw X-Trans pass 1", xtrans_p1.as_ref());
-        let xtrans_p2_module = create_shader("auraw X-Trans pass 2", xtrans_p2.as_ref());
-        let xtrans_p3_module = create_shader("auraw X-Trans pass 3", xtrans_p3.as_ref());
-        let xtrans_p4_module = create_shader("auraw X-Trans pass 4", xtrans_p4.as_ref());
-        let xtrans_p5_module = create_shader("auraw X-Trans pass 5", xtrans_p5.as_ref());
-        let xtrans_p6_module = create_shader("auraw X-Trans pass 6", xtrans_p6.as_ref());
-        let xtrans_p7_module = create_shader("auraw X-Trans pass 7", xtrans_p7.as_ref());
-        let tone_analysis_module = create_shader("auraw tone analysis", SHADER_TONE_ANALYSIS);
-        let adjustments_module = create_shader("auraw adjustments", adjustments_shader.as_ref());
+        let highlight_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw highlight module", highlight_shader.as_ref()));
+        let bayer_rcd_p1_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw Bayer RCD pass 1", bayer_rcd_p1.as_ref()));
+        let bayer_rcd_p2_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw Bayer RCD pass 2", bayer_rcd_p2.as_ref()));
+        let bayer_rcd_p3_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw Bayer RCD pass 3", bayer_rcd_p3.as_ref()));
+        let bayer_rcd_p4_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref()));
+        let xtrans_p1_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw X-Trans pass 1", xtrans_p1.as_ref()));
+        let xtrans_p2_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw X-Trans pass 2", xtrans_p2.as_ref()));
+        let xtrans_p3_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw X-Trans pass 3", xtrans_p3.as_ref()));
+        let xtrans_p4_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw X-Trans pass 4", xtrans_p4.as_ref()));
+        let xtrans_p5_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw X-Trans pass 5", xtrans_p5.as_ref()));
+        let xtrans_p6_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw X-Trans pass 6", xtrans_p6.as_ref()));
+        let xtrans_p7_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw X-Trans pass 7", xtrans_p7.as_ref()));
+        let tone_analysis_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw tone analysis", SHADER_TONE_ANALYSIS));
+        let adjustments_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw adjustments", adjustments_shader.as_ref()));
 
-        let make_pipeline = |shader: &wgpu::ShaderModule,
-                             entry: &str,
-                             bgl: &wgpu::BindGroupLayout|
+        let mut next_program_index = 0usize;
+        let mut make_pipeline = |shader: Option<&wgpu::ShaderModule>,
+                                 entry: &str,
+                                 bgl: &wgpu::BindGroupLayout|
          -> wgpu::ComputePipeline {
+            let program_index = next_program_index;
+            next_program_index += 1;
+            if let Some(template) = program_template {
+                return template.passes[program_index].pipeline.clone();
+            }
+            let shader = shader.expect("shader module exists without a program template");
             let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(&format!("pll_{}", entry)),
                 bind_group_layouts: &[Some(bgl)],
@@ -2018,7 +2128,7 @@ impl RawGpuPipeline {
 
         // Prepare writes the initial RGB estimate and reliability into A.
         passes.push(Pass {
-            pipeline: make_pipeline(&highlight_module, "highlight_prepare", &bgl_highlights),
+            pipeline: make_pipeline(highlight_module.as_ref(), "highlight_prepare", &bgl_highlights),
             bind_group: make_highlight_bind_group(
                 "bg highlight prepare",
                 &highlight_work_b_view,
@@ -2043,7 +2153,7 @@ impl RawGpuPipeline {
             };
             let label = format!("bg {entry}");
             passes.push(Pass {
-                pipeline: make_pipeline(&highlight_module, entry, &bgl_highlights),
+                pipeline: make_pipeline(highlight_module.as_ref(), entry, &bgl_highlights),
                 bind_group: make_highlight_bind_group(&label, read_view, write_view),
                 workgroups: image_workgroups,
             });
@@ -2068,7 +2178,7 @@ impl RawGpuPipeline {
         };
         let highlight_finalize_guided_index = passes.len();
         passes.push(Pass {
-            pipeline: make_pipeline(&highlight_module, "highlight_finalize", &bgl_highlights),
+            pipeline: make_pipeline(highlight_module.as_ref(), "highlight_finalize", &bgl_highlights),
             bind_group: make_highlight_bind_group(
                 "bg highlight finalize guided",
                 final_read_view,
@@ -2081,7 +2191,7 @@ impl RawGpuPipeline {
         // prepare texture. This avoids eleven full-frame copy dispatches.
         let highlight_finalize_direct_index = passes.len();
         passes.push(Pass {
-            pipeline: make_pipeline(&highlight_module, "highlight_finalize", &bgl_highlights),
+            pipeline: make_pipeline(highlight_module.as_ref(), "highlight_finalize", &bgl_highlights),
             bind_group: make_highlight_bind_group(
                 "bg highlight finalize direct",
                 &highlight_work_a_view,
@@ -2098,50 +2208,50 @@ impl RawGpuPipeline {
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
                 Pass {
-                    pipeline: make_pipeline(&bayer_rcd_p1_module, "bayer_rcd_directional", &bgl1),
+                    pipeline: make_pipeline(bayer_rcd_p1_module.as_ref(), "bayer_rcd_directional", &bgl1),
                     bind_group: bg1,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(&bayer_rcd_p2_module, "bayer_rcd_green", &bgl2),
+                    pipeline: make_pipeline(bayer_rcd_p2_module.as_ref(), "bayer_rcd_green", &bgl2),
                     bind_group: bg2,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(&bayer_rcd_p3_module, "bayer_rcd_chroma", &bgl3),
+                    pipeline: make_pipeline(bayer_rcd_p3_module.as_ref(), "bayer_rcd_chroma", &bgl3),
                     bind_group: bg3,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(&bayer_rcd_p4_module, "bayer_rcd_output", &bgl4),
+                    pipeline: make_pipeline(bayer_rcd_p4_module.as_ref(), "bayer_rcd_output", &bgl4),
                     bind_group: bg4,
                     workgroups: image_workgroups,
                 },
             ]),
             CfaKind::XTrans => passes.extend([
                 Pass {
-                    pipeline: make_pipeline(&xtrans_p1_module, "xtrans_seed", &bgl1),
+                    pipeline: make_pipeline(xtrans_p1_module.as_ref(), "xtrans_seed", &bgl1),
                     bind_group: bg1,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(&xtrans_p2_module, "xtrans_markesteijn_pass1", &bgl2),
+                    pipeline: make_pipeline(xtrans_p2_module.as_ref(), "xtrans_markesteijn_pass1", &bgl2),
                     bind_group: bg2.clone(),
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(&xtrans_p3_module, "xtrans_markesteijn_pass2", &bgl3),
+                    pipeline: make_pipeline(xtrans_p3_module.as_ref(), "xtrans_markesteijn_pass2", &bgl3),
                     bind_group: bg3,
                     workgroups: image_workgroups,
                 },
                 Pass {
-                    pipeline: make_pipeline(&xtrans_p2_module, "xtrans_markesteijn_pass3", &bgl2),
+                    pipeline: make_pipeline(xtrans_p2_module.as_ref(), "xtrans_markesteijn_pass3", &bgl2),
                     bind_group: bg2,
                     workgroups: image_workgroups,
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        &xtrans_p4_module,
+                        xtrans_p4_module.as_ref(),
                         "xtrans_markesteijn_derivatives",
                         &bgl_xtrans_derivatives,
                     ),
@@ -2150,7 +2260,7 @@ impl RawGpuPipeline {
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        &xtrans_p5_module,
+                        xtrans_p5_module.as_ref(),
                         "xtrans_markesteijn_homogeneity",
                         &bgl_xtrans_homogeneity,
                     ),
@@ -2159,7 +2269,7 @@ impl RawGpuPipeline {
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        &xtrans_p6_module,
+                        xtrans_p6_module.as_ref(),
                         "xtrans_markesteijn_accumulate",
                         &bgl_xtrans_accumulate,
                     ),
@@ -2168,7 +2278,7 @@ impl RawGpuPipeline {
                 },
                 Pass {
                     pipeline: make_pipeline(
-                        &xtrans_p7_module,
+                        xtrans_p7_module.as_ref(),
                         "xtrans_demosaic_finish",
                         &bgl_xtrans_finish,
                     ),
@@ -2187,7 +2297,7 @@ impl RawGpuPipeline {
         passes.extend([
             Pass {
                 pipeline: make_pipeline(
-                    &tone_analysis_module,
+                    tone_analysis_module.as_ref(),
                     "tone_guide_prepare",
                     &bgl_tone_prepare,
                 ),
@@ -2196,7 +2306,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    &tone_analysis_module,
+                    tone_analysis_module.as_ref(),
                     "tone_guide_horizontal",
                     &bgl_tone_blur,
                 ),
@@ -2205,7 +2315,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    &tone_analysis_module,
+                    tone_analysis_module.as_ref(),
                     "tone_guide_vertical",
                     &bgl_tone_blur,
                 ),
@@ -2214,7 +2324,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    &tone_analysis_module,
+                    tone_analysis_module.as_ref(),
                     "tone_reduce_histogram",
                     &bgl_tone_reduce,
                 ),
@@ -2233,7 +2343,7 @@ impl RawGpuPipeline {
         passes.extend([
             Pass {
                 pipeline: make_pipeline(
-                    &adjustments_module,
+                    adjustments_module.as_ref(),
                     "prepare_adjustment_base",
                     &bgl_adjust_prepare,
                 ),
@@ -2242,7 +2352,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    &adjustments_module,
+                    adjustments_module.as_ref(),
                     "apply_lightroom_effects",
                     &bgl_adjust_effects,
                 ),
@@ -2251,7 +2361,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    &adjustments_module,
+                    adjustments_module.as_ref(),
                     "apply_creative_effects",
                     &bgl_adjust_creative,
                 ),
@@ -2260,7 +2370,7 @@ impl RawGpuPipeline {
             },
             Pass {
                 pipeline: make_pipeline(
-                    &adjustments_module,
+                    adjustments_module.as_ref(),
                     "apply_lightroom_adjustments",
                     &bgl_adjust_render,
                 ),
@@ -2268,6 +2378,8 @@ impl RawGpuPipeline {
                 workgroups: image_workgroups,
             },
         ]);
+
+        debug_assert_eq!(next_program_index, expected_pass_count(raw.cfa_kind));
 
         let egui_texture_id = renderer.map(|renderer| {
             renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)
@@ -2277,6 +2389,8 @@ impl RawGpuPipeline {
             egui_texture_id,
             width: raw.width,
             height: raw.height,
+            cfa_kind: raw.cfa_kind,
+            processing_quality: quality,
             params_buffer,
             tone_histogram_buffer,
             raw_stage_end,

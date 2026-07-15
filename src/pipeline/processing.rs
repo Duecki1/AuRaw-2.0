@@ -115,15 +115,37 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
 /// map. Each proxy photosite averages only source samples from the same CFA
 /// plane, preventing colour-plane cross-contamination before demosaic.
 pub fn build_proxy(raw: &LoadedRaw, spec: ProxySpec) -> LoadedRaw {
+    build_region_proxy(raw, 0, 0, raw.width, raw.height, spec)
+}
+
+/// Builds a proxy directly from one source region. Unlike `crop_raw` followed
+/// by `build_proxy`, this visits and allocates only the final proxy data when
+/// reduction is required, which is important for repeated zoom previews on
+/// memory-constrained phones.
+pub fn build_region_proxy(
+    raw: &LoadedRaw,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    spec: ProxySpec,
+) -> LoadedRaw {
+    let x = x.min(raw.width.saturating_sub(1));
+    let y = y.min(raw.height.saturating_sub(1));
+    let region_width = width.max(1).min(raw.width - x);
+    let region_height = height.max(1).min(raw.height - y);
     let max_edge = spec.max_edge.max(1);
-    let longest = raw.width.max(raw.height);
+    let longest = region_width.max(region_height);
     let scale = longest.div_ceil(max_edge).max(1);
     if scale == 1 {
-        return raw.clone();
+        if x == 0 && y == 0 && region_width == raw.width && region_height == raw.height {
+            return raw.clone();
+        }
+        return crop_raw(raw, x, y, region_width, region_height);
     }
 
-    let width = raw.width.div_ceil(scale);
-    let height = raw.height.div_ceil(scale);
+    let width = region_width.div_ceil(scale);
+    let height = region_height.div_ceil(scale);
     let mut raw_pixels = Vec::with_capacity((width * height) as usize);
     let mut color_indices = Vec::with_capacity((width * height) as usize);
     let mut black_levels_per_pixel = Vec::with_capacity((width * height) as usize);
@@ -134,28 +156,30 @@ pub fn build_proxy(raw: &LoadedRaw, spec: ProxySpec) -> LoadedRaw {
     };
 
     for py in 0..height {
-        let y0 = py * scale;
-        let y1 = ((py + 1) * scale).min(raw.height);
+        let source_y0 = y + py * scale;
+        let source_y1 = (y + (py + 1) * scale).min(y + region_height);
         for px in 0..width {
-            let x0 = px * scale;
-            let x1 = ((px + 1) * scale).min(raw.width);
-            let center_x = (x0 + (x1 - x0) / 2).min(raw.width - 1);
-            let center_y = (y0 + (y1 - y0) / 2).min(raw.height - 1);
+            let source_x0 = x + px * scale;
+            let source_x1 = (x + (px + 1) * scale).min(x + region_width);
+            let center_x =
+                (source_x0 + (source_x1 - source_x0) / 2).min(raw.width - 1);
+            let center_y =
+                (source_y0 + (source_y1 - source_y0) / 2).min(raw.height - 1);
 
-            // Preserve a valid repeating CFA on the proxy. Choosing the CFA
-            // from the center of each source block would collapse a Bayer
-            // proxy to one plane whenever the reduction factor is even.
-            let phase_x = px % cfa_period;
-            let phase_y = py % cfa_period;
+            // Anchor the synthetic proxy mosaic to the source region's real CFA
+            // phase. Detail crops are aligned to the sensor period, preventing
+            // a phase jump from appearing as coloured horizontal/vertical lines.
+            let phase_x = (x + px % cfa_period).min(raw.width - 1);
+            let phase_y = (y + py % cfa_period).min(raw.height - 1);
             let phase_index = (phase_y * raw.width + phase_x) as usize;
             let cfa = raw.color_indices[phase_index];
 
             let mut pixel_sum = 0u64;
             let mut black_sum = 0.0f64;
             let mut count = 0u32;
-            for sy in y0..y1 {
+            for sy in source_y0..source_y1 {
                 let row = sy * raw.width;
-                for sx in x0..x1 {
+                for sx in source_x0..source_x1 {
                     let index = (row + sx) as usize;
                     if raw.color_indices[index] == cfa {
                         pixel_sum += u64::from(raw.raw_pixels[index]);

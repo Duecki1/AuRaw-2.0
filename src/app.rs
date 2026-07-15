@@ -1,9 +1,10 @@
 use crate::ai_masks::{spawn_subject_mask, SubjectMaskEvent, BIREFNET_MODEL_BYTES};
 use crate::pipeline::{
-    affected_stage, apply_lensfun_correction, build_proxy, crop_raw, lensfun_catalog, load_raw_file,
-    spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings, ExposureParams,
-    GpuParams, LensfunCatalog, LensfunLens, LoadedRaw, MaskImage, MaskKind, MaskRgbImage, MaskStack,
-    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, MAX_LOCAL_MASKS,
+    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
+    load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings,
+    ExposureParams, GpuParams, LensfunCatalog, LensfunLens, LoadedRaw, MaskImage, MaskKind,
+    MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
+    TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::layout::ScreenLayout;
@@ -47,12 +48,23 @@ impl PreviewQuality {
 
     pub const fn detail_edge(self) -> u32 {
         match (self, cfg!(target_os = "android")) {
-            (Self::Fast, true) => 1280,
-            (Self::Balanced, true) => 1920,
-            (Self::High, true) => 2560,
+            (Self::Fast, true) => 1080,
+            (Self::Balanced, true) => 1600,
+            (Self::High, true) => 2048,
             (Self::Fast, false) => 1920,
             (Self::Balanced, false) => 2560,
             (Self::High, false) => 3072,
+        }
+    }
+
+    pub const fn detail_pixel_scale(self) -> f32 {
+        match (self, cfg!(target_os = "android")) {
+            (Self::Fast, true) => 0.75,
+            (Self::Balanced, true) => 1.00,
+            (Self::High, true) => 1.35,
+            (Self::Fast, false) => 0.90,
+            (Self::Balanced, false) => 1.20,
+            (Self::High, false) => 1.50,
         }
     }
 }
@@ -65,8 +77,19 @@ pub(crate) struct PreviewUvRect {
 
 pub(crate) struct PreviewDetail {
     pub pipeline: RawGpuPipeline,
+    /// Full-image UV rectangle covered on screen by the detail texture.
     pub uv_rect: PreviewUvRect,
+    /// UV rectangle sampled from the padded detail texture. Keeping the padded
+    /// processing border outside this rectangle prevents crop-edge seams.
+    pub texture_uv_rect: PreviewUvRect,
     pub revision: u64,
+    /// Reusable RAW proxy for the padded visible crop. Adjustment interaction
+    /// updates this pipeline directly instead of touching the full-frame proxy.
+    raw: Arc<LoadedRaw>,
+    source_origin: [u32; 2],
+    source_size: [u32; 2],
+    virtual_origin: [i32; 2],
+    virtual_full_size: [u32; 2],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -250,9 +273,13 @@ pub struct AurawApp {
     pub(crate) preview_zoom: f32,
     pub(crate) preview_center: [f32; 2],
     pub(crate) preview_visible_uv: PreviewUvRect,
+    pub(crate) preview_viewport_pixels: [u32; 2],
     pub(crate) preview_motion_at: Option<Instant>,
+    pub(crate) preview_touch_navigation_active: bool,
     pub(crate) preview_revision: u64,
     pub(crate) preview_detail: Option<PreviewDetail>,
+    preview_detail_pending_stage: Option<ProcessingStage>,
+    preview_detail_urgent: bool,
     preview_quality_dirty: bool,
     pub exposure: ExposureParams,
     pub active_tab: AppTab,
@@ -303,6 +330,7 @@ pub struct AurawApp {
     current_label: Option<String>,
     notice: Option<String>,
     dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
+    detail_dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
     subject_consent_open: bool,
     subject_receiver: Option<mpsc::Receiver<SubjectMaskEvent>>,
     subject_download_progress: Option<(&'static str, u64, u64)>,

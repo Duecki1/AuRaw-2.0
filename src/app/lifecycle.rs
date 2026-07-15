@@ -53,9 +53,13 @@ impl AurawApp {
                 min: [0.0, 0.0],
                 max: [1.0, 1.0],
             },
+            preview_viewport_pixels: [1, 1],
             preview_motion_at: None,
+            preview_touch_navigation_active: false,
             preview_revision: 0,
             preview_detail: None,
+            preview_detail_pending_stage: None,
+            preview_detail_urgent: false,
             preview_quality_dirty: false,
             exposure,
             active_tab: AppTab::default(),
@@ -101,6 +105,7 @@ impl AurawApp {
             current_label: None,
             notice: None,
             dirty_mask_layers: [false; MAX_LOCAL_MASKS],
+            detail_dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             subject_consent_open: false,
             subject_receiver: None,
             subject_download_progress: None,
@@ -135,9 +140,13 @@ impl AurawApp {
                 min: [0.0, 0.0],
                 max: [1.0, 1.0],
             },
+            preview_viewport_pixels: [1, 1],
             preview_motion_at: None,
+            preview_touch_navigation_active: false,
             preview_revision: 0,
             preview_detail: None,
+            preview_detail_pending_stage: None,
+            preview_detail_urgent: false,
             preview_quality_dirty: false,
             exposure,
             active_tab: AppTab::default(),
@@ -181,6 +190,7 @@ impl AurawApp {
             current_label: None,
             notice: None,
             dirty_mask_layers: [false; MAX_LOCAL_MASKS],
+            detail_dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             subject_consent_open: false,
             subject_receiver: None,
             subject_download_progress: None,
@@ -288,14 +298,19 @@ impl AurawApp {
         self.subject_download_progress = None;
         self.subject_inferencing = false;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
+        self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.pending_stage = None;
+        self.preview_detail_pending_stage = None;
+        self.preview_detail_urgent = false;
         self.preview_zoom = 1.0;
         self.preview_center = [0.5, 0.5];
         self.preview_visible_uv = PreviewUvRect {
             min: [0.0, 0.0],
             max: [1.0, 1.0],
         };
+        self.preview_viewport_pixels = [1, 1];
         self.preview_motion_at = None;
+        self.preview_touch_navigation_active = false;
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.original_raw = None;
         self.lens_correction = LensCorrectionState::default();
@@ -487,9 +502,14 @@ impl AurawApp {
                     min: [0.0, 0.0],
                     max: [1.0, 1.0],
                 };
+                self.preview_viewport_pixels = [1, 1];
                 self.preview_motion_at = None;
+                self.preview_touch_navigation_active = false;
                 self.preview_revision = self.preview_revision.wrapping_add(1);
                 self.preview_detail = None;
+                self.preview_detail_pending_stage = None;
+                self.preview_detail_urgent = false;
+                self.detail_dirty_mask_layers.fill(false);
                 self.lens_correction = loaded.lens_correction;
                 self.lens_correction_dirty = false;
                 self.target_exposure = loaded.rendered_exposure;

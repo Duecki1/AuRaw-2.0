@@ -28,8 +28,8 @@ pub use masks::{
     MAX_LOCAL_MASKS,
 };
 pub use processing::{
-    affected_stage, build_proxy, crop_raw, extract_padded_tile, ExportTile, ProcessingStage,
-    ProxySpec, TilePlan, TileSpec, EXPORT_TILE_HALO,
+    affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile, ExportTile,
+    ProcessingStage, ProxySpec, TilePlan, TileSpec, EXPORT_TILE_HALO,
 };
 pub use raw_loader::{load_raw_file, load_raw_file_with_dcp, CfaKind, LoadedRaw};
 pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};

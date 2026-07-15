@@ -1,3 +1,87 @@
+fn aligned_detail_axis(
+    min_uv: f32,
+    max_uv: f32,
+    extent: u32,
+    cfa_period: u32,
+    viewport_pixels: u32,
+    detail_pixel_scale: f32,
+) -> (u32, u32) {
+    let extent = extent.max(1);
+    let period = cfa_period.max(1);
+    let visible_start = ((min_uv.clamp(0.0, 1.0) * extent as f32).floor() as u32)
+        .min(extent.saturating_sub(1));
+    let visible_end = ((max_uv.clamp(0.0, 1.0) * extent as f32).ceil() as u32)
+        .clamp(visible_start + 1, extent);
+    let visible_len = visible_end - visible_start;
+
+    // Demosaic, chroma cleanup, clarity, and glow all sample neighbouring
+    // pixels. Keep a generous source-space halo, then never display that halo.
+    // This prevents the straight crop-edge and coloured zipper artifacts that
+    // otherwise become obvious at high zoom.
+    let visible_detail_pixels =
+        (viewport_pixels.max(1) as f32 * detail_pixel_scale.max(0.1)).max(1.0);
+    let support_padding =
+        (visible_len as f32 * EXPORT_TILE_HALO as f32 / visible_detail_pixels).ceil() as u32;
+    let padding = ((visible_len as f32 * 0.06).ceil() as u32)
+        .max(EXPORT_TILE_HALO)
+        .max(support_padding);
+    let padded_start = visible_start.saturating_sub(padding);
+    let padded_end = visible_end.saturating_add(padding).min(extent);
+    let aligned_start = (padded_start / period) * period;
+    let aligned_end = padded_end
+        .div_ceil(period)
+        .saturating_mul(period)
+        .min(extent)
+        .max(aligned_start + 1);
+    (aligned_start, aligned_end)
+}
+
+fn detail_texture_uv(
+    visible: PreviewUvRect,
+    crop: PreviewUvRect,
+) -> PreviewUvRect {
+    let crop_width = (crop.max[0] - crop.min[0]).max(f32::EPSILON);
+    let crop_height = (crop.max[1] - crop.min[1]).max(f32::EPSILON);
+    PreviewUvRect {
+        min: [
+            ((visible.min[0] - crop.min[0]) / crop_width).clamp(0.0, 1.0),
+            ((visible.min[1] - crop.min[1]) / crop_height).clamp(0.0, 1.0),
+        ],
+        max: [
+            ((visible.max[0] - crop.min[0]) / crop_width).clamp(0.0, 1.0),
+            ((visible.max[1] - crop.min[1]) / crop_height).clamp(0.0, 1.0),
+        ],
+    }
+}
+
+fn requested_detail_edge(
+    quality: PreviewQuality,
+    viewport_pixels: [u32; 2],
+    visible: PreviewUvRect,
+    crop_width: u32,
+    crop_height: u32,
+    full_width: u32,
+    full_height: u32,
+) -> u32 {
+    let visible_source_width =
+        ((visible.max[0] - visible.min[0]).max(1.0 / full_width.max(1) as f32)
+            * full_width as f32)
+            .max(1.0);
+    let visible_source_height =
+        ((visible.max[1] - visible.min[1]).max(1.0 / full_height.max(1) as f32)
+            * full_height as f32)
+            .max(1.0);
+    let padded_width_pixels = viewport_pixels[0].max(1) as f32
+        * crop_width as f32
+        / visible_source_width;
+    let padded_height_pixels = viewport_pixels[1].max(1) as f32
+        * crop_height as f32
+        / visible_source_height;
+    (padded_width_pixels.max(padded_height_pixels) * quality.detail_pixel_scale())
+        .ceil()
+        .clamp(256.0, quality.detail_edge() as f32) as u32
+}
+
 impl AurawApp {
     pub(crate) fn mark_lens_correction_dirty(&mut self) {
         if self.original_raw.is_some() {
@@ -108,6 +192,7 @@ impl AurawApp {
         self.subject_download_progress = None;
         self.subject_inferencing = false;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
+        self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
 
         self.loaded_raw = Some(full_raw);
         self.preview_raw = Some(preview_raw);
@@ -118,8 +203,12 @@ impl AurawApp {
             min: [0.0, 0.0],
             max: [1.0, 1.0],
         };
+        self.preview_viewport_pixels = [1, 1];
         self.preview_motion_at = None;
+        self.preview_touch_navigation_active = false;
         self.preview_revision = self.preview_revision.wrapping_add(1);
+        self.preview_detail_pending_stage = None;
+        self.preview_detail_urgent = false;
         self.target_exposure = self.exposure;
         self.pending_stage = None;
         self.lens_correction.applied = applied_label.is_some();
@@ -134,9 +223,33 @@ impl AurawApp {
 
     pub(crate) fn note_preview_motion(&mut self) {
         self.preview_revision = self.preview_revision.wrapping_add(1);
+        self.preview_detail_pending_stage = None;
+        self.preview_detail_urgent = false;
         self.preview_motion_at = Some(Instant::now());
         self.egui_ctx
             .request_repaint_after(Duration::from_millis(1_000));
+    }
+
+    /// Queue a processing stage for the full proxy and, while zoomed, for the
+    /// visible detail crop. The full-frame work is deliberately deferred until
+    /// the user returns to fit view; interactive edits therefore only dispatch
+    /// the viewport-sized detail pipeline.
+    pub(crate) fn queue_preview_processing(&mut self, stage: ProcessingStage) {
+        self.pending_stage = Some(match self.pending_stage {
+            Some(existing) => existing.min(stage),
+            None => stage,
+        });
+
+        if self.preview_zoom > 1.01 {
+            self.preview_detail_pending_stage = Some(match self.preview_detail_pending_stage {
+                Some(existing) => existing.min(stage),
+                None => stage,
+            });
+            self.preview_detail_urgent = true;
+        }
+
+        self.notice = None;
+        self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn preview_quality_changed(&mut self) {
@@ -227,7 +340,10 @@ impl AurawApp {
         self.gpu_pipeline = Some(pipeline);
         self.target_exposure = self.exposure;
         self.pending_stage = None;
+        self.preview_detail_pending_stage = None;
+        self.preview_detail_urgent = false;
         self.dirty_mask_layers.fill(false);
+        self.detail_dirty_mask_layers.fill(false);
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.preview_motion_at = (self.preview_zoom > 1.01).then(Instant::now);
         if self.preview_motion_at.is_some() {
@@ -261,34 +377,45 @@ impl AurawApp {
                 }
             }
             self.preview_motion_at = None;
+            self.preview_detail_pending_stage = None;
+            self.preview_detail_urgent = false;
             return;
         }
         if self.active_tab != AppTab::Develop
-            || self.pending_stage.is_some()
             || self.preview_quality_dirty
             || self.lens_correction_dirty
             || self.load_receiver.is_some()
         {
             return;
         }
-        if self
+
+        let detail_is_current = self
             .preview_detail
             .as_ref()
-            .is_some_and(|detail| detail.revision == self.preview_revision)
-        {
+            .is_some_and(|detail| detail.revision == self.preview_revision);
+        if detail_is_current {
+            // Parameter edits are dispatched directly into this current crop by
+            // advance_zoomed_processing; rebuilding the RAW crop would waste CPU.
             return;
         }
-        let Some(motion_at) = self.preview_motion_at else {
-            return;
-        };
-        let elapsed = motion_at.elapsed();
-        if elapsed < IDLE_DELAY {
-            self.egui_ctx.request_repaint_after(IDLE_DELAY - elapsed);
-            return;
+
+        let urgent = self.preview_detail_urgent;
+        if !urgent {
+            let Some(motion_at) = self.preview_motion_at else {
+                return;
+            };
+            let elapsed = motion_at.elapsed();
+            if elapsed < IDLE_DELAY {
+                self.egui_ctx.request_repaint_after(IDLE_DELAY - elapsed);
+                return;
+            }
         }
+
         // Avoid retrying every frame if allocation fails. A later zoom, edit,
         // or quality change schedules a fresh attempt.
         self.preview_motion_at = None;
+        self.preview_detail_urgent = false;
+        self.preview_detail_pending_stage = None;
 
         let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
             return;
@@ -297,34 +424,78 @@ impl AurawApp {
             return;
         };
         let visible = self.preview_visible_uv;
-        let visible_width = (visible.max[0] - visible.min[0]).max(1.0 / full_raw.width as f32);
-        let visible_height = (visible.max[1] - visible.min[1]).max(1.0 / full_raw.height as f32);
-        let pad_u = (visible_width * 0.04).max(32.0 / full_raw.width.max(1) as f32);
-        let pad_v = (visible_height * 0.04).max(32.0 / full_raw.height.max(1) as f32);
-        let min_u = (visible.min[0] - pad_u).clamp(0.0, 1.0);
-        let min_v = (visible.min[1] - pad_v).clamp(0.0, 1.0);
-        let max_u = (visible.max[0] + pad_u).clamp(0.0, 1.0);
-        let max_v = (visible.max[1] + pad_v).clamp(0.0, 1.0);
+        if !urgent && self.pending_stage.is_none() {
+            if let Some(proxy) = self.preview_raw.as_ref() {
+                let visible_proxy_width = proxy.width as f32
+                    * (visible.max[0] - visible.min[0]).clamp(0.0, 1.0);
+                let visible_proxy_height = proxy.height as f32
+                    * (visible.max[1] - visible.min[1]).clamp(0.0, 1.0);
+                let requested_visible_width = self.preview_viewport_pixels[0].max(1) as f32
+                    * self.preview_quality.detail_pixel_scale();
+                let requested_visible_height = self.preview_viewport_pixels[1].max(1) as f32
+                    * self.preview_quality.detail_pixel_scale();
+                if requested_visible_width <= visible_proxy_width * 1.05
+                    && requested_visible_height <= visible_proxy_height * 1.05
+                {
+                    // When there are no deferred edits, the existing full-image
+                    // proxy already supplies enough texels at shallow zoom.
+                    return;
+                }
+            }
+        }
 
-        let x0 = ((min_u * full_raw.width as f32).floor() as u32)
-            .min(full_raw.width.saturating_sub(1));
-        let y0 = ((min_v * full_raw.height as f32).floor() as u32)
-            .min(full_raw.height.saturating_sub(1));
-        let x1 = ((max_u * full_raw.width as f32).ceil() as u32)
-            .clamp(x0 + 1, full_raw.width);
-        let y1 = ((max_v * full_raw.height as f32).ceil() as u32)
-            .clamp(y0 + 1, full_raw.height);
+        let cfa_period = match full_raw.cfa_kind {
+            crate::pipeline::CfaKind::Bayer => 2,
+            crate::pipeline::CfaKind::XTrans => 6,
+        };
+        let (x0, x1) = aligned_detail_axis(
+            visible.min[0],
+            visible.max[0],
+            full_raw.width,
+            cfa_period,
+            self.preview_viewport_pixels[0],
+            self.preview_quality.detail_pixel_scale(),
+        );
+        let (y0, y1) = aligned_detail_axis(
+            visible.min[1],
+            visible.max[1],
+            full_raw.height,
+            cfa_period,
+            self.preview_viewport_pixels[1],
+            self.preview_quality.detail_pixel_scale(),
+        );
         let crop_width = x1 - x0;
         let crop_height = y1 - y0;
-        let crop = crop_raw(&full_raw, x0, y0, crop_width, crop_height);
+        let crop_uv = PreviewUvRect {
+            min: [
+                x0 as f32 / full_raw.width as f32,
+                y0 as f32 / full_raw.height as f32,
+            ],
+            max: [
+                x1 as f32 / full_raw.width as f32,
+                y1 as f32 / full_raw.height as f32,
+            ],
+        };
+        let texture_uv_rect = detail_texture_uv(visible, crop_uv);
         let detail_spec = ProxySpec {
-            max_edge: self.preview_quality.detail_edge(),
+            max_edge: requested_detail_edge(
+                self.preview_quality,
+                self.preview_viewport_pixels,
+                visible,
+                crop_width,
+                crop_height,
+                full_raw.width,
+                full_raw.height,
+            ),
         };
-        let detail_raw = if crop.width.max(crop.height) <= detail_spec.max_edge {
-            Arc::new(crop)
-        } else {
-            Arc::new(build_proxy(&crop, detail_spec))
-        };
+        let detail_raw = Arc::new(build_region_proxy(
+            &full_raw,
+            x0,
+            y0,
+            crop_width,
+            crop_height,
+            detail_spec,
+        ));
         let detail_masks = self.masks.cropped_for_region(
             x0,
             y0,
@@ -348,7 +519,7 @@ impl AurawApp {
             * virtual_full_height as f64)
             .round() as i32;
         let params = GpuParams::new_for_tile(
-            &self.exposure,
+            &self.target_exposure,
             &detail_masks,
             &detail_raw,
             virtual_origin_x,
@@ -356,12 +527,54 @@ impl AurawApp {
             virtual_full_width,
             virtual_full_height,
         );
-        let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
+        if let Some(detail) = self.preview_detail.as_mut().filter(|detail| {
+            detail.pipeline.width == detail_raw.width
+                && detail.pipeline.height == detail_raw.height
+        }) {
+            if let Err(error) = detail
+                .pipeline
+                .upload_raw_tile(&render_state.queue, &detail_raw)
+            {
+                self.notice = Some(format!(
+                    "Could not update the zoomed preview crop: {error:#}"
+                ));
+                return;
+            }
+            if let Err(error) = Self::upload_preview_masks(
+                &detail.pipeline,
+                &render_state.queue,
+                &detail_masks,
+                &detail_raw,
+            ) {
+                self.notice = Some(error);
+                return;
+            }
+            detail
+                .pipeline
+                .recompute(&render_state.queue, &render_state.device, &params);
+            detail.uv_rect = visible;
+            detail.texture_uv_rect = texture_uv_rect;
+            detail.revision = self.preview_revision;
+            detail.raw = Arc::clone(&detail_raw);
+            detail.source_origin = [x0, y0];
+            detail.source_size = [crop_width, crop_height];
+            detail.virtual_origin = [virtual_origin_x, virtual_origin_y];
+            detail.virtual_full_size = [virtual_full_width, virtual_full_height];
+            self.detail_dirty_mask_layers.fill(false);
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        let Some(program_template) = self.gpu_pipeline.as_ref() else {
+            return;
+        };
+        let mut pipeline = match RawGpuPipeline::new_headless_reusing_programs(
             &render_state.device,
             &render_state.queue,
             &detail_raw,
             &params,
             ProcessingQuality::Preview,
+            program_template,
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
@@ -391,18 +604,16 @@ impl AurawApp {
 
         self.preview_detail = Some(PreviewDetail {
             pipeline,
-            uv_rect: PreviewUvRect {
-                min: [
-                    x0 as f32 / full_raw.width as f32,
-                    y0 as f32 / full_raw.height as f32,
-                ],
-                max: [
-                    x1 as f32 / full_raw.width as f32,
-                    y1 as f32 / full_raw.height as f32,
-                ],
-            },
+            uv_rect: visible,
+            texture_uv_rect,
             revision: self.preview_revision,
+            raw: detail_raw,
+            source_origin: [x0, y0],
+            source_size: [crop_width, crop_height],
+            virtual_origin: [virtual_origin_x, virtual_origin_y],
+            virtual_full_size: [virtual_full_width, virtual_full_height],
         });
+        self.detail_dirty_mask_layers.fill(false);
         self.egui_ctx.request_repaint();
     }
 
@@ -413,17 +624,107 @@ impl AurawApp {
         }
 
         if let Some(stage) = affected_stage(&self.target_exposure, &self.exposure) {
-            self.pending_stage = Some(match self.pending_stage {
-                Some(existing) => existing.min(stage),
-                None => stage,
-            });
             self.target_exposure = self.exposure;
-            self.notice = None;
-            self.note_preview_motion();
+            self.queue_preview_processing(stage);
         }
     }
 
+    fn advance_zoomed_processing(&mut self, frame: &eframe::Frame) {
+        let Some(stage) = self.preview_detail_pending_stage else {
+            return;
+        };
+        let Some(detail) = self
+            .preview_detail
+            .as_ref()
+            .filter(|detail| detail.revision == self.preview_revision)
+        else {
+            // advance_preview_detail will construct the current visible crop,
+            // immediately for edits and after the idle delay for navigation.
+            return;
+        };
+        let Some(full_raw) = self.loaded_raw.as_ref() else {
+            self.preview_detail_pending_stage = None;
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+
+        let detail_raw = Arc::clone(&detail.raw);
+        let source_origin = detail.source_origin;
+        let source_size = detail.source_size;
+        let virtual_origin = detail.virtual_origin;
+        let virtual_full_size = detail.virtual_full_size;
+        let detail_masks = self.masks.cropped_for_region(
+            source_origin[0],
+            source_origin[1],
+            source_size[0],
+            source_size[1],
+            full_raw.width,
+            full_raw.height,
+        );
+        let params = GpuParams::new_for_tile(
+            &self.target_exposure,
+            &detail_masks,
+            &detail_raw,
+            virtual_origin[0],
+            virtual_origin[1],
+            virtual_full_size[0],
+            virtual_full_size[1],
+        );
+
+        let Some(detail) = self.preview_detail.as_mut() else {
+            return;
+        };
+        if stage == ProcessingStage::Output
+            && self.detail_dirty_mask_layers.iter().any(|dirty| *dirty)
+        {
+            let edge = detail.pipeline.mask_atlas_edge();
+            for layer in 0..MAX_LOCAL_MASKS {
+                if !self.detail_dirty_mask_layers[layer] {
+                    continue;
+                }
+                let bytes = detail_masks.rasterize_layer(
+                    layer,
+                    edge,
+                    edge,
+                    detail_raw.width,
+                    detail_raw.height,
+                );
+                if let Err(error) =
+                    detail.pipeline.update_mask_layer(&render_state.queue, layer, &bytes)
+                {
+                    self.notice = Some(format!(
+                        "Could not update the zoomed local mask: {error:#}"
+                    ));
+                    self.preview_detail_pending_stage = None;
+                    return;
+                }
+                self.detail_dirty_mask_layers[layer] = false;
+            }
+        }
+
+        detail
+            .pipeline
+            .dispatch_stage(&render_state.queue, &render_state.device, &params, stage);
+        self.preview_detail_pending_stage = match stage {
+            ProcessingStage::Raw => Some(ProcessingStage::Tone),
+            ProcessingStage::Tone => Some(ProcessingStage::Output),
+            ProcessingStage::Output => None,
+        };
+        if self.preview_detail_pending_stage.is_none() {
+            detail.revision = self.preview_revision;
+            self.preview_detail_urgent = false;
+        }
+        self.egui_ctx.request_repaint();
+    }
+
     fn advance_processing(&mut self, frame: &eframe::Frame) {
+        if self.preview_zoom > 1.01 {
+            self.advance_zoomed_processing(frame);
+            return;
+        }
+
         let Some(stage) = self.pending_stage else {
             return;
         };
@@ -665,6 +966,14 @@ impl AurawApp {
             }
         } else if self.export_publish_pending {
             "Saving to Pictures/AuRaw…".to_owned()
+        } else if self.preview_zoom > 1.01 {
+            if let Some(stage) = self.preview_detail_pending_stage {
+                format!("Updating visible zoom crop — {}…", stage.label())
+            } else if let Some(notice) = &self.notice {
+                notice.clone()
+            } else {
+                self.image_status.clone()
+            }
         } else if let Some(stage) = self.pending_stage {
             format!("Updating preview — {}…", stage.label())
         } else if let Some(notice) = &self.notice {

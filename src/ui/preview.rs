@@ -71,37 +71,83 @@ impl Preview {
         let response = ui.interact(interaction_rect, interaction_id, interaction_sense);
 
         let mut moved = false;
-        if response.hovered() {
+        let (multi_touch, any_touches) = ui.input(|input| {
+            (
+                input.multi_touch().filter(|multi_touch| {
+                    outer_rect.contains(multi_touch.start_pos)
+                        || outer_rect.contains(multi_touch.center_pos)
+                }),
+                input.any_touches(),
+            )
+        });
+        if multi_touch.is_some() {
+            app.preview_touch_navigation_active = true;
+        } else if !any_touches {
+            app.preview_touch_navigation_active = false;
+        }
+        let touch_navigation = app.preview_touch_navigation_active;
+
+        if let Some(multi_touch) = multi_touch {
+            // Keep the image point that was under the previous gesture center under
+            // the current center. This combines pinch zooming and two-finger panning
+            // without accumulating a separate touch-only camera state.
+            let previous_touch_center = multi_touch.center_pos - multi_touch.translation_delta;
+            moved |= transform_preview_about_screen_points(
+                outer_rect,
+                image_rect,
+                base_size,
+                &mut app.preview_zoom,
+                &mut app.preview_center,
+                previous_touch_center,
+                multi_touch.center_pos,
+                multi_touch.zoom_delta,
+            );
+            image_rect = zoomed_image_rect(
+                outer_rect,
+                base_size,
+                app.preview_zoom,
+                app.preview_center,
+            );
+
+            // A second finger switches a mask gesture into viewport navigation.
+            // Commit any pending mask update and prevent this frame from painting.
+            if app.sidebar_tab == SidebarTab::Masks {
+                app.finish_mask_geometry_interaction();
+                app.last_brush_point = None;
+                app.mask_drag = None;
+            }
+        }
+
+        if !touch_navigation && response.hovered() {
             let scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll_y.abs() > 0.01 {
                 let pointer = ui
                     .input(|input| input.pointer.hover_pos())
                     .unwrap_or(outer_rect.center());
-                let anchor = [
-                    (pointer.x - image_rect.left()) / image_rect.width().max(1.0),
-                    (pointer.y - image_rect.top()) / image_rect.height().max(1.0),
-                ];
-                let previous_zoom = app.preview_zoom;
-                app.preview_zoom = (previous_zoom * (scroll_y * 0.0018).exp()).clamp(1.0, 32.0);
-                if (app.preview_zoom - previous_zoom).abs() > f32::EPSILON {
-                    let new_size = base_size * app.preview_zoom;
-                    let new_min = Pos2::new(
-                        pointer.x - anchor[0] * new_size.x,
-                        pointer.y - anchor[1] * new_size.y,
-                    );
-                    app.preview_center = [
-                        (outer_rect.center().x - new_min.x) / new_size.x.max(1.0),
-                        (outer_rect.center().y - new_min.y) / new_size.y.max(1.0),
-                    ];
-                    clamp_preview_center(&mut app.preview_center, outer_rect.size(), new_size);
-                    moved = true;
-                }
+                moved |= transform_preview_about_screen_points(
+                    outer_rect,
+                    image_rect,
+                    base_size,
+                    &mut app.preview_zoom,
+                    &mut app.preview_center,
+                    pointer,
+                    pointer,
+                    (scroll_y * 0.0018).exp(),
+                );
+                image_rect = zoomed_image_rect(
+                    outer_rect,
+                    base_size,
+                    app.preview_zoom,
+                    app.preview_center,
+                );
             }
         }
 
-        let pan_with_primary = app.sidebar_tab != SidebarTab::Masks
+        let pan_with_primary = !touch_navigation
+            && app.sidebar_tab != SidebarTab::Masks
             && response.dragged_by(egui::PointerButton::Primary);
-        let pan_with_middle = response.dragged_by(egui::PointerButton::Middle);
+        let pan_with_middle = !touch_navigation
+            && response.dragged_by(egui::PointerButton::Middle);
         if pan_with_primary || pan_with_middle {
             let delta = ui.input(|input| input.pointer.delta());
             let image_size = base_size * app.preview_zoom;
@@ -111,7 +157,8 @@ impl Preview {
             moved |= delta.length_sq() > 0.0;
         }
 
-        if response.double_clicked() {
+        let fit_gesture = !touch_navigation && response.double_clicked();
+        if fit_gesture {
             app.preview_zoom = 1.0;
             app.preview_center = [0.5, 0.5];
             moved = true;
@@ -124,6 +171,15 @@ impl Preview {
             app.preview_center,
         );
         let visible_screen = outer_rect.intersect(image_rect);
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        let viewport_pixels = [
+            (visible_screen.width() * pixels_per_point).round().max(1.0) as u32,
+            (visible_screen.height() * pixels_per_point).round().max(1.0) as u32,
+        ];
+        if app.preview_viewport_pixels != viewport_pixels {
+            app.preview_viewport_pixels = viewport_pixels;
+            moved = true;
+        }
         let visible_uv = crate::app::PreviewUvRect {
             min: [
                 ((visible_screen.left() - image_rect.left()) / image_rect.width().max(1.0))
@@ -167,7 +223,16 @@ impl Preview {
                 painter.image(
                     detail_texture_id,
                     detail_rect,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Rect::from_min_max(
+                        Pos2::new(
+                            detail.texture_uv_rect.min[0],
+                            detail.texture_uv_rect.min[1],
+                        ),
+                        Pos2::new(
+                            detail.texture_uv_rect.max[0],
+                            detail.texture_uv_rect.max[1],
+                        ),
+                    ),
                     Color32::WHITE,
                 );
             }
@@ -176,13 +241,18 @@ impl Preview {
         painter.text(
             outer_rect.left_top() + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
-            format!("{:.0}% · scroll to zoom · double-click to fit", app.preview_zoom * 100.0),
+            format!(
+                "{:.0}% · pinch/scroll zoom · drag pan · double-tap/click fit",
+                app.preview_zoom * 100.0
+            ),
             egui::FontId::proportional(11.0),
             Color32::from_white_alpha(180),
         );
 
         if app.sidebar_tab == SidebarTab::Masks {
-            Self::handle_mask_interaction(ui, app, image_rect, &response);
+            if !touch_navigation && !fit_gesture {
+                Self::handle_mask_interaction(ui, app, image_rect, &response);
+            }
             // Keep the selected mask's handles visible even when the colored
             // coverage overlay is hidden.
             Self::paint_mask_overlay(ui, app, image_rect);
@@ -943,6 +1013,40 @@ fn zoomed_image_rect(
         outer_rect.center().y - center[1] * size.y,
     );
     Rect::from_min_size(min, size)
+}
+
+fn transform_preview_about_screen_points(
+    outer_rect: Rect,
+    current_image_rect: Rect,
+    base_size: egui::Vec2,
+    zoom: &mut f32,
+    center: &mut [f32; 2],
+    anchor_screen: Pos2,
+    target_screen: Pos2,
+    zoom_factor: f32,
+) -> bool {
+    let previous_zoom = *zoom;
+    let previous_center = *center;
+    let anchor_uv = [
+        (anchor_screen.x - current_image_rect.left()) / current_image_rect.width().max(1.0),
+        (anchor_screen.y - current_image_rect.top()) / current_image_rect.height().max(1.0),
+    ];
+
+    *zoom = (previous_zoom * zoom_factor).clamp(1.0, 32.0);
+    let new_size = base_size * *zoom;
+    let new_min = Pos2::new(
+        target_screen.x - anchor_uv[0] * new_size.x,
+        target_screen.y - anchor_uv[1] * new_size.y,
+    );
+    *center = [
+        (outer_rect.center().x - new_min.x) / new_size.x.max(1.0),
+        (outer_rect.center().y - new_min.y) / new_size.y.max(1.0),
+    ];
+    clamp_preview_center(center, outer_rect.size(), new_size);
+
+    (*zoom - previous_zoom).abs() > f32::EPSILON
+        || (center[0] - previous_center[0]).abs() > f32::EPSILON
+        || (center[1] - previous_center[1]).abs() > f32::EPSILON
 }
 
 fn clamp_preview_center(center: &mut [f32; 2], viewport: egui::Vec2, image: egui::Vec2) {

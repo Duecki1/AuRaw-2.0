@@ -61,6 +61,20 @@ Other supported ABI names are `armeabi-v7a`, `x86`, and `x86_64`. Build and
 package one ABI at a time by passing the same name to the script and the Gradle
 `aurawAbi` property.
 
+## Touch preview controls
+
+- Drag with one finger to pan the preview when no mask tool is editing it.
+- Pinch with two fingers to zoom around the gesture center. Moving both fingers
+  together pans at the same time.
+- While editing masks, use two fingers to navigate without painting or moving the
+  mask. Lift both fingers before resuming a one-finger mask edit.
+- Double-tap the preview to return to fit view.
+- After roughly one second without viewport movement, AuRaw rerenders only the
+  visible RAW region at the selected preview quality.
+- While zoomed, adjustment sliders, tone curves, and color wheels update that
+  reusable visible-region pipeline directly. The full-frame proxy is deferred
+  until fit view, avoiding whole-preview renders during touch interaction.
+
 ## File access and GPU behavior
 
 The Open RAW button launches Android's Storage Access Framework with
