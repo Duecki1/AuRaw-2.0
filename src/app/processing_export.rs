@@ -104,6 +104,7 @@ fn zoom_detail_idle_delay() -> Duration {
 
 impl AurawApp {
     pub(crate) fn mark_lens_correction_dirty(&mut self) {
+        self.note_edit_changed();
         if self.original_raw.is_some() {
             self.lens_correction_dirty = true;
             self.notice = None;
@@ -156,7 +157,10 @@ impl AurawApp {
         } else {
             Arc::new(build_proxy(&full_raw, preview_spec))
         };
-        let params = GpuParams::new(&self.exposure, &MaskStack::default(), &preview_raw);
+        let restored_history_masks = self.history_lens_restore_masks.take();
+        let empty_masks = MaskStack::default();
+        let preview_masks = restored_history_masks.as_ref().unwrap_or(&empty_masks);
+        let params = GpuParams::new(&self.exposure, preview_masks, &preview_raw);
         let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
             &render_state.device,
             &render_state.queue,
@@ -171,6 +175,15 @@ impl AurawApp {
                 return;
             }
         };
+        if let Err(error) = Self::upload_preview_masks(
+            &pipeline,
+            &render_state.queue,
+            preview_masks,
+            &preview_raw,
+        ) {
+            self.notice = Some(error);
+            return;
+        }
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
 
         let mut renderer = render_state.renderer.write();
@@ -219,6 +232,11 @@ impl AurawApp {
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
+
+        if let Some(restored_masks) = restored_history_masks {
+            self.masks = restored_masks;
+            self.rehydrate_restored_mask_state();
+        }
 
         self.loaded_raw = Some(full_raw);
         self.preview_raw = Some(preview_raw);
@@ -562,6 +580,26 @@ impl AurawApp {
             virtual_full_width,
             virtual_full_height,
         );
+        // Prefer the higher-resolution normal proxy whenever its histogram is
+        // still valid. Output-only edits do not invalidate ToneStats; RAW/WB
+        // edits do, so their freshly updated navigation proxy is the anchor
+        // until the deferred normal proxy reaches its Tone stage again.
+        let normal_tone_is_current = !matches!(
+            self.pending_stage,
+            Some(ProcessingStage::Raw | ProcessingStage::Tone)
+        );
+        let full_frame_tone_pipeline = if normal_tone_is_current {
+            self.gpu_pipeline.as_ref().or_else(|| {
+                self.preview_navigation
+                    .as_ref()
+                    .map(|preview| &preview.pipeline)
+            })
+        } else {
+            self.preview_navigation
+                .as_ref()
+                .map(|preview| &preview.pipeline)
+                .or(self.gpu_pipeline.as_ref())
+        };
         if let Some(detail) = self.preview_detail.as_mut().filter(|detail| {
             detail.pipeline.width == detail_raw.width
                 && detail.pipeline.height == detail_raw.height
@@ -604,9 +642,31 @@ impl AurawApp {
                     self.detail_dirty_mask_layers[layer] = false;
                 }
             }
-            detail
-                .pipeline
-                .recompute(&render_state.queue, &render_state.device, &params);
+            detail.pipeline.dispatch_stage(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                ProcessingStage::Raw,
+            );
+            detail.pipeline.dispatch_stage(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                ProcessingStage::Tone,
+            );
+            if let Some(full_frame) = full_frame_tone_pipeline {
+                detail.pipeline.inherit_tone_statistics(
+                    &render_state.queue,
+                    &render_state.device,
+                    full_frame,
+                );
+            }
+            detail.pipeline.dispatch_stage(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                ProcessingStage::Output,
+            );
             detail.uv_rect = visible;
             detail.texture_uv_rect = texture_uv_rect;
             detail.revision = self.preview_revision;
@@ -646,7 +706,31 @@ impl AurawApp {
             self.notice = Some(error);
             return;
         }
-        pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        pipeline.dispatch_stage(
+            &render_state.queue,
+            &render_state.device,
+            &params,
+            ProcessingStage::Raw,
+        );
+        pipeline.dispatch_stage(
+            &render_state.queue,
+            &render_state.device,
+            &params,
+            ProcessingStage::Tone,
+        );
+        if let Some(full_frame) = full_frame_tone_pipeline {
+            pipeline.inherit_tone_statistics(
+                &render_state.queue,
+                &render_state.device,
+                full_frame,
+            );
+        }
+        pipeline.dispatch_stage(
+            &render_state.queue,
+            &render_state.device,
+            &params,
+            ProcessingStage::Output,
+        );
 
         let mut renderer = render_state.renderer.write();
         if let Some(old) = self.preview_detail.take() {
@@ -802,6 +886,7 @@ impl AurawApp {
     }
 
     pub(crate) fn mark_pipeline_dirty(&mut self) {
+        self.note_edit_changed();
         if self.gpu_pipeline.is_none() {
             self.target_exposure = self.exposure;
             return;
@@ -847,6 +932,22 @@ impl AurawApp {
             virtual_full_size[1],
         );
 
+        let normal_tone_is_current = !matches!(
+            self.pending_stage,
+            Some(ProcessingStage::Raw | ProcessingStage::Tone)
+        );
+        let full_frame_tone_pipeline = if normal_tone_is_current {
+            self.gpu_pipeline.as_ref().or_else(|| {
+                self.preview_navigation
+                    .as_ref()
+                    .map(|preview| &preview.pipeline)
+            })
+        } else {
+            self.preview_navigation
+                .as_ref()
+                .map(|preview| &preview.pipeline)
+                .or(self.gpu_pipeline.as_ref())
+        };
         let Some(detail) = self.preview_detail.as_mut() else {
             return;
         };
@@ -882,6 +983,15 @@ impl AurawApp {
             }
         }
 
+        if stage == ProcessingStage::Output {
+            if let Some(full_frame) = full_frame_tone_pipeline {
+                detail.pipeline.inherit_tone_statistics(
+                    &render_state.queue,
+                    &render_state.device,
+                    full_frame,
+                );
+            }
+        }
         detail
             .pipeline
             .dispatch_stage(&render_state.queue, &render_state.device, &params, stage);

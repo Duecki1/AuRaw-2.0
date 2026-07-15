@@ -337,8 +337,12 @@ def main() -> int:
         and "5.0f32.powf(-skew)" in sigmoid_rust,
         "darktable sigmoid defaults and generalized log-logistic coefficients are present",
     )
-    c.check(
-        "return apply_output_lut(darktable_sigmoid(rgb));" in tonemap,
+    c.require_in_order(
+        adjustments,
+        [
+            "let display_linear = darktable_sigmoid(graded);",
+            "apply_output_lut(display_linear)",
+        ],
         "darktable sigmoid runs before the bounded ICC LUT",
     )
     c.check(

@@ -1,3 +1,85 @@
+fn remove_temporary_raw(path: &std::path::Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        log::warn!(
+            "could not remove imported Android RAW cache file {}: {error}",
+            path.display()
+        );
+    }
+}
+
+fn load_sidecar_for_target(
+    target: &crate::sidecar::SidecarTarget,
+    #[cfg(target_os = "android")] android_app: &android_activity::AndroidApp,
+) -> Result<Option<crate::sidecar::LoadedSidecar>, crate::sidecar::SidecarError> {
+    match target {
+        crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+            crate::sidecar::load_desktop(raw_path)
+        }
+        #[cfg(target_os = "android")]
+        crate::sidecar::SidecarTarget::Android {
+            raw_uri,
+            display_name,
+        } => crate::sidecar::load_android(android_app, raw_uri, display_name),
+    }
+}
+
+fn raw_cache_key_for_target(target: &crate::sidecar::SidecarTarget) -> String {
+    match target {
+        crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+            let metadata = std::fs::metadata(raw_path).ok();
+            let bytes = metadata.as_ref().map(std::fs::Metadata::len).unwrap_or_default();
+            let modified = metadata
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            format!("desktop:{}:{bytes}:{modified}", raw_path.display())
+        }
+        #[cfg(target_os = "android")]
+        crate::sidecar::SidecarTarget::Android { raw_uri, .. } => {
+            format!("android:{raw_uri}")
+        }
+    }
+}
+
+fn append_notice(notice: &mut Option<String>, message: &str) {
+    match notice {
+        Some(existing) => {
+            existing.push(' ');
+            existing.push_str(message);
+        }
+        None => *notice = Some(message.to_owned()),
+    }
+}
+
+fn has_missing_range_sources(masks: &MaskStack) -> bool {
+    masks.masks.iter().any(|mask| {
+        mask.components.iter().any(|component| {
+            matches!(
+                &component.geometry,
+                MaskGeometry::LuminanceRange { source: None, .. }
+                    | MaskGeometry::ColorRange { source: None, .. }
+            )
+        })
+    })
+}
+
+fn install_missing_range_sources(masks: &mut MaskStack, source: &MaskRgbImage) {
+    for mask in &mut masks.masks {
+        for component in &mut mask.components {
+            match &mut component.geometry {
+                MaskGeometry::LuminanceRange { source: target, .. }
+                | MaskGeometry::ColorRange { source: target, .. }
+                    if target.is_none() =>
+                {
+                    *target = Some(source.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 impl AurawApp {
     fn install_lightroom_visuals(ctx: &egui::Context) {
         // Start from egui's robust dark palette, then make the editor panels a
@@ -36,11 +118,17 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     fn empty(ctx: &egui::Context) -> Self {
+        let performance_settings_path = crate::performance_settings::desktop_path();
+        let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        let last_library_folder = performance.last_library_folder.clone();
         let exposure = ExposureParams::scene_referred_default();
+        let masks = MaskStack::default();
+        let lens_correction = LensCorrectionState::default();
+        let edit_history = EditHistory::new(&exposure, &masks, &lens_correction);
         let runtime_selection = Self::load_onnx_runtime_selection();
         let onnx_runtime_path = runtime_selection.as_ref().map(|(path, _)| path.clone());
         let onnx_runtime_sha256 = runtime_selection.map(|(_, sha256)| sha256);
-        Self {
+        let mut app = Self {
             current_path: None,
             original_raw: None,
             loaded_raw: None,
@@ -64,6 +152,10 @@ impl AurawApp {
             preview_detail_urgent: false,
             preview_quality_dirty: false,
             exposure,
+            library: LibraryState::new_with_workers(ctx, performance.thumbnail_workers),
+            raw_cache: VecDeque::new(),
+            raw_cache_limit: performance.raw_cache_files,
+            performance_settings_path,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
             adjustment_section: AdjustmentSection::default(),
@@ -71,7 +163,7 @@ impl AurawApp {
             tone_curve_tab: ToneCurveTab::default(),
             color_grade_tab: ColorGradeTab::default(),
             export_settings: ExportSettings::default(),
-            masks: MaskStack::default(),
+            masks,
             active_mask_tool: None,
             brush_mode: BrushMode::Paint,
             mask_drag: None,
@@ -93,7 +185,20 @@ impl AurawApp {
             onnx_runtime_sha256,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
-            lens_correction: LensCorrectionState::default(),
+            lens_correction,
+            edit_history,
+            history_lens_restore_masks: None,
+            sidecar_target: None,
+            sidecar_generation: 0,
+            sidecar_saved_revision: None,
+            sidecar_failed_revision: None,
+            sidecar_pending: VecDeque::new(),
+            sidecar_in_flight: None,
+            sidecar_receiver: None,
+            sidecar_autosave_deadline: None,
+            developed_thumbnail_pending: None,
+            developed_thumbnail_in_flight: None,
+            developed_thumbnail_receiver: None,
             egui_ctx: ctx.clone(),
             target_exposure: exposure,
             pending_stage: None,
@@ -113,7 +218,11 @@ impl AurawApp {
             subject_receiver: None,
             subject_download_progress: None,
             subject_inferencing: false,
+        };
+        if let Some(folder) = last_library_folder.filter(|folder| folder.is_dir()) {
+            app.library.open_folder(folder, ctx);
         }
+        app
     }
 
     #[cfg(not(target_os = "android"))]
@@ -129,7 +238,14 @@ impl AurawApp {
     ) -> Self {
         crate::android::install_context(&cc.egui_ctx);
         Self::install_lightroom_visuals(&cc.egui_ctx);
+        let performance_settings_path = crate::android::performance_settings_path(&android_app)
+            .map_err(|error| log::warn!("{error}"))
+            .ok();
+        let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         let exposure = ExposureParams::scene_referred_default();
+        let masks = MaskStack::default();
+        let lens_correction = LensCorrectionState::default();
+        let edit_history = EditHistory::new(&exposure, &masks, &lens_correction);
         Self {
             current_path: None,
             original_raw: None,
@@ -154,6 +270,14 @@ impl AurawApp {
             preview_detail_urgent: false,
             preview_quality_dirty: false,
             exposure,
+            library: LibraryState::new_android_with_workers(
+                android_app.clone(),
+                &cc.egui_ctx,
+                performance.thumbnail_workers,
+            ),
+            raw_cache: VecDeque::new(),
+            raw_cache_limit: performance.raw_cache_files,
+            performance_settings_path,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
             adjustment_section: AdjustmentSection::default(),
@@ -161,7 +285,7 @@ impl AurawApp {
             tone_curve_tab: ToneCurveTab::default(),
             color_grade_tab: ColorGradeTab::default(),
             export_settings: ExportSettings::default(),
-            masks: MaskStack::default(),
+            masks,
             active_mask_tool: None,
             brush_mode: BrushMode::Paint,
             mask_drag: None,
@@ -181,7 +305,20 @@ impl AurawApp {
             subject_mask_cache: None,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
-            lens_correction: LensCorrectionState::default(),
+            lens_correction,
+            edit_history,
+            history_lens_restore_masks: None,
+            sidecar_target: None,
+            sidecar_generation: 0,
+            sidecar_saved_revision: None,
+            sidecar_failed_revision: None,
+            sidecar_pending: VecDeque::new(),
+            sidecar_in_flight: None,
+            sidecar_receiver: None,
+            sidecar_autosave_deadline: None,
+            developed_thumbnail_pending: None,
+            developed_thumbnail_in_flight: None,
+            developed_thumbnail_receiver: None,
             egui_ctx: cc.egui_ctx.clone(),
             target_exposure: exposure,
             pending_stage: None,
@@ -208,20 +345,28 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub fn open_file_dialog(&mut self, frame: &eframe::Frame) {
+        let extensions = crate::pipeline::SUPPORTED_RAW_EXTENSIONS
+            .iter()
+            .flat_map(|extension| [extension.to_string(), extension.to_ascii_uppercase()])
+            .collect::<Vec<_>>();
         let Some(path) = rfd::FileDialog::new()
-            .add_filter(
-                "RAW images",
-                &[
-                    "cr2", "CR2", "cr3", "CR3", "nef", "NEF", "arw", "ARW", "raf", "RAF", "rw2",
-                    "RW2", "orf", "ORF", "dng", "DNG", "pef", "PEF", "srw", "SRW",
-                ],
-            )
+            .add_filter("RAW images", &extensions)
             .pick_file()
         else {
             return;
         };
 
         self.open_path(path, frame);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn open_library_folder_dialog(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        self.library.open_folder(folder, &self.egui_ctx);
+        self.persist_performance_settings();
+        self.active_tab = AppTab::Library;
     }
 
     #[cfg(target_os = "android")]
@@ -239,9 +384,97 @@ impl AurawApp {
         }
     }
 
+    #[cfg(target_os = "android")]
+    pub fn open_android_library_document(&mut self, uri: &str, display_name: &str) {
+        if self.picker_pending {
+            return;
+        }
+        match crate::android::open_library_document(&self.android_app, uri, display_name) {
+            Ok(()) => {
+                self.picker_pending = true;
+                self.notice = None;
+                self.status = format!("Opening {display_name}…");
+            }
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
     pub fn open_path(&mut self, path: PathBuf, frame: &eframe::Frame) {
         let label = path.display().to_string();
-        self.open_path_labeled(path, label, false, frame);
+        self.active_tab = AppTab::Develop;
+        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
+            raw_path: path.clone(),
+        };
+        self.open_path_labeled(path, label, false, sidecar_target, frame);
+    }
+
+    pub(crate) fn raw_cache_limit(&self) -> usize {
+        self.raw_cache_limit
+    }
+
+    pub(crate) fn set_raw_cache_limit(&mut self, limit: usize) {
+        let limit = limit.min(maximum_raw_cache_limit());
+        if self.raw_cache_limit == limit {
+            return;
+        }
+        self.raw_cache_limit = limit;
+        self.trim_raw_cache();
+        self.persist_performance_settings();
+    }
+
+    pub(crate) fn thumbnail_worker_count(&self) -> usize {
+        self.library.thumbnail_worker_count()
+    }
+
+    pub(crate) fn set_thumbnail_worker_count(&mut self, workers: usize) {
+        let context = self.egui_ctx.clone();
+        let previous = self.library.thumbnail_worker_count();
+        self.library.set_thumbnail_worker_count(workers, &context);
+        if self.library.thumbnail_worker_count() != previous {
+            self.persist_performance_settings();
+        }
+    }
+
+    fn persist_performance_settings(&self) {
+        let settings = crate::performance_settings::PerformanceSettings {
+            raw_cache_files: self.raw_cache_limit,
+            thumbnail_workers: self.library.thumbnail_worker_count(),
+            #[cfg(not(target_os = "android"))]
+            last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
+            ..Default::default()
+        };
+        if let Err(error) = crate::performance_settings::save(
+            self.performance_settings_path.as_deref(),
+            settings,
+        ) {
+            log::warn!("{error}");
+        }
+    }
+
+    fn cached_raw_decode(&mut self, key: &str) -> Option<Arc<LoadedRaw>> {
+        let index = self.raw_cache.iter().position(|entry| entry.key == key)?;
+        let entry = self.raw_cache.remove(index)?;
+        let raw = Arc::clone(&entry.raw);
+        self.raw_cache.push_back(entry);
+        Some(raw)
+    }
+
+    fn cache_raw_decode(&mut self, key: String, raw: Arc<LoadedRaw>) {
+        if self.raw_cache_limit == 0 {
+            self.raw_cache.clear();
+            return;
+        }
+        if let Some(index) = self.raw_cache.iter().position(|entry| entry.key == key) {
+            self.raw_cache.remove(index);
+        }
+        self.raw_cache.push_back(CachedRawDecode { key, raw });
+        self.trim_raw_cache();
+    }
+
+    fn trim_raw_cache(&mut self) {
+        while self.raw_cache.len() > self.raw_cache_limit {
+            self.raw_cache.pop_front();
+        }
     }
 
     fn new_image_exposure(&self) -> ExposureParams {
@@ -267,9 +500,27 @@ impl AurawApp {
         path: PathBuf,
         label: String,
         delete_after_decode: bool,
+        sidecar_target: crate::sidecar::SidecarTarget,
         frame: &eframe::Frame,
     ) {
+        if self.load_receiver.is_some()
+            || self.export_receiver.is_some()
+            || self.export_publish_pending
+        {
+            if delete_after_decode {
+                remove_temporary_raw(&path);
+            }
+            self.notice = Some(if self.load_receiver.is_some() {
+                "Wait for the current RAW to finish opening.".to_owned()
+            } else {
+                "Wait for the current export to finish before opening another RAW.".to_owned()
+            });
+            return;
+        }
         let Some(render_state) = frame.wgpu_render_state() else {
+            if delete_after_decode {
+                remove_temporary_raw(&path);
+            }
             self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
             self.refresh_status();
             return;
@@ -277,6 +528,35 @@ impl AurawApp {
 
         let device = render_state.device.clone();
         let queue = render_state.queue.clone();
+        self.library.prepare_for_develop();
+        let decode_gate = self.library.decode_gate();
+        let raw_cache_key = raw_cache_key_for_target(&sidecar_target);
+        let cached_original_raw = self.cached_raw_decode(&raw_cache_key);
+        let sidecar_generation = self.begin_sidecar_open();
+        {
+            let mut renderer = render_state.renderer.write();
+            if let Some(old) = self.gpu_pipeline.take() {
+                if let Some(texture_id) = old.egui_texture_id {
+                    renderer.free_texture(&texture_id);
+                }
+            }
+            if let Some(old) = self.preview_detail.take() {
+                if let Some(texture_id) = old.pipeline.egui_texture_id {
+                    renderer.free_texture(&texture_id);
+                }
+            }
+            if let Some(old) = self.preview_navigation.take() {
+                if let Some(texture_id) = old.pipeline.egui_texture_id {
+                    renderer.free_texture(&texture_id);
+                }
+            }
+        }
+        self.original_raw = None;
+        self.loaded_raw = None;
+        self.preview_raw = None;
+        self.current_path = None;
+        self.current_label = None;
+        self.image_status = format!("Loading {label}…");
         let initial_exposure = self.new_image_exposure();
         let preview_quality_setting = self.preview_quality;
         self.exposure = initial_exposure;
@@ -320,12 +600,15 @@ impl AurawApp {
         self.preview_motion_at = None;
         self.preview_touch_navigation_active = false;
         self.preview_revision = self.preview_revision.wrapping_add(1);
-        self.original_raw = None;
         self.lens_correction = LensCorrectionState::default();
         self.lens_correction_dirty = false;
+        self.reset_edit_history();
         let source_path = (!delete_after_decode).then_some(path.clone());
         let repaint = self.egui_ctx.clone();
         let (sender, receiver) = mpsc::channel();
+        let cleanup_path_on_spawn_failure = delete_after_decode.then(|| path.clone());
+        #[cfg(target_os = "android")]
+        let sidecar_android_app = self.android_app.clone();
 
         self.load_receiver = Some(receiver);
         self.loading_label = Some(label.clone());
@@ -335,17 +618,74 @@ impl AurawApp {
         let spawn_result = std::thread::Builder::new()
             .name("auraw-decode-preview".to_owned())
             .spawn(move || {
-                let decoded = load_raw_file(&path);
+                let loaded_sidecar = load_sidecar_for_target(
+                    &sidecar_target,
+                    #[cfg(target_os = "android")]
+                    &sidecar_android_app,
+                );
+                let decoded: anyhow::Result<Arc<LoadedRaw>> = match cached_original_raw {
+                    Some(raw) => Ok(raw),
+                    None => match decode_gate.write() {
+                        Ok(_decode_guard) => load_raw_file(&path).map(Arc::new),
+                        Err(_) => Err(anyhow::anyhow!("RAW decode gate was poisoned")),
+                    },
+                };
                 if delete_after_decode {
-                    if let Err(error) = std::fs::remove_file(&path) {
-                        log::warn!("could not remove imported Android RAW cache file: {error}");
-                    }
+                    remove_temporary_raw(&path);
                 }
 
                 let result = (|| {
-                    let original_raw = Arc::new(decoded.map_err(|error| format!("{error:#}"))?);
+                    let (
+                        rendered_exposure,
+                        mut rendered_masks,
+                        saved_lens,
+                        mut sidecar_warning,
+                        sidecar_needs_rewrite,
+                    ) = match loaded_sidecar {
+                        Ok(Some(loaded)) => {
+                            let warning = loaded.migrated.then(|| {
+                                "Loaded edits were migrated to the current processing version."
+                                    .to_owned()
+                            });
+                            (
+                                loaded.edits.exposure,
+                                Arc::unwrap_or_clone(loaded.edits.masks),
+                                Some(loaded.edits.lens),
+                                warning,
+                                loaded.migrated,
+                            )
+                        }
+                        Ok(None) => (
+                            initial_exposure,
+                            MaskStack::default(),
+                            None,
+                            None,
+                            false,
+                        ),
+                        Err(error) => (
+                            initial_exposure,
+                            MaskStack::default(),
+                            None,
+                            Some(format!(
+                                "Could not load this RAW's sidecar; using default edits: {error}"
+                            )),
+                            false,
+                        ),
+                    };
+                    let original_raw = decoded.map_err(|error| format!("{error:#}"))?;
                     let mut lens_correction =
                         LensCorrectionState::from_catalog(lensfun_catalog(&original_raw));
+                    if let Some(saved) = saved_lens {
+                        lens_correction.selected_maker = saved.maker;
+                        lens_correction.selected_model = saved.model;
+                        lens_correction.enabled = saved.enabled && lens_correction.catalog.available;
+                        if saved.enabled && !lens_correction.catalog.available {
+                            append_notice(
+                                &mut sidecar_warning,
+                                "The saved lens correction is unavailable in this build.",
+                            );
+                        }
+                    }
                     let full_raw = if lens_correction.enabled {
                         if let Some(selection) = lens_correction.selected_lens() {
                             match apply_lensfun_correction(&original_raw, &selection) {
@@ -363,6 +703,10 @@ impl AurawApp {
                                     lens_correction.catalog.status = format!(
                                         "Matched {}, but correction failed: {error:#}",
                                         selection.label()
+                                    );
+                                    append_notice(
+                                        &mut sidecar_warning,
+                                        "The saved lens correction failed; the original RAW geometry is shown.",
                                     );
                                     Arc::clone(&original_raw)
                                 }
@@ -383,8 +727,8 @@ impl AurawApp {
                         } else {
                             Arc::new(build_proxy(&full_raw, preview_spec))
                         };
-                    let params =
-                        GpuParams::new(&initial_exposure, &MaskStack::default(), &preview_raw);
+                    let initial_params =
+                        GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw);
                     // Interactive previews use bounded half-float working
                     // surfaces on every platform. Full-float remains mandatory
                     // for regression rendering and tiled export readback.
@@ -393,21 +737,92 @@ impl AurawApp {
                         &device,
                         &queue,
                         &preview_raw,
-                        &params,
+                        &initial_params,
                         preview_quality,
                     )
                     .map_err(|error| format!("GPU preview setup failed: {error:#}"))?;
+
+                    // Range-mask source images are canonical RAW renditions,
+                    // not user edit data. Sidecars omit these large shared
+                    // caches and reconstruct one source on this decode worker.
+                    if has_missing_range_sources(&rendered_masks) {
+                        let source_edge = if cfg!(target_os = "android") {
+                            1600
+                        } else {
+                            2048
+                        };
+                        let source_raw = if full_raw.width.max(full_raw.height) <= source_edge {
+                            Arc::clone(&full_raw)
+                        } else {
+                            Arc::new(build_proxy(
+                                &full_raw,
+                                ProxySpec {
+                                    max_edge: source_edge,
+                                },
+                            ))
+                        };
+                        let reference_exposure = ExposureParams::scene_referred_default();
+                        let reference_masks = MaskStack::default();
+                        let reference_params =
+                            GpuParams::new(&reference_exposure, &reference_masks, &source_raw);
+                        let reference_pipeline = RawGpuPipeline::new_headless_reusing_programs(
+                            &device,
+                            &queue,
+                            &source_raw,
+                            &reference_params,
+                            ProcessingQuality::Preview,
+                            &pipeline,
+                        )
+                        .map_err(|error| {
+                            format!("range-mask source setup failed: {error:#}")
+                        })?;
+                        reference_pipeline.recompute(&queue, &device, &reference_params);
+                        let rgba = reference_pipeline
+                            .read_output_region_blocking(
+                                &device,
+                                &queue,
+                                0,
+                                0,
+                                reference_pipeline.width,
+                                reference_pipeline.height,
+                            )
+                            .map_err(|error| {
+                                format!("range-mask source readback failed: {error:#}")
+                            })?;
+                        let source = MaskRgbImage::new(
+                            reference_pipeline.width,
+                            reference_pipeline.height,
+                            rgba,
+                        )
+                        .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
+                        install_missing_range_sources(&mut rendered_masks, &source);
+                    }
+
+                    let params =
+                        GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw);
+                    Self::upload_preview_masks(
+                        &pipeline,
+                        &queue,
+                        &rendered_masks,
+                        &preview_raw,
+                    )?;
                     pipeline.recompute(&queue, &device, &params);
 
                     Ok(LoadedPreview {
                         source_path,
+                        raw_cache_key,
                         label,
                         original_raw,
                         full_raw,
                         preview_raw,
                         pipeline,
-                        rendered_exposure: initial_exposure,
+                        rendered_exposure,
+                        rendered_masks,
                         lens_correction,
+                        sidecar_target,
+                        sidecar_generation,
+                        sidecar_warning,
+                        sidecar_needs_rewrite,
                     })
                 })();
 
@@ -416,6 +831,9 @@ impl AurawApp {
             });
 
         if let Err(error) = spawn_result {
+            if let Some(path) = cleanup_path_on_spawn_failure {
+                remove_temporary_raw(&path);
+            }
             self.load_receiver = None;
             self.loading_label = None;
             self.notice = Some(format!("could not start RAW decode worker: {error}"));
@@ -429,7 +847,18 @@ impl AurawApp {
             self.picker_pending = false;
             match result {
                 crate::android::PickerResult::Picked(document) => {
-                    self.open_path_labeled(document.path, document.display_name, true, frame)
+                    self.library.refresh(&self.egui_ctx);
+                    self.active_tab = AppTab::Develop;
+                    self.open_path_labeled(
+                        document.path,
+                        document.display_name.clone(),
+                        document.delete_after_decode,
+                        crate::sidecar::SidecarTarget::Android {
+                            raw_uri: document.library_uri,
+                            display_name: document.display_name,
+                        },
+                        frame,
+                    )
                 }
                 crate::android::PickerResult::Cancelled => {
                     self.notice = Some("No RAW file selected.".to_owned());
@@ -505,10 +934,17 @@ impl AurawApp {
                 );
                 self.current_path = loaded.source_path;
                 self.current_label = Some(loaded.label.clone());
+                self.cache_raw_decode(
+                    loaded.raw_cache_key,
+                    Arc::clone(&loaded.original_raw),
+                );
                 self.original_raw = Some(loaded.original_raw);
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
                 self.gpu_pipeline = Some(loaded.pipeline);
+                self.exposure = loaded.rendered_exposure;
+                self.masks = loaded.rendered_masks;
+                self.rehydrate_restored_mask_state();
                 self.preview_zoom = 1.0;
                 self.preview_center = [0.5, 0.5];
                 self.preview_visible_uv = PreviewUvRect {
@@ -526,12 +962,21 @@ impl AurawApp {
                 self.preview_detail_urgent = false;
                 self.detail_dirty_mask_layers.fill(false);
                 self.navigation_dirty_mask_layers.fill(false);
+                self.dirty_mask_layers.fill(false);
                 self.lens_correction = loaded.lens_correction;
                 self.lens_correction_dirty = false;
                 self.target_exposure = loaded.rendered_exposure;
-                self.pending_stage = affected_stage(&self.target_exposure, &self.exposure);
-                self.target_exposure = self.exposure;
-                self.notice = None;
+                self.pending_stage = None;
+                self.notice = loaded.sidecar_warning;
+                // Automatic lens matching and initial render setup are the
+                // baseline for this RAW, not user edits inherited from the
+                // previous image or from the decode worker.
+                self.reset_edit_history();
+                self.install_sidecar_target(
+                    loaded.sidecar_target,
+                    loaded.sidecar_generation,
+                    loaded.sidecar_needs_rewrite,
+                );
                 log::info!("loaded RAW preview for {}", loaded.label);
             }
             Err(error) => {

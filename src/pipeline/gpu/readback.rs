@@ -1,5 +1,88 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn read_rgba8_texture_region_blocking(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    texture_width: u32,
+    texture_height: u32,
+    label: &'static str,
+) -> Result<Vec<u8>> {
+    let right = x
+        .checked_add(width)
+        .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
+    let bottom = y
+        .checked_add(height)
+        .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
+    if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
+        return Err(anyhow!("invalid GPU RGBA8 readback rectangle"));
+    }
+
+    let unpadded_bytes_per_row = width * 4;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: u64::from(padded_bytes_per_row) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let submission = queue.submit(Some(encoder.finish()));
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    readback.map_async(wgpu::MapMode::Read, .., move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .map_err(|error| anyhow!("GPU poll failed during thumbnail readback: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| anyhow!("GPU thumbnail readback callback was dropped"))?
+        .map_err(|error| anyhow!("GPU thumbnail readback mapping failed: {error}"))?;
+
+    let mapped = readback.get_mapped_range(..);
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for row in 0..height as usize {
+        let source = row * padded_bytes_per_row as usize;
+        let destination = row * unpadded_bytes_per_row as usize;
+        rgba[destination..destination + unpadded_bytes_per_row as usize]
+            .copy_from_slice(&mapped[source..source + unpadded_bytes_per_row as usize]);
+    }
+    drop(mapped);
+    readback.unmap();
+    Ok(rgba)
+}
+
 pub(super) fn read_rgba32_texture_region_rgb_blocking(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

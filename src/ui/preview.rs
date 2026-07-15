@@ -7,9 +7,8 @@ pub struct Preview;
 
 impl Preview {
     pub fn show(ui: &mut Ui, app: &mut AurawApp) {
-        let Some((texture_id, pipeline_width, pipeline_height)) = app
-            .preview_base_pipeline()
-            .and_then(|pipeline| {
+        let Some((texture_id, pipeline_width, pipeline_height)) =
+            app.preview_base_pipeline().and_then(|pipeline| {
                 pipeline
                     .egui_texture_id
                     .map(|texture_id| (texture_id, pipeline.width, pipeline.height))
@@ -47,12 +46,8 @@ impl Preview {
             outer_rect.size(),
             base_size * app.preview_zoom,
         );
-        let mut image_rect = zoomed_image_rect(
-            outer_rect,
-            base_size,
-            app.preview_zoom,
-            app.preview_center,
-        );
+        let mut image_rect =
+            zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
         let mut interaction_rect = outer_rect.intersect(image_rect);
         if interaction_rect.width() <= 0.0 || interaction_rect.height() <= 0.0 {
             interaction_rect = outer_rect;
@@ -101,12 +96,8 @@ impl Preview {
                 multi_touch.center_pos,
                 multi_touch.zoom_delta,
             );
-            image_rect = zoomed_image_rect(
-                outer_rect,
-                base_size,
-                app.preview_zoom,
-                app.preview_center,
-            );
+            image_rect =
+                zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
 
             // A second finger switches a mask gesture into viewport navigation.
             // Commit any pending mask update and prevent this frame from painting.
@@ -133,20 +124,13 @@ impl Preview {
                     pointer,
                     (scroll_y * 0.0018).exp(),
                 );
-                image_rect = zoomed_image_rect(
-                    outer_rect,
-                    base_size,
-                    app.preview_zoom,
-                    app.preview_center,
-                );
             }
         }
 
         let pan_with_primary = !touch_navigation
             && app.sidebar_tab != SidebarTab::Masks
             && response.dragged_by(egui::PointerButton::Primary);
-        let pan_with_middle = !touch_navigation
-            && response.dragged_by(egui::PointerButton::Middle);
+        let pan_with_middle = !touch_navigation && response.dragged_by(egui::PointerButton::Middle);
         if pan_with_primary || pan_with_middle {
             let delta = ui.input(|input| input.pointer.delta());
             let image_size = base_size * app.preview_zoom;
@@ -163,17 +147,14 @@ impl Preview {
             moved = true;
         }
 
-        image_rect = zoomed_image_rect(
-            outer_rect,
-            base_size,
-            app.preview_zoom,
-            app.preview_center,
-        );
+        image_rect = zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
         let visible_screen = outer_rect.intersect(image_rect);
         let pixels_per_point = ui.ctx().pixels_per_point();
         let viewport_pixels = [
             (visible_screen.width() * pixels_per_point).round().max(1.0) as u32,
-            (visible_screen.height() * pixels_per_point).round().max(1.0) as u32,
+            (visible_screen.height() * pixels_per_point)
+                .round()
+                .max(1.0) as u32,
         ];
         if app.preview_viewport_pixels != viewport_pixels {
             app.preview_viewport_pixels = viewport_pixels;
@@ -223,14 +204,8 @@ impl Preview {
                     detail_texture_id,
                     detail_rect,
                     Rect::from_min_max(
-                        Pos2::new(
-                            detail.texture_uv_rect.min[0],
-                            detail.texture_uv_rect.min[1],
-                        ),
-                        Pos2::new(
-                            detail.texture_uv_rect.max[0],
-                            detail.texture_uv_rect.max[1],
-                        ),
+                        Pos2::new(detail.texture_uv_rect.min[0], detail.texture_uv_rect.min[1]),
+                        Pos2::new(detail.texture_uv_rect.max[0], detail.texture_uv_rect.max[1]),
                     ),
                     Color32::WHITE,
                 );
@@ -291,8 +266,8 @@ impl Preview {
         }
         app.active_mask_tool = Some(kind);
         let pointer = response.interact_pointer_pos();
-        let primary_down = response.is_pointer_button_down_on()
-            && ui.input(|input| input.pointer.primary_down());
+        let primary_down =
+            response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
         if !primary_down {
             app.finish_mask_geometry_interaction();
             app.last_brush_point = None;
@@ -1023,12 +998,7 @@ fn fitted_image_size(available: egui::Vec2, image_aspect: f32) -> egui::Vec2 {
     }
 }
 
-fn zoomed_image_rect(
-    outer_rect: Rect,
-    base_size: egui::Vec2,
-    zoom: f32,
-    center: [f32; 2],
-) -> Rect {
+fn zoomed_image_rect(outer_rect: Rect, base_size: egui::Vec2, zoom: f32, center: [f32; 2]) -> Rect {
     let size = base_size * zoom;
     let min = Pos2::new(
         outer_rect.center().x - center[0] * size.x,

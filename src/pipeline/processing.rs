@@ -161,10 +161,8 @@ pub fn build_region_proxy(
         for px in 0..width {
             let source_x0 = x + px * scale;
             let source_x1 = (x + (px + 1) * scale).min(x + region_width);
-            let center_x =
-                (source_x0 + (source_x1 - source_x0) / 2).min(raw.width - 1);
-            let center_y =
-                (source_y0 + (source_y1 - source_y0) / 2).min(raw.height - 1);
+            let center_x = (source_x0 + (source_x1 - source_x0) / 2).min(raw.width - 1);
+            let center_y = (source_y0 + (source_y1 - source_y0) / 2).min(raw.height - 1);
 
             // Anchor the synthetic proxy mosaic to the source region's real CFA
             // phase. Detail crops are aligned to the sensor period, preventing
@@ -264,13 +262,22 @@ const HIGHLIGHT_GUIDED_SUPPORT: u32 = 2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 
 // Conservative bound over the complete Bayer RCD and X-Trans Markesteijn-3
 // pass chains, including their final detail-recovery neighbourhoods.
 const DEMOSAIC_CHAIN_SUPPORT: u32 = 32;
-const LOCAL_EFFECTS_SUPPORT: u32 = 8;
-// Glow's 5x5 kernel reaches +/-2*48 and glow_source_at reaches one more pixel.
-const GLOW_SUPPORT: u32 = 97;
+// The edge-aware tone guide is blurred by five guide texels at desktop's 4x
+// reduction and three texels at Android's 8x reduction. Bilinear lookup can
+// reach one additional guide cell, so its raw-pixel support is 24/32.
+const TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 };
+// Scale-aware Clarity has the widest presence footprint: the B3 kernel reaches
+// +/-2 times a step capped at 12 pixels. Texture and Dehaze remain inside it.
+const LOCAL_EFFECTS_SUPPORT: u32 = 24;
+// Glow cascades five B3 diffusion stages. At the capped 3x reference scale the
+// steps are 3+3+6+12+24, and each 5x5 stage reaches +/-2*step. Support therefore
+// accumulates to 96 pixels from the extracted highlight source.
+const GLOW_SUPPORT: u32 = 96;
 const COLOR_MIXER_SUPPORT: u32 = 4;
 const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_PREP_SUPPORT
     + HIGHLIGHT_GUIDED_SUPPORT
     + DEMOSAIC_CHAIN_SUPPORT
+    + TONE_GUIDE_SUPPORT
     + LOCAL_EFFECTS_SUPPORT
     + GLOW_SUPPORT
     + COLOR_MIXER_SUPPORT;
