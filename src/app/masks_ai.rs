@@ -67,7 +67,7 @@ impl AurawApp {
         self.active_mask_tool = kind.is_available().then_some(kind);
         self.mask_drag = None;
         self.last_brush_point = None;
-        if kind == MaskKind::Brush {
+        if matches!(kind, MaskKind::Brush | MaskKind::Object) {
             self.brush_mode = BrushMode::Paint;
         }
     }
@@ -107,14 +107,23 @@ impl AurawApp {
             .loaded_raw
             .as_ref()
             .ok_or_else(|| "The original RAW is not available.".to_owned())?;
-        let source_edge = if cfg!(target_os = "android") { 1600 } else { 2048 };
+        let source_edge = if cfg!(target_os = "android") {
+            1600
+        } else {
+            2048
+        };
         let raw = if full_raw.width.max(full_raw.height) <= source_edge {
             Arc::clone(full_raw)
         } else {
-            Arc::new(build_proxy(full_raw, ProxySpec { max_edge: source_edge }))
+            Arc::new(build_proxy(
+                full_raw,
+                ProxySpec {
+                    max_edge: source_edge,
+                },
+            ))
         };
 
-        // Subject and range classifiers must be stable when the user changes
+        // Subject, Object, and range classifiers must be stable when the user changes
         // Exposure, Color, Effects, curves, grading, or local masks. Render a
         // fresh canonical rendition from the unedited RAW proxy instead of
         // reading the live edited output texture. Camera white balance,
@@ -145,11 +154,8 @@ impl AurawApp {
                 reference_pipeline.height,
             )
             .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
-        self.mask_source_cache = MaskRgbImage::new(
-            reference_pipeline.width,
-            reference_pipeline.height,
-            rgba,
-        );
+        self.mask_source_cache =
+            MaskRgbImage::new(reference_pipeline.width, reference_pipeline.height, rgba);
         Ok(())
     }
 
@@ -259,6 +265,231 @@ impl AurawApp {
                 Err(error) => self.notice = Some(format!("Subject selection failed: {error}")),
             }
         }
+    }
+
+    pub(crate) fn request_object_mask(&mut self, mask_index: usize, component_index: usize) {
+        #[cfg(not(target_os = "android"))]
+        if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
+            self.notice = Some(
+                "Choose an ONNX Runtime library under Settings before using Object masks."
+                    .to_owned(),
+            );
+            return;
+        }
+        let Some(component) = self
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+        else {
+            return;
+        };
+        let crate::pipeline::MaskGeometry::Object { strokes, .. } = &component.geometry else {
+            return;
+        };
+        if !strokes
+            .iter()
+            .any(|stroke| stroke.positive && !stroke.points.is_empty())
+        {
+            self.notice = Some("Paint inside an object before generating its mask.".to_owned());
+            return;
+        }
+        if self.mask_source_cache.is_none() {
+            self.notice = Some(
+                "The original image source is not ready for object selection. Re-open the Object mask or create it again."
+                    .to_owned(),
+            );
+            return;
+        }
+        let (encoder, decoder) = self.sam21_model_paths();
+        if encoder.exists() && decoder.exists() {
+            self.start_object_worker(mask_index, component_index, encoder, decoder);
+        } else {
+            self.object_pending_target = Some((mask_index, component_index));
+            self.object_consent_open = true;
+        }
+    }
+
+    fn start_object_worker(
+        &mut self,
+        mask_index: usize,
+        component_index: usize,
+        encoder_path: PathBuf,
+        decoder_path: PathBuf,
+    ) {
+        if self.object_receiver.is_some() {
+            // Preserve the newest user intent; it will be submitted after the
+            // current generation finishes rather than racing two ORT sessions.
+            self.object_pending_target = Some((mask_index, component_index));
+            self.object_generation = self.object_generation.wrapping_add(1);
+            return;
+        }
+        let Some(source) = self.mask_source_cache.clone() else {
+            self.notice =
+                Some("The original image source is unavailable for object selection.".to_owned());
+            return;
+        };
+        let (strokes, edge_refine, detailed_edges) = {
+            let Some(component) = self
+                .masks
+                .masks
+                .get(mask_index)
+                .and_then(|mask| mask.components.get(component_index))
+            else {
+                return;
+            };
+            let crate::pipeline::MaskGeometry::Object {
+                strokes,
+                edge_refine,
+                detailed_edges,
+                ..
+            } = &component.geometry
+            else {
+                return;
+            };
+            (strokes.clone(), *edge_refine, *detailed_edges)
+        };
+        let cache = self
+            .object_cache
+            .as_ref()
+            .filter(|(target, _)| *target == (mask_index, component_index))
+            .map(|(_, cache)| cache.clone());
+        let request = ObjectMaskRequest {
+            source_width: source.width,
+            source_height: source.height,
+            source_rgba: source.rgba.to_vec(),
+            strokes,
+            edge_refine,
+            detailed_edges,
+            cache,
+        };
+        self.object_generation = self.object_generation.wrapping_add(1);
+        self.object_job_generation = self.object_generation;
+        self.object_job_target = Some((mask_index, component_index));
+        self.object_pending_target = None;
+        self.object_download_progress = None;
+        self.object_inferencing = encoder_path.exists() && decoder_path.exists();
+        self.object_decoder_only = request.cache.is_some();
+        #[cfg(not(target_os = "android"))]
+        let runtime_path = self.onnx_runtime_path.clone();
+        #[cfg(not(target_os = "android"))]
+        let runtime_sha256 = self.onnx_runtime_sha256.clone();
+        #[cfg(target_os = "android")]
+        let runtime_path = None;
+        #[cfg(target_os = "android")]
+        let runtime_sha256 = None;
+        self.object_receiver = Some(spawn_object_mask(
+            encoder_path,
+            decoder_path,
+            runtime_path,
+            runtime_sha256,
+            request,
+        ));
+        self.egui_ctx.request_repaint();
+    }
+
+    fn poll_object_worker(&mut self) {
+        let mut finished = None;
+        if let Some(receiver) = &self.object_receiver {
+            while let Ok(event) = receiver.try_recv() {
+                match event {
+                    ObjectMaskEvent::DownloadProgress {
+                        label,
+                        downloaded,
+                        total,
+                    } => {
+                        self.object_download_progress = Some((label, downloaded, total));
+                        self.object_inferencing = false;
+                    }
+                    ObjectMaskEvent::Inferencing { decoder_only } => {
+                        self.object_download_progress = None;
+                        self.object_inferencing = true;
+                        self.object_decoder_only = decoder_only;
+                    }
+                    ObjectMaskEvent::Finished(result) => finished = Some(result),
+                }
+            }
+        }
+        let Some(result) = finished else {
+            return;
+        };
+        self.object_receiver = None;
+        self.object_download_progress = None;
+        self.object_inferencing = false;
+        let target = self.object_job_target.take();
+        let generation = self.object_job_generation;
+        if generation == self.object_generation {
+            match (target, result) {
+                (Some((mask_index, component_index)), Ok(result)) => {
+                    let crate::ai_masks::ObjectMaskResult {
+                        width,
+                        height,
+                        mask: pixels,
+                        cache,
+                    } = result;
+                    let mask = MaskImage::new(width, height, pixels);
+                    let applied = if let (Some(mask), Some(component)) = (
+                        mask,
+                        self.masks
+                            .masks
+                            .get_mut(mask_index)
+                            .and_then(|local| local.components.get_mut(component_index)),
+                    ) {
+                        if let crate::pipeline::MaskGeometry::Object {
+                            mask: generated_mask,
+                            ..
+                        } = &mut component.geometry
+                        {
+                            *generated_mask = Some(mask);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if applied {
+                        self.object_cache = Some(((mask_index, component_index), cache));
+                        self.mark_mask_geometry_dirty(mask_index);
+                        self.blink_selected_component();
+                    }
+                }
+                (_, Ok(_)) => {}
+                (_, Err(error)) => {
+                    self.notice = Some(format!("Object selection failed: {error}"));
+                }
+            }
+        }
+        if let Some((mask_index, component_index)) = self.object_pending_target.take() {
+            let (encoder, decoder) = self.sam21_model_paths();
+            self.start_object_worker(mask_index, component_index, encoder, decoder);
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn sam21_model_paths(&self) -> (PathBuf, PathBuf) {
+        let root = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("auraw/models");
+        (
+            root.join("sam2.1-hiera-tiny.encoder.onnx"),
+            root.join("sam2.1-hiera-tiny.decoder.onnx"),
+        )
+    }
+
+    #[cfg(target_os = "android")]
+    fn sam21_model_paths(&self) -> (PathBuf, PathBuf) {
+        let root = self
+            .android_app
+            .internal_data_path()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("models");
+        (
+            root.join("sam2.1-hiera-tiny.encoder.onnx"),
+            root.join("sam2.1-hiera-tiny.decoder.onnx"),
+        )
     }
 
     #[cfg(not(target_os = "android"))]
@@ -457,6 +688,75 @@ impl AurawApp {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label("Running high-quality local subject selection…");
+                        });
+                    } else {
+                        ui.spinner();
+                    }
+                });
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+
+        if self.object_consent_open {
+            egui::Window::new("Download object-selection model?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label("Object masks use SAM 2.1 Hiera Tiny with separate image encoder and prompt decoder models.");
+                    ui.label(format!(
+                        "The first use downloads about {:.0} MB and stores both ONNX files in AuRaw's model cache.",
+                        SAM21_MODEL_BYTES_ESTIMATE as f64 / 1_000_000.0
+                    ));
+                    ui.label("Inference is local. No photograph or prompt stroke is uploaded.");
+                    #[cfg(not(target_os = "android"))]
+                    if self.onnx_runtime_path.is_none() {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "Select a trusted local ONNX Runtime library in Settings before continuing.",
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Download and continue").clicked() {
+                            self.object_consent_open = false;
+                            if let Some((mask_index, component_index)) = self.object_pending_target.take() {
+                                let (encoder, decoder) = self.sam21_model_paths();
+                                self.start_object_worker(mask_index, component_index, encoder, decoder);
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.object_consent_open = false;
+                            self.object_pending_target = None;
+                        }
+                    });
+                });
+        }
+        if self.object_receiver.is_some() {
+            egui::Window::new("Preparing object mask")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    if let Some((label, downloaded, total)) = self.object_download_progress {
+                        let fraction = downloaded as f32 / total.max(1) as f32;
+                        ui.label(format!("Downloading {label}…"));
+                        ui.add(
+                            egui::ProgressBar::new(fraction)
+                                .show_percentage()
+                                .text(format!(
+                                    "{:.1} / {:.1} MB",
+                                    downloaded as f64 / 1_000_000.0,
+                                    total as f64 / 1_000_000.0
+                                )),
+                        );
+                    } else if self.object_inferencing {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(if self.object_decoder_only {
+                                "Updating the object mask…"
+                            } else {
+                                "Encoding the selected image region and generating the object mask…"
+                            });
                         });
                     } else {
                         ui.spinner();

@@ -1,4 +1,4 @@
-use super::{AppTab, AurawApp, LensCorrectionState};
+use super::{needs_canonical_mask_source, AppTab, AurawApp, LensCorrectionState};
 use crate::pipeline::{ExposureParams, MaskGeometry, MaskStack};
 use eframe::egui;
 use std::collections::VecDeque;
@@ -514,7 +514,7 @@ impl AurawApp {
         self.mask_thumbnail_component_textures.clear();
         self.mask_thumbnail_revision = self.mask_overlay_revision;
 
-        self.mask_source_cache = self.masks.masks.iter().find_map(|mask| {
+        let restored_source = self.masks.masks.iter().find_map(|mask| {
             mask.components
                 .iter()
                 .find_map(|component| match &component.geometry {
@@ -529,6 +529,9 @@ impl AurawApp {
                     _ => None,
                 })
         });
+        if restored_source.is_some() || !needs_canonical_mask_source(&self.masks) {
+            self.mask_source_cache = restored_source;
+        }
         self.subject_mask_cache = self.masks.masks.iter().find_map(|mask| {
             mask.components
                 .iter()
@@ -543,6 +546,16 @@ impl AurawApp {
         self.subject_receiver = None;
         self.subject_download_progress = None;
         self.subject_inferencing = false;
+        self.object_consent_open = false;
+        self.object_pending_target = None;
+        self.object_receiver = None;
+        self.object_download_progress = None;
+        self.object_inferencing = false;
+        self.object_decoder_only = false;
+        self.object_generation = self.object_generation.wrapping_add(1);
+        self.object_job_generation = 0;
+        self.object_job_target = None;
+        self.object_cache = None;
     }
 }
 

@@ -8,10 +8,10 @@ fn aligned_detail_axis(
 ) -> (u32, u32) {
     let extent = extent.max(1);
     let period = cfa_period.max(1);
-    let visible_start = ((min_uv.clamp(0.0, 1.0) * extent as f32).floor() as u32)
-        .min(extent.saturating_sub(1));
-    let visible_end = ((max_uv.clamp(0.0, 1.0) * extent as f32).ceil() as u32)
-        .clamp(visible_start + 1, extent);
+    let visible_start =
+        ((min_uv.clamp(0.0, 1.0) * extent as f32).floor() as u32).min(extent.saturating_sub(1));
+    let visible_end =
+        ((max_uv.clamp(0.0, 1.0) * extent as f32).ceil() as u32).clamp(visible_start + 1, extent);
     let visible_len = visible_end - visible_start;
 
     // Demosaic, chroma cleanup, clarity, and glow all sample neighbouring
@@ -36,10 +36,7 @@ fn aligned_detail_axis(
     (aligned_start, aligned_end)
 }
 
-fn detail_texture_uv(
-    visible: PreviewUvRect,
-    crop: PreviewUvRect,
-) -> PreviewUvRect {
+fn detail_texture_uv(visible: PreviewUvRect, crop: PreviewUvRect) -> PreviewUvRect {
     let crop_width = (crop.max[0] - crop.min[0]).max(f32::EPSILON);
     let crop_height = (crop.max[1] - crop.min[1]).max(f32::EPSILON);
     PreviewUvRect {
@@ -64,19 +61,16 @@ fn requested_detail_edge(
     full_height: u32,
 ) -> u32 {
     let visible_source_width =
-        ((visible.max[0] - visible.min[0]).max(1.0 / full_width.max(1) as f32)
-            * full_width as f32)
+        ((visible.max[0] - visible.min[0]).max(1.0 / full_width.max(1) as f32) * full_width as f32)
             .max(1.0);
-    let visible_source_height =
-        ((visible.max[1] - visible.min[1]).max(1.0 / full_height.max(1) as f32)
-            * full_height as f32)
-            .max(1.0);
-    let padded_width_pixels = viewport_pixels[0].max(1) as f32
-        * crop_width as f32
-        / visible_source_width;
-    let padded_height_pixels = viewport_pixels[1].max(1) as f32
-        * crop_height as f32
-        / visible_source_height;
+    let visible_source_height = ((visible.max[1] - visible.min[1])
+        .max(1.0 / full_height.max(1) as f32)
+        * full_height as f32)
+        .max(1.0);
+    let padded_width_pixels =
+        viewport_pixels[0].max(1) as f32 * crop_width as f32 / visible_source_width;
+    let padded_height_pixels =
+        viewport_pixels[1].max(1) as f32 * crop_height as f32 / visible_source_height;
     (padded_width_pixels.max(padded_height_pixels) * quality.detail_pixel_scale())
         .ceil()
         .clamp(256.0, quality.detail_edge() as f32) as u32
@@ -141,7 +135,9 @@ impl AurawApp {
                     self.lens_correction.applied = false;
                     self.lens_correction.catalog.status =
                         format!("Could not apply {}: {error:#}", selection.label());
-                    correction_notice = Some("Lens correction failed; restored the original RAW geometry.".to_owned());
+                    correction_notice = Some(
+                        "Lens correction failed; restored the original RAW geometry.".to_owned(),
+                    );
                     (Arc::clone(&original_raw), None)
                 }
             }
@@ -170,17 +166,15 @@ impl AurawApp {
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
-                self.notice =
-                    Some(format!("Could not rebuild the corrected GPU preview: {error:#}"));
+                self.notice = Some(format!(
+                    "Could not rebuild the corrected GPU preview: {error:#}"
+                ));
                 return;
             }
         };
-        if let Err(error) = Self::upload_preview_masks(
-            &pipeline,
-            &render_state.queue,
-            preview_masks,
-            &preview_raw,
-        ) {
+        if let Err(error) =
+            Self::upload_preview_masks(&pipeline, &render_state.queue, preview_masks, &preview_raw)
+        {
             self.notice = Some(error);
             return;
         }
@@ -229,6 +223,16 @@ impl AurawApp {
         self.subject_receiver = None;
         self.subject_download_progress = None;
         self.subject_inferencing = false;
+        self.object_consent_open = false;
+        self.object_pending_target = None;
+        self.object_receiver = None;
+        self.object_download_progress = None;
+        self.object_inferencing = false;
+        self.object_decoder_only = false;
+        self.object_generation = self.object_generation.wrapping_add(1);
+        self.object_job_generation = 0;
+        self.object_job_target = None;
+        self.object_cache = None;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
@@ -271,7 +275,8 @@ impl AurawApp {
         self.preview_detail_pending_stage = None;
         self.preview_detail_urgent = false;
         self.preview_motion_at = Some(Instant::now());
-        self.egui_ctx.request_repaint_after(zoom_detail_idle_delay());
+        self.egui_ctx
+            .request_repaint_after(zoom_detail_idle_delay());
     }
 
     /// Queue processing for the full proxy and, while zoomed, both the visible
@@ -310,7 +315,9 @@ impl AurawApp {
         // downgrades 101-150% zoom even before the detail crop is ready.
         let use_navigation = self.preview_navigation.is_some() && self.pending_stage.is_some();
         if use_navigation {
-            self.preview_navigation.as_ref().map(|preview| &preview.pipeline)
+            self.preview_navigation
+                .as_ref()
+                .map(|preview| &preview.pipeline)
         } else {
             self.gpu_pipeline.as_ref()
         }
@@ -375,12 +382,9 @@ impl AurawApp {
                 return;
             }
         };
-        if let Err(error) = Self::upload_preview_masks(
-            &pipeline,
-            &render_state.queue,
-            &self.masks,
-            &preview_raw,
-        ) {
+        if let Err(error) =
+            Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &preview_raw)
+        {
             self.notice = Some(error);
             return;
         }
@@ -418,7 +422,8 @@ impl AurawApp {
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.preview_motion_at = (self.preview_zoom > DETAIL_ZOOM_START).then(Instant::now);
         if self.preview_motion_at.is_some() {
-            self.egui_ctx.request_repaint_after(zoom_detail_idle_delay());
+            self.egui_ctx
+                .request_repaint_after(zoom_detail_idle_delay());
         }
         if let Some(raw) = &self.preview_raw {
             if let Some(full) = &self.loaded_raw {
@@ -557,20 +562,17 @@ impl AurawApp {
         // virtual full size). Keep the atlas in that same coordinate space.
         // Cropping/remapping the mask stack here double-transforms every mask
         // once the crop moves away from the image origin.
-        let virtual_full_width = ((detail_raw.width as f64 * full_raw.width as f64
-            / crop_width as f64)
-            .round() as u32)
-            .max(detail_raw.width);
+        let virtual_full_width =
+            ((detail_raw.width as f64 * full_raw.width as f64 / crop_width as f64).round() as u32)
+                .max(detail_raw.width);
         let virtual_full_height = ((detail_raw.height as f64 * full_raw.height as f64
             / crop_height as f64)
             .round() as u32)
             .max(detail_raw.height);
-        let virtual_origin_x = (x0 as f64 / full_raw.width as f64
-            * virtual_full_width as f64)
-            .round() as i32;
-        let virtual_origin_y = (y0 as f64 / full_raw.height as f64
-            * virtual_full_height as f64)
-            .round() as i32;
+        let virtual_origin_x =
+            (x0 as f64 / full_raw.width as f64 * virtual_full_width as f64).round() as i32;
+        let virtual_origin_y =
+            (y0 as f64 / full_raw.height as f64 * virtual_full_height as f64).round() as i32;
         let params = GpuParams::new_for_tile(
             &self.target_exposure,
             &self.masks,
@@ -601,8 +603,7 @@ impl AurawApp {
                 .or(self.gpu_pipeline.as_ref())
         };
         if let Some(detail) = self.preview_detail.as_mut().filter(|detail| {
-            detail.pipeline.width == detail_raw.width
-                && detail.pipeline.height == detail_raw.height
+            detail.pipeline.width == detail_raw.width && detail.pipeline.height == detail_raw.height
         }) {
             if let Err(error) = detail
                 .pipeline
@@ -629,14 +630,13 @@ impl AurawApp {
                         full_raw.width,
                         full_raw.height,
                     );
-                    if let Err(error) = detail.pipeline.update_mask_layer(
-                        &render_state.queue,
-                        layer,
-                        &bytes,
-                    ) {
-                        self.notice = Some(format!(
-                            "Could not update the zoomed local mask: {error:#}"
-                        ));
+                    if let Err(error) =
+                        detail
+                            .pipeline
+                            .update_mask_layer(&render_state.queue, layer, &bytes)
+                    {
+                        self.notice =
+                            Some(format!("Could not update the zoomed local mask: {error:#}"));
                         return;
                     }
                     self.detail_dirty_mask_layers[layer] = false;
@@ -719,11 +719,7 @@ impl AurawApp {
             ProcessingStage::Tone,
         );
         if let Some(full_frame) = full_frame_tone_pipeline {
-            pipeline.inherit_tone_statistics(
-                &render_state.queue,
-                &render_state.device,
-                full_frame,
-            );
+            pipeline.inherit_tone_statistics(&render_state.queue, &render_state.device, full_frame);
         }
         pipeline.dispatch_stage(
             &render_state.queue,
@@ -806,12 +802,9 @@ impl AurawApp {
                     return;
                 }
             };
-            if let Err(error) = Self::upload_preview_masks(
-                &pipeline,
-                &render_state.queue,
-                &self.masks,
-                &raw,
-            ) {
+            if let Err(error) =
+                Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &raw)
+            {
                 self.notice = Some(error);
                 return;
             }
@@ -832,11 +825,7 @@ impl AurawApp {
         let Some(preview) = self.preview_navigation.as_mut() else {
             return;
         };
-        if self
-            .navigation_dirty_mask_layers
-            .iter()
-            .any(|dirty| *dirty)
-        {
+        if self.navigation_dirty_mask_layers.iter().any(|dirty| *dirty) {
             let edge = preview.pipeline.mask_atlas_edge();
             for layer in 0..MAX_LOCAL_MASKS {
                 if !self.navigation_dirty_mask_layers[layer] {
