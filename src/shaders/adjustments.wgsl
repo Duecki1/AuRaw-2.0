@@ -600,10 +600,12 @@ fn mixer_band_value(weights: MixerBandWeights, first: vec4<f32>, second: vec4<f3
 }
 
 fn directed_hue_shift(value: f32, backward_span: f32, forward_span: f32) -> f32 {
-    let amount = clamp(value / 100.0, -1.0, 1.0);
+    // Preserve the historical +/-100 response exactly, but permit the extended
+    // UI range to continue linearly up to twice that shift. This lets a named
+    // channel travel beyond its immediate neighbour without changing existing
+    // sidecars or reducing fine control around zero.
+    let amount = clamp(value / 100.0, -2.0, 2.0);
     let span = select(backward_span, forward_span, amount >= 0.0);
-    // At an endpoint, move close to the adjacent named channel without fully
-    // collapsing both channels onto the same hue.
     return amount * span * 0.90;
 }
 

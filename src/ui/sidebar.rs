@@ -3,7 +3,7 @@ use crate::app::{
 };
 use crate::pipeline::{
     BrushMode, DemosaicMode, ExportResizeMode, ExposureParams, MaskCombineMode, MaskGeometry,
-    MaskKind, SigmoidColorProcessing, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS,
+    MaskKind, SigmoidColorProcessing, HSL_HUE_LIMIT, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS,
 };
 use crate::ui::components::adjustment_slider::{adjustment_slider, slider_scroll_locked};
 use crate::ui::components::color_grading::color_grading_editor;
