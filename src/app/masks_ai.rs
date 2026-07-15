@@ -54,6 +54,62 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn begin_mask_touch_gesture(&mut self, mask_index: usize, component_index: usize) {
+        if self.mask_touch_gesture_backup.is_some() {
+            return;
+        }
+        let Some(geometry) = self
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .map(|component| component.geometry.clone())
+        else {
+            return;
+        };
+        self.mask_touch_gesture_backup = Some(MaskTouchGestureBackup {
+            mask_index,
+            component_index,
+            geometry,
+            object_cache: self.object_cache.clone(),
+        });
+    }
+
+    pub(crate) fn commit_mask_touch_gesture(&mut self) {
+        self.mask_touch_gesture_backup = None;
+    }
+
+    /// If a second finger joins a mask stroke, the gesture is viewport
+    /// navigation. Restore the exact pre-touch geometry so the first finger's
+    /// initial dab, color sample, or object-mask reset never leaks into the
+    /// image while pinch zooming.
+    pub(crate) fn cancel_mask_touch_gesture(&mut self) {
+        let Some(backup) = self.mask_touch_gesture_backup.take() else {
+            self.last_brush_point = None;
+            self.mask_drag = None;
+            return;
+        };
+        let restored = self
+            .masks
+            .masks
+            .get_mut(backup.mask_index)
+            .and_then(|mask| mask.components.get_mut(backup.component_index))
+            .is_some_and(|component| {
+                component.geometry = backup.geometry;
+                true
+            });
+        self.object_cache = backup.object_cache;
+        self.object_generation = self.object_generation.wrapping_add(1);
+        self.last_brush_point = None;
+        self.mask_drag = None;
+        self.mask_interaction_dirty_layer = None;
+        self.mask_interaction_last_upload = None;
+        self.mask_interaction_has_uncommitted_change = false;
+        if restored {
+            self.mark_mask_geometry_dirty(backup.mask_index);
+        }
+    }
+
     pub(crate) fn mark_all_mask_layers_dirty(&mut self) {
         self.dirty_mask_layers.fill(true);
         self.detail_dirty_mask_layers.fill(true);
@@ -67,6 +123,7 @@ impl AurawApp {
         self.active_mask_tool = kind.is_available().then_some(kind);
         self.mask_drag = None;
         self.last_brush_point = None;
+        self.mask_touch_gesture_backup = None;
         if matches!(kind, MaskKind::Brush | MaskKind::Object) {
             self.brush_mode = BrushMode::Paint;
         }
@@ -77,6 +134,7 @@ impl AurawApp {
         self.active_mask_tool = kind.is_available().then_some(kind);
         self.mask_drag = None;
         self.last_brush_point = None;
+        self.mask_touch_gesture_backup = None;
     }
 
     pub(crate) fn blink_selected_mask(&mut self) {
@@ -267,6 +325,56 @@ impl AurawApp {
         }
     }
 
+    /// A completed object mask is intentionally immutable from the canvas.
+    /// Starting another stroke on the same component replaces it from scratch
+    /// instead of treating the stroke as a correction to the previous SAM run.
+    pub(crate) fn restart_refined_object_mask_for_stroke(
+        &mut self,
+        mask_index: usize,
+        component_index: usize,
+    ) -> bool {
+        let target = (mask_index, component_index);
+        let cleared = self
+            .masks
+            .masks
+            .get_mut(mask_index)
+            .and_then(|mask| mask.components.get_mut(component_index))
+            .is_some_and(|component| {
+                let crate::pipeline::MaskGeometry::Object { mask, strokes, .. } =
+                    &mut component.geometry
+                else {
+                    return false;
+                };
+                if mask.is_none() {
+                    return false;
+                }
+                *mask = None;
+                strokes.clear();
+                true
+            });
+        if !cleared {
+            return false;
+        }
+
+        // Any in-flight result or cached logits belong to the replaced mask.
+        // Incrementing the generation makes that result stale without trying
+        // to interrupt ONNX Runtime halfway through a session run.
+        self.object_generation = self.object_generation.wrapping_add(1);
+        if self.object_pending_target == Some(target) {
+            self.object_pending_target = None;
+        }
+        if self
+            .object_cache
+            .as_ref()
+            .is_some_and(|(cached_target, _)| *cached_target == target)
+        {
+            self.object_cache = None;
+        }
+        self.mask_overlay_blink = None;
+        self.brush_mode = BrushMode::Paint;
+        true
+    }
+
     pub(crate) fn request_object_mask(&mut self, mask_index: usize, component_index: usize) {
         #[cfg(not(target_os = "android"))]
         if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
@@ -329,7 +437,7 @@ impl AurawApp {
                 Some("The original image source is unavailable for object selection.".to_owned());
             return;
         };
-        let (strokes, edge_refine, detailed_edges) = {
+        let (strokes, brush_size, edge_refine, detailed_edges) = {
             let Some(component) = self
                 .masks
                 .masks
@@ -340,6 +448,7 @@ impl AurawApp {
             };
             let crate::pipeline::MaskGeometry::Object {
                 strokes,
+                brush_size,
                 edge_refine,
                 detailed_edges,
                 ..
@@ -347,7 +456,7 @@ impl AurawApp {
             else {
                 return;
             };
-            (strokes.clone(), *edge_refine, *detailed_edges)
+            (strokes.clone(), *brush_size, *edge_refine, *detailed_edges)
         };
         let cache = self
             .object_cache
@@ -359,6 +468,7 @@ impl AurawApp {
             source_height: source.height,
             source_rgba: source.rgba.to_vec(),
             strokes,
+            brush_size,
             edge_refine,
             detailed_edges,
             cache,

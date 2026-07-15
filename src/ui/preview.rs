@@ -100,11 +100,9 @@ impl Preview {
                 zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
 
             // A second finger switches a mask gesture into viewport navigation.
-            // Commit any pending mask update and prevent this frame from painting.
+            // Roll back any pending mask stroke and prevent this frame from painting.
             if app.sidebar_tab == SidebarTab::Masks {
-                app.finish_mask_geometry_interaction();
-                app.last_brush_point = None;
-                app.mask_drag = None;
+                app.cancel_mask_touch_gesture();
             }
         }
 
@@ -273,6 +271,7 @@ impl Preview {
             app.finish_mask_geometry_interaction();
             app.last_brush_point = None;
             app.mask_drag = None;
+            app.commit_mask_touch_gesture();
             if object_stroke_finished {
                 app.request_object_mask(mask_index, component_index);
             }
@@ -281,6 +280,9 @@ impl Preview {
         let Some(pointer) = pointer else {
             return;
         };
+        if ui.input(|input| input.any_touches()) {
+            app.begin_mask_touch_gesture(mask_index, component_index);
+        }
         let uv = screen_to_normalized(image_rect, pointer);
         let color_was_sampled = app
             .masks
@@ -300,6 +302,10 @@ impl Preview {
         }
 
         let mut changed = false;
+
+        if kind == MaskKind::Object && app.last_brush_point.is_none() {
+            changed |= app.restart_refined_object_mask_for_stroke(mask_index, component_index);
+        }
 
         if let Some(component) = app
             .masks
@@ -492,8 +498,17 @@ impl Preview {
                     }
                     _ => {}
                 },
-                (MaskGeometry::Object { strokes, .. }, MaskKind::Object) => {
-                    let positive = app.brush_mode == BrushMode::Paint;
+                (
+                    MaskGeometry::Object {
+                        brush_size,
+                        strokes,
+                        ..
+                    },
+                    MaskKind::Object,
+                ) => {
+                    // Object strokes always start a new positive selection. A
+                    // refined mask was cleared above on the first pointer-down.
+                    let positive = true;
                     let first_point = app.last_brush_point.is_none();
                     let previous = app.last_brush_point.unwrap_or(uv);
                     let dx = uv[0] - previous[0];
@@ -501,7 +516,8 @@ impl Preview {
                     let distance_px = ((dx * image_rect.width()).powi(2)
                         + (dy * image_rect.height()).powi(2))
                     .sqrt();
-                    let spacing_px = 7.0;
+                    let radius_px = *brush_size * image_rect.width().min(image_rect.height());
+                    let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
                     if first_point {
                         strokes.push(ObjectStroke {
                             points: vec![uv],
@@ -509,19 +525,10 @@ impl Preview {
                         });
                         changed = true;
                     } else if distance_px >= spacing_px * 0.75 {
-                        let needs_new_stroke = strokes
-                            .last()
-                            .is_none_or(|stroke| stroke.positive != positive);
-                        if needs_new_stroke {
-                            strokes.push(ObjectStroke {
-                                points: vec![previous],
-                                positive,
-                            });
-                        }
                         if let Some(stroke) = strokes.last_mut() {
                             let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
                             for step in 1..=steps {
-                                if stroke.points.len() >= 2048 {
+                                if stroke.points.len() >= 8192 {
                                     break;
                                 }
                                 let t = step as f32 / steps as f32;
@@ -651,24 +658,6 @@ impl Preview {
             let color = accent;
             match &component.geometry {
                 MaskGeometry::Brush { .. } => {}
-                MaskGeometry::Object { strokes, .. } => {
-                    for stroke in strokes {
-                        let stroke_color = if stroke.positive { color } else { subtract };
-                        let points = stroke
-                            .points
-                            .iter()
-                            .map(|point| normalized_to_screen(image_rect, *point))
-                            .collect::<Vec<_>>();
-                        if points.len() == 1 {
-                            painter.circle_filled(points[0], 3.5, stroke_color);
-                        } else if points.len() > 1 {
-                            painter.add(egui::Shape::line(
-                                points,
-                                Stroke::new(4.0, stroke_color.gamma_multiply(0.9)),
-                            ));
-                        }
-                    }
-                }
                 MaskGeometry::Radial {
                     center,
                     radius,
@@ -758,8 +747,15 @@ impl Preview {
                             let radius = *size * image_rect.width().min(image_rect.height());
                             painter.circle_stroke(pointer, radius, Stroke::new(1.5, cursor_color));
                         }
-                        MaskGeometry::Object { .. } => {
-                            painter.circle_stroke(pointer, 8.0, Stroke::new(1.5, cursor_color));
+                        MaskGeometry::Object {
+                            mask, brush_size, ..
+                        } if mask.is_none() => {
+                            let radius = *brush_size * image_rect.width().min(image_rect.height());
+                            painter.circle_stroke(
+                                pointer,
+                                radius.max(1.5),
+                                Stroke::new(1.5, cursor_color),
+                            );
                         }
                         _ => {}
                     }
@@ -840,7 +836,13 @@ impl Preview {
         };
         let text = match kind {
             MaskKind::Brush => return,
-            MaskKind::Object => "Paint inside the object; use Subtract to correct the result",
+            MaskKind::Object
+                if app.masks.selected_component().is_some_and(|component| {
+                    matches!(&component.geometry, MaskGeometry::Object { mask: None, .. })
+                }) =>
+            {
+                "Paint through the middle of the object part"
+            }
             MaskKind::Radial
                 if !app
                     .masks

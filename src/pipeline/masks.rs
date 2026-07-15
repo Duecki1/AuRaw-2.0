@@ -227,6 +227,15 @@ pub enum MaskGeometry {
     Object {
         mask: Option<MaskImage>,
         feather: f32,
+        /// Radius as a fraction of the image's shorter edge. This controls the
+        /// on-canvas object prompt brush and is captured before SAM inference.
+        #[serde(default = "default_object_brush_size")]
+        brush_size: f32,
+        /// Softness of the temporary object prompt brush. This uses the same
+        /// dab falloff as the regular Brush mask and disappears after SAM
+        /// returns the refined object selection.
+        #[serde(default = "default_object_brush_feather")]
+        brush_feather: f32,
         #[serde(default = "default_object_edge_refine")]
         edge_refine: f32,
         #[serde(default)]
@@ -250,6 +259,14 @@ pub enum MaskGeometry {
         sampled: bool,
     },
     Placeholder,
+}
+
+fn default_object_brush_size() -> f32 {
+    0.055
+}
+
+fn default_object_brush_feather() -> f32 {
+    0.55
 }
 
 fn default_object_edge_refine() -> f32 {
@@ -284,6 +301,8 @@ impl MaskGeometry {
             MaskKind::Object => Self::Object {
                 mask: None,
                 feather: 0.0,
+                brush_size: default_object_brush_size(),
+                brush_feather: default_object_brush_feather(),
                 edge_refine: default_object_edge_refine(),
                 detailed_edges: false,
                 strokes: Vec::new(),
@@ -505,10 +524,16 @@ impl MaskStack {
                             .as_ref()
                             .map(|source| crop_mask_image(source, u0, v0, du, dv));
                     }
-                    MaskGeometry::Object { mask, strokes, .. } => {
+                    MaskGeometry::Object {
+                        mask,
+                        brush_size,
+                        strokes,
+                        ..
+                    } => {
                         *mask = mask
                             .as_ref()
                             .map(|source| crop_mask_image(source, u0, v0, du, dv));
+                        *brush_size *= image_scale;
                         for stroke in strokes {
                             for point in &mut stroke.points {
                                 remap_point(point);
@@ -878,6 +903,16 @@ fn rasterize_component(
             feather_probability_mask(&mut coverage, width, height, *feather);
             coverage
         }
+        MaskGeometry::Object {
+            mask: None,
+            brush_size,
+            brush_feather,
+            strokes,
+            ..
+        } => {
+            let dabs = object_prompt_dabs(strokes, *brush_size, *brush_feather);
+            rasterize_brush(width, height, image_width, image_height, &dabs)
+        }
         MaskGeometry::LuminanceRange {
             source: Some(source),
             low,
@@ -1096,6 +1131,21 @@ fn linear_srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
         1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
         0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
     ]
+}
+
+fn object_prompt_dabs(strokes: &[ObjectStroke], size: f32, feather: f32) -> Vec<BrushDab> {
+    let dab_count = strokes.iter().map(|stroke| stroke.points.len()).sum();
+    let mut dabs = Vec::with_capacity(dab_count);
+    for stroke in strokes {
+        let opacity = if stroke.positive { 1.0 } else { -1.0 };
+        dabs.extend(stroke.points.iter().copied().map(|center| BrushDab {
+            center,
+            opacity,
+            size,
+            feather,
+        }));
+    }
+    dabs
 }
 
 #[derive(Clone, Copy)]
@@ -1458,10 +1508,12 @@ mod tests {
 
         let foreground = stack.rasterize_layer(0, 96, 64, 800, 533);
         let background = stack.rasterize_layer(1, 96, 64, 800, 533);
-        assert!(foreground
-            .iter()
-            .zip(background.iter())
-            .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255));
+        assert!(
+            foreground
+                .iter()
+                .zip(background.iter())
+                .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255)
+        );
     }
 
     #[test]
@@ -1515,10 +1567,12 @@ mod tests {
         let normal = stack.rasterize_layer(0, 64, 64, 100, 100);
         stack.masks[0].invert = true;
         let inverted = stack.rasterize_layer(0, 64, 64, 100, 100);
-        assert!(normal
-            .iter()
-            .zip(inverted.iter())
-            .all(|(normal, inverted)| *normal as u16 + *inverted as u16 == 255));
+        assert!(
+            normal
+                .iter()
+                .zip(inverted.iter())
+                .all(|(normal, inverted)| *normal as u16 + *inverted as u16 == 255)
+        );
     }
 
     #[test]
@@ -1540,6 +1594,49 @@ mod tests {
         assert!(layer[32 * 64 + 32] < 32);
     }
     #[test]
+    fn object_prompt_overlay_uses_the_regular_soft_brush_rasterizer() {
+        let point = [0.45, 0.6];
+        let size = 0.12;
+        let feather = 0.63;
+
+        let mut brush_stack = MaskStack::default();
+        brush_stack.add_mask(MaskKind::Brush);
+        if let MaskGeometry::Brush { dabs, .. } =
+            &mut brush_stack.selected_component_mut().unwrap().geometry
+        {
+            dabs.push(BrushDab {
+                center: point,
+                size,
+                feather,
+                opacity: 1.0,
+            });
+        }
+
+        let mut object_stack = MaskStack::default();
+        object_stack.add_mask(MaskKind::Object);
+        if let MaskGeometry::Object {
+            mask,
+            brush_size,
+            brush_feather,
+            strokes,
+            ..
+        } = &mut object_stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = None;
+            *brush_size = size;
+            *brush_feather = feather;
+            strokes.push(ObjectStroke {
+                points: vec![point],
+                positive: true,
+            });
+        }
+
+        let brush = brush_stack.rasterize_component_layer(0, 0, 96, 64, 960, 640);
+        let object = object_stack.rasterize_component_layer(0, 0, 96, 64, 960, 640);
+        assert_eq!(object, brush);
+    }
+
+    #[test]
     fn object_masks_are_available_and_rasterize_soft_probabilities() {
         let mut stack = MaskStack::default();
         assert!(MaskKind::Object.is_available());
@@ -1560,11 +1657,13 @@ mod tests {
         } else {
             panic!("object mask used unexpected geometry");
         }
-        assert!(stack
-            .selected_component()
-            .unwrap()
-            .geometry
-            .is_initialized());
+        assert!(
+            stack
+                .selected_component()
+                .unwrap()
+                .geometry
+                .is_initialized()
+        );
         let layer = stack.rasterize_layer(0, 2, 1, 2, 1);
         assert!(layer[0] < 0.01);
         assert!(layer[1] > 0.99);

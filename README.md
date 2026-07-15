@@ -173,7 +173,7 @@ and applies a hue-preserving scene-linear gain. See
 The Develop sidebar is divided into four tabs:
 
 - **Adjustments** contains the complete photographic processing stack.
-- **Masks** provides Lightroom-style Brush, Radial Gradient, Linear Gradient, Subject, Background, Object, Luminance Range, and Color Range masks with add, subtract, and intersect submasks. Object selection uses positive/negative paint prompts, adaptive crop expansion, cached SAM 2.1 image embeddings, iterative decoder corrections, connected-component cleanup, and edge-aware fine-detail refinement. See [OBJECT_MASKS.md](OBJECT_MASKS.md) for the runtime, model, cache, and interaction details. Landscape and Depth Range remain future tools. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
+- **Masks** provides Lightroom-style Brush, Radial Gradient, Linear Gradient, Subject, Background, Object, Luminance Range, and Color Range masks with add, subtract, and intersect submasks. Object selection uses the same soft Size/Feather brush as regular mask painting, a brush-footprint focus box with automatic background guards, adaptive crop expansion, cached SAM 2.1 image embeddings, clean replacement strokes after refinement, connected-component cleanup, touch-safe pinch cancellation, and edge-aware fine-detail refinement. See [OBJECT_MASKS.md](OBJECT_MASKS.md) for the runtime, model, cache, and interaction details. Landscape and Depth Range remain future tools. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
 - **Inpainting** is reserved for future healing and object removal.
 - **Export** contains the PNG export action and all output options.
 

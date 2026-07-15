@@ -206,6 +206,7 @@ impl AurawApp {
         self.brush_mode = BrushMode::Paint;
         self.mask_drag = None;
         self.last_brush_point = None;
+        self.mask_touch_gesture_backup = None;
         self.mask_interaction_dirty_layer = None;
         self.mask_interaction_last_upload = None;
         self.mask_interaction_has_uncommitted_change = false;

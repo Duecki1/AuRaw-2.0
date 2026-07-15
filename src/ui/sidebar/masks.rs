@@ -1116,22 +1116,41 @@ impl Sidebar {
                 MaskGeometry::Object {
                     mask: generated_mask,
                     feather,
+                    brush_size,
+                    brush_feather,
                     edge_refine,
                     detailed_edges,
                     strokes,
                 } => {
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(brush_mode, BrushMode::Paint, "Add");
-                        ui.selectable_value(brush_mode, BrushMode::Erase, "Subtract");
-                    });
+                    *brush_mode = BrushMode::Paint;
                     ui.label(if generated_mask.is_some() {
-                        "Paint to add or subtract prompts; releasing the pointer updates the selection."
+                        "Draw again on the image to replace this object selection from scratch."
                     } else {
-                        "Paint a loose stroke inside the object to select it."
+                        "Paint through the middle of the object part you want to select."
                     });
+                    ui.strong("Selection brush");
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Size",
+                        brush_size,
+                        0.0025..=0.25,
+                        3,
+                        0.0025,
+                        Some("Uses the same radius and on-canvas falloff as a regular Brush mask."),
+                    );
                     geometry_changed |= adjustment_slider(
                         ui,
                         "Feather",
+                        brush_feather,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Uses the same soft brush edge as a regular Brush mask. It only guides object selection."),
+                    );
+                    ui.add_space(4.0);
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Mask feather",
                         feather,
                         0.0..=1.0,
                         2,
@@ -1165,15 +1184,13 @@ impl Sidebar {
                         if ui.small_button("Recalculate object").clicked() {
                             *request_object = true;
                         }
-                        if ui.small_button("Clear prompts").clicked() {
+                        if ui.small_button("Clear selection").clicked() {
                             strokes.clear();
                             *generated_mask = None;
                             geometry_changed = true;
                         }
                     });
-                    let add_count = strokes.iter().filter(|stroke| stroke.positive).count();
-                    let subtract_count = strokes.len().saturating_sub(add_count);
-                    ui.small(format!("{add_count} add and {subtract_count} subtract strokes"));
+                    ui.small(format!("{} selection stroke(s)", strokes.len()));
                 }
                 MaskGeometry::LuminanceRange {
                     low,

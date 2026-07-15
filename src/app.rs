@@ -338,6 +338,14 @@ struct CachedRawDecode {
     raw: Arc<LoadedRaw>,
 }
 
+#[derive(Clone)]
+pub(crate) struct MaskTouchGestureBackup {
+    mask_index: usize,
+    component_index: usize,
+    geometry: MaskGeometry,
+    object_cache: Option<((usize, usize), ObjectInferenceCache)>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum MaskOverlayBlink {
     #[default]
@@ -382,6 +390,7 @@ pub struct AurawApp {
     pub(crate) brush_mode: BrushMode,
     pub(crate) mask_drag: Option<MaskDragState>,
     pub(crate) last_brush_point: Option<[f32; 2]>,
+    mask_touch_gesture_backup: Option<MaskTouchGestureBackup>,
     mask_interaction_dirty_layer: Option<usize>,
     mask_interaction_last_upload: Option<Instant>,
     mask_interaction_has_uncommitted_change: bool,
