@@ -184,7 +184,11 @@ impl ColorGrading {
     }
 }
 
-pub const CURRENT_PROCESS_VERSION: u32 = 2;
+pub const CURRENT_PROCESS_VERSION: u32 = 4;
+/// Global camera white-balance temperature range in mired displacement.
+/// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
+/// while retaining fine one-unit control near zero.
+pub const GLOBAL_TEMPERATURE_LIMIT: f32 = 150.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExposureParams {
@@ -274,10 +278,11 @@ pub const DEFAULT_SCENE_EXPOSURE_EV: f32 = 0.7;
 
 impl ExposureParams {
     pub fn migrate_to_current_process(&mut self) {
-        // Version 1 and unversioned edits use the same formulas as version 2;
-        // the explicit assignment makes future migrations a reviewed branch.
+        // Version 3 introduces the revised perceptual color, presence, dehaze,
+        // and vignette mappings. Older edits are migrated explicitly so saved
+        // processing state never adopts a new formula version accidentally.
         match self.process_version {
-            0 | 1 => self.process_version = CURRENT_PROCESS_VERSION,
+            0 | 1 | 2 | 3 => self.process_version = CURRENT_PROCESS_VERSION,
             CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently

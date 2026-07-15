@@ -164,3 +164,10 @@ def test_vignette_max_midpoint_reaches_outermost_edge() -> None:
     assert start > 0.97
     assert "inward_softness" in ADJUSTMENTS
     assert "outward_softness" in ADJUSTMENTS
+
+
+def test_vignette_uses_smooth_optical_falloff_and_tonal_protection() -> None:
+    assert "let smoother = transition * transition" in ADJUSTMENTS
+    assert "tonal_protection" in ADJUSTMENTS
+    assert "smoothstep(0.012, 0.20, luminance)" in ADJUSTMENTS
+    assert "edge_ev = select(amount * 2.20, amount * 1.28" in ADJUSTMENTS

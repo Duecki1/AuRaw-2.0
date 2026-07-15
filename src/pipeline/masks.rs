@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
@@ -579,8 +580,7 @@ impl MaskStack {
             return vec![0; len];
         }
 
-        let mut combined = vec![0.0f32; len];
-        let mut has_component = false;
+        let mut combined: Option<Vec<f32>> = None;
         for component in &mask.components {
             if !component.enabled || !component.geometry.is_initialized() {
                 continue;
@@ -598,38 +598,42 @@ impl MaskStack {
                 }
             }
 
-            if !has_component {
-                if component.combine == MaskCombineMode::Add {
-                    combined.copy_from_slice(&coverage);
-                }
-                has_component = true;
+            let Some(existing) = combined.as_mut() else {
+                combined = Some(if component.combine == MaskCombineMode::Add {
+                    // The common one-component Brush case can take ownership
+                    // directly instead of allocating and copying a second
+                    // full-size f32 atlas.
+                    coverage
+                } else {
+                    vec![0.0; len]
+                });
                 continue;
-            }
+            };
             match component.combine {
                 MaskCombineMode::Add => {
-                    for (dst, src) in combined.iter_mut().zip(coverage) {
+                    for (dst, src) in existing.iter_mut().zip(coverage) {
                         *dst = dst.max(src);
                     }
                 }
                 MaskCombineMode::Subtract => {
-                    for (dst, src) in combined.iter_mut().zip(coverage) {
+                    for (dst, src) in existing.iter_mut().zip(coverage) {
                         *dst *= 1.0 - src;
                     }
                 }
                 MaskCombineMode::Intersect => {
-                    for (dst, src) in combined.iter_mut().zip(coverage) {
+                    for (dst, src) in existing.iter_mut().zip(coverage) {
                         *dst *= src;
                     }
                 }
             }
         }
 
-        if !has_component {
+        let Some(combined) = combined else {
             return vec![0; len];
-        }
+        };
         let opacity = mask.opacity.clamp(0.0, 1.0);
         combined
-            .into_iter()
+            .into_par_iter()
             .map(|value| (value.clamp(0.0, 1.0) * opacity * 255.0 + 0.5) as u8)
             .collect()
     }
@@ -773,12 +777,13 @@ fn rasterize_component(
             feather,
         } => {
             let mut coverage = rasterize_mask_image(width, height, mask);
-            if component.kind == MaskKind::Background {
-                for value in &mut coverage {
-                    *value = 1.0 - *value;
-                }
-            }
+            // Feather the subject boundary once, then complement it for Not
+            // Subject. This keeps the two AI masks exact opposites at every
+            // feather value instead of separately blurring an inverted map.
             feather_probability_mask(&mut coverage, width, height, *feather);
+            if component.kind == MaskKind::Background {
+                coverage.par_iter_mut().for_each(|value| *value = 1.0 - *value);
+            }
             coverage
         }
         MaskGeometry::LuminanceRange {
@@ -799,56 +804,114 @@ fn rasterize_component(
 }
 
 fn rasterize_mask_image(width: u32, height: u32, mask: &MaskImage) -> Vec<f32> {
-    let mut out = vec![0.0; width as usize * height as usize];
-    for y in 0..height {
-        let source_y = ((y as f32 + 0.5) * mask.height as f32 / height as f32 - 0.5)
-            .round()
-            .clamp(0.0, mask.height.saturating_sub(1) as f32) as usize;
-        for x in 0..width {
-            let source_x = ((x as f32 + 0.5) * mask.width as f32 / width as f32 - 0.5)
-                .round()
-                .clamp(0.0, mask.width.saturating_sub(1) as f32)
-                as usize;
-            out[y as usize * width as usize + x as usize] =
-                mask.pixels[source_y * mask.width as usize + source_x] as f32 / 255.0;
-        }
+    if width == 0 || height == 0 || mask.width == 0 || mask.height == 0 {
+        return vec![0.0; width as usize * height as usize];
     }
+    let row_stride = width as usize;
+    let mut out = vec![0.0; row_stride * height as usize];
+    out.par_chunks_mut(row_stride)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let source_y = ((y as f32 + 0.5) * mask.height as f32 / height as f32 - 0.5)
+                .clamp(0.0, mask.height.saturating_sub(1) as f32);
+            let y0 = source_y.floor() as usize;
+            let y1 = (y0 + 1).min(mask.height as usize - 1);
+            let fy = source_y - y0 as f32;
+            for (x, value) in row.iter_mut().enumerate() {
+                let source_x = ((x as f32 + 0.5) * mask.width as f32 / width as f32 - 0.5)
+                    .clamp(0.0, mask.width.saturating_sub(1) as f32);
+                let x0 = source_x.floor() as usize;
+                let x1 = (x0 + 1).min(mask.width as usize - 1);
+                let fx = source_x - x0 as f32;
+                let sample = |sx: usize, sy: usize| {
+                    mask.pixels[sy * mask.width as usize + sx] as f32 / 255.0
+                };
+                let top = sample(x0, y0) + (sample(x1, y0) - sample(x0, y0)) * fx;
+                let bottom = sample(x0, y1) + (sample(x1, y1) - sample(x0, y1)) * fx;
+                *value = top + (bottom - top) * fy;
+            }
+        });
     out
 }
 
+fn chamfer_distance(binary: &[u8], width: usize, height: usize, target: u8) -> Vec<f32> {
+    const INF: f32 = 1.0e20;
+    const DIAGONAL: f32 = std::f32::consts::SQRT_2;
+    let mut distance = binary
+        .iter()
+        .map(|value| if *value == target { 0.0 } else { INF })
+        .collect::<Vec<_>>();
+
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let mut best = distance[index];
+            if x > 0 {
+                best = best.min(distance[index - 1] + 1.0);
+            }
+            if y > 0 {
+                best = best.min(distance[index - width] + 1.0);
+                if x > 0 {
+                    best = best.min(distance[index - width - 1] + DIAGONAL);
+                }
+                if x + 1 < width {
+                    best = best.min(distance[index - width + 1] + DIAGONAL);
+                }
+            }
+            distance[index] = best;
+        }
+    }
+    for y in (0..height).rev() {
+        for x in (0..width).rev() {
+            let index = y * width + x;
+            let mut best = distance[index];
+            if x + 1 < width {
+                best = best.min(distance[index + 1] + 1.0);
+            }
+            if y + 1 < height {
+                best = best.min(distance[index + width] + 1.0);
+                if x > 0 {
+                    best = best.min(distance[index + width - 1] + DIAGONAL);
+                }
+                if x + 1 < width {
+                    best = best.min(distance[index + width + 1] + DIAGONAL);
+                }
+            }
+            distance[index] = best;
+        }
+    }
+    distance
+}
+
 fn feather_probability_mask(mask: &mut [f32], width: u32, height: u32, feather: f32) {
-    let radius = (feather.clamp(0.0, 1.0).powf(1.4) * 32.0).round() as usize;
-    if radius == 0 || width == 0 || height == 0 {
+    if width == 0 || height == 0 || mask.is_empty() {
         return;
     }
+    let feather = feather.clamp(0.0, 1.0);
+    if feather <= 1e-5 {
+        return;
+    }
+
+    // Feather is an image-relative boundary width, so thumbnails, the preview
+    // overlay, the 2048px mask atlas, and export all show the same shape. The old
+    // fixed 32-texel box blur changed apparent feathering with every resolution
+    // and washed probability across the entire subject.
+    let radius = (feather.powf(1.30) * width.min(height) as f32 * 0.045).max(0.75);
     let width = width as usize;
     let height = height as usize;
-    let mut horizontal = vec![0.0; mask.len()];
-    let mut row_prefix = vec![0.0f32; width + 1];
-    for y in 0..height {
-        let row = &mask[y * width..(y + 1) * width];
-        row_prefix.fill(0.0);
-        for x in 0..width {
-            row_prefix[x + 1] = row_prefix[x] + row[x];
-        }
-        for x in 0..width {
-            let from = x.saturating_sub(radius);
-            let to = (x + radius + 1).min(width);
-            horizontal[y * width + x] = (row_prefix[to] - row_prefix[from]) / (to - from) as f32;
-        }
-    }
-    let mut prefix = vec![0.0f32; height + 1];
-    for x in 0..width {
-        prefix.fill(0.0);
-        for y in 0..height {
-            prefix[y + 1] = prefix[y] + horizontal[y * width + x];
-        }
-        for y in 0..height {
-            let from = y.saturating_sub(radius);
-            let to = (y + radius + 1).min(height);
-            mask[y * width + x] = (prefix[to] - prefix[from]) / (to - from) as f32;
-        }
-    }
+    let binary = mask
+        .iter()
+        .map(|value| u8::from(*value >= 0.5))
+        .collect::<Vec<_>>();
+    let distance_to_inside = chamfer_distance(&binary, width, height, 1);
+    let distance_to_outside = chamfer_distance(&binary, width, height, 0);
+
+    mask.par_iter_mut().enumerate().for_each(|(index, value)| {
+        let confidence_offset = (*value - 0.5) * 1.5;
+        let signed_distance = distance_to_outside[index] - distance_to_inside[index]
+            + confidence_offset;
+        *value = smoothstep(-radius, radius, signed_distance);
+    });
 }
 
 fn rasterize_luminance_range(
@@ -943,6 +1006,21 @@ fn linear_srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+#[derive(Clone, Copy)]
+struct BrushRasterSpec {
+    opacity: f32,
+    center_x: f32,
+    center_y: f32,
+    radius_x: f32,
+    radius_y: f32,
+    min_x: i32,
+    max_x: i32,
+    min_y: i32,
+    max_y: i32,
+    antialias: f32,
+    inner: f32,
+}
+
 fn rasterize_brush(
     width: u32,
     height: u32,
@@ -950,9 +1028,12 @@ fn rasterize_brush(
     image_height: u32,
     dabs: &[BrushDab],
 ) -> Vec<f32> {
-    let mut out = vec![0.0f32; width as usize * height as usize];
-    let image_min = image_width.min(image_height).max(1) as f32;
+    if width == 0 || height == 0 || dabs.is_empty() {
+        return vec![0.0; width as usize * height as usize];
+    }
 
+    let image_min = image_width.min(image_height).max(1) as f32;
+    let mut specs = Vec::with_capacity(dabs.len());
     for dab in dabs {
         let radius_image = dab.size.clamp(0.0025, 0.5) * image_min;
         let radius_x = radius_image * width as f32 / image_width.max(1) as f32;
@@ -971,25 +1052,64 @@ fn rasterize_brush(
         let max_y = (center_y.ceil() as i32 + bbox_y).min(height as i32 - 1);
         let antialias = (1.0 / radius_x.max(radius_y).max(1.0)).clamp(0.002, 0.25);
         let inner = (1.0 - feather).clamp(0.0, 1.0 - antialias);
+        specs.push(BrushRasterSpec {
+            opacity: dab.opacity,
+            center_x,
+            center_y,
+            radius_x,
+            radius_y,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            antialias,
+            inner,
+        });
+    }
 
-        for y in min_y..=max_y {
-            let dy = (y as f32 + 0.5 - center_y) / radius_y.max(0.5);
-            for x in min_x..=max_x {
-                let dx = (x as f32 + 0.5 - center_x) / radius_x.max(0.5);
-                let distance = (dx * dx + dy * dy).sqrt();
-                if distance >= 1.0 + antialias {
+    // Each row band is independent, so the expensive full-resolution atlas can
+    // use all CPU cores while preserving the exact original dab order inside
+    // every pixel. Paint/erase semantics therefore remain bit-for-bit the same
+    // as the serial implementation.
+    const ROW_BAND_HEIGHT: usize = 64;
+    let row_stride = width as usize;
+    let mut out = vec![0.0f32; row_stride * height as usize];
+    out.par_chunks_mut(row_stride * ROW_BAND_HEIGHT)
+        .enumerate()
+        .for_each(|(band_index, band)| {
+            let band_start_y = band_index * ROW_BAND_HEIGHT;
+            let band_height = band.len() / row_stride;
+            let band_end_y = band_start_y + band_height - 1;
+
+            for spec in &specs {
+                if spec.max_y < band_start_y as i32 || spec.min_y > band_end_y as i32 {
                     continue;
                 }
-                let coverage = 1.0 - smoothstep(inner, 1.0 + antialias, distance);
-                let index = y as usize * width as usize + x as usize;
-                if dab.opacity >= 0.0 {
-                    out[index] = out[index].max(coverage * dab.opacity.clamp(0.0, 1.0));
-                } else {
-                    out[index] *= 1.0 - coverage * (-dab.opacity).clamp(0.0, 1.0);
+                let min_y = spec.min_y.max(band_start_y as i32);
+                let max_y = spec.max_y.min(band_end_y as i32);
+                for y in min_y..=max_y {
+                    let dy = (y as f32 + 0.5 - spec.center_y) / spec.radius_y.max(0.5);
+                    let row_offset = (y as usize - band_start_y) * row_stride;
+                    for x in spec.min_x..=spec.max_x {
+                        let dx = (x as f32 + 0.5 - spec.center_x) / spec.radius_x.max(0.5);
+                        let distance = (dx * dx + dy * dy).sqrt();
+                        if distance >= 1.0 + spec.antialias {
+                            continue;
+                        }
+                        let coverage =
+                            1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
+                        let index = row_offset + x as usize;
+                        if spec.opacity >= 0.0 {
+                            band[index] =
+                                band[index].max(coverage * spec.opacity.clamp(0.0, 1.0));
+                        } else {
+                            band[index] *=
+                                1.0 - coverage * (-spec.opacity).clamp(0.0, 1.0);
+                        }
+                    }
                 }
             }
-        }
-    }
+        });
     out
 }
 
@@ -1220,6 +1340,39 @@ mod tests {
         let background = stack.rasterize_layer(1, 2, 1, 2, 1);
         assert_eq!(foreground, vec![0, 255]);
         assert_eq!(background, vec![255, 0]);
+    }
+
+    #[test]
+    fn feathered_background_is_the_exact_subject_complement() {
+        let mut pixels = vec![0u8; 8 * 8];
+        for y in 2..6 {
+            for x in 2..6 {
+                pixels[y * 8 + x] = 255;
+            }
+        }
+        let subject = MaskImage::new(8, 8, pixels).unwrap();
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Subject);
+        if let MaskGeometry::Ai { mask, feather } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = Some(subject.clone());
+            *feather = 0.65;
+        }
+        stack.add_mask(MaskKind::Background);
+        if let MaskGeometry::Ai { mask, feather } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = Some(subject);
+            *feather = 0.65;
+        }
+
+        let foreground = stack.rasterize_layer(0, 96, 64, 800, 533);
+        let background = stack.rasterize_layer(1, 96, 64, 800, 533);
+        assert!(foreground
+            .iter()
+            .zip(background.iter())
+            .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255));
     }
 
     #[test]

@@ -294,10 +294,11 @@ impl Sidebar {
                 ui,
                 "Temperature",
                 &mut exposure.temperature,
-                -100.0..=100.0,
+                -crate::pipeline::GLOBAL_TEMPERATURE_LIMIT
+                    ..=crate::pipeline::GLOBAL_TEMPERATURE_LIMIT,
                 0,
                 1.0,
-                Some("Relative blue-yellow adaptation; zero preserves the camera as-shot white balance."),
+                Some("Metadata-aware blue-yellow adaptation with an extended warm/cool range; zero preserves the camera as-shot white balance."),
             );
             changed |= adjustment_slider(
                 ui,

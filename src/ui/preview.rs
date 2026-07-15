@@ -8,8 +8,7 @@ pub struct Preview;
 impl Preview {
     pub fn show(ui: &mut Ui, app: &mut AurawApp) {
         let Some((texture_id, pipeline_width, pipeline_height)) = app
-            .gpu_pipeline
-            .as_ref()
+            .preview_base_pipeline()
             .and_then(|pipeline| {
                 pipeline
                     .egui_texture_id
@@ -342,6 +341,7 @@ impl Preview {
                         BrushMode::Paint => 1.0,
                         BrushMode::Erase => -1.0,
                     };
+                    let first_dab = app.last_brush_point.is_none();
                     let previous = app.last_brush_point.unwrap_or(uv);
                     let dx = uv[0] - previous[0];
                     let dy = uv[1] - previous[1];
@@ -352,22 +352,44 @@ impl Preview {
                         + (dy * image_rect.height()).powi(2))
                     .sqrt();
                     let radius_px = *size * image_rect.width().min(image_rect.height());
-                    let spacing_px = (radius_px * 0.22).clamp(0.75, 24.0);
-                    let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
-                    for step in 1..=steps {
-                        if dabs.len() >= 8192 {
-                            break;
+                    let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
+
+                    // Pointer-down frames with no movement used to append a
+                    // duplicate dab indefinitely. That made long touch holds
+                    // and slow strokes progressively more expensive without
+                    // changing a single mask pixel.
+                    if first_dab {
+                        if dabs.len() < 8192 {
+                            dabs.push(BrushDab {
+                                center: uv,
+                                opacity,
+                                size: *size,
+                                feather: *feather,
+                            });
+                            changed = true;
                         }
-                        let t = step as f32 / steps as f32;
-                        dabs.push(BrushDab {
-                            center: [previous[0] + dx * t, previous[1] + dy * t],
-                            opacity,
-                            size: *size,
-                            feather: *feather,
-                        });
+                    } else if distance_px >= spacing_px * 0.80 {
+                        let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
+                        for step in 1..=steps {
+                            if dabs.len() >= 8192 {
+                                break;
+                            }
+                            let t = step as f32 / steps as f32;
+                            dabs.push(BrushDab {
+                                center: [previous[0] + dx * t, previous[1] + dy * t],
+                                opacity,
+                                size: *size,
+                                feather: *feather,
+                            });
+                            changed = true;
+                        }
                     }
-                    app.last_brush_point = Some(uv);
-                    changed = true;
+                    if changed {
+                        // Keep the last emitted point, not merely the last
+                        // pointer sample, so sub-spacing motion accumulates
+                        // instead of disappearing between frames.
+                        app.last_brush_point = Some(uv);
+                    }
                 }
                 (
                     MaskGeometry::Radial {

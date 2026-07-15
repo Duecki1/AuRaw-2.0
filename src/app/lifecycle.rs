@@ -58,7 +58,9 @@ impl AurawApp {
             preview_touch_navigation_active: false,
             preview_revision: 0,
             preview_detail: None,
+            preview_navigation: None,
             preview_detail_pending_stage: None,
+            navigation_pending_stage: None,
             preview_detail_urgent: false,
             preview_quality_dirty: false,
             exposure,
@@ -75,7 +77,7 @@ impl AurawApp {
             mask_drag: None,
             last_brush_point: None,
             mask_interaction_dirty_layer: None,
-            mask_interaction_frame_count: 0,
+            mask_interaction_last_upload: None,
             mask_interaction_has_uncommitted_change: false,
             mask_overlay_revision: 0,
             mask_overlay_texture: None,
@@ -106,6 +108,7 @@ impl AurawApp {
             notice: None,
             dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             detail_dirty_mask_layers: [false; MAX_LOCAL_MASKS],
+            navigation_dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             subject_consent_open: false,
             subject_receiver: None,
             subject_download_progress: None,
@@ -145,7 +148,9 @@ impl AurawApp {
             preview_touch_navigation_active: false,
             preview_revision: 0,
             preview_detail: None,
+            preview_navigation: None,
             preview_detail_pending_stage: None,
+            navigation_pending_stage: None,
             preview_detail_urgent: false,
             preview_quality_dirty: false,
             exposure,
@@ -162,7 +167,7 @@ impl AurawApp {
             mask_drag: None,
             last_brush_point: None,
             mask_interaction_dirty_layer: None,
-            mask_interaction_frame_count: 0,
+            mask_interaction_last_upload: None,
             mask_interaction_has_uncommitted_change: false,
             mask_overlay_revision: 0,
             mask_overlay_texture: None,
@@ -191,6 +196,7 @@ impl AurawApp {
             notice: None,
             dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             detail_dirty_mask_layers: [false; MAX_LOCAL_MASKS],
+            navigation_dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             subject_consent_open: false,
             subject_receiver: None,
             subject_download_progress: None,
@@ -281,7 +287,7 @@ impl AurawApp {
         self.mask_drag = None;
         self.last_brush_point = None;
         self.mask_interaction_dirty_layer = None;
-        self.mask_interaction_frame_count = 0;
+        self.mask_interaction_last_upload = None;
         self.mask_interaction_has_uncommitted_change = false;
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mask_overlay_texture = None;
@@ -299,8 +305,10 @@ impl AurawApp {
         self.subject_inferencing = false;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
+        self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.pending_stage = None;
         self.preview_detail_pending_stage = None;
+        self.navigation_pending_stage = None;
         self.preview_detail_urgent = false;
         self.preview_zoom = 1.0;
         self.preview_center = [0.5, 0.5];
@@ -472,6 +480,11 @@ impl AurawApp {
                         renderer.free_texture(&texture_id);
                     }
                 }
+                if let Some(old) = self.preview_navigation.take() {
+                    if let Some(texture_id) = old.pipeline.egui_texture_id {
+                        renderer.free_texture(&texture_id);
+                    }
+                }
                 loaded
                     .pipeline
                     .register_egui_texture(&render_state.device, &mut renderer);
@@ -507,9 +520,12 @@ impl AurawApp {
                 self.preview_touch_navigation_active = false;
                 self.preview_revision = self.preview_revision.wrapping_add(1);
                 self.preview_detail = None;
+                self.preview_navigation = None;
                 self.preview_detail_pending_stage = None;
+                self.navigation_pending_stage = None;
                 self.preview_detail_urgent = false;
                 self.detail_dirty_mask_layers.fill(false);
+                self.navigation_dirty_mask_layers.fill(false);
                 self.lens_correction = loaded.lens_correction;
                 self.lens_correction_dirty = false;
                 self.target_exposure = loaded.rendered_exposure;

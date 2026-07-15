@@ -120,7 +120,8 @@ def test_mask_creation_buttons_are_thin_on_the_strip_axis() -> None:
 
 
 def test_mask_preview_updates_are_throttled_and_committed_on_release() -> None:
-    assert "UPDATE_EVERY_CHANGED_FRAMES: u8 = 10" in APP
+    assert "INTERACTIVE_MASK_INTERVAL: Duration = Duration::from_millis(45)" in APP
+    assert "mask_interaction_last_upload" in APP
     assert "note_mask_geometry_interaction" in APP
     assert "finish_mask_geometry_interaction" in APP
     assert "app.note_mask_geometry_interaction(mask_index)" in (ROOT / "src/ui/preview.rs").read_text(encoding="utf-8")

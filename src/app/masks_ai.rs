@@ -10,29 +10,33 @@ impl AurawApp {
         if layer < MAX_LOCAL_MASKS {
             self.dirty_mask_layers[layer] = true;
             self.detail_dirty_mask_layers[layer] = true;
+            self.navigation_dirty_mask_layers[layer] = true;
         }
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mark_mask_adjustments_dirty();
     }
 
-    /// Interactive brush and geometry edits can produce one expensive mask
-    /// rasterization and preview dispatch per display frame. Keep handles and
-    /// geometry responsive, but only refresh the rendered mask every tenth
-    /// changed frame. Releasing the pointer always commits the newest shape.
+    /// Interactive brush and geometry edits can otherwise trigger a full
+    /// high-resolution atlas rasterization every display frame. Refresh at a
+    /// steady interactive cadence independent of monitor refresh rate, then
+    /// always commit the exact newest geometry when the pointer is released.
     pub(crate) fn note_mask_geometry_interaction(&mut self, layer: usize) {
-        const UPDATE_EVERY_CHANGED_FRAMES: u8 = 10;
+        const INTERACTIVE_MASK_INTERVAL: Duration = Duration::from_millis(45);
 
         if self.mask_interaction_dirty_layer != Some(layer) {
             self.finish_mask_geometry_interaction();
             self.mask_interaction_dirty_layer = Some(layer);
-            self.mask_interaction_frame_count = 0;
+            self.mask_interaction_last_upload = None;
         }
 
         self.mask_interaction_has_uncommitted_change = true;
-        self.mask_interaction_frame_count = self.mask_interaction_frame_count.saturating_add(1);
-        if self.mask_interaction_frame_count >= UPDATE_EVERY_CHANGED_FRAMES {
+        let now = Instant::now();
+        let upload_due = self
+            .mask_interaction_last_upload
+            .is_none_or(|last| now.duration_since(last) >= INTERACTIVE_MASK_INTERVAL);
+        if upload_due {
             self.mark_mask_geometry_dirty(layer);
-            self.mask_interaction_frame_count = 0;
+            self.mask_interaction_last_upload = Some(now);
             self.mask_interaction_has_uncommitted_change = false;
         }
     }
@@ -40,7 +44,7 @@ impl AurawApp {
     pub(crate) fn finish_mask_geometry_interaction(&mut self) {
         let layer = self.mask_interaction_dirty_layer.take();
         let should_commit = self.mask_interaction_has_uncommitted_change;
-        self.mask_interaction_frame_count = 0;
+        self.mask_interaction_last_upload = None;
         self.mask_interaction_has_uncommitted_change = false;
         if should_commit {
             if let Some(layer) = layer {
@@ -52,6 +56,7 @@ impl AurawApp {
     pub(crate) fn mark_all_mask_layers_dirty(&mut self) {
         self.dirty_mask_layers.fill(true);
         self.detail_dirty_mask_layers.fill(true);
+        self.navigation_dirty_mask_layers.fill(true);
         self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
         self.mark_mask_adjustments_dirty();
     }
@@ -93,21 +98,57 @@ impl AurawApp {
         let render_state = frame
             .wgpu_render_state()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let pipeline = self
+        let program_template = self
             .gpu_pipeline
             .as_ref()
             .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
-        let rgba = pipeline
+        let full_raw = self
+            .loaded_raw
+            .as_ref()
+            .ok_or_else(|| "The original RAW is not available.".to_owned())?;
+        let source_edge = if cfg!(target_os = "android") { 1600 } else { 2048 };
+        let raw = if full_raw.width.max(full_raw.height) <= source_edge {
+            Arc::clone(full_raw)
+        } else {
+            Arc::new(build_proxy(full_raw, ProxySpec { max_edge: source_edge }))
+        };
+
+        // Subject and range classifiers must be stable when the user changes
+        // Exposure, Color, Effects, curves, grading, or local masks. Render a
+        // fresh canonical rendition from the unedited RAW proxy instead of
+        // reading the live edited output texture. Camera white balance,
+        // profile color, demosaic, and lens-corrected geometry are retained so
+        // the model sees a natural image that remains pixel-aligned with the
+        // preview and export. A dedicated 1600/2048-edge proxy keeps model
+        // quality independent of the interactive Preview Quality setting.
+        let reference_exposure = ExposureParams::scene_referred_default();
+        let reference_masks = MaskStack::default();
+        let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
+        let reference_pipeline = RawGpuPipeline::new_headless_reusing_programs(
+            &render_state.device,
+            &render_state.queue,
+            &raw,
+            &params,
+            ProcessingQuality::Preview,
+            program_template,
+        )
+        .map_err(|error| format!("Could not prepare the original RAW for masking: {error:#}"))?;
+        reference_pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        let rgba = reference_pipeline
             .read_output_region_blocking(
                 &render_state.device,
                 &render_state.queue,
                 0,
                 0,
-                pipeline.width,
-                pipeline.height,
+                reference_pipeline.width,
+                reference_pipeline.height,
             )
-            .map_err(|error| format!("Could not read the preview for masking: {error:#}"))?;
-        self.mask_source_cache = MaskRgbImage::new(pipeline.width, pipeline.height, rgba);
+            .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
+        self.mask_source_cache = MaskRgbImage::new(
+            reference_pipeline.width,
+            reference_pipeline.height,
+            rgba,
+        );
         Ok(())
     }
 

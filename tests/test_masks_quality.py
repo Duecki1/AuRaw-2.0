@@ -67,3 +67,42 @@ def test_local_adjustments_are_scene_linear_and_mask_weighted() -> None:
     assert "apply_texture_and_clarity_values" in ADJUSTMENTS
     assert "apply_dehaze_value" in ADJUSTMENTS
     assert "apply_saturation_value" in ADJUSTMENTS
+
+
+def test_ai_and_range_masks_use_a_stable_unedited_raw_reference() -> None:
+    capture = APP[APP.index("pub(crate) fn capture_mask_source"):APP.index("pub(crate) fn request_subject_mask")]
+    assert "loaded_raw" in capture
+    assert "ExposureParams::scene_referred_default()" in capture
+    assert "MaskStack::default()" in capture
+    assert "RawGpuPipeline::new_headless_reusing_programs" in capture
+    assert "reference_pipeline.read_output_region_blocking" not in capture  # formatted as a chained call
+    assert "let rgba = reference_pipeline" in capture
+    assert "live edited output texture" in capture
+    assert "source_edge" in capture and "2048" in capture
+
+
+def test_brush_input_and_rasterization_avoid_progressive_slowdown() -> None:
+    assert "if first_dab" in PREVIEW
+    assert "distance_px >= spacing_px * 0.80" in PREVIEW
+    assert "if changed" in PREVIEW and "last emitted point" in PREVIEW
+    assert "use rayon::prelude::*" in MASKS
+    assert "par_chunks_mut" in MASKS
+    assert "ROW_BAND_HEIGHT" in MASKS
+    assert "into_par_iter" in MASKS
+    assert "take ownership" in MASKS
+
+
+def test_ai_subject_feather_is_resolution_relative_and_background_is_exact_complement() -> None:
+    assert "fn chamfer_distance" in MASKS
+    assert "width.min(height) as f32 * 0.045" in MASKS
+    assert "distance_to_outside[index] - distance_to_inside[index]" in MASKS
+    assert "feather_probability_mask(&mut coverage" in MASKS
+    assert "component.kind == MaskKind::Background" in MASKS
+    assert "*value = 1.0 - *value" in MASKS
+    assert "fixed 32-texel box blur" in MASKS
+
+
+def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
+    assert "let top = sample(x0, y0)" in MASKS
+    assert "let bottom = sample(x0, y1)" in MASKS
+    assert "*value = top + (bottom - top) * fy" in MASKS

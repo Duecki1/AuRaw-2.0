@@ -115,14 +115,21 @@ fn repair_negative_rec2020(rgb: vec3<f32>) -> vec3<f32> {
     return neutral + chroma * clamp(scale, 0.0, 1.0);
 }
 
+fn perceptual_control(value: f32) -> f32 {
+    let normalized = clamp(value / 100.0, -1.0, 1.0);
+    let magnitude = abs(normalized);
+    // Keep fine control around zero while still reaching the full endpoint.
+    return sign(normalized) * (0.78 * magnitude + 0.22 * magnitude * magnitude);
+}
+
 fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
-    let saturation = clamp(params.saturation / 100.0, -1.0, 1.0);
-    let vibrance = clamp(params.vibrance / 100.0, -1.0, 1.0);
+    let saturation = perceptual_control(params.saturation);
+    let vibrance = perceptual_control(params.vibrance);
     if abs(saturation) < 1e-6 && abs(vibrance) < 1e-6 {
         return rgb;
     }
 
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
+    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * max(rgb, vec3<f32>(0.0)));
     let chroma = length(lab.yz);
     if chroma < 1e-9 {
         return rgb;
@@ -130,27 +137,54 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
 
     let hue = fract(atan2(lab.z, lab.y) / (2.0 * 3.14159265359) + 1.0);
     let skin_distance = circular_hue_distance(hue, 0.12);
-    let skin_protection = 1.0 - smoothstep(0.035, 0.14, skin_distance);
-    let content_saturation = clamp(chroma / max(0.04 + 0.30 * lab.x, 0.06), 0.0, 1.0);
+    let skin_protection = 1.0 - smoothstep(0.032, 0.145, skin_distance);
+    let relative_chroma = chroma / max(0.030 + 0.40 * max(lab.x, 0.0), 0.045);
+    let content_saturation = clamp(relative_chroma, 0.0, 1.0);
 
-    let saturation_factor = max(0.0, 1.0 + saturation);
-    var vibrance_factor = 1.0 + vibrance * 0.85;
-    if vibrance >= 0.0 {
-        vibrance_factor = 1.0
-            + vibrance * (1.0 - content_saturation) * (1.0 - 0.55 * skin_protection);
+    // Saturation is deliberately obvious throughout its full UI range. Positive
+    // values use a smooth exponential response, while -100 reaches a genuinely
+    // monochrome result instead of stopping at a weak partial desaturation.
+    var saturation_factor = max(1.0 + saturation, 0.0);
+    if saturation > 0.0 {
+        saturation_factor = exp2(saturation * 1.24);
     }
 
-    let adjusted = vec3<f32>(lab.x, lab.yz * saturation_factor * max(vibrance_factor, 0.0));
+    // Vibrance favours muted colours but still produces a visible change on an
+    // ordinary photograph. Very small chroma is gated as noise, skin is softly
+    // protected, and already vivid colours receive a smaller positive boost.
+    var vibrance_factor = 1.0;
+    if vibrance >= 0.0 {
+        let muted_weight = pow(1.0 - content_saturation, 0.72);
+        let neutral_guard = smoothstep(0.0025, 0.014, chroma);
+        let tonal_guard = smoothstep(0.018, 0.13, max(lab.x, 0.0))
+            * (1.0 - 0.18 * smoothstep(0.92, 1.28, lab.x));
+        let boost = vibrance
+            * (0.34 + 1.02 * muted_weight)
+            * neutral_guard
+            * tonal_guard
+            * (1.0 - 0.46 * skin_protection);
+        vibrance_factor = exp2(boost * 1.38);
+    } else {
+        let reduction = (-vibrance)
+            * mix(0.30, 0.96, pow(content_saturation, 0.68));
+        vibrance_factor = max(1.0 - reduction, 0.0);
+    }
+
+    let chroma_factor = clamp(saturation_factor * vibrance_factor, 0.0, 4.0);
+    let adjusted = vec3<f32>(lab.x, lab.yz * chroma_factor);
     return repair_negative_rec2020(SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted));
 }
 
 fn apply_saturation_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
-    let saturation = clamp(value / 100.0, -1.0, 1.0);
+    let saturation = perceptual_control(value);
     if abs(saturation) < 1e-6 {
         return rgb;
     }
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
-    let factor = max(0.0, 1.0 + saturation);
+    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * max(rgb, vec3<f32>(0.0)));
+    var factor = max(1.0 + saturation, 0.0);
+    if saturation > 0.0 {
+        factor = exp2(saturation * 1.24);
+    }
     let adjusted = vec3<f32>(lab.x, lab.yz * factor);
     return repair_negative_rec2020(SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted));
 }
