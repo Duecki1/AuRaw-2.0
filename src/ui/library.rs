@@ -10,6 +10,12 @@ use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui}
 #[cfg(not(target_os = "android"))]
 use std::cmp::Ordering as CmpOrdering;
 #[cfg(not(target_os = "android"))]
+use std::ffi::OsString;
+#[cfg(not(target_os = "android"))]
+use std::fs::{self, OpenOptions};
+#[cfg(not(target_os = "android"))]
+use std::io;
+#[cfg(not(target_os = "android"))]
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::path::Path;
@@ -148,6 +154,8 @@ pub(crate) struct LibraryState {
     status: String,
     usage_clock: u64,
     thumbnail_workers: usize,
+    #[cfg(not(target_os = "android"))]
+    file_action_receiver: Option<mpsc::Receiver<Result<PathBuf, String>>>,
 }
 
 impl LibraryState {
@@ -174,6 +182,7 @@ impl LibraryState {
             status: "Open a folder to build your RAW library.".to_owned(),
             usage_clock: 0,
             thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
+            file_action_receiver: None,
         }
     }
 
@@ -264,6 +273,35 @@ impl LibraryState {
 
     fn resume_thumbnail_decoding(&self) {
         self.decoding_paused.store(false, Ordering::Release);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn file_action_in_progress(&self) -> bool {
+        self.file_action_receiver.is_some()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn duplicate_raw_with_sidecar(&mut self, raw_path: PathBuf, context: &egui::Context) {
+        if self.file_action_receiver.is_some() {
+            self.status = "Another library file action is still running.".to_owned();
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        self.file_action_receiver = Some(receiver);
+        self.status = format!("Duplicating {}…", raw_path.display());
+        let repaint = context.clone();
+        let spawn = std::thread::Builder::new()
+            .name("auraw-library-duplicate".to_owned())
+            .spawn(move || {
+                let result = duplicate_raw_and_sidecar(&raw_path);
+                let _ = sender.send(result);
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.file_action_receiver = None;
+            self.status = format!("Could not start duplicate operation: {error}");
+        }
     }
 
     #[cfg(not(target_os = "android"))]
@@ -415,6 +453,30 @@ impl LibraryState {
     }
 
     fn poll(&mut self, context: &egui::Context) {
+        #[cfg(not(target_os = "android"))]
+        {
+            let completed = self
+                .file_action_receiver
+                .as_ref()
+                .map(mpsc::Receiver::try_recv);
+            match completed {
+                Some(Ok(Ok(destination))) => {
+                    self.file_action_receiver = None;
+                    self.refresh(context);
+                    self.status = format!("Duplicated as {}", destination.display());
+                }
+                Some(Ok(Err(error))) => {
+                    self.file_action_receiver = None;
+                    self.status = error;
+                }
+                Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                    self.file_action_receiver = None;
+                    self.status = "The library file operation stopped unexpectedly.".to_owned();
+                }
+                Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+            }
+        }
+
         for _ in 0..MAX_EVENTS_PER_FRAME {
             let received = self.event_receiver.as_ref().map(mpsc::Receiver::try_recv);
             let event = match received {
@@ -916,6 +978,91 @@ fn catalog_status(count: usize, warning_count: usize, truncated: bool) -> String
     )
 }
 
+#[cfg(not(target_os = "android"))]
+enum LibraryCardAction {
+    Duplicate(PathBuf),
+    ResetAdjustments(PathBuf),
+    Delete(PathBuf),
+}
+
+#[cfg(not(target_os = "android"))]
+fn duplicate_raw_and_sidecar(raw_path: &Path) -> Result<PathBuf, String> {
+    let parent = raw_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let stem = raw_path
+        .file_stem()
+        .map(OsString::from)
+        .or_else(|| raw_path.file_name().map(OsString::from))
+        .ok_or_else(|| "RAW path has no file name".to_owned())?;
+    let extension = raw_path.extension().map(OsString::from);
+
+    for number in 1..=10_000usize {
+        let mut file_name = stem.clone();
+        if number == 1 {
+            file_name.push(" copy");
+        } else {
+            file_name.push(format!(" copy {number}"));
+        }
+        if let Some(extension) = &extension {
+            file_name.push(".");
+            file_name.push(extension);
+        }
+        let destination = parent.join(file_name);
+        if crate::sidecar::sidecar_path_for_raw(&destination).exists() {
+            continue;
+        }
+
+        match copy_file_create_new(raw_path, &destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not duplicate {}: {error}",
+                    raw_path.display()
+                ));
+            }
+        }
+
+        let source_sidecar = crate::sidecar::sidecar_path_for_raw(raw_path);
+        if source_sidecar.is_file() {
+            let destination_sidecar = crate::sidecar::sidecar_path_for_raw(&destination);
+            if let Err(error) = copy_file_create_new(&source_sidecar, &destination_sidecar) {
+                let _ = fs::remove_file(&destination);
+                let _ = fs::remove_file(&destination_sidecar);
+                return Err(format!(
+                    "Duplicated RAW cleanup completed after the sidecar copy failed: {error}"
+                ));
+            }
+        }
+        return Ok(destination);
+    }
+
+    Err("Could not find an unused duplicate file name.".to_owned())
+}
+
+#[cfg(not(target_os = "android"))]
+fn copy_file_create_new(source: &Path, destination: &Path) -> io::Result<()> {
+    let mut input = OpenOptions::new().read(true).open(source)?;
+    let mut output = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+    {
+        Ok(output) => output,
+        Err(error) => return Err(error),
+    };
+    let result = io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
+    if result.is_err() {
+        drop(output);
+        let _ = fs::remove_file(destination);
+    } else if let Ok(metadata) = fs::metadata(source) {
+        let _ = fs::set_permissions(destination, metadata.permissions());
+    }
+    result.map(|_| ())
+}
+
 pub struct Library;
 
 impl Library {
@@ -929,6 +1076,8 @@ impl Library {
         #[cfg(target_os = "android")]
         let mut import_raw = false;
         let mut open_source = None;
+        #[cfg(not(target_os = "android"))]
+        let mut library_action = None;
 
         ui.horizontal(|ui| {
             ui.heading("Library");
@@ -1044,15 +1193,115 @@ impl Library {
                                     #[cfg(target_os = "android")]
                                     LibrarySource::Android { .. } => false,
                                 };
-                                if thumbnail_card(ui, entry, card_width, selected) {
+                                let response = thumbnail_card(ui, entry, card_width, selected);
+                                if response.clicked() {
                                     open_source =
                                         Some((entry.info.source.clone(), entry.info.name.clone()));
+                                }
+                                #[cfg(not(target_os = "android"))]
+                                if let LibrarySource::File(path) = &entry.info.source {
+                                    let path = path.clone();
+                                    let action_enabled = !app.library.file_action_in_progress();
+                                    response.context_menu(|ui| {
+                                        if ui
+                                            .add_enabled(
+                                                action_enabled,
+                                                egui::Button::new("Duplicate (RAW + sidecar)"),
+                                            )
+                                            .clicked()
+                                        {
+                                            library_action =
+                                                Some(LibraryCardAction::Duplicate(path.clone()));
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                action_enabled,
+                                                egui::Button::new("Reset all adjustments"),
+                                            )
+                                            .clicked()
+                                        {
+                                            library_action = Some(
+                                                LibraryCardAction::ResetAdjustments(path.clone()),
+                                            );
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                        if ui
+                                            .add_enabled(
+                                                action_enabled,
+                                                egui::Button::new("Delete"),
+                                            )
+                                            .clicked()
+                                        {
+                                            library_action =
+                                                Some(LibraryCardAction::Delete(path.clone()));
+                                            ui.close();
+                                        }
+                                    });
                                 }
                             }
                         });
                     }
                 });
             app.library.evict_old_textures();
+        }
+
+        #[cfg(not(target_os = "android"))]
+        if let Some(action) = library_action {
+            match action {
+                LibraryCardAction::Duplicate(path) => {
+                    app.library.duplicate_raw_with_sidecar(path, ui.ctx());
+                }
+                LibraryCardAction::ResetAdjustments(path) => {
+                    let was_current = app.detach_current_file_for_library_action(&path);
+                    match crate::sidecar::remove_desktop_edits(&path) {
+                        Ok(removed) => {
+                            app.library.refresh(ui.ctx());
+                            app.library.status = if removed {
+                                format!("Reset all adjustments for {}", path.display())
+                            } else {
+                                format!("{} already had no saved adjustments", path.display())
+                            };
+                            if was_current {
+                                app.open_path(path, frame);
+                            }
+                        }
+                        Err(error) => {
+                            app.library.status = error;
+                            if was_current {
+                                app.open_path(path, frame);
+                            }
+                        }
+                    }
+                }
+                LibraryCardAction::Delete(path) => {
+                    let was_current = app.detach_current_file_for_library_action(&path);
+                    match fs::remove_file(&path) {
+                        Ok(()) => {
+                            let cleanup = crate::sidecar::remove_desktop_edits(&path);
+                            if was_current {
+                                app.current_path = None;
+                            }
+                            app.library.refresh(ui.ctx());
+                            app.library.status = match cleanup {
+                                Ok(_) => format!("Deleted {}", path.display()),
+                                Err(error) => format!(
+                                    "Deleted {}, but could not remove all related files: {error}",
+                                    path.display()
+                                ),
+                            };
+                        }
+                        Err(error) => {
+                            app.library.status =
+                                format!("Could not delete {}: {error}", path.display());
+                            if was_current {
+                                app.open_path(path, frame);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         #[cfg(target_os = "android")]
@@ -1105,7 +1354,12 @@ fn thumbnail_card_height(width: f32) -> f32 {
     (width - 14.0).max(80.0) + 54.0
 }
 
-fn thumbnail_card(ui: &mut Ui, entry: &LibraryEntry, width: f32, selected: bool) -> bool {
+fn thumbnail_card(
+    ui: &mut Ui,
+    entry: &LibraryEntry,
+    width: f32,
+    selected: bool,
+) -> egui::Response {
     let image_edge = (width - 14.0).max(80.0);
     let height = thumbnail_card_height(width);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
@@ -1186,14 +1440,12 @@ fn thumbnail_card(ui: &mut Ui, entry: &LibraryEntry, width: f32, selected: bool)
         visuals.weak_text_color(),
     );
 
-    let clicked = response.clicked();
     let mut tooltip = entry.info.display_path.clone();
     if let Some(error) = &entry.thumbnail_error {
         tooltip.push_str("\nPreview: ");
         tooltip.push_str(error);
     }
-    response.on_hover_text(tooltip);
-    clicked
+    response.on_hover_text(tooltip)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1362,8 +1614,9 @@ mod tests {
     #[cfg(unix)]
     use super::LibrarySource;
     use super::{
-        elide_middle, format_file_size, run_thumbnail_workers, scan_folder, scan_folder_with_limit,
-        LibraryState, LoadedLibraryThumbnail, ScanEvent, ThumbnailRequest, ThumbnailWorker,
+        duplicate_raw_and_sidecar, elide_middle, format_file_size, run_thumbnail_workers,
+        scan_folder, scan_folder_with_limit, LibraryState, LoadedLibraryThumbnail, ScanEvent,
+        ThumbnailRequest, ThumbnailWorker,
     };
     use crate::pipeline::RawThumbnail;
     #[cfg(unix)]
@@ -1496,6 +1749,34 @@ mod tests {
 
         let sources = HashSet::from([LibrarySource::File(first), LibrarySource::File(second)]);
         assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_raw_copies_the_matching_sidecar_and_uses_unique_names() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-duplicate-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let raw = root.join("photo.CR3");
+        fs::write(&raw, b"raw-bytes").unwrap();
+        fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar-bytes").unwrap();
+
+        let first = duplicate_raw_and_sidecar(&raw).unwrap();
+        let second = duplicate_raw_and_sidecar(&raw).unwrap();
+        assert_eq!(first.file_name().unwrap(), "photo copy.CR3");
+        assert_eq!(second.file_name().unwrap(), "photo copy 2.CR3");
+        assert_eq!(fs::read(&first).unwrap(), b"raw-bytes");
+        assert_eq!(
+            fs::read(crate::sidecar::sidecar_path_for_raw(&first)).unwrap(),
+            b"sidecar-bytes"
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

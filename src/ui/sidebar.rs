@@ -2,8 +2,9 @@ use crate::app::{
     AdjustmentSection, AurawApp, ColorGradeTab, MaskSection, SidebarTab, ToneCurveTab,
 };
 use crate::pipeline::{
-    BrushMode, DemosaicMode, ExportResizeMode, ExposureParams, MaskCombineMode, MaskGeometry,
-    MaskKind, SigmoidColorProcessing, HSL_HUE_LIMIT, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS,
+    BrushMode, DemosaicMode, ExportResizeMode, ExposureParams, LocalMask, MaskCombineMode,
+    MaskComponent, MaskGeometry, MaskKind, SigmoidColorProcessing, HSL_HUE_LIMIT,
+    MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use crate::ui::components::adjustment_slider::{adjustment_slider, slider_scroll_locked};
 use crate::ui::components::color_grading::color_grading_editor;

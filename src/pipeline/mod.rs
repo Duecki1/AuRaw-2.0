@@ -26,7 +26,7 @@ pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, Len
 pub use masks::{
     ellipse_outline_points, mask_atlas_edge, BrushDab, BrushMode, LocalAdjustments, LocalMask,
     MaskCombineMode, MaskComponent, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
-    MAX_LOCAL_MASKS,
+    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 pub use processing::{
     affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile, ExportTile,
