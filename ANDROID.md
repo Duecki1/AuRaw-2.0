@@ -68,6 +68,8 @@ package one ABI at a time by passing the same name to the script and the Gradle
   together pans at the same time.
 - While editing masks, use two fingers to navigate without painting or moving the
   mask. Lift both fingers before resuming a one-finger mask edit.
+- Brush input, cursor rings, and mask overlays are clipped to the visible preview;
+  touching the bottom or side editor panels never paints or shows a brush cursor.
 - Double-tap the preview to return to fit view.
 - After roughly one second without viewport movement, AuRaw rerenders only the
   visible RAW region at the selected preview quality.
@@ -78,7 +80,9 @@ package one ABI at a time by passing the same name to the script and the Gradle
 ## RAW library, file access, and GPU behavior
 
 The Library tab's floating **+** button launches Android's Storage Access
-Framework with `ACTION_OPEN_DOCUMENT`. On Android 10 and newer, the activity
+Framework with `ACTION_OPEN_DOCUMENT`. Press and hold a thumbnail to open its
+context menu without also opening the photo; Android offers Open, Reset all
+adjustments, and Delete actions there. On Android 10 and newer, the activity
 imports the selected document into the app-owned MediaStore Downloads
 collection at `Download/AuRaw`. The folder remains visible to the user and the
 files survive app removal; app-owned Downloads items need no broad storage

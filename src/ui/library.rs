@@ -985,6 +985,18 @@ enum LibraryCardAction {
     Delete(PathBuf),
 }
 
+#[cfg(target_os = "android")]
+enum LibraryCardAction {
+    ResetAdjustments {
+        uri: String,
+        display_name: String,
+    },
+    Delete {
+        uri: String,
+        display_name: String,
+    },
+}
+
 #[cfg(not(target_os = "android"))]
 fn duplicate_raw_and_sidecar(raw_path: &Path) -> Result<PathBuf, String> {
     let parent = raw_path
@@ -1076,7 +1088,6 @@ impl Library {
         #[cfg(target_os = "android")]
         let mut import_raw = false;
         let mut open_source = None;
-        #[cfg(not(target_os = "android"))]
         let mut library_action = None;
 
         ui.horizontal(|ui| {
@@ -1194,7 +1205,10 @@ impl Library {
                                     LibrarySource::Android { .. } => false,
                                 };
                                 let response = thumbnail_card(ui, entry, card_width, selected);
-                                if response.clicked() {
+                                // egui reports a touch long-press as both a click and a
+                                // secondary click. Do not open the photo underneath the
+                                // context menu when the user holds a thumbnail.
+                                if response.clicked() && !response.secondary_clicked() {
                                     open_source =
                                         Some((entry.info.source.clone(), entry.info.name.clone()));
                                 }
@@ -1236,6 +1250,39 @@ impl Library {
                                         {
                                             library_action =
                                                 Some(LibraryCardAction::Delete(path.clone()));
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                                #[cfg(target_os = "android")]
+                                if let LibrarySource::Android {
+                                    uri, display_name, ..
+                                } = &entry.info.source
+                                {
+                                    let source = entry.info.source.clone();
+                                    let name = entry.info.name.clone();
+                                    let uri = uri.clone();
+                                    let display_name = display_name.clone();
+                                    response.context_menu(|ui| {
+                                        if ui.button("Open").clicked() {
+                                            open_source = Some((source.clone(), name.clone()));
+                                            ui.close();
+                                        }
+                                        if ui.button("Reset all adjustments").clicked() {
+                                            library_action = Some(
+                                                LibraryCardAction::ResetAdjustments {
+                                                    uri: uri.clone(),
+                                                    display_name: display_name.clone(),
+                                                },
+                                            );
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                        if ui.button("Delete").clicked() {
+                                            library_action = Some(LibraryCardAction::Delete {
+                                                uri: uri.clone(),
+                                                display_name: display_name.clone(),
+                                            });
                                             ui.close();
                                         }
                                     });
@@ -1299,6 +1346,31 @@ impl Library {
                                 app.open_path(path, frame);
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        if let Some(action) = library_action {
+            match action {
+                LibraryCardAction::ResetAdjustments { uri, display_name } => {
+                    match app.reset_android_library_adjustments(&uri, &display_name) {
+                        Ok(()) => {
+                            app.library.refresh(ui.ctx());
+                            app.library.status =
+                                format!("Reset all adjustments for {display_name}");
+                        }
+                        Err(error) => app.library.status = error,
+                    }
+                }
+                LibraryCardAction::Delete { uri, display_name } => {
+                    match app.delete_android_library_item(&uri, &display_name) {
+                        Ok(()) => {
+                            app.library.refresh(ui.ctx());
+                            app.library.status = format!("Deleted {display_name}");
+                        }
+                        Err(error) => app.library.status = error,
                     }
                 }
             }

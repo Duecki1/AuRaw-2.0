@@ -453,6 +453,60 @@ pub fn open_library_document(
     .map_err(|error| format!("could not open Android RAW library item: {error:#}"))
 }
 
+pub fn remove_raw_sidecar(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+) -> Result<(), String> {
+    let raw_uri_owned = raw_uri.to_owned();
+    let display_name_owned = display_name.to_owned();
+    with_activity(app, |env, activity| {
+        let raw_uri = env.new_string(&raw_uri_owned)?;
+        let display_name = env.new_string(&display_name_owned)?;
+        env.call_method(
+            activity,
+            jni::jni_str!("removeRawSidecar"),
+            jni::jni_sig!((JString, JString) -> void),
+            &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not reset Android RAW adjustments: {error:#}"))?;
+    clear_developed_thumbnail_cache(app, raw_uri);
+    Ok(())
+}
+
+pub fn delete_library_document(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+) -> Result<(), String> {
+    let raw_uri_owned = raw_uri.to_owned();
+    let display_name_owned = display_name.to_owned();
+    with_activity(app, |env, activity| {
+        let raw_uri = env.new_string(&raw_uri_owned)?;
+        let display_name = env.new_string(&display_name_owned)?;
+        env.call_method(
+            activity,
+            jni::jni_str!("deleteRawLibraryDocument"),
+            jni::jni_sig!((JString, JString) -> void),
+            &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not delete Android RAW library item: {error:#}"))?;
+    clear_developed_thumbnail_cache(app, raw_uri);
+    Ok(())
+}
+
+fn clear_developed_thumbnail_cache(app: &AndroidApp, raw_uri: &str) {
+    if let Ok(cache_path) = developed_thumbnail_cache_path(app, raw_uri) {
+        let fingerprint_path = developed_thumbnail_fingerprint_path(&cache_path);
+        let _ = fs::remove_file(cache_path);
+        let _ = fs::remove_file(fingerprint_path);
+    }
+}
+
 pub fn materialize_raw_sidecar(
     app: &AndroidApp,
     raw_uri: &str,

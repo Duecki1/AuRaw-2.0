@@ -49,3 +49,20 @@ def test_mask_groups_have_serialized_final_inversion() -> None:
     assert "group_invert_is_the_exact_final_mask_complement" in MASKS
     assert "MAX_MASK_COMPONENTS" in MASKS
     assert "MAX_MASK_COMPONENTS" in SIDECAR
+
+
+def test_android_thumbnail_long_press_opens_context_menu_without_opening_photo() -> None:
+    android_bridge = (ROOT / "src/android.rs").read_text(encoding="utf-8")
+    android_activity = (
+        ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java"
+    ).read_text(encoding="utf-8")
+
+    assert "response.clicked() && !response.secondary_clicked()" in LIBRARY
+    assert 'if let LibrarySource::Android {' in LIBRARY
+    assert 'ui.button("Open")' in LIBRARY
+    assert "reset_android_library_adjustments" in LIBRARY
+    assert "delete_android_library_item" in LIBRARY
+    assert 'jni::jni_str!("removeRawSidecar")' in android_bridge
+    assert 'jni::jni_str!("deleteRawLibraryDocument")' in android_bridge
+    assert "public void removeRawSidecar" in android_activity
+    assert "public void deleteRawLibraryDocument" in android_activity
