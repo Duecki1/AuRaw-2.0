@@ -120,6 +120,7 @@ impl AurawApp {
     fn empty(ctx: &egui::Context) -> Self {
         let performance_settings_path = crate::performance_settings::desktop_path();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        let last_library_folder = performance.last_library_folder.clone();
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -127,7 +128,7 @@ impl AurawApp {
         let runtime_selection = Self::load_onnx_runtime_selection();
         let onnx_runtime_path = runtime_selection.as_ref().map(|(path, _)| path.clone());
         let onnx_runtime_sha256 = runtime_selection.map(|(_, sha256)| sha256);
-        Self {
+        let mut app = Self {
             current_path: None,
             original_raw: None,
             loaded_raw: None,
@@ -217,7 +218,11 @@ impl AurawApp {
             subject_receiver: None,
             subject_download_progress: None,
             subject_inferencing: false,
+        };
+        if let Some(folder) = last_library_folder.filter(|folder| folder.is_dir()) {
+            app.library.open_folder(folder, ctx);
         }
+        app
     }
 
     #[cfg(not(target_os = "android"))]
@@ -360,6 +365,7 @@ impl AurawApp {
             return;
         };
         self.library.open_folder(folder, &self.egui_ctx);
+        self.persist_performance_settings();
         self.active_tab = AppTab::Library;
     }
 
@@ -433,6 +439,8 @@ impl AurawApp {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.raw_cache_limit,
             thumbnail_workers: self.library.thumbnail_worker_count(),
+            #[cfg(not(target_os = "android"))]
+            last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
             ..Default::default()
         };
         if let Err(error) = crate::performance_settings::save(

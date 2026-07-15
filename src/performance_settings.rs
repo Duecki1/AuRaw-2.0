@@ -6,7 +6,7 @@ use std::path::PathBuf;
 const SETTINGS_VERSION: u32 = 1;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct PerformanceSettings {
     #[serde(default = "settings_version")]
     pub(crate) version: u32,
@@ -14,6 +14,9 @@ pub(crate) struct PerformanceSettings {
     pub(crate) raw_cache_files: usize,
     #[serde(default = "default_thumbnail_workers")]
     pub(crate) thumbnail_workers: usize,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_library_folder: Option<PathBuf>,
 }
 
 const fn settings_version() -> u32 {
@@ -34,6 +37,8 @@ impl Default for PerformanceSettings {
             version: SETTINGS_VERSION,
             raw_cache_files: default_raw_cache_files(),
             thumbnail_workers: default_thumbnail_workers(),
+            #[cfg(not(target_os = "android"))]
+            last_library_folder: None,
         }
     }
 }
@@ -129,6 +134,8 @@ mod tests {
             version: 99,
             raw_cache_files: usize::MAX,
             thumbnail_workers: 0,
+            #[cfg(not(target_os = "android"))]
+            last_library_folder: None,
         }
         .sanitized();
         assert_eq!(settings.version, SETTINGS_VERSION);

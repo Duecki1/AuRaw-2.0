@@ -48,6 +48,19 @@ def test_performance_settings_are_persistent_on_both_platforms() -> None:
     assert "performance.json" in (ROOT / "src/performance_settings.rs").read_text()
 
 
+def test_desktop_last_library_folder_is_restored() -> None:
+    lifecycle = (ROOT / "src/app/lifecycle.rs").read_text()
+    performance = (ROOT / "src/performance_settings.rs").read_text()
+    assert "last_library_folder" in performance
+    assert 'cfg(not(target_os = "android"))' in performance
+    assert "last_library_folder.filter(|folder| folder.is_dir())" in lifecycle
+    assert "app.library.open_folder(folder, ctx)" in lifecycle
+    dialog = lifecycle[lifecycle.index("pub fn open_library_folder_dialog"):]
+    assert dialog.index("self.library.open_folder") < dialog.index(
+        "self.persist_performance_settings()"
+    )
+
+
 def test_reopening_the_same_folder_keeps_live_thumbnail_textures() -> None:
     refresh = LIBRARY[LIBRARY.index("pub(crate) fn refresh"):LIBRARY.index("fn poll(&mut self")]
     assert "Keep already decoded GPU textures visible" in refresh
