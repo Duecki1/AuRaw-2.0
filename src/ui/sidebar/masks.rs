@@ -108,10 +108,43 @@ impl Sidebar {
                         mask_enabled,
                         MaskCardSize::Group,
                     );
-                    if response.clicked() {
+                    let can_add_group = app.masks.masks.len() < MAX_LOCAL_MASKS;
+                    #[cfg(target_os = "android")]
+                    let overflow_clicked = {
+                        let menu_id = ui.make_persistent_id((
+                            "android-mask-group-overflow",
+                            index,
+                        ));
+                        crate::ui::android_overflow_menu(
+                            ui,
+                            response.rect,
+                            menu_id,
+                            22.0,
+                            |ui| {
+                                let mut geometry_changed = false;
+                                Self::mask_group_context_menu(
+                                    ui,
+                                    &mut app.masks.masks[index],
+                                    can_add_group,
+                                    &mut group_enabled_changed,
+                                    &mut geometry_changed,
+                                    &mut duplicate_mask,
+                                    &mut paste_mask,
+                                    &mut remove_mask,
+                                    index,
+                                );
+                                if geometry_changed {
+                                    group_geometry_dirty = Some(index);
+                                }
+                            },
+                        )
+                        .clicked()
+                    };
+                    #[cfg(not(target_os = "android"))]
+                    let overflow_clicked = false;
+                    if response.clicked() && !overflow_clicked {
                         select_mask = Some(index);
                     }
-                    let can_add_group = app.masks.masks.len() < MAX_LOCAL_MASKS;
                     response.context_menu(|ui| {
                         let mut geometry_changed = false;
                         Self::mask_group_context_menu(
@@ -157,11 +190,42 @@ impl Sidebar {
                                 component_enabled,
                                 MaskCardSize::Submask,
                             );
-                            if response.clicked() {
-                                select_component = Some(component_index);
-                            }
                             let mut menu_geometry_changed = false;
                             let mut menu_remove_component = None;
+                            #[cfg(target_os = "android")]
+                            let overflow_clicked = {
+                                let menu_id = ui.make_persistent_id((
+                                    "android-submask-overflow",
+                                    index,
+                                    component_index,
+                                ));
+                                crate::ui::android_overflow_menu(
+                                    ui,
+                                    response.rect,
+                                    menu_id,
+                                    20.0,
+                                    |ui| {
+                                        Self::submask_context_menu(
+                                            ui,
+                                            &mut app.masks.masks[index].components[component_index],
+                                            component_count > 1,
+                                            component_count < MAX_MASK_COMPONENTS,
+                                            &mut menu_geometry_changed,
+                                            &mut duplicate_component,
+                                            &mut paste_component,
+                                            &mut menu_remove_component,
+                                            index,
+                                            component_index,
+                                        );
+                                    },
+                                )
+                                .clicked()
+                            };
+                            #[cfg(not(target_os = "android"))]
+                            let overflow_clicked = false;
+                            if response.clicked() && !overflow_clicked {
+                                select_component = Some(component_index);
+                            }
                             response.context_menu(|ui| {
                                 Self::submask_context_menu(
                                     ui,

@@ -267,6 +267,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # Keep the same debug certificate for installable builds. Android rejects
+      # an APK update when its signing certificate differs from the installed
+      # package. Do not expose this cache to pull-request code.
+      - name: Restore Android debug signing key
+        if: ${{ gitea.event_name != 'pull_request' }}
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        with:
+          path: ~/.android/debug.keystore
+          key: auraw-android-debug-keystore-v1
+
       - name: Restore pinned Android toolchains
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
         with:
@@ -299,6 +309,34 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+
+      - name: Initialize Android debug signing key
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          KEYSTORE="$HOME/.android/debug.keystore"
+          mkdir -p "$(dirname "$KEYSTORE")"
+          if [ ! -f "$KEYSTORE" ]; then
+            keytool -genkeypair \
+              -keystore "$KEYSTORE" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -noprompt
+          fi
+          chmod 600 "$KEYSTORE"
+
+          # Print only the public certificate fingerprint for troubleshooting.
+          keytool -list -v \
+            -keystore "$KEYSTORE" \
+            -storepass android \
+            -alias androiddebugkey \
+            | grep -E 'Alias name:|SHA256:'
 
       - name: Install Android and native build dependencies
         shell: bash
@@ -405,12 +443,20 @@ jobs:
           export PATH="$HOME/gradle-${GRADLE_VERSION}/bin:$PATH"
 
           gradle --version
+          case "$GITHUB_RUN_NUMBER" in
+            ''|*[!0-9]*)
+              echo "GITHUB_RUN_NUMBER must be a positive integer" >&2
+              exit 1
+              ;;
+          esac
+
           gradle \
             --no-daemon \
             --stacktrace \
             -p android \
             assembleDebug \
-            -PaurawAbi=arm64-v8a
+            -PaurawAbi=arm64-v8a \
+            -PaurawVersionCode="$GITHUB_RUN_NUMBER"
 
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
@@ -418,6 +464,9 @@ jobs:
           unzip -tq "$APK" 'lib/arm64-v8a/libc++_shared.so'
           mkdir -p dist
           cp "$APK" dist/AuRaw-debug-arm64-v8a.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
+            verify --print-certs "$APK" \
+            | tee dist/AuRaw-debug-arm64-v8a.signing-certificate.txt
           sha256sum dist/AuRaw-debug-arm64-v8a.apk \
             > dist/AuRaw-debug-arm64-v8a.apk.sha256
 

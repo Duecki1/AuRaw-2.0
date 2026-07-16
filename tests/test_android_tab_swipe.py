@@ -25,6 +25,9 @@ def test_android_page_swipe_is_guarded_from_editing_gestures() -> None:
     assert 'slider_scroll_locked(ctx)' in SWIPE
     assert 'self.mask_drag.is_some()' in SWIPE
     assert 'self.active_mask_tool.is_some()' in SWIPE
+    assert 'zoomed_preview_blocks_tab_swipe(' in SWIPE
+    assert 'preview_zoom > 1.0' in SWIPE
+    assert '1.000_001' in SWIPE
     assert 'captured_by_control' in SWIPE
     assert 'ctx.any_popup_open()' in SWIPE
     assert 'next_tab(swipe.starting_tab)' in SWIPE
