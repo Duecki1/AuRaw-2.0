@@ -2,6 +2,7 @@ mod ai_masks;
 #[cfg(target_os = "android")]
 mod android;
 mod app;
+mod diagnostics;
 mod performance_settings;
 pub mod pipeline;
 pub mod regression;
@@ -23,8 +24,21 @@ fn native_options() -> eframe::NativeOptions {
 
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
         setup.device_descriptor = std::sync::Arc::new(|adapter| {
+            let info = adapter.get_info();
             let adapter_limits = adapter.limits();
-            let mut required_limits = if adapter.get_info().backend == eframe::wgpu::Backend::Gl {
+            crate::diagnostics::set_gpu_info(format!(
+                "name={}\nbackend={:?}\ndevice_type={:?}\nvendor=0x{:04x}\ndevice=0x{:04x}\ndriver={}\ndriver_info={}\nmax_texture_dimension_2d={}\nfeatures={:?}",
+                info.name,
+                info.backend,
+                info.device_type,
+                info.vendor,
+                info.device,
+                info.driver,
+                info.driver_info,
+                adapter_limits.max_texture_dimension_2d,
+                adapter.features(),
+            ));
+            let mut required_limits = if info.backend == eframe::wgpu::Backend::Gl {
                 eframe::wgpu::Limits::downlevel_webgl2_defaults()
             } else {
                 eframe::wgpu::Limits::default()

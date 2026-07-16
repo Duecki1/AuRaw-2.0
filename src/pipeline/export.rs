@@ -9,7 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExportResizeMode {
@@ -179,6 +179,20 @@ pub fn spawn_tiled_png_export(
     let spawn_result = std::thread::Builder::new()
         .name("auraw-tiled-export".to_owned())
         .spawn(move || {
+            let worker_started = Instant::now();
+            crate::diagnostics::record(format!(
+                "PNG export worker started: source={}x{} cfa={:?} requested_tile_core={} halo={} exposure={:.3} temperature={:.3} tint={:.3} demosaic={:?} highlight={:?}",
+                raw.width,
+                raw.height,
+                raw.cfa_kind,
+                tile_spec.core_edge,
+                tile_spec.halo,
+                exposure.exposure,
+                exposure.temperature,
+                exposure.tint,
+                exposure.demosaic_mode,
+                exposure.highlight_method,
+            ));
             let result = (|| -> Result<()> {
                 let (output_width, output_height) =
                     settings.checked_output_dimensions(raw.width, raw.height)?;
@@ -212,6 +226,16 @@ pub fn spawn_tiled_png_export(
                 }
                 Ok(())
             })();
+            match &result {
+                Ok(()) => crate::diagnostics::record(format!(
+                    "PNG export worker finished successfully in {:.3}s",
+                    worker_started.elapsed().as_secs_f64()
+                )),
+                Err(error) => crate::diagnostics::record(format!(
+                    "PNG export worker failed after {:.3}s: {error:#}",
+                    worker_started.elapsed().as_secs_f64()
+                )),
+            }
             let _ = worker_sender.send(ExportEvent::Finished(
                 result
                     .map(|_| worker_path)
@@ -263,8 +287,17 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         keep_metadata,
         metadata,
     } = request;
+    let export_started = Instant::now();
     validate_export_dimensions(output_width, output_height)?;
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
+    crate::diagnostics::record(format!(
+        "Tiled export plan: output={}x{} tiles={} core={} halo={} keep_metadata={keep_metadata}",
+        output_width,
+        output_height,
+        plan.tile_count(),
+        tile_spec.core_edge,
+        tile_spec.halo,
+    ));
     let first = *plan
         .tiles
         .first()
@@ -279,6 +312,7 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         raw.width,
         raw.height,
     );
+    let pipeline_started = Instant::now();
     let tile_pipeline = RawGpuPipeline::new_headless_with_quality(
         device,
         queue,
@@ -288,10 +322,17 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
     )
     .context("create reusable full-quality export pipeline")?;
     upload_mask_atlas(&tile_pipeline, queue, masks, raw.width, raw.height)?;
+    crate::diagnostics::record(format!(
+        "Full-quality export pipeline prepared in {:.3}s; padded_tile={}x{}",
+        pipeline_started.elapsed().as_secs_f64(),
+        first_raw.width,
+        first_raw.height
+    ));
 
     // Establish one histogram from every full-resolution source pixel before
     // rendering output tiles. Reusing the tile pipeline keeps peak memory
     // bounded; restricting each dispatch to its core avoids counting halos.
+    let tone_analysis_started = Instant::now();
     tile_pipeline.begin_export_tone_analysis(queue, device);
     for (index, tile) in plan.tiles.iter().copied().enumerate() {
         let tile_raw = if index == 0 {
@@ -320,6 +361,15 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         tile_pipeline.accumulate_export_tone_tile(queue, device, &params);
     }
     tile_pipeline.finish_export_tone_analysis(queue, device);
+    crate::diagnostics::record(format!(
+        "Full-resolution tone-analysis prepass queued in {:.3}s across {} tiles",
+        tone_analysis_started.elapsed().as_secs_f64(),
+        plan.tile_count()
+    ));
+    crate::diagnostics::record(format!(
+        "Export preparation reached PNG creation after {:.3}s",
+        export_started.elapsed().as_secs_f64()
+    ));
 
     let file = OpenOptions::new()
         .write(true)
@@ -353,6 +403,7 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
 
     let total_tiles = plan.tile_count();
     let mut completed_tiles = 0usize;
+    let mut first_progress_logged = false;
     let mut tile_index = 0usize;
 
     while tile_index < plan.tiles.len() {
@@ -406,6 +457,13 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
 
             stitch_linear_tile_into_band(&mut band, raw.width, band_y, tile, &rgb)?;
             completed_tiles += 1;
+            if !first_progress_logged {
+                first_progress_logged = true;
+                crate::diagnostics::record(format!(
+                    "First export tile completed after {:.3}s; preparation plus first blocking readback is complete",
+                    export_started.elapsed().as_secs_f64()
+                ));
+            }
             let _ = events.send(ExportEvent::Progress {
                 completed_tiles,
                 total_tiles,
