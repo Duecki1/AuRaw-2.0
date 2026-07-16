@@ -61,14 +61,8 @@ Other supported ABI names are `armeabi-v7a`, `x86`, and `x86_64`. Build and
 package one ABI at a time by passing the same name to the script and the Gradle
 `aurawAbi` property.
 
-## Touch navigation and preview controls
+## Touch preview controls
 
-- Library, Develop, and Settings use three equal-width tabs across the top of
-  the Android screen.
-- Swipe left in the main content area to move to the next tab, or swipe right
-  to move to the previous tab. Tab swipes are disabled while a slider owns the
-  drag, while masks are being edited, during multi-touch navigation, and while
-  a zoomed preview needs one-finger panning.
 - Drag with one finger to pan the preview when no mask tool is editing it.
 - Pinch with two fingers to zoom around the gesture center. Moving both fingers
   together pans at the same time.
@@ -77,9 +71,6 @@ package one ABI at a time by passing the same name to the script and the Gradle
 - Brush input, cursor rings, and mask overlays are clipped to the visible preview;
   touching the bottom or side editor panels never paints or shows a brush cursor.
 - Double-tap the preview to return to fit view.
-- Hold one finger still on the preview for one second to show the unedited
-  original. Releasing the finger immediately restores the current edit. Moving
-  the finger or adding a second touch cancels the comparison gesture.
 - After roughly one second without viewport movement, AuRaw rerenders only the
   visible RAW region at the selected preview quality.
 - While zoomed, adjustment sliders, tone curves, and color wheels update that

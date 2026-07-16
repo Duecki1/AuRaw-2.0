@@ -3,8 +3,11 @@ use image::ImageFormat;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "android"))]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_os = "android"))]
 use std::time::UNIX_EPOCH;
 
 const RAW_THUMBNAIL_SUFFIX: &str = ".auraw-raw-thumb.png";

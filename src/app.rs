@@ -26,6 +26,17 @@ use std::time::{Duration, Instant};
 mod edit_history;
 use edit_history::EditHistory;
 
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod android_tab_swipe;
+use android_tab_swipe::AndroidTabSwipe;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AndroidOriginalHold {
+    pub start: egui::Pos2,
+    pub started_at: Instant,
+    pub showing_original: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum PreviewQuality {
     Fast,
@@ -113,32 +124,6 @@ pub enum AppTab {
     Library,
     Develop,
     Settings,
-}
-
-impl AppTab {
-    pub(crate) const fn previous(self) -> Option<Self> {
-        match self {
-            Self::Library => None,
-            Self::Develop => Some(Self::Library),
-            Self::Settings => Some(Self::Develop),
-        }
-    }
-
-    pub(crate) const fn next(self) -> Option<Self> {
-        match self {
-            Self::Library => Some(Self::Develop),
-            Self::Develop => Some(Self::Settings),
-            Self::Settings => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AndroidTabSwipeState {
-    pub origin: egui::Pos2,
-    pub latest: egui::Pos2,
-    pub start_tab: AppTab,
-    pub cancelled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -262,8 +247,6 @@ struct LoadedPreview {
     full_raw: Arc<LoadedRaw>,
     preview_raw: Arc<LoadedRaw>,
     pipeline: RawGpuPipeline,
-    original_preview: Option<OriginalPreviewImage>,
-    original_preview_exposure: ExposureParams,
     rendered_exposure: ExposureParams,
     rendered_masks: MaskStack,
     mask_source: Option<MaskRgbImage>,
@@ -272,12 +255,6 @@ struct LoadedPreview {
     sidecar_generation: u64,
     sidecar_warning: Option<String>,
     sidecar_needs_rewrite: bool,
-}
-
-struct OriginalPreviewImage {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
 }
 
 enum LoadEvent {
@@ -393,12 +370,6 @@ pub struct AurawApp {
     pub loaded_raw: Option<Arc<LoadedRaw>>,
     pub preview_raw: Option<Arc<LoadedRaw>>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
-    pub(crate) original_preview_texture: Option<egui::TextureHandle>,
-    pub(crate) original_preview_exposure: ExposureParams,
-    pub(crate) show_original_preview: bool,
-    pub(crate) original_preview_hold_started: Option<Instant>,
-    pub(crate) original_preview_hold_origin: Option<egui::Pos2>,
-    pub(crate) original_preview_hold_cancelled: bool,
     pub(crate) preview_quality: PreviewQuality,
     pub(crate) preview_zoom: f32,
     pub(crate) preview_center: [f32; 2],
@@ -413,13 +384,16 @@ pub struct AurawApp {
     navigation_pending_stage: Option<ProcessingStage>,
     preview_detail_urgent: bool,
     preview_quality_dirty: bool,
+    pub(crate) original_preview_exposure: ExposureParams,
+    pub(crate) original_preview_requested: bool,
+    original_preview_rendered_state: Option<(bool, u64)>,
+    pub(crate) android_original_hold: Option<AndroidOriginalHold>,
     pub exposure: ExposureParams,
     pub(crate) library: LibraryState,
     raw_cache: VecDeque<CachedRawDecode>,
     raw_cache_limit: usize,
     performance_settings_path: Option<PathBuf>,
     pub active_tab: AppTab,
-    pub(crate) android_tab_swipe: Option<AndroidTabSwipeState>,
     pub sidebar_tab: SidebarTab,
     pub adjustment_section: AdjustmentSection,
     pub mask_section: MaskSection,
@@ -500,10 +474,34 @@ pub struct AurawApp {
     object_job_target: Option<(usize, usize)>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
 
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    android_tab_swipe: AndroidTabSwipe,
+    tab_swipe_surface_id: Option<egui::Id>,
     #[cfg(target_os = "android")]
     android_app: android_activity::AndroidApp,
     #[cfg(target_os = "android")]
     picker_pending: bool,
+}
+
+impl AurawApp {
+    pub(crate) fn activate_tab(&mut self, tab: AppTab) {
+        if self.active_tab == tab {
+            return;
+        }
+        if self.active_tab == AppTab::Develop && tab != AppTab::Develop {
+            self.set_original_preview_requested(false);
+            self.android_original_hold = None;
+        }
+        if self.active_tab == AppTab::Library && tab != AppTab::Library {
+            // Keep thumbnail decoding from competing with Develop rendering.
+            self.library.prepare_for_develop();
+        }
+        self.active_tab = tab;
+    }
+
+    pub(crate) fn note_tab_swipe_surface(&mut self, id: egui::Id) {
+        self.tab_swipe_surface_id = Some(id);
+    }
 }
 
 include!("app/lifecycle.rs");
