@@ -14,7 +14,7 @@ pub(crate) fn android_overflow_menu<R>(
     edge: f32,
     add_contents: impl FnOnce(&mut eframe::egui::Ui) -> R,
 ) -> eframe::egui::Response {
-    use eframe::egui::{self, Direction, Layout, UiBuilder};
+    use eframe::egui::{self, Color32, Popup, Sense};
 
     const INSET: f32 = 5.0;
     let button_rect = egui::Rect::from_min_size(
@@ -24,28 +24,33 @@ pub(crate) fn android_overflow_menu<R>(
         ),
         egui::vec2(edge, edge),
     );
-    let mut button_ui = ui.new_child(
-        UiBuilder::new()
-            .id(id)
-            .max_rect(button_rect)
-            .layout(Layout::centered_and_justified(Direction::LeftToRight)),
-    );
-    button_ui.spacing_mut().interact_size = button_rect.size();
-    let response = button_ui.menu_button("", add_contents).response;
 
-    // Paint the ellipsis ourselves instead of relying on U+22EE. Some Android
-    // system-font combinations do not contain that glyph and render a tofu
-    // square in its place.
-    let visuals = button_ui.style().interact(&response);
-    let dot_radius = (edge * 0.055).clamp(1.1, 1.7);
-    let dot_spacing = edge * 0.18;
-    let center = response.rect.center();
-    let painter = button_ui.painter_at(response.rect);
+    // Do not use `Ui::menu_button` here. Its normal button layout can grow to
+    // the global Android touch target and it also lays out menu-button atoms,
+    // which may render as a missing-glyph square with some system fonts.
+    // A raw interaction keeps the visible control at the requested exact size.
+    let response = ui.interact(button_rect, id, Sense::click());
+    Popup::menu(&response).show(add_contents);
+
+    let painter = ui.painter_at(button_rect);
+    let background = if response.is_pointer_button_down_on() {
+        Color32::from_black_alpha(220)
+    } else if response.hovered() {
+        Color32::from_black_alpha(195)
+    } else {
+        Color32::from_black_alpha(165)
+    };
+    painter.rect_filled(button_rect, (edge * 0.22).clamp(3.0, 7.0), background);
+
+    // Draw the overflow mark geometrically so it never depends on font glyphs.
+    let dot_radius = (edge * 0.065).clamp(1.0, 1.6);
+    let dot_spacing = edge * 0.20;
+    let center = button_rect.center();
     for offset in [-dot_spacing, 0.0, dot_spacing] {
         painter.circle_filled(
             egui::pos2(center.x, center.y + offset),
             dot_radius,
-            visuals.fg_stroke.color,
+            Color32::WHITE,
         );
     }
 
