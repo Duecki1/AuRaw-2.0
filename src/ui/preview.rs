@@ -1,12 +1,15 @@
 use crate::app::{AurawApp, MaskDragState, MaskOverlayBlink, SidebarTab};
-use crate::pipeline::{BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind, ObjectStroke};
+use crate::pipeline::{
+    rasterize_brush_dabs, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
+    ObjectStroke,
+};
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui};
 
 pub struct Preview;
 
 impl Preview {
-    pub fn show(ui: &mut Ui, app: &mut AurawApp) {
+    pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         let Some((texture_id, pipeline_width, pipeline_height)) =
             app.preview_base_pipeline().and_then(|pipeline| {
                 pipeline
@@ -52,12 +55,13 @@ impl Preview {
         if interaction_rect.width() <= 0.0 || interaction_rect.height() <= 0.0 {
             interaction_rect = outer_rect;
         }
-        let interaction_id = if app.sidebar_tab == SidebarTab::Masks {
-            ui.id().with("develop-preview-mask-interaction")
-        } else {
-            ui.id().with("develop-preview-interaction")
+        let brush_canvas = matches!(app.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting);
+        let interaction_id = match app.sidebar_tab {
+            SidebarTab::Masks => ui.id().with("develop-preview-mask-interaction"),
+            SidebarTab::Inpainting => ui.id().with("develop-preview-inpaint-interaction"),
+            _ => ui.id().with("develop-preview-interaction"),
         };
-        let interaction_sense = if app.sidebar_tab == SidebarTab::Masks {
+        let interaction_sense = if brush_canvas {
             Sense::drag()
         } else {
             Sense::click_and_drag()
@@ -104,6 +108,11 @@ impl Preview {
             // Roll back any pending mask stroke and prevent this frame from painting.
             if app.sidebar_tab == SidebarTab::Masks {
                 app.cancel_mask_touch_gesture();
+            } else if app.sidebar_tab == SidebarTab::Inpainting {
+                app.inpaint_stroke.clear();
+                app.last_inpaint_brush_point = None;
+                app.inpaint_stroke_texture = None;
+                app.inpaint_stroke_texture_key = None;
             }
         }
 
@@ -138,7 +147,7 @@ impl Preview {
 
         let pan_with_primary = !touch_navigation
             && !original_hold_tracking
-            && app.sidebar_tab != SidebarTab::Masks
+            && !brush_canvas
             && response.dragged_by(egui::PointerButton::Primary);
         let pan_with_middle = !touch_navigation && response.dragged_by(egui::PointerButton::Middle);
         if pan_with_primary || pan_with_middle {
@@ -243,16 +252,33 @@ impl Preview {
             );
         }
 
-        if app.sidebar_tab == SidebarTab::Masks && !app.original_preview_visible() {
-            if !touch_navigation && !fit_gesture {
-                Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response);
+        if !app.original_preview_visible() {
+            if app.sidebar_tab == SidebarTab::Inpainting && !touch_navigation && !fit_gesture {
+                Self::handle_inpaint_interaction(
+                    ui,
+                    app,
+                    frame,
+                    image_rect,
+                    visible_screen,
+                    &response,
+                );
             }
-            // Keep every mask interaction and overlay clipped to the visible
-            // preview. A zoomed image rect can extend behind the sidebar, and
-            // touch input reports a pointer position there even though that
-            // area belongs to the UI rather than the canvas.
-            Self::paint_mask_overlay(ui, app, image_rect, visible_screen);
-            Self::paint_tool_hint(ui, app, visible_screen);
+            // Completed inpainting is part of the developed image and remains
+            // visible while switching between Develop tabs. The live stroke
+            // and cursor are shown only while the Inpainting tab is active.
+            Self::paint_inpaint_overlay(ui, app, image_rect, visible_screen);
+
+            if app.sidebar_tab == SidebarTab::Masks {
+                if !touch_navigation && !fit_gesture {
+                    Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response);
+                }
+                // Keep every mask interaction and overlay clipped to the visible
+                // preview. A zoomed image rect can extend behind the sidebar, and
+                // touch input reports a pointer position there even though that
+                // area belongs to the UI rather than the canvas.
+                Self::paint_mask_overlay(ui, app, image_rect, visible_screen);
+                Self::paint_tool_hint(ui, app, visible_screen);
+            }
         }
     }
 
@@ -277,7 +303,7 @@ impl Preview {
             )
         });
 
-        let allowed = app.sidebar_tab != SidebarTab::Masks
+        let allowed = !matches!(app.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting)
             && !touch_navigation
             && !multi_touch
             && any_touches;
@@ -323,6 +349,156 @@ impl Preview {
         }
 
         true
+    }
+
+    fn handle_inpaint_interaction(
+        ui: &Ui,
+        app: &mut AurawApp,
+        frame: &eframe::Frame,
+        image_rect: Rect,
+        preview_rect: Rect,
+        response: &egui::Response,
+    ) {
+        let pointer = response
+            .interact_pointer_pos()
+            .filter(|position| preview_rect.contains(*position));
+        let primary_down = pointer.is_some()
+            && response.is_pointer_button_down_on()
+            && ui.input(|input| input.pointer.primary_down());
+        if !primary_down {
+            if ui.input(|input| input.pointer.primary_released()) {
+                let stroke_finished = app.last_inpaint_brush_point.take().is_some()
+                    && !app.inpaint_stroke.is_empty();
+                if stroke_finished {
+                    app.request_inpaint(frame);
+                }
+            }
+            return;
+        }
+        if app.inpaint_busy() {
+            return;
+        }
+        let Some(pointer) = pointer else {
+            return;
+        };
+        let uv = screen_to_normalized(image_rect, pointer);
+        let first_dab = app.last_inpaint_brush_point.is_none();
+        let previous = app.last_inpaint_brush_point.unwrap_or(uv);
+        let dx = uv[0] - previous[0];
+        let dy = uv[1] - previous[1];
+        let distance_px = ((dx * image_rect.width()).powi(2)
+            + (dy * image_rect.height()).powi(2))
+        .sqrt();
+        let radius_px = app.inpaint_brush_size * image_rect.width().min(image_rect.height());
+        let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
+        let mut changed = false;
+        if first_dab {
+            if app.inpaint_stroke.len() < 8192 {
+                app.inpaint_stroke.push(BrushDab {
+                    center: uv,
+                    opacity: 1.0,
+                    size: app.inpaint_brush_size,
+                    feather: app.inpaint_brush_feather,
+                });
+                changed = true;
+            }
+        } else if distance_px >= spacing_px * 0.80 {
+            let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
+            for step in 1..=steps {
+                if app.inpaint_stroke.len() >= 8192 {
+                    break;
+                }
+                let t = step as f32 / steps as f32;
+                app.inpaint_stroke.push(BrushDab {
+                    center: [previous[0] + dx * t, previous[1] + dy * t],
+                    opacity: 1.0,
+                    size: app.inpaint_brush_size,
+                    feather: app.inpaint_brush_feather,
+                });
+                changed = true;
+            }
+        }
+        if changed {
+            app.last_inpaint_brush_point = Some(uv);
+            app.inpaint_stroke_texture_key = None;
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn paint_inpaint_overlay(ui: &Ui, app: &mut AurawApp, image_rect: Rect, preview_rect: Rect) {
+        let painter = ui.painter_at(preview_rect);
+        if let Some(layer) = &app.inpaint_layer {
+            if app.inpaint_texture_key != Some(app.inpaint_texture_revision) {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [layer.width as usize, layer.height as usize],
+                    &layer.as_masked_rgba(),
+                );
+                if let Some(texture) = app.inpaint_texture.as_mut() {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    app.inpaint_texture = Some(ui.ctx().load_texture(
+                        "auraw-inpaint-result",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                app.inpaint_texture_key = Some(app.inpaint_texture_revision);
+            }
+            if let Some(texture) = &app.inpaint_texture {
+                painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
+            }
+        }
+
+        if app.sidebar_tab != SidebarTab::Inpainting {
+            return;
+        }
+
+        if !app.inpaint_stroke.is_empty() {
+            let Some(pipeline) = app.gpu_pipeline.as_ref() else {
+                return;
+            };
+            let max_edge = if cfg!(target_os = "android") { 384.0 } else { 512.0 };
+            let scale = (max_edge / image_rect.width().max(image_rect.height())).min(1.0);
+            let width = (image_rect.width() * scale).round().max(1.0) as u32;
+            let height = (image_rect.height() * scale).round().max(1.0) as u32;
+            let key = (app.inpaint_stroke.len(), width, height);
+            if app.inpaint_stroke_texture_key != Some(key) {
+                let coverage = rasterize_brush_dabs(
+                    width,
+                    height,
+                    pipeline.width,
+                    pipeline.height,
+                    &app.inpaint_stroke,
+                );
+                let rgba = coverage_rgba(coverage, Color32::from_rgb(255, 94, 94));
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [width as usize, height as usize],
+                    &rgba,
+                );
+                if let Some(texture) = app.inpaint_stroke_texture.as_mut() {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    app.inpaint_stroke_texture = Some(ui.ctx().load_texture(
+                        "auraw-inpaint-stroke",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                app.inpaint_stroke_texture_key = Some(key);
+            }
+            if let Some(texture) = &app.inpaint_stroke_texture {
+                painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
+            }
+        }
+
+        if let Some(pointer) = ui
+            .ctx()
+            .pointer_hover_pos()
+            .filter(|position| preview_rect.contains(*position))
+        {
+            let radius = app.inpaint_brush_size * image_rect.width().min(image_rect.height());
+            painter.circle_stroke(pointer, radius.max(1.5), Stroke::new(1.5, Color32::WHITE));
+        }
     }
 
     fn handle_mask_interaction(

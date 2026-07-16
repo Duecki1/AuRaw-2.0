@@ -237,6 +237,21 @@ impl AurawApp {
             object_job_generation: 0,
             object_job_target: None,
             object_cache: None,
+            inpaint_brush_size: 0.055,
+            inpaint_brush_feather: 0.55,
+            inpaint_stroke: Vec::new(),
+            last_inpaint_brush_point: None,
+            inpaint_layer: None,
+            inpaint_texture: None,
+            inpaint_texture_revision: 0,
+            inpaint_texture_key: None,
+            inpaint_stroke_texture: None,
+            inpaint_stroke_texture_key: None,
+            inpaint_pending_source: None,
+            inpaint_consent_open: false,
+            inpaint_receiver: None,
+            inpaint_download_progress: None,
+            inpaint_inferencing: false,
             android_tab_swipe: AndroidTabSwipe::default(),
             tab_swipe_surface_id: None,
         };
@@ -380,6 +395,21 @@ impl AurawApp {
             object_job_generation: 0,
             object_job_target: None,
             object_cache: None,
+            inpaint_brush_size: 0.055,
+            inpaint_brush_feather: 0.55,
+            inpaint_stroke: Vec::new(),
+            last_inpaint_brush_point: None,
+            inpaint_layer: None,
+            inpaint_texture: None,
+            inpaint_texture_revision: 0,
+            inpaint_texture_key: None,
+            inpaint_stroke_texture: None,
+            inpaint_stroke_texture_key: None,
+            inpaint_pending_source: None,
+            inpaint_consent_open: false,
+            inpaint_receiver: None,
+            inpaint_download_progress: None,
+            inpaint_inferencing: false,
             android_tab_swipe: AndroidTabSwipe::default(),
             tab_swipe_surface_id: None,
             android_app,
@@ -614,6 +644,7 @@ impl AurawApp {
         self.exposure = initial_exposure;
         self.target_exposure = initial_exposure;
         self.masks.clear();
+        self.reset_inpainting_state();
         self.active_mask_tool = None;
         self.brush_mode = BrushMode::Paint;
         self.mask_drag = None;
