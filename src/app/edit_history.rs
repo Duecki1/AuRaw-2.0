@@ -371,7 +371,10 @@ impl AurawApp {
     }
 
     pub(crate) fn edit_commit_revision(&self) -> u64 {
-        self.edit_history.committed_revision()
+        self.edit_history
+            .committed_revision()
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ self.inpaint_revision
     }
 
     /// O(1) snapshot for persistence. Call `commit_edit_history_now` first so
