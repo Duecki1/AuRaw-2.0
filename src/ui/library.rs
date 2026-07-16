@@ -1165,7 +1165,7 @@ impl Library {
             let row_height = thumbnail_card_height(card_width);
             let total_rows = app.library.entries.len().div_ceil(columns);
 
-            egui::ScrollArea::vertical()
+            let scroll = egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show_rows(ui, row_height, total_rows, |ui, row_range| {
                     for row_index in row_range {
@@ -1235,10 +1235,10 @@ impl Library {
                                     });
                                 }
                                 #[cfg(target_os = "android")]
-                                if let LibrarySource::Android {
-                                    uri, display_name, ..
-                                } = &entry.info.source
                                 {
+                                    let LibrarySource::Android {
+                                        uri, display_name, ..
+                                    } = &entry.info.source;
                                     let source = entry.info.source.clone();
                                     let name = entry.info.name.clone();
                                     let uri = uri.clone();
@@ -1270,6 +1270,7 @@ impl Library {
                         });
                     }
                 });
+            app.note_tab_swipe_surface(scroll.id);
             app.library.evict_old_textures();
         }
 

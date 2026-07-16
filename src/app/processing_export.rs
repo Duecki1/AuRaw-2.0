@@ -246,14 +246,6 @@ impl AurawApp {
         self.loaded_raw = Some(full_raw);
         self.preview_raw = Some(preview_raw);
         self.gpu_pipeline = Some(pipeline);
-        if let Err(error) = self.rebuild_original_preview_texture(frame) {
-            self.original_preview_texture = None;
-            self.show_original_preview = false;
-            append_notice(
-                &mut correction_notice,
-                &format!("Original comparison preview is unavailable: {error}"),
-            );
-        }
         self.preview_zoom = 1.0;
         self.preview_center = [0.5, 0.5];
         self.preview_visible_uv = PreviewUvRect {
@@ -317,6 +309,79 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    pub(crate) fn original_preview_visible(&self) -> bool {
+        self.original_preview_requested
+    }
+
+    pub(crate) fn set_original_preview_requested(&mut self, requested: bool) {
+        if self.original_preview_requested == requested {
+            return;
+        }
+        self.original_preview_requested = requested;
+        self.original_preview_rendered_state = None;
+        self.egui_ctx.request_repaint();
+    }
+
+    pub(crate) fn toggle_original_preview(&mut self) {
+        self.set_original_preview_requested(!self.original_preview_requested);
+    }
+
+    pub(crate) fn sync_original_preview(&mut self, frame: &eframe::Frame) {
+        let requested_state = (self.original_preview_requested, self.preview_revision);
+        if self.original_preview_rendered_state == Some(requested_state) {
+            return;
+        }
+
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let empty_masks = MaskStack::default();
+        let exposure = if self.original_preview_requested {
+            &self.original_preview_exposure
+        } else {
+            &self.target_exposure
+        };
+        let masks = if self.original_preview_requested {
+            &empty_masks
+        } else {
+            &self.masks
+        };
+
+        if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
+            let params = GpuParams::new(exposure, masks, raw);
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        }
+
+        if let Some(navigation) = self.preview_navigation.as_ref() {
+            let params = GpuParams::new(exposure, masks, &navigation.raw);
+            navigation
+                .pipeline
+                .recompute(&render_state.queue, &render_state.device, &params);
+        }
+
+        if let Some(detail) = self
+            .preview_detail
+            .as_ref()
+            .filter(|detail| detail.revision == self.preview_revision)
+        {
+            let params = GpuParams::new_for_tile(
+                exposure,
+                masks,
+                &detail.raw,
+                detail.virtual_origin[0],
+                detail.virtual_origin[1],
+                detail.virtual_full_size[0],
+                detail.virtual_full_size[1],
+            );
+            detail
+                .pipeline
+                .recompute(&render_state.queue, &render_state.device, &params);
+        }
+
+        self.original_preview_rendered_state = Some(requested_state);
+        self.egui_ctx.request_repaint();
+    }
+
     pub(crate) fn preview_base_pipeline(&self) -> Option<&RawGpuPipeline> {
         // Keep the normal adjusted full-frame proxy as the zoom backing while
         // it is current. The tiny navigation proxy is only needed after an edit
@@ -330,59 +395,6 @@ impl AurawApp {
         } else {
             self.gpu_pipeline.as_ref()
         }
-    }
-
-    fn rebuild_original_preview_texture(&mut self, frame: &eframe::Frame) -> Result<(), String> {
-        let Some(render_state) = frame.wgpu_render_state() else {
-            return Err("eframe is not running with the wgpu backend".to_owned());
-        };
-        let raw = self
-            .preview_raw
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or_else(|| "the preview RAW is unavailable".to_owned())?;
-
-        let (width, height, rgba) = {
-            let template = self
-                .gpu_pipeline
-                .as_ref()
-                .ok_or_else(|| "the adjusted preview pipeline is unavailable".to_owned())?;
-            let masks = MaskStack::default();
-            let params = GpuParams::new(&self.original_preview_exposure, &masks, &raw);
-            let pipeline = RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
-                &render_state.device,
-                &render_state.queue,
-                &raw,
-                &params,
-                ProcessingQuality::Preview,
-                template,
-                64,
-            )
-            .map_err(|error| format!("could not create the original preview: {error:#}"))?;
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
-            let rgba = pipeline
-                .read_output_region_blocking(
-                    &render_state.device,
-                    &render_state.queue,
-                    0,
-                    0,
-                    pipeline.width,
-                    pipeline.height,
-                )
-                .map_err(|error| format!("could not read the original preview: {error:#}"))?;
-            (pipeline.width, pipeline.height, rgba)
-        };
-
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [width as usize, height as usize],
-            &rgba,
-        );
-        self.original_preview_texture = Some(self.egui_ctx.load_texture(
-            "auraw-original-preview",
-            image,
-            egui::TextureOptions::LINEAR,
-        ));
-        Ok(())
     }
 
     pub(crate) fn preview_quality_changed(&mut self) {
@@ -473,13 +485,6 @@ impl AurawApp {
 
         self.preview_raw = Some(preview_raw);
         self.gpu_pipeline = Some(pipeline);
-        if let Err(error) = self.rebuild_original_preview_texture(frame) {
-            self.original_preview_texture = None;
-            self.show_original_preview = false;
-            self.notice = Some(format!(
-                "Preview quality changed, but original comparison is unavailable: {error}"
-            ));
-        }
         self.target_exposure = self.exposure;
         self.pending_stage = None;
         self.preview_detail_pending_stage = None;

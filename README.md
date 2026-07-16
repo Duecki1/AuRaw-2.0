@@ -177,11 +177,6 @@ The Develop sidebar is divided into four tabs:
 - **Inpainting** is reserved for future healing and object removal.
 - **Export** contains the PNG export action and all output options.
 
-On desktop, **Show Original** in the Develop toolbar switches the preview to
-the image's unedited baseline. The same button changes to **Show Edited** so the
-current edit can be restored with one click. The comparison keeps the current
-zoom and pan position.
-
 PNG sizing can use the original dimensions, long edge, short edge, width,
 height, or a percentage while preserving the source aspect ratio. Upscaling is
 disabled by default. Final-size resampling happens only after demosaic and tone

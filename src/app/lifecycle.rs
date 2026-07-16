@@ -138,12 +138,6 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
-            original_preview_texture: None,
-            original_preview_exposure: exposure,
-            show_original_preview: false,
-            original_preview_hold_started: None,
-            original_preview_hold_origin: None,
-            original_preview_hold_cancelled: false,
             preview_quality: PreviewQuality::default(),
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
@@ -161,13 +155,16 @@ impl AurawApp {
             navigation_pending_stage: None,
             preview_detail_urgent: false,
             preview_quality_dirty: false,
+            original_preview_exposure: exposure,
+            original_preview_requested: false,
+            original_preview_rendered_state: None,
+            android_original_hold: None,
             exposure,
             library: LibraryState::new_with_workers(ctx, performance.thumbnail_workers),
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
             active_tab: AppTab::default(),
-            android_tab_swipe: None,
             sidebar_tab: SidebarTab::default(),
             adjustment_section: AdjustmentSection::default(),
             mask_section: MaskSection::default(),
@@ -240,6 +237,8 @@ impl AurawApp {
             object_job_generation: 0,
             object_job_target: None,
             object_cache: None,
+            android_tab_swipe: AndroidTabSwipe::default(),
+            tab_swipe_surface_id: None,
         };
         if let Some(folder) = last_library_folder.filter(|folder| folder.is_dir()) {
             app.library.open_folder(folder, ctx);
@@ -274,12 +273,6 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
-            original_preview_texture: None,
-            original_preview_exposure: exposure,
-            show_original_preview: false,
-            original_preview_hold_started: None,
-            original_preview_hold_origin: None,
-            original_preview_hold_cancelled: false,
             preview_quality: PreviewQuality::default(),
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
@@ -297,6 +290,10 @@ impl AurawApp {
             navigation_pending_stage: None,
             preview_detail_urgent: false,
             preview_quality_dirty: false,
+            original_preview_exposure: exposure,
+            original_preview_requested: false,
+            original_preview_rendered_state: None,
+            android_original_hold: None,
             exposure,
             library: LibraryState::new_android_with_workers(
                 android_app.clone(),
@@ -307,7 +304,6 @@ impl AurawApp {
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
             active_tab: AppTab::default(),
-            android_tab_swipe: None,
             sidebar_tab: SidebarTab::default(),
             adjustment_section: AdjustmentSection::default(),
             mask_section: MaskSection::default(),
@@ -378,6 +374,8 @@ impl AurawApp {
             object_job_generation: 0,
             object_job_target: None,
             object_cache: None,
+            android_tab_swipe: AndroidTabSwipe::default(),
+            tab_swipe_surface_id: None,
             android_app,
             picker_pending: false,
         }
@@ -593,18 +591,16 @@ impl AurawApp {
         self.original_raw = None;
         self.loaded_raw = None;
         self.preview_raw = None;
-        self.original_preview_texture = None;
-        self.show_original_preview = false;
-        self.original_preview_hold_started = None;
-        self.original_preview_hold_origin = None;
-        self.original_preview_hold_cancelled = false;
         self.current_path = None;
         self.current_label = None;
         self.image_status = format!("Loading {label}…");
         let initial_exposure = self.new_image_exposure();
         let preview_quality_setting = self.preview_quality;
-        self.exposure = initial_exposure;
         self.original_preview_exposure = initial_exposure;
+        self.original_preview_requested = false;
+        self.original_preview_rendered_state = None;
+        self.android_original_hold = None;
+        self.exposure = initial_exposure;
         self.target_exposure = initial_exposure;
         self.masks.clear();
         self.active_mask_tool = None;
@@ -798,61 +794,6 @@ impl AurawApp {
                     )
                     .map_err(|error| format!("GPU preview setup failed: {error:#}"))?;
 
-                    let original_preview = {
-                        let original_masks = MaskStack::default();
-                        let original_params =
-                            GpuParams::new(&initial_exposure, &original_masks, &preview_raw);
-                        match RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
-                            &device,
-                            &queue,
-                            &preview_raw,
-                            &original_params,
-                            ProcessingQuality::Preview,
-                            &pipeline,
-                            64,
-                        ) {
-                            Ok(original_pipeline) => {
-                                original_pipeline.recompute(
-                                    &queue,
-                                    &device,
-                                    &original_params,
-                                );
-                                match original_pipeline.read_output_region_blocking(
-                                    &device,
-                                    &queue,
-                                    0,
-                                    0,
-                                    original_pipeline.width,
-                                    original_pipeline.height,
-                                ) {
-                                    Ok(rgba) => Some(OriginalPreviewImage {
-                                        width: original_pipeline.width,
-                                        height: original_pipeline.height,
-                                        rgba,
-                                    }),
-                                    Err(error) => {
-                                        append_notice(
-                                            &mut sidecar_warning,
-                                            &format!(
-                                                "Original comparison preview is unavailable: {error:#}"
-                                            ),
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                append_notice(
-                                    &mut sidecar_warning,
-                                    &format!(
-                                        "Original comparison preview is unavailable: {error:#}"
-                                    ),
-                                );
-                                None
-                            }
-                        }
-                    };
-
                     // Range and promptable-object source images are canonical RAW renditions,
                     // not user edit data. Sidecars omit these large shared
                     // caches and reconstruct one source on this decode worker.
@@ -929,8 +870,6 @@ impl AurawApp {
                         full_raw,
                         preview_raw,
                         pipeline,
-                        original_preview,
-                        original_preview_exposure: initial_exposure,
                         rendered_exposure,
                         rendered_masks,
                         mask_source,
@@ -1061,17 +1000,6 @@ impl AurawApp {
                 loaded
                     .pipeline
                     .register_egui_texture(&render_state.device, &mut renderer);
-                let original_preview_texture = loaded.original_preview.take().map(|preview| {
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [preview.width as usize, preview.height as usize],
-                        &preview.rgba,
-                    );
-                    self.egui_ctx.load_texture(
-                        "auraw-original-preview",
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    )
-                });
 
                 let full_width = loaded.full_raw.width;
                 let full_height = loaded.full_raw.height;
@@ -1094,12 +1022,6 @@ impl AurawApp {
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
                 self.gpu_pipeline = Some(loaded.pipeline);
-                self.original_preview_texture = original_preview_texture;
-                self.original_preview_exposure = loaded.original_preview_exposure;
-                self.show_original_preview = false;
-                self.original_preview_hold_started = None;
-                self.original_preview_hold_origin = None;
-                self.original_preview_hold_cancelled = false;
                 self.exposure = loaded.rendered_exposure;
                 self.masks = loaded.rendered_masks;
                 self.rehydrate_restored_mask_state();
@@ -1116,6 +1038,7 @@ impl AurawApp {
                 self.preview_motion_at = None;
                 self.preview_touch_navigation_active = false;
                 self.preview_revision = self.preview_revision.wrapping_add(1);
+                self.original_preview_rendered_state = None;
                 self.preview_detail = None;
                 self.preview_navigation = None;
                 self.preview_detail_pending_stage = None;
