@@ -184,6 +184,16 @@ impl Settings {
             let mut diagnostic_log = crate::diagnostics::snapshot();
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Copy log").clicked() {
+                    #[cfg(target_os = "android")]
+                    match app.copy_text_to_clipboard("AuRaw diagnostics", &diagnostic_log) {
+                        Ok(()) => {
+                            crate::diagnostics::record("Diagnostic log copied to Android clipboard")
+                        }
+                        Err(error) => crate::diagnostics::record(format!(
+                            "Android clipboard copy failed: {error}"
+                        )),
+                    }
+                    #[cfg(not(target_os = "android"))]
                     ui.ctx().copy_text(diagnostic_log.clone());
                 }
                 if ui.button("Clear events").clicked() {
