@@ -104,12 +104,20 @@ impl AurawApp {
                     .android_original_hold
                     .is_some_and(|hold| hold.showing_original)
                 || (self.sidebar_tab == SidebarTab::Masks && self.active_mask_tool.is_some()));
+        // At any zoom above fit, horizontal one-finger drags belong to preview
+        // panning and must never be promoted into page navigation.
+        let zoomed_preview = zoomed_preview_blocks_tab_swipe(
+            self.active_tab,
+            self.preview_zoom,
+            self.tab_swipe_surface_id.is_some(),
+        );
         let captured_by_control =
             dragged_id.is_some_and(|id| Some(id) != self.tab_swipe_surface_id);
         if multi_touch
             || popup_open
             || crate::ui::components::adjustment_slider::slider_scroll_locked(ctx)
             || editing_mask
+            || zoomed_preview
             || captured_by_control
             || self.active_tab != self.android_tab_swipe.starting_tab
         {
@@ -151,6 +159,14 @@ impl AurawApp {
     }
 }
 
+fn zoomed_preview_blocks_tab_swipe(
+    active_tab: AppTab,
+    preview_zoom: f32,
+    has_preview_swipe_surface: bool,
+) -> bool {
+    active_tab == AppTab::Develop && has_preview_swipe_surface && preview_zoom > 1.0
+}
+
 fn next_tab(tab: AppTab) -> Option<AppTab> {
     match tab {
         AppTab::Library => Some(AppTab::Develop),
@@ -169,7 +185,7 @@ fn previous_tab(tab: AppTab) -> Option<AppTab> {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_tab, previous_tab, AppTab};
+    use super::{next_tab, previous_tab, zoomed_preview_blocks_tab_swipe, AppTab};
 
     #[test]
     fn tab_order_matches_android_page_order() {
@@ -179,5 +195,29 @@ mod tests {
         assert_eq!(previous_tab(AppTab::Settings), Some(AppTab::Develop));
         assert_eq!(previous_tab(AppTab::Develop), Some(AppTab::Library));
         assert_eq!(previous_tab(AppTab::Library), None);
+    }
+
+    #[test]
+    fn any_zoom_above_fit_blocks_preview_tab_swipes() {
+        assert!(!zoomed_preview_blocks_tab_swipe(
+            AppTab::Develop,
+            1.0,
+            true,
+        ));
+        assert!(zoomed_preview_blocks_tab_swipe(
+            AppTab::Develop,
+            1.000_001,
+            true,
+        ));
+        assert!(!zoomed_preview_blocks_tab_swipe(
+            AppTab::Library,
+            2.0,
+            true,
+        ));
+        assert!(!zoomed_preview_blocks_tab_swipe(
+            AppTab::Develop,
+            2.0,
+            false,
+        ));
     }
 }
