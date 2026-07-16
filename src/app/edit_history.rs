@@ -546,6 +546,14 @@ impl AurawApp {
                     _ => None,
                 })
         });
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_failed = false;
+        if self.ai_masks_need_update {
+            let (subject, objects) = self.generated_ai_mask_targets();
+            self.ai_masks_need_update = subject || !objects.is_empty();
+        }
         self.subject_consent_open = false;
         self.subject_receiver = None;
         self.subject_download_progress = None;

@@ -19,6 +19,25 @@ impl Sidebar {
         ui.heading("Masks");
         ui.add_space(4.0);
 
+        if app.ai_masks_need_update() {
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    "Inpainting changed the image used by existing Subject, Not Subject, or Object masks.",
+                );
+                ui.add_space(4.0);
+                if app.ai_mask_update_busy() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Updating AI masks from the erased image…");
+                    });
+                } else if ui.button("Update all AI masks").clicked() {
+                    app.request_update_all_ai_masks(frame);
+                }
+            });
+            ui.add_space(6.0);
+        }
+
         if app.masks.masks.is_empty() {
             ui.add_space(16.0);
             ui.vertical_centered(|ui| {

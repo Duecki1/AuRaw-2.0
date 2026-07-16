@@ -150,6 +150,194 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    pub(crate) fn ai_mask_update_busy(&self) -> bool {
+        self.ai_mask_update_active
+            || self.subject_receiver.is_some()
+            || self.object_receiver.is_some()
+            || self.subject_consent_open
+            || self.object_consent_open
+    }
+
+    pub(crate) fn ai_masks_need_update(&self) -> bool {
+        if !self.ai_masks_need_update {
+            return false;
+        }
+        let (subject, objects) = self.generated_ai_mask_targets();
+        subject || !objects.is_empty()
+    }
+
+    fn generated_ai_mask_targets(&self) -> (bool, VecDeque<(usize, usize)>) {
+        let mut subject = false;
+        let mut objects = VecDeque::new();
+        for (mask_index, local_mask) in self.masks.masks.iter().enumerate() {
+            for (component_index, component) in local_mask.components.iter().enumerate() {
+                match (component.kind, &component.geometry) {
+                    (
+                        MaskKind::Subject | MaskKind::Background,
+                        MaskGeometry::Ai { mask: Some(_), .. },
+                    ) => subject = true,
+                    (
+                        MaskKind::Object,
+                        MaskGeometry::Object {
+                            mask: Some(_),
+                            strokes,
+                            ..
+                        },
+                    ) if strokes
+                        .iter()
+                        .any(|stroke| stroke.positive && !stroke.points.is_empty()) =>
+                    {
+                        objects.push_back((mask_index, component_index));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (subject, objects)
+    }
+
+    pub(crate) fn note_inpainting_changed_for_ai_masks(&mut self) {
+        let (has_subject, object_targets) = self.generated_ai_mask_targets();
+        self.mask_source_cache = None;
+        self.subject_mask_cache = None;
+        self.object_cache = None;
+        self.object_generation = self.object_generation.wrapping_add(1);
+        self.object_pending_target = None;
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_failed = false;
+        self.ai_masks_need_update = has_subject || !object_targets.is_empty();
+    }
+
+    pub(crate) fn request_update_all_ai_masks(&mut self, frame: &eframe::Frame) {
+        if self.ai_mask_update_busy() {
+            self.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
+            return;
+        }
+        let (update_subject, object_targets) = self.generated_ai_mask_targets();
+        if !update_subject && object_targets.is_empty() {
+            self.ai_masks_need_update = false;
+            return;
+        }
+        #[cfg(not(target_os = "android"))]
+        if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
+            self.notice = Some(
+                "Choose an ONNX Runtime library under Settings before updating AI masks."
+                    .to_owned(),
+            );
+            return;
+        }
+
+        // Force a new canonical source because the previous cache predates the
+        // latest erased stroke. capture_mask_source renders the unadjusted RAW
+        // and composites the current inpainting layer over it.
+        self.mask_source_cache = None;
+        self.subject_mask_cache = None;
+        self.object_cache = None;
+        if let Err(error) = self.capture_mask_source(frame) {
+            self.notice = Some(error);
+            return;
+        }
+
+        self.ai_mask_update_active = true;
+        self.ai_mask_update_subject_pending = update_subject;
+        self.ai_mask_update_object_queue = object_targets;
+        self.ai_mask_update_failed = false;
+
+        if update_subject {
+            let path = self.birefnet_model_path();
+            if path.exists() {
+                self.start_subject_worker(path);
+            } else {
+                self.subject_consent_open = true;
+                self.egui_ctx.request_repaint();
+            }
+        } else {
+            self.continue_ai_mask_update();
+        }
+    }
+
+    fn continue_ai_mask_update(&mut self) {
+        if !self.ai_mask_update_active
+            || self.ai_mask_update_subject_pending
+            || self.subject_receiver.is_some()
+            || self.object_receiver.is_some()
+            || self.subject_consent_open
+            || self.object_consent_open
+        {
+            return;
+        }
+
+        while let Some((mask_index, component_index)) =
+            self.ai_mask_update_object_queue.pop_front()
+        {
+            let valid = self
+                .masks
+                .masks
+                .get(mask_index)
+                .and_then(|mask| mask.components.get(component_index))
+                .is_some_and(|component| {
+                    matches!(
+                        &component.geometry,
+                        MaskGeometry::Object {
+                            mask: Some(_),
+                            strokes,
+                            ..
+                        } if strokes
+                            .iter()
+                            .any(|stroke| stroke.positive && !stroke.points.is_empty())
+                    )
+                });
+            if !valid {
+                continue;
+            }
+
+            let (encoder, decoder) = self.sam21_model_paths();
+            if encoder.exists() && decoder.exists() {
+                self.start_object_worker(mask_index, component_index, encoder, decoder);
+            } else {
+                self.object_pending_target = Some((mask_index, component_index));
+                self.object_consent_open = true;
+                self.egui_ctx.request_repaint();
+            }
+            return;
+        }
+
+        self.finish_ai_mask_update();
+    }
+
+    fn finish_ai_mask_update(&mut self) {
+        if !self.ai_mask_update_active {
+            return;
+        }
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        if self.ai_mask_update_failed {
+            self.ai_masks_need_update = true;
+            self.notice = Some(
+                "Some AI masks could not be updated. The update button will remain available."
+                    .to_owned(),
+            );
+        } else {
+            self.ai_masks_need_update = false;
+            self.notice = Some("All AI masks were updated from the erased image.".to_owned());
+        }
+        self.egui_ctx.request_repaint();
+    }
+
+    fn cancel_ai_mask_update(&mut self) {
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_failed = false;
+        self.object_pending_target = None;
+        self.ai_masks_need_update = true;
+        self.notice = Some("AI-mask update canceled.".to_owned());
+        self.egui_ctx.request_repaint();
+    }
+
     pub(crate) fn capture_mask_source(&mut self, frame: &eframe::Frame) -> Result<(), String> {
         if self.mask_source_cache.is_some() {
             return Ok(());
@@ -212,8 +400,20 @@ impl AurawApp {
                 reference_pipeline.height,
             )
             .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
-        self.mask_source_cache =
-            MaskRgbImage::new(reference_pipeline.width, reference_pipeline.height, rgba);
+        let source = MaskRgbImage::new(
+            reference_pipeline.width,
+            reference_pipeline.height,
+            rgba,
+        )
+        .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
+        let source = if let Some(layer) = &self.inpaint_layer {
+            flatten_inpaint_source(source, layer).map_err(|error| {
+                format!("Could not apply the erased image to the AI-mask source: {error}")
+            })?
+        } else {
+            source
+        };
+        self.mask_source_cache = Some(source);
         Ok(())
     }
 
@@ -311,16 +511,32 @@ impl AurawApp {
             }
         }
         if let Some(result) = finished {
+            let updating_all =
+                self.ai_mask_update_active && self.ai_mask_update_subject_pending;
             self.subject_receiver = None;
             self.subject_download_progress = None;
             self.subject_inferencing = false;
-            match result {
+            let succeeded = match result {
                 Ok(result) => {
                     if let Some(mask) = MaskImage::new(result.width, result.height, result.mask) {
                         self.apply_subject_mask(mask);
+                        true
+                    } else {
+                        self.notice = Some(
+                            "Subject selection returned an invalid mask image.".to_owned(),
+                        );
+                        false
                     }
                 }
-                Err(error) => self.notice = Some(format!("Subject selection failed: {error}")),
+                Err(error) => {
+                    self.notice = Some(format!("Subject selection failed: {error}"));
+                    false
+                }
+            };
+            if updating_all {
+                self.ai_mask_update_subject_pending = false;
+                self.ai_mask_update_failed |= !succeeded;
+                self.continue_ai_mask_update();
             }
         }
     }
@@ -528,6 +744,8 @@ impl AurawApp {
         self.object_inferencing = false;
         let target = self.object_job_target.take();
         let generation = self.object_job_generation;
+        let updating_all = self.ai_mask_update_active && target.is_some();
+        let mut succeeded = false;
         if generation == self.object_generation {
             match (target, result) {
                 (Some((mask_index, component_index)), Ok(result)) => {
@@ -562,6 +780,10 @@ impl AurawApp {
                         self.object_cache = Some(((mask_index, component_index), cache));
                         self.mark_mask_geometry_dirty(mask_index);
                         self.blink_selected_component();
+                        succeeded = true;
+                    } else {
+                        self.notice =
+                            Some("Object selection returned an invalid mask image.".to_owned());
                     }
                 }
                 (_, Ok(_)) => {}
@@ -573,6 +795,12 @@ impl AurawApp {
         if let Some((mask_index, component_index)) = self.object_pending_target.take() {
             let (encoder, decoder) = self.sam21_model_paths();
             self.start_object_worker(mask_index, component_index, encoder, decoder);
+        } else if updating_all {
+            self.ai_mask_update_failed |= !succeeded;
+            if !succeeded {
+                self.ai_mask_update_object_queue.clear();
+            }
+            self.continue_ai_mask_update();
         }
     }
 
@@ -772,6 +1000,9 @@ impl AurawApp {
                         }
                         if ui.button("Cancel").clicked() {
                             self.subject_consent_open = false;
+                            if self.ai_mask_update_active {
+                                self.cancel_ai_mask_update();
+                            }
                         }
                     });
                 });
@@ -837,6 +1068,9 @@ impl AurawApp {
                         if ui.button("Cancel").clicked() {
                             self.object_consent_open = false;
                             self.object_pending_target = None;
+                            if self.ai_mask_update_active {
+                                self.cancel_ai_mask_update();
+                            }
                         }
                     });
                 });

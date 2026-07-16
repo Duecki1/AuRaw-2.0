@@ -221,6 +221,11 @@ impl AurawApp {
         self.mask_thumbnail_revision = self.mask_overlay_revision;
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
+        self.ai_masks_need_update = false;
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_failed = false;
         self.subject_consent_open = false;
         self.subject_receiver = None;
         self.subject_download_progress = None;
