@@ -977,6 +977,38 @@ enum LibraryCardAction {
     Delete { uri: String, display_name: String },
 }
 
+#[cfg(target_os = "android")]
+fn android_library_card_menu(
+    ui: &mut Ui,
+    source: &LibrarySource,
+    name: &str,
+    open_source: &mut Option<(LibrarySource, String)>,
+    library_action: &mut Option<LibraryCardAction>,
+) {
+    let LibrarySource::Android {
+        uri, display_name, ..
+    } = source;
+    if ui.button("Open").clicked() {
+        *open_source = Some((source.clone(), name.to_owned()));
+        ui.close();
+    }
+    if ui.button("Reset all adjustments").clicked() {
+        *library_action = Some(LibraryCardAction::ResetAdjustments {
+            uri: uri.clone(),
+            display_name: display_name.clone(),
+        });
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Delete").clicked() {
+        *library_action = Some(LibraryCardAction::Delete {
+            uri: uri.clone(),
+            display_name: display_name.clone(),
+        });
+        ui.close();
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 fn duplicate_raw_and_sidecar(raw_path: &Path) -> Result<PathBuf, String> {
     let parent = raw_path
@@ -1185,10 +1217,50 @@ impl Library {
                                     LibrarySource::Android { .. } => false,
                                 };
                                 let response = thumbnail_card(ui, entry, card_width, selected);
+                                #[cfg(target_os = "android")]
+                                let overflow_clicked = {
+                                    let source = entry.info.source.clone();
+                                    let name = entry.info.name.clone();
+                                    let menu_id = ui.make_persistent_id((
+                                        "android-library-card-overflow",
+                                        index,
+                                    ));
+                                    let overflow = crate::ui::android_overflow_menu(
+                                        ui,
+                                        response.rect,
+                                        menu_id,
+                                        38.0,
+                                        |ui| {
+                                            android_library_card_menu(
+                                                ui,
+                                                &source,
+                                                &name,
+                                                &mut open_source,
+                                                &mut library_action,
+                                            );
+                                        },
+                                    );
+                                    response.context_menu(|ui| {
+                                        android_library_card_menu(
+                                            ui,
+                                            &source,
+                                            &name,
+                                            &mut open_source,
+                                            &mut library_action,
+                                        );
+                                    });
+                                    overflow.clicked()
+                                };
+                                #[cfg(not(target_os = "android"))]
+                                let overflow_clicked = false;
+
                                 // egui reports a touch long-press as both a click and a
-                                // secondary click. Do not open the photo underneath the
-                                // context menu when the user holds a thumbnail.
-                                if response.clicked() && !response.secondary_clicked() {
+                                // secondary click. Do not open the photo underneath either
+                                // the context menu or the visible Android overflow button.
+                                if response.clicked()
+                                    && !response.secondary_clicked()
+                                    && !overflow_clicked
+                                {
                                     open_source =
                                         Some((entry.info.source.clone(), entry.info.name.clone()));
                                 }
@@ -1230,38 +1302,6 @@ impl Library {
                                         {
                                             library_action =
                                                 Some(LibraryCardAction::Delete(path.clone()));
-                                            ui.close();
-                                        }
-                                    });
-                                }
-                                #[cfg(target_os = "android")]
-                                {
-                                    let LibrarySource::Android {
-                                        uri, display_name, ..
-                                    } = &entry.info.source;
-                                    let source = entry.info.source.clone();
-                                    let name = entry.info.name.clone();
-                                    let uri = uri.clone();
-                                    let display_name = display_name.clone();
-                                    response.context_menu(|ui| {
-                                        if ui.button("Open").clicked() {
-                                            open_source = Some((source.clone(), name.clone()));
-                                            ui.close();
-                                        }
-                                        if ui.button("Reset all adjustments").clicked() {
-                                            library_action =
-                                                Some(LibraryCardAction::ResetAdjustments {
-                                                    uri: uri.clone(),
-                                                    display_name: display_name.clone(),
-                                                });
-                                            ui.close();
-                                        }
-                                        ui.separator();
-                                        if ui.button("Delete").clicked() {
-                                            library_action = Some(LibraryCardAction::Delete {
-                                                uri: uri.clone(),
-                                                display_name: display_name.clone(),
-                                            });
                                             ui.close();
                                         }
                                     });
