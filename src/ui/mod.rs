@@ -14,7 +14,7 @@ pub(crate) fn android_overflow_menu<R>(
     edge: f32,
     add_contents: impl FnOnce(&mut eframe::egui::Ui) -> R,
 ) -> eframe::egui::Response {
-    use eframe::egui::{self, Direction, Layout, RichText, UiBuilder};
+    use eframe::egui::{self, Direction, Layout, UiBuilder};
 
     const INSET: f32 = 5.0;
     let button_rect = egui::Rect::from_min_size(
@@ -31,10 +31,25 @@ pub(crate) fn android_overflow_menu<R>(
             .layout(Layout::centered_and_justified(Direction::LeftToRight)),
     );
     button_ui.spacing_mut().interact_size = button_rect.size();
-    button_ui
-        .menu_button(RichText::new("⋮").size(20.0).strong(), add_contents)
-        .response
-        .on_hover_text("More actions")
+    let response = button_ui.menu_button("", add_contents).response;
+
+    // Paint the ellipsis ourselves instead of relying on U+22EE. Some Android
+    // system-font combinations do not contain that glyph and render a tofu
+    // square in its place.
+    let visuals = button_ui.style().interact(&response);
+    let dot_radius = (edge * 0.055).clamp(1.1, 1.7);
+    let dot_spacing = edge * 0.18;
+    let center = response.rect.center();
+    let painter = button_ui.painter_at(response.rect);
+    for offset in [-dot_spacing, 0.0, dot_spacing] {
+        painter.circle_filled(
+            egui::pos2(center.x, center.y + offset),
+            dot_radius,
+            visuals.fg_stroke.color,
+        );
+    }
+
+    response.on_hover_text("More actions")
 }
 
 pub(crate) fn mask_component_color(index: usize) -> eframe::egui::Color32 {
