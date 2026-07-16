@@ -11,6 +11,59 @@ impl TopBar {
         Self::show_desktop(ui, app, frame);
     }
 
+    fn history_icon_button(
+        ui: &mut Ui,
+        enabled: bool,
+        redo: bool,
+        size: egui::Vec2,
+        hover_text: &str,
+    ) -> egui::Response {
+        // Paint the symbol instead of using Unicode arrow glyphs. Some Android
+        // font fallbacks render those glyphs as empty squares.
+        let response = ui
+            .add_enabled_ui(enabled, |ui| {
+                ui.add_sized(size, egui::Button::new(""))
+            })
+            .inner;
+        let widget_visuals = ui.style().interact(&response);
+        let stroke = egui::Stroke::new(
+            widget_visuals.fg_stroke.width.max(2.0),
+            widget_visuals.fg_stroke.color,
+        );
+        let radius = response.rect.width().min(response.rect.height()) * 0.25;
+        let center = response.rect.center() + egui::vec2(0.0, radius * 0.06);
+        let mut arc = Vec::with_capacity(17);
+        for step in 0..=16 {
+            let progress = step as f32 / 16.0;
+            let angle = (150.0_f32 - 220.0 * progress).to_radians();
+            let x = angle.cos() * radius;
+            let y = -angle.sin() * radius;
+            arc.push(center + egui::vec2(if redo { -x } else { x }, y));
+        }
+
+        let arrow_tip = arc[0];
+        ui.painter().add(egui::Shape::line(arc, stroke));
+        let head_direction = if redo { -1.0 } else { 1.0 };
+        ui.painter().line_segment(
+            [
+                arrow_tip,
+                arrow_tip
+                    + egui::vec2(head_direction * radius * 0.62, -radius * 0.44),
+            ],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                arrow_tip,
+                arrow_tip
+                    + egui::vec2(head_direction * radius * 0.62, radius * 0.44),
+            ],
+            stroke,
+        );
+
+        response.on_hover_text(hover_text)
+    }
+
     #[cfg(target_os = "android")]
     fn show_android(ui: &mut Ui, app: &mut AurawApp, _frame: &eframe::Frame) {
         let mut requested_tab = None;
@@ -38,15 +91,25 @@ impl TopBar {
             ui.add_space(3.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if ui
-                    .add_enabled(app.can_undo_edit(), egui::Button::new("↶ Undo"))
-                    .clicked()
+                if Self::history_icon_button(
+                    ui,
+                    app.can_undo_edit(),
+                    false,
+                    egui::vec2(42.0, 36.0),
+                    "Undo the last edit",
+                )
+                .clicked()
                 {
                     app.undo_edit();
                 }
-                if ui
-                    .add_enabled(app.can_redo_edit(), egui::Button::new("↷ Redo"))
-                    .clicked()
+                if Self::history_icon_button(
+                    ui,
+                    app.can_redo_edit(),
+                    true,
+                    egui::vec2(42.0, 36.0),
+                    "Redo the last edit",
+                )
+                .clicked()
                 {
                     app.redo_edit();
                 }
@@ -99,17 +162,25 @@ impl TopBar {
 
             if app.active_tab == AppTab::Develop {
                 ui.separator();
-                if ui
-                    .add_enabled(app.can_undo_edit(), egui::Button::new("↶ Undo"))
-                    .on_hover_text("Undo the last edit (Ctrl/Cmd+Z)")
-                    .clicked()
+                if Self::history_icon_button(
+                    ui,
+                    app.can_undo_edit(),
+                    false,
+                    egui::vec2(32.0, 26.0),
+                    "Undo the last edit (Ctrl/Cmd+Z)",
+                )
+                .clicked()
                 {
                     app.undo_edit();
                 }
-                if ui
-                    .add_enabled(app.can_redo_edit(), egui::Button::new("↷ Redo"))
-                    .on_hover_text("Redo the last edit (Ctrl/Cmd+Shift+Z or Ctrl+Y)")
-                    .clicked()
+                if Self::history_icon_button(
+                    ui,
+                    app.can_redo_edit(),
+                    true,
+                    egui::vec2(32.0, 26.0),
+                    "Redo the last edit (Ctrl/Cmd+Shift+Z or Ctrl+Y)",
+                )
+                .clicked()
                 {
                     app.redo_edit();
                 }
