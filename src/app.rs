@@ -5,8 +5,9 @@ use crate::ai_masks::{
 use crate::inpainting::{spawn_inpaint, InpaintEvent, InpaintRequest, LAMA_MODEL_BYTES};
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
-    load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings,
-    ExposureParams, GpuParams, InpaintLayer, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry,
+    compose_inpaint_strokes, load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent,
+    ExportMetadata, ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke,
+    LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry,
     MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
     RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
@@ -250,6 +251,7 @@ struct LoadedPreview {
     pipeline: RawGpuPipeline,
     rendered_exposure: ExposureParams,
     rendered_masks: MaskStack,
+    inpaint_strokes: Vec<InpaintStroke>,
     mask_source: Option<MaskRgbImage>,
     lens_correction: LensCorrectionState,
     sidecar_target: crate::sidecar::SidecarTarget,
@@ -478,6 +480,7 @@ pub struct AurawApp {
     pub(crate) inpaint_brush_size: f32,
     pub(crate) inpaint_brush_feather: f32,
     pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,
+    pub(crate) inpaint_strokes: Vec<InpaintStroke>,
     pub(crate) last_inpaint_brush_point: Option<[f32; 2]>,
     pub(crate) inpaint_layer: Option<InpaintLayer>,
     pub(crate) inpaint_texture: Option<egui::TextureHandle>,
@@ -486,6 +489,8 @@ pub struct AurawApp {
     pub(crate) inpaint_stroke_texture: Option<egui::TextureHandle>,
     pub(crate) inpaint_stroke_texture_key: Option<(usize, u32, u32)>,
     inpaint_pending_source: Option<MaskRgbImage>,
+    inpaint_active_dabs: Option<Vec<crate::pipeline::BrushDab>>,
+    inpaint_revision: u64,
     inpaint_consent_open: bool,
     inpaint_receiver: Option<mpsc::Receiver<InpaintEvent>>,
     inpaint_download_progress: Option<(u64, u64)>,

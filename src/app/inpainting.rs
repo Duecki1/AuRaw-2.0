@@ -16,6 +16,7 @@ impl AurawApp {
             return;
         }
         self.inpaint_stroke.clear();
+        self.inpaint_strokes.clear();
         self.last_inpaint_brush_point = None;
         self.inpaint_layer = None;
         self.inpaint_texture = None;
@@ -23,12 +24,14 @@ impl AurawApp {
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
         self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
+        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.notice = Some("Inpainting cleared.".to_owned());
         self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn reset_inpainting_state(&mut self) {
         self.inpaint_stroke.clear();
+        self.inpaint_strokes.clear();
         self.last_inpaint_brush_point = None;
         self.inpaint_layer = None;
         self.inpaint_texture = None;
@@ -36,6 +39,8 @@ impl AurawApp {
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
         self.inpaint_pending_source = None;
+        self.inpaint_active_dabs = None;
+        self.inpaint_revision = 0;
         self.inpaint_consent_open = false;
         self.inpaint_receiver = None;
         self.inpaint_download_progress = None;
@@ -117,6 +122,7 @@ impl AurawApp {
             return;
         }
         let dabs = std::mem::take(&mut self.inpaint_stroke);
+        self.inpaint_active_dabs = Some(dabs.clone());
         self.last_inpaint_brush_point = None;
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
@@ -162,20 +168,41 @@ impl AurawApp {
             self.inpaint_inferencing = false;
             match result {
                 Ok(result) => {
-                    let merged = if let Some(previous) = &self.inpaint_layer {
-                        merge_inpaint_result(previous, result)
+                    let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
+                    if let Some(stroke) = InpaintStroke::from_result(dabs, &result) {
+                        self.inpaint_strokes.push(stroke);
+                        self.rebuild_inpaint_layer();
+                        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+                        self.notice = Some("Erase complete.".to_owned());
                     } else {
-                        result
-                    };
-                    self.inpaint_layer = Some(merged);
-                    self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
-                    self.inpaint_texture_key = None;
-                    self.notice = Some("Erase complete.".to_owned());
+                        self.notice = Some("Inpainting returned an empty result.".to_owned());
+                    }
                 }
-                Err(error) => self.notice = Some(format!("Inpainting failed: {error}")),
+                Err(error) => {
+                    self.inpaint_active_dabs = None;
+                    self.notice = Some(format!("Inpainting failed: {error}"));
+                }
             }
             self.egui_ctx.request_repaint();
         }
+    }
+
+    pub(crate) fn delete_inpaint_stroke(&mut self, index: usize) {
+        if self.inpaint_busy() || index >= self.inpaint_strokes.len() {
+            return;
+        }
+        self.inpaint_strokes.remove(index);
+        self.rebuild_inpaint_layer();
+        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+        self.notice = Some("Inpainting stroke deleted.".to_owned());
+        self.egui_ctx.request_repaint();
+    }
+
+    fn rebuild_inpaint_layer(&mut self) {
+        self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
+        self.inpaint_texture = None;
+        self.inpaint_texture_key = None;
+        self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -224,6 +251,7 @@ impl AurawApp {
                         if ui.button("Cancel").clicked() {
                             self.inpaint_consent_open = false;
                             self.inpaint_pending_source = None;
+                            self.inpaint_active_dabs = None;
                             self.inpaint_stroke.clear();
                             self.last_inpaint_brush_point = None;
                         }
@@ -262,63 +290,65 @@ impl AurawApp {
     }
 }
 
-fn merge_inpaint_result(previous: &InpaintLayer, result: InpaintLayer) -> InpaintLayer {
-    let Some(result_pixels) = usize::try_from(result.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(result.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-    else {
-        return result;
-    };
-    let Some(previous_pixels) = usize::try_from(previous.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(previous.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-    else {
-        return result;
-    };
-    if result.mask.len() != result_pixels
-        || previous.mask.len() != previous_pixels
-        || result.width == 0
-        || result.height == 0
-        || previous.width == 0
-        || previous.height == 0
+fn composite_inpaint_thumbnail(
+    thumbnail: &mut crate::pipeline::RawThumbnail,
+    layer: &InpaintLayer,
+) -> Result<(), String> {
+    if thumbnail.width == 0
+        || thumbnail.height == 0
+        || layer.width == 0
+        || layer.height == 0
     {
-        return result;
+        return Err("The inpainting thumbnail dimensions are invalid.".to_owned());
+    }
+    let thumbnail_pixels = usize::try_from(thumbnail.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(thumbnail.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| "The thumbnail dimensions are too large.".to_owned())?;
+    if thumbnail.rgba.len() != thumbnail_pixels.saturating_mul(4) {
+        return Err("The thumbnail buffer is incomplete.".to_owned());
+    }
+    let layer_pixels = usize::try_from(layer.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(layer.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| "The inpainting dimensions are too large.".to_owned())?;
+    if layer.mask.len() != layer_pixels || layer.rgba.len() != layer_pixels.saturating_mul(4) {
+        return Err("The inpainting layer is incomplete.".to_owned());
     }
 
-    let mut mask = result.mask.to_vec();
-    if previous.width == result.width && previous.height == result.height {
-        for (current, prior) in mask.iter_mut().zip(previous.mask.iter().copied()) {
-            *current = (*current).max(prior);
-        }
-    } else {
-        for y in 0..result.height {
-            let previous_y = ((y as f32 + 0.5) * previous.height as f32 / result.height as f32)
+    for y in 0..thumbnail.height {
+        let layer_y = ((y as f32 + 0.5) * layer.height as f32 / thumbnail.height as f32)
+            .floor()
+            .clamp(0.0, layer.height.saturating_sub(1) as f32) as u32;
+        for x in 0..thumbnail.width {
+            let layer_x = ((x as f32 + 0.5) * layer.width as f32 / thumbnail.width as f32)
                 .floor()
-                .clamp(0.0, previous.height.saturating_sub(1) as f32)
-                as u32;
-            for x in 0..result.width {
-                let previous_x = ((x as f32 + 0.5) * previous.width as f32
-                    / result.width as f32)
-                    .floor()
-                    .clamp(0.0, previous.width.saturating_sub(1) as f32)
-                    as u32;
-                let current_index = (y as usize * result.width as usize + x as usize) as usize;
-                let previous_index =
-                    (previous_y as usize * previous.width as usize + previous_x as usize) as usize;
-                mask[current_index] = mask[current_index].max(previous.mask[previous_index]);
+                .clamp(0.0, layer.width.saturating_sub(1) as f32) as u32;
+            let layer_index = layer_y as usize * layer.width as usize + layer_x as usize;
+            let alpha = layer.mask[layer_index] as f32 / 255.0;
+            if alpha <= 0.0 {
+                continue;
             }
+            let destination = (y as usize * thumbnail.width as usize + x as usize) * 4;
+            let source = layer_index * 4;
+            for channel in 0..3 {
+                let base = thumbnail.rgba[destination + channel] as f32;
+                let replacement = layer.rgba[source + channel] as f32;
+                thumbnail.rgba[destination + channel] =
+                    (base + (replacement - base) * alpha).round().clamp(0.0, 255.0) as u8;
+            }
+            thumbnail.rgba[destination + 3] = 255;
         }
     }
-
-    InpaintLayer::new(result.width, result.height, result.rgba.to_vec(), mask).unwrap_or(result)
+    Ok(())
 }
 
 fn flatten_inpaint_source(

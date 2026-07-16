@@ -240,6 +240,7 @@ impl AurawApp {
             inpaint_brush_size: 0.055,
             inpaint_brush_feather: 0.55,
             inpaint_stroke: Vec::new(),
+            inpaint_strokes: Vec::new(),
             last_inpaint_brush_point: None,
             inpaint_layer: None,
             inpaint_texture: None,
@@ -248,6 +249,8 @@ impl AurawApp {
             inpaint_stroke_texture: None,
             inpaint_stroke_texture_key: None,
             inpaint_pending_source: None,
+            inpaint_active_dabs: None,
+            inpaint_revision: 0,
             inpaint_consent_open: false,
             inpaint_receiver: None,
             inpaint_download_progress: None,
@@ -398,6 +401,7 @@ impl AurawApp {
             inpaint_brush_size: 0.055,
             inpaint_brush_feather: 0.55,
             inpaint_stroke: Vec::new(),
+            inpaint_strokes: Vec::new(),
             last_inpaint_brush_point: None,
             inpaint_layer: None,
             inpaint_texture: None,
@@ -406,6 +410,8 @@ impl AurawApp {
             inpaint_stroke_texture: None,
             inpaint_stroke_texture_key: None,
             inpaint_pending_source: None,
+            inpaint_active_dabs: None,
+            inpaint_revision: 0,
             inpaint_consent_open: false,
             inpaint_receiver: None,
             inpaint_download_progress: None,
@@ -752,6 +758,7 @@ impl AurawApp {
                     let (
                         rendered_exposure,
                         mut rendered_masks,
+                        inpaint_strokes,
                         saved_lens,
                         mut sidecar_warning,
                         sidecar_needs_rewrite,
@@ -764,6 +771,7 @@ impl AurawApp {
                             (
                                 loaded.edits.exposure,
                                 Arc::unwrap_or_clone(loaded.edits.masks),
+                                Arc::unwrap_or_clone(loaded.edits.inpainting),
                                 Some(loaded.edits.lens),
                                 warning,
                                 loaded.migrated,
@@ -772,6 +780,7 @@ impl AurawApp {
                         Ok(None) => (
                             initial_exposure,
                             MaskStack::default(),
+                            Vec::new(),
                             None,
                             None,
                             false,
@@ -779,6 +788,7 @@ impl AurawApp {
                         Err(error) => (
                             initial_exposure,
                             MaskStack::default(),
+                            Vec::new(),
                             None,
                             Some(format!(
                                 "Could not load this RAW's sidecar; using default edits: {error}"
@@ -970,6 +980,7 @@ impl AurawApp {
                         pipeline,
                         rendered_exposure,
                         rendered_masks,
+                        inpaint_strokes,
                         mask_source,
                         lens_correction,
                         sidecar_target,
@@ -1128,6 +1139,12 @@ impl AurawApp {
                 self.gpu_pipeline = Some(loaded.pipeline);
                 self.exposure = loaded.rendered_exposure;
                 self.masks = loaded.rendered_masks;
+                self.inpaint_strokes = loaded.inpaint_strokes;
+                self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
+                self.inpaint_texture = None;
+                self.inpaint_texture_key = None;
+                self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
+                self.inpaint_revision = 0;
                 self.rehydrate_restored_mask_state();
                 if loaded.mask_source.is_some() {
                     self.mask_source_cache = loaded.mask_source;
