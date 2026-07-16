@@ -119,7 +119,7 @@ impl Sidebar {
                             ui,
                             response.rect,
                             menu_id,
-                            30.0,
+                            22.0,
                             |ui| {
                                 let mut geometry_changed = false;
                                 Self::mask_group_context_menu(
@@ -203,7 +203,7 @@ impl Sidebar {
                                     ui,
                                     response.rect,
                                     menu_id,
-                                    28.0,
+                                    20.0,
                                     |ui| {
                                         Self::submask_context_menu(
                                             ui,

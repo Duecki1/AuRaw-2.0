@@ -73,7 +73,9 @@ def test_android_thumbnail_long_press_opens_context_menu_without_opening_photo()
 def test_android_library_cards_have_visible_overflow_menu_buttons() -> None:
     ui = (ROOT / "src/ui/mod.rs").read_text(encoding="utf-8")
     assert 'fn android_overflow_menu' in ui
-    assert 'RichText::new("⋮")' in ui
+    assert 'painter.circle_filled(' in ui
+    assert 'menu_button("", add_contents)' in ui
+    assert 'RichText::new("⋮")' not in ui
     assert 'android-library-card-overflow' in LIBRARY
     assert 'android_library_card_menu(' in LIBRARY
     assert '&& !overflow_clicked' in LIBRARY
@@ -84,3 +86,5 @@ def test_android_mask_cards_have_visible_overflow_menu_buttons() -> None:
     assert 'android-submask-overflow' in MASK_UI
     assert MASK_UI.count('crate::ui::android_overflow_menu(') >= 2
     assert MASK_UI.count('&& !overflow_clicked') >= 2
+    assert 'response.rect,\n                            menu_id,\n                            22.0,' in MASK_UI
+    assert 'response.rect,\n                                    menu_id,\n                                    20.0,' in MASK_UI
