@@ -422,6 +422,11 @@ pub struct AurawApp {
     pub(crate) mask_thumbnail_component_textures: Vec<egui::TextureHandle>,
     pub(crate) mask_source_cache: Option<MaskRgbImage>,
     pub(crate) subject_mask_cache: Option<MaskImage>,
+    pub(crate) ai_masks_need_update: bool,
+    ai_mask_update_active: bool,
+    ai_mask_update_subject_pending: bool,
+    ai_mask_update_object_queue: VecDeque<(usize, usize)>,
+    ai_mask_update_failed: bool,
     #[cfg(not(target_os = "android"))]
     pub(crate) onnx_runtime_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]

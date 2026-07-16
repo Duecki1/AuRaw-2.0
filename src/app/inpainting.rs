@@ -25,6 +25,7 @@ impl AurawApp {
         self.inpaint_stroke_texture_key = None;
         self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+        self.note_inpainting_changed_for_ai_masks();
         self.notice = Some("Inpainting cleared.".to_owned());
         self.egui_ctx.request_repaint();
     }
@@ -173,6 +174,7 @@ impl AurawApp {
                         self.inpaint_strokes.push(stroke);
                         self.rebuild_inpaint_layer();
                         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+                        self.note_inpainting_changed_for_ai_masks();
                         self.notice = Some("Erase complete.".to_owned());
                     } else {
                         self.notice = Some("Inpainting returned an empty result.".to_owned());
@@ -194,6 +196,7 @@ impl AurawApp {
         self.inpaint_strokes.remove(index);
         self.rebuild_inpaint_layer();
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+        self.note_inpainting_changed_for_ai_masks();
         self.notice = Some("Inpainting stroke deleted.".to_owned());
         self.egui_ctx.request_repaint();
     }

@@ -190,6 +190,11 @@ impl AurawApp {
             mask_thumbnail_component_textures: Vec::new(),
             mask_source_cache: None,
             subject_mask_cache: None,
+            ai_masks_need_update: false,
+            ai_mask_update_active: false,
+            ai_mask_update_subject_pending: false,
+            ai_mask_update_object_queue: VecDeque::new(),
+            ai_mask_update_failed: false,
             onnx_runtime_path,
             onnx_runtime_sha256,
             status: "Open a RAW file to get started.".to_owned(),
@@ -353,6 +358,11 @@ impl AurawApp {
             mask_thumbnail_component_textures: Vec::new(),
             mask_source_cache: None,
             subject_mask_cache: None,
+            ai_masks_need_update: false,
+            ai_mask_update_active: false,
+            ai_mask_update_subject_pending: false,
+            ai_mask_update_object_queue: VecDeque::new(),
+            ai_mask_update_failed: false,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
             lens_correction,
@@ -669,6 +679,11 @@ impl AurawApp {
         self.mask_thumbnail_revision = self.mask_overlay_revision;
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
+        self.ai_masks_need_update = false;
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_failed = false;
         self.subject_consent_open = false;
         self.subject_receiver = None;
         self.subject_download_progress = None;
@@ -947,6 +962,13 @@ impl AurawApp {
                             rgba,
                         )
                         .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
+                        let source = if let Some(layer) = compose_inpaint_strokes(&inpaint_strokes) {
+                            flatten_inpaint_source(source, &layer).map_err(|error| {
+                                format!("could not apply inpainting to mask source: {error}")
+                            })?
+                        } else {
+                            source
+                        };
                         install_missing_range_sources(&mut rendered_masks, &source);
                         mask_source = Some(source);
                     }
