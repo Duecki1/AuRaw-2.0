@@ -116,6 +116,27 @@ pub fn device_diagnostics(app: &AndroidApp) -> Result<String, String> {
     .map_err(|error| format!("could not read Android device diagnostics: {error:#}"))
 }
 
+pub fn copy_text_to_clipboard(
+    app: &AndroidApp,
+    label: &str,
+    text: &str,
+) -> Result<(), String> {
+    let label = label.to_owned();
+    let text = text.to_owned();
+    with_activity(app, |env, activity| {
+        let label = env.new_string(&label)?;
+        let text = env.new_string(&text)?;
+        env.call_method(
+            activity,
+            jni::jni_str!("copyTextToClipboard"),
+            jni::jni_sig!((JString, JString) -> void),
+            &[JValue::Object(&label), JValue::Object(&text)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not copy diagnostics to Android clipboard: {error:#}"))
+}
+
 pub fn performance_settings_path(app: &AndroidApp) -> Result<PathBuf, String> {
     let path = with_activity(app, |env, activity| {
         let object = env

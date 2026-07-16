@@ -3,6 +3,8 @@ package de.duecki.auraw;
 import android.Manifest;
 import android.app.NativeActivity;
 import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.ContentUris;
 import android.content.ContentResolver;
 import android.content.ContentValues;
@@ -17,6 +19,7 @@ import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -223,6 +226,24 @@ public final class AuRawActivity extends NativeActivity {
                             + MAX_RAW_IMPORT_BYTES);
         }
         return storeRawInLibrary(uri, displayName);
+    }
+
+    /** Copies text through Android's native clipboard service. */
+    public void copyTextToClipboard(String label, String text) {
+        final String safeLabel = label == null || label.isEmpty()
+                ? "AuRaw diagnostics"
+                : label;
+        final String safeText = text == null ? "" : text;
+        runOnUiThread(() -> {
+            ClipboardManager clipboard =
+                    (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) {
+                Toast.makeText(this, "Clipboard is unavailable", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            clipboard.setPrimaryClip(ClipData.newPlainText(safeLabel, safeText));
+            Toast.makeText(this, "Diagnostic log copied", Toast.LENGTH_SHORT).show();
+        });
     }
 
     /** Device information displayed in AuRaw's in-app diagnostic log. */

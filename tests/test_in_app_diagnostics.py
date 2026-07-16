@@ -29,3 +29,17 @@ def test_diagnostics_capture_device_gpu_raw_and_timing_information():
     assert "RAW decode finished" in lifecycle
     assert "Preview proxy prepared" in lifecycle
     assert "First export tile completed" in export
+
+
+def test_android_diagnostics_uses_native_clipboard_bridge():
+    settings = (ROOT / "src/ui/settings.rs").read_text(encoding="utf-8")
+    android = (ROOT / "src/android.rs").read_text(encoding="utf-8")
+    activity = (
+        ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java"
+    ).read_text(encoding="utf-8")
+
+    assert 'app.copy_text_to_clipboard("AuRaw diagnostics", &diagnostic_log)' in settings
+    assert 'jni::jni_str!("copyTextToClipboard")' in android
+    assert "ClipboardManager" in activity
+    assert "setPrimaryClip" in activity
+    assert 'Toast.makeText(this, "Diagnostic log copied"' in activity

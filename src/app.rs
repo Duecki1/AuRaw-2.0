@@ -502,6 +502,11 @@ impl AurawApp {
     pub(crate) fn note_tab_swipe_surface(&mut self, id: egui::Id) {
         self.tab_swipe_surface_id = Some(id);
     }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn copy_text_to_clipboard(&self, label: &str, text: &str) -> Result<(), String> {
+        crate::android::copy_text_to_clipboard(&self.android_app, label, text)
+    }
 }
 
 include!("app/lifecycle.rs");
