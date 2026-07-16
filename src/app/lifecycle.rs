@@ -249,6 +249,7 @@ impl AurawApp {
     #[cfg(not(target_os = "android"))]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self::install_lightroom_visuals(&cc.egui_ctx);
+        crate::diagnostics::record("AuRaw desktop UI initialized");
         Self::empty(&cc.egui_ctx)
     }
 
@@ -259,6 +260,11 @@ impl AurawApp {
     ) -> Self {
         crate::android::install_context(&cc.egui_ctx);
         Self::install_lightroom_visuals(&cc.egui_ctx);
+        match crate::android::device_diagnostics(&android_app) {
+            Ok(info) => crate::diagnostics::set_device_info(info),
+            Err(error) => crate::diagnostics::record(error),
+        }
+        crate::diagnostics::record("AuRaw Android UI initialized");
         let performance_settings_path = crate::android::performance_settings_path(&android_app)
             .map_err(|error| log::warn!("{error}"))
             .ok();
@@ -569,6 +575,11 @@ impl AurawApp {
         let decode_gate = self.library.decode_gate();
         let raw_cache_key = raw_cache_key_for_target(&sidecar_target);
         let cached_original_raw = self.cached_raw_decode(&raw_cache_key);
+        let decode_was_cached = cached_original_raw.is_some();
+        crate::diagnostics::record(format!(
+            "RAW open requested: label=\"{label}\" cached={decode_was_cached} preview_quality={}",
+            self.preview_quality.label()
+        ));
         let sidecar_generation = self.begin_sidecar_open();
         {
             let mut renderer = render_state.renderer.write();
@@ -670,11 +681,18 @@ impl AurawApp {
         let spawn_result = std::thread::Builder::new()
             .name("auraw-decode-preview".to_owned())
             .spawn(move || {
+                let open_started = Instant::now();
+                let sidecar_started = Instant::now();
                 let loaded_sidecar = load_sidecar_for_target(
                     &sidecar_target,
                     #[cfg(target_os = "android")]
                     &sidecar_android_app,
                 );
+                crate::diagnostics::record(format!(
+                    "RAW sidecar lookup finished in {:.3}s",
+                    sidecar_started.elapsed().as_secs_f64()
+                ));
+                let decode_started = Instant::now();
                 let decoded: anyhow::Result<Arc<LoadedRaw>> = match cached_original_raw {
                     Some(raw) => Ok(raw),
                     None => match decode_gate.write() {
@@ -682,6 +700,19 @@ impl AurawApp {
                         Err(_) => Err(anyhow::anyhow!("RAW decode gate was poisoned")),
                     },
                 };
+                match &decoded {
+                    Ok(raw) => {
+                        crate::diagnostics::record(format!(
+                            "RAW decode finished in {:.3}s (cached={decode_was_cached})",
+                            decode_started.elapsed().as_secs_f64()
+                        ));
+                        crate::diagnostics::record_raw("Decoded RAW", raw);
+                    }
+                    Err(error) => crate::diagnostics::record(format!(
+                        "RAW decode failed after {:.3}s: {error:#}",
+                        decode_started.elapsed().as_secs_f64()
+                    )),
+                }
                 if delete_after_decode {
                     remove_temporary_raw(&path);
                 }
@@ -724,6 +755,18 @@ impl AurawApp {
                             false,
                         ),
                     };
+                    crate::diagnostics::record(format!(
+                        "Edit state: process_version={} exposure={:.3} temperature={:.3} tint={:.3} saturation={:.3} vibrance={:.3} demosaic={:?} highlight={:?} masks={}",
+                        rendered_exposure.process_version,
+                        rendered_exposure.exposure,
+                        rendered_exposure.temperature,
+                        rendered_exposure.tint,
+                        rendered_exposure.saturation,
+                        rendered_exposure.vibrance,
+                        rendered_exposure.demosaic_mode,
+                        rendered_exposure.highlight_method,
+                        rendered_masks.masks.len(),
+                    ));
                     let original_raw = decoded.map_err(|error| format!("{error:#}"))?;
                     let mut lens_correction =
                         LensCorrectionState::from_catalog(lensfun_catalog(&original_raw));
@@ -773,18 +816,29 @@ impl AurawApp {
                     let preview_spec = ProxySpec {
                         max_edge: preview_quality_setting.proxy_edge(),
                     };
+                    let proxy_started = Instant::now();
                     let preview_raw =
                         if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
                             Arc::clone(&full_raw)
                         } else {
                             Arc::new(build_proxy(&full_raw, preview_spec))
                         };
+                    crate::diagnostics::record(format!(
+                        "Preview proxy prepared in {:.3}s: {}x{} -> {}x{}",
+                        proxy_started.elapsed().as_secs_f64(),
+                        full_raw.width,
+                        full_raw.height,
+                        preview_raw.width,
+                        preview_raw.height
+                    ));
+                    crate::diagnostics::record_raw("Preview proxy", &preview_raw);
                     let initial_params =
                         GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw);
                     // Interactive previews use bounded half-float working
                     // surfaces on every platform. Full-float remains mandatory
                     // for regression rendering and tiled export readback.
                     let preview_quality = ProcessingQuality::Preview;
+                    let pipeline_started = Instant::now();
                     let pipeline = RawGpuPipeline::new_headless_with_quality(
                         &device,
                         &queue,
@@ -793,6 +847,10 @@ impl AurawApp {
                         preview_quality,
                     )
                     .map_err(|error| format!("GPU preview setup failed: {error:#}"))?;
+                    crate::diagnostics::record(format!(
+                        "GPU preview pipeline created in {:.3}s",
+                        pipeline_started.elapsed().as_secs_f64()
+                    ));
 
                     // Range and promptable-object source images are canonical RAW renditions,
                     // not user edit data. Sidecars omit these large shared
@@ -860,7 +918,16 @@ impl AurawApp {
                         &rendered_masks,
                         &preview_raw,
                     )?;
+                    let first_render_started = Instant::now();
                     pipeline.recompute(&queue, &device, &params);
+                    crate::diagnostics::record(format!(
+                        "Initial GPU preview dispatch submitted in {:.3}s",
+                        first_render_started.elapsed().as_secs_f64()
+                    ));
+                    crate::diagnostics::record(format!(
+                        "RAW open worker finished in {:.3}s",
+                        open_started.elapsed().as_secs_f64()
+                    ));
 
                     Ok(LoadedPreview {
                         source_path,
@@ -881,6 +948,12 @@ impl AurawApp {
                     })
                 })();
 
+                if let Err(error) = &result {
+                    crate::diagnostics::record(format!(
+                        "RAW open worker failed after {:.3}s: {error}",
+                        open_started.elapsed().as_secs_f64()
+                    ));
+                }
                 let _ = sender.send(LoadEvent::Finished(result));
                 repaint.request_repaint();
             });

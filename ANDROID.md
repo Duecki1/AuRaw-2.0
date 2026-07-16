@@ -129,6 +129,15 @@ supports them. Pass 3 reuses pass 1's intermediate texture, saving eight bytes
 of GPU allocation per RAW pixel (about 192 MB for a 24-megapixel file). Very
 large RAW files still require substantial device GPU memory.
 
+## In-app diagnostics
+
+The Settings tab includes a **Diagnostics** field with a **Copy log** button.
+It records the Android model and ABI, selected wgpu backend and GPU driver,
+RAW white balance / black and white levels / camera matrix, sampled input
+fingerprints, preview decode and proxy timings, and tiled-export preparation
+timings. Open the same RAW and run an export before copying the report from
+each device.
+
 ## Linux remains unchanged
 
 On the computer where LibRaw is installed in `/usr/local`, continue to use:

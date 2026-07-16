@@ -225,6 +225,18 @@ public final class AuRawActivity extends NativeActivity {
         return storeRawInLibrary(uri, displayName);
     }
 
+    /** Device information displayed in AuRaw's in-app diagnostic log. */
+    public String deviceDiagnostics() {
+        return "manufacturer=" + Build.MANUFACTURER
+                + "\nbrand=" + Build.BRAND
+                + "\nmodel=" + Build.MODEL
+                + "\ndevice=" + Build.DEVICE
+                + "\nproduct=" + Build.PRODUCT
+                + "\nandroid_release=" + Build.VERSION.RELEASE
+                + "\nsdk=" + Build.VERSION.SDK_INT
+                + "\nsupported_abis=" + String.join(",", Build.SUPPORTED_ABIS);
+    }
+
     /** Private persistent path used for small application preferences. */
     public String performanceSettingsPath() {
         return new File(getFilesDir(), "auraw-performance.json").getAbsolutePath();

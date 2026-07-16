@@ -170,6 +170,41 @@ impl Settings {
             });
         }
 
+        ui.add_space(8.0);
+        Self::group(ui, content_width, |ui| {
+            ui.heading("Diagnostics");
+            ui.add(
+                egui::Label::new(
+                    "Open the same RAW and run an export on each device, then use Copy log. The report includes Android, GPU/backend, RAW calibration, fingerprints, and timing information.",
+                )
+                .wrap(),
+            );
+            ui.add_space(4.0);
+
+            let mut diagnostic_log = crate::diagnostics::snapshot();
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Copy log").clicked() {
+                    ui.ctx().copy_text(diagnostic_log.clone());
+                }
+                if ui.button("Clear events").clicked() {
+                    crate::diagnostics::clear();
+                    diagnostic_log = crate::diagnostics::snapshot();
+                }
+            });
+
+            let rows = match layout {
+                ScreenLayout::Horizontal => 16,
+                ScreenLayout::Vertical => 12,
+            };
+            let mut diagnostic_view = diagnostic_log.as_str();
+            ui.add(
+                egui::TextEdit::multiline(&mut diagnostic_view)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_rows(rows)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+
         if !app.expert_mode {
             return;
         }

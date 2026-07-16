@@ -100,6 +100,22 @@ pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
     .map_err(|error| format!("could not open Android's file picker: {error:#}"))
 }
 
+pub fn device_diagnostics(app: &AndroidApp) -> Result<String, String> {
+    with_activity(app, |env, activity| {
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("deviceDiagnostics"),
+                jni::jni_sig!(() -> JString),
+                &[],
+            )?
+            .l()?;
+        let string = env.cast_local::<JString>(object)?;
+        Ok(string.to_string())
+    })
+    .map_err(|error| format!("could not read Android device diagnostics: {error:#}"))
+}
+
 pub fn performance_settings_path(app: &AndroidApp) -> Result<PathBuf, String> {
     let path = with_activity(app, |env, activity| {
         let object = env
