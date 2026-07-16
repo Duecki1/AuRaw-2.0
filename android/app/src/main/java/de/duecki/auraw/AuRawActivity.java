@@ -232,9 +232,6 @@ public final class AuRawActivity extends NativeActivity {
 
     /** Human-readable storage location shown by the Rust library UI. */
     public String rawLibraryLocation() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return RAW_LIBRARY_RELATIVE_PATH.substring(0, RAW_LIBRARY_RELATIVE_PATH.length() - 1);
-        }
         return legacyRawLibraryDirectory().getAbsolutePath();
     }
 
@@ -245,9 +242,7 @@ public final class AuRawActivity extends NativeActivity {
      */
     public String listRawLibrary() {
         try {
-            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                    ? listScopedRawLibrary()
-                    : listLegacyRawLibrary();
+            return listLegacyRawLibrary();
         } catch (Exception error) {
             throw new IllegalStateException("Could not list the RAW library", error);
         }
@@ -339,15 +334,9 @@ public final class AuRawActivity extends NativeActivity {
     public void removeRawSidecar(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            for (Uri sidecarUri : scopedSidecarUris(displayName)) {
-                getContentResolver().delete(sidecarUri, null, null);
-            }
-        } else {
-            File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
-            if (sidecar.exists() && !sidecar.delete()) {
-                throw new IllegalStateException("Could not delete the RAW sidecar");
-            }
+        File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
+        if (sidecar.exists() && !sidecar.delete()) {
+            throw new IllegalStateException("Could not delete the RAW sidecar");
         }
     }
 
@@ -374,26 +363,16 @@ public final class AuRawActivity extends NativeActivity {
     public String materializeRawSidecar(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        Uri sidecarUri;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ArrayList<Uri> matches = scopedSidecarUris(displayName);
-            sidecarUri = matches.isEmpty() ? null : matches.get(0);
-        } else {
-            File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
-            sidecarUri = sidecar.isFile() ? Uri.fromFile(sidecar) : null;
-        }
-        if (sidecarUri == null) {
+        File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
+        if (!sidecar.isFile()) {
             return "";
         }
 
         File cached = File.createTempFile("auraw-sidecar-", ".auraw", getCacheDir());
         boolean completed = false;
         try {
-            try (InputStream input = openLibraryInput(sidecarUri);
+            try (FileInputStream input = new FileInputStream(sidecar);
                  FileOutputStream output = new FileOutputStream(cached)) {
-                if (input == null) {
-                    throw new IllegalStateException("Android storage returned no sidecar stream");
-                }
                 copy(input, output, MAX_SIDECAR_BYTES);
                 output.getFD().sync();
             }
@@ -426,9 +405,7 @@ public final class AuRawActivity extends NativeActivity {
         }
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                ? publishRawSidecarScoped(cached, displayName)
-                : publishRawSidecarLegacy(cached, displayName);
+        return publishRawSidecarLegacy(cached, displayName);
     }
 
     private String publishRawSidecarScoped(File cached, String rawDisplayName) throws Exception {
@@ -584,33 +561,8 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     private void verifyRawLibraryIdentity(Uri rawUri, String expectedDisplayName) throws Exception {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            String[] projection = {
-                    MediaStore.Downloads.DISPLAY_NAME,
-                    MediaStore.Downloads.RELATIVE_PATH,
-                    MediaStore.Downloads.OWNER_PACKAGE_NAME
-            };
-            try (Cursor cursor = getContentResolver().query(rawUri, projection, null, null, null)) {
-                if (cursor == null || !cursor.moveToFirst()) {
-                    throw new IllegalArgumentException("The RAW is no longer in the AuRaw library");
-                }
-                String name = cursor.getString(cursor.getColumnIndexOrThrow(
-                        MediaStore.Downloads.DISPLAY_NAME));
-                String relativePath = cursor.getString(cursor.getColumnIndexOrThrow(
-                        MediaStore.Downloads.RELATIVE_PATH));
-                String owner = cursor.getString(cursor.getColumnIndexOrThrow(
-                        MediaStore.Downloads.OWNER_PACKAGE_NAME));
-                if (!expectedDisplayName.equals(name)
-                        || !RAW_LIBRARY_RELATIVE_PATH.equals(relativePath)
-                        || !getPackageName().equals(owner)) {
-                    throw new IllegalArgumentException("The RAW is outside AuRaw's library");
-                }
-            }
-            return;
-        }
-
         if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            throw new IllegalArgumentException("The legacy RAW library URI is invalid");
+            throw new IllegalArgumentException("The RAW library URI is invalid");
         }
         File raw = new File(rawUri.getPath()).getCanonicalFile();
         File directory = legacyRawLibraryDirectory().getCanonicalFile();
@@ -685,9 +637,7 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     private StoredRaw storeRawInLibrary(Uri source, String requestedName) throws Exception {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                ? storeRawScoped(source, requestedName)
-                : storeRawLegacy(source, requestedName);
+        return storeRawLegacy(source, requestedName);
     }
 
     private StoredRaw storeRawScoped(Uri source, String requestedName) throws Exception {
@@ -941,11 +891,15 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     private File legacyRawLibraryDirectory() {
-        File downloads = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-        if (downloads == null) {
-            downloads = new File(getFilesDir(), Environment.DIRECTORY_DOWNLOADS);
+        File[] mediaDirectories = getExternalMediaDirs();
+        if (mediaDirectories != null) {
+            for (File directory : mediaDirectories) {
+                if (directory != null) {
+                    return directory;
+                }
+            }
         }
-        return new File(downloads, "AuRaw");
+        throw new IllegalStateException("Android shared media storage is unavailable");
     }
 
     private void deleteStoredRaw(Uri uri) {
