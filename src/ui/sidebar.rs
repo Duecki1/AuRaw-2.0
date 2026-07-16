@@ -71,5 +71,6 @@ impl Sidebar {
 
 include!("sidebar/navigation.rs");
 include!("sidebar/masks.rs");
+include!("sidebar/inpainting.rs");
 include!("sidebar/export.rs");
 include!("sidebar/develop.rs");

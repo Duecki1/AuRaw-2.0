@@ -3,6 +3,7 @@ mod ai_masks;
 mod android;
 mod app;
 mod diagnostics;
+mod inpainting;
 mod performance_settings;
 pub mod pipeline;
 pub mod regression;

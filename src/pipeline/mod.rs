@@ -24,8 +24,9 @@ pub use export::{
 pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};
 pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
 pub use masks::{
-    ellipse_outline_points, mask_atlas_edge, BrushDab, BrushMode, LocalAdjustments, LocalMask,
-    MaskCombineMode, MaskComponent, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
+    ellipse_outline_points, mask_atlas_edge, rasterize_brush_dabs, BrushDab, BrushMode,
+    InpaintLayer, LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry,
+    MaskImage, MaskKind, MaskRgbImage, MaskStack,
     ObjectStroke, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 pub use processing::{

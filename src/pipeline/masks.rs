@@ -161,6 +161,37 @@ impl MaskRgbImage {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct InpaintLayer {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Arc<[u8]>,
+    pub mask: Arc<[u8]>,
+}
+
+impl InpaintLayer {
+    pub fn new(width: u32, height: u32, rgba: Vec<u8>, mask: Vec<u8>) -> Option<Self> {
+        let pixels = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        let rgba_len = pixels.checked_mul(4)?;
+        (rgba.len() == rgba_len && mask.len() == pixels).then(|| Self {
+            width,
+            height,
+            rgba: rgba.into(),
+            mask: mask.into(),
+        })
+    }
+
+    pub fn as_masked_rgba(&self) -> Vec<u8> {
+        let mut output = self.rgba.to_vec();
+        for (pixel, alpha) in output.chunks_exact_mut(4).zip(self.mask.iter().copied()) {
+            pixel[3] = alpha;
+        }
+        output
+    }
+}
+
 mod base64_arc_bytes {
     use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -1161,6 +1192,19 @@ struct BrushRasterSpec {
     max_y: i32,
     antialias: f32,
     inner: f32,
+}
+
+pub fn rasterize_brush_dabs(
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+    dabs: &[BrushDab],
+) -> Vec<u8> {
+    rasterize_brush(width, height, image_width, image_height, dabs)
+        .into_iter()
+        .map(|value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+        .collect()
 }
 
 fn rasterize_brush(

@@ -2,11 +2,12 @@ use crate::ai_masks::{
     spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent,
     ObjectMaskRequest, SubjectMaskEvent, BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE,
 };
+use crate::inpainting::{spawn_inpaint, InpaintEvent, InpaintRequest, LAMA_MODEL_BYTES};
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
     load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings,
-    ExposureParams, GpuParams, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage,
-    MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
+    ExposureParams, GpuParams, InpaintLayer, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry,
+    MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
     RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{EditState as SidecarEditState, LensEditState as SidecarLensEditState};
@@ -474,6 +475,22 @@ pub struct AurawApp {
     object_job_target: Option<(usize, usize)>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
 
+    pub(crate) inpaint_brush_size: f32,
+    pub(crate) inpaint_brush_feather: f32,
+    pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,
+    pub(crate) last_inpaint_brush_point: Option<[f32; 2]>,
+    pub(crate) inpaint_layer: Option<InpaintLayer>,
+    pub(crate) inpaint_texture: Option<egui::TextureHandle>,
+    pub(crate) inpaint_texture_revision: u64,
+    pub(crate) inpaint_texture_key: Option<u64>,
+    pub(crate) inpaint_stroke_texture: Option<egui::TextureHandle>,
+    pub(crate) inpaint_stroke_texture_key: Option<(usize, u32, u32)>,
+    inpaint_pending_source: Option<MaskRgbImage>,
+    inpaint_consent_open: bool,
+    inpaint_receiver: Option<mpsc::Receiver<InpaintEvent>>,
+    inpaint_download_progress: Option<(u64, u64)>,
+    inpaint_inferencing: bool,
+
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     android_tab_swipe: AndroidTabSwipe,
     tab_swipe_surface_id: Option<egui::Id>,
@@ -511,6 +528,7 @@ impl AurawApp {
 
 include!("app/lifecycle.rs");
 include!("app/masks_ai.rs");
+include!("app/inpainting.rs");
 include!("app/processing_export.rs");
 include!("app/sidecar_persistence.rs");
 include!("app/eframe_impl.rs");
