@@ -7,7 +7,7 @@ pub struct Preview;
 
 impl Preview {
     pub fn show(ui: &mut Ui, app: &mut AurawApp) {
-        let Some((texture_id, pipeline_width, pipeline_height)) =
+        let Some((edited_texture_id, pipeline_width, pipeline_height)) =
             app.preview_base_pipeline().and_then(|pipeline| {
                 pipeline
                     .egui_texture_id
@@ -81,6 +81,14 @@ impl Preview {
         }
         let touch_navigation = app.preview_touch_navigation_active;
 
+        let original_hold_tracking = Self::update_original_preview_hold(
+            ui,
+            app,
+            interaction_rect,
+            &response,
+            touch_navigation,
+        );
+
         if let Some(multi_touch) = multi_touch {
             // Keep the image point that was under the previous gesture center under
             // the current center. This combines pinch zooming and two-finger panning
@@ -126,6 +134,7 @@ impl Preview {
         }
 
         let pan_with_primary = !touch_navigation
+            && !original_hold_tracking
             && app.sidebar_tab != SidebarTab::Masks
             && response.dragged_by(egui::PointerButton::Primary);
         let pan_with_middle = !touch_navigation && response.dragged_by(egui::PointerButton::Middle);
@@ -180,6 +189,18 @@ impl Preview {
             app.note_preview_motion();
         }
 
+        let original_texture_id = app
+            .original_preview_texture
+            .as_ref()
+            .map(|texture| texture.id());
+        if original_texture_id.is_none() {
+            app.show_original_preview = false;
+        }
+        let show_original = app.show_original_preview && original_texture_id.is_some();
+        let texture_id = original_texture_id
+            .filter(|_| show_original)
+            .unwrap_or(edited_texture_id);
+
         let painter = ui.painter_at(outer_rect);
         painter.image(
             texture_id,
@@ -188,40 +209,50 @@ impl Preview {
             Color32::WHITE,
         );
 
-        if let Some(detail) = app
-            .preview_detail
-            .as_ref()
-            .filter(|detail| detail.revision == app.preview_revision)
-        {
-            if let Some(detail_texture_id) = detail.pipeline.egui_texture_id {
-                let detail_rect = Rect::from_min_max(
-                    normalized_to_screen(image_rect, detail.uv_rect.min),
-                    normalized_to_screen(image_rect, detail.uv_rect.max),
-                );
-                painter.image(
-                    detail_texture_id,
-                    detail_rect,
-                    Rect::from_min_max(
-                        Pos2::new(detail.texture_uv_rect.min[0], detail.texture_uv_rect.min[1]),
-                        Pos2::new(detail.texture_uv_rect.max[0], detail.texture_uv_rect.max[1]),
-                    ),
-                    Color32::WHITE,
-                );
+        if !show_original {
+            if let Some(detail) = app
+                .preview_detail
+                .as_ref()
+                .filter(|detail| detail.revision == app.preview_revision)
+            {
+                if let Some(detail_texture_id) = detail.pipeline.egui_texture_id {
+                    let detail_rect = Rect::from_min_max(
+                        normalized_to_screen(image_rect, detail.uv_rect.min),
+                        normalized_to_screen(image_rect, detail.uv_rect.max),
+                    );
+                    painter.image(
+                        detail_texture_id,
+                        detail_rect,
+                        Rect::from_min_max(
+                            Pos2::new(detail.texture_uv_rect.min[0], detail.texture_uv_rect.min[1]),
+                            Pos2::new(detail.texture_uv_rect.max[0], detail.texture_uv_rect.max[1]),
+                        ),
+                        Color32::WHITE,
+                    );
+                }
             }
         }
 
+        let interaction_hint = if cfg!(target_os = "android") {
+            if show_original {
+                "Original · release for edited"
+            } else {
+                "hold still 1s for original · pinch zoom · drag pan · double-tap fit"
+            }
+        } else if show_original {
+            "Original · use Show Edited to return"
+        } else {
+            "pinch/scroll zoom · drag pan · double-tap/click fit"
+        };
         painter.text(
             outer_rect.left_top() + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
-            format!(
-                "{:.0}% · pinch/scroll zoom · drag pan · double-tap/click fit",
-                app.preview_zoom * 100.0
-            ),
+            format!("{:.0}% · {interaction_hint}", app.preview_zoom * 100.0),
             egui::FontId::proportional(11.0),
             Color32::from_white_alpha(180),
         );
 
-        if app.sidebar_tab == SidebarTab::Masks {
+        if app.sidebar_tab == SidebarTab::Masks && !show_original {
             if !touch_navigation && !fit_gesture {
                 Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response);
             }
@@ -232,6 +263,84 @@ impl Preview {
             Self::paint_mask_overlay(ui, app, image_rect, visible_screen);
             Self::paint_tool_hint(ui, app, visible_screen);
         }
+    }
+
+    fn update_original_preview_hold(
+        ui: &Ui,
+        app: &mut AurawApp,
+        interaction_rect: Rect,
+        response: &egui::Response,
+        touch_navigation: bool,
+    ) -> bool {
+        if !cfg!(target_os = "android") {
+            return false;
+        }
+
+        const HOLD_DURATION: std::time::Duration = std::time::Duration::from_secs(1);
+        const MOVE_TOLERANCE_POINTS: f32 = 12.0;
+
+        let pointer_pos = response
+            .interact_pointer_pos()
+            .or_else(|| ui.input(|input| input.pointer.interact_pos()));
+        let pointer_down = ui.input(|input| input.pointer.primary_down());
+        let holding_preview = response.is_pointer_button_down_on()
+            && pointer_pos.is_some_and(|position| interaction_rect.contains(position));
+
+        if !pointer_down {
+            app.original_preview_hold_started = None;
+            app.original_preview_hold_origin = None;
+            app.original_preview_hold_cancelled = false;
+            app.show_original_preview = false;
+            return false;
+        }
+
+        if app.original_preview_texture.is_none() || touch_navigation || !holding_preview {
+            app.original_preview_hold_started = None;
+            app.original_preview_hold_origin = None;
+            app.original_preview_hold_cancelled = true;
+            app.show_original_preview = false;
+            return false;
+        }
+
+        if app.original_preview_hold_cancelled {
+            return false;
+        }
+
+        let Some(pointer_pos) = pointer_pos else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        let started = match app.original_preview_hold_started {
+            Some(started) => started,
+            None => {
+                app.original_preview_hold_started = Some(now);
+                app.original_preview_hold_origin = Some(pointer_pos);
+                ui.ctx().request_repaint_after(HOLD_DURATION);
+                return true;
+            }
+        };
+
+        if app
+            .original_preview_hold_origin
+            .is_some_and(|origin| origin.distance(pointer_pos) > MOVE_TOLERANCE_POINTS)
+        {
+            app.original_preview_hold_started = None;
+            app.original_preview_hold_origin = None;
+            app.original_preview_hold_cancelled = true;
+            app.show_original_preview = false;
+            return false;
+        }
+
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= HOLD_DURATION {
+            if !app.show_original_preview && app.sidebar_tab == SidebarTab::Masks {
+                app.cancel_mask_touch_gesture();
+            }
+            app.show_original_preview = true;
+        } else {
+            ui.ctx().request_repaint_after(HOLD_DURATION - elapsed);
+        }
+        true
     }
 
     fn handle_mask_interaction(

@@ -115,6 +115,32 @@ pub enum AppTab {
     Settings,
 }
 
+impl AppTab {
+    pub(crate) const fn previous(self) -> Option<Self> {
+        match self {
+            Self::Library => None,
+            Self::Develop => Some(Self::Library),
+            Self::Settings => Some(Self::Develop),
+        }
+    }
+
+    pub(crate) const fn next(self) -> Option<Self> {
+        match self {
+            Self::Library => Some(Self::Develop),
+            Self::Develop => Some(Self::Settings),
+            Self::Settings => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AndroidTabSwipeState {
+    pub origin: egui::Pos2,
+    pub latest: egui::Pos2,
+    pub start_tab: AppTab,
+    pub cancelled: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SidebarTab {
     #[default]
@@ -236,6 +262,8 @@ struct LoadedPreview {
     full_raw: Arc<LoadedRaw>,
     preview_raw: Arc<LoadedRaw>,
     pipeline: RawGpuPipeline,
+    original_preview: Option<OriginalPreviewImage>,
+    original_preview_exposure: ExposureParams,
     rendered_exposure: ExposureParams,
     rendered_masks: MaskStack,
     mask_source: Option<MaskRgbImage>,
@@ -244,6 +272,12 @@ struct LoadedPreview {
     sidecar_generation: u64,
     sidecar_warning: Option<String>,
     sidecar_needs_rewrite: bool,
+}
+
+struct OriginalPreviewImage {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
 }
 
 enum LoadEvent {
@@ -359,6 +393,12 @@ pub struct AurawApp {
     pub loaded_raw: Option<Arc<LoadedRaw>>,
     pub preview_raw: Option<Arc<LoadedRaw>>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
+    pub(crate) original_preview_texture: Option<egui::TextureHandle>,
+    pub(crate) original_preview_exposure: ExposureParams,
+    pub(crate) show_original_preview: bool,
+    pub(crate) original_preview_hold_started: Option<Instant>,
+    pub(crate) original_preview_hold_origin: Option<egui::Pos2>,
+    pub(crate) original_preview_hold_cancelled: bool,
     pub(crate) preview_quality: PreviewQuality,
     pub(crate) preview_zoom: f32,
     pub(crate) preview_center: [f32; 2],
@@ -379,6 +419,7 @@ pub struct AurawApp {
     raw_cache_limit: usize,
     performance_settings_path: Option<PathBuf>,
     pub active_tab: AppTab,
+    pub(crate) android_tab_swipe: Option<AndroidTabSwipeState>,
     pub sidebar_tab: SidebarTab,
     pub adjustment_section: AdjustmentSection,
     pub mask_section: MaskSection,
