@@ -190,6 +190,11 @@ impl AurawApp {
             mask_thumbnail_component_textures: Vec::new(),
             mask_source_cache: None,
             subject_mask_cache: None,
+            ai_masks_need_update: false,
+            ai_mask_update_active: false,
+            ai_mask_update_subject_pending: false,
+            ai_mask_update_object_queue: VecDeque::new(),
+            ai_mask_update_failed: false,
             onnx_runtime_path,
             onnx_runtime_sha256,
             status: "Open a RAW file to get started.".to_owned(),
@@ -237,6 +242,24 @@ impl AurawApp {
             object_job_generation: 0,
             object_job_target: None,
             object_cache: None,
+            inpaint_brush_size: 0.055,
+            inpaint_brush_feather: 0.55,
+            inpaint_stroke: Vec::new(),
+            inpaint_strokes: Vec::new(),
+            last_inpaint_brush_point: None,
+            inpaint_layer: None,
+            inpaint_texture: None,
+            inpaint_texture_revision: 0,
+            inpaint_texture_key: None,
+            inpaint_stroke_texture: None,
+            inpaint_stroke_texture_key: None,
+            inpaint_pending_source: None,
+            inpaint_active_dabs: None,
+            inpaint_revision: 0,
+            inpaint_consent_open: false,
+            inpaint_receiver: None,
+            inpaint_download_progress: None,
+            inpaint_inferencing: false,
             android_tab_swipe: AndroidTabSwipe::default(),
             tab_swipe_surface_id: None,
         };
@@ -335,6 +358,11 @@ impl AurawApp {
             mask_thumbnail_component_textures: Vec::new(),
             mask_source_cache: None,
             subject_mask_cache: None,
+            ai_masks_need_update: false,
+            ai_mask_update_active: false,
+            ai_mask_update_subject_pending: false,
+            ai_mask_update_object_queue: VecDeque::new(),
+            ai_mask_update_failed: false,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
             lens_correction,
@@ -380,6 +408,24 @@ impl AurawApp {
             object_job_generation: 0,
             object_job_target: None,
             object_cache: None,
+            inpaint_brush_size: 0.055,
+            inpaint_brush_feather: 0.55,
+            inpaint_stroke: Vec::new(),
+            inpaint_strokes: Vec::new(),
+            last_inpaint_brush_point: None,
+            inpaint_layer: None,
+            inpaint_texture: None,
+            inpaint_texture_revision: 0,
+            inpaint_texture_key: None,
+            inpaint_stroke_texture: None,
+            inpaint_stroke_texture_key: None,
+            inpaint_pending_source: None,
+            inpaint_active_dabs: None,
+            inpaint_revision: 0,
+            inpaint_consent_open: false,
+            inpaint_receiver: None,
+            inpaint_download_progress: None,
+            inpaint_inferencing: false,
             android_tab_swipe: AndroidTabSwipe::default(),
             tab_swipe_surface_id: None,
             android_app,
@@ -614,6 +660,7 @@ impl AurawApp {
         self.exposure = initial_exposure;
         self.target_exposure = initial_exposure;
         self.masks.clear();
+        self.reset_inpainting_state();
         self.active_mask_tool = None;
         self.brush_mode = BrushMode::Paint;
         self.mask_drag = None;
@@ -632,6 +679,11 @@ impl AurawApp {
         self.mask_thumbnail_revision = self.mask_overlay_revision;
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
+        self.ai_masks_need_update = false;
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_failed = false;
         self.subject_consent_open = false;
         self.subject_receiver = None;
         self.subject_download_progress = None;
@@ -721,6 +773,7 @@ impl AurawApp {
                     let (
                         rendered_exposure,
                         mut rendered_masks,
+                        inpaint_strokes,
                         saved_lens,
                         mut sidecar_warning,
                         sidecar_needs_rewrite,
@@ -733,6 +786,7 @@ impl AurawApp {
                             (
                                 loaded.edits.exposure,
                                 Arc::unwrap_or_clone(loaded.edits.masks),
+                                Arc::unwrap_or_clone(loaded.edits.inpainting),
                                 Some(loaded.edits.lens),
                                 warning,
                                 loaded.migrated,
@@ -741,6 +795,7 @@ impl AurawApp {
                         Ok(None) => (
                             initial_exposure,
                             MaskStack::default(),
+                            Vec::new(),
                             None,
                             None,
                             false,
@@ -748,6 +803,7 @@ impl AurawApp {
                         Err(error) => (
                             initial_exposure,
                             MaskStack::default(),
+                            Vec::new(),
                             None,
                             Some(format!(
                                 "Could not load this RAW's sidecar; using default edits: {error}"
@@ -906,6 +962,13 @@ impl AurawApp {
                             rgba,
                         )
                         .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
+                        let source = if let Some(layer) = compose_inpaint_strokes(&inpaint_strokes) {
+                            flatten_inpaint_source(source, &layer).map_err(|error| {
+                                format!("could not apply inpainting to mask source: {error}")
+                            })?
+                        } else {
+                            source
+                        };
                         install_missing_range_sources(&mut rendered_masks, &source);
                         mask_source = Some(source);
                     }
@@ -939,6 +1002,7 @@ impl AurawApp {
                         pipeline,
                         rendered_exposure,
                         rendered_masks,
+                        inpaint_strokes,
                         mask_source,
                         lens_correction,
                         sidecar_target,
@@ -1097,6 +1161,12 @@ impl AurawApp {
                 self.gpu_pipeline = Some(loaded.pipeline);
                 self.exposure = loaded.rendered_exposure;
                 self.masks = loaded.rendered_masks;
+                self.inpaint_strokes = loaded.inpaint_strokes;
+                self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
+                self.inpaint_texture = None;
+                self.inpaint_texture_key = None;
+                self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
+                self.inpaint_revision = 0;
                 self.rehydrate_restored_mask_state();
                 if loaded.mask_source.is_some() {
                     self.mask_source_cache = loaded.mask_source;

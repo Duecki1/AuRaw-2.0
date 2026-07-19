@@ -1,0 +1,869 @@
+diff --git a/src/app.rs b/src/app.rs
+index 16338e8..d7898af 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -5,8 +5,9 @@ use crate::ai_masks::{
+ use crate::inpainting::{spawn_inpaint, InpaintEvent, InpaintRequest, LAMA_MODEL_BYTES};
+ use crate::pipeline::{
+     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
+-    load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings,
+-    ExposureParams, GpuParams, InpaintLayer, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry,
++    compose_inpaint_strokes, load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent,
++    ExportMetadata, ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke,
++    LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry,
+     MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
+     RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+ };
+@@ -250,6 +251,7 @@ struct LoadedPreview {
+     pipeline: RawGpuPipeline,
+     rendered_exposure: ExposureParams,
+     rendered_masks: MaskStack,
++    inpaint_strokes: Vec<InpaintStroke>,
+     mask_source: Option<MaskRgbImage>,
+     lens_correction: LensCorrectionState,
+     sidecar_target: crate::sidecar::SidecarTarget,
+@@ -478,6 +480,7 @@ pub struct AurawApp {
+     pub(crate) inpaint_brush_size: f32,
+     pub(crate) inpaint_brush_feather: f32,
+     pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,
++    pub(crate) inpaint_strokes: Vec<InpaintStroke>,
+     pub(crate) last_inpaint_brush_point: Option<[f32; 2]>,
+     pub(crate) inpaint_layer: Option<InpaintLayer>,
+     pub(crate) inpaint_texture: Option<egui::TextureHandle>,
+@@ -486,6 +489,8 @@ pub struct AurawApp {
+     pub(crate) inpaint_stroke_texture: Option<egui::TextureHandle>,
+     pub(crate) inpaint_stroke_texture_key: Option<(usize, u32, u32)>,
+     inpaint_pending_source: Option<MaskRgbImage>,
++    inpaint_active_dabs: Option<Vec<crate::pipeline::BrushDab>>,
++    inpaint_revision: u64,
+     inpaint_consent_open: bool,
+     inpaint_receiver: Option<mpsc::Receiver<InpaintEvent>>,
+     inpaint_download_progress: Option<(u64, u64)>,
+diff --git a/src/app/edit_history.rs b/src/app/edit_history.rs
+index d625386..0a92556 100644
+--- a/src/app/edit_history.rs
++++ b/src/app/edit_history.rs
+@@ -371,7 +371,10 @@ impl AurawApp {
+     }
+ 
+     pub(crate) fn edit_commit_revision(&self) -> u64 {
+-        self.edit_history.committed_revision()
++        self.edit_history
++            .committed_revision()
++            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
++            ^ self.inpaint_revision
+     }
+ 
+     /// O(1) snapshot for persistence. Call `commit_edit_history_now` first so
+diff --git a/src/app/inpainting.rs b/src/app/inpainting.rs
+index 5fba4ea..390f2b2 100644
+--- a/src/app/inpainting.rs
++++ b/src/app/inpainting.rs
+@@ -16,6 +16,7 @@ impl AurawApp {
+             return;
+         }
+         self.inpaint_stroke.clear();
++        self.inpaint_strokes.clear();
+         self.last_inpaint_brush_point = None;
+         self.inpaint_layer = None;
+         self.inpaint_texture = None;
+@@ -23,12 +24,14 @@ impl AurawApp {
+         self.inpaint_stroke_texture = None;
+         self.inpaint_stroke_texture_key = None;
+         self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
++        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+         self.notice = Some("Inpainting cleared.".to_owned());
+         self.egui_ctx.request_repaint();
+     }
+ 
+     pub(crate) fn reset_inpainting_state(&mut self) {
+         self.inpaint_stroke.clear();
++        self.inpaint_strokes.clear();
+         self.last_inpaint_brush_point = None;
+         self.inpaint_layer = None;
+         self.inpaint_texture = None;
+@@ -36,6 +39,8 @@ impl AurawApp {
+         self.inpaint_stroke_texture = None;
+         self.inpaint_stroke_texture_key = None;
+         self.inpaint_pending_source = None;
++        self.inpaint_active_dabs = None;
++        self.inpaint_revision = 0;
+         self.inpaint_consent_open = false;
+         self.inpaint_receiver = None;
+         self.inpaint_download_progress = None;
+@@ -117,6 +122,7 @@ impl AurawApp {
+             return;
+         }
+         let dabs = std::mem::take(&mut self.inpaint_stroke);
++        self.inpaint_active_dabs = Some(dabs.clone());
+         self.last_inpaint_brush_point = None;
+         self.inpaint_stroke_texture = None;
+         self.inpaint_stroke_texture_key = None;
+@@ -162,22 +168,43 @@ impl AurawApp {
+             self.inpaint_inferencing = false;
+             match result {
+                 Ok(result) => {
+-                    let merged = if let Some(previous) = &self.inpaint_layer {
+-                        merge_inpaint_result(previous, result)
++                    let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
++                    if let Some(stroke) = InpaintStroke::from_result(dabs, &result) {
++                        self.inpaint_strokes.push(stroke);
++                        self.rebuild_inpaint_layer();
++                        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
++                        self.notice = Some("Erase complete.".to_owned());
+                     } else {
+-                        result
+-                    };
+-                    self.inpaint_layer = Some(merged);
+-                    self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
+-                    self.inpaint_texture_key = None;
+-                    self.notice = Some("Erase complete.".to_owned());
++                        self.notice = Some("Inpainting returned an empty result.".to_owned());
++                    }
++                }
++                Err(error) => {
++                    self.inpaint_active_dabs = None;
++                    self.notice = Some(format!("Inpainting failed: {error}"));
+                 }
+-                Err(error) => self.notice = Some(format!("Inpainting failed: {error}")),
+             }
+             self.egui_ctx.request_repaint();
+         }
+     }
+ 
++    pub(crate) fn delete_inpaint_stroke(&mut self, index: usize) {
++        if self.inpaint_busy() || index >= self.inpaint_strokes.len() {
++            return;
++        }
++        self.inpaint_strokes.remove(index);
++        self.rebuild_inpaint_layer();
++        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
++        self.notice = Some("Inpainting stroke deleted.".to_owned());
++        self.egui_ctx.request_repaint();
++    }
++
++    fn rebuild_inpaint_layer(&mut self) {
++        self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
++        self.inpaint_texture = None;
++        self.inpaint_texture_key = None;
++        self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
++    }
++
+     #[cfg(not(target_os = "android"))]
+     fn lama_model_path(&self) -> PathBuf {
+         let root = std::env::var_os("XDG_CACHE_HOME")
+@@ -224,6 +251,7 @@ impl AurawApp {
+                         if ui.button("Cancel").clicked() {
+                             self.inpaint_consent_open = false;
+                             self.inpaint_pending_source = None;
++                            self.inpaint_active_dabs = None;
+                             self.inpaint_stroke.clear();
+                             self.last_inpaint_brush_point = None;
+                         }
+@@ -262,63 +290,65 @@ impl AurawApp {
+     }
+ }
+ 
+-fn merge_inpaint_result(previous: &InpaintLayer, result: InpaintLayer) -> InpaintLayer {
+-    let Some(result_pixels) = usize::try_from(result.width)
++fn composite_inpaint_thumbnail(
++    thumbnail: &mut crate::pipeline::RawThumbnail,
++    layer: &InpaintLayer,
++) -> Result<(), String> {
++    if thumbnail.width == 0
++        || thumbnail.height == 0
++        || layer.width == 0
++        || layer.height == 0
++    {
++        return Err("The inpainting thumbnail dimensions are invalid.".to_owned());
++    }
++    let thumbnail_pixels = usize::try_from(thumbnail.width)
+         .ok()
+         .and_then(|width| {
+-            usize::try_from(result.height)
++            usize::try_from(thumbnail.height)
+                 .ok()
+                 .and_then(|height| width.checked_mul(height))
+         })
+-    else {
+-        return result;
+-    };
+-    let Some(previous_pixels) = usize::try_from(previous.width)
++        .ok_or_else(|| "The thumbnail dimensions are too large.".to_owned())?;
++    if thumbnail.rgba.len() != thumbnail_pixels.saturating_mul(4) {
++        return Err("The thumbnail buffer is incomplete.".to_owned());
++    }
++    let layer_pixels = usize::try_from(layer.width)
+         .ok()
+         .and_then(|width| {
+-            usize::try_from(previous.height)
++            usize::try_from(layer.height)
+                 .ok()
+                 .and_then(|height| width.checked_mul(height))
+         })
+-    else {
+-        return result;
+-    };
+-    if result.mask.len() != result_pixels
+-        || previous.mask.len() != previous_pixels
+-        || result.width == 0
+-        || result.height == 0
+-        || previous.width == 0
+-        || previous.height == 0
+-    {
+-        return result;
++        .ok_or_else(|| "The inpainting dimensions are too large.".to_owned())?;
++    if layer.mask.len() != layer_pixels || layer.rgba.len() != layer_pixels.saturating_mul(4) {
++        return Err("The inpainting layer is incomplete.".to_owned());
+     }
+ 
+-    let mut mask = result.mask.to_vec();
+-    if previous.width == result.width && previous.height == result.height {
+-        for (current, prior) in mask.iter_mut().zip(previous.mask.iter().copied()) {
+-            *current = (*current).max(prior);
+-        }
+-    } else {
+-        for y in 0..result.height {
+-            let previous_y = ((y as f32 + 0.5) * previous.height as f32 / result.height as f32)
++    for y in 0..thumbnail.height {
++        let layer_y = ((y as f32 + 0.5) * layer.height as f32 / thumbnail.height as f32)
++            .floor()
++            .clamp(0.0, layer.height.saturating_sub(1) as f32) as u32;
++        for x in 0..thumbnail.width {
++            let layer_x = ((x as f32 + 0.5) * layer.width as f32 / thumbnail.width as f32)
+                 .floor()
+-                .clamp(0.0, previous.height.saturating_sub(1) as f32)
+-                as u32;
+-            for x in 0..result.width {
+-                let previous_x = ((x as f32 + 0.5) * previous.width as f32
+-                    / result.width as f32)
+-                    .floor()
+-                    .clamp(0.0, previous.width.saturating_sub(1) as f32)
+-                    as u32;
+-                let current_index = (y as usize * result.width as usize + x as usize) as usize;
+-                let previous_index =
+-                    (previous_y as usize * previous.width as usize + previous_x as usize) as usize;
+-                mask[current_index] = mask[current_index].max(previous.mask[previous_index]);
++                .clamp(0.0, layer.width.saturating_sub(1) as f32) as u32;
++            let layer_index = layer_y as usize * layer.width as usize + layer_x as usize;
++            let alpha = layer.mask[layer_index] as f32 / 255.0;
++            if alpha <= 0.0 {
++                continue;
++            }
++            let destination = (y as usize * thumbnail.width as usize + x as usize) * 4;
++            let source = layer_index * 4;
++            for channel in 0..3 {
++                let base = thumbnail.rgba[destination + channel] as f32;
++                let replacement = layer.rgba[source + channel] as f32;
++                thumbnail.rgba[destination + channel] =
++                    (base + (replacement - base) * alpha).round().clamp(0.0, 255.0) as u8;
+             }
++            thumbnail.rgba[destination + 3] = 255;
+         }
+     }
+-
+-    InpaintLayer::new(result.width, result.height, result.rgba.to_vec(), mask).unwrap_or(result)
++    Ok(())
+ }
+ 
+ fn flatten_inpaint_source(
+diff --git a/src/app/lifecycle.rs b/src/app/lifecycle.rs
+index e2e36bd..1147954 100644
+--- a/src/app/lifecycle.rs
++++ b/src/app/lifecycle.rs
+@@ -240,6 +240,7 @@ impl AurawApp {
+             inpaint_brush_size: 0.055,
+             inpaint_brush_feather: 0.55,
+             inpaint_stroke: Vec::new(),
++            inpaint_strokes: Vec::new(),
+             last_inpaint_brush_point: None,
+             inpaint_layer: None,
+             inpaint_texture: None,
+@@ -248,6 +249,8 @@ impl AurawApp {
+             inpaint_stroke_texture: None,
+             inpaint_stroke_texture_key: None,
+             inpaint_pending_source: None,
++            inpaint_active_dabs: None,
++            inpaint_revision: 0,
+             inpaint_consent_open: false,
+             inpaint_receiver: None,
+             inpaint_download_progress: None,
+@@ -398,6 +401,7 @@ impl AurawApp {
+             inpaint_brush_size: 0.055,
+             inpaint_brush_feather: 0.55,
+             inpaint_stroke: Vec::new(),
++            inpaint_strokes: Vec::new(),
+             last_inpaint_brush_point: None,
+             inpaint_layer: None,
+             inpaint_texture: None,
+@@ -406,6 +410,8 @@ impl AurawApp {
+             inpaint_stroke_texture: None,
+             inpaint_stroke_texture_key: None,
+             inpaint_pending_source: None,
++            inpaint_active_dabs: None,
++            inpaint_revision: 0,
+             inpaint_consent_open: false,
+             inpaint_receiver: None,
+             inpaint_download_progress: None,
+@@ -752,6 +758,7 @@ impl AurawApp {
+                     let (
+                         rendered_exposure,
+                         mut rendered_masks,
++                        inpaint_strokes,
+                         saved_lens,
+                         mut sidecar_warning,
+                         sidecar_needs_rewrite,
+@@ -764,6 +771,7 @@ impl AurawApp {
+                             (
+                                 loaded.edits.exposure,
+                                 Arc::unwrap_or_clone(loaded.edits.masks),
++                                Arc::unwrap_or_clone(loaded.edits.inpainting),
+                                 Some(loaded.edits.lens),
+                                 warning,
+                                 loaded.migrated,
+@@ -772,6 +780,7 @@ impl AurawApp {
+                         Ok(None) => (
+                             initial_exposure,
+                             MaskStack::default(),
++                            Vec::new(),
+                             None,
+                             None,
+                             false,
+@@ -779,6 +788,7 @@ impl AurawApp {
+                         Err(error) => (
+                             initial_exposure,
+                             MaskStack::default(),
++                            Vec::new(),
+                             None,
+                             Some(format!(
+                                 "Could not load this RAW's sidecar; using default edits: {error}"
+@@ -970,6 +980,7 @@ impl AurawApp {
+                         pipeline,
+                         rendered_exposure,
+                         rendered_masks,
++                        inpaint_strokes,
+                         mask_source,
+                         lens_correction,
+                         sidecar_target,
+@@ -1128,6 +1139,12 @@ impl AurawApp {
+                 self.gpu_pipeline = Some(loaded.pipeline);
+                 self.exposure = loaded.rendered_exposure;
+                 self.masks = loaded.rendered_masks;
++                self.inpaint_strokes = loaded.inpaint_strokes;
++                self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
++                self.inpaint_texture = None;
++                self.inpaint_texture_key = None;
++                self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
++                self.inpaint_revision = 0;
+                 self.rehydrate_restored_mask_state();
+                 if loaded.mask_source.is_some() {
+                     self.mask_source_cache = loaded.mask_source;
+diff --git a/src/app/sidecar_persistence.rs b/src/app/sidecar_persistence.rs
+index b681d5c..1531758 100644
+--- a/src/app/sidecar_persistence.rs
++++ b/src/app/sidecar_persistence.rs
+@@ -23,6 +23,7 @@ impl AurawApp {
+         SidecarEditState {
+             exposure: self.exposure,
+             masks: self.committed_mask_state_for_persistence(),
++            inpainting: Arc::new(self.inpaint_strokes.clone()),
+             lens: SidecarLensEditState {
+                 enabled: self.lens_correction.enabled,
+                 maker: self.lens_correction.selected_maker.clone(),
+@@ -588,6 +589,7 @@ impl AurawApp {
+             self.egui_ctx.request_repaint();
+             return;
+         };
++        let inpaint = self.inpaint_layer.clone();
+         let Some(render_state) = frame.wgpu_render_state() else {
+             self.developed_thumbnail_pending = None;
+             log::warn!("cannot cache developed thumbnail without the wgpu backend");
+@@ -605,9 +607,12 @@ impl AurawApp {
+             .name("auraw-developed-thumbnail".to_owned())
+             .spawn(move || {
+                 let result = (|| {
+-                    let thumbnail = snapshot
++                    let mut thumbnail = snapshot
+                         .read_thumbnail_blocking(&device, &queue, 512)
+                         .map_err(|error| format!("GPU thumbnail readback failed: {error:#}"))?;
++                    if let Some(layer) = inpaint.as_ref() {
++                        composite_inpaint_thumbnail(&mut thumbnail, layer)?;
++                    }
+                     match &worker_target {
+                         #[cfg(not(target_os = "android"))]
+                         crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+diff --git a/src/pipeline/masks.rs b/src/pipeline/masks.rs
+index 68ff5e0..99dbc8f 100644
+--- a/src/pipeline/masks.rs
++++ b/src/pipeline/masks.rs
+@@ -192,6 +192,182 @@ impl InpaintLayer {
+     }
+ }
+ 
++/// Compact persisted result for one released inpainting brush stroke. Only the
++/// rectangle touched by the stroke is stored, rather than a full preview-sized
++/// RGBA image for every history entry.
++#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
++pub struct InpaintPatch {
++    pub source_width: u32,
++    pub source_height: u32,
++    pub x: u32,
++    pub y: u32,
++    pub width: u32,
++    pub height: u32,
++    #[serde(with = "base64_arc_bytes")]
++    pub rgba: Arc<[u8]>,
++    #[serde(with = "base64_arc_bytes")]
++    pub mask: Arc<[u8]>,
++}
++
++impl InpaintPatch {
++    pub fn from_layer(layer: &InpaintLayer) -> Option<Self> {
++        let pixels = usize::try_from(layer.width)
++            .ok()?
++            .checked_mul(usize::try_from(layer.height).ok()?)?;
++        if layer.width == 0
++            || layer.height == 0
++            || layer.mask.len() != pixels
++            || layer.rgba.len() != pixels.checked_mul(4)?
++        {
++            return None;
++        }
++
++        let mut min_x = layer.width;
++        let mut min_y = layer.height;
++        let mut max_x = 0u32;
++        let mut max_y = 0u32;
++        let mut found = false;
++        for y in 0..layer.height {
++            for x in 0..layer.width {
++                let index = y as usize * layer.width as usize + x as usize;
++                if layer.mask[index] == 0 {
++                    continue;
++                }
++                found = true;
++                min_x = min_x.min(x);
++                min_y = min_y.min(y);
++                max_x = max_x.max(x);
++                max_y = max_y.max(y);
++            }
++        }
++        if !found {
++            return None;
++        }
++
++        let width = max_x.checked_sub(min_x)?.checked_add(1)?;
++        let height = max_y.checked_sub(min_y)?.checked_add(1)?;
++        let patch_pixels = usize::try_from(width)
++            .ok()?
++            .checked_mul(usize::try_from(height).ok()?)?;
++        let mut rgba = vec![0u8; patch_pixels.checked_mul(4)?];
++        let mut mask = vec![0u8; patch_pixels];
++        for local_y in 0..height {
++            let source_start = ((min_y + local_y) as usize * layer.width as usize
++                + min_x as usize) as usize;
++            let source_end = source_start + width as usize;
++            let patch_start = local_y as usize * width as usize;
++            let patch_end = patch_start + width as usize;
++            mask[patch_start..patch_end].copy_from_slice(&layer.mask[source_start..source_end]);
++            rgba[patch_start * 4..patch_end * 4]
++                .copy_from_slice(&layer.rgba[source_start * 4..source_end * 4]);
++        }
++
++        Some(Self {
++            source_width: layer.width,
++            source_height: layer.height,
++            x: min_x,
++            y: min_y,
++            width,
++            height,
++            rgba: rgba.into(),
++            mask: mask.into(),
++        })
++    }
++}
++
++#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
++pub struct InpaintStroke {
++    #[serde(default)]
++    pub dabs: Vec<BrushDab>,
++    pub patch: InpaintPatch,
++}
++
++impl InpaintStroke {
++    pub fn from_result(dabs: Vec<BrushDab>, layer: &InpaintLayer) -> Option<Self> {
++        Some(Self {
++            dabs,
++            patch: InpaintPatch::from_layer(layer)?,
++        })
++    }
++}
++
++/// Rebuilds the live display/export layer from the retained stroke list. Later
++/// strokes overwrite earlier strokes where their patches overlap.
++pub fn compose_inpaint_strokes(strokes: &[InpaintStroke]) -> Option<InpaintLayer> {
++    let target = strokes.last()?;
++    let width = target.patch.source_width;
++    let height = target.patch.source_height;
++    let pixels = usize::try_from(width)
++        .ok()?
++        .checked_mul(usize::try_from(height).ok()?)?;
++    let mut rgba = vec![0u8; pixels.checked_mul(4)?];
++    let mut mask = vec![0u8; pixels];
++
++    for stroke in strokes {
++        let patch = &stroke.patch;
++        if patch.source_width == 0
++            || patch.source_height == 0
++            || patch.width == 0
++            || patch.height == 0
++            || patch.x.checked_add(patch.width)? > patch.source_width
++            || patch.y.checked_add(patch.height)? > patch.source_height
++        {
++            return None;
++        }
++        let patch_pixels = usize::try_from(patch.width)
++            .ok()?
++            .checked_mul(usize::try_from(patch.height).ok()?)?;
++        if patch.mask.len() != patch_pixels || patch.rgba.len() != patch_pixels.checked_mul(4)? {
++            return None;
++        }
++
++        let target_x0 = ((u64::from(patch.x) * u64::from(width)) / u64::from(patch.source_width))
++            .min(u64::from(width)) as u32;
++        let target_y0 = ((u64::from(patch.y) * u64::from(height))
++            / u64::from(patch.source_height))
++            .min(u64::from(height)) as u32;
++        let target_x1 = ((u64::from(patch.x + patch.width) * u64::from(width))
++            .div_ceil(u64::from(patch.source_width)))
++            .min(u64::from(width)) as u32;
++        let target_y1 = ((u64::from(patch.y + patch.height) * u64::from(height))
++            .div_ceil(u64::from(patch.source_height)))
++            .min(u64::from(height)) as u32;
++
++        for target_y in target_y0..target_y1 {
++            let source_y = ((target_y as f32 + 0.5) * patch.source_height as f32
++                / height as f32)
++                .floor()
++                .clamp(0.0, patch.source_height.saturating_sub(1) as f32) as u32;
++            if source_y < patch.y || source_y >= patch.y + patch.height {
++                continue;
++            }
++            let local_y = source_y - patch.y;
++            for target_x in target_x0..target_x1 {
++                let source_x = ((target_x as f32 + 0.5) * patch.source_width as f32
++                    / width as f32)
++                    .floor()
++                    .clamp(0.0, patch.source_width.saturating_sub(1) as f32) as u32;
++                if source_x < patch.x || source_x >= patch.x + patch.width {
++                    continue;
++                }
++                let local_x = source_x - patch.x;
++                let patch_index = local_y as usize * patch.width as usize + local_x as usize;
++                if patch.mask[patch_index] == 0 {
++                    continue;
++                }
++                let destination = target_y as usize * width as usize + target_x as usize;
++                mask[destination] = patch.mask[patch_index];
++                let source_rgba = patch_index * 4;
++                let destination_rgba = destination * 4;
++                rgba[destination_rgba..destination_rgba + 4]
++                    .copy_from_slice(&patch.rgba[source_rgba..source_rgba + 4]);
++            }
++        }
++    }
++
++    InpaintLayer::new(width, height, rgba, mask)
++}
++
+ mod base64_arc_bytes {
+     use base64::Engine as _;
+     use serde::{Deserialize, Deserializer, Serializer};
+@@ -1712,4 +1888,45 @@ mod tests {
+         assert!(layer[0] < 0.01);
+         assert!(layer[1] > 0.99);
+     }
++    #[test]
++    fn inpaint_patch_is_cropped_and_recomposed() {
++        let mut rgba = vec![0u8; 4 * 3 * 4];
++        let mut mask = vec![0u8; 4 * 3];
++        for (x, value) in [(1usize, 80u8), (2usize, 160u8)] {
++            let index = 4 + x;
++            mask[index] = 255;
++            rgba[index * 4..index * 4 + 4].copy_from_slice(&[value, 2, 3, 255]);
++        }
++        let layer = InpaintLayer::new(4, 3, rgba, mask).unwrap();
++        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], &layer).unwrap();
++        assert_eq!((stroke.patch.x, stroke.patch.y), (1, 1));
++        assert_eq!((stroke.patch.width, stroke.patch.height), (2, 1));
++
++        let composed = compose_inpaint_strokes(&[stroke]).unwrap();
++        assert_eq!(composed.width, 4);
++        assert_eq!(composed.height, 3);
++        assert_eq!(composed.mask[5], 255);
++        assert_eq!(composed.mask[6], 255);
++        assert_eq!(composed.rgba[5 * 4], 80);
++        assert_eq!(composed.rgba[6 * 4], 160);
++    }
++
++    #[test]
++    fn later_inpaint_stroke_overwrites_earlier_patch() {
++        let make_stroke = |value: u8| {
++            let mut rgba = vec![0u8; 2 * 2 * 4];
++            let mut mask = vec![0u8; 2 * 2];
++            mask[3] = 255;
++            rgba[12..16].copy_from_slice(&[value, value, value, 255]);
++            let layer = InpaintLayer::new(2, 2, rgba, mask).unwrap();
++            InpaintStroke::from_result(Vec::new(), &layer).unwrap()
++        };
++        let first = make_stroke(40);
++        let second = make_stroke(220);
++        let both = compose_inpaint_strokes(&[first.clone(), second]).unwrap();
++        assert_eq!(both.rgba[12], 220);
++        let after_delete = compose_inpaint_strokes(&[first]).unwrap();
++        assert_eq!(after_delete.rgba[12], 40);
++    }
++
+ }
+diff --git a/src/pipeline/mod.rs b/src/pipeline/mod.rs
+index 0e9cccc..11e96ac 100644
+--- a/src/pipeline/mod.rs
++++ b/src/pipeline/mod.rs
+@@ -24,8 +24,9 @@ pub use export::{
+ pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};
+ pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
+ pub use masks::{
+-    ellipse_outline_points, mask_atlas_edge, rasterize_brush_dabs, BrushDab, BrushMode,
+-    InpaintLayer, LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry,
++    compose_inpaint_strokes, ellipse_outline_points, mask_atlas_edge, rasterize_brush_dabs,
++    BrushDab, BrushMode, InpaintLayer, InpaintPatch, InpaintStroke, LocalAdjustments, LocalMask,
++    MaskCombineMode, MaskComponent, MaskGeometry,
+     MaskImage, MaskKind, MaskRgbImage, MaskStack,
+     ObjectStroke, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+ };
+diff --git a/src/sidecar.rs b/src/sidecar.rs
+index ebae9f7..5dad308 100644
+--- a/src/sidecar.rs
++++ b/src/sidecar.rs
+@@ -1,8 +1,8 @@
+ #[cfg(not(target_os = "android"))]
+ use crate::pipeline::RawThumbnail;
+ use crate::pipeline::{
+-    ExposureParams, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION, MAX_LOCAL_MASKS,
+-    MAX_MASK_COMPONENTS,
++    ExposureParams, InpaintStroke, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION,
++    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+ };
+ use serde::{Deserialize, Serialize};
+ use std::ffi::OsString;
+@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::Arc;
+ 
+-pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
++pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
+ pub const SIDECAR_SUFFIX: &str = ".auraw";
+ #[cfg(not(target_os = "android"))]
+ pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
+@@ -33,6 +33,8 @@ const SIDECAR_FORMAT: &str = "AuRaw edit sidecar";
+ const MAX_BRUSH_DABS: usize = 1_000_000;
+ const MAX_OBJECT_STROKES: usize = 4096;
+ const MAX_OBJECT_STROKE_POINTS: usize = 1_000_000;
++const MAX_INPAINT_STROKES: usize = 4096;
++const MAX_INPAINT_DABS: usize = 1_000_000;
+ const MAX_MASK_IMAGE_EDGE: u32 = 8192;
+ const MAX_EDIT_NAME_BYTES: usize = 4096;
+ static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+@@ -63,6 +65,8 @@ pub struct LensEditState {
+ pub struct EditState {
+     pub exposure: ExposureParams,
+     pub masks: Arc<MaskStack>,
++    #[serde(default)]
++    pub inpainting: Arc<Vec<InpaintStroke>>,
+     pub lens: LensEditState,
+ }
+ 
+@@ -801,6 +805,43 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
+             }
+         }
+     }
++    if edits.inpainting.len() > MAX_INPAINT_STROKES {
++        return invalid("sidecar contains too many inpainting strokes");
++    }
++    let mut inpaint_dabs = 0usize;
++    for stroke in edits.inpainting.iter() {
++        inpaint_dabs = inpaint_dabs
++            .checked_add(stroke.dabs.len())
++            .ok_or_else(|| SidecarError::Invalid("inpainting dab count overflow".to_owned()))?;
++        if inpaint_dabs > MAX_INPAINT_DABS {
++            return invalid("sidecar contains too many inpainting brush dabs");
++        }
++        for dab in &stroke.dabs {
++            finite(
++                "inpainting brush dab",
++                &[dab.center[0], dab.center[1], dab.opacity, dab.size, dab.feather],
++            )?;
++            bounded("inpainting dab x", dab.center[0], -16.0, 16.0)?;
++            bounded("inpainting dab y", dab.center[1], -16.0, 16.0)?;
++            bounded("inpainting dab opacity", dab.opacity, -1.0, 1.0)?;
++            bounded("inpainting dab size", dab.size, 0.0, 16.0)?;
++            bounded("inpainting dab feather", dab.feather, 0.0, 1.0)?;
++        }
++
++        let patch = &stroke.patch;
++        if patch.source_width == 0
++            || patch.source_height == 0
++            || patch.width == 0
++            || patch.height == 0
++            || patch.x.checked_add(patch.width).is_none_or(|right| right > patch.source_width)
++            || patch.y.checked_add(patch.height).is_none_or(|bottom| bottom > patch.source_height)
++        {
++            return invalid("inpainting patch bounds are invalid");
++        }
++        validate_image(patch.width, patch.height, patch.mask.len(), 1)?;
++        validate_image(patch.width, patch.height, patch.rgba.len(), 4)?;
++    }
++
+     if stack.selected_mask.is_none() && stack.selected_component.is_some() {
+         return invalid("a component is selected without a selected mask");
+     }
+@@ -868,6 +909,18 @@ fn preflight_encoded_images(edits: &EditState) -> Result<(), SidecarError> {
+             }
+         }
+     }
++    for stroke in edits.inpainting.iter() {
++        for image_bytes in [stroke.patch.rgba.len(), stroke.patch.mask.len()] {
++            let base64_bytes = (image_bytes as u64)
++                .div_ceil(3)
++                .checked_mul(4)
++                .and_then(|bytes| bytes.checked_add(2))
++                .ok_or(SidecarError::TooLarge(u64::MAX))?;
++            encoded_bytes = encoded_bytes
++                .checked_add(base64_bytes)
++                .ok_or(SidecarError::TooLarge(u64::MAX))?;
++        }
++    }
+     let estimated = encoded_bytes.saturating_add(STRUCTURE_HEADROOM);
+     if estimated > MAX_SIDECAR_BYTES {
+         Err(SidecarError::TooLarge(estimated))
+@@ -1083,6 +1136,7 @@ mod tests {
+         EditState {
+             exposure,
+             masks: Arc::new(masks),
++            inpainting: Arc::new(Vec::new()),
+             lens: LensEditState {
+                 enabled: true,
+                 maker: "Test Optics".to_owned(),
+@@ -1113,6 +1167,43 @@ mod tests {
+         assert!(!loaded.migrated);
+     }
+ 
++    #[test]
++    fn inpainting_round_trip_preserves_individual_strokes() {
++        use crate::pipeline::{BrushDab, InpaintLayer, InpaintStroke};
++
++        let mut edits = sample_edits();
++        let mut rgba = vec![0u8; 4 * 4 * 4];
++        let mut mask = vec![0u8; 4 * 4];
++        mask[5] = 255;
++        rgba[20..24].copy_from_slice(&[12, 34, 56, 255]);
++        let layer = InpaintLayer::new(4, 4, rgba, mask).unwrap();
++        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], &layer).unwrap();
++        edits.inpainting = Arc::new(vec![stroke]);
++
++        let encoded = encode(edits.clone()).unwrap();
++        let loaded = decode(&encoded).unwrap();
++        assert_eq!(loaded.edits.inpainting, edits.inpainting);
++    }
++
++    #[test]
++    fn schema_one_sidecar_without_inpainting_loads_as_empty() {
++        let document = SidecarDocument {
++            format: SIDECAR_FORMAT.to_owned(),
++            schema_version: 1,
++            process_version: CURRENT_PROCESS_VERSION,
++            edits: sample_edits(),
++        };
++        let mut value = serde_json::to_value(document).unwrap();
++        value["edits"]
++            .as_object_mut()
++            .unwrap()
++            .remove("inpainting");
++        let encoded = serde_json::to_vec(&value).unwrap();
++        let loaded = decode(&encoded).unwrap();
++        assert!(loaded.edits.inpainting.is_empty());
++        assert!(loaded.migrated);
++    }
++
+     #[test]
+     fn old_processing_state_is_migrated_deliberately() {
+         let mut edits = sample_edits();
+diff --git a/src/ui/sidebar/inpainting.rs b/src/ui/sidebar/inpainting.rs
+index e8b9119..ca67ea6 100644
+--- a/src/ui/sidebar/inpainting.rs
++++ b/src/ui/sidebar/inpainting.rs
+@@ -9,8 +9,8 @@ impl Sidebar {
+             ui.heading("Inpainting");
+             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                 let clear = ui.add_enabled(
+-                    app.inpaint_layer.is_some() && !app.inpaint_busy(),
+-                    egui::Button::new("Clear result"),
++                    !app.inpaint_strokes.is_empty() && !app.inpaint_busy(),
++                    egui::Button::new("Clear all"),
+                 );
+                 if clear.clicked() {
+                     app.clear_inpainting();
+@@ -55,6 +55,53 @@ impl Sidebar {
+             .color(ui.visuals().weak_text_color()),
+         );
+ 
++        ui.add_space(10.0);
++        ui.separator();
++        ui.add_space(4.0);
++        ui.label(egui::RichText::new("Brush strokes").strong());
++        if app.inpaint_strokes.is_empty() {
++            ui.label(
++                egui::RichText::new("No completed strokes yet.")
++                    .size(11.5)
++                    .color(ui.visuals().weak_text_color()),
++            );
++        } else {
++            let mut delete_stroke = None;
++            egui::ScrollArea::vertical()
++                .id_salt("inpainting-stroke-list")
++                .max_height(180.0)
++                .show(ui, |ui| {
++                    for index in (0..app.inpaint_strokes.len()).rev() {
++                        let dab_count = app.inpaint_strokes[index].dabs.len();
++                        ui.horizontal(|ui| {
++                            ui.label(format!("Stroke {}", index + 1));
++                            ui.label(
++                                egui::RichText::new(format!("{dab_count} dabs"))
++                                    .size(10.5)
++                                    .color(ui.visuals().weak_text_color()),
++                            );
++                            ui.with_layout(
++                                egui::Layout::right_to_left(egui::Align::Center),
++                                |ui| {
++                                    if ui
++                                        .add_enabled(
++                                            !app.inpaint_busy(),
++                                            egui::Button::new("Delete").small(),
++                                        )
++                                        .clicked()
++                                    {
++                                        delete_stroke = Some(index);
++                                    }
++                                },
++                            );
++                        });
++                    }
++                });
++            if let Some(index) = delete_stroke {
++                app.delete_inpaint_stroke(index);
++            }
++        }
++
+         if let Some((downloaded, total)) = app.inpaint_progress() {
+             ui.add_space(8.0);
+             ui.label("Downloading lama.onnx…");

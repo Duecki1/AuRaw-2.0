@@ -161,6 +161,213 @@ impl MaskRgbImage {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct InpaintLayer {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Arc<[u8]>,
+    pub mask: Arc<[u8]>,
+}
+
+impl InpaintLayer {
+    pub fn new(width: u32, height: u32, rgba: Vec<u8>, mask: Vec<u8>) -> Option<Self> {
+        let pixels = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        let rgba_len = pixels.checked_mul(4)?;
+        (rgba.len() == rgba_len && mask.len() == pixels).then(|| Self {
+            width,
+            height,
+            rgba: rgba.into(),
+            mask: mask.into(),
+        })
+    }
+
+    pub fn as_masked_rgba(&self) -> Vec<u8> {
+        let mut output = self.rgba.to_vec();
+        for (pixel, alpha) in output.chunks_exact_mut(4).zip(self.mask.iter().copied()) {
+            pixel[3] = alpha;
+        }
+        output
+    }
+}
+
+/// Compact persisted result for one released inpainting brush stroke. Only the
+/// rectangle touched by the stroke is stored, rather than a full preview-sized
+/// RGBA image for every history entry.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct InpaintPatch {
+    pub source_width: u32,
+    pub source_height: u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(with = "base64_arc_bytes")]
+    pub rgba: Arc<[u8]>,
+    #[serde(with = "base64_arc_bytes")]
+    pub mask: Arc<[u8]>,
+}
+
+impl InpaintPatch {
+    pub fn from_layer(layer: &InpaintLayer) -> Option<Self> {
+        let pixels = usize::try_from(layer.width)
+            .ok()?
+            .checked_mul(usize::try_from(layer.height).ok()?)?;
+        if layer.width == 0
+            || layer.height == 0
+            || layer.mask.len() != pixels
+            || layer.rgba.len() != pixels.checked_mul(4)?
+        {
+            return None;
+        }
+
+        let mut min_x = layer.width;
+        let mut min_y = layer.height;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        let mut found = false;
+        for y in 0..layer.height {
+            for x in 0..layer.width {
+                let index = y as usize * layer.width as usize + x as usize;
+                if layer.mask[index] == 0 {
+                    continue;
+                }
+                found = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        if !found {
+            return None;
+        }
+
+        let width = max_x.checked_sub(min_x)?.checked_add(1)?;
+        let height = max_y.checked_sub(min_y)?.checked_add(1)?;
+        let patch_pixels = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        let mut rgba = vec![0u8; patch_pixels.checked_mul(4)?];
+        let mut mask = vec![0u8; patch_pixels];
+        for local_y in 0..height {
+            let source_start = ((min_y + local_y) as usize * layer.width as usize
+                + min_x as usize) as usize;
+            let source_end = source_start + width as usize;
+            let patch_start = local_y as usize * width as usize;
+            let patch_end = patch_start + width as usize;
+            mask[patch_start..patch_end].copy_from_slice(&layer.mask[source_start..source_end]);
+            rgba[patch_start * 4..patch_end * 4]
+                .copy_from_slice(&layer.rgba[source_start * 4..source_end * 4]);
+        }
+
+        Some(Self {
+            source_width: layer.width,
+            source_height: layer.height,
+            x: min_x,
+            y: min_y,
+            width,
+            height,
+            rgba: rgba.into(),
+            mask: mask.into(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct InpaintStroke {
+    #[serde(default)]
+    pub dabs: Vec<BrushDab>,
+    pub patch: InpaintPatch,
+}
+
+impl InpaintStroke {
+    pub fn from_result(dabs: Vec<BrushDab>, layer: &InpaintLayer) -> Option<Self> {
+        Some(Self {
+            dabs,
+            patch: InpaintPatch::from_layer(layer)?,
+        })
+    }
+}
+
+/// Rebuilds the live display/export layer from the retained stroke list. Later
+/// strokes overwrite earlier strokes where their patches overlap.
+pub fn compose_inpaint_strokes(strokes: &[InpaintStroke]) -> Option<InpaintLayer> {
+    let target = strokes.last()?;
+    let width = target.patch.source_width;
+    let height = target.patch.source_height;
+    let pixels = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    let mut rgba = vec![0u8; pixels.checked_mul(4)?];
+    let mut mask = vec![0u8; pixels];
+
+    for stroke in strokes {
+        let patch = &stroke.patch;
+        if patch.source_width == 0
+            || patch.source_height == 0
+            || patch.width == 0
+            || patch.height == 0
+            || patch.x.checked_add(patch.width)? > patch.source_width
+            || patch.y.checked_add(patch.height)? > patch.source_height
+        {
+            return None;
+        }
+        let patch_pixels = usize::try_from(patch.width)
+            .ok()?
+            .checked_mul(usize::try_from(patch.height).ok()?)?;
+        if patch.mask.len() != patch_pixels || patch.rgba.len() != patch_pixels.checked_mul(4)? {
+            return None;
+        }
+
+        let target_x0 = ((u64::from(patch.x) * u64::from(width)) / u64::from(patch.source_width))
+            .min(u64::from(width)) as u32;
+        let target_y0 = ((u64::from(patch.y) * u64::from(height))
+            / u64::from(patch.source_height))
+            .min(u64::from(height)) as u32;
+        let target_x1 = ((u64::from(patch.x + patch.width) * u64::from(width))
+            .div_ceil(u64::from(patch.source_width)))
+            .min(u64::from(width)) as u32;
+        let target_y1 = ((u64::from(patch.y + patch.height) * u64::from(height))
+            .div_ceil(u64::from(patch.source_height)))
+            .min(u64::from(height)) as u32;
+
+        for target_y in target_y0..target_y1 {
+            let source_y = ((target_y as f32 + 0.5) * patch.source_height as f32
+                / height as f32)
+                .floor()
+                .clamp(0.0, patch.source_height.saturating_sub(1) as f32) as u32;
+            if source_y < patch.y || source_y >= patch.y + patch.height {
+                continue;
+            }
+            let local_y = source_y - patch.y;
+            for target_x in target_x0..target_x1 {
+                let source_x = ((target_x as f32 + 0.5) * patch.source_width as f32
+                    / width as f32)
+                    .floor()
+                    .clamp(0.0, patch.source_width.saturating_sub(1) as f32) as u32;
+                if source_x < patch.x || source_x >= patch.x + patch.width {
+                    continue;
+                }
+                let local_x = source_x - patch.x;
+                let patch_index = local_y as usize * patch.width as usize + local_x as usize;
+                if patch.mask[patch_index] == 0 {
+                    continue;
+                }
+                let destination = target_y as usize * width as usize + target_x as usize;
+                mask[destination] = patch.mask[patch_index];
+                let source_rgba = patch_index * 4;
+                let destination_rgba = destination * 4;
+                rgba[destination_rgba..destination_rgba + 4]
+                    .copy_from_slice(&patch.rgba[source_rgba..source_rgba + 4]);
+            }
+        }
+    }
+
+    InpaintLayer::new(width, height, rgba, mask)
+}
+
 mod base64_arc_bytes {
     use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -1163,6 +1370,19 @@ struct BrushRasterSpec {
     inner: f32,
 }
 
+pub fn rasterize_brush_dabs(
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+    dabs: &[BrushDab],
+) -> Vec<u8> {
+    rasterize_brush(width, height, image_width, image_height, dabs)
+        .into_iter()
+        .map(|value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+        .collect()
+}
+
 fn rasterize_brush(
     width: u32,
     height: u32,
@@ -1668,4 +1888,45 @@ mod tests {
         assert!(layer[0] < 0.01);
         assert!(layer[1] > 0.99);
     }
+    #[test]
+    fn inpaint_patch_is_cropped_and_recomposed() {
+        let mut rgba = vec![0u8; 4 * 3 * 4];
+        let mut mask = vec![0u8; 4 * 3];
+        for (x, value) in [(1usize, 80u8), (2usize, 160u8)] {
+            let index = 4 + x;
+            mask[index] = 255;
+            rgba[index * 4..index * 4 + 4].copy_from_slice(&[value, 2, 3, 255]);
+        }
+        let layer = InpaintLayer::new(4, 3, rgba, mask).unwrap();
+        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], &layer).unwrap();
+        assert_eq!((stroke.patch.x, stroke.patch.y), (1, 1));
+        assert_eq!((stroke.patch.width, stroke.patch.height), (2, 1));
+
+        let composed = compose_inpaint_strokes(&[stroke]).unwrap();
+        assert_eq!(composed.width, 4);
+        assert_eq!(composed.height, 3);
+        assert_eq!(composed.mask[5], 255);
+        assert_eq!(composed.mask[6], 255);
+        assert_eq!(composed.rgba[5 * 4], 80);
+        assert_eq!(composed.rgba[6 * 4], 160);
+    }
+
+    #[test]
+    fn later_inpaint_stroke_overwrites_earlier_patch() {
+        let make_stroke = |value: u8| {
+            let mut rgba = vec![0u8; 2 * 2 * 4];
+            let mut mask = vec![0u8; 2 * 2];
+            mask[3] = 255;
+            rgba[12..16].copy_from_slice(&[value, value, value, 255]);
+            let layer = InpaintLayer::new(2, 2, rgba, mask).unwrap();
+            InpaintStroke::from_result(Vec::new(), &layer).unwrap()
+        };
+        let first = make_stroke(40);
+        let second = make_stroke(220);
+        let both = compose_inpaint_strokes(&[first.clone(), second]).unwrap();
+        assert_eq!(both.rgba[12], 220);
+        let after_delete = compose_inpaint_strokes(&[first]).unwrap();
+        assert_eq!(after_delete.rgba[12], 40);
+    }
+
 }

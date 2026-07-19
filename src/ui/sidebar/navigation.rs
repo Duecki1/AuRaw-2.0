@@ -45,11 +45,7 @@ impl Sidebar {
             .show(ui, |ui| match app.sidebar_tab {
                 SidebarTab::Adjustments => Self::show_adjustments(ui, app, layout),
                 SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
-                SidebarTab::Inpainting => Self::show_placeholder(
-                    ui,
-                    "Inpainting",
-                    "Healing, object removal, and generative inpainting controls are coming later.",
-                ),
+                SidebarTab::Inpainting => Self::show_inpainting(ui, app, layout, frame),
                 SidebarTab::Export => Self::show_export(ui, app, frame),
             });
     }

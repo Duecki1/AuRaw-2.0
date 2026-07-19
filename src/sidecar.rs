@@ -1,8 +1,8 @@
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
-    ExposureParams, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION, MAX_LOCAL_MASKS,
-    MAX_MASK_COMPONENTS,
+    ExposureParams, InpaintStroke, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION,
+    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
@@ -33,6 +33,8 @@ const SIDECAR_FORMAT: &str = "AuRaw edit sidecar";
 const MAX_BRUSH_DABS: usize = 1_000_000;
 const MAX_OBJECT_STROKES: usize = 4096;
 const MAX_OBJECT_STROKE_POINTS: usize = 1_000_000;
+const MAX_INPAINT_STROKES: usize = 4096;
+const MAX_INPAINT_DABS: usize = 1_000_000;
 const MAX_MASK_IMAGE_EDGE: u32 = 8192;
 const MAX_EDIT_NAME_BYTES: usize = 4096;
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
@@ -63,6 +65,8 @@ pub struct LensEditState {
 pub struct EditState {
     pub exposure: ExposureParams,
     pub masks: Arc<MaskStack>,
+    #[serde(default)]
+    pub inpainting: Arc<Vec<InpaintStroke>>,
     pub lens: LensEditState,
 }
 
@@ -801,6 +805,43 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
             }
         }
     }
+    if edits.inpainting.len() > MAX_INPAINT_STROKES {
+        return invalid("sidecar contains too many inpainting strokes");
+    }
+    let mut inpaint_dabs = 0usize;
+    for stroke in edits.inpainting.iter() {
+        inpaint_dabs = inpaint_dabs
+            .checked_add(stroke.dabs.len())
+            .ok_or_else(|| SidecarError::Invalid("inpainting dab count overflow".to_owned()))?;
+        if inpaint_dabs > MAX_INPAINT_DABS {
+            return invalid("sidecar contains too many inpainting brush dabs");
+        }
+        for dab in &stroke.dabs {
+            finite(
+                "inpainting brush dab",
+                &[dab.center[0], dab.center[1], dab.opacity, dab.size, dab.feather],
+            )?;
+            bounded("inpainting dab x", dab.center[0], -16.0, 16.0)?;
+            bounded("inpainting dab y", dab.center[1], -16.0, 16.0)?;
+            bounded("inpainting dab opacity", dab.opacity, -1.0, 1.0)?;
+            bounded("inpainting dab size", dab.size, 0.0, 16.0)?;
+            bounded("inpainting dab feather", dab.feather, 0.0, 1.0)?;
+        }
+
+        let patch = &stroke.patch;
+        if patch.source_width == 0
+            || patch.source_height == 0
+            || patch.width == 0
+            || patch.height == 0
+            || patch.x.checked_add(patch.width).is_none_or(|right| right > patch.source_width)
+            || patch.y.checked_add(patch.height).is_none_or(|bottom| bottom > patch.source_height)
+        {
+            return invalid("inpainting patch bounds are invalid");
+        }
+        validate_image(patch.width, patch.height, patch.mask.len(), 1)?;
+        validate_image(patch.width, patch.height, patch.rgba.len(), 4)?;
+    }
+
     if stack.selected_mask.is_none() && stack.selected_component.is_some() {
         return invalid("a component is selected without a selected mask");
     }
@@ -866,6 +907,18 @@ fn preflight_encoded_images(edits: &EditState) -> Result<(), SidecarError> {
                     .checked_add(base64_bytes)
                     .ok_or(SidecarError::TooLarge(u64::MAX))?;
             }
+        }
+    }
+    for stroke in edits.inpainting.iter() {
+        for image_bytes in [stroke.patch.rgba.len(), stroke.patch.mask.len()] {
+            let base64_bytes = (image_bytes as u64)
+                .div_ceil(3)
+                .checked_mul(4)
+                .and_then(|bytes| bytes.checked_add(2))
+                .ok_or(SidecarError::TooLarge(u64::MAX))?;
+            encoded_bytes = encoded_bytes
+                .checked_add(base64_bytes)
+                .ok_or(SidecarError::TooLarge(u64::MAX))?;
         }
     }
     let estimated = encoded_bytes.saturating_add(STRUCTURE_HEADROOM);
@@ -1083,6 +1136,7 @@ mod tests {
         EditState {
             exposure,
             masks: Arc::new(masks),
+            inpainting: Arc::new(Vec::new()),
             lens: LensEditState {
                 enabled: true,
                 maker: "Test Optics".to_owned(),
@@ -1111,6 +1165,43 @@ mod tests {
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits, edits);
         assert!(!loaded.migrated);
+    }
+
+    #[test]
+    fn inpainting_round_trip_preserves_individual_strokes() {
+        use crate::pipeline::{BrushDab, InpaintLayer, InpaintStroke};
+
+        let mut edits = sample_edits();
+        let mut rgba = vec![0u8; 4 * 4 * 4];
+        let mut mask = vec![0u8; 4 * 4];
+        mask[5] = 255;
+        rgba[20..24].copy_from_slice(&[12, 34, 56, 255]);
+        let layer = InpaintLayer::new(4, 4, rgba, mask).unwrap();
+        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], &layer).unwrap();
+        edits.inpainting = Arc::new(vec![stroke]);
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits.inpainting, edits.inpainting);
+    }
+
+    #[test]
+    fn schema_one_sidecar_without_inpainting_loads_as_empty() {
+        let document = SidecarDocument {
+            format: SIDECAR_FORMAT.to_owned(),
+            schema_version: 1,
+            process_version: CURRENT_PROCESS_VERSION,
+            edits: sample_edits(),
+        };
+        let mut value = serde_json::to_value(document).unwrap();
+        value["edits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("inpainting");
+        let encoded = serde_json::to_vec(&value).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert!(loaded.edits.inpainting.is_empty());
+        assert!(loaded.migrated);
     }
 
     #[test]

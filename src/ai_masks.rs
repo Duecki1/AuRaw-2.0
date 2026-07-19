@@ -264,7 +264,7 @@ fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Resul
 }
 
 #[cfg(not(target_os = "android"))]
-fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: Option<&str>) -> Result<()> {
+pub(crate) fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: Option<&str>) -> Result<()> {
     let selected = runtime_path
         .context("no ONNX Runtime library is selected; choose one in Settings and try again")?;
     let expected_sha256 = expected_sha256
@@ -405,7 +405,7 @@ fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, Str
 }
 
 #[cfg(target_os = "android")]
-fn initialize_runtime(_runtime_path: Option<&Path>, _expected_sha256: Option<&str>) -> Result<()> {
+pub(crate) fn initialize_runtime(_runtime_path: Option<&Path>, _expected_sha256: Option<&str>) -> Result<()> {
     if RUNTIME_INITIALIZED.get().is_some() {
         return Ok(());
     }
@@ -425,7 +425,7 @@ fn initialize_runtime(_runtime_path: Option<&Path>, _expected_sha256: Option<&st
 }
 
 #[cfg(target_os = "android")]
-fn create_session(model_path: &Path) -> Result<Session> {
+pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
     let xnnpack_result = (|| -> Result<Session> {
         let mut builder = Session::builder()
             .context("create XNNPACK ONNX Runtime session")?
@@ -460,7 +460,7 @@ fn create_session(model_path: &Path) -> Result<Session> {
 }
 
 #[cfg(not(target_os = "android"))]
-fn create_session(model_path: &Path) -> Result<Session> {
+pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
     let builder = Session::builder().context("create ONNX Runtime session")?;
 
     #[cfg(target_os = "linux")]

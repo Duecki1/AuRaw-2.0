@@ -2,11 +2,13 @@ use crate::ai_masks::{
     spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent,
     ObjectMaskRequest, SubjectMaskEvent, BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE,
 };
+use crate::inpainting::{spawn_inpaint, InpaintEvent, InpaintRequest, LAMA_MODEL_BYTES};
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
-    load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent, ExportMetadata, ExportSettings,
-    ExposureParams, GpuParams, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage,
-    MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
+    compose_inpaint_strokes, load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent,
+    ExportMetadata, ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke,
+    LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry,
+    MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
     RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{EditState as SidecarEditState, LensEditState as SidecarLensEditState};
@@ -249,6 +251,7 @@ struct LoadedPreview {
     pipeline: RawGpuPipeline,
     rendered_exposure: ExposureParams,
     rendered_masks: MaskStack,
+    inpaint_strokes: Vec<InpaintStroke>,
     mask_source: Option<MaskRgbImage>,
     lens_correction: LensCorrectionState,
     sidecar_target: crate::sidecar::SidecarTarget,
@@ -419,6 +422,11 @@ pub struct AurawApp {
     pub(crate) mask_thumbnail_component_textures: Vec<egui::TextureHandle>,
     pub(crate) mask_source_cache: Option<MaskRgbImage>,
     pub(crate) subject_mask_cache: Option<MaskImage>,
+    pub(crate) ai_masks_need_update: bool,
+    ai_mask_update_active: bool,
+    ai_mask_update_subject_pending: bool,
+    ai_mask_update_object_queue: VecDeque<(usize, usize)>,
+    ai_mask_update_failed: bool,
     #[cfg(not(target_os = "android"))]
     pub(crate) onnx_runtime_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
@@ -474,6 +482,25 @@ pub struct AurawApp {
     object_job_target: Option<(usize, usize)>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
 
+    pub(crate) inpaint_brush_size: f32,
+    pub(crate) inpaint_brush_feather: f32,
+    pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,
+    pub(crate) inpaint_strokes: Vec<InpaintStroke>,
+    pub(crate) last_inpaint_brush_point: Option<[f32; 2]>,
+    pub(crate) inpaint_layer: Option<InpaintLayer>,
+    pub(crate) inpaint_texture: Option<egui::TextureHandle>,
+    pub(crate) inpaint_texture_revision: u64,
+    pub(crate) inpaint_texture_key: Option<u64>,
+    pub(crate) inpaint_stroke_texture: Option<egui::TextureHandle>,
+    pub(crate) inpaint_stroke_texture_key: Option<(usize, u32, u32)>,
+    inpaint_pending_source: Option<MaskRgbImage>,
+    inpaint_active_dabs: Option<Vec<crate::pipeline::BrushDab>>,
+    inpaint_revision: u64,
+    inpaint_consent_open: bool,
+    inpaint_receiver: Option<mpsc::Receiver<InpaintEvent>>,
+    inpaint_download_progress: Option<(u64, u64)>,
+    inpaint_inferencing: bool,
+
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     android_tab_swipe: AndroidTabSwipe,
     tab_swipe_surface_id: Option<egui::Id>,
@@ -511,6 +538,7 @@ impl AurawApp {
 
 include!("app/lifecycle.rs");
 include!("app/masks_ai.rs");
+include!("app/inpainting.rs");
 include!("app/processing_export.rs");
 include!("app/sidecar_persistence.rs");
 include!("app/eframe_impl.rs");

@@ -202,6 +202,7 @@ impl AurawApp {
         // Existing local masks are tied to the previous image geometry. Clear
         // them rather than silently applying them to shifted content.
         self.masks.clear();
+        self.reset_inpainting_state();
         self.active_mask_tool = None;
         self.brush_mode = BrushMode::Paint;
         self.mask_drag = None;
@@ -220,6 +221,11 @@ impl AurawApp {
         self.mask_thumbnail_revision = self.mask_overlay_revision;
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
+        self.ai_masks_need_update = false;
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_failed = false;
         self.subject_consent_open = false;
         self.subject_receiver = None;
         self.subject_download_progress = None;
@@ -1207,6 +1213,7 @@ impl AurawApp {
             Arc::clone(raw),
             self.exposure,
             self.masks.clone(),
+            self.inpaint_layer.clone(),
             path,
             TileSpec::default(),
             self.export_settings,
