@@ -371,7 +371,10 @@ impl AurawApp {
     }
 
     pub(crate) fn edit_commit_revision(&self) -> u64 {
-        self.edit_history.committed_revision()
+        self.edit_history
+            .committed_revision()
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ self.inpaint_revision
     }
 
     /// O(1) snapshot for persistence. Call `commit_edit_history_now` first so
@@ -543,6 +546,14 @@ impl AurawApp {
                     _ => None,
                 })
         });
+        self.ai_mask_update_active = false;
+        self.ai_mask_update_subject_pending = false;
+        self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_failed = false;
+        if self.ai_masks_need_update {
+            let (subject, objects) = self.generated_ai_mask_targets();
+            self.ai_masks_need_update = subject || !objects.is_empty();
+        }
         self.subject_consent_open = false;
         self.subject_receiver = None;
         self.subject_download_progress = None;

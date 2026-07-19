@@ -11,6 +11,7 @@ impl eframe::App for AurawApp {
         self.poll_export_worker();
         self.poll_subject_worker();
         self.poll_object_worker();
+        self.poll_inpaint_worker();
         self.handle_edit_history_shortcuts(ui.ctx());
         self.handle_sidecar_shortcut(ui.ctx());
 
@@ -65,7 +66,7 @@ impl eframe::App for AurawApp {
 
         let _central = egui::CentralPanel::default().show(ui, |ui| match self.active_tab {
             AppTab::Library => Library::show(ui, self, frame),
-            AppTab::Develop => Preview::show(ui, self),
+            AppTab::Develop => Preview::show(ui, self, frame),
             AppTab::Settings => {
                 let settings_scroll_source = if slider_scroll_locked(ui.ctx()) {
                     egui::scroll_area::ScrollSource::NONE
@@ -102,10 +103,14 @@ impl eframe::App for AurawApp {
         {
             ui.ctx().request_repaint();
         }
-        if self.export_receiver.is_some() || self.export_publish_pending {
+        if self.export_receiver.is_some()
+            || self.export_publish_pending
+            || self.inpaint_receiver.is_some()
+        {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
         self.show_subject_dialogs(ui.ctx());
+        self.show_inpainting_dialogs(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
         self.observe_edit_history(ui.ctx());
         self.schedule_sidecar_autosave(ui.ctx(), edit_interaction_active);
