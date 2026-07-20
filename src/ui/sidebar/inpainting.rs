@@ -104,7 +104,7 @@ impl Sidebar {
 
         if let Some((downloaded, total)) = app.inpaint_progress() {
             ui.add_space(8.0);
-            ui.label("Downloading lama.onnx…");
+            ui.label("Downloading lama_fp32.onnx…");
             ui.add(
                 egui::ProgressBar::new(downloaded as f32 / total.max(1) as f32)
                     .show_percentage()
