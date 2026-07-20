@@ -114,10 +114,8 @@ impl Settings {
             );
         });
 
-        #[cfg(not(target_os = "android"))]
-        {
-            ui.add_space(8.0);
-            Self::group(ui, content_width, |ui| {
+        ui.add_space(8.0);
+        Self::group(ui, content_width, |ui| {
                 ui.heading("RAW color profiles");
                 ui.add(
                     egui::Label::new(
@@ -167,41 +165,105 @@ impl Settings {
 
                 ui.separator();
                 ui.strong("Camera profile folder");
-                if let Some(path) = &app.camera_profile_folder {
+                #[cfg(target_os = "android")]
+                if let Some(label) = &app.camera_profile_folder_importing_label {
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(path.display().to_string()).monospace(),
+                            egui::RichText::new(format!("Importing {label}…")).strong(),
                         )
                         .wrap(),
                     );
+                    ui.small("Copying .dcp files into AuRaw's persistent private storage. Large Adobe CameraProfiles trees can take a moment.");
+                } else if let Some(path) = &app.camera_profile_folder {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(
+                                app.camera_profile_folder_label
+                                    .as_deref()
+                                    .unwrap_or("CameraProfiles"),
+                            )
+                            .strong(),
+                        )
+                        .wrap(),
+                    );
+                    ui.small("Android keeps a private persistent copy of the selected .dcp files so profiles remain available after restart.");
+                    let _ = path;
+                } else {
+                    ui.small("No external DCP folder selected.");
+                }
+                #[cfg(not(target_os = "android"))]
+                if let Some(path) = &app.camera_profile_folder {
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        if let Some(label) = &app.camera_profile_folder_label {
+                            ui.small(label);
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(path.display().to_string()).monospace(),
+                            )
+                            .wrap(),
+                        );
+                    }
                 } else {
                     ui.small("No external DCP folder selected.");
                 }
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Choose folder…").clicked() {
+                    #[cfg(target_os = "android")]
+                    let choose_label = if app.camera_profile_folder_importing_label.is_some() {
+                        "Importing…"
+                    } else {
+                        "Choose folder…"
+                    };
+                    #[cfg(not(target_os = "android"))]
+                    let choose_label = "Choose folder…";
+
+                    #[cfg(target_os = "android")]
+                    let choose_enabled = !app.picker_pending;
+                    #[cfg(not(target_os = "android"))]
+                    let choose_enabled = true;
+
+                    if ui
+                        .add_enabled(choose_enabled, egui::Button::new(choose_label))
+                        .clicked()
+                    {
                         app.choose_camera_profile_folder();
                     }
+                    #[cfg(not(target_os = "android"))]
+                    if ui.button("Auto-detect Adobe").clicked() {
+                        app.auto_detect_camera_profile_folder();
+                    }
+                    let can_clear = app.camera_profile_folder.is_some() || app.camera_profile_auto_detect;
+                    #[cfg(target_os = "android")]
+                    let can_clear = can_clear && !app.picker_pending;
                     if ui
-                        .add_enabled(
-                            app.camera_profile_folder.is_some(),
-                            egui::Button::new("Clear"),
-                        )
+                        .add_enabled(can_clear, egui::Button::new("Clear"))
                         .clicked()
                     {
                         app.clear_camera_profile_folder();
                     }
                 });
+                #[cfg(not(target_os = "android"))]
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(
-                            "Choose the top-level profile root (for example CameraProfiles). AuRaw searches every subfolder recursively, groups all matching DCPs by camera, and offers multiple matches in the Develop view. Reopen the current RAW after changing this folder."
+                            "Choose the top-level profile root (for example CameraProfiles). AuRaw searches every subfolder recursively. Auto-detect checks Adobe Camera Raw's standard CameraProfiles install location on Windows and macOS."
+                        )
+                        .small(),
+                    )
+                    .wrap(),
+                );
+                #[cfg(target_os = "android")]
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "Choose the top-level CameraProfiles folder with Android's system folder picker. AuRaw recursively imports only .dcp files, then groups all matches by camera and exposes multiple profiles in Develop."
                         )
                         .small(),
                     )
                     .wrap(),
                 );
             });
-        }
 
         #[cfg(not(target_os = "android"))]
         {

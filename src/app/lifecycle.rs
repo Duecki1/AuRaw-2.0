@@ -125,6 +125,22 @@ impl AurawApp {
         let performance_settings_path = crate::performance_settings::desktop_path();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         let last_library_folder = performance.last_library_folder.clone();
+        let mut camera_profile_folder = performance.camera_profile_folder.clone();
+        let mut camera_profile_folder_label = performance.camera_profile_folder_label.clone();
+        if performance.camera_profile_auto_detect
+            && camera_profile_folder.as_ref().is_none_or(|folder| !folder.is_dir())
+        {
+            camera_profile_folder = crate::performance_settings::detected_adobe_camera_profile_folder();
+            if let Some(folder) = &camera_profile_folder {
+                crate::diagnostics::record(format!(
+                    "Camera profiles: auto-detected Adobe Camera Raw folder {}",
+                    folder.display()
+                ));
+                camera_profile_folder_label = Some("Adobe Camera Raw (auto-detected)".to_owned());
+            } else {
+                camera_profile_folder_label = None;
+            }
+        }
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -165,7 +181,9 @@ impl AurawApp {
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
             camera_profile_mode: performance.camera_profile_mode,
-            camera_profile_folder: performance.camera_profile_folder.clone(),
+            camera_profile_folder,
+            camera_profile_folder_label,
+            camera_profile_auto_detect: performance.camera_profile_auto_detect,
             last_camera_profile: performance.last_camera_profile.clone(),
             selected_camera_profile: None,
             active_tab: AppTab::default(),
@@ -338,6 +356,8 @@ impl AurawApp {
             performance_settings_path,
             camera_profile_mode: performance.camera_profile_mode,
             camera_profile_folder: performance.camera_profile_folder.clone(),
+            camera_profile_folder_label: performance.camera_profile_folder_label.clone(),
+            camera_profile_auto_detect: performance.camera_profile_auto_detect,
             last_camera_profile: performance.last_camera_profile.clone(),
             selected_camera_profile: None,
             active_tab: AppTab::default(),
@@ -438,6 +458,8 @@ impl AurawApp {
             tab_swipe_surface_id: None,
             android_app,
             picker_pending: false,
+            camera_profile_folder_importing_label: None,
+            pending_android_profile_reload: None,
         }
     }
 
@@ -476,7 +498,13 @@ impl AurawApp {
         let Some(folder) = dialog.pick_folder() else {
             return;
         };
+        self.camera_profile_folder_label = folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
         self.camera_profile_folder = Some(folder);
+        self.camera_profile_auto_detect = false;
+        self.last_camera_profile = None;
         self.raw_cache.clear();
         self.persist_performance_settings();
         self.notice = Some(
@@ -485,15 +513,64 @@ impl AurawApp {
         );
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "android")]
+    pub(crate) fn choose_camera_profile_folder(&mut self) {
+        if self.picker_pending {
+            self.notice = Some("Finish the current Android file picker first.".to_owned());
+            return;
+        }
+        match crate::android::open_camera_profile_folder(&self.android_app) {
+            Ok(()) => {
+                self.picker_pending = true;
+                self.camera_profile_folder_importing_label = None;
+                self.notice = None;
+                self.status = "Choose a CameraProfiles folder…".to_owned();
+            }
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
     pub(crate) fn clear_camera_profile_folder(&mut self) {
-        if self.camera_profile_folder.take().is_some() {
+        if self.camera_profile_folder.take().is_some() || self.camera_profile_auto_detect {
+            self.camera_profile_folder_label = None;
+            self.camera_profile_auto_detect = false;
+            self.last_camera_profile = None;
             self.raw_cache.clear();
             self.persist_performance_settings();
             self.notice = Some(
                 "Camera profile folder cleared. Reopen the RAW to apply the new profile selection."
                     .to_owned(),
             );
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn auto_detect_camera_profile_folder(&mut self) {
+        self.camera_profile_auto_detect = true;
+        match crate::performance_settings::detected_adobe_camera_profile_folder() {
+            Some(folder) => {
+                self.camera_profile_folder = Some(folder.clone());
+                self.camera_profile_folder_label =
+                    Some("Adobe Camera Raw (auto-detected)".to_owned());
+                self.last_camera_profile = None;
+                self.raw_cache.clear();
+                self.persist_performance_settings();
+                self.notice = Some(format!(
+                    "Using Adobe Camera Raw camera profiles from {}. Reopen the RAW to apply them.",
+                    folder.display()
+                ));
+            }
+            None => {
+                self.camera_profile_folder = None;
+                self.camera_profile_folder_label = None;
+                self.last_camera_profile = None;
+                self.raw_cache.clear();
+                self.persist_performance_settings();
+                self.notice = Some(
+                    "No Adobe Camera Raw CameraProfiles folder was found in the standard location."
+                        .to_owned(),
+                );
+            }
         }
     }
 
@@ -510,7 +587,6 @@ impl AurawApp {
         );
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn select_camera_profile_for_current(
         &mut self,
         selection: Option<PathBuf>,
@@ -529,19 +605,16 @@ impl AurawApp {
         if self.selected_camera_profile == selection {
             return;
         }
-        let Some(path) = self.current_path.clone() else {
+        let Some(sidecar_target) = self.sidecar_target.clone() else {
             self.notice = Some("Open a RAW before choosing a camera profile.".to_owned());
             return;
         };
         if let Some(selected) = selection.as_ref() {
-            let is_available = self
-                .loaded_raw
-                .as_ref()
-                .is_some_and(|raw| {
-                    raw.available_camera_profiles
-                        .iter()
-                        .any(|candidate| candidate.path == *selected)
-                });
+            let is_available = self.loaded_raw.as_ref().is_some_and(|raw| {
+                raw.available_camera_profiles
+                    .iter()
+                    .any(|candidate| candidate.path == *selected)
+            });
             if !is_available {
                 self.notice = Some(
                     "That DCP is no longer available for the current camera. Refresh the profile folder and reopen the RAW."
@@ -551,15 +624,9 @@ impl AurawApp {
             }
         }
 
-        let label = self
-            .current_label
-            .clone()
-            .unwrap_or_else(|| path.display().to_string());
         self.selected_camera_profile = selection.clone();
-        // Remember the user's last explicit dropdown choice as a global sticky
-        // default. Store it relative to the configured root so moving a whole
-        // CameraProfiles tree does not bake an absolute machine-specific path
-        // into settings. Choosing Automatic clears the sticky DCP preference.
+        // Only an explicit dropdown change updates the sticky default. Merely
+        // opening an edited photo never mutates this preference.
         self.last_camera_profile = selection
             .as_ref()
             .zip(self.camera_profile_folder.as_ref())
@@ -567,23 +634,57 @@ impl AurawApp {
             .filter(|relative| !relative.as_os_str().is_empty())
             .map(std::path::Path::to_path_buf);
         self.persist_performance_settings();
-        // Profile choice is part of the image's rendering state. Save an
-        // explicit snapshot and carry the exact live edits through the reload
-        // so changing DCP never drops unsaved slider/mask work.
         self.queue_explicit_sidecar_save();
         let edit_override = self.capture_sidecar_edit_state();
-        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
-            raw_path: path.clone(),
-        };
-        self.open_path_labeled_with_options(
-            path,
-            label,
-            false,
-            sidecar_target,
-            frame,
-            Some(selection),
-            Some(edit_override),
-        );
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let crate::sidecar::SidecarTarget::Desktop { raw_path } = sidecar_target;
+            let label = self
+                .current_label
+                .clone()
+                .unwrap_or_else(|| raw_path.display().to_string());
+            let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
+                raw_path: raw_path.clone(),
+            };
+            self.open_path_labeled_with_options(
+                raw_path,
+                label,
+                false,
+                sidecar_target,
+                frame,
+                Some(selection),
+                Some(edit_override),
+            );
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let (raw_uri, display_name) = match sidecar_target {
+                crate::sidecar::SidecarTarget::Android {
+                    raw_uri,
+                    display_name,
+                } => (raw_uri, display_name),
+                crate::sidecar::SidecarTarget::Desktop { .. } => {
+                    self.notice = Some(
+                        "The current Android RAW does not have a reloadable library target."
+                            .to_owned(),
+                    );
+                    return;
+                }
+            };
+            match crate::android::open_library_document(&self.android_app, &raw_uri, &display_name) {
+                Ok(()) => {
+                    self.pending_android_profile_reload = Some((selection, edit_override));
+                    self.picker_pending = true;
+                    self.notice = None;
+                    self.status = format!("Applying camera profile to {display_name}…");
+                }
+                Err(error) => {
+                    self.notice = Some(format!("Could not reload RAW for camera profile: {error}"));
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "android")]
@@ -658,6 +759,8 @@ impl AurawApp {
             thumbnail_workers: self.library.thumbnail_worker_count(),
             camera_profile_mode: self.camera_profile_mode,
             camera_profile_folder: self.camera_profile_folder.clone(),
+            camera_profile_folder_label: self.camera_profile_folder_label.clone(),
+            camera_profile_auto_detect: self.camera_profile_auto_detect,
             last_camera_profile: self.last_camera_profile.clone(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
@@ -1296,22 +1399,78 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     fn poll_android_picker(&mut self, frame: &eframe::Frame) {
+        while let Some(result) = crate::android::take_camera_profile_folder_result() {
+            match result {
+                crate::android::CameraProfileFolderResult::ImportStarted { label } => {
+                    self.camera_profile_folder_importing_label = Some(label.clone());
+                    self.status = format!("Importing DCP profiles from {label}…");
+                    self.notice = None;
+                    // The SAF picker has returned, but its tree is copied on a Java
+                    // worker thread. Keep picker_pending set so a second picker cannot
+                    // race the import; eframe_impl keeps polling while it is pending.
+                }
+                crate::android::CameraProfileFolderResult::Picked {
+                    path,
+                    label,
+                    profiles,
+                } => {
+                    self.picker_pending = false;
+                    self.camera_profile_folder_importing_label = None;
+                    self.camera_profile_folder = Some(path);
+                    self.camera_profile_folder_label = Some(label.clone());
+                    self.camera_profile_auto_detect = false;
+                    self.last_camera_profile = None;
+                    self.raw_cache.clear();
+                    self.persist_performance_settings();
+                    self.notice = Some(format!(
+                        "Camera profile folder '{label}' imported with {profiles} DCP {}. Reopen the RAW to apply the new profile selection.",
+                        if profiles == 1 { "profile" } else { "profiles" }
+                    ));
+                }
+                crate::android::CameraProfileFolderResult::Cancelled => {
+                    self.picker_pending = false;
+                    self.camera_profile_folder_importing_label = None;
+                    self.notice = Some("No camera profile folder selected.".to_owned());
+                }
+                crate::android::CameraProfileFolderResult::Failed(error) => {
+                    self.picker_pending = false;
+                    self.camera_profile_folder_importing_label = None;
+                    self.notice = Some(format!("Could not import camera profiles: {error}"));
+                }
+            }
+        }
+
         while let Some(result) = crate::android::take_picker_result() {
             self.picker_pending = false;
             match result {
                 crate::android::PickerResult::Picked(document) => {
                     self.library.refresh(&self.egui_ctx);
                     self.active_tab = AppTab::Develop;
-                    self.open_path_labeled(
-                        document.path,
-                        document.display_name.clone(),
-                        document.delete_after_decode,
-                        crate::sidecar::SidecarTarget::Android {
-                            raw_uri: document.library_uri,
-                            display_name: document.display_name,
-                        },
-                        frame,
-                    )
+                    let sidecar_target = crate::sidecar::SidecarTarget::Android {
+                        raw_uri: document.library_uri,
+                        display_name: document.display_name.clone(),
+                    };
+                    if let Some((selection, edit_override)) =
+                        self.pending_android_profile_reload.take()
+                    {
+                        self.open_path_labeled_with_options(
+                            document.path,
+                            document.display_name,
+                            document.delete_after_decode,
+                            sidecar_target,
+                            frame,
+                            Some(selection),
+                            Some(edit_override),
+                        );
+                    } else {
+                        self.open_path_labeled(
+                            document.path,
+                            document.display_name,
+                            document.delete_after_decode,
+                            sidecar_target,
+                            frame,
+                        );
+                    }
                 }
                 crate::android::PickerResult::BatchImported {
                     imported,
@@ -1342,10 +1501,16 @@ impl AurawApp {
                     };
                 }
                 crate::android::PickerResult::Cancelled => {
+                    self.pending_android_profile_reload = None;
                     self.notice = Some("No RAW files selected.".to_owned());
                 }
                 crate::android::PickerResult::Failed(error) => {
-                    self.notice = Some(format!("Could not import the selected file: {error}"));
+                    let was_profile_reload = self.pending_android_profile_reload.take().is_some();
+                    self.notice = Some(if was_profile_reload {
+                        format!("Could not reload RAW for camera profile: {error}")
+                    } else {
+                        format!("Could not import the selected file: {error}")
+                    });
                 }
             }
         }

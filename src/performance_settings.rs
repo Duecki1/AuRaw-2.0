@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 1;
+const SETTINGS_VERSION: u32 = 2;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -17,6 +17,14 @@ pub(crate) struct PerformanceSettings {
     pub(crate) camera_profile_mode: CameraProfileMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) camera_profile_folder: Option<PathBuf>,
+    /// Human-readable source shown in Settings. Android stores a private mirror
+    /// path in `camera_profile_folder`, while this keeps the selected SAF tree name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) camera_profile_folder_label: Option<String>,
+    /// When enabled and no explicit folder is configured, desktop builds probe
+    /// Adobe Camera Raw's standard CameraProfiles installation locations.
+    #[serde(default = "default_camera_profile_auto_detect")]
+    pub(crate) camera_profile_auto_detect: bool,
     /// Last manually chosen external DCP, stored relative to the configured
     /// profile root. New RAWs without a sidecar may inherit this choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,6 +46,10 @@ fn default_thumbnail_workers() -> usize {
     crate::ui::library::default_thumbnail_worker_count()
 }
 
+const fn default_camera_profile_auto_detect() -> bool {
+    !cfg!(target_os = "android")
+}
+
 impl Default for PerformanceSettings {
     fn default() -> Self {
         Self {
@@ -46,6 +58,8 @@ impl Default for PerformanceSettings {
             thumbnail_workers: default_thumbnail_workers(),
             camera_profile_mode: CameraProfileMode::default(),
             camera_profile_folder: None,
+            camera_profile_folder_label: None,
+            camera_profile_auto_detect: default_camera_profile_auto_detect(),
             last_camera_profile: None,
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
@@ -134,6 +148,65 @@ pub(crate) fn desktop_path() -> Option<PathBuf> {
     base.map(|base| base.join("auraw").join("performance.json"))
 }
 
+
+/// Adobe's documented Camera Raw camera-profile install roots. AuRaw only
+/// auto-selects an existing directory; recursive DCP discovery remains in the
+/// RAW loader so manually installed camera subfolders work too.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn detected_adobe_camera_profile_folder() -> Option<PathBuf> {
+    adobe_camera_profile_candidates()
+        .into_iter()
+        .find(|path| path.is_dir())
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn adobe_camera_profile_candidates() -> Vec<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut candidates = Vec::new();
+        if let Some(program_data) = std::env::var_os("ProgramData")
+            .or_else(|| std::env::var_os("ALLUSERSPROFILE"))
+        {
+            candidates.push(
+                PathBuf::from(program_data)
+                    .join("Adobe")
+                    .join("CameraRaw")
+                    .join("CameraProfiles"),
+            );
+        }
+        return candidates;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut candidates = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(
+                PathBuf::from(home)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("Adobe")
+                    .join("CameraRaw")
+                    .join("CameraProfiles"),
+            );
+        }
+        candidates.push(PathBuf::from(
+            "/Library/Application Support/Adobe/CameraRaw/CameraProfiles",
+        ));
+        return candidates;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+    {
+        Vec::new()
+    }
+
+    #[cfg(not(any(windows, unix, target_os = "macos")))]
+    {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +219,8 @@ mod tests {
             thumbnail_workers: 0,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
             camera_profile_folder: Some(PathBuf::from("profiles")),
+            camera_profile_folder_label: Some("CameraProfiles".to_owned()),
+            camera_profile_auto_detect: false,
             last_camera_profile: Some(PathBuf::from("Sony/Camera ST.dcp")),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
@@ -159,6 +234,8 @@ mod tests {
         assert_eq!(settings.thumbnail_workers, 1);
         assert_eq!(settings.camera_profile_mode, CameraProfileMode::DcpProfiles);
         assert_eq!(settings.camera_profile_folder, Some(PathBuf::from("profiles")));
+        assert_eq!(settings.camera_profile_folder_label.as_deref(), Some("CameraProfiles"));
+        assert!(!settings.camera_profile_auto_detect);
         assert_eq!(
             settings.last_camera_profile,
             Some(PathBuf::from("Sony/Camera ST.dcp"))

@@ -72,7 +72,6 @@ impl Sidebar {
         ui.add_space(2.0);
         ui.separator();
 
-        #[cfg(not(target_os = "android"))]
         Self::show_camera_profile_selector(ui, app, frame);
 
         let mut changed = false;
@@ -156,7 +155,6 @@ impl Sidebar {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn show_camera_profile_selector(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         if app.camera_profile_mode == crate::pipeline::CameraProfileMode::MatrixOnly {
             return;
