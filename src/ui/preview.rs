@@ -39,9 +39,24 @@ impl Preview {
         }
 
         let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
+        // The displayed backing texture may switch between the normal proxy and
+        // the tiny full-frame navigation proxy while an adjustment is being
+        // dragged. Those independently downscaled proxies can differ by a pixel
+        // after integer rounding, which gives them a slightly different aspect
+        // ratio. Deriving zoom geometry from whichever texture happens to be
+        // active makes that texture swap look like camera motion: visible UVs
+        // change, `note_preview_motion` invalidates the detail crop, and the
+        // low-resolution backing briefly flashes through. Anchor all preview
+        // geometry to the full developed image instead; texture swaps then only
+        // change pixels, never the zoom/crop coordinate system.
+        let (geometry_width, geometry_height) = app
+            .loaded_raw
+            .as_ref()
+            .map(|raw| (raw.width, raw.height))
+            .unwrap_or((pipeline_width, pipeline_height));
         let base_size = fitted_image_size(
             outer_rect.size(),
-            pipeline_width as f32 / pipeline_height as f32,
+            geometry_width as f32 / geometry_height.max(1) as f32,
         );
         app.preview_zoom = app.preview_zoom.clamp(1.0, 32.0);
         clamp_preview_center(

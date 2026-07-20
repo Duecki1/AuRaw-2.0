@@ -74,7 +74,9 @@ def test_android_library_cards_have_visible_overflow_menu_buttons() -> None:
     ui = (ROOT / "src/ui/mod.rs").read_text(encoding="utf-8")
     assert 'fn android_overflow_menu' in ui
     assert 'painter.circle_filled(' in ui
-    assert 'menu_button("", add_contents)' in ui
+    assert 'ui.interact(button_rect, id, Sense::click())' in ui
+    assert 'Popup::menu(&response).show(add_contents)' in ui
+    assert 'Do not use `Ui::menu_button` here' in ui
     assert 'RichText::new("⋮")' not in ui
     assert 'android-library-card-overflow' in LIBRARY
     assert 'android_library_card_menu(' in LIBRARY

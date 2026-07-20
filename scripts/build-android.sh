@@ -93,7 +93,7 @@ if [ -z "${LIBCLANG_PATH:-}" ] && command -v ldconfig >/dev/null 2>&1 \
 fi
 
 if [ "$PROFILE" = release ]; then
-    REVISION=$("$ROOT/scripts/verify-source-revision.sh")
+    REVISION=$(sh "$ROOT/scripts/verify-source-revision.sh")
     export AURAW_REQUIRE_COMMITTED_SOURCE=1
     export AURAW_SOURCE_REVISION="$REVISION"
     export SOURCE_DATE_EPOCH="$(git -C "$ROOT" show -s --format=%ct "$REVISION")"
@@ -103,7 +103,7 @@ export CARGO_INCREMENTAL=0
 export CARGO_TARGET_DIR="$ROOT/target"
 unset CARGO_BUILD_TARGET CARGO_ENCODED_RUSTFLAGS RUSTFLAGS RUSTDOCFLAGS
 
-"$ROOT/scripts/build-android-libraw.sh" "$ABI"
+sh "$ROOT/scripts/build-android-libraw.sh" "$ABI"
 
 case "$PROFILE" in
     release) CARGO_PROFILE=--release ;;
@@ -127,7 +127,7 @@ test -f "$ROOT/android/app/src/main/jniLibs/$ABI/libauraw.so"
 test -f "$ROOT/android/app/src/main/jniLibs/$ABI/libc++_shared.so"
 
 if [ "$PROFILE" = release ]; then
-    if ! FINAL_REVISION=$("$ROOT/scripts/verify-source-revision.sh") \
+    if ! FINAL_REVISION=$(sh "$ROOT/scripts/verify-source-revision.sh") \
         || [ "$FINAL_REVISION" != "$REVISION" ]; then
         rm -rf "$ROOT/android/app/src/main/jniLibs/$ABI"
         echo "source changed during the build; discarded the Android native library" >&2

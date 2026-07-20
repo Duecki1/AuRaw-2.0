@@ -80,6 +80,14 @@ def test_current_normal_proxy_is_not_replaced_by_tiny_navigation_proxy() -> None
     assert "Keep the normal adjusted full-frame proxy as the zoom backing" in PROCESSING_EXPORT
 
 
+def test_preview_geometry_does_not_change_when_backing_proxy_switches() -> None:
+    assert "geometry_width" in PREVIEW
+    assert "geometry_height" in PREVIEW
+    assert ".loaded_raw" in PREVIEW
+    assert "Anchor all preview" in PREVIEW
+    assert "geometry_width as f32 / geometry_height.max(1) as f32" in PREVIEW
+
+
 def test_zoom_detail_masks_remain_in_full_image_coordinate_space() -> None:
     # adjustments.wgsl samples local_mask_tex using tile_origin/full_size UVs.
     # A crop-remapped atlas would therefore be transformed twice and drift as
