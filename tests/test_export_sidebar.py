@@ -22,7 +22,9 @@ def test_sidebar_has_exactly_four_requested_tabs() -> None:
     assert "fn show_masks" in SIDEBAR
     for kind in ("Brush", "Radial", "Linear", "Subject", "Background", "Object", "Landscape", "LuminanceRange", "ColorRange", "DepthRange"):
         assert f"MaskKind::{kind}" in SIDEBAR
-    assert "generative inpainting controls are coming later" in SIDEBAR
+    assert "fn show_inpainting" in SIDEBAR
+    assert '"Paint over unwanted content"' in SIDEBAR
+    assert '"Drag on the image. Releasing each stroke runs the local LaMa eraser."' in SIDEBAR
 
 
 def test_export_button_only_lives_in_export_sidebar_tab() -> None:

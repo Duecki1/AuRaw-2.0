@@ -12,25 +12,28 @@ def test_desktop_toolbar_toggles_original_and_edited_preview() -> None:
     assert '#[cfg(not(target_os = "android"))]' in TOP_BAR
     assert '"Show Original"' in TOP_BAR
     assert '"Show Edited"' in TOP_BAR
-    assert "app.show_original_preview = !app.show_original_preview" in TOP_BAR
+    assert "app.original_preview_visible()" in TOP_BAR
+    assert "app.toggle_original_preview();" in TOP_BAR
 
 
 def test_android_hold_shows_original_only_while_stationary() -> None:
-    assert 'cfg!(target_os = "android")' in PREVIEW
-    assert "HOLD_DURATION" in PREVIEW
+    assert '#[cfg(target_os = "android")]' in PREVIEW
+    assert "const HOLD_TIME" in PREVIEW
     assert "Duration::from_secs(1)" in PREVIEW
-    assert "MOVE_TOLERANCE_POINTS" in PREVIEW
-    assert "original_preview_hold_cancelled" in APP
+    assert "MAX_STATIONARY_DISTANCE" in PREVIEW
+    assert "android_original_hold" in APP
     assert "input.pointer.primary_down()" in PREVIEW
-    assert "app.show_original_preview = false" in PREVIEW
-    assert "Original · release for edited" in PREVIEW
+    assert "app.set_original_preview_requested(false)" in PREVIEW
+    assert "app.set_original_preview_requested(true)" in PREVIEW
+    assert "position.distance(hold.start) > MAX_STATIONARY_DISTANCE" in PREVIEW
 
 
-def test_original_preview_is_a_separate_cached_texture() -> None:
-    assert "original_preview_texture: Option<egui::TextureHandle>" in APP
-    assert "OriginalPreviewImage" in APP
-    assert "GpuParams::new(&initial_exposure, &original_masks, &preview_raw)" in LIFECYCLE
-    assert "new_headless_reusing_programs_with_mask_edge" in LIFECYCLE
-    assert 'self.egui_ctx.load_texture(' in LIFECYCLE
-    assert "rebuild_original_preview_texture" in PROCESSING
-    assert "if !show_original" in PREVIEW
+def test_original_preview_reuses_gpu_pipelines_without_texture_swapping() -> None:
+    assert "original_preview_exposure: ExposureParams" in APP
+    assert "original_preview_requested: bool" in APP
+    assert "original_preview_rendered_state: Option<(bool, u64)>" in APP
+    assert "self.original_preview_exposure = initial_exposure" in LIFECYCLE
+    assert "pub(crate) fn sync_original_preview" in PROCESSING
+    assert "pipeline.recompute(&render_state.queue, &render_state.device, &params)" in PROCESSING
+    assert "requested_state = (self.original_preview_requested, self.preview_revision)" in PROCESSING
+    assert "app.original_preview_visible()" in PREVIEW

@@ -6,7 +6,7 @@ if [ "$#" -ne 0 ]; then
     echo "build-linux.sh does not accept Cargo overrides" >&2
     exit 2
 fi
-REVISION=$("$ROOT/scripts/verify-source-revision.sh")
+REVISION=$(sh "$ROOT/scripts/verify-source-revision.sh")
 
 export AURAW_REQUIRE_COMMITTED_SOURCE=1
 export AURAW_SOURCE_REVISION="$REVISION"
@@ -19,7 +19,7 @@ cargo build --locked --release --manifest-path "$ROOT/Cargo.toml"
 test -f "$ROOT/target/release/auraw"
 test -f "$ROOT/target/release/auraw-regression-render"
 
-if ! FINAL_REVISION=$("$ROOT/scripts/verify-source-revision.sh") \
+if ! FINAL_REVISION=$(sh "$ROOT/scripts/verify-source-revision.sh") \
     || [ "$FINAL_REVISION" != "$REVISION" ]; then
     rm -f "$ROOT/target/release/auraw" \
         "$ROOT/target/release/auraw-regression-render"

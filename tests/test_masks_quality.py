@@ -29,7 +29,10 @@ def test_brush_radial_and_linear_interactions_are_cross_platform_egui() -> None:
     assert "BrushMode::Erase" in PREVIEW
     assert "MaskGeometry::Radial" in PREVIEW
     assert "MaskGeometry::Linear" in PREVIEW
-    assert "cfg(target_os = \"android\")" not in PREVIEW
+    # Mask editing itself stays on the shared egui path. Android-only code in
+    # this module is limited to the press-and-hold original-preview gesture.
+    mask_interaction = PREVIEW[PREVIEW.index("fn handle_mask_interaction"):]
+    assert "cfg(target_os = \"android\")" not in mask_interaction
     assert "distance_px" in PREVIEW
 
 

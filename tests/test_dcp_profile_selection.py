@@ -2,7 +2,7 @@ import unittest
 
 from pathlib import Path
 
-from source_helpers import read_source_tree
+from tests.source_helpers import read_source_tree
 
 
 class DcpProfileSelectionTests(unittest.TestCase):
