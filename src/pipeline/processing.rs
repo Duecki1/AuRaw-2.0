@@ -107,6 +107,8 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         black_levels_per_pixel,
         white_levels: raw.white_levels,
         camera_profile: raw.camera_profile.clone(),
+        camera_profile_source: raw.camera_profile_source.clone(),
+        available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
     }
 }
@@ -218,6 +220,8 @@ pub fn build_region_proxy(
         black_levels_per_pixel,
         white_levels: raw.white_levels,
         camera_profile: raw.camera_profile.clone(),
+        camera_profile_source: raw.camera_profile_source.clone(),
+        available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
     }
 }
@@ -411,6 +415,8 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
         black_levels_per_pixel,
         white_levels: raw.white_levels,
         camera_profile: raw.camera_profile.clone(),
+        camera_profile_source: raw.camera_profile_source.clone(),
+        available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
     }
 }
@@ -496,6 +502,8 @@ mod tests {
             black_levels_per_pixel: (0..width * height).map(|value| value as f32).collect(),
             white_levels: [1023.0; 4],
             camera_profile: CameraProfile::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
             white_balance_model: None,
         };
 
@@ -541,6 +549,8 @@ mod tests {
             black_levels_per_pixel: vec![0.0; (width * height) as usize],
             white_levels: [1023.0; 4],
             camera_profile: CameraProfile::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
             white_balance_model: None,
         };
 

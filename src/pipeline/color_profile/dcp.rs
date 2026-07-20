@@ -1,5 +1,6 @@
 use super::*;
 
+const UNIQUE_CAMERA_MODEL: u16 = 50708;
 const COLOR_MATRIX_1: u16 = 50721;
 const COLOR_MATRIX_2: u16 = 50722;
 const CAMERA_CALIBRATION_1: u16 = 50723;
@@ -44,6 +45,7 @@ pub(super) fn profile_from_tags(
     }
 
     let name = read_ascii_tag(reader, tags, PROFILE_NAME)?;
+    let camera_model = read_ascii_tag(reader, tags, UNIQUE_CAMERA_MODEL)?;
     let camera_calibration_signature = read_ascii_tag(reader, tags, CAMERA_CALIBRATION_SIGNATURE)?;
     let calibration_signature = read_ascii_tag(reader, tags, PROFILE_CALIBRATION_SIGNATURE)?;
     let hue_dims = read_u32_tag(reader, tags, PROFILE_HUE_SAT_MAP_DIMS)?;
@@ -133,6 +135,7 @@ pub(super) fn profile_from_tags(
 
     Ok(Some(DcpProfile {
         name,
+        camera_model,
         camera_calibration_signature,
         calibration_signature,
         matrices,

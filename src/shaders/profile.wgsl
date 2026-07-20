@@ -119,7 +119,14 @@ fn apply_profile_hsv_map(rgb_rec2020: vec3<f32>, map_info: vec4<u32>, encoding: 
     if map_info.x == 0u || map_info.y == 0u || map_info.z == 0u {
         return rgb_rec2020;
     }
-    let profile_rgb = max(REC2020_TO_PROPHOTO * rgb_rec2020, vec3<f32>(0.0));
+    // Adobe/DNG baseline rendering feeds the profile tables bounded linear
+    // ProPhoto RGB. Keep the table domain identical so camera-matching DCPs
+    // do not see out-of-range RGB values that Lightroom would have clipped.
+    let profile_rgb = clamp(
+        REC2020_TO_PROPHOTO * rgb_rec2020,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
     var hsv = profile_rgb_to_hsv(profile_rgb);
 
     // For standard-dynamic-range DCPs, the encoding tags apply only to the
@@ -145,7 +152,11 @@ fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
         return apply_profile_hsv_map(rgb, params.profile_hue_sat, params.profile_flags.x);
     }
 
-    let profile_rgb = max(REC2020_TO_PROPHOTO * rgb, vec3<f32>(0.0));
+    let profile_rgb = clamp(
+        REC2020_TO_PROPHOTO * rgb,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
     var hsv = profile_rgb_to_hsv(profile_rgb);
     let encode_value = params.profile_flags.x == 1u
         && (params.profile_hue_sat.z > 1u || second.z > 1u);
@@ -201,12 +212,29 @@ fn apply_profile_tone_curve(rgb_rec2020: vec3<f32>) -> vec3<f32> {
     if params.profile_tone.x < 2u {
         return rgb_rec2020;
     }
-    let prophoto = REC2020_TO_PROPHOTO * rgb_rec2020;
-    let curved = vec3<f32>(
-        profile_curve_value(prophoto.r),
-        profile_curve_value(prophoto.g),
-        profile_curve_value(prophoto.b),
+
+    // Match the DNG reference RGB-tone operation instead of applying the
+    // spline independently to R, G and B. Adobe maps the minimum and maximum
+    // channel through the curve, then places the middle channel at the same
+    // relative position between them. That preserves the profile's hue
+    // relationships while still applying its intended contrast curve.
+    let prophoto = clamp(
+        REC2020_TO_PROPHOTO * rgb_rec2020,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
     );
+    let low = min(prophoto.r, min(prophoto.g, prophoto.b));
+    let high = max(prophoto.r, max(prophoto.g, prophoto.b));
+    if high - low <= 1e-8 {
+        let value = profile_curve_value(low);
+        return PROPHOTO_TO_REC2020 * vec3<f32>(value);
+    }
+
+    let mapped_low = profile_curve_value(low);
+    let mapped_high = profile_curve_value(high);
+    let scale = (mapped_high - mapped_low) / (high - low);
+    let curved = vec3<f32>(mapped_low)
+        + (prophoto - vec3<f32>(low)) * scale;
     return PROPHOTO_TO_REC2020 * curved;
 }
 

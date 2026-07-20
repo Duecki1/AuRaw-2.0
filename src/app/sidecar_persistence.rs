@@ -19,9 +19,17 @@ fn sidecar_interaction_active(ctx: &egui::Context) -> bool {
 }
 
 impl AurawApp {
-    fn capture_sidecar_edit_state(&self) -> SidecarEditState {
+    pub(super) fn capture_sidecar_edit_state(&self) -> SidecarEditState {
+        let camera_profile = self
+            .selected_camera_profile
+            .as_ref()
+            .zip(self.camera_profile_folder.as_ref())
+            .and_then(|(selected, root)| selected.strip_prefix(root).ok())
+            .filter(|relative| !relative.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
         SidecarEditState {
             exposure: self.exposure,
+            camera_profile,
             masks: self.committed_mask_state_for_persistence(),
             inpainting: Arc::new(self.inpaint_strokes.clone()),
             lens: SidecarLensEditState {
@@ -94,6 +102,12 @@ impl AurawApp {
                 self.queue_developed_thumbnail_refresh(generation, self.edit_commit_revision());
             }
         }
+    }
+
+    pub(super) fn queue_explicit_sidecar_save(&mut self) {
+        self.commit_edit_history_now();
+        self.queue_current_sidecar_save(true);
+        self.start_next_sidecar_save();
     }
 
     fn queue_current_sidecar_save(&mut self, explicit: bool) {

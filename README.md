@@ -32,6 +32,22 @@ storage I/O stay on a worker. Desktop
 sidecars sit beside the source file; Android sidecars are visible siblings in
 the AuRaw library folder.
 
+## DCP camera profiles
+
+Desktop builds can point **Settings > RAW color profiles > Camera profile folder**
+at a top-level profile library such as Adobe Camera Raw's `CameraProfiles`
+directory. AuRaw scans that root recursively, so one folder can contain profiles
+for many camera models and any number of DCP variants per camera. Matching uses
+the DCP camera model metadata first and falls back to camera/model names in the
+profile path when required.
+
+When the current camera has more than one matching DCP, **Develop > Adjustments**
+shows a **Camera profile** dropdown. The default Automatic choice uses AuRaw's
+preferred neutral/standard match; selecting another profile reloads the RAW with
+that DCP while preserving the live edits. Explicit per-image profile choices are
+stored in the `.auraw` sidecar as a path relative to the configured profile root,
+so reopening the image restores the same rendering choice.
+
 ## Linux (Debian/Ubuntu)
 
 Install the build dependencies:
