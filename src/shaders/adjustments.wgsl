@@ -1049,14 +1049,17 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
-    // DNG rendering order is camera/WB transform -> HueSatMap -> exposure
-    // compensation -> LookTable -> profile tone curve. In particular, user
-    // Exposure must not run before HueSatMap: doing so changes which bounded
-    // profile-table cells are sampled and can clip colors before the camera
-    // characterization has been applied.
+    // Keep the newer DNG camera-characterisation order, but apply global and
+    // masked Exposure together in the same scene-linear stage. Exposure after
+    // LookTable/ProfileToneCurve behaves like a baked display edit and can no
+    // longer recover highlight separation. Local masks use normalized full-
+    // image coordinates, so the same exposure field is used for preview and
+    // every export tile.
     var rgb = apply_profile_hue_sat(scene_working_at(pos));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
-    rgb = rgb * exp2(profile_exposure_ev);
+    let local = local_adjustment_mix(pos);
+    let local_exposure_ev = clamp(local.tone0.x, -10.0, 10.0);
+    rgb = rgb * exp2(profile_exposure_ev + local_exposure_ev);
     rgb = apply_exposure(rgb);
     rgb = apply_profile_look(rgb);
     rgb = apply_profile_tone_curve(rgb);
@@ -1064,10 +1067,6 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = max(rgb, vec3<f32>(0.0));
     rgb = apply_lightroom_tone(rgb, pos);
 
-    // Local masks are evaluated in normalized full-image coordinates, so the
-    // same feathered mask is used by the preview proxy and every export tile.
-    let local = local_adjustment_mix(pos);
-    rgb = rgb * exp2(clamp(local.tone0.x, -10.0, 10.0));
     rgb = apply_local_basic_tone_values(
         rgb,
         pos,
@@ -1149,6 +1148,21 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(creative_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
 }
 
+fn profile_tone_display_shoulder(rgb: vec3<f32>) -> vec3<f32> {
+    // A DCP ProfileToneCurve already supplies the profile's baseline contrast.
+    // Preserve that rendition through the midtones, then blend smoothly into
+    // the normal sigmoid only as highlights approach/exceed display white. This
+    // keeps profile matching without ever collapsing over-range values via a
+    // hard clamp.
+    let positive = desaturate_negative_values(rgb);
+    let peak = max(positive.r, max(positive.g, positive.b));
+    if peak <= 0.82 {
+        return positive;
+    }
+    let shoulder_weight = smoothstep(0.82, 1.18, peak);
+    return mix(positive, darktable_sigmoid(positive), shoulder_weight);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
@@ -1164,13 +1178,13 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
         params.grade_options,
     );
     let graded = apply_local_color_grading(pos, globally_graded);
-    // A DCP ProfileToneCurve is already the profile's base display-tone
-    // rendition. Do not stack AuRaw's unrelated default darktable sigmoid on
-    // top of it. A non-default Rendering/Sigmoid setting clears the CPU flag
-    // and intentionally opts back into AuRaw's transform.
-    var display_linear = clamp(graded, vec3<f32>(0.0), vec3<f32>(1.0));
-    if (params.process_info.y & 1u) == 0u {
-        display_linear = darktable_sigmoid(graded);
+    // Never hard-clamp the creative result. With a default DCP ProfileToneCurve
+    // retain its baseline rendition and add only a highlight shoulder; otherwise
+    // use the full configurable sigmoid. Both paths preserve separation between
+    // over-range values instead of flattening them to 1.0.
+    var display_linear = darktable_sigmoid(graded);
+    if (params.process_info.y & 1u) != 0u {
+        display_linear = profile_tone_display_shoulder(graded);
     }
     textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
     textureStore(out_tex, pos, vec4<f32>(apply_output_lut(display_linear), 1.0));

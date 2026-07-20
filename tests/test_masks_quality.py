@@ -51,13 +51,24 @@ def test_submasks_have_user_renameable_names() -> None:
     assert "component.name" in SIDEBAR
 
 
+def test_export_mask_atlas_helpers_are_reexported() -> None:
+    pipeline_mod = (ROOT / "src/pipeline/mod.rs").read_text(encoding="utf-8")
+    assert "export_mask_atlas_edge," in pipeline_mod
+    assert "export_mask_atlas_edge_limit," in pipeline_mod
+
+
 def test_mask_atlas_is_shared_by_preview_and_export() -> None:
-    assert "R8Unorm" in GPU
+    assert "R16Float" in GPU
     assert "TextureViewDimension::D2Array" in GPU
     assert "update_mask_layer" in GPU
+    assert "rasterize_layer_f16" in MASKS
+    assert "f16::from_f32" in MASKS
     assert "mark_mask_geometry_dirty" in APP
     assert "upload_mask_atlas" in EXPORT
-    assert "rasterize_layer" in EXPORT
+    assert "rasterize_layer_f16" in EXPORT
+    assert "export_mask_atlas_edge(raw.width, raw.height)" in EXPORT
+    assert "MASK_ATLAS_EDGE_EXPORT_DESKTOP: u32 = 4096" in MASKS
+    assert "MASK_ATLAS_EDGE_EXPORT_ANDROID: u32 = 2048" in MASKS
 
 
 def test_local_adjustments_are_scene_linear_and_mask_weighted() -> None:
@@ -81,7 +92,7 @@ def test_ai_and_range_masks_use_a_stable_unedited_raw_reference() -> None:
     assert "reference_pipeline.read_output_region_blocking" not in capture  # formatted as a chained call
     assert "let rgba = reference_pipeline" in capture
     assert "live edited output texture" in capture
-    assert "source_edge" in capture and "2048" in capture
+    assert "source_edge" in capture and "3072" in capture and "2048" in capture
 
 
 def test_brush_input_and_rasterization_avoid_progressive_slowdown() -> None:
@@ -110,6 +121,15 @@ def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
     assert "let bottom = sample(x0, y1)" in MASKS
     assert "*value = top + (bottom - top) * fy" in MASKS
 
+
+
+
+def test_ai_subject_edges_use_high_resolution_rgb_guidance() -> None:
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    assert "refine_subject_mask_edges" in ai
+    assert "color_distance" in ai
+    assert "weighted_probability" in ai
+    assert "center_probability * 0.40 + guided * 0.60" in ai
 
 def test_mask_input_and_cursor_are_clipped_to_the_visible_preview() -> None:
     assert "Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response)" in PREVIEW

@@ -555,7 +555,7 @@ fn infer_subject(
         run_subject_session(session, input)?
     };
 
-    let mask = restore_from_letterbox(
+    let mut mask = restore_from_letterbox(
         &logits,
         output_width,
         output_height,
@@ -563,6 +563,7 @@ fn infer_subject(
         width,
         height,
     )?;
+    refine_subject_mask_edges(&mut mask, image.as_raw(), width, height)?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -711,6 +712,88 @@ fn restore_from_letterbox(
         .into_iter()
         .map(|probability| (probability.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
         .collect())
+}
+
+/// Joint-bilateral cleanup of the upscaled BiRefNet probability map. The
+/// network still runs at 1024px, but the canonical RAW rendition is retained
+/// at a higher resolution. Using that RGB image as a guide keeps sub-pixel mask
+/// transitions from bleeding across strong image edges after upsampling.
+fn refine_subject_mask_edges(
+    mask: &mut [u8],
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let width = usize::try_from(width).context("subject-mask width exceeds usize")?;
+    let height = usize::try_from(height).context("subject-mask height exceeds usize")?;
+    let pixels = width
+        .checked_mul(height)
+        .context("subject-mask refinement dimensions overflow")?;
+    anyhow::ensure!(mask.len() == pixels, "subject-mask refinement size mismatch");
+    anyhow::ensure!(
+        rgba.len() == pixels.saturating_mul(4),
+        "subject-mask refinement RGB size mismatch"
+    );
+    if width < 2 || height < 2 {
+        return Ok(());
+    }
+
+    let source_mask = mask.to_vec();
+    mask.par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, output_row)| {
+            for (x, output) in output_row.iter_mut().enumerate() {
+                let index = y * width + x;
+                let center_probability = source_mask[index] as f32 / 255.0;
+                // Confident interiors do not need filtering; restricting work
+                // to the uncertain band also keeps large 3K sources fast.
+                if !(0.025..=0.975).contains(&center_probability) {
+                    continue;
+                }
+
+                let center_rgba = index * 4;
+                let center = [
+                    rgba[center_rgba] as f32,
+                    rgba[center_rgba + 1] as f32,
+                    rgba[center_rgba + 2] as f32,
+                ];
+                let min_y = y.saturating_sub(1);
+                let max_y = (y + 1).min(height - 1);
+                let min_x = x.saturating_sub(1);
+                let max_x = (x + 1).min(width - 1);
+                let mut weighted_probability = 0.0f32;
+                let mut weight_sum = 0.0f32;
+
+                for sample_y in min_y..=max_y {
+                    for sample_x in min_x..=max_x {
+                        let sample_index = sample_y * width + sample_x;
+                        let sample_rgba = sample_index * 4;
+                        let dr = (rgba[sample_rgba] as f32 - center[0]) / 255.0;
+                        let dg = (rgba[sample_rgba + 1] as f32 - center[1]) / 255.0;
+                        let db = (rgba[sample_rgba + 2] as f32 - center[2]) / 255.0;
+                        let color_distance = dr * dr + dg * dg + db * db;
+                        let diagonal = sample_x != x && sample_y != y;
+                        let spatial_weight = if sample_x == x && sample_y == y {
+                            1.0
+                        } else if diagonal {
+                            0.55
+                        } else {
+                            0.78
+                        };
+                        let color_weight = 1.0 / (1.0 + 42.0 * color_distance);
+                        let weight = spatial_weight * color_weight;
+                        weighted_probability +=
+                            source_mask[sample_index] as f32 / 255.0 * weight;
+                        weight_sum += weight;
+                    }
+                }
+
+                let guided = weighted_probability / weight_sum.max(1e-6);
+                let refined = center_probability * 0.40 + guided * 0.60;
+                *output = (refined.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+        });
+    Ok(())
 }
 
 fn sigmoid_probability(logit: f32) -> f32 {

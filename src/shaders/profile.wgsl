@@ -119,11 +119,17 @@ fn apply_profile_hsv_map(rgb_rec2020: vec3<f32>, map_info: vec4<u32>, encoding: 
     if map_info.x == 0u || map_info.y == 0u || map_info.z == 0u {
         return rgb_rec2020;
     }
-    // Adobe/DNG baseline rendering feeds the profile tables bounded linear
-    // ProPhoto RGB. Keep the table domain identical so camera-matching DCPs
-    // do not see out-of-range RGB values that Lightroom would have clipped.
+    // DCP tables are defined on a bounded domain, but hard-clipping scene-
+    // linear highlights before table lookup destroys exposure headroom. Scale
+    // over-range RGB into the table domain, apply the profile adjustment, then
+    // restore the scale. Values already in [0, 1] are bit-for-bit unchanged.
+    let profile_linear = max(REC2020_TO_PROPHOTO * rgb_rec2020, vec3<f32>(0.0));
+    let profile_headroom = max(
+        1.0,
+        max(profile_linear.r, max(profile_linear.g, profile_linear.b)),
+    );
     let profile_rgb = clamp(
-        REC2020_TO_PROPHOTO * rgb_rec2020,
+        profile_linear / profile_headroom,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
@@ -143,7 +149,7 @@ fn apply_profile_hsv_map(rgb_rec2020: vec3<f32>, map_info: vec4<u32>, encoding: 
     if encode_value {
         hsv.z = profile_srgb_decode_value(hsv.z);
     }
-    return PROPHOTO_TO_REC2020 * profile_hsv_to_rgb(hsv);
+    return PROPHOTO_TO_REC2020 * profile_hsv_to_rgb(hsv) * profile_headroom;
 }
 
 fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
@@ -152,8 +158,13 @@ fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
         return apply_profile_hsv_map(rgb, params.profile_hue_sat, params.profile_flags.x);
     }
 
+    let profile_linear = max(REC2020_TO_PROPHOTO * rgb, vec3<f32>(0.0));
+    let profile_headroom = max(
+        1.0,
+        max(profile_linear.r, max(profile_linear.g, profile_linear.b)),
+    );
     let profile_rgb = clamp(
-        REC2020_TO_PROPHOTO * rgb,
+        profile_linear / profile_headroom,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
@@ -178,7 +189,7 @@ fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
     if encode_value {
         hsv.z = profile_srgb_decode_value(hsv.z);
     }
-    return PROPHOTO_TO_REC2020 * profile_hsv_to_rgb(hsv);
+    return PROPHOTO_TO_REC2020 * profile_hsv_to_rgb(hsv) * profile_headroom;
 }
 
 fn apply_profile_look(rgb: vec3<f32>) -> vec3<f32> {
@@ -218,8 +229,13 @@ fn apply_profile_tone_curve(rgb_rec2020: vec3<f32>) -> vec3<f32> {
     // channel through the curve, then places the middle channel at the same
     // relative position between them. That preserves the profile's hue
     // relationships while still applying its intended contrast curve.
+    let prophoto_linear = max(REC2020_TO_PROPHOTO * rgb_rec2020, vec3<f32>(0.0));
+    let profile_headroom = max(
+        1.0,
+        max(prophoto_linear.r, max(prophoto_linear.g, prophoto_linear.b)),
+    );
     let prophoto = clamp(
-        REC2020_TO_PROPHOTO * rgb_rec2020,
+        prophoto_linear / profile_headroom,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
@@ -227,7 +243,7 @@ fn apply_profile_tone_curve(rgb_rec2020: vec3<f32>) -> vec3<f32> {
     let high = max(prophoto.r, max(prophoto.g, prophoto.b));
     if high - low <= 1e-8 {
         let value = profile_curve_value(low);
-        return PROPHOTO_TO_REC2020 * vec3<f32>(value);
+        return PROPHOTO_TO_REC2020 * vec3<f32>(value) * profile_headroom;
     }
 
     let mapped_low = profile_curve_value(low);
@@ -235,7 +251,7 @@ fn apply_profile_tone_curve(rgb_rec2020: vec3<f32>) -> vec3<f32> {
     let scale = (mapped_high - mapped_low) / (high - low);
     let curved = vec3<f32>(mapped_low)
         + (prophoto - vec3<f32>(low)) * scale;
-    return PROPHOTO_TO_REC2020 * curved;
+    return PROPHOTO_TO_REC2020 * curved * profile_headroom;
 }
 
 fn output_lut_fetch(r: u32, g: u32, b: u32) -> vec3<f32> {
