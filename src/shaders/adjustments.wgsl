@@ -63,8 +63,10 @@ fn local_adjustment_mix(pos: vec2<i32>) -> LocalAdjustmentMix {
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(scene_tex, clamp_pos(pos), 0).xyz;
     // The global white balance and its DCP interpolation are folded into the
-    // camera-specific matrix assembled on the CPU.
-    return map_negative_gamut(cam_to_working(camera_rgb));
+    // camera-specific matrix assembled on the CPU. Preserve the matrix result
+    // until all DCP stages are complete: gamut remapping between HueSatMap,
+    // exposure, LookTable and ProfileToneCurve changes the profile itself.
+    return cam_to_working(camera_rgb);
 }
 
 fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
@@ -1047,15 +1049,18 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
-    // Exposure is a scene-referred input correction, so it must run before
-    // every bounded-domain DCP table. Applying it later cannot recover
-    // headroom those profile stages have already compressed.
-    var rgb = apply_exposure(scene_working_at(pos));
-    rgb = map_negative_gamut(apply_profile_hue_sat(rgb));
+    // DNG rendering order is camera/WB transform -> HueSatMap -> exposure
+    // compensation -> LookTable -> profile tone curve. In particular, user
+    // Exposure must not run before HueSatMap: doing so changes which bounded
+    // profile-table cells are sampled and can clip colors before the camera
+    // characterization has been applied.
+    var rgb = apply_profile_hue_sat(scene_working_at(pos));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     rgb = rgb * exp2(profile_exposure_ev);
+    rgb = apply_exposure(rgb);
     rgb = apply_profile_look(rgb);
     rgb = apply_profile_tone_curve(rgb);
+    rgb = map_negative_gamut(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
     rgb = apply_lightroom_tone(rgb, pos);
 
@@ -1159,7 +1164,14 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
         params.grade_options,
     );
     let graded = apply_local_color_grading(pos, globally_graded);
-    let display_linear = darktable_sigmoid(graded);
+    // A DCP ProfileToneCurve is already the profile's base display-tone
+    // rendition. Do not stack AuRaw's unrelated default darktable sigmoid on
+    // top of it. A non-default Rendering/Sigmoid setting clears the CPU flag
+    // and intentionally opts back into AuRaw's transform.
+    var display_linear = clamp(graded, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (params.process_info.y & 1u) == 0u {
+        display_linear = darktable_sigmoid(graded);
+    }
     textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
     textureStore(out_tex, pos, vec4<f32>(apply_output_lut(display_linear), 1.0));
 }

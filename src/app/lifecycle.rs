@@ -164,6 +164,10 @@ impl AurawApp {
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
+            camera_profile_mode: performance.camera_profile_mode,
+            camera_profile_folder: performance.camera_profile_folder.clone(),
+            last_camera_profile: performance.last_camera_profile.clone(),
+            selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
             adjustment_section: AdjustmentSection::default(),
@@ -332,6 +336,10 @@ impl AurawApp {
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
+            camera_profile_mode: performance.camera_profile_mode,
+            camera_profile_folder: performance.camera_profile_folder.clone(),
+            last_camera_profile: performance.last_camera_profile.clone(),
+            selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
             adjustment_section: AdjustmentSection::default(),
@@ -459,6 +467,125 @@ impl AurawApp {
         self.active_tab = AppTab::Library;
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn choose_camera_profile_folder(&mut self) {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(folder) = &self.camera_profile_folder {
+            dialog = dialog.set_directory(folder);
+        }
+        let Some(folder) = dialog.pick_folder() else {
+            return;
+        };
+        self.camera_profile_folder = Some(folder);
+        self.raw_cache.clear();
+        self.persist_performance_settings();
+        self.notice = Some(
+            "Camera profile folder updated. Reopen the RAW to apply the new profile selection."
+                .to_owned(),
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn clear_camera_profile_folder(&mut self) {
+        if self.camera_profile_folder.take().is_some() {
+            self.raw_cache.clear();
+            self.persist_performance_settings();
+            self.notice = Some(
+                "Camera profile folder cleared. Reopen the RAW to apply the new profile selection."
+                    .to_owned(),
+            );
+        }
+    }
+
+    pub(crate) fn set_camera_profile_mode(&mut self, mode: CameraProfileMode) {
+        if self.camera_profile_mode == mode {
+            return;
+        }
+        self.camera_profile_mode = mode;
+        self.raw_cache.clear();
+        self.persist_performance_settings();
+        self.notice = Some(
+            "RAW color profile mode changed. Reopen the RAW to apply the new profile selection."
+                .to_owned(),
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn select_camera_profile_for_current(
+        &mut self,
+        selection: Option<PathBuf>,
+        frame: &eframe::Frame,
+    ) {
+        if self.load_receiver.is_some()
+            || self.export_receiver.is_some()
+            || self.export_publish_pending
+        {
+            self.notice = Some(
+                "Wait for the current RAW load/export to finish before changing camera profile."
+                    .to_owned(),
+            );
+            return;
+        }
+        if self.selected_camera_profile == selection {
+            return;
+        }
+        let Some(path) = self.current_path.clone() else {
+            self.notice = Some("Open a RAW before choosing a camera profile.".to_owned());
+            return;
+        };
+        if let Some(selected) = selection.as_ref() {
+            let is_available = self
+                .loaded_raw
+                .as_ref()
+                .is_some_and(|raw| {
+                    raw.available_camera_profiles
+                        .iter()
+                        .any(|candidate| candidate.path == *selected)
+                });
+            if !is_available {
+                self.notice = Some(
+                    "That DCP is no longer available for the current camera. Refresh the profile folder and reopen the RAW."
+                        .to_owned(),
+                );
+                return;
+            }
+        }
+
+        let label = self
+            .current_label
+            .clone()
+            .unwrap_or_else(|| path.display().to_string());
+        self.selected_camera_profile = selection.clone();
+        // Remember the user's last explicit dropdown choice as a global sticky
+        // default. Store it relative to the configured root so moving a whole
+        // CameraProfiles tree does not bake an absolute machine-specific path
+        // into settings. Choosing Automatic clears the sticky DCP preference.
+        self.last_camera_profile = selection
+            .as_ref()
+            .zip(self.camera_profile_folder.as_ref())
+            .and_then(|(selected, root)| selected.strip_prefix(root).ok())
+            .filter(|relative| !relative.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
+        self.persist_performance_settings();
+        // Profile choice is part of the image's rendering state. Save an
+        // explicit snapshot and carry the exact live edits through the reload
+        // so changing DCP never drops unsaved slider/mask work.
+        self.queue_explicit_sidecar_save();
+        let edit_override = self.capture_sidecar_edit_state();
+        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
+            raw_path: path.clone(),
+        };
+        self.open_path_labeled_with_options(
+            path,
+            label,
+            false,
+            sidecar_target,
+            frame,
+            Some(selection),
+            Some(edit_override),
+        );
+    }
+
     #[cfg(target_os = "android")]
     pub fn open_file_dialog(&mut self, _frame: &eframe::Frame) {
         if self.picker_pending {
@@ -529,6 +656,9 @@ impl AurawApp {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.raw_cache_limit,
             thumbnail_workers: self.library.thumbnail_worker_count(),
+            camera_profile_mode: self.camera_profile_mode,
+            camera_profile_folder: self.camera_profile_folder.clone(),
+            last_camera_profile: self.last_camera_profile.clone(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
             ..Default::default()
@@ -592,6 +722,28 @@ impl AurawApp {
         sidecar_target: crate::sidecar::SidecarTarget,
         frame: &eframe::Frame,
     ) {
+        self.open_path_labeled_with_options(
+            path,
+            label,
+            delete_after_decode,
+            sidecar_target,
+            frame,
+            None,
+            None,
+        );
+    }
+
+    fn open_path_labeled_with_options(
+        &mut self,
+        path: PathBuf,
+        label: String,
+        delete_after_decode: bool,
+        sidecar_target: crate::sidecar::SidecarTarget,
+        frame: &eframe::Frame,
+        // None = use sidecar selection; Some(None) = automatic; Some(Some(path)) = explicit DCP.
+        profile_selection_override: Option<Option<PathBuf>>,
+        edit_override: Option<SidecarEditState>,
+    ) {
         if self.load_receiver.is_some()
             || self.export_receiver.is_some()
             || self.export_publish_pending
@@ -619,8 +771,30 @@ impl AurawApp {
         let queue = render_state.queue.clone();
         self.library.prepare_for_develop();
         let decode_gate = self.library.decode_gate();
-        let raw_cache_key = raw_cache_key_for_target(&sidecar_target);
-        let cached_original_raw = self.cached_raw_decode(&raw_cache_key);
+        let profile_selection_key = match profile_selection_override.as_ref() {
+            Some(Some(path)) => path.to_string_lossy().into_owned(),
+            Some(None) => "automatic".to_owned(),
+            None => "sidecar".to_owned(),
+        };
+        let raw_cache_key = format!(
+            "{}|profile:{}|folder:{}|selection:{}",
+            raw_cache_key_for_target(&sidecar_target),
+            self.camera_profile_mode.cache_key(),
+            self.camera_profile_folder
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            profile_selection_key,
+        );
+        // A normal open may obtain an explicit per-image profile from the
+        // sidecar, which is intentionally read on the worker. Do not reuse an
+        // ambiguous cache entry before that selection is known.
+        let cache_selection_is_known = profile_selection_override.is_some()
+            || self.camera_profile_mode == CameraProfileMode::MatrixOnly
+            || self.camera_profile_folder.is_none();
+        let cached_original_raw = cache_selection_is_known
+            .then(|| self.cached_raw_decode(&raw_cache_key))
+            .flatten();
         let decode_was_cached = cached_original_raw.is_some();
         crate::diagnostics::record(format!(
             "RAW open requested: label=\"{label}\" cached={decode_was_cached} preview_quality={}",
@@ -650,9 +824,13 @@ impl AurawApp {
         self.preview_raw = None;
         self.current_path = None;
         self.current_label = None;
+        self.selected_camera_profile = None;
         self.image_status = format!("Loading {label}…");
         let initial_exposure = self.new_image_exposure();
         let preview_quality_setting = self.preview_quality;
+        let camera_profile_mode = self.camera_profile_mode;
+        let camera_profile_folder = self.camera_profile_folder.clone();
+        let last_camera_profile = self.last_camera_profile.clone();
         self.original_preview_exposure = initial_exposure;
         self.original_preview_requested = false;
         self.original_preview_rendered_state = None;
@@ -744,11 +922,49 @@ impl AurawApp {
                     "RAW sidecar lookup finished in {:.3}s",
                     sidecar_started.elapsed().as_secs_f64()
                 ));
+                // Existing per-image edits always win. Only a truly new RAW
+                // (no sidecar at all) inherits the last DCP chosen in the
+                // Develop dropdown. A stale/mismatched sticky profile is safe:
+                // the loader validates it against this camera and falls back to
+                // its normal automatic selection when it does not match.
+                let (requested_camera_profile, requested_profile_from_sidecar) =
+                    match profile_selection_override {
+                        Some(selection) => (selection, false),
+                        None => match loaded_sidecar.as_ref() {
+                            Ok(Some(loaded)) => (
+                                loaded
+                                    .edits
+                                    .camera_profile
+                                    .as_ref()
+                                    .and_then(|relative| {
+                                        camera_profile_folder
+                                            .as_ref()
+                                            .map(|root| root.join(relative))
+                                    }),
+                                loaded.edits.camera_profile.is_some(),
+                            ),
+                            Ok(None) => (
+                                last_camera_profile.as_ref().and_then(|relative| {
+                                    camera_profile_folder
+                                        .as_ref()
+                                        .map(|root| root.join(relative))
+                                }),
+                                false,
+                            ),
+                            Err(_) => (None, false),
+                        },
+                    };
                 let decode_started = Instant::now();
                 let decoded: anyhow::Result<Arc<LoadedRaw>> = match cached_original_raw {
                     Some(raw) => Ok(raw),
                     None => match decode_gate.write() {
-                        Ok(_decode_guard) => load_raw_file(&path).map(Arc::new),
+                        Ok(_decode_guard) => load_raw_file_with_profile_selection(
+                            &path,
+                            camera_profile_mode,
+                            camera_profile_folder.as_deref(),
+                            requested_camera_profile.as_deref(),
+                        )
+                        .map(Arc::new),
                         Err(_) => Err(anyhow::anyhow!("RAW decode gate was poisoned")),
                     },
                 };
@@ -771,46 +987,73 @@ impl AurawApp {
 
                 let result = (|| {
                     let (
-                        rendered_exposure,
+                        mut rendered_exposure,
                         mut rendered_masks,
                         inpaint_strokes,
                         saved_lens,
                         mut sidecar_warning,
-                        sidecar_needs_rewrite,
-                    ) = match loaded_sidecar {
-                        Ok(Some(loaded)) => {
-                            let warning = loaded.migrated.then(|| {
-                                "Loaded edits were migrated to the current processing version."
-                                    .to_owned()
-                            });
-                            (
-                                loaded.edits.exposure,
-                                Arc::unwrap_or_clone(loaded.edits.masks),
-                                Arc::unwrap_or_clone(loaded.edits.inpainting),
-                                Some(loaded.edits.lens),
-                                warning,
-                                loaded.migrated,
-                            )
+                        mut sidecar_needs_rewrite,
+                        using_default_edits,
+                    ) = if let Some(edits) = edit_override {
+                        (
+                            edits.exposure,
+                            Arc::unwrap_or_clone(edits.masks),
+                            Arc::unwrap_or_clone(edits.inpainting),
+                            Some(edits.lens),
+                            None,
+                            true,
+                            false,
+                        )
+                    } else {
+                        match loaded_sidecar {
+                            Ok(Some(loaded)) => {
+                                let warning = loaded.migrated.then(|| {
+                                    "Loaded edits were migrated to the current processing version."
+                                        .to_owned()
+                                });
+                                (
+                                    loaded.edits.exposure,
+                                    Arc::unwrap_or_clone(loaded.edits.masks),
+                                    Arc::unwrap_or_clone(loaded.edits.inpainting),
+                                    Some(loaded.edits.lens),
+                                    warning,
+                                    loaded.migrated,
+                                    false,
+                                )
+                            }
+                            Ok(None) => (
+                                initial_exposure,
+                                MaskStack::default(),
+                                Vec::new(),
+                                None,
+                                None,
+                                false,
+                                true,
+                            ),
+                            Err(error) => (
+                                initial_exposure,
+                                MaskStack::default(),
+                                Vec::new(),
+                                None,
+                                Some(format!(
+                                    "Could not load this RAW's sidecar; using default edits: {error}"
+                                )),
+                                false,
+                                true,
+                            ),
                         }
-                        Ok(None) => (
-                            initial_exposure,
-                            MaskStack::default(),
-                            Vec::new(),
-                            None,
-                            None,
-                            false,
-                        ),
-                        Err(error) => (
-                            initial_exposure,
-                            MaskStack::default(),
-                            Vec::new(),
-                            None,
-                            Some(format!(
-                                "Could not load this RAW's sidecar; using default edits: {error}"
-                            )),
-                            false,
-                        ),
                     };
+                    let original_raw = decoded.map_err(|error| format!("{error:#}"))?;
+                    // Adobe-compatible DCPs already carry their baseline exposure/tone
+                    // rendition. Start a newly opened profiled RAW at user Exposure 0,
+                    // matching the neutral slider position used by Lightroom/ACR. Keep
+                    // existing sidecars and explicit edits untouched.
+                    if using_default_edits
+                        && (original_raw.camera_profile_source.is_some()
+                            || original_raw.camera_profile.has_dcp_rendering_stages())
+                    {
+                        rendered_exposure.exposure = 0.0;
+                    }
                     crate::diagnostics::record(format!(
                         "Edit state: process_version={} exposure={:.3} temperature={:.3} tint={:.3} saturation={:.3} vibrance={:.3} demosaic={:?} highlight={:?} masks={}",
                         rendered_exposure.process_version,
@@ -823,7 +1066,24 @@ impl AurawApp {
                         rendered_exposure.highlight_method,
                         rendered_masks.masks.len(),
                     ));
-                    let original_raw = decoded.map_err(|error| format!("{error:#}"))?;
+                    let selected_camera_profile = requested_camera_profile
+                        .clone()
+                        .filter(|requested| {
+                            original_raw
+                                .camera_profile_source
+                                .as_ref()
+                                .is_some_and(|applied| applied == requested)
+                        });
+                    if requested_profile_from_sidecar
+                        && requested_camera_profile.is_some()
+                        && selected_camera_profile.is_none()
+                    {
+                        sidecar_needs_rewrite = true;
+                        append_notice(
+                            &mut sidecar_warning,
+                            "The saved camera profile was not found or did not match this camera; automatic profile selection was used instead.",
+                        );
+                    }
                     let mut lens_correction =
                         LensCorrectionState::from_catalog(lensfun_catalog(&original_raw));
                     if let Some(saved) = saved_lens {
@@ -1009,6 +1269,7 @@ impl AurawApp {
                         sidecar_generation,
                         sidecar_warning,
                         sidecar_needs_rewrite,
+                        selected_camera_profile,
                     })
                 })();
 
@@ -1142,8 +1403,15 @@ impl AurawApp {
                 let full_height = loaded.full_raw.height;
                 let preview_width = loaded.preview_raw.width;
                 let preview_height = loaded.preview_raw.height;
+                let profile_label = loaded
+                    .full_raw
+                    .camera_profile
+                    .name
+                    .as_deref()
+                    .map(|name| format!(", profile {name}"))
+                    .unwrap_or_default();
                 self.image_status = format!(
-                    "{} {} — full {}×{}, preview {}×{} ({})",
+                    "{} {} — full {}×{}, preview {}×{} ({}{})",
                     loaded.full_raw.camera_make,
                     loaded.full_raw.camera_model,
                     full_width,
@@ -1151,9 +1419,14 @@ impl AurawApp {
                     preview_width,
                     preview_height,
                     self.preview_quality.label(),
+                    profile_label,
                 );
                 self.current_path = loaded.source_path;
                 self.current_label = Some(loaded.label.clone());
+                self.selected_camera_profile = loaded.selected_camera_profile.clone();
+                // Loading an existing sidecar must not change the sticky global
+                // profile preference. Only an explicit user dropdown change in
+                // `select_camera_profile_for_current` may update it.
                 self.cache_raw_decode(loaded.raw_cache_key, Arc::clone(&loaded.original_raw));
                 self.original_raw = Some(loaded.original_raw);
                 self.loaded_raw = Some(loaded.full_raw);

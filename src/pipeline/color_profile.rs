@@ -209,6 +209,9 @@ impl DcpMatrixSet {
 #[derive(Clone, Debug, Default)]
 pub struct DcpProfile {
     pub name: Option<String>,
+    /// Camera model declared by the DCP/DNG UniqueCameraModel tag. Standalone
+    /// profiles use this to match a profile to the RAW camera safely.
+    pub camera_model: Option<String>,
     /// Signature attached to CameraCalibration in IFD 0.
     pub camera_calibration_signature: Option<String>,
     /// Signature attached to the selected camera profile.
@@ -331,6 +334,13 @@ impl CameraProfile {
             interpolation_weight: interpolation_weight.clamp(0.0, 1.0),
             embedded_camera_icc: None,
         }
+    }
+
+    pub(crate) fn has_dcp_rendering_stages(&self) -> bool {
+        self.baseline_exposure_offset.abs() > 1e-6
+            || self.hue_sat_maps.iter().any(Option::is_some)
+            || self.look_table.is_some()
+            || self.tone_curve.is_some()
     }
 
     pub(crate) fn gpu_layout(&self) -> ProfileGpuLayout {

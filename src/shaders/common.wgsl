@@ -93,7 +93,9 @@ struct Params {
     // HueSat encoding, LookTable encoding, default exposure EV bits, and the
     // live DCP dual-illuminant interpolation weight as f32 bits.
     profile_flags: vec4<u32>,
-    // Explicit processing-formula version; remaining lanes are reserved.
+    // x = processing-formula version. y bit 0 = the active DCP provides the
+    // baseline ProfileToneCurve and AuRaw's default sigmoid should not be
+    // stacked on top of it. Remaining lanes are reserved.
     process_info: vec4<u32>,
     // Local adjustments. Each mask index maps directly to one layer in the
     // normalized R8 array texture sampled by adjustments.wgsl. mask_meta.w is

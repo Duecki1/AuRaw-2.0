@@ -300,19 +300,24 @@ fn adjustments_shader_contains_lightroom_style_controls() {
 }
 
 #[test]
-fn exposure_precedes_bounded_camera_profile_rendering() {
+fn dcp_characterization_precedes_exposure_and_profile_rendering() {
     let prepare = &SHADER_ADJUSTMENTS[SHADER_ADJUSTMENTS
         .find("fn prepare_adjustment_base")
         .unwrap()..];
-    let exposure = prepare.find("var rgb = apply_exposure(").unwrap();
     let hue_sat = prepare
-        .find("rgb = map_negative_gamut(apply_profile_hue_sat(rgb))")
+        .find("var rgb = apply_profile_hue_sat(scene_working_at(pos))")
         .unwrap();
     let profile_exposure = prepare.find("let profile_exposure_ev").unwrap();
+    let exposure = prepare.find("rgb = apply_exposure(rgb)").unwrap();
     let look = prepare.find("rgb = apply_profile_look(rgb)").unwrap();
     let curve = prepare.find("rgb = apply_profile_tone_curve(rgb)").unwrap();
+    let gamut = prepare.find("rgb = map_negative_gamut(rgb)").unwrap();
     assert!(
-        exposure < hue_sat && hue_sat < profile_exposure && profile_exposure < look && look < curve
+        hue_sat < profile_exposure
+            && profile_exposure < exposure
+            && exposure < look
+            && look < curve
+            && curve < gamut
     );
     assert!(SHADER_ADJUSTMENTS.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
     assert!(SHADER_ADJUSTMENTS.contains("return profile_data[offset + maximum].x"));
@@ -425,6 +430,8 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
             black_levels_per_pixel: vec![0.0; (width * height) as usize],
             white_levels: [4095.0; 4],
             camera_profile: Default::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
             white_balance_model: None,
         };
         let params = super::GpuParams::new(
@@ -654,6 +661,8 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
             black_levels_per_pixel: vec![0.0; (width * height) as usize],
             white_levels: [white; 4],
             camera_profile: Default::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
             white_balance_model: None,
         }
     }
@@ -943,6 +952,8 @@ fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
         black_levels_per_pixel: vec![0.0; (width * height) as usize],
         white_levels: [white; 4],
         camera_profile: Default::default(),
+        camera_profile_source: None,
+        available_camera_profiles: Vec::new(),
         white_balance_model: None,
     };
     let exposure = ExposureParams::default();
@@ -1058,6 +1069,8 @@ fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
             black_levels_per_pixel: vec![0.0; (WIDTH * HEIGHT) as usize],
             white_levels: [WHITE; 4],
             camera_profile: Default::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
             white_balance_model: None,
         }
     }

@@ -1,7 +1,6 @@
+use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-#[cfg(not(target_os = "android"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const SETTINGS_VERSION: u32 = 1;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
@@ -14,6 +13,14 @@ pub(crate) struct PerformanceSettings {
     pub(crate) raw_cache_files: usize,
     #[serde(default = "default_thumbnail_workers")]
     pub(crate) thumbnail_workers: usize,
+    #[serde(default)]
+    pub(crate) camera_profile_mode: CameraProfileMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) camera_profile_folder: Option<PathBuf>,
+    /// Last manually chosen external DCP, stored relative to the configured
+    /// profile root. New RAWs without a sidecar may inherit this choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_camera_profile: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_library_folder: Option<PathBuf>,
@@ -37,6 +44,9 @@ impl Default for PerformanceSettings {
             version: SETTINGS_VERSION,
             raw_cache_files: default_raw_cache_files(),
             thumbnail_workers: default_thumbnail_workers(),
+            camera_profile_mode: CameraProfileMode::default(),
+            camera_profile_folder: None,
+            last_camera_profile: None,
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
         }
@@ -134,6 +144,9 @@ mod tests {
             version: 99,
             raw_cache_files: usize::MAX,
             thumbnail_workers: 0,
+            camera_profile_mode: CameraProfileMode::DcpProfiles,
+            camera_profile_folder: Some(PathBuf::from("profiles")),
+            last_camera_profile: Some(PathBuf::from("Sony/Camera ST.dcp")),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
         }
@@ -144,5 +157,11 @@ mod tests {
             crate::app::maximum_raw_cache_limit()
         );
         assert_eq!(settings.thumbnail_workers, 1);
+        assert_eq!(settings.camera_profile_mode, CameraProfileMode::DcpProfiles);
+        assert_eq!(settings.camera_profile_folder, Some(PathBuf::from("profiles")));
+        assert_eq!(
+            settings.last_camera_profile,
+            Some(PathBuf::from("Sony/Camera ST.dcp"))
+        );
     }
 }

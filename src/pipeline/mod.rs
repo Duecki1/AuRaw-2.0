@@ -35,7 +35,9 @@ pub use processing::{
     ProcessingStage, ProxySpec, TilePlan, TileSpec, EXPORT_TILE_HALO,
 };
 pub use raw_loader::{
-    is_supported_raw_path, load_raw_file, load_raw_file_with_dcp, load_raw_thumbnail, CfaKind,
-    LoadedRaw, RawThumbnail, SUPPORTED_RAW_EXTENSIONS,
+    is_supported_raw_path, load_raw_file, load_raw_file_with_dcp,
+    load_raw_file_with_profile_config, load_raw_file_with_profile_selection, load_raw_thumbnail,
+    CameraProfileCandidate, CameraProfileMode, CfaKind, LoadedRaw,
+    RawThumbnail, SUPPORTED_RAW_EXTENSIONS,
 };
 pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};
