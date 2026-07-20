@@ -18,6 +18,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
+import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.widget.Toast;
 
@@ -40,8 +41,13 @@ import java.util.Set;
 public final class AuRawActivity extends NativeActivity {
     private static final int OPEN_RAW_DOCUMENT = 1001;
     private static final int WRITE_EXPORT_PERMISSION = 1002;
+    private static final int OPEN_CAMERA_PROFILE_FOLDER = 1003;
     private static final long MAX_RAW_IMPORT_BYTES = 2_000_000_000L;
     private static final long MAX_SIDECAR_BYTES = 32L * 1024L * 1024L;
+    private static final long MAX_DCP_FILE_BYTES = 64L * 1024L * 1024L;
+    private static final long MAX_DCP_TREE_BYTES = 1024L * 1024L * 1024L;
+    private static final int MAX_DCP_FILES = 10_000;
+    private static final int MAX_DCP_TREE_DEPTH = 16;
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
     private static final int MAX_THUMBNAIL_CACHE_FILES = 512;
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
@@ -109,6 +115,14 @@ public final class AuRawActivity extends NativeActivity {
             int failedCount,
             String errors);
 
+    private static native void nativeOnCameraProfileFolderImportStarted(String displayName);
+
+    private static native void nativeOnCameraProfileFolderPicked(
+            String cachedPath,
+            String displayName,
+            int profileCount,
+            String error);
+
     private static native void nativeOnExportPublished(
             String location,
             String error);
@@ -116,6 +130,19 @@ public final class AuRawActivity extends NativeActivity {
     /** Called from Rust's egui button. */
     public void openRawDocument() {
         runOnUiThread(this::launchRawDocumentPicker);
+    }
+
+    /** Opens Android's Storage Access Framework tree picker for DCP profile roots. */
+    public void openCameraProfileFolder() {
+        runOnUiThread(this::launchCameraProfileFolderPicker);
+    }
+
+    private void launchCameraProfileFolderPicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        startActivityForResult(intent, OPEN_CAMERA_PROFILE_FOLDER);
     }
 
     private void launchRawDocumentPicker() {
@@ -130,6 +157,34 @@ public final class AuRawActivity extends NativeActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == OPEN_CAMERA_PROFILE_FOLDER) {
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+                nativeOnCameraProfileFolderPicked("", "", 0, "");
+                return;
+            }
+            Uri treeUri = data.getData();
+            String folderLabel = queryProfileFolderName(treeUri);
+            // Tell Rust immediately that the SAF picker returned successfully.
+            // The recursive DCP mirror runs on a worker and can take noticeable
+            // time for Adobe's full CameraProfiles tree.
+            nativeOnCameraProfileFolderImportStarted(folderLabel);
+            int takeFlags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            if (takeFlags != 0) {
+                try {
+                    getContentResolver().takePersistableUriPermission(treeUri, takeFlags);
+                } catch (SecurityException ignored) {
+                    // Some providers allow the current read but do not offer a
+                    // persistable grant. AuRaw mirrors DCPs into private app
+                    // storage immediately, so the selected profiles still
+                    // remain usable across restarts.
+                }
+            }
+            new Thread(
+                    () -> importCameraProfileFolder(treeUri, folderLabel),
+                    "AuRaw camera profile import")
+                    .start();
+            return;
+        }
         if (requestCode != OPEN_RAW_DOCUMENT) {
             return;
         }
@@ -147,6 +202,245 @@ public final class AuRawActivity extends NativeActivity {
                 () -> importDocuments(uris),
                 uris.size() == 1 ? "AuRaw document import" : "AuRaw document batch import")
                 .start();
+    }
+
+    private void importCameraProfileFolder(Uri treeUri, String label) {
+        File destination = new File(
+                getFilesDir(),
+                "camera-profiles-" + Long.toUnsignedString(System.nanoTime()));
+        try {
+            if (!destination.mkdirs()) {
+                throw new IllegalStateException("Could not create private camera-profile storage");
+            }
+            ProfileImportStats stats = new ProfileImportStats();
+            String rootDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
+            copyCameraProfileTree(treeUri, rootDocumentId, destination, 0, stats);
+            if (stats.files == 0) {
+                deleteDirectoryTree(destination);
+                throw new IllegalArgumentException(
+                        "The selected folder contains no .dcp camera profiles");
+            }
+            String importedPath = destination.getAbsolutePath();
+            int importedProfiles = stats.files;
+            runOnUiThread(() -> nativeOnCameraProfileFolderPicked(
+                    importedPath, label, importedProfiles, ""));
+        } catch (Exception error) {
+            deleteDirectoryTree(destination);
+            String message = error.toString();
+            runOnUiThread(() -> nativeOnCameraProfileFolderPicked("", label, 0, message));
+        }
+    }
+
+    private void copyCameraProfileTree(
+            Uri treeUri,
+            String parentDocumentId,
+            File destination,
+            int depth,
+            ProfileImportStats stats) throws Exception {
+        if (depth > MAX_DCP_TREE_DEPTH) {
+            throw new IllegalStateException(
+                    "Camera profile folder nesting exceeds " + MAX_DCP_TREE_DEPTH + " levels");
+        }
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                treeUri, parentDocumentId);
+        String[] projection = {
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE
+        };
+        try (Cursor cursor = getContentResolver().query(
+                childrenUri, projection, null, null, null)) {
+            if (cursor == null) {
+                throw new IllegalStateException("Android storage could not list the selected folder");
+            }
+            int idColumn = cursor.getColumnIndexOrThrow(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID);
+            int nameColumn = cursor.getColumnIndexOrThrow(
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME);
+            int typeColumn = cursor.getColumnIndexOrThrow(
+                    DocumentsContract.Document.COLUMN_MIME_TYPE);
+            int sizeColumn = cursor.getColumnIndex(
+                    DocumentsContract.Document.COLUMN_SIZE);
+            while (cursor.moveToNext()) {
+                String documentId = cursor.getString(idColumn);
+                String name = cursor.getString(nameColumn);
+                String mimeType = cursor.getString(typeColumn);
+                if (documentId == null || name == null) {
+                    continue;
+                }
+                String safeName = safeProfileComponent(name);
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mimeType)) {
+                    File childDirectory = uniqueProfileDirectory(destination, safeName, documentId);
+                    if (!childDirectory.mkdirs() && !childDirectory.isDirectory()) {
+                        throw new IllegalStateException(
+                                "Could not create camera-profile subfolder " + safeName);
+                    }
+                    copyCameraProfileTree(
+                            treeUri, documentId, childDirectory, depth + 1, stats);
+                    File[] contents = childDirectory.listFiles();
+                    if (contents != null && contents.length == 0) {
+                        childDirectory.delete();
+                    }
+                    continue;
+                }
+                if (!name.toLowerCase(Locale.ROOT).endsWith(".dcp")) {
+                    continue;
+                }
+                if (stats.files >= MAX_DCP_FILES) {
+                    throw new IllegalStateException(
+                            "The selected folder contains more than " + MAX_DCP_FILES
+                                    + " DCP files");
+                }
+                if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) {
+                    long declaredSize = cursor.getLong(sizeColumn);
+                    if (declaredSize > MAX_DCP_FILE_BYTES) {
+                        throw new IllegalStateException(
+                                name + " exceeds the per-profile import limit");
+                    }
+                    if (declaredSize >= 0 && stats.bytes > MAX_DCP_TREE_BYTES - declaredSize) {
+                        throw new IllegalStateException(
+                                "The selected profile tree exceeds the "
+                                        + MAX_DCP_TREE_BYTES + "-byte import limit");
+                    }
+                }
+                Uri documentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId);
+                File output = uniqueProfileFile(destination, safeName, documentId);
+                long copied = 0L;
+                try (InputStream input = getContentResolver().openInputStream(documentUri);
+                     FileOutputStream stream = new FileOutputStream(output)) {
+                    if (input == null) {
+                        throw new IllegalStateException("Android storage returned no DCP stream");
+                    }
+                    copied = copyProfile(input, stream, stats.bytes);
+                    stream.getFD().sync();
+                } catch (Exception error) {
+                    output.delete();
+                    throw error;
+                }
+                stats.bytes += copied;
+                stats.files++;
+            }
+        }
+    }
+
+    private static long copyProfile(InputStream input, OutputStream output, long alreadyImported)
+            throws Exception {
+        byte[] buffer = new byte[256 * 1024];
+        long fileBytes = 0L;
+        while (true) {
+            int count = input.read(buffer);
+            if (count < 0) {
+                break;
+            }
+            if (count == 0) {
+                int value = input.read();
+                if (value < 0) {
+                    break;
+                }
+                fileBytes = checkedProfileCopyLength(fileBytes, 1, alreadyImported);
+                output.write(value);
+                continue;
+            }
+            fileBytes = checkedProfileCopyLength(fileBytes, count, alreadyImported);
+            output.write(buffer, 0, count);
+        }
+        return fileBytes;
+    }
+
+    private static long checkedProfileCopyLength(
+            long fileBytes, int count, long alreadyImported) {
+        if (count < 0 || fileBytes > MAX_DCP_FILE_BYTES - count) {
+            throw new IllegalStateException(
+                    "A DCP exceeds the " + MAX_DCP_FILE_BYTES + "-byte import limit");
+        }
+        long next = fileBytes + count;
+        if (alreadyImported > MAX_DCP_TREE_BYTES - next) {
+            throw new IllegalStateException(
+                    "The selected profile tree exceeds the "
+                            + MAX_DCP_TREE_BYTES + "-byte import limit");
+        }
+        return next;
+    }
+
+    private static String safeProfileComponent(String requestedName) {
+        String name = requestedName == null ? "profile" : requestedName.trim();
+        name = name.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_");
+        if (name.isEmpty() || ".".equals(name) || "..".equals(name)) {
+            name = "profile";
+        }
+        if (name.length() > 180) {
+            int dot = name.toLowerCase(Locale.ROOT).endsWith(".dcp")
+                    ? name.length() - 4
+                    : -1;
+            if (dot > 0) {
+                name = name.substring(0, Math.min(dot, 176)) + ".dcp";
+            } else {
+                name = name.substring(0, 180);
+            }
+        }
+        return name;
+    }
+
+    private static File uniqueProfileDirectory(File parent, String name, String documentId) {
+        File candidate = new File(parent, name);
+        if (!candidate.exists()) {
+            return candidate;
+        }
+        return new File(parent, name + "-" + Integer.toHexString(documentId.hashCode()));
+    }
+
+    private static File uniqueProfileFile(File parent, String name, String documentId) {
+        File candidate = new File(parent, name);
+        if (!candidate.exists()) {
+            return candidate;
+        }
+        int dot = name.toLowerCase(Locale.ROOT).endsWith(".dcp") ? name.length() - 4 : name.length();
+        String stem = name.substring(0, dot);
+        return new File(
+                parent,
+                stem + "-" + Integer.toHexString(documentId.hashCode()) + ".dcp");
+    }
+
+    private String queryProfileFolderName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(
+                uri,
+                new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME},
+                null,
+                null,
+                null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int column = cursor.getColumnIndex(
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME);
+                if (column >= 0) {
+                    String name = cursor.getString(column);
+                    if (name != null && !name.isEmpty()) {
+                        return name;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // A provider may omit display metadata while still allowing traversal.
+        }
+        return "CameraProfiles";
+    }
+
+    private static void deleteDirectoryTree(File file) {
+        if (file == null || !file.exists()) {
+            return;
+        }
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                deleteDirectoryTree(child);
+            }
+        }
+        file.delete();
+    }
+
+    private static final class ProfileImportStats {
+        int files;
+        long bytes;
     }
 
     private static ArrayList<Uri> selectedDocumentUris(Intent data) {

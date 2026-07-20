@@ -399,6 +399,8 @@ pub struct AurawApp {
     performance_settings_path: Option<PathBuf>,
     pub(crate) camera_profile_mode: CameraProfileMode,
     pub(crate) camera_profile_folder: Option<PathBuf>,
+    pub(crate) camera_profile_folder_label: Option<String>,
+    pub(crate) camera_profile_auto_detect: bool,
     /// Last manually selected DCP, relative to `camera_profile_folder`. This is
     /// a sticky default only for newly opened RAWs that have no sidecar yet.
     pub(crate) last_camera_profile: Option<PathBuf>,
@@ -515,7 +517,13 @@ pub struct AurawApp {
     #[cfg(target_os = "android")]
     android_app: android_activity::AndroidApp,
     #[cfg(target_os = "android")]
-    picker_pending: bool,
+    pub(crate) picker_pending: bool,
+    /// Label of the SAF tree currently being mirrored into app-private DCP storage.
+    /// This is UI-only transient state and is never persisted as the active folder.
+    #[cfg(target_os = "android")]
+    pub(crate) camera_profile_folder_importing_label: Option<String>,
+    #[cfg(target_os = "android")]
+    pending_android_profile_reload: Option<(Option<PathBuf>, SidecarEditState)>,
 }
 
 impl AurawApp {
