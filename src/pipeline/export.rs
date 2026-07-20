@@ -1,6 +1,8 @@
 use super::{
-    extract_padded_tile, ExposureParams, GpuParams, IccOutputTransform, InpaintLayer, LoadedRaw,
-    MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan, TileSpec, EXPORT_TILE_HALO,
+    export_mask_atlas_edge, extract_padded_tile, mask_atlas_edge, ExposureParams, GpuParams,
+    IccOutputTransform,
+    InpaintLayer, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan, TileSpec,
+    EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS,
 };
 use anyhow::{Context, Result};
@@ -318,20 +320,28 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         raw.height,
     );
     let pipeline_started = Instant::now();
-    let tile_pipeline = RawGpuPipeline::new_headless_with_quality(
+    let export_mask_edge = if masks.masks.is_empty() {
+        mask_atlas_edge()
+    } else {
+        export_mask_atlas_edge(raw.width, raw.height)
+    };
+    let tile_pipeline = RawGpuPipeline::new_headless_with_quality_and_mask_edge(
         device,
         queue,
         &first_raw,
         &first_params,
         ProcessingQuality::High,
+        export_mask_edge,
     )
     .context("create reusable full-quality export pipeline")?;
     upload_mask_atlas(&tile_pipeline, queue, masks, raw.width, raw.height)?;
     crate::diagnostics::record(format!(
-        "Full-quality export pipeline prepared in {:.3}s; padded_tile={}x{}",
+        "Full-quality export pipeline prepared in {:.3}s; padded_tile={}x{} mask_atlas={}x{} R16F",
         pipeline_started.elapsed().as_secs_f64(),
         first_raw.width,
-        first_raw.height
+        first_raw.height,
+        export_mask_edge,
+        export_mask_edge
     ));
 
     // Establish one histogram from every full-resolution source pixel before
@@ -1081,7 +1091,7 @@ fn upload_mask_atlas(
 ) -> Result<()> {
     let edge = pipeline.mask_atlas_edge();
     for layer in 0..MAX_LOCAL_MASKS {
-        let bytes = masks.rasterize_layer(layer, edge, edge, image_width, image_height);
+        let bytes = masks.rasterize_layer_f16(layer, edge, edge, image_width, image_height);
         pipeline
             .update_mask_layer(queue, layer, &bytes)
             .with_context(|| format!("upload local-mask layer {}", layer + 1))?;

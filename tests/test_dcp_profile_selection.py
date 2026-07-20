@@ -69,6 +69,16 @@ class DcpProfileSelectionTests(unittest.TestCase):
         self.assertIn("mapped_high", profile)
         self.assertIn("(prophoto - vec3<f32>(low)) * scale", profile)
         self.assertIn("use_profile_base_tone", gpu)
+        self.assertIn("profile_headroom", profile)
+        self.assertIn("profile_linear / profile_headroom", profile)
+        self.assertIn("let local_exposure_ev", adjustments)
+        self.assertLess(
+            adjustments.index("let local_exposure_ev"),
+            adjustments.index("rgb = apply_profile_look(rgb)"),
+        )
+        self.assertIn("profile_tone_display_shoulder", adjustments)
+        self.assertIn("var display_linear = darktable_sigmoid(graded)", adjustments)
+        self.assertNotIn("var display_linear = clamp(graded", adjustments)
         self.assertIn("has_dcp_rendering_stages", lifecycle)
         self.assertIn("rendered_exposure.exposure = 0.0", lifecycle)
 

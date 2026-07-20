@@ -1,7 +1,8 @@
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
-    mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
-    ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams, GLOBAL_TEMPERATURE_LIMIT,
+    export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform,
+    LoadedRaw, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
+    GLOBAL_TEMPERATURE_LIMIT,
     MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Result};
@@ -325,7 +326,7 @@ pub struct GpuParams {
     // value deliberately rather than silently changing existing edits.
     process_info: [u32; 4],
     // Local mask count followed by reserved values. Each fixed mask index maps
-    // directly to one layer in the normalized R8 mask atlas.
+    // directly to one layer in the normalized R16F mask atlas.
     mask_counts: [u32; 4],
     mask_meta: [[u32; 4]; MAX_LOCAL_MASKS],
     // Exposure, contrast, highlights, shadows.
@@ -437,11 +438,10 @@ impl GpuParams {
         let mut profile_layout = raw.camera_profile.gpu_layout();
         profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
         let sigmoid = sigmoid_coefficients(exposure.sigmoid);
-        // A DCP ProfileToneCurve already defines the profile's baseline tone
-        // rendition. At untouched Rendering defaults, skip AuRaw's separate
-        // darktable sigmoid so camera-matching Adobe profiles are not given a
-        // second, unrelated contrast curve. Changing Rendering/Sigmoid opts
-        // back into the AuRaw display transform explicitly.
+        // Keep the DCP profile tone as the baseline rendition at untouched
+        // Rendering defaults, but use a highlight-only display shoulder rather
+        // than the previous hard [0, 1] clamp. Custom Sigmoid settings still
+        // opt into the full AuRaw scene-to-display transform.
         let use_profile_base_tone = raw.camera_profile.tone_curve.is_some()
             && exposure.sigmoid == SigmoidParams::default();
         let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
@@ -1052,6 +1052,29 @@ impl RawGpuPipeline {
         Self::new_internal(device, queue, None, None, raw, params, quality, None)
     }
 
+    /// Creates a headless pipeline with an explicit normalized-mask atlas edge.
+    /// Full-quality export uses a larger atlas than the interactive preview so
+    /// fine mask edges are not limited to preview resolution.
+    pub fn new_headless_with_quality_and_mask_edge(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+        mask_edge: u32,
+    ) -> Result<Self> {
+        Self::new_internal(
+            device,
+            queue,
+            None,
+            None,
+            raw,
+            params,
+            quality,
+            Some(mask_edge),
+        )
+    }
+
     /// Allocates a new set of textures and bind groups while reusing the
     /// already-compiled compute programs from another pipeline with the same
     /// CFA family and processing quality. This avoids recompiling the complete
@@ -1216,7 +1239,7 @@ impl RawGpuPipeline {
         let default_mask_atlas_edge = mask_atlas_edge();
         let mask_atlas_edge = mask_atlas_edge_override
             .unwrap_or(default_mask_atlas_edge)
-            .clamp(64, default_mask_atlas_edge);
+            .clamp(64, export_mask_atlas_edge_limit());
         let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw normalized local-mask atlas"),
             size: wgpu::Extent3d {
@@ -1227,12 +1250,12 @@ impl RawGpuPipeline {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::R16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[wgpu::TextureFormat::R8Unorm],
+            view_formats: &[wgpu::TextureFormat::R16Float],
         });
         let empty_masks =
-            vec![0u8; mask_atlas_edge as usize * mask_atlas_edge as usize * MAX_LOCAL_MASKS];
+            vec![0u16; mask_atlas_edge as usize * mask_atlas_edge as usize * MAX_LOCAL_MASKS];
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &mask_texture,
@@ -1240,10 +1263,10 @@ impl RawGpuPipeline {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &empty_masks,
+            bytemuck::cast_slice(&empty_masks),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(mask_atlas_edge),
+                bytes_per_row: Some(mask_atlas_edge * 2),
                 rows_per_image: Some(mask_atlas_edge),
             },
             wgpu::Extent3d {
@@ -2818,17 +2841,18 @@ impl RawGpuPipeline {
         Ok(pipeline)
     }
 
-    /// Uploads one normalized, anti-aliased local-mask layer. The same atlas
-    /// is sampled by preview proxies and full-resolution export tiles.
-    pub fn update_mask_layer(&self, queue: &wgpu::Queue, layer: usize, bytes: &[u8]) -> Result<()> {
+    /// Uploads one normalized, anti-aliased local-mask layer as IEEE-754 half
+    /// floats. Preview and export share the same shader path, while export can
+    /// allocate a larger atlas for higher spatial fidelity.
+    pub fn update_mask_layer(&self, queue: &wgpu::Queue, layer: usize, values: &[u16]) -> Result<()> {
         if layer >= MAX_LOCAL_MASKS {
             return Err(anyhow!("local-mask layer {layer} is out of range"));
         }
         let expected = self.mask_atlas_edge as usize * self.mask_atlas_edge as usize;
-        if bytes.len() != expected {
+        if values.len() != expected {
             return Err(anyhow!(
-                "local-mask layer has {} bytes, expected {expected}",
-                bytes.len()
+                "local-mask layer has {} samples, expected {expected}",
+                values.len()
             ));
         }
         queue.write_texture(
@@ -2842,10 +2866,10 @@ impl RawGpuPipeline {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            bytes,
+            bytemuck::cast_slice(values),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.mask_atlas_edge),
+                bytes_per_row: Some(self.mask_atlas_edge * 2),
                 rows_per_image: Some(self.mask_atlas_edge),
             },
             wgpu::Extent3d {

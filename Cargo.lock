@@ -527,6 +527,7 @@ dependencies = [
  "bytemuck",
  "eframe",
  "env_logger",
+ "half",
  "image",
  "jni",
  "log",

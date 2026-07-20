@@ -1,3 +1,4 @@
+use half::f16;
 use rayon::prelude::*;
 use std::f32::consts::TAU;
 use std::sync::Arc;
@@ -6,6 +7,8 @@ pub const MAX_LOCAL_MASKS: usize = 8;
 pub const MAX_MASK_COMPONENTS: usize = 64;
 pub const MASK_ATLAS_EDGE_DESKTOP: u32 = 2048;
 pub const MASK_ATLAS_EDGE_ANDROID: u32 = 1024;
+pub const MASK_ATLAS_EDGE_EXPORT_DESKTOP: u32 = 4096;
+pub const MASK_ATLAS_EDGE_EXPORT_ANDROID: u32 = 2048;
 
 pub const fn mask_atlas_edge() -> u32 {
     if cfg!(target_os = "android") {
@@ -13,6 +16,21 @@ pub const fn mask_atlas_edge() -> u32 {
     } else {
         MASK_ATLAS_EDGE_DESKTOP
     }
+}
+
+pub const fn export_mask_atlas_edge_limit() -> u32 {
+    if cfg!(target_os = "android") {
+        MASK_ATLAS_EDGE_EXPORT_ANDROID
+    } else {
+        MASK_ATLAS_EDGE_EXPORT_DESKTOP
+    }
+}
+
+pub fn export_mask_atlas_edge(image_width: u32, image_height: u32) -> u32 {
+    image_width
+        .max(image_height)
+        .min(export_mask_atlas_edge_limit())
+        .max(mask_atlas_edge())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -874,20 +892,20 @@ impl MaskStack {
         true
     }
 
-    pub fn rasterize_layer(
+    fn rasterize_layer_coverage(
         &self,
         layer: usize,
         atlas_width: u32,
         atlas_height: u32,
         image_width: u32,
         image_height: u32,
-    ) -> Vec<u8> {
+    ) -> Vec<f32> {
         let len = atlas_width as usize * atlas_height as usize;
         let Some(mask) = self.masks.get(layer) else {
-            return vec![0; len];
+            return vec![0.0; len];
         };
         if mask.components.is_empty() {
-            return vec![0; len];
+            return vec![0.0; len];
         }
 
         let mut combined: Option<Vec<f32>> = None;
@@ -939,16 +957,58 @@ impl MaskStack {
         }
 
         let Some(combined) = combined else {
-            return vec![0; len];
+            return vec![0.0; len];
         };
         let opacity = mask.opacity.clamp(0.0, 1.0);
         combined
             .into_par_iter()
             .map(|value| {
                 let value = if mask.invert { 1.0 - value } else { value };
-                (value.clamp(0.0, 1.0) * opacity * 255.0 + 0.5) as u8
+                value.clamp(0.0, 1.0) * opacity
             })
             .collect()
+    }
+
+    pub fn rasterize_layer(
+        &self,
+        layer: usize,
+        atlas_width: u32,
+        atlas_height: u32,
+        image_width: u32,
+        image_height: u32,
+    ) -> Vec<u8> {
+        self.rasterize_layer_coverage(
+            layer,
+            atlas_width,
+            atlas_height,
+            image_width,
+            image_height,
+        )
+        .into_par_iter()
+        .map(|value| (value * 255.0 + 0.5) as u8)
+        .collect()
+    }
+
+    /// Full-precision GPU mask coverage. R16F avoids the 1/255 opacity steps
+    /// becoming visible at feathered boundaries under strong local exposure.
+    pub fn rasterize_layer_f16(
+        &self,
+        layer: usize,
+        atlas_width: u32,
+        atlas_height: u32,
+        image_width: u32,
+        image_height: u32,
+    ) -> Vec<u16> {
+        self.rasterize_layer_coverage(
+            layer,
+            atlas_width,
+            atlas_height,
+            image_width,
+            image_height,
+        )
+        .into_par_iter()
+        .map(|value| f16::from_f32(value).to_bits())
+        .collect()
     }
 
     pub fn rasterize_component_layer(

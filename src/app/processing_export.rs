@@ -418,7 +418,7 @@ impl AurawApp {
     ) -> Result<(), String> {
         let edge = pipeline.mask_atlas_edge();
         for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {
-            let bytes = masks.rasterize_layer(layer, edge, edge, raw.width, raw.height);
+            let bytes = masks.rasterize_layer_f16(layer, edge, edge, raw.width, raw.height);
             pipeline
                 .update_mask_layer(queue, layer, &bytes)
                 .map_err(|error| format!("Could not update preview mask: {error:#}"))?;
@@ -703,7 +703,7 @@ impl AurawApp {
                     if !self.detail_dirty_mask_layers[layer] {
                         continue;
                     }
-                    let bytes = self.masks.rasterize_layer(
+                    let bytes = self.masks.rasterize_layer_f16(
                         layer,
                         edge,
                         edge,
@@ -911,7 +911,7 @@ impl AurawApp {
                 if !self.navigation_dirty_mask_layers[layer] {
                     continue;
                 }
-                let bytes = self.masks.rasterize_layer(
+                let bytes = self.masks.rasterize_layer_f16(
                     layer,
                     edge,
                     edge,
@@ -1032,7 +1032,7 @@ impl AurawApp {
                 // so dirty layers must stay full-frame as well. Rasterizing a
                 // crop-local atlas makes masks slide, repeat, or disappear
                 // while panning.
-                let bytes = self.masks.rasterize_layer(
+                let bytes = self.masks.rasterize_layer_f16(
                     layer,
                     edge,
                     edge,
@@ -1102,7 +1102,7 @@ impl AurawApp {
                 }
                 let bytes = self
                     .masks
-                    .rasterize_layer(layer, edge, edge, raw.width, raw.height);
+                    .rasterize_layer_f16(layer, edge, edge, raw.width, raw.height);
                 if let Err(error) = pipeline.update_mask_layer(&render_state.queue, layer, &bytes) {
                     upload_error = Some(format!("Could not update local mask: {error:#}"));
                     break;

@@ -354,9 +354,9 @@ impl AurawApp {
             .as_ref()
             .ok_or_else(|| "The original RAW is not available.".to_owned())?;
         let source_edge = if cfg!(target_os = "android") {
-            1600
-        } else {
             2048
+        } else {
+            3072
         };
         let raw = if full_raw.width.max(full_raw.height) <= source_edge {
             Arc::clone(full_raw)
@@ -375,8 +375,9 @@ impl AurawApp {
         // reading the live edited output texture. Camera white balance,
         // profile color, demosaic, and lens-corrected geometry are retained so
         // the model sees a natural image that remains pixel-aligned with the
-        // preview and export. A dedicated 1600/2048-edge proxy keeps model
-        // quality independent of the interactive Preview Quality setting.
+        // preview and export. A dedicated 2048/3072-edge proxy preserves much
+        // finer boundary guidance than the 1024px model input while keeping
+        // inference memory bounded and independent of Preview Quality.
         let reference_exposure = ExposureParams::scene_referred_default();
         let reference_masks = MaskStack::default();
         let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
