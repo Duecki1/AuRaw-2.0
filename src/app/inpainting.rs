@@ -181,6 +181,7 @@ impl AurawApp {
                     }
                 }
                 Err(error) => {
+                    log::error!("Inpainting failed: {error}");
                     self.inpaint_active_dabs = None;
                     self.notice = Some(format!("Inpainting failed: {error}"));
                 }
@@ -214,7 +215,7 @@ impl AurawApp {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
             .unwrap_or_else(std::env::temp_dir);
-        root.join("auraw/models/lama.onnx")
+        root.join("auraw/models/lama_fp32.onnx")
     }
 
     #[cfg(target_os = "android")]
@@ -222,7 +223,7 @@ impl AurawApp {
         self.android_app
             .internal_data_path()
             .unwrap_or_else(std::env::temp_dir)
-            .join("models/lama.onnx")
+            .join("models/lama_fp32.onnx")
     }
 
     pub(crate) fn show_inpainting_dialogs(&mut self, ctx: &egui::Context) {
@@ -269,7 +270,7 @@ impl AurawApp {
                 .show(ctx, |ui| {
                     if let Some((downloaded, total)) = self.inpaint_download_progress {
                         let fraction = downloaded as f32 / total.max(1) as f32;
-                        ui.label("Downloading lama.onnx…");
+                        ui.label("Downloading lama_fp32.onnx…");
                         ui.add(
                             egui::ProgressBar::new(fraction)
                                 .show_percentage()

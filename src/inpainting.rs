@@ -13,14 +13,14 @@ use std::{
 use crate::pipeline::{rasterize_brush_dabs, BrushDab, InpaintLayer, MaskRgbImage};
 
 pub const LAMA_MODEL_URL: &str =
-    "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama.onnx";
-pub const LAMA_MODEL_BYTES: u64 = 207_479_252;
+    "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx";
+pub const LAMA_MODEL_BYTES: u64 = 208_044_816;
 pub const LAMA_MODEL_SHA256_HEX: &str =
-    "351e481e287f345b7fbfd026068cfb9ec0c7f24b440e6501458ebe54a833d1a1";
+    "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6";
 const LAMA_MODEL_SHA256: [u8; 32] = [
-    0x35, 0x1e, 0x48, 0x1e, 0x28, 0x7f, 0x34, 0x5b, 0x7f, 0xbf, 0xd0, 0x26, 0x06, 0x8c,
-    0xfb, 0x9e, 0xc0, 0xc7, 0xf2, 0x4b, 0x44, 0x0e, 0x65, 0x01, 0x45, 0x8e, 0xbe, 0x54,
-    0xa8, 0x33, 0xd1, 0xa1,
+    0x1f, 0xae, 0xf5, 0x30, 0x1d, 0x78, 0xdb, 0x7d, 0xda, 0x50, 0x2f, 0xe5, 0x99, 0x66,
+    0x95, 0x7e, 0xc4, 0xb7, 0x9d, 0xd6, 0x4e, 0x16, 0xf0, 0x3e, 0xd9, 0x69, 0x13, 0xc7,
+    0xa4, 0xeb, 0x68, 0xd6,
 ];
 const LAMA_EDGE: u32 = 512;
 const MAX_INPAINT_PIXELS: u64 = 20_000_000;
@@ -416,7 +416,7 @@ fn rgba_to_chw(image: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> Vec<f32> {
 fn chw_to_rgba(values: &[f32]) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     let plane = (LAMA_EDGE * LAMA_EDGE) as usize;
     anyhow::ensure!(values.len() == plane * 3, "invalid LaMa output length");
-    // The pinned `lama.onnx` graph emits RGB values in the 0..255 range.
+    // The pinned `lama_fp32.onnx` graph emits RGB values in the 0..255 range.
     // Do not apply the 0..1 scaling used by the original PyTorch checkpoint.
     let mut rgba = vec![255u8; plane * 4];
     for index in 0..plane {

@@ -920,10 +920,14 @@ impl AurawApp {
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let looks_like_runtime = file_name.contains("onnxruntime")
-            && (file_name.ends_with(".dll")
-                || file_name.ends_with(".dylib")
-                || file_name.contains(".so"));
+        let looks_like_runtime = if cfg!(target_os = "windows") {
+            file_name == "onnxruntime.dll"
+        } else if cfg!(target_os = "macos") {
+            file_name == "libonnxruntime.dylib"
+                || (file_name.starts_with("libonnxruntime.") && file_name.ends_with(".dylib"))
+        } else {
+            file_name == "libonnxruntime.so" || file_name.starts_with("libonnxruntime.so.")
+        };
         if !looks_like_runtime {
             self.notice = Some(
                 "Select the ONNX Runtime shared library (onnxruntime.dll, libonnxruntime.so, or libonnxruntime.dylib)."

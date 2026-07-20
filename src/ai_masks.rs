@@ -291,7 +291,7 @@ pub(crate) fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: O
     );
     let (runtime_load_path, _verified_runtime_handle, actual_sha256) =
         verified_runtime_load_path(&runtime_path)
-            .context("stage selected ONNX Runtime for race-free loading")?;
+            .context("verify selected ONNX Runtime before loading")?;
     anyhow::ensure!(
         actual_sha256 == expected_sha256,
         "selected ONNX Runtime changed after approval: expected SHA-256 {expected_sha256}, found {actual_sha256}; select it again only if you trust the replacement"
@@ -333,69 +333,18 @@ pub(crate) fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: O
     Ok(())
 }
 
-/// Returns a path whose bytes are the bytes that were hashed, plus an open
-/// handle that must remain alive through `dlopen`/runtime initialization.
+/// Returns the verified runtime path and its SHA-256.
+///
+/// Do not load ONNX Runtime through `/proc/self/fd/<n>` on Linux. ONNX Runtime
+/// discovers dynamically-loaded execution-provider libraries relative to the
+/// path of `libonnxruntime.so`. A memfd path therefore makes it look for
+/// siblings such as `libonnxruntime_providers_shared.so` under `/proc/self/fd/`,
+/// which can never work. Load the canonical on-disk library instead so provider
+/// discovery stays anchored to the directory the user selected.
 #[cfg(target_os = "linux")]
 fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::raw::{c_char, c_int, c_uint};
-
-    unsafe extern "C" {
-        fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
-        fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
-    }
-
-    const MFD_CLOEXEC: c_uint = 0x0001;
-    const MFD_ALLOW_SEALING: c_uint = 0x0002;
-    const F_ADD_SEALS: c_int = 1033;
-    const F_SEAL_SEAL: c_int = 0x0001;
-    const F_SEAL_SHRINK: c_int = 0x0002;
-    const F_SEAL_GROW: c_int = 0x0004;
-    const F_SEAL_WRITE: c_int = 0x0008;
-
-    let mut source = File::open(path)
-        .with_context(|| format!("open selected ONNX Runtime {}", path.display()))?;
-    let name = CString::new("auraw-verified-onnx-runtime")
-        .map_err(|_| anyhow::anyhow!("internal ONNX Runtime memfd name contains a NUL byte"))?;
-    // SAFETY: `name` is a valid NUL-terminated CString and the flags are accepted by Linux memfd_create.
-    let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC | MFD_ALLOW_SEALING) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error()).context("create sealed runtime file");
-    }
-    // SAFETY: `fd` was just returned as an owned descriptor and is transferred exactly once into `File`.
-    let mut sealed = unsafe { File::from_raw_fd(fd) };
-    let mut hasher = Sha256Context::new(&SHA256);
-    let mut buffer = [0u8; 256 * 1024];
-    loop {
-        let read = source
-            .read(&mut buffer)
-            .with_context(|| format!("read selected ONNX Runtime {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        sealed
-            .write_all(&buffer[..read])
-            .context("copy selected ONNX Runtime into sealed memory")?;
-    }
-    sealed.sync_all().context("flush sealed ONNX Runtime")?;
-    let digest: [u8; 32] =
-        hasher.finish().as_ref().try_into().map_err(|_| {
-            anyhow::anyhow!("SHA-256 implementation returned the wrong digest length")
-        })?;
-    let actual_sha256 = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-
-    let seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
-    // SAFETY: the descriptor remains open for the call and `F_ADD_SEALS` consumes the integer bitmask by value.
-    if unsafe { fcntl(sealed.as_raw_fd(), F_ADD_SEALS, seals) } < 0 {
-        return Err(std::io::Error::last_os_error()).context("seal verified ONNX Runtime bytes");
-    }
-    let load_path = PathBuf::from(format!("/proc/self/fd/{}", sealed.as_raw_fd()));
-    Ok((load_path, Some(sealed), actual_sha256))
+    let actual_sha256 = sha256_file_hex(path).context("verify selected ONNX Runtime SHA-256")?;
+    Ok((path.to_path_buf(), None, actual_sha256))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -460,37 +409,115 @@ pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
 }
 
 #[cfg(not(target_os = "android"))]
-pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
-    let builder = Session::builder().context("create ONNX Runtime session")?;
+fn create_cpu_session(model_path: &Path) -> Result<Session> {
+    let mut builder = Session::builder()
+        .context("create CPU ONNX Runtime session")?
+        .with_execution_providers([ort::ep::CPU::default().build()])
+        .map_err(|error| anyhow::anyhow!("configure ONNX CPU execution provider: {error}"))?;
+    builder
+        .commit_from_file(model_path)
+        .with_context(|| format!("load ONNX model on CPU from {}", model_path.display()))
+}
 
-    #[cfg(target_os = "linux")]
-    let mut builder = builder
-        .with_execution_providers([
-            ort::ep::TensorRT::default().build(),
-            ort::ep::CUDA::default().build(),
-            ort::ep::ROCm::default().build(),
-            ort::ep::OpenVINO::default().build(),
-            ort::ep::XNNPACK::default().build(),
-        ])
+#[cfg(target_os = "linux")]
+fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
+    // Only register provider libraries that actually ship beside the selected
+    // libonnxruntime. The ort crate/ONNX Runtime will fall back unsupported graph
+    // nodes to CPU automatically inside a successfully-created session.
+    let runtime_dir = DESKTOP_RUNTIME_IDENTITY
+        .get()
+        .and_then(|(runtime_path, _)| runtime_path.parent());
+    let has_provider = |filename: &str| {
+        runtime_dir
+            .map(|directory| directory.join(filename).is_file())
+            .unwrap_or(false)
+    };
+    let mut providers = Vec::new();
+    if has_provider("libonnxruntime_providers_cuda.so") {
+        providers.push(ort::ep::CUDA::default().build());
+    }
+    if has_provider("libonnxruntime_providers_openvino.so") {
+        providers.push(ort::ep::OpenVINO::default().build());
+    }
+    if has_provider("libonnxruntime_providers_rocm.so") {
+        providers.push(ort::ep::ROCm::default().build());
+    }
+    // Do not auto-register TensorRT simply because its provider .so exists. It
+    // also requires an external matching TensorRT installation; CUDA is the
+    // safer general-purpose NVIDIA accelerator and CPU remains the final fallback.
+    if providers.is_empty() {
+        return Ok(None);
+    }
+
+    let mut builder = Session::builder()
+        .context("create accelerated ONNX Runtime session")?
+        .with_execution_providers(providers)
         .map_err(|error| anyhow::anyhow!("configure Linux ONNX execution providers: {error}"))?;
+    builder
+        .commit_from_file(model_path)
+        .map(Some)
+        .with_context(|| format!("load ONNX model with Linux acceleration from {}", model_path.display()))
+}
 
-    #[cfg(target_os = "windows")]
-    let mut builder = builder
+#[cfg(target_os = "windows")]
+fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
+    let mut builder = Session::builder()
+        .context("create accelerated ONNX Runtime session")?
         .with_execution_providers([
             ort::ep::TensorRT::default().build(),
             ort::ep::CUDA::default().build(),
             ort::ep::DirectML::default().build(),
         ])
         .map_err(|error| anyhow::anyhow!("configure Windows ONNX execution providers: {error}"))?;
-
-    #[cfg(target_os = "macos")]
-    let mut builder = builder
-        .with_execution_providers([ort::ep::CoreML::default().build()])
-        .map_err(|error| anyhow::anyhow!("configure macOS ONNX execution provider: {error}"))?;
-
     builder
         .commit_from_file(model_path)
-        .with_context(|| format!("load ONNX model from {}", model_path.display()))
+        .map(Some)
+        .with_context(|| format!("load ONNX model with Windows acceleration from {}", model_path.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
+    let mut builder = Session::builder()
+        .context("create accelerated ONNX Runtime session")?
+        .with_execution_providers([ort::ep::CoreML::default().build()])
+        .map_err(|error| anyhow::anyhow!("configure macOS ONNX execution provider: {error}"))?;
+    builder
+        .commit_from_file(model_path)
+        .map(Some)
+        .with_context(|| format!("load ONNX model with CoreML from {}", model_path.display()))
+}
+
+#[cfg(all(
+    not(target_os = "android"),
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos"))
+))]
+fn create_accelerated_session(_model_path: &Path) -> Result<Option<Session>> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
+    match create_accelerated_session(model_path) {
+        Ok(Some(session)) => Ok(session),
+        Ok(None) => {
+            log::info!(
+                "No usable accelerated ONNX execution provider was found; using CPU for {}",
+                model_path.display()
+            );
+            create_cpu_session(model_path)
+        }
+        Err(accelerated_error) => {
+            log::warn!(
+                "Accelerated ONNX session failed; retrying on CPU for {}: {accelerated_error:#}",
+                model_path.display()
+            );
+            create_cpu_session(model_path).with_context(|| {
+                format!(
+                    "CPU fallback also failed after accelerated ONNX session error: {accelerated_error:#}"
+                )
+            })
+        }
+    }
 }
 
 fn infer_subject(
