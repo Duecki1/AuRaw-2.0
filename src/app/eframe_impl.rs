@@ -109,6 +109,15 @@ impl eframe::App for AurawApp {
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
+        #[cfg(target_os = "android")]
+        if self.picker_pending {
+            // Android's SAF result can be followed by an asynchronous copy (DCP
+            // folders in particular may contain thousands of files). A repaint
+            // requested from the Java/JNI worker is not guaranteed to wake every
+            // vendor's NativeActivity event loop after the external picker closes,
+            // so keep a tiny polling heartbeat until the terminal result arrives.
+            ui.ctx().request_repaint_after(Duration::from_millis(120));
+        }
         self.show_subject_dialogs(ui.ctx());
         self.show_inpainting_dialogs(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());

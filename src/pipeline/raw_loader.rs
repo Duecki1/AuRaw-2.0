@@ -3,7 +3,47 @@ use super::color_profile::CameraProfile;
 #[cfg(not(libraw_available))]
 use anyhow::anyhow;
 use anyhow::{Context, Result};
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraProfileMode {
+    /// Ignore DCP creative stages and use only camera/DNG/LibRaw matrices.
+    MatrixOnly,
+    /// Use a matching external DCP from the configured folder, otherwise
+    /// fall back to the camera matrix without using an embedded DCP.
+    DcpProfiles,
+    /// Prefer a matching external DCP, then an embedded DNG/DCP profile, then
+    /// fall back to the camera matrix.
+    #[default]
+    Automatic,
+}
+
+impl CameraProfileMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MatrixOnly => "Embedded matrix only",
+            Self::DcpProfiles => "Use DCP profiles",
+            Self::Automatic => "Automatic",
+        }
+    }
+
+    pub(crate) const fn cache_key(self) -> &'static str {
+        match self {
+            Self::MatrixOnly => "matrix",
+            Self::DcpProfiles => "dcp",
+            Self::Automatic => "auto",
+        }
+    }
+}
+
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CameraProfileCandidate {
+    pub path: PathBuf,
+    pub name: String,
+}
 
 pub const SUPPORTED_RAW_EXTENSIONS: &[&str] = &[
     "3fr", "ari", "arw", "bay", "bmq", "cap", "cine", "cr2", "cr3", "crw", "cs1", "dc2", "dcr",
@@ -124,6 +164,10 @@ pub struct LoadedRaw {
     pub white_levels: [f32; 4],
     /// DCP creative profile stages and retained embedded camera ICC data.
     pub camera_profile: CameraProfile,
+    /// External DCP actually applied to this RAW, when one was selected.
+    pub camera_profile_source: Option<PathBuf>,
+    /// All external DCPs in the configured root that match this camera.
+    pub available_camera_profiles: Vec<CameraProfileCandidate>,
     /// Camera/DCP calibration data retained so global white-balance edits can
     /// rebuild the camera transform instead of applying generic RGB gains.
     pub(crate) white_balance_model: Option<CameraWhiteBalanceModel>,
@@ -177,9 +221,56 @@ pub fn load_raw_file_with_dcp(_path: &Path, _profile_path: &Path) -> Result<Load
     ))
 }
 
+#[cfg(not(libraw_available))]
+pub fn load_raw_file_with_profile_config(
+    _path: &Path,
+    _mode: CameraProfileMode,
+    _profile_folder: Option<&Path>,
+) -> Result<LoadedRaw> {
+    Err(anyhow!(
+        "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
+    ))
+}
+
+#[cfg(not(libraw_available))]
+pub fn load_raw_file_with_profile_selection(
+    _path: &Path,
+    _mode: CameraProfileMode,
+    _profile_folder: Option<&Path>,
+    _selected_profile: Option<&Path>,
+) -> Result<LoadedRaw> {
+    Err(anyhow!(
+        "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
+    ))
+}
+
 #[cfg(libraw_available)]
 pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
     libraw_loader::load_raw_file(path)
+}
+
+#[cfg(libraw_available)]
+pub fn load_raw_file_with_profile_config(
+    path: &Path,
+    mode: CameraProfileMode,
+    profile_folder: Option<&Path>,
+) -> Result<LoadedRaw> {
+    libraw_loader::load_raw_file_with_profile_config(path, mode, profile_folder)
+}
+
+#[cfg(libraw_available)]
+pub fn load_raw_file_with_profile_selection(
+    path: &Path,
+    mode: CameraProfileMode,
+    profile_folder: Option<&Path>,
+    selected_profile: Option<&Path>,
+) -> Result<LoadedRaw> {
+    libraw_loader::load_raw_file_with_profile_selection(
+        path,
+        mode,
+        profile_folder,
+        selected_profile,
+    )
 }
 
 #[cfg(libraw_available)]
@@ -226,6 +317,8 @@ mod tests {
             black_levels_per_pixel: vec![0.0],
             white_levels: [1.0; 4],
             camera_profile: CameraProfile::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
             white_balance_model: Some(CameraWhiteBalanceModel {
                 base_wb: [2.0, 1.0, 1.5, 1.0],
                 cdesc: *b"RGBG",

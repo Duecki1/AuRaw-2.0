@@ -562,6 +562,8 @@ mod imp {
             black_levels_per_pixel,
             white_levels: raw.white_levels,
             camera_profile: raw.camera_profile.clone(),
+            camera_profile_source: raw.camera_profile_source.clone(),
+            available_camera_profiles: raw.available_camera_profiles.clone(),
             white_balance_model: raw.white_balance_model.clone(),
         })
     }

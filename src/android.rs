@@ -48,12 +48,27 @@ pub enum ExportPublishResult {
     Failed(String),
 }
 
+#[derive(Debug)]
+pub enum CameraProfileFolderResult {
+    /// Android returned a tree URI and AuRaw started mirroring its DCP files.
+    /// Keep the picker transaction pending until Picked/Failed arrives.
+    ImportStarted { label: String },
+    Picked { path: PathBuf, label: String, profiles: usize },
+    Cancelled,
+    Failed(String),
+}
+
 static RESULTS: OnceLock<Mutex<VecDeque<PickerResult>>> = OnceLock::new();
+static CAMERA_PROFILE_FOLDER_RESULTS: OnceLock<Mutex<VecDeque<CameraProfileFolderResult>>> = OnceLock::new();
 static EXPORT_RESULTS: OnceLock<Mutex<VecDeque<ExportPublishResult>>> = OnceLock::new();
 static EGUI_CONTEXT: Mutex<Option<eframe::egui::Context>> = Mutex::new(None);
 
 fn results() -> &'static Mutex<VecDeque<PickerResult>> {
     RESULTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn camera_profile_folder_results() -> &'static Mutex<VecDeque<CameraProfileFolderResult>> {
+    CAMERA_PROFILE_FOLDER_RESULTS.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 fn export_results() -> &'static Mutex<VecDeque<ExportPublishResult>> {
@@ -78,8 +93,25 @@ pub fn take_picker_result() -> Option<PickerResult> {
     results().lock().ok()?.pop_front()
 }
 
+pub fn take_camera_profile_folder_result() -> Option<CameraProfileFolderResult> {
+    camera_profile_folder_results().lock().ok()?.pop_front()
+}
+
 pub fn take_export_publish_result() -> Option<ExportPublishResult> {
     export_results().lock().ok()?.pop_front()
+}
+
+pub fn open_camera_profile_folder(app: &AndroidApp) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("openCameraProfileFolder"),
+            jni::jni_sig!(() -> void),
+            &[],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not open Android's camera-profile folder picker: {error:#}"))
 }
 
 pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
@@ -729,6 +761,62 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePicked<'lo
         })
         .resolve_with::<LogContextErrorAndDefault, _>(|| {
             "AuRawActivity.nativeOnFilePicked".to_owned()
+        });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCameraProfileFolderImportStarted<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    label: JString<'local>,
+) {
+    unowned_env
+        .with_env(|_env| -> jni::errors::Result<()> {
+            let label = label.to_string();
+            if let Ok(mut queue) = camera_profile_folder_results().lock() {
+                queue.push_back(CameraProfileFolderResult::ImportStarted { label });
+            }
+            request_repaint();
+            Ok(())
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "AuRawActivity.nativeOnCameraProfileFolderImportStarted".to_owned()
+        });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCameraProfileFolderPicked<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+    label: JString<'local>,
+    profile_count: jni::sys::jint,
+    error: JString<'local>,
+) {
+    unowned_env
+        .with_env(|_env| -> jni::errors::Result<()> {
+            let path = path.to_string();
+            let label = label.to_string();
+            let error = error.to_string();
+            let result = if !error.is_empty() {
+                CameraProfileFolderResult::Failed(error)
+            } else if path.is_empty() {
+                CameraProfileFolderResult::Cancelled
+            } else {
+                CameraProfileFolderResult::Picked {
+                    path: PathBuf::from(path),
+                    label,
+                    profiles: usize::try_from(profile_count.max(0)).unwrap_or(0),
+                }
+            };
+            if let Ok(mut queue) = camera_profile_folder_results().lock() {
+                queue.push_back(result);
+            }
+            request_repaint();
+            Ok(())
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "AuRawActivity.nativeOnCameraProfileFolderPicked".to_owned()
         });
 }
 

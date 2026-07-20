@@ -43,14 +43,19 @@ impl Sidebar {
             .scroll_source(sidebar_scroll_source)
             .auto_shrink([false, false])
             .show(ui, |ui| match app.sidebar_tab {
-                SidebarTab::Adjustments => Self::show_adjustments(ui, app, layout),
+                SidebarTab::Adjustments => Self::show_adjustments(ui, app, layout, frame),
                 SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
                 SidebarTab::Inpainting => Self::show_inpainting(ui, app, layout, frame),
                 SidebarTab::Export => Self::show_export(ui, app, frame),
             });
     }
 
-    fn show_adjustments(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
+    fn show_adjustments(
+        ui: &mut Ui,
+        app: &mut AurawApp,
+        layout: ScreenLayout,
+        frame: &eframe::Frame,
+    ) {
         ui.horizontal(|ui| {
             ui.heading("Adjustments");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -66,6 +71,8 @@ impl Sidebar {
         );
         ui.add_space(2.0);
         ui.separator();
+
+        Self::show_camera_profile_selector(ui, app, frame);
 
         let mut changed = false;
         let mut lens_changed = false;
@@ -145,6 +152,84 @@ impl Sidebar {
         }
         if lens_changed {
             app.mark_lens_correction_dirty();
+        }
+    }
+
+    fn show_camera_profile_selector(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+        if app.camera_profile_mode == crate::pipeline::CameraProfileMode::MatrixOnly {
+            return;
+        }
+        let Some(raw) = app.loaded_raw.as_ref() else {
+            return;
+        };
+        let candidates = raw.available_camera_profiles.clone();
+        if candidates.is_empty() {
+            return;
+        }
+        let active_source = raw.camera_profile_source.clone();
+        let active_name = active_source
+            .as_ref()
+            .and_then(|active| {
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.path == *active)
+                    .map(|candidate| candidate.name.clone())
+            })
+            .or_else(|| raw.camera_profile.name.clone())
+            .unwrap_or_else(|| "Camera matrix".to_owned());
+
+        if candidates.len() == 1 {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Camera profile");
+                ui.label(&active_name);
+            });
+            ui.separator();
+            return;
+        }
+
+        let previous = app.selected_camera_profile.clone();
+        let mut selection = previous.clone();
+        let selected_text = previous
+            .as_ref()
+            .and_then(|selected| {
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.path == *selected)
+                    .map(|candidate| candidate.name.clone())
+            })
+            .unwrap_or_else(|| format!("Automatic — {active_name}"));
+
+        ui.horizontal(|ui| {
+            ui.strong("Camera profile");
+            egui::ComboBox::from_id_salt("current-image-camera-profile")
+                .selected_text(selected_text)
+                .width(ui.available_width().max(140.0))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selection, None, "Automatic (recommended)")
+                        .on_hover_text("Use AuRaw's preferred matching profile for this camera.");
+                    ui.separator();
+                    for candidate in &candidates {
+                        ui.selectable_value(
+                            &mut selection,
+                            Some(candidate.path.clone()),
+                            &candidate.name,
+                        )
+                        .on_hover_text(candidate.path.display().to_string());
+                    }
+                });
+        });
+        ui.label(
+            egui::RichText::new(format!(
+                "{} matching DCP profiles found for {} {}.",
+                candidates.len(), raw.camera_make, raw.camera_model
+            ))
+            .size(11.0)
+            .color(ui.visuals().weak_text_color()),
+        );
+        ui.separator();
+
+        if selection != previous {
+            app.select_camera_profile_for_current(selection, frame);
         }
     }
 

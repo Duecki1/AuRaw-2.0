@@ -62,7 +62,9 @@ def test_grading_is_scene_referred_perceptual_and_gamut_safe() -> None:
     assert "nonnegative_rec2020_from_oklab" in ADJUSTMENTS
     assert "target_ab / target_chroma" in ADJUSTMENTS
     assert "adjusted = adjusted * exp2(mixer_luminance_ev" in ADJUSTMENTS
-    assert "let display_linear = darktable_sigmoid(graded)" in ADJUSTMENTS
+    assert "(params.process_info.y & 1u) == 0u" in ADJUSTMENTS
+    assert "display_linear = darktable_sigmoid(graded)" in ADJUSTMENTS
+    assert "var display_linear = clamp(graded" in ADJUSTMENTS
     assert "clipping individual RGB channels" in ADJUSTMENTS
 
 
