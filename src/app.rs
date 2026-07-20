@@ -5,10 +5,10 @@ use crate::ai_masks::{
 use crate::inpainting::{spawn_inpaint, InpaintEvent, InpaintRequest, LAMA_MODEL_BYTES};
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
-    compose_inpaint_strokes, load_raw_file, spawn_tiled_png_export, BrushMode, ExportEvent,
-    ExportMetadata, ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke,
-    LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry,
-    MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
+    compose_inpaint_strokes, load_raw_file_with_profile_selection, spawn_tiled_png_export, BrushMode,
+    CameraProfileMode, ExportEvent, ExportMetadata, ExportSettings, ExposureParams, GpuParams,
+    InpaintLayer, InpaintStroke, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage,
+    MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
     RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{EditState as SidecarEditState, LensEditState as SidecarLensEditState};
@@ -258,6 +258,7 @@ struct LoadedPreview {
     sidecar_generation: u64,
     sidecar_warning: Option<String>,
     sidecar_needs_rewrite: bool,
+    selected_camera_profile: Option<PathBuf>,
 }
 
 enum LoadEvent {
@@ -396,6 +397,13 @@ pub struct AurawApp {
     raw_cache: VecDeque<CachedRawDecode>,
     raw_cache_limit: usize,
     performance_settings_path: Option<PathBuf>,
+    pub(crate) camera_profile_mode: CameraProfileMode,
+    pub(crate) camera_profile_folder: Option<PathBuf>,
+    /// Last manually selected DCP, relative to `camera_profile_folder`. This is
+    /// a sticky default only for newly opened RAWs that have no sidecar yet.
+    pub(crate) last_camera_profile: Option<PathBuf>,
+    /// Explicit DCP chosen for the currently edited image. None keeps automatic selection.
+    pub(crate) selected_camera_profile: Option<PathBuf>,
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
     pub adjustment_section: AdjustmentSection,

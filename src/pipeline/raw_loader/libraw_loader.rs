@@ -1,6 +1,8 @@
 use super::{
-    validate_raw_dimensions, CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind,
-    DngColorEndpoint, LoadedRaw, RawThumbnail, MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE,
+    validate_raw_dimensions, CameraColorModel, CameraProfile, CameraProfileCandidate,
+    CameraProfileMode, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint, LoadedRaw, RawThumbnail,
+    MAX_RAW_FILE_BYTES,
+    MAX_SENSOR_EDGE,
     MAX_SENSOR_PIXELS,
 };
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
@@ -9,12 +11,14 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::Cursor;
 use std::os::raw::c_char;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
 const MAX_DCP_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_DCP_SCAN_FILES: usize = 10_000;
+const MAX_DCP_SCAN_DEPTH: usize = 16;
 #[cfg(target_os = "android")]
 const MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
@@ -54,8 +58,143 @@ mod ffi {
 }
 
 pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
+    load_raw_file_with_profile_config(path, CameraProfileMode::Automatic, None)
+}
+
+pub fn load_raw_file_with_profile_config(
+    path: &Path,
+    mode: CameraProfileMode,
+    profile_folder: Option<&Path>,
+) -> Result<LoadedRaw> {
+    load_raw_file_with_profile_selection(path, mode, profile_folder, None)
+}
+
+pub fn load_raw_file_with_profile_selection(
+    path: &Path,
+    mode: CameraProfileMode,
+    profile_folder: Option<&Path>,
+    selected_profile: Option<&Path>,
+) -> Result<LoadedRaw> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW input")?;
-    load_raw_file_with_selected_profile(path, read_optional_profile(path))
+
+    let c_path = path_to_libraw_cstring(path)?;
+    let ctx = LibRawContext::new()?;
+    check_libraw(
+        // SAFETY: `ctx.raw` is a live LibRaw handle owned by `ctx`, and `c_path` remains alive for the call.
+        unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
+        "open RAW file",
+    )?;
+    // SAFETY: opening the RAW populates identity and geometry metadata.
+    unsafe { validate_opened_raw_geometry(&ctx) }?;
+
+    let embedded_profile = match mode {
+        CameraProfileMode::MatrixOnly | CameraProfileMode::DcpProfiles => None,
+        CameraProfileMode::Automatic => read_optional_profile(path),
+    };
+    let raw_camera_signature = match mode {
+        CameraProfileMode::Automatic => embedded_profile
+            .as_ref()
+            .and_then(|profile| profile.camera_calibration_signature.clone()),
+        CameraProfileMode::DcpProfiles => read_optional_profile(path)
+            .and_then(|profile| profile.camera_calibration_signature),
+        CameraProfileMode::MatrixOnly => None,
+    };
+
+    // SAFETY: LibRaw has identified the file and iparams strings are initialized.
+    let (camera_make, camera_model) = unsafe {
+        let iparams = &(*ctx.raw).rawdata.iparams;
+        (c_array_to_string(&iparams.make), c_array_to_string(&iparams.model))
+    };
+
+    let mut matches = match mode {
+        CameraProfileMode::MatrixOnly => Vec::new(),
+        CameraProfileMode::DcpProfiles | CameraProfileMode::Automatic => profile_folder
+            .map(|folder| find_matching_dcp_profiles(folder, &camera_make, &camera_model))
+            .transpose()
+            .unwrap_or_else(|error| {
+                if let Some(folder) = profile_folder {
+                    log::warn!(
+                        "could not search DCP profile folder {}: {error:#}",
+                        folder.display()
+                    );
+                }
+                None
+            })
+            .unwrap_or_default(),
+    };
+
+    let available_camera_profiles = matches
+        .iter()
+        .map(|candidate| CameraProfileCandidate {
+            path: candidate.path.clone(),
+            name: candidate.name.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let explicitly_selected = selected_profile.and_then(|requested| {
+        matches
+            .iter()
+            .position(|candidate| candidate.path == requested)
+            .map(|index| matches.remove(index))
+    });
+    if selected_profile.is_some() && explicitly_selected.is_none() {
+        crate::diagnostics::record(format!(
+            "Camera profile: requested profile is not a valid match for {} {}; falling back to automatic selection",
+            camera_make, camera_model
+        ));
+    }
+    let external_profile = explicitly_selected.or_else(|| (!matches.is_empty()).then(|| matches.remove(0)));
+
+    let (selected_profile_path, selected_profile) = if let Some(mut candidate) = external_profile {
+        candidate.profile.camera_calibration_signature = raw_camera_signature;
+        crate::diagnostics::record(format!(
+            "Camera profile: external DCP '{}' for {} {}",
+            candidate.path.display(),
+            camera_make,
+            camera_model
+        ));
+        (Some(candidate.path), Some(candidate.profile))
+    } else {
+        let profile = match (mode, embedded_profile) {
+            (CameraProfileMode::Automatic, Some(profile)) => {
+                crate::diagnostics::record(format!(
+                    "Camera profile: embedded DNG/DCP profile for {} {}",
+                    camera_make, camera_model
+                ));
+                Some(profile)
+            }
+            (CameraProfileMode::DcpProfiles, _) => {
+                crate::diagnostics::record(format!(
+                    "Camera profile: no matching external DCP for {} {}; using camera matrix",
+                    camera_make, camera_model
+                ));
+                None
+            }
+            (CameraProfileMode::Automatic, None) => {
+                crate::diagnostics::record(format!(
+                    "Camera profile: automatic fallback to camera matrix for {} {}",
+                    camera_make, camera_model
+                ));
+                None
+            }
+            (CameraProfileMode::MatrixOnly, _) => {
+                crate::diagnostics::record(format!(
+                    "Camera profile: matrix-only for {} {}",
+                    camera_make, camera_model
+                ));
+                None
+            }
+        };
+        (None, profile)
+    };
+
+    // SAFETY: the context is valid and exclusively owned by this worker.
+    check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
+    // SAFETY: unpack succeeded and the converter validates all exposed buffers.
+    let mut loaded = unsafe { loaded_raw_from_context(&ctx, selected_profile) }?;
+    loaded.camera_profile_source = selected_profile_path;
+    loaded.available_camera_profiles = available_camera_profiles;
+    Ok(loaded)
 }
 
 pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<LoadedRaw> {
@@ -71,7 +210,14 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
     if let Some(raw_profile) = read_optional_profile(path) {
         selected.camera_calibration_signature = raw_profile.camera_calibration_signature;
     }
-    load_raw_file_with_selected_profile(path, Some(selected))
+    let display_name = dcp_profile_display_name(&selected, profile_path);
+    let mut loaded = load_raw_file_with_selected_profile(path, Some(selected))?;
+    loaded.camera_profile_source = Some(profile_path.to_path_buf());
+    loaded.available_camera_profiles = vec![CameraProfileCandidate {
+        path: profile_path.to_path_buf(),
+        name: display_name,
+    }];
+    Ok(loaded)
 }
 
 /// Loads a display-ready sRGB thumbnail without unpacking the sensor data when
@@ -437,6 +583,241 @@ fn validate_input_file(path: &Path, maximum_bytes: u64, label: &str) -> Result<(
     Ok(())
 }
 
+struct MatchedDcpProfile {
+    score: i32,
+    path: PathBuf,
+    name: String,
+    profile: DcpProfile,
+}
+
+fn find_matching_dcp_profiles(
+    folder: &Path,
+    camera_make: &str,
+    camera_model: &str,
+) -> Result<Vec<MatchedDcpProfile>> {
+    let metadata = fs::metadata(folder)
+        .with_context(|| format!("inspect DCP profile folder {}", folder.display()))?;
+    anyhow::ensure!(metadata.is_dir(), "configured DCP profile path is not a folder");
+
+    let make_key = normalize_camera_name(camera_make);
+    let model_key = normalize_camera_name(camera_model);
+    let combined_key = normalize_camera_name(&format!("{camera_make} {camera_model}"));
+    if model_key.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stack = vec![(folder.to_path_buf(), 0usize)];
+    let mut scanned = 0usize;
+    let mut matches = Vec::new();
+
+    'scan: while let Some((directory, depth)) = stack.pop() {
+        if depth > MAX_DCP_SCAN_DEPTH {
+            continue;
+        }
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                log::warn!("could not read DCP directory {}: {error}", directory.display());
+                continue;
+            }
+        };
+        for entry in entries {
+            if scanned >= MAX_DCP_SCAN_FILES {
+                log::warn!(
+                    "stopped DCP profile scan after {MAX_DCP_SCAN_FILES} filesystem entries"
+                );
+                break 'scan;
+            }
+            scanned += 1;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    log::warn!("could not inspect DCP directory entry: {error}");
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() && !file_type.is_symlink() {
+                stack.push((entry.path(), depth + 1));
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let is_dcp = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dcp"));
+            if !is_dcp {
+                continue;
+            }
+            match entry.metadata() {
+                Ok(metadata) if metadata.len() > 0 && metadata.len() <= MAX_DCP_FILE_BYTES => {}
+                _ => continue,
+            }
+            let profile = match DcpProfile::from_path(&path) {
+                Ok(Some(profile)) => profile,
+                Ok(None) => continue,
+                Err(error) => {
+                    log::warn!("ignoring invalid DCP profile {}: {error:#}", path.display());
+                    continue;
+                }
+            };
+            let score = dcp_match_score(
+                &profile,
+                &path,
+                &make_key,
+                &model_key,
+                &combined_key,
+            );
+            if score <= 0 {
+                continue;
+            }
+            let name = dcp_profile_display_name(&profile, &path);
+            matches.push(MatchedDcpProfile {
+                score,
+                path,
+                name,
+                profile,
+            });
+        }
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+            .then_with(|| {
+                left.path
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .cmp(&right.path.to_string_lossy().to_ascii_lowercase())
+            })
+    });
+
+    // ProfileName is not guaranteed unique. Keep the friendly name when it is
+    // unique, otherwise append the filename so the editor dropdown can
+    // distinguish every camera-matched profile deterministically.
+    for index in 0..matches.len() {
+        let duplicate = matches.iter().enumerate().any(|(other_index, other)| {
+            other_index != index && other.name.eq_ignore_ascii_case(&matches[index].name)
+        });
+        if duplicate {
+            let file_name = matches[index]
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned);
+            if let Some(file_name) = file_name {
+                let base_name = matches[index].name.clone();
+                matches[index].name = format!("{base_name} — {file_name}");
+            }
+        }
+    }
+
+    Ok(matches)
+}
+
+fn dcp_profile_display_name(profile: &DcpProfile, path: &Path) -> String {
+    profile
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "Camera profile".to_owned())
+}
+
+fn dcp_match_score(
+    profile: &DcpProfile,
+    path: &Path,
+    make_key: &str,
+    model_key: &str,
+    combined_key: &str,
+) -> i32 {
+    let declared = profile
+        .camera_model
+        .as_deref()
+        .map(normalize_camera_name)
+        .unwrap_or_default();
+    let filename = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(normalize_camera_name)
+        .unwrap_or_default();
+    let profile_name = profile
+        .name
+        .as_deref()
+        .map(normalize_camera_name)
+        .unwrap_or_default();
+    let path_key = normalize_camera_name(&path.to_string_lossy());
+
+    let mut score = if !declared.is_empty() {
+        if declared == model_key || declared == combined_key {
+            1000
+        } else if model_key.len() >= 4 && declared.contains(model_key) {
+            900
+        } else {
+            return 0;
+        }
+    } else if filename == model_key || filename == combined_key {
+        700
+    } else if model_key.len() >= 4 && filename.contains(model_key) {
+        600
+    } else if model_key.len() >= 4 && path_key.contains(model_key) {
+        // Some profile packs use generic filenames such as "Camera ST.dcp"
+        // inside a camera-model directory. The configured root may therefore
+        // contain many cameras while the parent folder provides the identity.
+        550
+    } else {
+        return 0;
+    };
+
+    if !make_key.is_empty()
+        && (declared.contains(make_key) || filename.contains(make_key) || path_key.contains(make_key))
+    {
+        score += 25;
+    }
+    // When a folder contains several creative variants for one camera, prefer
+    // a neutral/default camera profile deterministically rather than a vivid or
+    // monochrome look. Exact camera metadata matching still dominates.
+    if profile_name.contains("adobestandard") || filename.contains("adobestandard") {
+        score += 20;
+    } else if profile_name.contains("camerastandard")
+        || filename.contains("camerastandard")
+        || profile_name.ends_with("camerast")
+        || filename.ends_with("camerast")
+    {
+        score += 15;
+    }
+    if profile_name.contains("monochrome")
+        || filename.contains("monochrome")
+        || profile_name.ends_with("camerabw")
+        || filename.ends_with("camerabw")
+    {
+        score -= 30;
+    }
+    score
+}
+
+fn normalize_camera_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
 fn read_optional_profile(path: &Path) -> Option<DcpProfile> {
     // DCP tags can be embedded directly in a DNG. Treat malformed optional
     // creative-profile metadata as non-fatal while preserving a diagnostic.
@@ -752,6 +1133,8 @@ unsafe fn loaded_raw_from_context(
         black_levels_per_pixel,
         white_levels,
         camera_profile,
+        camera_profile_source: None,
+        available_camera_profiles: Vec::new(),
         white_balance_model,
     })
 }

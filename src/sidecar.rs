@@ -64,6 +64,9 @@ pub struct LensEditState {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct EditState {
     pub exposure: ExposureParams,
+    /// Explicit per-image DCP selection relative to the configured camera-profile root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_profile: Option<PathBuf>,
     pub masks: Arc<MaskStack>,
     #[serde(default)]
     pub inpainting: Arc<Vec<InpaintStroke>>,
@@ -611,6 +614,23 @@ fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
 
 fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
     validate_exposure(&edits.exposure)?;
+    if let Some(profile) = &edits.camera_profile {
+        if profile.as_os_str().len() > MAX_EDIT_NAME_BYTES * 4 {
+            return invalid("camera profile path is unreasonably long");
+        }
+        if profile.is_absolute()
+            || profile.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return invalid("camera profile path must stay inside the configured profile folder");
+        }
+    }
     let stack = &edits.masks;
     if stack.masks.len() > MAX_LOCAL_MASKS {
         return invalid("sidecar contains too many local masks");
@@ -1135,6 +1155,7 @@ mod tests {
         masks.add_mask(MaskKind::Radial);
         EditState {
             exposure,
+            camera_profile: None,
             masks: Arc::new(masks),
             inpainting: Arc::new(Vec::new()),
             lens: LensEditState {

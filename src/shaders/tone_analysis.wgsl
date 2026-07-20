@@ -22,13 +22,13 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     // keeping the histogram stable while that slider moves.
     // Match the rendered DCP order and colour domain. Global white balance is
     // already represented by the camera-specific transform in GpuParams.
-    let working = map_negative_gamut(cam_to_working(camera_rgb));
-    let hue_sat = map_negative_gamut(apply_profile_hue_sat(working));
+    let working = cam_to_working(camera_rgb);
+    let hue_sat = apply_profile_hue_sat(working);
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     let exposed = hue_sat * exp2(profile_exposure_ev);
     let looked = apply_profile_look(exposed);
     let curved = apply_profile_tone_curve(looked);
-    return max(curved, vec3<f32>(0.0));
+    return max(map_negative_gamut(curved), vec3<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)

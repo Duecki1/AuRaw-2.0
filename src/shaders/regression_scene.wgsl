@@ -12,9 +12,11 @@ fn write_regression_scene(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let camera_rgb = textureLoad(regression_camera_scene, pos, 0).xyz;
-    let working = map_negative_gamut(cam_to_working(camera_rgb));
-    let profile_corrected = map_negative_gamut(apply_profile_hue_sat(working));
+    let working = cam_to_working(camera_rgb);
+    let profile_corrected = apply_profile_hue_sat(working);
     let baseline_exposure_ev = bitcast<f32>(params.profile_flags.z);
-    let scene_linear = profile_corrected * exp2(baseline_exposure_ev);
+    let scene_linear = map_negative_gamut(
+        profile_corrected * exp2(baseline_exposure_ev),
+    );
     textureStore(regression_working_scene, pos, vec4<f32>(scene_linear, 1.0));
 }

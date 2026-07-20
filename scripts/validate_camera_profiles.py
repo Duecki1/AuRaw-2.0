@@ -308,16 +308,16 @@ def main() -> int:
         adjustments,
         [
             "cam_to_working(camera_rgb)",
-            "apply_exposure(scene_working_at(pos))",
-            "apply_profile_hue_sat(rgb)",
+            "apply_profile_hue_sat(scene_working_at(pos))",
             "exp2(profile_exposure_ev)",
+            "apply_exposure(rgb)",
             "apply_profile_look(rgb)",
             "apply_profile_tone_curve(rgb)",
+            "map_negative_gamut(rgb)",
             "apply_lightroom_tone(rgb, pos)",
             "apply_saturation_vibrance(rgb)",
-            "darktable_sigmoid(graded)",
         ],
-        "render order is camera/WB transform -> exposure -> DCP -> tone/color -> display transform",
+        "render order is camera/WB -> HueSat -> exposure -> Look -> profile tone -> adjustments",
     )
     c.require_in_order(
         tone_analysis,
@@ -337,13 +337,18 @@ def main() -> int:
         and "5.0f32.powf(-skew)" in sigmoid_rust,
         "darktable sigmoid defaults and generalized log-logistic coefficients are present",
     )
+    c.check(
+        "(params.process_info.y & 1u) == 0u" in adjustments
+        and "display_linear = darktable_sigmoid(graded);" in adjustments,
+        "DCP base tone can bypass the default sigmoid while the sigmoid fallback remains available",
+    )
     c.require_in_order(
         adjustments,
         [
-            "let display_linear = darktable_sigmoid(graded);",
+            "display_linear = darktable_sigmoid(graded);",
             "apply_output_lut(display_linear)",
         ],
-        "darktable sigmoid runs before the bounded ICC LUT",
+        "the optional darktable sigmoid path still precedes the bounded ICC LUT",
     )
     c.check(
         "preserve_hue_and_energy" in tonemap

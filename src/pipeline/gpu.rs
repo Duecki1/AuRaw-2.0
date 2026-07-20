@@ -1,7 +1,8 @@
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
-    ProcessingStage, RawThumbnail, RenderingIntent, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
+    ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams, GLOBAL_TEMPERATURE_LIMIT,
+    MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -436,6 +437,13 @@ impl GpuParams {
         let mut profile_layout = raw.camera_profile.gpu_layout();
         profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
         let sigmoid = sigmoid_coefficients(exposure.sigmoid);
+        // A DCP ProfileToneCurve already defines the profile's baseline tone
+        // rendition. At untouched Rendering defaults, skip AuRaw's separate
+        // darktable sigmoid so camera-matching Adobe profiles are not given a
+        // second, unrelated contrast curve. Changing Rendering/Sigmoid opts
+        // back into the AuRaw display transform explicitly.
+        let use_profile_base_tone = raw.camera_profile.tone_curve.is_some()
+            && exposure.sigmoid == SigmoidParams::default();
         let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
@@ -756,7 +764,12 @@ impl GpuParams {
             profile_tone: profile_layout.tone,
             output_lut: profile_layout.output,
             profile_flags: profile_layout.flags,
-            process_info: [exposure.process_version, 0, 0, 0],
+            process_info: [
+                exposure.process_version,
+                u32::from(use_profile_base_tone),
+                0,
+                0,
+            ],
             mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
             mask_meta,
             mask_adjust_0,
