@@ -245,4 +245,6 @@ Some algorithms are adapted from GPL-compatible upstream projects and retain
 their original copyrights. Model weights, native libraries, profile databases,
 and other third-party components keep their own licenses. See
 [NOTICE.md](NOTICE.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and
-[DEPENDENCIES.md](DEPENDENCIES.md) before redistributing a packaged build.
+[DEPENDENCIES.md](DEPENDENCIES.md) before redistributing a packaged build. The
+bilingual [privacy notice](PRIVACY.md) explains local image processing and the
+optional third-party model downloads.
