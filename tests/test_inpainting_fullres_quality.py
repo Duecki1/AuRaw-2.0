@@ -28,9 +28,10 @@ def test_inpainting_uses_full_resolution_local_raw_crop() -> None:
 def test_lama_stays_512_but_float_output_is_not_quantized() -> None:
     assert "const LAMA_EDGE: u32 = 512;" in INPAINT
     infer = INPAINT[INPAINT.index("fn infer_lama("):INPAINT.index("fn run_lama_session(")]
-    assert "sample_lama_bilinear(&output" in infer
-    assert "srgb_encoded_to_rec2020_linear" in infer
+    assert "decode_lama_output_scene(&output, scene_scale)" in infer
+    assert "sample_scene_bilinear(" in infer
     assert "f16::from_f32" in infer
+    assert ".clamp(1, u64::from(LAMA_EDGE))" in infer
     assert "chw_to_rgba(&output)" not in infer
 
 
@@ -38,9 +39,29 @@ def test_inpaint_results_are_sparse_full_coordinate_rgba16f_patches() -> None:
     assert "pub patches: Arc<[InpaintPatch]>" in MASKS
     assert "pub rgba16f: Arc<[u16]>" in MASKS
     assert "pub fn new_linear(" in MASKS
+    assert "pub fn new_linear_resampled(" in MASKS
+    assert "pub raster_width: u32" in MASKS
+    assert "pub raster_height: u32" in MASKS
     assert "source_width" in MASKS and "source_height" in MASKS
-    assert "prepared.origin_x + crop.x" in INPAINT
-    assert "prepared.origin_y + crop.y" in INPAINT
+    assert "prepared.origin_x + bounds.x" in INPAINT
+    assert "prepared.origin_y + bounds.y" in INPAINT
+
+
+def test_inpaint_storage_keeps_placement_separate_from_model_raster() -> None:
+    infer = INPAINT[INPAINT.index("fn infer_lama("):INPAINT.index("fn localize_dabs(")]
+    assert "inpaint_storage_bounds(&composite_mask" in infer
+    assert "build_resampled_inpaint_patch(" in infer
+    assert "crop.size" not in infer
+
+    sampler = MASKS[
+        MASKS.index("pub fn sample_linear_rec2020_bilinear(") : MASKS.index(
+            "#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]",
+            MASKS.index("pub fn sample_linear_rec2020_bilinear("),
+        )
+    ]
+    assert "self.raster_dimensions()" in sampler
+    assert "raster_width as f32" in sampler
+    assert "/ self.width as f32" in sampler
 
 
 def test_gpu_inpaint_texture_is_linear_rgba16f_without_srgb_redecode() -> None:
@@ -59,6 +80,24 @@ def test_lama_boundary_keeps_wide_gamut_source_float_until_tensor_build() -> Non
     assert "pub rgb_rec2020: Vec<f32>" in INPAINT
     assert "build_lama_image_tensor(&prepared" in INPAINT
     assert "rec2020_linear_to_model_srgb" in INPAINT
+
+
+def test_lama_uses_invertible_model_exposure_and_same_pixel_boundary_matching() -> None:
+    infer = INPAINT[INPAINT.index("fn infer_lama("):INPAINT.index("fn localize_dabs(")]
+    assert "lama_model_scene_scale(&prepared.rgb_rec2020, &mask_values)" in infer
+    assert "build_lama_image_tensor(&prepared, scene_scale)" in infer
+    assert "decode_lama_output_scene(&output, scene_scale)" in infer
+    assert "match_lama_boundary_color(" in infer
+
+    matching = INPAINT[
+        INPAINT.index("fn match_lama_boundary_color(") : INPAINT.index(
+            "fn build_lama_mask_tensor(",
+            INPAINT.index("fn match_lama_boundary_color("),
+        )
+    ]
+    assert "inference_mask[index] < 0.5 || painted_mask[index] >= 0.5" in matching
+    assert "source[generated_index]" in matching
+    assert "generated[generated_index]" in matching
 
 
 def test_resized_inpaint_capture_converts_camera_rgb_and_antialiases() -> None:
@@ -87,7 +126,9 @@ def test_inpainting_keeps_binary_model_mask_and_soft_composite_edge() -> None:
     assert "rasterize_inpaint_dabs_binary" in infer
     assert "rasterize_brush_dabs" in infer
     assert "build_lama_mask_tensor(&inference_mask" in infer
-    assert "replacement_mask[patch_index] = composite_mask[source_index];" in infer
+    assert "inpaint_storage_bounds(&composite_mask" in infer
+    assert "weighted_alpha += f64::from(mask[source_index])" in INPAINT
+    assert "(weighted_alpha / area).round()" in INPAINT
     assert "inpaint_brush_feather" not in APP
     assert '"Feather"' not in INPAINT_SIDEBAR
     assert "feather: 0.0" in PREVIEW

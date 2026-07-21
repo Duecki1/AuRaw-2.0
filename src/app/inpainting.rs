@@ -427,3 +427,48 @@ fn flatten_inpaint_source_model_region(
     }
     Ok(rgb_rec2020)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::flatten_inpaint_source_model_region;
+    use crate::inpainting::LAMA_EDGE;
+    use crate::pipeline::{InpaintLayer, InpaintPatch};
+    use half::f16;
+
+    #[test]
+    fn later_stroke_source_flattens_a_resampled_existing_patch() {
+        let rgba16f = [0.5, 0.25, 0.75, 1.0]
+            .map(|value| f16::from_f32(value).to_bits())
+            .to_vec();
+        let patch = InpaintPatch::new_linear_resampled(
+            [4, 4],
+            [1, 1],
+            [2, 2],
+            [1, 1],
+            rgba16f,
+            vec![255],
+        )
+        .unwrap();
+        let layer = InpaintLayer::new(vec![patch]).unwrap();
+        let source = vec![0.1; (LAMA_EDGE * LAMA_EDGE * 3) as usize];
+        let flattened = flatten_inpaint_source_model_region(
+            source,
+            &layer,
+            [0, 0],
+            4,
+            [4, 4],
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+        )
+        .unwrap();
+
+        assert!((flattened[0] - 0.1).abs() < 1e-6);
+        let center = ((256 * LAMA_EDGE + 256) * 3) as usize;
+        assert!((flattened[center] - 0.5).abs() < 1e-3);
+        assert!((flattened[center + 1] - 0.25).abs() < 1e-3);
+        assert!((flattened[center + 2] - 0.75).abs() < 1e-3);
+    }
+}

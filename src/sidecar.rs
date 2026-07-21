@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 3;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
@@ -869,14 +869,18 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
         {
             return invalid("inpainting patch bounds are invalid");
         }
-        validate_image(patch.width, patch.height, patch.mask.len(), 1)?;
-        let pixels = patch.width as usize * patch.height as usize;
+        if !patch.is_valid() {
+            return invalid("inpainting patch storage is invalid");
+        }
+        let [raster_width, raster_height] = patch.raster_dimensions();
+        validate_image(raster_width, raster_height, patch.mask.len(), 1)?;
+        let pixels = raster_width as usize * raster_height as usize;
         if !patch.rgba16f.is_empty() {
             if patch.rgba16f.len() != pixels.saturating_mul(4) {
                 return invalid("inpainting RGBA16F patch dimensions are invalid");
             }
         } else {
-            validate_image(patch.width, patch.height, patch.rgba.len(), 4)?;
+            validate_image(raster_width, raster_height, patch.rgba.len(), 4)?;
         }
     }
 
@@ -1316,7 +1320,9 @@ mod tests {
 
         let mut edits = sample_edits();
         let rgba16f = vec![f16::from_f32(0.25).to_bits(); 4];
-        let patch = InpaintPatch::new_linear(4, 4, 1, 1, 1, 1, rgba16f, vec![255]).unwrap();
+        let patch =
+            InpaintPatch::new_linear_resampled([4, 4], [1, 1], [2, 2], [1, 1], rgba16f, vec![255])
+                .unwrap();
         let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
         edits.inpainting = Arc::new(vec![stroke]);
 
@@ -1386,6 +1392,45 @@ mod tests {
     }
 
     #[test]
+    fn native_resolution_patches_round_trip_as_sequential_android_strokes() {
+        use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke};
+
+        let raster_pixels = 512usize * 512;
+        let patch = InpaintPatch::new_linear_resampled(
+            [6000, 4000],
+            [500, 500],
+            [1600, 1600],
+            [512, 512],
+            vec![0u16; raster_pixels * 4],
+            vec![255; raster_pixels],
+        )
+        .unwrap();
+        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
+        let android_limit = 32 * 1024 * 1024;
+        let mut strokes = Vec::new();
+        for index in 0..8 {
+            let mut candidate = stroke.clone();
+            candidate.patch.x += index * 10;
+            candidate.dabs[0].center[0] = index as f32 / 8.0;
+            preflight_inpaint_addition_with_limit(
+                &MaskStack::default(),
+                &strokes,
+                &candidate,
+                android_limit,
+            )
+            .unwrap();
+            strokes.push(candidate);
+        }
+
+        let mut edits = sample_edits();
+        edits.inpainting = Arc::new(strokes.clone());
+        let encoded = encode(edits).unwrap();
+        assert!((encoded.len() as u64) <= android_limit);
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded.edits.inpainting.as_ref(), strokes.as_slice());
+    }
+
+    #[test]
     fn schema_one_sidecar_without_inpainting_loads_as_empty() {
         let document = SidecarDocument {
             format: SIDECAR_FORMAT.to_owned(),
@@ -1398,6 +1443,26 @@ mod tests {
         let encoded = serde_json::to_vec(&value).unwrap();
         let loaded = decode(&encoded).unwrap();
         assert!(loaded.edits.inpainting.is_empty());
+        assert!(loaded.migrated);
+    }
+
+    #[test]
+    fn schema_two_full_resolution_inpaint_patch_remains_compatible() {
+        use crate::pipeline::{InpaintPatch, InpaintStroke};
+
+        let mut edits = sample_edits();
+        let patch =
+            InpaintPatch::new_linear(4, 4, 1, 1, 2, 2, vec![0u16; 16], vec![255; 4]).unwrap();
+        edits.inpainting = Arc::new(vec![InpaintStroke::from_result(Vec::new(), patch).unwrap()]);
+        let encoded = serde_json::to_vec(&SidecarDocument {
+            format: SIDECAR_FORMAT.to_owned(),
+            schema_version: 2,
+            process_version: CURRENT_PROCESS_VERSION,
+            edits,
+        })
+        .unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits.inpainting[0].patch.raster_dimensions(), [2, 2]);
         assert!(loaded.migrated);
     }
 
