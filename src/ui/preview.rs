@@ -1,6 +1,6 @@
 use crate::app::{AurawApp, MaskDragState, MaskOverlayBlink, SidebarTab};
 use crate::pipeline::{
-    rasterize_brush_dabs, rasterize_inpaint_dabs_binary, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
+    rasterize_inpaint_dabs_binary, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
     ObjectStroke,
 };
 use crate::ui::mask_component_color;
@@ -132,12 +132,8 @@ impl Preview {
         }
 
         #[cfg(target_os = "android")]
-        let original_hold_tracking = Self::handle_android_original_hold(
-            ui,
-            app,
-            interaction_rect,
-            touch_navigation,
-        );
+        let original_hold_tracking =
+            Self::handle_android_original_hold(ui, app, interaction_rect, touch_navigation);
         #[cfg(not(target_os = "android"))]
         let original_hold_tracking = false;
 
@@ -382,8 +378,8 @@ impl Preview {
             && ui.input(|input| input.pointer.primary_down());
         if !primary_down {
             if ui.input(|input| input.pointer.primary_released()) {
-                let stroke_finished = app.last_inpaint_brush_point.take().is_some()
-                    && !app.inpaint_stroke.is_empty();
+                let stroke_finished =
+                    app.last_inpaint_brush_point.take().is_some() && !app.inpaint_stroke.is_empty();
                 if stroke_finished {
                     app.request_inpaint(frame);
                 }
@@ -401,9 +397,8 @@ impl Preview {
         let previous = app.last_inpaint_brush_point.unwrap_or(uv);
         let dx = uv[0] - previous[0];
         let dy = uv[1] - previous[1];
-        let distance_px = ((dx * image_rect.width()).powi(2)
-            + (dy * image_rect.height()).powi(2))
-        .sqrt();
+        let distance_px =
+            ((dx * image_rect.width()).powi(2) + (dy * image_rect.height()).powi(2)).sqrt();
         let radius_px = app.inpaint_brush_size * image_rect.width().min(image_rect.height());
         let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
         let mut changed = false;
@@ -450,7 +445,11 @@ impl Preview {
             let Some(pipeline) = app.gpu_pipeline.as_ref() else {
                 return;
             };
-            let max_edge = if cfg!(target_os = "android") { 384.0 } else { 512.0 };
+            let max_edge = if cfg!(target_os = "android") {
+                384.0
+            } else {
+                512.0
+            };
             let scale = (max_edge / image_rect.width().max(image_rect.height())).min(1.0);
             let width = (image_rect.width() * scale).round().max(1.0) as u32;
             let height = (image_rect.height() * scale).round().max(1.0) as u32;
@@ -1354,6 +1353,7 @@ fn zoomed_image_rect(outer_rect: Rect, base_size: egui::Vec2, zoom: f32, center:
     Rect::from_min_size(min, size)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transform_preview_about_screen_points(
     outer_rect: Rect,
     current_image_rect: Rect,
@@ -1389,14 +1389,14 @@ fn transform_preview_about_screen_points(
 }
 
 fn clamp_preview_center(center: &mut [f32; 2], viewport: egui::Vec2, image: egui::Vec2) {
-    for axis in 0..2 {
+    for (axis, center_axis) in center.iter_mut().enumerate() {
         let viewport_axis = if axis == 0 { viewport.x } else { viewport.y };
         let image_axis = if axis == 0 { image.x } else { image.y };
         if image_axis <= viewport_axis + 0.5 {
-            center[axis] = 0.5;
+            *center_axis = 0.5;
         } else {
             let half_visible = (viewport_axis / (2.0 * image_axis)).clamp(0.0, 0.5);
-            center[axis] = center[axis].clamp(half_visible, 1.0 - half_visible);
+            *center_axis = center_axis.clamp(half_visible, 1.0 - half_visible);
         }
     }
 }

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use image::{ImageBuffer, Luma, Rgba, imageops::FilterType};
+use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::{session::Session, value::Tensor};
 use rayon::prelude::*;
 use ring::digest::{Context as Sha256Context, SHA256};
@@ -7,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock, mpsc},
+    sync::{mpsc, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -264,7 +264,10 @@ fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Resul
 }
 
 #[cfg(not(target_os = "android"))]
-pub(crate) fn initialize_runtime(runtime_path: Option<&Path>, expected_sha256: Option<&str>) -> Result<()> {
+pub(crate) fn initialize_runtime(
+    runtime_path: Option<&Path>,
+    expected_sha256: Option<&str>,
+) -> Result<()> {
     let selected = runtime_path
         .context("no ONNX Runtime library is selected; choose one in Settings and try again")?;
     let expected_sha256 = expected_sha256
@@ -354,7 +357,10 @@ fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, Str
 }
 
 #[cfg(target_os = "android")]
-pub(crate) fn initialize_runtime(_runtime_path: Option<&Path>, _expected_sha256: Option<&str>) -> Result<()> {
+pub(crate) fn initialize_runtime(
+    _runtime_path: Option<&Path>,
+    _expected_sha256: Option<&str>,
+) -> Result<()> {
     if RUNTIME_INITIALIZED.get().is_some() {
         return Ok(());
     }
@@ -456,7 +462,12 @@ fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
     builder
         .commit_from_file(model_path)
         .map(Some)
-        .with_context(|| format!("load ONNX model with Linux acceleration from {}", model_path.display()))
+        .with_context(|| {
+            format!(
+                "load ONNX model with Linux acceleration from {}",
+                model_path.display()
+            )
+        })
 }
 
 #[cfg(target_os = "windows")]
@@ -472,7 +483,12 @@ fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
     builder
         .commit_from_file(model_path)
         .map(Some)
-        .with_context(|| format!("load ONNX model with Windows acceleration from {}", model_path.display()))
+        .with_context(|| {
+            format!(
+                "load ONNX model with Windows acceleration from {}",
+                model_path.display()
+            )
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -610,7 +626,7 @@ fn run_subject_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32
         .try_extract_tensor::<f32>()
         .context("read BiRefNet output tensor")?;
     let (output_width, output_height, output_elements) =
-        validate_birefnet_output_shape(&**shape, logits.len())?;
+        validate_birefnet_output_shape(shape, logits.len())?;
     anyhow::ensure!(
         logits.iter().all(|value| value.is_finite()),
         "BiRefNet output contains non-finite logits"
@@ -745,18 +761,16 @@ fn restore_from_letterbox(
 /// network still runs at 1024px, but the canonical RAW rendition is retained
 /// at a higher resolution. Using that RGB image as a guide keeps sub-pixel mask
 /// transitions from bleeding across strong image edges after upsampling.
-fn refine_subject_mask_edges(
-    mask: &mut [u8],
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<()> {
+fn refine_subject_mask_edges(mask: &mut [u8], rgba: &[u8], width: u32, height: u32) -> Result<()> {
     let width = usize::try_from(width).context("subject-mask width exceeds usize")?;
     let height = usize::try_from(height).context("subject-mask height exceeds usize")?;
     let pixels = width
         .checked_mul(height)
         .context("subject-mask refinement dimensions overflow")?;
-    anyhow::ensure!(mask.len() == pixels, "subject-mask refinement size mismatch");
+    anyhow::ensure!(
+        mask.len() == pixels,
+        "subject-mask refinement size mismatch"
+    );
     anyhow::ensure!(
         rgba.len() == pixels.saturating_mul(4),
         "subject-mask refinement RGB size mismatch"
@@ -809,8 +823,7 @@ fn refine_subject_mask_edges(
                         };
                         let color_weight = 1.0 / (1.0 + 42.0 * color_distance);
                         let weight = spatial_weight * color_weight;
-                        weighted_probability +=
-                            source_mask[sample_index] as f32 / 255.0 * weight;
+                        weighted_probability += source_mask[sample_index] as f32 / 255.0 * weight;
                         weight_sum += weight;
                     }
                 }
@@ -834,7 +847,7 @@ fn sigmoid_probability(logit: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Letterbox, MODEL_SIZE, sigmoid_probability, validate_birefnet_output_shape};
+    use super::{sigmoid_probability, validate_birefnet_output_shape, Letterbox, MODEL_SIZE};
 
     #[test]
     fn letterbox_preserves_landscape_aspect_ratio() {
@@ -1885,7 +1898,7 @@ fn select_sam_candidate(
             candidate_focus_statistics(logits, width, height, prompt_set.focus, cache);
         score -= outside_focus * 0.95;
         score += focus_fill.min(0.75) * 0.22;
-        score -= (area_ratio - 2.0).max(0.0).min(5.0) * 0.10;
+        score -= (area_ratio - 2.0).clamp(0.0, 5.0) * 0.10;
         let border = candidate_border_fraction(logits, width, height);
         score -= border * 0.20;
         if score > best_score {
@@ -2314,26 +2327,22 @@ mod object_mask_tests {
         ];
         let set = sampled_object_prompts(&strokes, 0.04, 1000, 600, SAM21_MAX_PROMPTS);
         assert!(set.prompts.len() <= SAM21_MAX_PROMPTS);
-        assert!(
-            set.prompts
-                .iter()
-                .any(|prompt| prompt.kind == ObjectPromptKind::Foreground)
-        );
-        assert!(
-            set.prompts
-                .iter()
-                .any(|prompt| prompt.kind == ObjectPromptKind::Background)
-        );
-        assert!(
-            set.prompts
-                .iter()
-                .any(|prompt| prompt.kind == ObjectPromptKind::BoxTopLeft)
-        );
-        assert!(
-            set.prompts
-                .iter()
-                .any(|prompt| prompt.kind == ObjectPromptKind::BoxBottomRight)
-        );
+        assert!(set
+            .prompts
+            .iter()
+            .any(|prompt| prompt.kind == ObjectPromptKind::Foreground));
+        assert!(set
+            .prompts
+            .iter()
+            .any(|prompt| prompt.kind == ObjectPromptKind::Background));
+        assert!(set
+            .prompts
+            .iter()
+            .any(|prompt| prompt.kind == ObjectPromptKind::BoxTopLeft));
+        assert!(set
+            .prompts
+            .iter()
+            .any(|prompt| prompt.kind == ObjectPromptKind::BoxBottomRight));
     }
 
     #[test]

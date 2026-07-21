@@ -7,12 +7,13 @@ use crate::inpainting::{
     PreparedInpaintSource, LAMA_EDGE, LAMA_MODEL_BYTES,
 };
 use crate::pipeline::{
-    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, crop_raw, lensfun_catalog,
-    compose_inpaint_strokes, load_raw_file_with_profile_selection, spawn_tiled_png_export, BrushDab, BrushMode,
-    CameraProfileMode, ExportEvent, ExportMetadata, ExportSettings, ExposureParams, GpuParams,
-    InpaintLayer, InpaintStroke, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage,
-    MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
-    RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
+    compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
+    spawn_tiled_png_export, BrushDab, BrushMode, CameraProfileMode, ExportEvent, ExportMetadata,
+    ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog,
+    LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
+    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO,
+    MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{EditState as SidecarEditState, LensEditState as SidecarLensEditState};
 use crate::ui::components::adjustment_slider::slider_scroll_locked;
@@ -36,6 +37,7 @@ mod android_tab_swipe;
 use android_tab_swipe::AndroidTabSwipe;
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) struct AndroidOriginalHold {
     pub start: egui::Pos2,
     pub started_at: Instant,
@@ -340,7 +342,11 @@ pub(crate) const MAX_DESKTOP_RAW_CACHE_FILES: usize = 8;
 pub(crate) const MAX_ANDROID_RAW_CACHE_FILES: usize = 3;
 
 pub(crate) const fn default_raw_cache_limit() -> usize {
-    if cfg!(target_os = "android") { 1 } else { 2 }
+    if cfg!(target_os = "android") {
+        1
+    } else {
+        2
+    }
 }
 
 pub(crate) const fn maximum_raw_cache_limit() -> usize {

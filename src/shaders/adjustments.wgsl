@@ -916,13 +916,66 @@ fn local_curve_block(mask_index: u32, curve: u32, block: u32) -> vec4<f32> {
     }
 }
 
+fn local_curve_point(mask_index: u32, curve: u32, index: u32) -> vec2<f32> {
+    let packed = local_curve_block(mask_index, curve, index / 2u);
+    return select(packed.xy, packed.zw, (index & 1u) != 0u);
+}
+
+fn local_curve_secant(a: vec2<f32>, b: vec2<f32>) -> f32 {
+    return (b.y - a.y) / max(b.x - a.x, 1e-5);
+}
+
+fn local_curve_tangent(mask_index: u32, curve: u32, index: u32, count: u32) -> f32 {
+    if index == 0u {
+        return local_curve_secant(
+            local_curve_point(mask_index, curve, 0u),
+            local_curve_point(mask_index, curve, 1u),
+        );
+    }
+    if index + 1u >= count {
+        return local_curve_secant(
+            local_curve_point(mask_index, curve, count - 2u),
+            local_curve_point(mask_index, curve, count - 1u),
+        );
+    }
+    let previous = local_curve_secant(
+        local_curve_point(mask_index, curve, index - 1u),
+        local_curve_point(mask_index, curve, index),
+    );
+    let next = local_curve_secant(
+        local_curve_point(mask_index, curve, index),
+        local_curve_point(mask_index, curve, index + 1u),
+    );
+    if previous * next <= 0.0 {
+        return 0.0;
+    }
+    return 2.0 * previous * next / max(abs(previous + next), 1e-6) * sign(previous + next);
+}
+
 fn local_curve_value(mask_index: u32, curve: u32, input: f32) -> f32 {
-    let position = clamp(input, 0.0, 1.0) * 31.0;
-    let lower = u32(floor(position));
-    let upper = min(lower + 1u, 31u);
-    let first = local_curve_block(mask_index, curve, lower / 4u)[lower % 4u];
-    let second = local_curve_block(mask_index, curve, upper / 4u)[upper % 4u];
-    return mix(first, second, fract(position));
+    let count = u32(clamp(local_curve_block(mask_index, curve, 4u).x, 2.0, 8.0));
+    let x = clamp(input, 0.0, 1.0);
+    var segment = count - 2u;
+    for (var index = 0u; index + 1u < count; index = index + 1u) {
+        if x <= local_curve_point(mask_index, curve, index + 1u).x {
+            segment = index;
+            break;
+        }
+    }
+
+    let p0 = local_curve_point(mask_index, curve, segment);
+    let p1 = local_curve_point(mask_index, curve, segment + 1u);
+    let width = max(p1.x - p0.x, 1e-5);
+    let t = clamp((x - p0.x) / width, 0.0, 1.0);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let m0 = local_curve_tangent(mask_index, curve, segment, count) * width;
+    let m1 = local_curve_tangent(mask_index, curve, segment + 1u, count) * width;
+    let hermite = (2.0 * t3 - 3.0 * t2 + 1.0) * p0.y
+        + (t3 - 2.0 * t2 + t) * m0
+        + (-2.0 * t3 + 3.0 * t2) * p1.y
+        + (t3 - t2) * m1;
+    return clamp(hermite, min(p0.y, p1.y), max(p0.y, p1.y));
 }
 
 fn local_hue_shift(weights: MixerBandWeights, first_values: vec4<f32>, second_values: vec4<f32>) -> f32 {
@@ -956,7 +1009,7 @@ fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
         if (state.z & 1u) != 0u {
             let luminance = max(dot(adjusted, LUMA), 0.0);
             let curved = scene_curve_decode(local_curve_value(index, 0u, scene_curve_encode(luminance)));
-            adjusted = select(vec3<f32>(curved), adjusted * clamp(curved / luminance, 0.0, 256.0), luminance > 1e-9);
+            adjusted = remap_scene_luminance(adjusted, curved);
         }
         if (state.z & 2u) != 0u && adjusted.r >= 0.0 {
             adjusted.r = scene_curve_decode(local_curve_value(index, 1u, scene_curve_encode(adjusted.r)));
@@ -1172,18 +1225,17 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 fn profile_tone_display_shoulder(rgb: vec3<f32>) -> vec3<f32> {
-    // A DCP ProfileToneCurve already supplies the profile's baseline contrast.
-    // Preserve that rendition through the midtones, then blend smoothly into
-    // the normal sigmoid only as highlights approach/exceed display white. This
-    // keeps profile matching without ever collapsing over-range values via a
-    // hard clamp.
     let positive = desaturate_negative_values(rgb);
     let peak = max(positive.r, max(positive.g, positive.b));
-    if peak <= 0.82 {
+    let knee = 0.82;
+    if peak <= knee {
         return positive;
     }
-    let shoulder_weight = smoothstep(0.82, 1.18, peak);
-    return mix(positive, darktable_sigmoid(positive), shoulder_weight);
+    // This rational shoulder meets the identity with unit slope at the knee,
+    // stays monotone, and approaches display white without clipping HDR detail.
+    let distance = peak - knee;
+    let mapped_peak = knee + distance / (1.0 + distance / (1.0 - knee));
+    return positive * (mapped_peak / peak);
 }
 
 @compute @workgroup_size(8, 8, 1)

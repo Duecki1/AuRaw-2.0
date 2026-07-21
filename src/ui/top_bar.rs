@@ -21,9 +21,7 @@ impl TopBar {
         // Paint the symbol instead of using Unicode arrow glyphs. Some Android
         // font fallbacks render those glyphs as empty squares.
         let response = ui
-            .add_enabled_ui(enabled, |ui| {
-                ui.add_sized(size, egui::Button::new(""))
-            })
+            .add_enabled_ui(enabled, |ui| ui.add_sized(size, egui::Button::new("")))
             .inner;
         let widget_visuals = ui.style().interact(&response);
         let stroke = egui::Stroke::new(
@@ -47,16 +45,14 @@ impl TopBar {
         ui.painter().line_segment(
             [
                 arrow_tip,
-                arrow_tip
-                    + egui::vec2(head_direction * radius * 0.62, -radius * 0.44),
+                arrow_tip + egui::vec2(head_direction * radius * 0.62, -radius * 0.44),
             ],
             stroke,
         );
         ui.painter().line_segment(
             [
                 arrow_tip,
-                arrow_tip
-                    + egui::vec2(head_direction * radius * 0.62, radius * 0.44),
+                arrow_tip + egui::vec2(head_direction * radius * 0.62, radius * 0.44),
             ],
             stroke,
         );

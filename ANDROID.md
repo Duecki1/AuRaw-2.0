@@ -102,7 +102,9 @@ its external app-specific Downloads directory on those releases, shows the
 exact location in the Library, and does not prompt for import permission. That
 fallback directory is removed if the app is uninstalled. The legacy write
 permission in the manifest is used only when publishing exported PNGs on
-Android 8 and 9.
+Android 8 and 9. After an app or OS upgrade to Android 10+, the Library merges
+those existing file-backed entries with `Download/AuRaw`; edits and deletion
+continue using each RAW's original storage backend.
 
 Non-destructive Develop settings are stored as a visible sibling named
 `<RAW display name>.auraw`. AuRaw loads it before the first preview render and

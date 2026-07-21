@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +34,11 @@ def test_android_embedded_previews_are_not_blocked_by_full_sensor_pixel_budget()
 
 
 def test_performance_defaults_and_controls_are_exposed() -> None:
-    assert 'if cfg!(target_os = "android") { 1 } else { 2 }' in APP
+    assert re.search(
+        r"default_raw_cache_limit\(\).*?cfg!\(target_os = \"android\"\).*?1.*?else.*?2",
+        APP,
+        re.DOTALL,
+    )
     assert "Decoded RAW cache" in SETTINGS
     assert "Thumbnail workers" in SETTINGS
     assert "default_thumbnail_worker_count" in LIBRARY

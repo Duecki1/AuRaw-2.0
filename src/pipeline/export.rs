@@ -1,9 +1,7 @@
 use super::{
     export_mask_atlas_edge, extract_padded_tile, mask_atlas_edge, ExposureParams, GpuParams,
-    IccOutputTransform,
-    InpaintLayer, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan, TileSpec,
-    EXPORT_TILE_HALO,
-    MAX_LOCAL_MASKS,
+    IccOutputTransform, InpaintLayer, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline,
+    TilePlan, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use anyhow::{Context, Result};
 use eframe::wgpu;
@@ -164,6 +162,7 @@ pub enum ExportEvent {
 /// the GPU, read back as display-linear Rec.2020, stitched into source rows,
 /// resized in linear light, then encoded to sRGB. The destination is published
 /// only after the PNG has completed successfully.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_png_export(
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -507,12 +506,7 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
                 .checked_add(source_row_values)
                 .context("source export row end overflow")?;
             let source_y = band_y + local_y;
-            resizer.push_source_row(
-                source_y,
-                &band[start..end],
-                &output_transform,
-                &mut stream,
-            )?;
+            resizer.push_source_row(source_y, &band[start..end], &output_transform, &mut stream)?;
         }
     }
 
@@ -843,7 +837,10 @@ fn resize_horizontal_row(source: &[f32], weights: &[Vec<SampleWeight>]) -> Resul
 }
 
 fn encode_srgb_row(row: &[f32], transform: &IccOutputTransform) -> Result<Vec<u8>> {
-    anyhow::ensure!(row.len() % 3 == 0, "linear RGB row has an invalid length");
+    anyhow::ensure!(
+        row.len().is_multiple_of(3),
+        "linear RGB row has an invalid length"
+    );
     let pixels = row.len() / 3;
     let bytes = pixels.checked_mul(4).context("encoded row overflow")?;
     let mut encoded = Vec::new();
@@ -922,7 +919,7 @@ fn validate_tile_spec(spec: TileSpec) -> Result<()> {
         "export halo must be between {EXPORT_TILE_HALO} and 512 pixels"
     );
     anyhow::ensure!(
-        spec.core_edge % scale == 0 && spec.halo % scale == 0,
+        spec.core_edge.is_multiple_of(scale) && spec.halo.is_multiple_of(scale),
         "export tile core and halo must align to the global tone-guide grid"
     );
     spec.core_edge
@@ -1001,18 +998,50 @@ fn cleanup_stale_export_parts(parent: &Path, destination_name: &str) {
 }
 
 fn publish_completed_export(temporary: &Path, destination: &Path) -> Result<()> {
-    #[cfg(windows)]
-    if destination.exists() {
-        fs::remove_file(destination)
-            .with_context(|| format!("replace existing export {}", destination.display()))?;
-    }
-    fs::rename(temporary, destination).with_context(|| {
+    replace_export_file(temporary, destination).with_context(|| {
         format!(
             "publish completed export {} to {}",
             temporary.display(),
             destination.display()
         )
     })
+}
+
+#[cfg(not(windows))]
+fn replace_export_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_export_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both buffers are NUL-terminated and remain alive for the call.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn upload_mask_atlas(
@@ -1170,10 +1199,12 @@ fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_heigh
 mod tests {
     use super::{
         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
-        stitch_linear_tile_into_band, validate_export_dimensions, ExportMetadata, ExportResizeMode,
-        ExportSettings, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
+        publish_completed_export, stitch_linear_tile_into_band, validate_export_dimensions,
+        ExportMetadata, ExportResizeMode, ExportSettings, LinearLightResizer, EXPORT_TILE_HALO,
+        MAX_EXPORT_EDGE,
     };
     use crate::pipeline::ExportTile;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn resize_modes_preserve_aspect_ratio() {
@@ -1321,5 +1352,26 @@ mod tests {
         assert_eq!(encoded.len(), 4);
         assert_eq!(encoded[3], 255);
         assert!(encode_srgb_row(&[f32::NAN, 0.0, 0.0], &transform).is_err());
+    }
+
+    #[test]
+    fn failed_export_publish_preserves_existing_destination() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "auraw-export-publish-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("photo.png");
+        let missing_temporary = directory.join("missing.part");
+        std::fs::write(&destination, b"previous export").unwrap();
+
+        assert!(publish_completed_export(&missing_temporary, &destination).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous export");
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

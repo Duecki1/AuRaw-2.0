@@ -85,7 +85,7 @@ pub fn color_grading_editor(
 
 fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     let mut changed = false;
-    let size = ui.available_width().min(WHEEL_MAX_SIZE).max(WHEEL_MIN_SIZE);
+    let size = ui.available_width().clamp(WHEEL_MIN_SIZE, WHEEL_MAX_SIZE);
 
     ui.horizontal(|ui| {
         ui.strong("Hue / Saturation");

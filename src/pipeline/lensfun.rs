@@ -595,10 +595,10 @@ mod imp {
             if applied == 0 {
                 continue;
             }
-            for x in 0..width {
+            for (x, rgba_gain) in rgba_gains.iter().enumerate().take(width) {
                 let index = y * width + x;
                 let channel = lensfun_rgb_channel(raw.color_indices[index]);
-                gains[index] = rgba_gains[x].0[channel];
+                gains[index] = rgba_gain.0[channel];
             }
         }
 

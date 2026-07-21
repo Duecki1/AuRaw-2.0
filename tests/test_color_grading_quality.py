@@ -20,7 +20,8 @@ def test_four_way_grading_exists_globally_and_on_masks() -> None:
     assert "pub balance: f32" in BASIC
     assert "pub color_grading: ColorGrading" in BASIC
     assert "pub color_grading: super::ColorGrading" in MASKS
-    assert SIDEBAR.count('CollapsingHeader::new("Color Grading")') == 2
+    assert 'CollapsingHeader::new("Color Grading")' in SIDEBAR
+    assert "Self::show_local_mask_color_grading" in SIDEBAR
 
 
 def test_wheels_are_real_two_dimensional_controls_with_precise_entry() -> None:

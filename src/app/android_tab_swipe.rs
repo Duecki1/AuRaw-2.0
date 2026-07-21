@@ -199,21 +199,13 @@ mod tests {
 
     #[test]
     fn any_zoom_above_fit_blocks_preview_tab_swipes() {
-        assert!(!zoomed_preview_blocks_tab_swipe(
-            AppTab::Develop,
-            1.0,
-            true,
-        ));
+        assert!(!zoomed_preview_blocks_tab_swipe(AppTab::Develop, 1.0, true,));
         assert!(zoomed_preview_blocks_tab_swipe(
             AppTab::Develop,
             1.000_001,
             true,
         ));
-        assert!(!zoomed_preview_blocks_tab_swipe(
-            AppTab::Library,
-            2.0,
-            true,
-        ));
+        assert!(!zoomed_preview_blocks_tab_swipe(AppTab::Library, 2.0, true,));
         assert!(!zoomed_preview_blocks_tab_swipe(
             AppTab::Develop,
             2.0,

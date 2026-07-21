@@ -73,10 +73,9 @@ impl PerformanceSettings {
         self.raw_cache_files = self
             .raw_cache_files
             .min(crate::app::maximum_raw_cache_limit());
-        self.thumbnail_workers = self.thumbnail_workers.clamp(
-            1,
-            crate::ui::library::maximum_thumbnail_worker_count(),
-        );
+        self.thumbnail_workers = self
+            .thumbnail_workers
+            .clamp(1, crate::ui::library::maximum_thumbnail_worker_count());
         self
     }
 }
@@ -92,17 +91,24 @@ pub(crate) fn load(path: Option<&Path>) -> PerformanceSettings {
             return PerformanceSettings::default()
         }
         Err(error) => {
-            log::warn!("could not inspect performance settings {}: {error}", path.display());
+            log::warn!(
+                "could not inspect performance settings {}: {error}",
+                path.display()
+            );
             return PerformanceSettings::default();
         }
     }
-    match std::fs::read(path).map_err(|error| error.to_string()).and_then(|bytes| {
-        serde_json::from_slice::<PerformanceSettings>(&bytes).map_err(|error| error.to_string())
-    })
-    {
+    match std::fs::read(path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            serde_json::from_slice::<PerformanceSettings>(&bytes).map_err(|error| error.to_string())
+        }) {
         Ok(settings) => settings.sanitized(),
         Err(error) => {
-            log::warn!("could not load performance settings {}: {error}", path.display());
+            log::warn!(
+                "could not load performance settings {}: {error}",
+                path.display()
+            );
             PerformanceSettings::default()
         }
     }
@@ -148,7 +154,6 @@ pub(crate) fn desktop_path() -> Option<PathBuf> {
     base.map(|base| base.join("auraw").join("performance.json"))
 }
 
-
 /// Adobe's documented Camera Raw camera-profile install roots. AuRaw only
 /// auto-selects an existing directory; recursive DCP discovery remains in the
 /// RAW loader so manually installed camera subfolders work too.
@@ -164,8 +169,8 @@ pub(crate) fn adobe_camera_profile_candidates() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let mut candidates = Vec::new();
-        if let Some(program_data) = std::env::var_os("ProgramData")
-            .or_else(|| std::env::var_os("ALLUSERSPROFILE"))
+        if let Some(program_data) =
+            std::env::var_os("ProgramData").or_else(|| std::env::var_os("ALLUSERSPROFILE"))
         {
             candidates.push(
                 PathBuf::from(program_data)
@@ -233,8 +238,14 @@ mod tests {
         );
         assert_eq!(settings.thumbnail_workers, 1);
         assert_eq!(settings.camera_profile_mode, CameraProfileMode::DcpProfiles);
-        assert_eq!(settings.camera_profile_folder, Some(PathBuf::from("profiles")));
-        assert_eq!(settings.camera_profile_folder_label.as_deref(), Some("CameraProfiles"));
+        assert_eq!(
+            settings.camera_profile_folder,
+            Some(PathBuf::from("profiles"))
+        );
+        assert_eq!(
+            settings.camera_profile_folder_label.as_deref(),
+            Some("CameraProfiles")
+        );
         assert!(!settings.camera_profile_auto_detect);
         assert_eq!(
             settings.last_camera_profile,

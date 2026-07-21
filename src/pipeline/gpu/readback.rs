@@ -102,6 +102,7 @@ fn rgba32_readback_rows_per_chunk(width: u32) -> Result<u32> {
     Ok(rows.min(u64::from(u32::MAX)) as u32)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn read_rgba32_texture_region_rgb_blocking(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -144,9 +145,8 @@ pub(super) fn read_rgba32_texture_region_rgb_blocking(
         let chunk_height = rows_per_chunk.min(height - row_offset);
         let (readback, padded_bytes_per_row) =
             create_rgba32_readback_buffer(device, width, chunk_height, label);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some(label),
-        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -196,16 +196,7 @@ pub(super) fn read_rgba32_texture_rgb_blocking(
     label: &'static str,
 ) -> Result<Vec<f32>> {
     read_rgba32_texture_region_rgb_blocking(
-        device,
-        queue,
-        texture,
-        0,
-        0,
-        width,
-        height,
-        width,
-        height,
-        label,
+        device, queue, texture, 0, 0, width, height, width, height, label,
     )
 }
 
@@ -273,7 +264,6 @@ pub(super) fn map_rgba32_readback_rgb(
     }
     Ok(rgb)
 }
-
 
 #[cfg(test)]
 mod tests {

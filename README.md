@@ -181,16 +181,15 @@ Glow Amount; Expert mode adds Radius and Threshold.
 
 Vignette exposes Amount, Midpoint, Roundness, Feather, and Highlights. It uses
 full-image coordinates for stable geometry across previews and tiled exports,
-and applies a hue-preserving scene-linear gain. See
-[CREATIVE_EFFECTS.md](CREATIVE_EFFECTS.md) for the processing details.
+and applies a hue-preserving scene-linear gain.
 
 ## Sidebar and export
 
 The Develop sidebar is divided into four tabs:
 
 - **Adjustments** contains the complete photographic processing stack.
-- **Masks** provides Lightroom-style Brush, Radial Gradient, Linear Gradient, Subject, Background, Object, Luminance Range, and Color Range masks with add, subtract, and intersect submasks. Object selection uses the same soft Size/Feather brush as regular mask painting, a brush-footprint focus box with automatic background guards, adaptive crop expansion, cached SAM 2.1 image embeddings, clean replacement strokes after refinement, connected-component cleanup, touch-safe pinch cancellation, and edge-aware fine-detail refinement. See [OBJECT_MASKS.md](OBJECT_MASKS.md) for the runtime, model, cache, and interaction details. Landscape and Depth Range remain future tools. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
-- **Inpainting** is reserved for future healing and object removal.
+- **Masks** provides Lightroom-style Brush, Radial Gradient, Linear Gradient, Subject, Background, Object, Luminance Range, and Color Range masks with add, subtract, and intersect submasks. Object selection uses the same soft Size/Feather brush as regular mask painting, a brush-footprint focus box with automatic background guards, adaptive crop expansion, cached SAM 2.1 image embeddings, clean replacement strokes after refinement, connected-component cleanup, touch-safe pinch cancellation, and edge-aware fine-detail refinement. Landscape and Depth Range remain future tools. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
+- **Inpainting** provides local LaMa-based object removal. It processes a bounded context crop locally, then stores only the affected full-resolution scene-linear patch in the edit sidecar.
 - **Export** contains the PNG export action and all output options.
 
 PNG sizing can use the original dimensions, long edge, short edge, width,
@@ -225,4 +224,4 @@ with an error rather than allowing unbounded memory or storage growth.
 
 ## Development quality gates
 
-Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `regression/README.md`, `benchmarks/README.md`, [ARCHITECTURE.md](ARCHITECTURE.md), and [AUDIT_REMEDIATION.md](AUDIT_REMEDIATION.md). Supply-chain and dependency policies are in [SUPPLY_CHAIN.md](SUPPLY_CHAIN.md) and [DEPENDENCIES.md](DEPENDENCIES.md).
+Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `regression/README.md` and `benchmarks/README.md`. Dependency policy is documented in [DEPENDENCIES.md](DEPENDENCIES.md), with bundled-license details in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

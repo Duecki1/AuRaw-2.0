@@ -20,6 +20,7 @@ import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
+import android.util.Log;
 import android.widget.Toast;
 
 import java.io.File;
@@ -39,6 +40,7 @@ import java.util.Locale;
 import java.util.Set;
 
 public final class AuRawActivity extends NativeActivity {
+    private static final String LOG_TAG = "AuRaw";
     private static final int OPEN_RAW_DOCUMENT = 1001;
     private static final int WRITE_EXPORT_PERMISSION = 1002;
     private static final int OPEN_CAMERA_PROFILE_FOLDER = 1003;
@@ -48,6 +50,7 @@ public final class AuRawActivity extends NativeActivity {
     private static final long MAX_DCP_TREE_BYTES = 1024L * 1024L * 1024L;
     private static final int MAX_DCP_FILES = 10_000;
     private static final int MAX_DCP_TREE_DEPTH = 16;
+    private static final String CAMERA_PROFILE_MIRROR_PREFIX = "camera-profiles-";
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
     private static final int MAX_THUMBNAIL_CACHE_FILES = 512;
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
@@ -168,10 +171,10 @@ public final class AuRawActivity extends NativeActivity {
             // The recursive DCP mirror runs on a worker and can take noticeable
             // time for Adobe's full CameraProfiles tree.
             nativeOnCameraProfileFolderImportStarted(folderLabel);
-            int takeFlags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
-            if (takeFlags != 0) {
+            if ((data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
                 try {
-                    getContentResolver().takePersistableUriPermission(treeUri, takeFlags);
+                    getContentResolver().takePersistableUriPermission(
+                            treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 } catch (SecurityException ignored) {
                     // Some providers allow the current read but do not offer a
                     // persistable grant. AuRaw mirrors DCPs into private app
@@ -204,10 +207,25 @@ public final class AuRawActivity extends NativeActivity {
                 .start();
     }
 
+    /** Removes one superseded app-private DCP mirror without trusting a persisted path. */
+    public void removeCameraProfileMirror(String mirrorPath) {
+        final String requestedPath = mirrorPath == null ? "" : mirrorPath;
+        new Thread(
+                () -> {
+                    try {
+                        removeOwnedCameraProfileMirror(requestedPath);
+                    } catch (Exception error) {
+                        Log.w(LOG_TAG, "Could not remove superseded camera-profile mirror", error);
+                    }
+                },
+                "AuRaw camera profile cleanup")
+                .start();
+    }
+
     private void importCameraProfileFolder(Uri treeUri, String label) {
         File destination = new File(
                 getFilesDir(),
-                "camera-profiles-" + Long.toUnsignedString(System.nanoTime()));
+                CAMERA_PROFILE_MIRROR_PREFIX + Long.toUnsignedString(System.nanoTime()));
         try {
             if (!destination.mkdirs()) {
                 throw new IllegalStateException("Could not create private camera-profile storage");
@@ -425,14 +443,76 @@ public final class AuRawActivity extends NativeActivity {
         return "CameraProfiles";
     }
 
-    private static void deleteDirectoryTree(File file) {
-        if (file == null || !file.exists()) {
+    private void removeOwnedCameraProfileMirror(String mirrorPath) throws Exception {
+        if (mirrorPath.isEmpty()) {
             return;
         }
-        File[] children = file.listFiles();
-        if (children != null) {
+        File requestedMirror = new File(mirrorPath);
+        if (Files.isSymbolicLink(requestedMirror.toPath())) {
+            throw new IllegalArgumentException(
+                    "Refusing to follow a camera-profile mirror symbolic link");
+        }
+        File filesDirectory = getFilesDir().getCanonicalFile();
+        File mirror = requestedMirror.getCanonicalFile();
+        if (!isCameraProfileMirrorName(mirror.getName())
+                || mirror.getParentFile() == null
+                || !filesDirectory.equals(mirror.getParentFile())) {
+            throw new IllegalArgumentException(
+                    "Refusing to remove a path outside AuRaw camera-profile storage");
+        }
+        deleteDirectoryTreeChecked(mirror);
+    }
+
+    private static boolean isCameraProfileMirrorName(String name) {
+        if (!name.startsWith(CAMERA_PROFILE_MIRROR_PREFIX)) {
+            return false;
+        }
+        int suffixStart = CAMERA_PROFILE_MIRROR_PREFIX.length();
+        if (name.length() == suffixStart) {
+            return false;
+        }
+        for (int index = suffixStart; index < name.length(); index++) {
+            char value = name.charAt(index);
+            if (value < '0' || value > '9') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void deleteDirectoryTreeChecked(File file) throws Exception {
+        boolean symbolicLink = Files.isSymbolicLink(file.toPath());
+        if (!symbolicLink && !file.exists()) {
+            return;
+        }
+        if (!symbolicLink && file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children == null) {
+                throw new IllegalStateException("Could not list camera-profile mirror " + file);
+            }
             for (File child : children) {
-                deleteDirectoryTree(child);
+                deleteDirectoryTreeChecked(child);
+            }
+        }
+        if (!Files.deleteIfExists(file.toPath()) && file.exists()) {
+            throw new IllegalStateException("Could not remove camera-profile mirror " + file);
+        }
+    }
+
+    private static void deleteDirectoryTree(File file) {
+        if (file == null) {
+            return;
+        }
+        boolean symbolicLink = Files.isSymbolicLink(file.toPath());
+        if (!symbolicLink && !file.exists()) {
+            return;
+        }
+        if (!symbolicLink) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteDirectoryTree(child);
+                }
             }
         }
         file.delete();
@@ -559,17 +639,16 @@ public final class AuRawActivity extends NativeActivity {
 
     /** Human-readable storage location shown by the Rust library UI. */
     public String rawLibraryLocation() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return RAW_LIBRARY_RELATIVE_PATH;
+        }
         return legacyRawLibraryDirectory().getAbsolutePath();
     }
 
-    /**
-     * Lists only AuRaw's scoped-storage collection. Each line contains URI,
-     * name, visible path, bytes, and modified time; strings are URI-escaped so
-     * tabs and newlines in document names cannot corrupt the bridge format.
-     */
+    /** Lists current MediaStore RAWs plus legacy file entries retained across upgrades. */
     public String listRawLibrary() {
         try {
-            return listLegacyRawLibrary();
+            return listCombinedRawLibrary();
         } catch (Exception error) {
             throw new IllegalStateException("Could not list the RAW library", error);
         }
@@ -661,9 +740,23 @@ public final class AuRawActivity extends NativeActivity {
     public void removeRawSidecar(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
+        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
+            removeRawSidecarScoped(displayName);
+            return;
+        }
         File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
         if (sidecar.exists() && !sidecar.delete()) {
             throw new IllegalStateException("Could not delete the RAW sidecar");
+        }
+    }
+
+    private void removeRawSidecarScoped(String rawDisplayName) {
+        boolean deletionFailed = false;
+        for (Uri generation : scopedSidecarUris(rawDisplayName)) {
+            deletionFailed |= deleteScopedSidecarGeneration(generation, rawDisplayName) <= 0;
+        }
+        if (deletionFailed && !scopedSidecarUris(rawDisplayName).isEmpty()) {
+            throw new IllegalStateException("Android storage could not delete the RAW sidecar");
         }
     }
 
@@ -690,6 +783,9 @@ public final class AuRawActivity extends NativeActivity {
     public String materializeRawSidecar(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
+        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
+            return materializeRawSidecarScoped(displayName);
+        }
         File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
         if (!sidecar.isFile()) {
             return "";
@@ -700,6 +796,33 @@ public final class AuRawActivity extends NativeActivity {
         try {
             try (FileInputStream input = new FileInputStream(sidecar);
                  FileOutputStream output = new FileOutputStream(cached)) {
+                copy(input, output, MAX_SIDECAR_BYTES);
+                output.getFD().sync();
+            }
+            completed = true;
+            return cached.getAbsolutePath();
+        } finally {
+            if (!completed && !cached.delete() && cached.exists()) {
+                cached.deleteOnExit();
+            }
+        }
+    }
+
+    private String materializeRawSidecarScoped(String rawDisplayName) throws Exception {
+        ArrayList<Uri> generations = scopedSidecarUris(rawDisplayName);
+        if (generations.isEmpty()) {
+            return "";
+        }
+
+        Uri newestGeneration = generations.get(0);
+        File cached = File.createTempFile("auraw-sidecar-", ".auraw", getCacheDir());
+        boolean completed = false;
+        try {
+            try (InputStream input = getContentResolver().openInputStream(newestGeneration);
+                 FileOutputStream output = new FileOutputStream(cached)) {
+                if (input == null) {
+                    throw new IllegalStateException("Android storage returned no sidecar stream");
+                }
                 copy(input, output, MAX_SIDECAR_BYTES);
                 output.getFD().sync();
             }
@@ -732,6 +855,9 @@ public final class AuRawActivity extends NativeActivity {
         }
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
+        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
+            return publishRawSidecarScoped(cached, displayName);
+        }
         return publishRawSidecarLegacy(cached, displayName);
     }
 
@@ -776,7 +902,8 @@ public final class AuRawActivity extends NativeActivity {
             boolean removedOldRows = true;
             for (Uri oldSidecar : oldSidecars) {
                 if (!oldSidecar.equals(destination)) {
-                    removedOldRows &= resolver.delete(oldSidecar, null, null) > 0;
+                    removedOldRows &= deleteScopedSidecarGeneration(
+                            oldSidecar, rawDisplayName) > 0;
                 }
             }
             if (!removedOldRows) {
@@ -853,17 +980,8 @@ public final class AuRawActivity extends NativeActivity {
                 MediaStore.Downloads._ID,
                 MediaStore.Downloads.DISPLAY_NAME
         };
-        String selection = MediaStore.Downloads.RELATIVE_PATH + "=? AND "
-                + MediaStore.Downloads.OWNER_PACKAGE_NAME + "=? AND "
-                + MediaStore.Downloads.IS_PENDING + "=0 AND ("
-                + MediaStore.Downloads.DISPLAY_NAME + "=? OR "
-                + MediaStore.Downloads.DISPLAY_NAME + " LIKE ? ESCAPE '\\')";
-        String[] args = {
-                RAW_LIBRARY_RELATIVE_PATH,
-                getPackageName(),
-                displayName,
-                escapeLike(stagedPrefix) + "%"
-        };
+        String selection = scopedSidecarSelection();
+        String[] args = scopedSidecarSelectionArgs(displayName, stagedPrefix);
         try (Cursor cursor = getContentResolver().query(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 projection,
@@ -877,7 +995,8 @@ public final class AuRawActivity extends NativeActivity {
             int nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME);
             while (cursor.moveToNext()) {
                 String foundName = cursor.getString(nameColumn);
-                if (displayName.equals(foundName) || foundName.startsWith(stagedPrefix)) {
+                if (foundName != null
+                        && (displayName.equals(foundName) || foundName.startsWith(stagedPrefix))) {
                     result.add(ContentUris.withAppendedId(
                             MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                             cursor.getLong(idColumn)));
@@ -887,8 +1006,58 @@ public final class AuRawActivity extends NativeActivity {
         return result;
     }
 
+    private int deleteScopedSidecarGeneration(Uri generation, String rawDisplayName) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            throw new IllegalStateException("Scoped sidecars require Android 10 or newer");
+        }
+        long generationId = ContentUris.parseId(generation);
+        String displayName = sidecarDisplayName(rawDisplayName);
+        String stagedPrefix = sidecarStagePrefix(rawDisplayName);
+        String selection = MediaStore.Downloads._ID + "=? AND ("
+                + scopedSidecarSelection() + ")";
+        String[] sidecarArgs = scopedSidecarSelectionArgs(displayName, stagedPrefix);
+        String[] args = new String[sidecarArgs.length + 1];
+        args[0] = Long.toString(generationId);
+        System.arraycopy(sidecarArgs, 0, args, 1, sidecarArgs.length);
+        return getContentResolver().delete(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                selection,
+                args);
+    }
+
+    private static String scopedSidecarSelection() {
+        return MediaStore.Downloads.RELATIVE_PATH + "=? AND "
+                + MediaStore.Downloads.OWNER_PACKAGE_NAME + "=? AND "
+                + MediaStore.Downloads.IS_PENDING + "=0 AND ("
+                + MediaStore.Downloads.DISPLAY_NAME + "=? OR "
+                + MediaStore.Downloads.DISPLAY_NAME + " LIKE ? ESCAPE '\\')";
+    }
+
+    private String[] scopedSidecarSelectionArgs(String displayName, String stagedPrefix) {
+        return new String[]{
+                RAW_LIBRARY_RELATIVE_PATH,
+                getPackageName(),
+                displayName,
+                escapeLike(stagedPrefix) + "%"
+        };
+    }
+
     private void verifyRawLibraryIdentity(Uri rawUri, String expectedDisplayName) throws Exception {
-        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
+        if (ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
+            verifyLegacyRawLibraryIdentity(rawUri, expectedDisplayName);
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            verifyScopedRawLibraryIdentity(rawUri, expectedDisplayName);
+            return;
+        }
+        throw new IllegalArgumentException("The RAW library URI is invalid");
+    }
+
+    private void verifyLegacyRawLibraryIdentity(
+            Uri rawUri,
+            String expectedDisplayName) throws Exception {
+        if (rawUri.getPath() == null || expectedDisplayName == null) {
             throw new IllegalArgumentException("The RAW library URI is invalid");
         }
         File raw = new File(rawUri.getPath()).getCanonicalFile();
@@ -897,6 +1066,68 @@ public final class AuRawActivity extends NativeActivity {
                 || raw.getParentFile() == null
                 || !directory.equals(raw.getParentFile())) {
             throw new IllegalArgumentException("The RAW is outside AuRaw's library");
+        }
+    }
+
+    private void verifyScopedRawLibraryIdentity(
+            Uri rawUri,
+            String expectedDisplayName) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            throw new IllegalStateException("Scoped RAW storage requires Android 10 or newer");
+        }
+        Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+        if (expectedDisplayName == null
+                || !isRawName(expectedDisplayName)
+                || !ContentResolver.SCHEME_CONTENT.equals(rawUri.getScheme())
+                || !collection.getAuthority().equals(rawUri.getAuthority())) {
+            throw new IllegalArgumentException("The RAW library URI is invalid");
+        }
+
+        long expectedId;
+        try {
+            expectedId = ContentUris.parseId(rawUri);
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException("The RAW library URI is invalid", error);
+        }
+        if (expectedId < 0
+                || !ContentUris.withAppendedId(collection, expectedId).equals(rawUri)) {
+            throw new IllegalArgumentException("The RAW library URI is invalid");
+        }
+
+        String[] projection = {
+                MediaStore.Downloads._ID,
+                MediaStore.Downloads.DISPLAY_NAME,
+                MediaStore.Downloads.RELATIVE_PATH,
+                MediaStore.Downloads.OWNER_PACKAGE_NAME,
+                MediaStore.Downloads.IS_PENDING
+        };
+        try (Cursor cursor = getContentResolver().query(
+                rawUri,
+                projection,
+                null,
+                null,
+                null)) {
+            if (cursor == null || !cursor.moveToFirst()) {
+                throw new IllegalArgumentException("The RAW is not in AuRaw's library");
+            }
+            long storedId = cursor.getLong(cursor.getColumnIndexOrThrow(
+                    MediaStore.Downloads._ID));
+            String storedName = cursor.getString(cursor.getColumnIndexOrThrow(
+                    MediaStore.Downloads.DISPLAY_NAME));
+            String storedPath = cursor.getString(cursor.getColumnIndexOrThrow(
+                    MediaStore.Downloads.RELATIVE_PATH));
+            String storedOwner = cursor.getString(cursor.getColumnIndexOrThrow(
+                    MediaStore.Downloads.OWNER_PACKAGE_NAME));
+            int pending = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    MediaStore.Downloads.IS_PENDING));
+            if (storedId != expectedId
+                    || !expectedDisplayName.equals(storedName)
+                    || !RAW_LIBRARY_RELATIVE_PATH.equals(storedPath)
+                    || !getPackageName().equals(storedOwner)
+                    || pending != 0
+                    || cursor.moveToNext()) {
+                throw new IllegalArgumentException("The RAW is outside AuRaw's library");
+            }
         }
     }
 
@@ -964,6 +1195,9 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     private StoredRaw storeRawInLibrary(Uri source, String requestedName) throws Exception {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return storeRawScoped(source, requestedName);
+        }
         return storeRawLegacy(source, requestedName);
     }
 
@@ -1041,6 +1275,7 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     private void materializeLibraryRaw(Uri source, String displayName) throws Exception {
+        verifyRawLibraryIdentity(source, displayName);
         File cached = File.createTempFile("auraw-library-", suffixFor(displayName), getCacheDir());
         boolean completed = false;
         try {
@@ -1068,11 +1303,50 @@ public final class AuRawActivity extends NativeActivity {
         return getContentResolver().openInputStream(uri);
     }
 
-    private String listScopedRawLibrary() {
+    private String listCombinedRawLibrary() {
+        ArrayList<RawLibraryRecord> records = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            records.addAll(listScopedRawLibrary());
+            try {
+                records.addAll(listLegacyRawLibrary());
+            } catch (IllegalStateException error) {
+                Log.w(LOG_TAG, "Could not inspect the legacy RAW library", error);
+            }
+        } else {
+            records.addAll(listLegacyRawLibrary());
+        }
+        records.sort((left, right) -> {
+            int modifiedOrder = Long.compare(right.modifiedSeconds, left.modifiedSeconds);
+            return modifiedOrder != 0 ? modifiedOrder : left.uri.compareTo(right.uri);
+        });
+
+        StringBuilder result = new StringBuilder();
+        Set<String> seenUris = new HashSet<>();
+        int added = 0;
+        for (RawLibraryRecord record : records) {
+            if (!seenUris.add(record.uri)) {
+                continue;
+            }
+            if (added > MAX_RAW_LIBRARY_FILES) {
+                break;
+            }
+            appendLibraryRecord(
+                    result,
+                    record.uri,
+                    record.displayName,
+                    record.displayPath,
+                    record.bytes,
+                    record.modifiedSeconds);
+            added++;
+        }
+        return result.toString();
+    }
+
+    private ArrayList<RawLibraryRecord> listScopedRawLibrary() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             throw new IllegalStateException("Scoped RAW storage requires Android 10 or newer");
         }
-        StringBuilder result = new StringBuilder();
+        ArrayList<RawLibraryRecord> result = new ArrayList<>();
         String[] projection = {
                 MediaStore.Downloads._ID,
                 MediaStore.Downloads.DISPLAY_NAME,
@@ -1096,10 +1370,9 @@ public final class AuRawActivity extends NativeActivity {
             int nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME);
             int sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.SIZE);
             int modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DATE_MODIFIED);
-            int added = 0;
             // Return one sentinel record beyond the UI limit so Rust can
             // distinguish exactly 20,000 files from a truncated collection.
-            while (added <= MAX_RAW_LIBRARY_FILES && cursor.moveToNext()) {
+            while (result.size() <= MAX_RAW_LIBRARY_FILES && cursor.moveToNext()) {
                 String name = cursor.getString(nameColumn);
                 if (!isRawName(name)) {
                     continue;
@@ -1107,46 +1380,41 @@ public final class AuRawActivity extends NativeActivity {
                 Uri uri = ContentUris.withAppendedId(
                         MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                         cursor.getLong(idColumn));
-                appendLibraryRecord(
-                        result,
+                result.add(new RawLibraryRecord(
                         uri.toString(),
                         name,
                         RAW_LIBRARY_RELATIVE_PATH + name,
                         Math.max(0, cursor.getLong(sizeColumn)),
-                        Math.max(0, cursor.getLong(modifiedColumn)));
-                added++;
+                        Math.max(0, cursor.getLong(modifiedColumn))));
             }
         }
-        return result.toString();
+        return result;
     }
 
-    private String listLegacyRawLibrary() {
-        StringBuilder result = new StringBuilder();
+    private ArrayList<RawLibraryRecord> listLegacyRawLibrary() {
+        ArrayList<RawLibraryRecord> result = new ArrayList<>();
         File[] files = legacyRawLibraryDirectory().listFiles();
         if (files == null) {
-            return "";
+            return result;
         }
         Arrays.sort(files, (left, right) -> Long.compare(right.lastModified(), left.lastModified()));
-        int added = 0;
         for (File file : files) {
             // Return one sentinel record beyond the UI limit; Rust displays
             // only the first MAX_RAW_LIBRARY_FILES entries.
-            if (added > MAX_RAW_LIBRARY_FILES) {
+            if (result.size() > MAX_RAW_LIBRARY_FILES) {
                 break;
             }
             if (!file.isFile() || !isRawName(file.getName())) {
                 continue;
             }
-            appendLibraryRecord(
-                    result,
+            result.add(new RawLibraryRecord(
                     Uri.fromFile(file).toString(),
                     file.getName(),
                     file.getAbsolutePath(),
                     Math.max(0, file.length()),
-                    Math.max(0, file.lastModified() / 1000));
-            added++;
+                    Math.max(0, file.lastModified() / 1000)));
         }
-        return result.toString();
+        return result;
     }
 
     private static void appendLibraryRecord(
@@ -1270,6 +1538,27 @@ public final class AuRawActivity extends NativeActivity {
         int dot = displayName.lastIndexOf('.');
         return dot >= 0 && dot < displayName.length() - 1
                 && RAW_SUFFIXES.contains(displayName.substring(dot + 1).toLowerCase(Locale.ROOT));
+    }
+
+    private static final class RawLibraryRecord {
+        final String uri;
+        final String displayName;
+        final String displayPath;
+        final long bytes;
+        final long modifiedSeconds;
+
+        RawLibraryRecord(
+                String uri,
+                String displayName,
+                String displayPath,
+                long bytes,
+                long modifiedSeconds) {
+            this.uri = uri;
+            this.displayName = displayName;
+            this.displayPath = displayPath;
+            this.bytes = bytes;
+            this.modifiedSeconds = modifiedSeconds;
+        }
     }
 
     private static final class StoredRaw {

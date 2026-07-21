@@ -9,7 +9,7 @@ use std::{
     collections::VecDeque,
     fs::{self, File},
     os::fd::FromRawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
@@ -52,14 +52,21 @@ pub enum ExportPublishResult {
 pub enum CameraProfileFolderResult {
     /// Android returned a tree URI and AuRaw started mirroring its DCP files.
     /// Keep the picker transaction pending until Picked/Failed arrives.
-    ImportStarted { label: String },
-    Picked { path: PathBuf, label: String, profiles: usize },
+    ImportStarted {
+        label: String,
+    },
+    Picked {
+        path: PathBuf,
+        label: String,
+        profiles: usize,
+    },
     Cancelled,
     Failed(String),
 }
 
 static RESULTS: OnceLock<Mutex<VecDeque<PickerResult>>> = OnceLock::new();
-static CAMERA_PROFILE_FOLDER_RESULTS: OnceLock<Mutex<VecDeque<CameraProfileFolderResult>>> = OnceLock::new();
+static CAMERA_PROFILE_FOLDER_RESULTS: OnceLock<Mutex<VecDeque<CameraProfileFolderResult>>> =
+    OnceLock::new();
 static EXPORT_RESULTS: OnceLock<Mutex<VecDeque<ExportPublishResult>>> = OnceLock::new();
 static EGUI_CONTEXT: Mutex<Option<eframe::egui::Context>> = Mutex::new(None);
 
@@ -114,6 +121,21 @@ pub fn open_camera_profile_folder(app: &AndroidApp) -> Result<(), String> {
     .map_err(|error| format!("could not open Android's camera-profile folder picker: {error:#}"))
 }
 
+pub fn remove_camera_profile_mirror(app: &AndroidApp, path: &Path) -> Result<(), String> {
+    let path = path.to_string_lossy().into_owned();
+    with_activity(app, |env, activity| {
+        let path = env.new_string(&path)?;
+        env.call_method(
+            activity,
+            jni::jni_str!("removeCameraProfileMirror"),
+            jni::jni_sig!((JString) -> void),
+            &[JValue::Object(&path)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not schedule Android camera-profile cleanup: {error:#}"))
+}
+
 pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
     // SAFETY: Android owns the JavaVM for the process lifetime; `JavaVM` is a non-owning handle and does not destroy the VM on drop.
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
@@ -148,11 +170,7 @@ pub fn device_diagnostics(app: &AndroidApp) -> Result<String, String> {
     .map_err(|error| format!("could not read Android device diagnostics: {error:#}"))
 }
 
-pub fn copy_text_to_clipboard(
-    app: &AndroidApp,
-    label: &str,
-    text: &str,
-) -> Result<(), String> {
+pub fn copy_text_to_clipboard(app: &AndroidApp, label: &str, text: &str) -> Result<(), String> {
     let label = label.to_owned();
     let text = text.to_owned();
     with_activity(app, |env, activity| {
@@ -765,7 +783,9 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePicked<'lo
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCameraProfileFolderImportStarted<'local>(
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCameraProfileFolderImportStarted<
+    'local,
+>(
     mut unowned_env: EnvUnowned<'local>,
     _class: JClass<'local>,
     label: JString<'local>,
@@ -785,7 +805,9 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCameraProfileF
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCameraProfileFolderPicked<'local>(
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCameraProfileFolderPicked<
+    'local,
+>(
     mut unowned_env: EnvUnowned<'local>,
     _class: JClass<'local>,
     path: JString<'local>,

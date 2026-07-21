@@ -1,8 +1,8 @@
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
-    export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams, IccOutputTransform,
-    LoadedRaw, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
-    GLOBAL_TEMPERATURE_LIMIT,
+    export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams,
+    HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
+    ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams, GLOBAL_TEMPERATURE_LIMIT,
     MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Result};
@@ -68,7 +68,7 @@ enum HighlightWorkSlot {
 }
 
 fn highlight_stage_slots(index: usize) -> (HighlightWorkSlot, HighlightWorkSlot) {
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         (HighlightWorkSlot::A, HighlightWorkSlot::B)
     } else {
         (HighlightWorkSlot::B, HighlightWorkSlot::A)
@@ -76,7 +76,7 @@ fn highlight_stage_slots(index: usize) -> (HighlightWorkSlot, HighlightWorkSlot)
 }
 
 fn highlight_final_read_slot(stage_count: usize) -> HighlightWorkSlot {
-    if stage_count % 2 == 0 {
+    if stage_count.is_multiple_of(2) {
         HighlightWorkSlot::A
     } else {
         HighlightWorkSlot::B
@@ -288,7 +288,6 @@ struct InpaintResizeParams {
     _pad1: u32,
 }
 
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuParams {
@@ -447,13 +446,73 @@ fn split_eight(values: [f32; 8]) -> ([f32; 4], [f32; 4]) {
     )
 }
 
+fn pack_local_point_curve(curve: &PointCurve) -> [[f32; 4]; 8] {
+    let mut packed = [[0.0; 4]; 8];
+    for (pair, values) in packed.iter_mut().take(4).enumerate() {
+        *values = [
+            curve.points[pair * 2][0],
+            curve.points[pair * 2][1],
+            curve.points[pair * 2 + 1][0],
+            curve.points[pair * 2 + 1][1],
+        ];
+    }
+    packed[4] = [
+        curve.len.clamp(2, 8) as f32,
+        if curve.is_identity() { 1.0 } else { 0.0 },
+        0.0,
+        0.0,
+    ];
+    packed
+}
+
 fn pack_color_grade_wheel(wheel: crate::pipeline::ColorGradeWheel) -> [f32; 4] {
     [
-        wheel.hue.rem_euclid(360.0) / 360.0,
+        color_grade_hue_turns(wheel.hue),
         (wheel.saturation / 100.0).clamp(0.0, 1.0),
         (wheel.luminance / 100.0).clamp(-1.0, 1.0),
         0.0,
     ]
+}
+
+fn color_grade_hue_turns(hue_degrees: f32) -> f32 {
+    let hue = hue_degrees.rem_euclid(360.0) / 60.0;
+    let sector = hue.floor() as u32;
+    let fraction = hue - sector as f32;
+    let value = 0.9;
+    let (r, g, b) = match sector % 6 {
+        0 => (value, value * fraction, 0.0),
+        1 => (value * (1.0 - fraction), value, 0.0),
+        2 => (0.0, value, value * fraction),
+        3 => (0.0, value * (1.0 - fraction), value),
+        4 => (value * fraction, 0.0, value),
+        _ => (value, 0.0, value * (1.0 - fraction)),
+    };
+    let decode = |encoded: f32| {
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let rgb = [decode(r), decode(g), decode(b)];
+    let l = 0.412_221_46 * rgb[0] + 0.536_332_55 * rgb[1] + 0.051_445_995 * rgb[2];
+    let m = 0.211_903_5 * rgb[0] + 0.680_699_5 * rgb[1] + 0.107_396_96 * rgb[2];
+    let s = 0.088_302_46 * rgb[0] + 0.281_718_85 * rgb[1] + 0.629_978_7 * rgb[2];
+    let l = l.cbrt();
+    let m = m.cbrt();
+    let s = s.cbrt();
+    let a = 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s;
+    let b = 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s;
+    b.atan2(a).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU
+}
+
+fn shader_highlight_method(cfa_kind: CfaKind, method: HighlightReconstructionMethod) -> f32 {
+    match (cfa_kind, method) {
+        (CfaKind::XTrans, HighlightReconstructionMethod::Lch) => {
+            HighlightReconstructionMethod::Guided.shader_value()
+        }
+        (_, method) => method.shader_value(),
+    }
 }
 
 fn pack_color_grade_options(grading: crate::pipeline::ColorGrading) -> [f32; 4] {
@@ -500,9 +559,7 @@ fn multiply_matrix3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
     let mut out = [[0.0; 3]; 3];
     for row in 0..3 {
         for col in 0..3 {
-            out[row][col] = a[row][0] * b[0][col]
-                + a[row][1] * b[1][col]
-                + a[row][2] * b[2][col];
+            out[row][col] = a[row][0] * b[0][col] + a[row][1] * b[1][col] + a[row][2] * b[2][col];
         }
     }
     out
@@ -557,8 +614,8 @@ impl GpuParams {
         // Rendering defaults, but use a highlight-only display shoulder rather
         // than the previous hard [0, 1] clamp. Custom Sigmoid settings still
         // opt into the full AuRaw scene-to-display transform.
-        let use_profile_base_tone = raw.camera_profile.tone_curve.is_some()
-            && exposure.sigmoid == SigmoidParams::default();
+        let use_profile_base_tone =
+            raw.camera_profile.tone_curve.is_some() && exposure.sigmoid == SigmoidParams::default();
         let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
@@ -615,17 +672,10 @@ impl GpuParams {
                 adjustment.clarity.clamp(-100.0, 100.0),
                 adjustment.dehaze.clamp(-100.0, 100.0),
             ];
-            for sample in 0..32 {
-                let x = sample as f32 / 31.0;
-                mask_curves[index][sample / 4][sample % 4] =
-                    evaluate_point_curve(&adjustment.tone_curve, x);
-                mask_curves_red[index][sample / 4][sample % 4] =
-                    evaluate_point_curve(&adjustment.tone_curve_red, x);
-                mask_curves_green[index][sample / 4][sample % 4] =
-                    evaluate_point_curve(&adjustment.tone_curve_green, x);
-                mask_curves_blue[index][sample / 4][sample % 4] =
-                    evaluate_point_curve(&adjustment.tone_curve_blue, x);
-            }
+            mask_curves[index] = pack_local_point_curve(&adjustment.tone_curve);
+            mask_curves_red[index] = pack_local_point_curve(&adjustment.tone_curve_red);
+            mask_curves_green[index] = pack_local_point_curve(&adjustment.tone_curve_green);
+            mask_curves_blue[index] = pack_local_point_curve(&adjustment.tone_curve_blue);
             let (hue_0, hue_1) = split_eight(adjustment.hsl_hue);
             let (saturation_0, saturation_1) = split_eight(adjustment.hsl_saturation);
             let (luminance_0, luminance_1) = split_eight(adjustment.hsl_luminance);
@@ -712,7 +762,7 @@ impl GpuParams {
                 0.0,
             ],
             highlight_options: [
-                exposure.highlight_method.shader_value(),
+                shader_highlight_method(raw.cfa_kind, exposure.highlight_method),
                 exposure.highlight_iterations.clamp(1, 4) as f32,
                 exposure.highlight_color_adaptation.clamp(0.0, 1.0),
                 0.0,
@@ -979,42 +1029,6 @@ impl GpuParams {
     }
 }
 
-fn evaluate_point_curve(curve: &PointCurve, input: f32) -> f32 {
-    let count = curve.len.clamp(2, 8) as usize;
-    let x = input.clamp(0.0, 1.0);
-    let segment = (0..count - 1)
-        .find(|index| x <= curve.points[index + 1][0])
-        .unwrap_or(count - 2);
-    let p0 = curve.points[segment];
-    let p1 = curve.points[segment + 1];
-    let width = (p1[0] - p0[0]).max(1e-5);
-    let secant = |a: [f32; 2], b: [f32; 2]| (b[1] - a[1]) / (b[0] - a[0]).max(1e-5);
-    let tangent = |index: usize| {
-        if index == 0 {
-            secant(curve.points[0], curve.points[1])
-        } else if index + 1 >= count {
-            secant(curve.points[count - 2], curve.points[count - 1])
-        } else {
-            let previous = secant(curve.points[index - 1], curve.points[index]);
-            let next = secant(curve.points[index], curve.points[index + 1]);
-            if previous * next <= 0.0 {
-                0.0
-            } else {
-                2.0 * previous * next / (previous + next).abs().max(1e-6)
-                    * (previous + next).signum()
-            }
-        }
-    };
-    let t = ((x - p0[0]) / width).clamp(0.0, 1.0);
-    let t2 = t * t;
-    let t3 = t2 * t;
-    let value = (2.0 * t3 - 3.0 * t2 + 1.0) * p0[1]
-        + (t3 - 2.0 * t2 + t) * tangent(segment) * width
-        + (-2.0 * t3 + 3.0 * t2) * p1[1]
-        + (t3 - t2) * tangent(segment + 1) * width;
-    value.clamp(p0[1].min(p1[1]), p0[1].max(p1[1]))
-}
-
 struct Pass {
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
@@ -1103,9 +1117,11 @@ impl GpuOutputSnapshot {
         )?;
         let image = image::RgbaImage::from_raw(self.width, self.height, rgba)
             .ok_or_else(|| anyhow!("developed thumbnail readback has an invalid byte count"))?;
-        let image = image::DynamicImage::ImageRgba8(image)
-            .thumbnail(maximum_edge, maximum_edge)
-            .to_rgba8();
+        let image = crate::thumbnail_cache::downscale_to_fit(
+            image::DynamicImage::ImageRgba8(image),
+            maximum_edge,
+        )
+        .to_rgba8();
         let (width, height) = image.dimensions();
         Ok(RawThumbnail {
             width,
@@ -1242,6 +1258,7 @@ impl RawGpuPipeline {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_internal(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1517,10 +1534,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl highlights"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     storage_texture_entry(
                         3,
                         wgpu::TextureFormat::R32Float,
@@ -1540,10 +1557,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl1"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
                         4,
@@ -1558,10 +1575,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl2"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
@@ -1577,10 +1594,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl3"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
@@ -1599,10 +1616,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl4"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
@@ -1626,10 +1643,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans derivatives"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
@@ -1653,10 +1670,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans homogeneity"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(20, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(21, wgpu::TextureSampleType::Float { filterable: false }),
@@ -1681,10 +1698,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans accumulate"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
@@ -1705,10 +1722,10 @@ impl RawGpuPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bgl X-Trans finish"),
                 entries: &[
-                    common_entries[0].clone(),
-                    common_entries[1].clone(),
-                    common_entries[2].clone(),
-                    common_entries[3].clone(),
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
@@ -1759,10 +1776,10 @@ impl RawGpuPipeline {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl adjustment preparation"),
                     entries: &[
-                        common_entries[0].clone(),
-                        common_entries[1].clone(),
-                        common_entries[2].clone(),
-                        common_entries[3].clone(),
+                        common_entries[0],
+                        common_entries[1],
+                        common_entries[2],
+                        common_entries[3],
                         texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_texture_entry(
                             21,
@@ -2992,7 +3009,12 @@ impl RawGpuPipeline {
     /// Uploads one normalized, anti-aliased local-mask layer as IEEE-754 half
     /// floats. Preview and export share the same shader path, while export can
     /// allocate a larger atlas for higher spatial fidelity.
-    pub fn update_mask_layer(&self, queue: &wgpu::Queue, layer: usize, values: &[u16]) -> Result<()> {
+    pub fn update_mask_layer(
+        &self,
+        queue: &wgpu::Queue,
+        layer: usize,
+        values: &[u16],
+    ) -> Result<()> {
         if layer >= MAX_LOCAL_MASKS {
             return Err(anyhow!("local-mask layer {layer} is out of range"));
         }
@@ -3060,18 +3082,20 @@ impl RawGpuPipeline {
                 let global_y0 = ((u64::from(patch.y) * u64::from(full_height))
                     / u64::from(patch.source_height)) as i64;
                 let global_x1 = ((u64::from(patch.x + patch.width) * u64::from(full_width))
-                    .div_ceil(u64::from(patch.source_width))) as i64;
+                    .div_ceil(u64::from(patch.source_width)))
+                    as i64;
                 let global_y1 = ((u64::from(patch.y + patch.height) * u64::from(full_height))
-                    .div_ceil(u64::from(patch.source_height))) as i64;
+                    .div_ceil(u64::from(patch.source_height)))
+                    as i64;
 
-                let local_x0 = (global_x0 - i64::from(tile_origin_x))
-                    .clamp(0, i64::from(self.width)) as u32;
-                let local_y0 = (global_y0 - i64::from(tile_origin_y))
-                    .clamp(0, i64::from(self.height)) as u32;
-                let local_x1 = (global_x1 - i64::from(tile_origin_x))
-                    .clamp(0, i64::from(self.width)) as u32;
-                let local_y1 = (global_y1 - i64::from(tile_origin_y))
-                    .clamp(0, i64::from(self.height)) as u32;
+                let local_x0 =
+                    (global_x0 - i64::from(tile_origin_x)).clamp(0, i64::from(self.width)) as u32;
+                let local_y0 =
+                    (global_y0 - i64::from(tile_origin_y)).clamp(0, i64::from(self.height)) as u32;
+                let local_x1 =
+                    (global_x1 - i64::from(tile_origin_x)).clamp(0, i64::from(self.width)) as u32;
+                let local_y1 =
+                    (global_y1 - i64::from(tile_origin_y)).clamp(0, i64::from(self.height)) as u32;
 
                 for y in local_y0..local_y1 {
                     let global_y = tile_origin_y + y as i32;
@@ -3529,12 +3553,7 @@ impl RawGpuPipeline {
                 "regression scene conversion requires ProcessingQuality::High (RGBA32Float)"
             ));
         }
-        self.render_scene_conversion_blocking(
-            device,
-            queue,
-            params,
-            "write_regression_scene",
-        )
+        self.render_scene_conversion_blocking(device, queue, params, "write_regression_scene")
     }
 
     /// Renders the neutral scene-working image used as LaMa input. Unlike the
@@ -3546,12 +3565,7 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         params: &GpuParams,
     ) -> Result<Vec<f32>> {
-        self.render_scene_conversion_blocking(
-            device,
-            queue,
-            params,
-            "write_inpaint_working_scene",
-        )
+        self.render_scene_conversion_blocking(device, queue, params, "write_inpaint_working_scene")
     }
 
     fn render_scene_conversion_blocking(
@@ -3689,6 +3703,7 @@ impl RawGpuPipeline {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render_inpaint_working_scene_region_resized_blocking(
         &self,
         device: &wgpu::Device,
@@ -3705,8 +3720,12 @@ impl RawGpuPipeline {
             || source_height == 0
             || output_width == 0
             || output_height == 0
-            || source_x.checked_add(source_width).map_or(true, |right| right > self.width)
-            || source_y.checked_add(source_height).map_or(true, |bottom| bottom > self.height)
+            || source_x
+                .checked_add(source_width)
+                .is_none_or(|right| right > self.width)
+            || source_y
+                .checked_add(source_height)
+                .is_none_or(|bottom| bottom > self.height)
         {
             return Err(anyhow!("invalid inpainting resize rectangle"));
         }

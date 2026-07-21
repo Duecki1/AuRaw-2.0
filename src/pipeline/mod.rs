@@ -26,11 +26,9 @@ pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, Len
 pub use masks::{
     compose_inpaint_strokes, ellipse_outline_points, export_mask_atlas_edge,
     export_mask_atlas_edge_limit, mask_atlas_edge, rasterize_brush_dabs,
-    rasterize_inpaint_dabs_binary,
-    BrushDab, BrushMode, InpaintLayer, InpaintPatch, InpaintStroke, LocalAdjustments, LocalMask,
-    MaskCombineMode, MaskComponent, MaskGeometry,
-    MaskImage, MaskKind, MaskRgbImage, MaskStack,
-    ObjectStroke, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    rasterize_inpaint_dabs_binary, BrushDab, BrushMode, InpaintLayer, InpaintPatch, InpaintStroke,
+    LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry, MaskImage, MaskKind,
+    MaskRgbImage, MaskStack, ObjectStroke, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 pub use processing::{
     affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile, ExportTile,
@@ -39,7 +37,7 @@ pub use processing::{
 pub use raw_loader::{
     is_supported_raw_path, load_raw_file, load_raw_file_with_dcp,
     load_raw_file_with_profile_config, load_raw_file_with_profile_selection, load_raw_thumbnail,
-    CameraProfileCandidate, CameraProfileMode, CfaKind, LoadedRaw,
-    RawThumbnail, SUPPORTED_RAW_EXTENSIONS,
+    CameraProfileCandidate, CameraProfileMode, CfaKind, LoadedRaw, RawThumbnail,
+    SUPPORTED_RAW_EXTENSIONS,
 };
 pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};

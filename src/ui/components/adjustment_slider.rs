@@ -156,6 +156,7 @@ fn touch_value_field(ui: &mut Ui, value: f64, decimals: usize) -> egui::Response
     response
 }
 
+#[allow(clippy::too_many_arguments)]
 fn guarded_slider<Num>(
     ui: &mut Ui,
     value: &mut Num,

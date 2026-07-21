@@ -47,14 +47,12 @@ fn run() -> Result<()> {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
-        ..Default::default()
     }))
     .or_else(|_| {
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: None,
             force_fallback_adapter: true,
-            ..Default::default()
         }))
     })
     .context("request a hardware or software wgpu adapter")?;
