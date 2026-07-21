@@ -196,10 +196,10 @@ impl InpaintLayer {
 
 /// Compact persisted result for one released inpainting brush stroke.
 ///
-/// New patches are stored as scene-linear Rec.2020 RGBA16F at the exact
-/// full-resolution image coordinates where LaMa was applied. `rgba` is kept
-/// only for backward compatibility with early AuRaw 2.0 sidecars that stored
-/// 8-bit sRGB proxy patches.
+/// Replacement pixels use scene-linear Rec.2020 RGBA16F. Placement remains in
+/// full-resolution source coordinates, while newer patches may retain LaMa's
+/// smaller native raster instead of persisting a redundant upscale. `rgba` is
+/// kept for backward compatibility with early 8-bit sRGB patches.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct InpaintPatch {
     pub source_width: u32,
@@ -208,6 +208,11 @@ pub struct InpaintPatch {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+    /// Zero means the stored raster has the legacy `width` by `height` layout.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub raster_width: u32,
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub raster_height: u32,
     /// Zero identifies RGBA16F patches written by the former camera-RGB
     /// capture bug. Version one is neutral scene-linear Rec.2020.
     #[serde(default)]
@@ -237,6 +242,10 @@ fn arc_u8_is_empty(values: &Arc<[u8]>) -> bool {
     values.is_empty()
 }
 
+fn u32_is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 impl InpaintPatch {
     #[allow(clippy::too_many_arguments)]
     pub fn new_linear(
@@ -249,9 +258,32 @@ impl InpaintPatch {
         rgba16f: Vec<u16>,
         mask: Vec<u8>,
     ) -> Option<Self> {
-        let pixels = usize::try_from(width)
+        Self::new_linear_resampled(
+            [source_width, source_height],
+            [x, y],
+            [width, height],
+            [width, height],
+            rgba16f,
+            mask,
+        )
+    }
+
+    pub fn new_linear_resampled(
+        source_dimensions: [u32; 2],
+        origin: [u32; 2],
+        extent: [u32; 2],
+        raster_dimensions: [u32; 2],
+        rgba16f: Vec<u16>,
+        mask: Vec<u8>,
+    ) -> Option<Self> {
+        let [source_width, source_height] = source_dimensions;
+        let [x, y] = origin;
+        let [width, height] = extent;
+        let [stored_width, stored_height] = raster_dimensions;
+        let pixels = usize::try_from(stored_width)
             .ok()?
-            .checked_mul(usize::try_from(height).ok()?)?;
+            .checked_mul(usize::try_from(stored_height).ok()?)?;
+        let legacy_sized = stored_width == width && stored_height == height;
         let patch = Self {
             source_width,
             source_height,
@@ -259,12 +291,22 @@ impl InpaintPatch {
             y,
             width,
             height,
+            raster_width: if legacy_sized { 0 } else { stored_width },
+            raster_height: if legacy_sized { 0 } else { stored_height },
             working_space_version: 1,
             rgba16f: rgba16f.into(),
             rgba: Vec::<u8>::new().into(),
             mask: mask.into(),
         };
         (patch.rgba16f.len() == pixels.checked_mul(4)? && patch.is_valid()).then_some(patch)
+    }
+
+    pub(crate) fn raster_dimensions(&self) -> [u32; 2] {
+        if self.raster_width == 0 && self.raster_height == 0 {
+            [self.width, self.height]
+        } else {
+            [self.raster_width, self.raster_height]
+        }
     }
 
     fn has_valid_storage_layout(&self) -> bool {
@@ -280,11 +322,13 @@ impl InpaintPatch {
                 .y
                 .checked_add(self.height)
                 .is_none_or(|bottom| bottom > self.source_height)
+            || (self.raster_width == 0) != (self.raster_height == 0)
         {
             return false;
         }
-        let Some(pixels) = usize::try_from(self.width).ok().and_then(|width| {
-            usize::try_from(self.height)
+        let [raster_width, raster_height] = self.raster_dimensions();
+        let Some(pixels) = usize::try_from(raster_width).ok().and_then(|width| {
+            usize::try_from(raster_height)
                 .ok()
                 .and_then(|height| width.checked_mul(height))
         }) else {
@@ -392,14 +436,19 @@ impl InpaintPatch {
         {
             return None;
         }
-        let sx = source_x.clamp(self.x as f32, (self.x + self.width - 1) as f32);
-        let sy = source_y.clamp(self.y as f32, (self.y + self.height - 1) as f32);
-        let x0 = sx.floor() as u32;
-        let y0 = sy.floor() as u32;
-        let x1 = (x0 + 1).min(self.x + self.width - 1);
-        let y1 = (y0 + 1).min(self.y + self.height - 1);
-        let tx = sx - x0 as f32;
-        let ty = sy - y0 as f32;
+        let [raster_width, raster_height] = self.raster_dimensions();
+        let raster_x =
+            (((source_x - self.x as f32 + 0.5) * raster_width as f32 / self.width as f32) - 0.5)
+                .clamp(0.0, (raster_width - 1) as f32);
+        let raster_y =
+            (((source_y - self.y as f32 + 0.5) * raster_height as f32 / self.height as f32) - 0.5)
+                .clamp(0.0, (raster_height - 1) as f32);
+        let x0 = raster_x.floor() as u32;
+        let y0 = raster_y.floor() as u32;
+        let x1 = (x0 + 1).min(raster_width - 1);
+        let y1 = (y0 + 1).min(raster_height - 1);
+        let tx = raster_x - x0 as f32;
+        let ty = raster_y - y0 as f32;
         let samples = [
             (x0, y0, (1.0 - tx) * (1.0 - ty)),
             (x1, y0, tx * (1.0 - ty)),
@@ -409,8 +458,7 @@ impl InpaintPatch {
         let mut rgb = [0.0f32; 3];
         let mut alpha = 0.0f32;
         for (sample_x, sample_y, weight) in samples {
-            let index =
-                (sample_y - self.y) as usize * self.width as usize + (sample_x - self.x) as usize;
+            let index = sample_y as usize * raster_width as usize + sample_x as usize;
             let pixel = self.linear_rgba16f_at(index)?;
             let linear = pixel.map(|value| f16::from_bits(value).to_f32());
             if !linear.iter().all(|value| value.is_finite()) {
@@ -1921,6 +1969,46 @@ mod tests {
     }
 
     #[test]
+    fn resampled_inpaint_patch_maps_native_raster_over_full_resolution_extent() {
+        use half::f16;
+
+        let pixel = |red: f32| {
+            [
+                f16::from_f32(red).to_bits(),
+                f16::from_f32(0.0).to_bits(),
+                f16::from_f32(0.0).to_bits(),
+                f16::from_f32(1.0).to_bits(),
+            ]
+        };
+        let rgba16f = pixel(0.25).into_iter().chain(pixel(0.75)).collect();
+        let patch = InpaintPatch::new_linear_resampled(
+            [10, 10],
+            [2, 3],
+            [4, 2],
+            [2, 1],
+            rgba16f,
+            vec![255, 255],
+        )
+        .unwrap();
+        assert_eq!(patch.raster_dimensions(), [2, 1]);
+        assert!((patch.sample_linear_rec2020_bilinear(2.0, 3.0).unwrap().0[0] - 0.25).abs() < 1e-3);
+        assert!((patch.sample_linear_rec2020_bilinear(5.0, 4.0).unwrap().0[0] - 0.75).abs() < 1e-3);
+        assert!(patch.sample_linear_rec2020_bilinear(6.0, 4.0).is_none());
+    }
+
+    #[test]
+    fn missing_resampled_dimensions_keep_legacy_patch_layout() {
+        let patch =
+            InpaintPatch::new_linear(2, 2, 0, 0, 2, 2, vec![0u16; 16], vec![255; 4]).unwrap();
+        let mut document = serde_json::to_value(&patch).unwrap();
+        document.as_object_mut().unwrap().remove("raster_width");
+        document.as_object_mut().unwrap().remove("raster_height");
+        let restored: InpaintPatch = serde_json::from_value(document).unwrap();
+        assert_eq!(restored.raster_dimensions(), [2, 2]);
+        assert!(restored.is_valid());
+    }
+
+    #[test]
     fn inpaint_patch_rejects_partial_or_non_finite_linear_payloads() {
         use half::f16;
 
@@ -1928,6 +2016,11 @@ mod tests {
             InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, vec![0u16; 4], vec![255]).unwrap();
         partial.rgba16f = vec![0u16; 3].into();
         assert!(!partial.is_valid());
+
+        let mut incomplete_raster =
+            InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, vec![0u16; 4], vec![255]).unwrap();
+        incomplete_raster.raster_width = 1;
+        assert!(!incomplete_raster.is_valid());
 
         let mut non_finite =
             InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, vec![0u16; 4], vec![255]).unwrap();
