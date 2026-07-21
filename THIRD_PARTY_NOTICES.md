@@ -63,6 +63,14 @@ Promptable Object selection uses the SAM 2.1 Hiera Tiny image encoder and mask d
 
 The object-mask implementation follows the public SAM 2.1 point-prompt interface used by AnyLabeling: normalized RGB encoder input, cached high-resolution/image embedding outputs, foreground/background point prompts, previous-mask logits, and candidate mask scores.
 
+## LaMa ONNX
+
+Local inpainting uses the `lama_fp32.onnx` model distributed by
+[Carve/LaMa-ONNX](https://huggingface.co/Carve/LaMa-ONNX), an ONNX port of the
+original LaMa model. The model repository identifies the model as licensed
+under the Apache License 2.0. AuRaw downloads it only after an explicit user
+choice and verifies it against a pinned SHA-256 digest before use.
+
 ## Lensfun
 
 Lens correction uses the Lensfun library and its camera/lens profile database.

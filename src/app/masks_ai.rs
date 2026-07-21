@@ -987,12 +987,26 @@ impl AurawApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
+                    ui.set_max_width(520.0);
                     ui.label("Subject masks use BiRefNet; Not Subject is the inverse of that probability map, not an independent background model.");
                     ui.label(format!(
                         "The first use downloads {:.0} MB from the rembg GitHub release and stores it in AuRaw's cache.",
                         BIREFNET_MODEL_BYTES as f64 / 1_000_000.0
                     ));
+                    ui.label("Model license: MIT. The model is optional and can be used only after this download.");
                     ui.label("Inference is local. No photograph is uploaded.");
+                    ui.label("When you continue, your device connects directly to GitHub. GitHub receives connection data such as your IP address and request time under its own privacy statement. AuRaw sends no account identifier or telemetry.");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.hyperlink_to(
+                            "GitHub privacy statement",
+                            "https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement",
+                        );
+                        ui.separator();
+                        ui.hyperlink_to(
+                            "MIT model license",
+                            "https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE",
+                        );
+                    });
                     #[cfg(not(target_os = "android"))]
                     if self.onnx_runtime_path.is_none() {
                         ui.colored_label(
@@ -1002,7 +1016,7 @@ impl AurawApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Download and continue").clicked() {
+                        if ui.button("Consent, download and continue").clicked() {
                             self.subject_consent_open = false;
                             self.start_subject_worker(self.birefnet_model_path());
                         }
@@ -1051,12 +1065,26 @@ impl AurawApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
+                    ui.set_max_width(520.0);
                     ui.label("Object masks use SAM 2.1 Hiera Tiny with separate image encoder and prompt decoder models.");
                     ui.label(format!(
                         "The first use downloads about {:.0} MB and stores both ONNX files in AuRaw's model cache.",
                         SAM21_MODEL_BYTES_ESTIMATE as f64 / 1_000_000.0
                     ));
+                    ui.label("Model license: Apache-2.0. The models are optional and can be used only after this download.");
                     ui.label("Inference is local. No photograph or prompt stroke is uploaded.");
+                    ui.label("When you continue, your device connects directly to Hugging Face. Hugging Face receives connection data such as your IP address and request time under its own privacy policy. AuRaw sends no account identifier or telemetry.");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.hyperlink_to(
+                            "Hugging Face privacy policy",
+                            "https://huggingface.co/privacy",
+                        );
+                        ui.separator();
+                        ui.hyperlink_to(
+                            "Apache-2.0 model license",
+                            "https://github.com/facebookresearch/sam2/blob/main/LICENSE",
+                        );
+                    });
                     #[cfg(not(target_os = "android"))]
                     if self.onnx_runtime_path.is_none() {
                         ui.colored_label(
@@ -1066,7 +1094,7 @@ impl AurawApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Download and continue").clicked() {
+                        if ui.button("Consent, download and continue").clicked() {
                             self.object_consent_open = false;
                             if let Some((mask_index, component_index)) = self.object_pending_target.take() {
                                 let (encoder, decoder) = self.sam21_model_paths();

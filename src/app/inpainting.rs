@@ -315,12 +315,26 @@ impl AurawApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
+                    ui.set_max_width(520.0);
                     ui.label("Inpainting uses the LaMa ONNX model to remove painted content.");
                     ui.label(format!(
                         "The first use downloads {:.0} MB and stores the model in AuRaw's cache.",
                         LAMA_MODEL_BYTES as f64 / 1_000_000.0
                     ));
+                    ui.label("Model license: Apache-2.0. The model is optional and can be used only after this download.");
                     ui.label("Inference is local. No photograph or brush stroke is uploaded.");
+                    ui.label("When you continue, your device connects directly to Hugging Face. Hugging Face receives connection data such as your IP address and request time under its own privacy policy. AuRaw sends no account identifier or telemetry.");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.hyperlink_to(
+                            "Hugging Face privacy policy",
+                            "https://huggingface.co/privacy",
+                        );
+                        ui.separator();
+                        ui.hyperlink_to(
+                            "Apache-2.0 model page",
+                            "https://huggingface.co/Carve/LaMa-ONNX",
+                        );
+                    });
                     #[cfg(not(target_os = "android"))]
                     if self.onnx_runtime_path.is_none() {
                         ui.colored_label(
@@ -330,7 +344,7 @@ impl AurawApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Download and continue").clicked() {
+                        if ui.button("Consent, download and continue").clicked() {
                             self.inpaint_consent_open = false;
                             self.start_inpaint_worker(self.lama_model_path());
                         }
