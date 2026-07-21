@@ -352,13 +352,24 @@ impl AurawApp {
         } else {
             &self.masks
         };
+        let inpaint = if self.original_preview_requested {
+            None
+        } else {
+            self.inpaint_layer.as_ref()
+        };
 
         if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
+            let _ = pipeline.update_inpaint_layer(
+                &render_state.queue, inpaint, 0, 0, raw.width, raw.height
+            );
             let params = GpuParams::new(exposure, masks, raw);
             pipeline.recompute(&render_state.queue, &render_state.device, &params);
         }
 
         if let Some(navigation) = self.preview_navigation.as_ref() {
+            let _ = navigation.pipeline.update_inpaint_layer(
+                &render_state.queue, inpaint, 0, 0, navigation.raw.width, navigation.raw.height
+            );
             let params = GpuParams::new(exposure, masks, &navigation.raw);
             navigation
                 .pipeline
@@ -370,6 +381,14 @@ impl AurawApp {
             .as_ref()
             .filter(|detail| detail.revision == self.preview_revision)
         {
+            let _ = detail.pipeline.update_inpaint_layer(
+                &render_state.queue,
+                inpaint,
+                detail.virtual_origin[0],
+                detail.virtual_origin[1],
+                detail.virtual_full_size[0],
+                detail.virtual_full_size[1],
+            );
             let params = GpuParams::new_for_tile(
                 exposure,
                 masks,
@@ -466,6 +485,17 @@ impl AurawApp {
             Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &preview_raw)
         {
             self.notice = Some(error);
+            return;
+        }
+        if let Err(error) = pipeline.update_inpaint_layer(
+            &render_state.queue,
+            self.inpaint_layer.as_ref(),
+            0,
+            0,
+            preview_raw.width,
+            preview_raw.height,
+        ) {
+            self.notice = Some(format!("Could not rebuild preview inpainting: {error:#}"));
             return;
         }
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
@@ -741,6 +771,17 @@ impl AurawApp {
                     full_frame,
                 );
             }
+            if let Err(error) = detail.pipeline.update_inpaint_layer(
+                &render_state.queue,
+                self.inpaint_layer.as_ref(),
+                virtual_origin_x,
+                virtual_origin_y,
+                virtual_full_width,
+                virtual_full_height,
+            ) {
+                self.notice = Some(format!("Could not update zoomed inpainting: {error:#}"));
+                return;
+            }
             detail.pipeline.dispatch_stage(
                 &render_state.queue,
                 &render_state.device,
@@ -800,6 +841,17 @@ impl AurawApp {
         );
         if let Some(full_frame) = full_frame_tone_pipeline {
             pipeline.inherit_tone_statistics(&render_state.queue, &render_state.device, full_frame);
+        }
+        if let Err(error) = pipeline.update_inpaint_layer(
+            &render_state.queue,
+            self.inpaint_layer.as_ref(),
+            virtual_origin_x,
+            virtual_origin_y,
+            virtual_full_width,
+            virtual_full_height,
+        ) {
+            self.notice = Some(format!("Could not update zoomed inpainting: {error:#}"));
+            return;
         }
         pipeline.dispatch_stage(
             &render_state.queue,
@@ -888,6 +940,17 @@ impl AurawApp {
                 self.notice = Some(error);
                 return;
             }
+            if let Err(error) = pipeline.update_inpaint_layer(
+                &render_state.queue,
+                self.inpaint_layer.as_ref(),
+                0,
+                0,
+                raw.width,
+                raw.height,
+            ) {
+                self.notice = Some(format!("Could not update navigation inpainting: {error:#}"));
+                return;
+            }
             pipeline.recompute(&render_state.queue, &render_state.device, &params);
             let mut renderer = render_state.renderer.write();
             pipeline.register_egui_texture(&render_state.device, &mut renderer);
@@ -932,6 +995,17 @@ impl AurawApp {
             }
         }
 
+        if let Err(error) = preview.pipeline.update_inpaint_layer(
+            &render_state.queue,
+            self.inpaint_layer.as_ref(),
+            0,
+            0,
+            preview.raw.width,
+            preview.raw.height,
+        ) {
+            self.notice = Some(format!("Could not update navigation inpainting: {error:#}"));
+            return;
+        }
         let params = GpuParams::new(&self.target_exposure, &self.masks, &preview.raw);
         let stages = match stage {
             ProcessingStage::Raw => &[
@@ -1053,6 +1127,18 @@ impl AurawApp {
         }
 
         if stage == ProcessingStage::Output {
+            if let Err(error) = detail.pipeline.update_inpaint_layer(
+                &render_state.queue,
+                self.inpaint_layer.as_ref(),
+                virtual_origin[0],
+                virtual_origin[1],
+                virtual_full_size[0],
+                virtual_full_size[1],
+            ) {
+                self.notice = Some(format!("Could not update zoomed inpainting: {error:#}"));
+                self.preview_detail_pending_stage = None;
+                return;
+            }
             if let Some(full_frame) = full_frame_tone_pipeline {
                 detail.pipeline.inherit_tone_statistics(
                     &render_state.queue,
@@ -1115,6 +1201,19 @@ impl AurawApp {
             }
         }
 
+        if stage == ProcessingStage::Output {
+            if let Err(error) = pipeline.update_inpaint_layer(
+                &render_state.queue,
+                self.inpaint_layer.as_ref(),
+                0,
+                0,
+                raw.width,
+                raw.height,
+            ) {
+                self.notice = Some(format!("Could not update preview inpainting: {error:#}"));
+                return;
+            }
+        }
         let params = GpuParams::new(&self.target_exposure, &self.masks, raw);
         pipeline.dispatch_stage(&render_state.queue, &render_state.device, &params, stage);
         self.pending_stage = match stage {

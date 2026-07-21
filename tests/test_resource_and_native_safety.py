@@ -17,7 +17,6 @@ LIBRAW_BUILD = (ROOT / "scripts/build-android-libraw.sh").read_text(encoding="ut
 
 def test_native_runtime_is_never_downloaded_or_archive_extracted() -> None:
     assert "onnxruntime-linux" not in AI
-    assert "libonnxruntime.so" not in AI
     assert "flate2" not in CARGO
     assert "tar =" not in CARGO
     assert "ort::init_from" in AI
@@ -26,9 +25,12 @@ def test_native_runtime_is_never_downloaded_or_archive_extracted() -> None:
     assert "DESKTOP_RUNTIME_IDENTITY" in AI
     assert "builder.with_name(\"AuRaw\").commit()" in AI
     assert "a different ONNX Runtime is already active" in AI
-    assert "memfd_create" in AI
-    assert "F_SEAL_WRITE" in AI
-    assert "/proc/self/fd/" in AI
+    # Linux must load the user-approved canonical on-disk runtime so ONNX
+    # Runtime can discover sibling execution-provider libraries. It must not
+    # stage or load the runtime through a memfd pseudo-path.
+    assert "Ok((path.to_path_buf(), None, actual_sha256))" in AI
+    assert "memfd_create(" not in AI
+    assert "F_SEAL_WRITE" not in AI
 
 
 def test_downloaded_model_is_size_and_sha256_pinned() -> None:

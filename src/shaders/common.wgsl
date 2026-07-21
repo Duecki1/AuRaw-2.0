@@ -73,6 +73,11 @@ struct Params {
     cam_to_srgb_0: vec4<f32>,
     cam_to_srgb_1: vec4<f32>,
     cam_to_srgb_2: vec4<f32>,
+    // Neutral scene-working -> current camera-WB scene-working transform used
+    // only for persisted/generated inpaint replacement pixels.
+    inpaint_wb_0: vec4<f32>,
+    inpaint_wb_1: vec4<f32>,
+    inpaint_wb_2: vec4<f32>,
     black_levels: vec4<f32>,
     white_levels: vec4<f32>,
     width: u32,

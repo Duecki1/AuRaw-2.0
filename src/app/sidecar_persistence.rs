@@ -603,7 +603,6 @@ impl AurawApp {
             self.egui_ctx.request_repaint();
             return;
         };
-        let inpaint = self.inpaint_layer.clone();
         let Some(render_state) = frame.wgpu_render_state() else {
             self.developed_thumbnail_pending = None;
             log::warn!("cannot cache developed thumbnail without the wgpu backend");
@@ -624,9 +623,6 @@ impl AurawApp {
                     let mut thumbnail = snapshot
                         .read_thumbnail_blocking(&device, &queue, 512)
                         .map_err(|error| format!("GPU thumbnail readback failed: {error:#}"))?;
-                    if let Some(layer) = inpaint.as_ref() {
-                        composite_inpaint_thumbnail(&mut thumbnail, layer)?;
-                    }
                     match &worker_target {
                         #[cfg(not(target_os = "android"))]
                         crate::sidecar::SidecarTarget::Desktop { raw_path } => {

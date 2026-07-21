@@ -26,6 +26,7 @@ impl AurawApp {
         self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.note_inpainting_changed_for_ai_masks();
+        self.queue_preview_processing(ProcessingStage::Output);
         self.notice = Some("Inpainting cleared.".to_owned());
         self.egui_ctx.request_repaint();
     }
@@ -93,20 +94,43 @@ impl AurawApp {
         let render_state = frame
             .wgpu_render_state()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let pipeline = self
-            .gpu_pipeline
+        let raw = self
+            .preview_raw
             .as_ref()
             .ok_or_else(|| "Open an image before using Inpainting.".to_owned())?;
-        let rgba = pipeline
-            .read_output_region_blocking(
+
+        // Run LaMa on the pre-adjustment scene rather than the live edited
+        // output. The generated replacement can then be inserted back before
+        // Develop processing, allowing later global and mask adjustments to
+        // affect it exactly like the surrounding photo instead of baking the
+        // sliders into the patch at erase time.
+        let empty_masks = MaskStack::default();
+        // Persist inpainting in the RAW's neutral scene-working basis. At
+        // display/export time the GPU maps that neutral basis through the live
+        // camera white-balance matrix before applying the current DCP/profile
+        // and all later global/local edits. This keeps temperature/tint editable
+        // instead of baking the values that happened to be active when erased.
+        let mut neutral_exposure = self.exposure;
+        neutral_exposure.temperature = 0.0;
+        neutral_exposure.tint = 0.0;
+        let params = GpuParams::new(&neutral_exposure, &empty_masks, raw);
+        let pipeline = RawGpuPipeline::new_headless_with_quality(
+            &render_state.device,
+            &render_state.queue,
+            raw,
+            &params,
+            ProcessingQuality::High,
+        )
+        .map_err(|error| format!("Could not prepare the inpainting scene: {error:#}"))?;
+        let scene = pipeline
+            .render_inpaint_working_scene_blocking(
                 &render_state.device,
                 &render_state.queue,
-                0,
-                0,
-                pipeline.width,
-                pipeline.height,
+                &params,
             )
-            .map_err(|error| format!("Could not read the current image for inpainting: {error:#}"))?;
+            .map_err(|error| format!("Could not read the inpainting scene: {error:#}"))?;
+        let rgba = scene_rec2020_to_srgb8(&scene)
+            .map_err(|error| format!("Could not encode the inpainting scene: {error}"))?;
         MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
             .ok_or_else(|| "The inpainting source has invalid dimensions.".to_owned())
     }
@@ -175,6 +199,7 @@ impl AurawApp {
                         self.rebuild_inpaint_layer();
                         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
                         self.note_inpainting_changed_for_ai_masks();
+                        self.queue_preview_processing(ProcessingStage::Output);
                         self.notice = Some("Erase complete.".to_owned());
                     } else {
                         self.notice = Some("Inpainting returned an empty result.".to_owned());
@@ -198,6 +223,7 @@ impl AurawApp {
         self.rebuild_inpaint_layer();
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.note_inpainting_changed_for_ai_masks();
+        self.queue_preview_processing(ProcessingStage::Output);
         self.notice = Some("Inpainting stroke deleted.".to_owned());
         self.egui_ctx.request_repaint();
     }
@@ -294,65 +320,28 @@ impl AurawApp {
     }
 }
 
-fn composite_inpaint_thumbnail(
-    thumbnail: &mut crate::pipeline::RawThumbnail,
-    layer: &InpaintLayer,
-) -> Result<(), String> {
-    if thumbnail.width == 0
-        || thumbnail.height == 0
-        || layer.width == 0
-        || layer.height == 0
-    {
-        return Err("The inpainting thumbnail dimensions are invalid.".to_owned());
-    }
-    let thumbnail_pixels = usize::try_from(thumbnail.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(thumbnail.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-        .ok_or_else(|| "The thumbnail dimensions are too large.".to_owned())?;
-    if thumbnail.rgba.len() != thumbnail_pixels.saturating_mul(4) {
-        return Err("The thumbnail buffer is incomplete.".to_owned());
-    }
-    let layer_pixels = usize::try_from(layer.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(layer.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-        .ok_or_else(|| "The inpainting dimensions are too large.".to_owned())?;
-    if layer.mask.len() != layer_pixels || layer.rgba.len() != layer_pixels.saturating_mul(4) {
-        return Err("The inpainting layer is incomplete.".to_owned());
-    }
 
-    for y in 0..thumbnail.height {
-        let layer_y = ((y as f32 + 0.5) * layer.height as f32 / thumbnail.height as f32)
-            .floor()
-            .clamp(0.0, layer.height.saturating_sub(1) as f32) as u32;
-        for x in 0..thumbnail.width {
-            let layer_x = ((x as f32 + 0.5) * layer.width as f32 / thumbnail.width as f32)
-                .floor()
-                .clamp(0.0, layer.width.saturating_sub(1) as f32) as u32;
-            let layer_index = layer_y as usize * layer.width as usize + layer_x as usize;
-            let alpha = layer.mask[layer_index] as f32 / 255.0;
-            if alpha <= 0.0 {
-                continue;
-            }
-            let destination = (y as usize * thumbnail.width as usize + x as usize) * 4;
-            let source = layer_index * 4;
-            for channel in 0..3 {
-                let base = thumbnail.rgba[destination + channel] as f32;
-                let replacement = layer.rgba[source + channel] as f32;
-                thumbnail.rgba[destination + channel] =
-                    (base + (replacement - base) * alpha).round().clamp(0.0, 255.0) as u8;
-            }
-            thumbnail.rgba[destination + 3] = 255;
-        }
+fn scene_rec2020_to_srgb8(scene: &[f32]) -> Result<Vec<u8>, String> {
+    if scene.len() % 3 != 0 {
+        return Err("scene RGB buffer has an invalid length".to_owned());
     }
-    Ok(())
+    let mut rgba = Vec::with_capacity(scene.len() / 3 * 4);
+    for rgb in scene.chunks_exact(3) {
+        let r = 1.660_491_0 * rgb[0] - 0.587_641_1 * rgb[1] - 0.072_849_9 * rgb[2];
+        let g = -0.124_550_5 * rgb[0] + 1.132_899_9 * rgb[1] - 0.008_349_4 * rgb[2];
+        let b = -0.018_150_8 * rgb[0] - 0.100_578_9 * rgb[1] + 1.118_729_7 * rgb[2];
+        for value in [r, g, b] {
+            let linear = value.max(0.0);
+            let encoded = if linear <= 0.003_130_8 {
+                linear * 12.92
+            } else {
+                1.055 * linear.powf(1.0 / 2.4) - 0.055
+            };
+            rgba.push((encoded.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+        rgba.push(255);
+    }
+    Ok(rgba)
 }
 
 fn flatten_inpaint_source(

@@ -190,7 +190,7 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
     // Sixteen scalar values keep the stable 64-byte prefix. The two
     // darktable sigmoid vec4s follow the local-tone controls, then the
     // remaining adjustment, camera/raw, dimension and profile blocks.
-    assert_eq!(std::mem::size_of::<super::GpuParams>(), 6960);
+    assert_eq!(std::mem::size_of::<super::GpuParams>(), 7008);
     assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
     assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
     assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
