@@ -427,6 +427,7 @@ impl AurawApp {
     }
 
     pub(crate) fn preview_quality_changed(&mut self) {
+        self.persist_performance_settings();
         if self.loaded_raw.is_some() || self.load_receiver.is_some() {
             self.preview_quality_dirty = true;
             self.note_preview_motion();

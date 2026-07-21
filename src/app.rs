@@ -24,6 +24,7 @@ use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::top_bar::TopBar;
 use eframe::{egui, wgpu};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -44,7 +45,8 @@ pub(crate) struct AndroidOriginalHold {
     pub showing_original: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum PreviewQuality {
     Fast,
     #[default]
