@@ -13,6 +13,10 @@ darktable and these source files are licensed GPL-3.0-or-later. Distribution of 
 
 # Third-party notices
 
+These notices identify source-derived components and separately licensed runtime
+assets. They do not replace the license texts supplied by the respective
+projects.
+
 ## darktable sigmoid
 
 Portions of this project are adapted from darktable 5.6.0:
@@ -30,6 +34,22 @@ The adapted Rust and WGSL code is located in:
 The port includes the generalized log-logistic curve and coefficient calculation, negative-value desaturation, channel ordering, per-channel hue/energy preservation, and RGB-ratio hyperbolic gamut compression.
 
 darktable and these adaptations are licensed under the GNU General Public License, version 3 or (at your option) any later version. AuRaw is distributed under compatible GPL-3.0 terms. Source-file headers retain attribution and license identifiers.
+
+## Ansel highlight reconstruction
+
+AuRaw's guided pre-demosaic highlight reconstruction is adapted from the
+`highlights` module in [Ansel](https://github.com/aurelienpierreeng/ansel),
+including its interpolate, clipping-mask propagation, chroma reconstruction,
+and remosaic design. The corresponding AuRaw implementation is primarily in:
+
+- `src/shaders/highlights.wgsl`
+- `src/shaders/highlight_lch_pass.wgsl`
+- `src/pipeline/basicadj.rs`
+
+Copyright remains with the Ansel and darktable contributors for their original
+work; the Rust/WGSL adaptation is copyright 2026 AuRaw contributors. Ansel is
+distributed under GNU GPL version 3 terms, compatible with AuRaw's GPL-3.0
+distribution. The adapted files retain attribution and SPDX identifiers.
 
 ## BiRefNet
 

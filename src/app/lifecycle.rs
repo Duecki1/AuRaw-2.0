@@ -154,7 +154,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
-            preview_quality: PreviewQuality::default(),
+            preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
             preview_visible_uv: PreviewUvRect {
@@ -324,7 +324,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
-            preview_quality: PreviewQuality::default(),
+            preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
             preview_visible_uv: PreviewUvRect {
@@ -768,6 +768,7 @@ impl AurawApp {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.raw_cache_limit,
             thumbnail_workers: self.library.thumbnail_worker_count(),
+            preview_quality: self.preview_quality,
             camera_profile_mode: self.camera_profile_mode,
             camera_profile_folder: self.camera_profile_folder.clone(),
             camera_profile_folder_label: self.camera_profile_folder_label.clone(),

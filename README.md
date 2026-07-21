@@ -2,6 +2,15 @@
 
 GPU-based RAW image editor for Linux, Windows, and Android.
 
+AuRaw is an independent Rust/egui implementation whose product direction was
+inspired by the open-source RAW-editing work of
+[darktable](https://www.darktable.org/), [Ansel](https://ansel.photos/), and
+[RapidRAW](https://github.com/CyberTimon/RapidRAW). Source-derived darktable and
+Ansel algorithms are identified in file headers and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). RapidRAW is acknowledged as
+interface and workflow inspiration; its AGPL-3.0 source code is not relicensed
+as part of AuRaw.
+
 
 ## Platform support
 
@@ -225,3 +234,15 @@ with an error rather than allowing unbounded memory or storage growth.
 ## Development quality gates
 
 Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `regression/README.md` and `benchmarks/README.md`. Dependency policy is documented in [DEPENDENCIES.md](DEPENDENCIES.md), with bundled-license details in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## License and attribution
+
+AuRaw is copyright 2026 Duecki and AuRaw contributors and is distributed under
+the [GNU General Public License, version 3 or later](COPYING)
+(`GPL-3.0-or-later`). There is no warranty, to the extent permitted by law.
+
+Some algorithms are adapted from GPL-compatible upstream projects and retain
+their original copyrights. Model weights, native libraries, profile databases,
+and other third-party components keep their own licenses. See
+[NOTICE.md](NOTICE.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and
+[DEPENDENCIES.md](DEPENDENCIES.md) before redistributing a packaged build.

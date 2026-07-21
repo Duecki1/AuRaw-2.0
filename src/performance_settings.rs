@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 2;
+const SETTINGS_VERSION: u32 = 3;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -13,6 +13,8 @@ pub(crate) struct PerformanceSettings {
     pub(crate) raw_cache_files: usize,
     #[serde(default = "default_thumbnail_workers")]
     pub(crate) thumbnail_workers: usize,
+    #[serde(default)]
+    pub(crate) preview_quality: crate::app::PreviewQuality,
     #[serde(default)]
     pub(crate) camera_profile_mode: CameraProfileMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +58,7 @@ impl Default for PerformanceSettings {
             version: SETTINGS_VERSION,
             raw_cache_files: default_raw_cache_files(),
             thumbnail_workers: default_thumbnail_workers(),
+            preview_quality: crate::app::PreviewQuality::default(),
             camera_profile_mode: CameraProfileMode::default(),
             camera_profile_folder: None,
             camera_profile_folder_label: None,
@@ -222,6 +225,7 @@ mod tests {
             version: 99,
             raw_cache_files: usize::MAX,
             thumbnail_workers: 0,
+            preview_quality: crate::app::PreviewQuality::High,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
             camera_profile_folder: Some(PathBuf::from("profiles")),
             camera_profile_folder_label: Some("CameraProfiles".to_owned()),
@@ -237,6 +241,7 @@ mod tests {
             crate::app::maximum_raw_cache_limit()
         );
         assert_eq!(settings.thumbnail_workers, 1);
+        assert_eq!(settings.preview_quality, crate::app::PreviewQuality::High);
         assert_eq!(settings.camera_profile_mode, CameraProfileMode::DcpProfiles);
         assert_eq!(
             settings.camera_profile_folder,
@@ -250,6 +255,18 @@ mod tests {
         assert_eq!(
             settings.last_camera_profile,
             Some(PathBuf::from("Sony/Camera ST.dcp"))
+        );
+    }
+
+    #[test]
+    fn older_settings_default_preview_quality_to_balanced() {
+        let settings: PerformanceSettings =
+            serde_json::from_str(r#"{"version":2,"raw_cache_files":1,"thumbnail_workers":1}"#)
+                .expect("legacy settings should remain readable");
+
+        assert_eq!(
+            settings.preview_quality,
+            crate::app::PreviewQuality::Balanced
         );
     }
 }

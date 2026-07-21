@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
 // Pre-demosaic highlight reconstruction translated from Ansel's highlights
 // module. All values here are black-level-normalized, white-balanced camera
 // samples. Repairing the CFA before demosaic prevents a clipped sensor channel
 // from becoming the familiar magenta/pink highlight after exposure is lowered.
+// Copyright (C) Ansel and darktable contributors.
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
 
 const ANSEL_SQRT3: f32 = 1.7320508075688772;
 const ANSEL_SQRT12: f32 = 3.4641016151377544;
