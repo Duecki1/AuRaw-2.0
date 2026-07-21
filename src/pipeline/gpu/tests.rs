@@ -1,11 +1,13 @@
 use super::{
-    highlight_final_read_slot, highlight_stage_slots, processing_work_format, work_shader_source,
+    color_grade_hue_turns, highlight_final_read_slot, highlight_stage_slots,
+    pack_local_point_curve, processing_work_format, shader_highlight_method, work_shader_source,
     HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS,
     SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
     SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1,
     SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5, SHADER_XTRANS_P6,
     SHADER_XTRANS_P7,
 };
+use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
 
 #[test]
 fn compute_shaders_parse_and_validate() {
@@ -119,6 +121,79 @@ fn guided_highlight_strength_is_one_continuous_final_blend() {
 }
 
 #[test]
+fn xtrans_never_dispatches_the_bayer_phase_lch_reconstruction() {
+    assert_eq!(
+        shader_highlight_method(CfaKind::Bayer, HighlightReconstructionMethod::Lch),
+        HighlightReconstructionMethod::Lch.shader_value()
+    );
+    assert_eq!(
+        shader_highlight_method(CfaKind::XTrans, HighlightReconstructionMethod::Lch),
+        HighlightReconstructionMethod::Guided.shader_value()
+    );
+    assert_eq!(
+        shader_highlight_method(CfaKind::XTrans, HighlightReconstructionMethod::Off),
+        HighlightReconstructionMethod::Off.shader_value()
+    );
+}
+
+#[test]
+fn grading_hues_match_the_visible_srgb_wheel_in_oklab() {
+    let red = color_grade_hue_turns(0.0);
+    let green = color_grade_hue_turns(120.0);
+    let blue = color_grade_hue_turns(240.0);
+    assert!((red - 0.081).abs() < 0.002);
+    assert!((green - 0.396).abs() < 0.002);
+    assert!((blue - 0.733).abs() < 0.002);
+    assert!((color_grade_hue_turns(360.0) - red).abs() < f32::EPSILON);
+}
+
+#[test]
+fn profile_highlight_shoulder_is_monotonic() {
+    let map_peak = |peak: f32| {
+        let knee = 0.82;
+        if peak <= knee {
+            peak
+        } else {
+            let distance = peak - knee;
+            knee + distance / (1.0 + distance / (1.0 - knee))
+        }
+    };
+    let mut previous = map_peak(0.0);
+    for step in 1..=10_000 {
+        let current = map_peak(step as f32 / 1_000.0);
+        assert!(current >= previous, "shoulder reversed at step {step}");
+        assert!(current <= 1.0);
+        previous = current;
+    }
+    assert!(SHADER_ADJUSTMENTS.contains("mapped_peak = knee + distance /"));
+    assert!(!SHADER_ADJUSTMENTS.contains("mix(positive, darktable_sigmoid"));
+}
+
+#[test]
+fn lifted_black_curve_uses_continuous_luminance_remapping() {
+    assert!(SHADER_ADJUSTMENTS.contains("fn remap_scene_luminance"));
+    assert!(SHADER_ADJUSTMENTS.contains("smoothstep(1e-7, 1e-5, luminance)"));
+    assert!(!SHADER_ADJUSTMENTS.contains("adjusted * clamp(curved / luminance, 0.0, 256.0)"));
+}
+
+#[test]
+fn local_curves_preserve_exact_control_points() {
+    let mut curve = PointCurve::linear();
+    curve.len = 4;
+    curve.points[1] = [0.500, 0.20];
+    curve.points[2] = [0.505, 0.80];
+    curve.points[3] = [1.0, 1.0];
+    let packed = pack_local_point_curve(&curve);
+
+    assert_eq!(packed[0], [0.0, 0.0, 0.500, 0.20]);
+    assert_eq!(packed[1], [0.505, 0.80, 1.0, 1.0]);
+    assert_eq!(packed[4][0], 4.0);
+    assert!(SHADER_ADJUSTMENTS.contains("fn local_curve_tangent"));
+    assert!(SHADER_ADJUSTMENTS.contains("let hermite ="));
+    assert!(!SHADER_ADJUSTMENTS.contains("clamp(input, 0.0, 1.0) * 31.0"));
+}
+
+#[test]
 fn demosaic_reference_invariants_are_present() {
     assert!(SHADER_BAYER_RCD_P4.contains("const RCD_MARGIN: i32 = 9"));
     assert!(SHADER_BAYER_RCD_P4.contains("ppg_rgb_at"));
@@ -222,49 +297,50 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
         432
     );
     assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 608);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, width), 704);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 712);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 720);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, inpaint_wb_0), 672);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, width), 752);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 760);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 768);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_histogram_bounds),
-        736
+        784
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 752);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 816);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, process_info), 832);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 848);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 864);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 992);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1120);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1248);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1376);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2272);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 800);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 864);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, process_info), 880);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 896);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 912);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 1040);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1168);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1296);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1424);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2320);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_red_0),
-        2400
+        2448
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_green_0),
-        3424
+        3472
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
-        4448
+        4496
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5472);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5520);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
-        6112
+        6160
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 6240);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 6304);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 6288);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 6352);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_grade_shadows),
-        6320
+        6368
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_grade_options),
-        6832
+        6880
     );
 }
 
@@ -333,9 +409,11 @@ fn global_wb_changes_camera_transform_for_dng_metadata() {
         &crate::pipeline::MaskStack::default(),
         &raw,
     );
-    let mut adjusted = crate::pipeline::ExposureParams::default();
-    adjusted.temperature = 40.0;
-    adjusted.tint = 20.0;
+    let adjusted = crate::pipeline::ExposureParams {
+        temperature: 40.0,
+        tint: 20.0,
+        ..crate::pipeline::ExposureParams::default()
+    };
     let changed = super::GpuParams::new(&adjusted, &crate::pipeline::MaskStack::default(), &raw);
     assert_ne!(neutral.cam_to_srgb_0, changed.cam_to_srgb_0);
     assert_ne!(neutral.cam_to_srgb_1, changed.cam_to_srgb_1);

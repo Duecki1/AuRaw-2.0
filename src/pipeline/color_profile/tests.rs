@@ -26,12 +26,39 @@ fn tone_curve_sampling_is_monotonic_for_monotonic_points() {
 }
 
 #[test]
+fn tone_curve_accepts_partial_domain_and_extends_end_values() {
+    let curve = ToneCurve::new(vec![[0.2, 0.1], [0.8, 0.9]]).unwrap();
+    let lut = curve.sampled_lut(11);
+    assert!((lut[0] - 0.1).abs() < f32::EPSILON);
+    assert!((lut[10] - 0.9).abs() < f32::EPSILON);
+}
+
+#[test]
 fn default_srgb_output_lut_preserves_neutral_order() {
     let lut = IccOutputTransform::srgb();
     let low = lut.transform_rgb([0.1; 3]);
     let high = lut.transform_rgb([0.5; 3]);
     assert!(low[0] < high[0]);
     assert!((low[0] - low[1]).abs() < 0.02);
+}
+
+#[test]
+fn default_srgb_output_lut_resolves_near_black_transfer_curve() {
+    let lut = IccOutputTransform::srgb();
+    for linear in [0.000_1_f32, 0.001, 0.003_130_8, 0.01] {
+        let expected = if linear <= 0.003_130_8 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        };
+        let actual = lut.transform_rgb([linear; 3]);
+        for channel in actual {
+            assert!(
+                (channel - expected).abs() < 2e-3,
+                "linear {linear}: got {channel}, expected {expected}"
+            );
+        }
+    }
 }
 
 #[test]

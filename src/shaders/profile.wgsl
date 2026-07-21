@@ -265,7 +265,13 @@ fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
     if lut_info.x < 2u || lut_info.y < 2u || lut_info.z < 2u {
         return clamp(srgb_oetf(REC2020_TO_SRGB * rgb), vec3<f32>(0.0), vec3<f32>(1.0));
     }
-    let coordinate = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))
+    let clamped = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let shaped = vec3<f32>(
+        profile_srgb_encode_value(clamped.r),
+        profile_srgb_encode_value(clamped.g),
+        profile_srgb_encode_value(clamped.b),
+    );
+    let coordinate = shaped
         * vec3<f32>(f32(lut_info.x - 1u), f32(lut_info.y - 1u), f32(lut_info.z - 1u));
     let low = vec3<u32>(floor(coordinate));
     let high = min(low + vec3<u32>(1u), lut_info.xyz - vec3<u32>(1u));

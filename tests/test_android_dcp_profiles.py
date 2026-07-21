@@ -22,6 +22,44 @@ def test_android_uses_tree_picker_and_persistent_private_dcp_mirror() -> None:
     assert "MAX_DCP_TREE_DEPTH" in ACTIVITY
 
 
+def test_android_releases_only_superseded_app_private_dcp_mirrors() -> None:
+    assert "removeCameraProfileMirror" in ACTIVITY
+    assert "remove_camera_profile_mirror" in ANDROID_RS
+    assert "CAMERA_PROFILE_MIRROR_PREFIX" in ACTIVITY
+    assert "getFilesDir().getCanonicalFile()" in ACTIVITY
+    requested = ACTIVITY.index("File requestedMirror = new File(mirrorPath);")
+    symlink_check = ACTIVITY.index(
+        "Files.isSymbolicLink(requestedMirror.toPath())", requested
+    )
+    canonicalize = ACTIVITY.index("requestedMirror.getCanonicalFile()", requested)
+    assert requested < symlink_check < canonicalize
+    assert "filesDirectory.equals(mirror.getParentFile())" in ACTIVITY
+    assert "isCameraProfileMirrorName" in ACTIVITY
+    assert "Files.isSymbolicLink" in ACTIVITY
+
+    clear_start = LIFECYCLE.index("pub(crate) fn clear_camera_profile_folder")
+    clear_end = LIFECYCLE.index("auto_detect_camera_profile_folder", clear_start)
+    clear_body = LIFECYCLE[clear_start:clear_end]
+    assert clear_body.index("persist_performance_settings") < clear_body.index(
+        "remove_camera_profile_mirror"
+    )
+
+    picked_start = LIFECYCLE.index("CameraProfileFolderResult::Picked")
+    picked_end = LIFECYCLE.index("CameraProfileFolderResult::Cancelled", picked_start)
+    picked_body = LIFECYCLE[picked_start:picked_end]
+    assert picked_body.index("persist_performance_settings") < picked_body.index(
+        "remove_camera_profile_mirror"
+    )
+
+
+def test_android_persistable_permission_uses_only_grant_flags() -> None:
+    call = (
+        "takePersistableUriPermission(\n"
+        "                            treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)"
+    )
+    assert call in ACTIVITY
+
+
 def test_android_folder_picker_is_bridged_back_to_rust_settings() -> None:
     assert "open_camera_profile_folder" in ANDROID_RS
     assert "nativeOnCameraProfileFolderPicked" in ANDROID_RS

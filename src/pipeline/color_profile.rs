@@ -140,15 +140,6 @@ impl ToneCurve {
         if points.windows(2).any(|pair| pair[1][0] <= pair[0][0]) {
             bail!("DCP tone-curve x coordinates must be stored in strictly increasing order");
         }
-        let first = points[0];
-        let last = points[points.len() - 1];
-        if first[0].abs() > 1e-6
-            || first[1].abs() > 1e-6
-            || (last[0] - 1.0).abs() > 1e-6
-            || (last[1] - 1.0).abs() > 1e-6
-        {
-            bail!("SDR DCP tone curves must start at (0, 0) and end at (1, 1)");
-        }
         Ok(Self { points })
     }
 
@@ -374,9 +365,9 @@ impl IccOutputTransform {
             for g in 0..size {
                 for r in 0..size {
                     let rec2020 = [
-                        r as f32 / (size - 1) as f32,
-                        g as f32 / (size - 1) as f32,
-                        b as f32 / (size - 1) as f32,
+                        output_lut_linear_node(r, size),
+                        output_lut_linear_node(g, size),
+                        output_lut_linear_node(b, size),
                     ];
                     let linear = mul3(
                         [
@@ -410,9 +401,9 @@ impl IccOutputTransform {
             for g in 0..size {
                 for r in 0..size {
                     let rgb = [
-                        r as f32 / (size - 1) as f32,
-                        g as f32 / (size - 1) as f32,
-                        b as f32 / (size - 1) as f32,
+                        output_lut_linear_node(r, size),
+                        output_lut_linear_node(g, size),
+                        output_lut_linear_node(b, size),
                     ];
                     let encoded = profile.transform(rgb, intent);
                     entries.push([encoded[0], encoded[1], encoded[2], 0.0]);
@@ -427,7 +418,8 @@ impl IccOutputTransform {
     }
 
     /// CPU trilinear evaluation for image export. Input is display-referred
-    /// linear Rec.2020 in the 0..1 domain; output is encoded device RGB.
+    /// linear Rec.2020 in the 0..1 domain; the cube uses a fixed sRGB input
+    /// shaper and returns encoded device RGB.
     pub fn transform_rgb(&self, rgb: [f32; 3]) -> [f32; 3] {
         sample_rgb_lut(&self.entries, self.size, rgb)
     }
@@ -752,7 +744,7 @@ fn natural_cubic_second_derivatives(points: &[[f32; 2]]) -> Vec<f64> {
     }
 
     // Thomas algorithm for a natural cubic spline. The endpoint values stay
-    // zero, which imposes zero second derivative at x=0 and x=1.
+    // zero, imposing zero second derivative at both ends of the point domain.
     let mut rhs = vec![0.0f64; count];
     for index in 1..count - 1 {
         let x_prev = points[index - 1][0] as f64;
@@ -868,9 +860,22 @@ fn srgb_encode(value: f32) -> f32 {
     }
 }
 
+fn srgb_decode(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= 0.040_45 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn output_lut_linear_node(index: u32, size: u32) -> f32 {
+    srgb_decode(index as f32 / (size.max(2) - 1) as f32)
+}
+
 fn sample_rgb_lut(entries: &[[f32; 4]], size: u32, rgb: [f32; 3]) -> [f32; 3] {
     let edge = size.max(2);
-    let coord = rgb.map(|v| v.clamp(0.0, 1.0) * (edge - 1) as f32);
+    let coord = rgb.map(|v| srgb_encode(v) * (edge - 1) as f32);
     let lo = coord.map(|v| v.floor() as u32);
     let hi = lo.map(|v| (v + 1).min(edge - 1));
     let f = [

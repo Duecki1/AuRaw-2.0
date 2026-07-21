@@ -173,7 +173,7 @@ impl MatrixShaperProfile {
         let mut xyz = mul3(D65_TO_D50, mul3(REC2020_TO_XYZ_D65, rec2020));
         if intent == RenderingIntent::AbsoluteColorimetric {
             for channel in 0..3 {
-                xyz[channel] *= self.media_white[channel] / D50_XYZ[channel];
+                xyz[channel] *= D50_XYZ[channel] / self.media_white[channel];
             }
         }
         let mut linear = mul3(self.pcs_to_device_linear, xyz);
@@ -355,4 +355,34 @@ fn be_u32(bytes: &[u8], label: &str) -> Result<u32> {
 
 fn s15_fixed16(bytes: &[u8], label: &str) -> Result<f32> {
     Ok(i32::from_be_bytes(checked_array(bytes, label)?) as f32 / 65_536.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_intent_maps_media_white_to_device_white() {
+        let profile = MatrixShaperProfile {
+            pcs_to_device_linear: [
+                [1.0 / D50_XYZ[0], 0.0, 0.0],
+                [0.0, 1.0 / D50_XYZ[1], 0.0],
+                [0.0, 0.0, 1.0 / D50_XYZ[2]],
+            ],
+            curves: [
+                TransferCurve::Identity,
+                TransferCurve::Identity,
+                TransferCurve::Identity,
+            ],
+            media_white: D50_XYZ.map(|value| value * 0.8),
+        };
+
+        let relative = profile.transform([0.8; 3], RenderingIntent::RelativeColorimetric);
+        let absolute = profile.transform([0.8; 3], RenderingIntent::AbsoluteColorimetric);
+
+        for channel in 0..3 {
+            assert!((relative[channel] - 0.8).abs() < 2e-4);
+            assert!((absolute[channel] - 1.0).abs() < 2e-4);
+        }
+    }
 }

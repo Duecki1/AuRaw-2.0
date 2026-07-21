@@ -132,7 +132,9 @@ impl AurawApp {
             ProcessingQuality::Preview,
             template,
         )
-        .map_err(|error| format!("Could not prepare the full-resolution inpainting crop: {error:#}"))?;
+        .map_err(|error| {
+            format!("Could not prepare the full-resolution inpainting crop: {error:#}")
+        })?;
         let patch_local_x = patch.x.saturating_sub(rect.x);
         let patch_local_y = patch.y.saturating_sub(rect.y);
         let scene = pipeline
@@ -237,12 +239,25 @@ impl AurawApp {
                 Ok(result) => {
                     let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
                     if let Some(stroke) = InpaintStroke::from_result(dabs, result) {
-                        self.inpaint_strokes.push(stroke);
-                        self.rebuild_inpaint_layer();
-                        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
-                        self.note_inpainting_changed_for_ai_masks();
-                        self.queue_preview_processing(ProcessingStage::Output);
-                        self.notice = Some("Erase complete.".to_owned());
+                        match crate::sidecar::preflight_inpaint_addition(
+                            &self.masks,
+                            &self.inpaint_strokes,
+                            &stroke,
+                        ) {
+                            Ok(()) => {
+                                self.inpaint_strokes.push(stroke);
+                                self.rebuild_inpaint_layer();
+                                self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+                                self.note_inpainting_changed_for_ai_masks();
+                                self.queue_preview_processing(ProcessingStage::Output);
+                                self.notice = Some("Erase complete.".to_owned());
+                            }
+                            Err(error) => {
+                                self.notice = Some(format!(
+                                    "Erase result was not applied because the edit cannot fit in the platform sidecar: {error}. Delete an existing mask or erase result and try again."
+                                ));
+                            }
+                        }
                     } else {
                         self.notice = Some("Inpainting returned an empty result.".to_owned());
                     }
@@ -362,7 +377,6 @@ impl AurawApp {
     }
 }
 
-
 fn flatten_inpaint_source_model_region(
     mut rgb_rec2020: Vec<f32>,
     layer: &InpaintLayer,
@@ -384,15 +398,15 @@ fn flatten_inpaint_source_model_region(
             continue;
         }
         for y in 0..LAMA_EDGE {
-            let global_y = origin_y as f32
-                + ((y as f32 + 0.5) * size as f32 / LAMA_EDGE as f32)
-                - 0.5;
+            let global_y =
+                origin_y as f32 + ((y as f32 + 0.5) * size as f32 / LAMA_EDGE as f32) - 0.5;
             for x in 0..LAMA_EDGE {
-                let global_x = origin_x as f32
-                    + ((x as f32 + 0.5) * size as f32 / LAMA_EDGE as f32)
-                    - 0.5;
-                let source_x = (global_x + 0.5) * patch.source_width as f32 / full_width as f32 - 0.5;
-                let source_y = (global_y + 0.5) * patch.source_height as f32 / full_height as f32 - 0.5;
+                let global_x =
+                    origin_x as f32 + ((x as f32 + 0.5) * size as f32 / LAMA_EDGE as f32) - 0.5;
+                let source_x =
+                    (global_x + 0.5) * patch.source_width as f32 / full_width as f32 - 0.5;
+                let source_y =
+                    (global_y + 0.5) * patch.source_height as f32 / full_height as f32 - 0.5;
                 let Some((replacement, alpha)) =
                     patch.sample_linear_rec2020_bilinear_hard_mask(source_x, source_y)
                 else {
@@ -411,4 +425,3 @@ fn flatten_inpaint_source_model_region(
     }
     Ok(rgb_rec2020)
 }
-

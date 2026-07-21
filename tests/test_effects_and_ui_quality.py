@@ -35,7 +35,9 @@ def test_effects_are_a_dedicated_same_stage_pass() -> None:
 
 
 def test_saturation_and_vibrance_keep_the_effects_pass_enabled() -> None:
-    gate = GPU[GPU.index("fn needs_intermediate_adjustment_passes"):GPU.index("fn evaluate_point_curve")]
+    gate = GPU[
+        GPU.index("fn needs_intermediate_adjustment_passes") : GPU.index("struct Pass")
+    ]
     assert "self.saturation.abs() > 1e-6" in gate
     assert "self.vibrance.abs() > 1e-6" in gate
     assert "mask_adjust_2" in gate
@@ -166,8 +168,8 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
 
 
 def test_revised_adjustment_formulas_increment_the_process_version() -> None:
-    assert "CURRENT_PROCESS_VERSION: u32 = 5" in BASIC
-    assert "0..=4 => self.process_version = CURRENT_PROCESS_VERSION" in BASIC
+    assert "CURRENT_PROCESS_VERSION: u32 = 6" in BASIC
+    assert "0..=5 => self.process_version = CURRENT_PROCESS_VERSION" in BASIC
 
 
 def test_presence_and_color_controls_use_perceptual_bounded_mappings() -> None:

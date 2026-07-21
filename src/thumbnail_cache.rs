@@ -17,6 +17,17 @@ const MAX_CACHED_THUMBNAIL_EDGE: u32 = 8192;
 const MAX_CACHED_THUMBNAIL_BYTES: u64 = 128 * 1024 * 1024;
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) fn downscale_to_fit(
+    image: image::DynamicImage,
+    maximum_edge: u32,
+) -> image::DynamicImage {
+    if image.width() > maximum_edge || image.height() > maximum_edge {
+        image.thumbnail(maximum_edge, maximum_edge)
+    } else {
+        image
+    }
+}
+
 pub(crate) fn load_png(path: &Path, maximum_edge: u32) -> Result<Option<RawThumbnail>, String> {
     if maximum_edge == 0 {
         return Err("thumbnail edge must be non-zero".to_owned());
@@ -45,9 +56,8 @@ pub(crate) fn load_png(path: &Path, maximum_edge: u32) -> Result<Option<RawThumb
                 path.display()
             ));
         }
-    }
-    .thumbnail(maximum_edge, maximum_edge)
-    .to_rgba8();
+    };
+    let image = downscale_to_fit(image, maximum_edge).to_rgba8();
     let (width, height) = image.dimensions();
     if width == 0
         || height == 0
@@ -85,12 +95,9 @@ pub(crate) fn save_png(path: &Path, thumbnail: &RawThumbnail) -> Result<(), Stri
         return Err("thumbnail has an invalid RGBA byte count".to_owned());
     }
 
-    let image = image::RgbaImage::from_raw(
-        thumbnail.width,
-        thumbnail.height,
-        thumbnail.rgba.clone(),
-    )
-    .ok_or_else(|| "thumbnail has an invalid RGBA layout".to_owned())?;
+    let image =
+        image::RgbaImage::from_raw(thumbnail.width, thumbnail.height, thumbnail.rgba.clone())
+            .ok_or_else(|| "thumbnail has an invalid RGBA layout".to_owned())?;
     let mut encoded = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(image)
         .write_to(&mut encoded, ImageFormat::Png)
@@ -114,6 +121,7 @@ pub(crate) fn save_png(path: &Path, thumbnail: &RawThumbnail) -> Result<(), Stri
     })
 }
 
+#[cfg(target_os = "android")]
 pub(crate) fn fingerprint_file(path: &Path, maximum_bytes: u64) -> Result<u64, String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
@@ -127,11 +135,12 @@ pub(crate) fn fingerprint_file(path: &Path, maximum_bytes: u64) -> Result<u64, S
             metadata.len()
         ));
     }
-    let bytes = fs::read(path)
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let bytes =
+        fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
     Ok(fnv1a64(&bytes))
 }
 
+#[cfg(any(target_os = "android", test))]
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {

@@ -83,7 +83,7 @@ def test_android_sidecars_are_complete_discoverable_generations() -> None:
     assert "values.put(MediaStore.Downloads.IS_PENDING, 1)" in ANDROID_ACTIVITY
     assert "sidecarStagePrefix(rawDisplayName)" in ANDROID_ACTIVITY
     assert "contentPublished = true" in ANDROID_ACTIVITY
-    assert "removedOldRows &= resolver.delete" in ANDROID_ACTIVITY
+    assert "removedOldRows &= deleteScopedSidecarGeneration" in ANDROID_ACTIVITY
     assert "queryStoredDisplayName(destination)" in ANDROID_ACTIVITY
     assert "String storedDisplayName = queryStoredDisplayName(destination);" in ANDROID_ACTIVITY
     raw_store = ANDROID_ACTIVITY.index("private StoredRaw storeRawScoped")
@@ -98,7 +98,7 @@ def test_sidecar_serialization_and_io_stay_off_the_render_thread() -> None:
     persistence = (ROOT / "src/app/sidecar_persistence.rs").read_text(encoding="utf-8")
     assert "struct CappedVec" in sidecar
     assert "serde_json::to_writer(&mut writer" in sidecar
-    assert "preflight_encoded_images(&edits)" in sidecar
+    assert "preflight_edit_size(&edits)" in sidecar
     assert 'name("auraw-sidecar-save"' in persistence
     assert "save_sidecar_request(" in persistence
 
@@ -161,5 +161,5 @@ def test_rust_compile_surface_regressions_are_absent() -> None:
     assert "#[derive(Clone, Debug)]\nenum TransferCurve" in icc
     assert '#[cfg(not(libraw_available))]\nuse anyhow::anyhow;' in raw_loader
     assert "use crate::ui::mask_component_color;" not in sidebar
-    assert "offset_of!(super::GpuParams, process_info), 832" in gpu_tests
-    assert "offset_of!(super::GpuParams, mask_counts), 848" in gpu_tests
+    assert "offset_of!(super::GpuParams, process_info), 880" in gpu_tests
+    assert "offset_of!(super::GpuParams, mask_counts), 896" in gpu_tests

@@ -128,10 +128,8 @@ pub(super) fn profile_from_tags(
             forward_matrix: read_matrix_3x4(reader, tags, FORWARD_MATRIX_2)?,
         },
     ];
-    let baseline_exposure_offset = read_f32_tag(reader, tags, BASELINE_EXPOSURE_OFFSET)?
-        .first()
-        .copied()
-        .unwrap_or(0.0);
+    let baseline_values = read_f32_tag(reader, tags, BASELINE_EXPOSURE_OFFSET)?;
+    let baseline_exposure_offset = parse_baseline_exposure_offset(&baseline_values)?;
 
     Ok(Some(DcpProfile {
         name,
@@ -144,6 +142,14 @@ pub(super) fn profile_from_tags(
         tone_curve,
         baseline_exposure_offset,
     }))
+}
+
+fn parse_baseline_exposure_offset(values: &[f32]) -> Result<f32> {
+    let value = values.first().copied().unwrap_or(0.0);
+    if !value.is_finite() {
+        bail!("BaselineExposureOffset contains a non-finite value");
+    }
+    Ok(value)
 }
 
 fn read_hsv_map(
@@ -579,4 +585,18 @@ fn checked_array<const N: usize>(bytes: &[u8], label: &str) -> Result<[u8; N]> {
     bytes
         .try_into()
         .map_err(|_| anyhow!("{label} requires exactly {N} bytes, got {}", bytes.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_baseline_exposure_offset;
+
+    #[test]
+    fn baseline_exposure_offset_rejects_non_finite_values() {
+        assert_eq!(parse_baseline_exposure_offset(&[]).unwrap(), 0.0);
+        assert_eq!(parse_baseline_exposure_offset(&[0.25]).unwrap(), 0.25);
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(parse_baseline_exposure_offset(&[value]).is_err());
+        }
+    }
 }

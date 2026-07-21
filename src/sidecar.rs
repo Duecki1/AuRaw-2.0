@@ -221,9 +221,8 @@ pub fn load_developed_thumbnail_cache(
                 cache_path.display()
             ));
         }
-    }
-    .thumbnail(maximum_edge, maximum_edge)
-    .to_rgba8();
+    };
+    let image = crate::thumbnail_cache::downscale_to_fit(image, maximum_edge).to_rgba8();
     let (width, height) = image.dimensions();
     Ok(Some(RawThumbnail {
         width,
@@ -368,7 +367,7 @@ pub fn remove_desktop_edits(raw_path: &Path) -> Result<bool, String> {
 
 pub fn encode(edits: EditState) -> Result<Vec<u8>, SidecarError> {
     validate_edit_state(&edits)?;
-    preflight_encoded_images(&edits)?;
+    preflight_edit_size(&edits)?;
     if edits.exposure.process_version > CURRENT_PROCESS_VERSION {
         return Err(SidecarError::Unsupported(format!(
             "edit uses future processing version {} (this build supports {})",
@@ -839,7 +838,13 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
         for dab in &stroke.dabs {
             finite(
                 "inpainting brush dab",
-                &[dab.center[0], dab.center[1], dab.opacity, dab.size, dab.feather],
+                &[
+                    dab.center[0],
+                    dab.center[1],
+                    dab.opacity,
+                    dab.size,
+                    dab.feather,
+                ],
             )?;
             bounded("inpainting dab x", dab.center[0], -16.0, 16.0)?;
             bounded("inpainting dab y", dab.center[1], -16.0, 16.0)?;
@@ -853,8 +858,14 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
             || patch.source_height == 0
             || patch.width == 0
             || patch.height == 0
-            || patch.x.checked_add(patch.width).is_none_or(|right| right > patch.source_width)
-            || patch.y.checked_add(patch.height).is_none_or(|bottom| bottom > patch.source_height)
+            || patch
+                .x
+                .checked_add(patch.width)
+                .is_none_or(|right| right > patch.source_width)
+            || patch
+                .y
+                .checked_add(patch.height)
+                .is_none_or(|bottom| bottom > patch.source_height)
         {
             return invalid("inpainting patch bounds are invalid");
         }
@@ -907,58 +918,156 @@ impl Write for CappedVec {
     }
 }
 
-fn preflight_encoded_images(edits: &EditState) -> Result<(), SidecarError> {
-    // Leave room for brush dabs, curve points, names, and JSON structure. The
-    // capped streaming writer remains authoritative for unusually large
-    // non-image edit state.
-    const STRUCTURE_HEADROOM: u64 = 1024 * 1024;
-    let mut encoded_bytes = 0u64;
-    for mask in &edits.masks.masks {
-        for component in &mask.components {
-            let image_bytes = match &component.geometry {
-                MaskGeometry::Ai {
-                    mask: Some(image), ..
-                }
-                | MaskGeometry::Object {
-                    mask: Some(image), ..
-                } => Some(image.pixels.len()),
-                _ => None,
-            };
-            if let Some(image_bytes) = image_bytes {
-                let base64_bytes = (image_bytes as u64)
-                    .div_ceil(3)
-                    .checked_mul(4)
-                    .and_then(|bytes| bytes.checked_add(2))
-                    .ok_or(SidecarError::TooLarge(u64::MAX))?;
-                encoded_bytes = encoded_bytes
-                    .checked_add(base64_bytes)
-                    .ok_or(SidecarError::TooLarge(u64::MAX))?;
-            }
-        }
-    }
-    for stroke in edits.inpainting.iter() {
-        let rgba_bytes = if stroke.patch.rgba16f.is_empty() {
-            stroke.patch.rgba.len()
-        } else {
-            stroke.patch.rgba16f.len().saturating_mul(2)
-        };
-        for image_bytes in [rgba_bytes, stroke.patch.mask.len()] {
-            let base64_bytes = (image_bytes as u64)
-                .div_ceil(3)
-                .checked_mul(4)
-                .and_then(|bytes| bytes.checked_add(2))
-                .ok_or(SidecarError::TooLarge(u64::MAX))?;
-            encoded_bytes = encoded_bytes
-                .checked_add(base64_bytes)
-                .ok_or(SidecarError::TooLarge(u64::MAX))?;
-        }
-    }
-    let estimated = encoded_bytes.saturating_add(STRUCTURE_HEADROOM);
-    if estimated > MAX_SIDECAR_BYTES {
+/// Rejects an inpainting result before it becomes visible state when adding it
+/// would make the edit impossible to persist on the current platform. This is
+/// intentionally an allocation-free upper bound: the large raster payloads
+/// are measured from their lengths instead of being base64-encoded on the UI
+/// thread.
+pub(crate) fn preflight_inpaint_addition(
+    masks: &MaskStack,
+    existing: &[InpaintStroke],
+    candidate: &InpaintStroke,
+) -> Result<(), SidecarError> {
+    preflight_inpaint_addition_with_limit(masks, existing, candidate, MAX_SIDECAR_BYTES)
+}
+
+fn preflight_edit_size(edits: &EditState) -> Result<(), SidecarError> {
+    let estimated = estimate_sidecar_bytes(&edits.masks, edits.inpainting.iter())?;
+    enforce_size_limit(estimated, MAX_SIDECAR_BYTES)
+}
+
+fn preflight_inpaint_addition_with_limit(
+    masks: &MaskStack,
+    existing: &[InpaintStroke],
+    candidate: &InpaintStroke,
+    limit: u64,
+) -> Result<(), SidecarError> {
+    let estimated =
+        estimate_sidecar_bytes(masks, existing.iter().chain(std::iter::once(candidate)))?;
+    enforce_size_limit(estimated, limit)
+}
+
+fn enforce_size_limit(estimated: u64, limit: u64) -> Result<(), SidecarError> {
+    if estimated > limit {
         Err(SidecarError::TooLarge(estimated))
     } else {
         Ok(())
     }
+}
+
+fn estimate_sidecar_bytes<'a>(
+    masks: &MaskStack,
+    inpainting: impl IntoIterator<Item = &'a InpaintStroke>,
+) -> Result<u64, SidecarError> {
+    // This covers the bounded camera-profile/lens strings, the complete global
+    // adjustment structure, and document-level JSON punctuation. Dynamic mask
+    // names, geometry, and inpainting data are counted separately below.
+    const DOCUMENT_HEADROOM: u64 = 1024 * 1024;
+    const MASK_HEADROOM: u64 = 16 * 1024;
+    const COMPONENT_HEADROOM: u64 = 2 * 1024;
+    const INPAINT_STROKE_HEADROOM: u64 = 512;
+    const BRUSH_DAB_HEADROOM: u64 = 256;
+    const OBJECT_STROKE_HEADROOM: u64 = 128;
+    const OBJECT_POINT_HEADROOM: u64 = 96;
+
+    let mut estimated = DOCUMENT_HEADROOM;
+    for mask in &masks.masks {
+        checked_add(&mut estimated, MASK_HEADROOM)?;
+        checked_add(&mut estimated, escaped_json_string_bound(&mask.name)?)?;
+        for component in &mask.components {
+            checked_add(&mut estimated, COMPONENT_HEADROOM)?;
+            checked_add(&mut estimated, escaped_json_string_bound(&component.name)?)?;
+            match &component.geometry {
+                MaskGeometry::Brush { dabs, .. } => {
+                    checked_add_scaled(&mut estimated, dabs.len(), BRUSH_DAB_HEADROOM)?
+                }
+                MaskGeometry::Ai {
+                    mask: Some(image), ..
+                } => checked_add(
+                    &mut estimated,
+                    base64_json_string_bytes(image.pixels.len())?,
+                )?,
+                MaskGeometry::Object { mask, strokes, .. } => {
+                    if let Some(image) = mask {
+                        checked_add(
+                            &mut estimated,
+                            base64_json_string_bytes(image.pixels.len())?,
+                        )?;
+                    }
+                    checked_add_scaled(&mut estimated, strokes.len(), OBJECT_STROKE_HEADROOM)?;
+                    for stroke in strokes {
+                        checked_add_scaled(
+                            &mut estimated,
+                            stroke.points.len(),
+                            OBJECT_POINT_HEADROOM,
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for stroke in inpainting {
+        checked_add(&mut estimated, INPAINT_STROKE_HEADROOM)?;
+        checked_add_scaled(&mut estimated, stroke.dabs.len(), BRUSH_DAB_HEADROOM)?;
+        if !stroke.patch.rgba16f.is_empty() {
+            let byte_count = stroke
+                .patch
+                .rgba16f
+                .len()
+                .checked_mul(2)
+                .ok_or(SidecarError::TooLarge(u64::MAX))?;
+            checked_add(&mut estimated, base64_json_string_bytes(byte_count)?)?;
+        }
+        if !stroke.patch.rgba.is_empty() {
+            checked_add(
+                &mut estimated,
+                base64_json_string_bytes(stroke.patch.rgba.len())?,
+            )?;
+        }
+        checked_add(
+            &mut estimated,
+            base64_json_string_bytes(stroke.patch.mask.len())?,
+        )?;
+    }
+    Ok(estimated)
+}
+
+fn checked_add(total: &mut u64, value: u64) -> Result<(), SidecarError> {
+    *total = total
+        .checked_add(value)
+        .ok_or(SidecarError::TooLarge(u64::MAX))?;
+    Ok(())
+}
+
+fn checked_add_scaled(
+    total: &mut u64,
+    count: usize,
+    bytes_per_item: u64,
+) -> Result<(), SidecarError> {
+    let count = u64::try_from(count).map_err(|_| SidecarError::TooLarge(u64::MAX))?;
+    let bytes = count
+        .checked_mul(bytes_per_item)
+        .ok_or(SidecarError::TooLarge(u64::MAX))?;
+    checked_add(total, bytes)
+}
+
+fn escaped_json_string_bound(value: &str) -> Result<u64, SidecarError> {
+    let bytes = u64::try_from(value.len()).map_err(|_| SidecarError::TooLarge(u64::MAX))?;
+    bytes
+        .checked_mul(6)
+        .and_then(|bytes| bytes.checked_add(2))
+        .ok_or(SidecarError::TooLarge(u64::MAX))
+}
+
+fn base64_json_string_bytes(byte_count: usize) -> Result<u64, SidecarError> {
+    let byte_count = u64::try_from(byte_count).map_err(|_| SidecarError::TooLarge(u64::MAX))?;
+    byte_count
+        .div_ceil(3)
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(2))
+        .ok_or(SidecarError::TooLarge(u64::MAX))
 }
 
 fn geometry_matches_kind(kind: MaskKind, geometry: &MaskGeometry) -> bool {
@@ -1217,6 +1326,66 @@ mod tests {
     }
 
     #[test]
+    fn prospective_inpaint_budget_counts_existing_persisted_payloads() {
+        use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke, MaskImage};
+
+        fn stroke(edge: u32, value: u16) -> InpaintStroke {
+            let pixels = edge as usize * edge as usize;
+            let patch = InpaintPatch::new_linear(
+                edge + 2,
+                edge + 2,
+                1,
+                1,
+                edge,
+                edge,
+                vec![value; pixels * 4],
+                vec![255; pixels],
+            )
+            .unwrap();
+            InpaintStroke::from_result(vec![BrushDab::default(); 3], patch).unwrap()
+        }
+
+        let mut masks = MaskStack::default();
+        masks.add_mask(MaskKind::Subject);
+        masks.masks[0].name = "subject \"mask\"".to_owned();
+        if let MaskGeometry::Ai { mask, .. } = &mut masks.masks[0].components[0].geometry {
+            *mask = MaskImage::new(32, 32, vec![127; 32 * 32]);
+        } else {
+            panic!("subject mask should use AI geometry");
+        }
+
+        let existing = stroke(16, 1);
+        let candidate = stroke(8, 2);
+        let candidate_only =
+            estimate_sidecar_bytes(&MaskStack::default(), std::iter::once(&candidate)).unwrap();
+        let prospective = estimate_sidecar_bytes(&masks, [&existing, &candidate]).unwrap();
+        assert!(prospective > candidate_only);
+
+        assert!(preflight_inpaint_addition_with_limit(
+            &MaskStack::default(),
+            &[],
+            &candidate,
+            prospective - 1,
+        )
+        .is_ok());
+        assert!(matches!(
+            preflight_inpaint_addition_with_limit(
+                &masks,
+                std::slice::from_ref(&existing),
+                &candidate,
+                prospective - 1,
+            ),
+            Err(SidecarError::TooLarge(bytes)) if bytes == prospective
+        ));
+
+        let mut edits = sample_edits();
+        edits.masks = Arc::new(masks);
+        edits.inpainting = Arc::new(vec![existing, candidate]);
+        let encoded = encode(edits).unwrap();
+        assert!((encoded.len() as u64) <= prospective);
+    }
+
+    #[test]
     fn schema_one_sidecar_without_inpainting_loads_as_empty() {
         let document = SidecarDocument {
             format: SIDECAR_FORMAT.to_owned(),
@@ -1225,10 +1394,7 @@ mod tests {
             edits: sample_edits(),
         };
         let mut value = serde_json::to_value(document).unwrap();
-        value["edits"]
-            .as_object_mut()
-            .unwrap()
-            .remove("inpainting");
+        value["edits"].as_object_mut().unwrap().remove("inpainting");
         let encoded = serde_json::to_vec(&value).unwrap();
         let loaded = decode(&encoded).unwrap();
         assert!(loaded.edits.inpainting.is_empty());
@@ -1238,11 +1404,11 @@ mod tests {
     #[test]
     fn old_processing_state_is_migrated_deliberately() {
         let mut edits = sample_edits();
-        edits.exposure.process_version = 4;
+        edits.exposure.process_version = CURRENT_PROCESS_VERSION - 1;
         let value = serde_json::to_vec(&SidecarDocument {
             format: SIDECAR_FORMAT.to_owned(),
             schema_version: 0,
-            process_version: 4,
+            process_version: CURRENT_PROCESS_VERSION - 1,
             edits,
         })
         .unwrap();

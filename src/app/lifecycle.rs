@@ -531,12 +531,23 @@ impl AurawApp {
     }
 
     pub(crate) fn clear_camera_profile_folder(&mut self) {
-        if self.camera_profile_folder.take().is_some() || self.camera_profile_auto_detect {
+        let previous_folder = self.camera_profile_folder.take();
+        if previous_folder.is_some() || self.camera_profile_auto_detect {
             self.camera_profile_folder_label = None;
             self.camera_profile_auto_detect = false;
             self.last_camera_profile = None;
             self.raw_cache.clear();
-            self.persist_performance_settings();
+            if self.persist_performance_settings() {
+                #[cfg(target_os = "android")]
+                if let Some(previous_folder) = previous_folder {
+                    if let Err(error) = crate::android::remove_camera_profile_mirror(
+                        &self.android_app,
+                        &previous_folder,
+                    ) {
+                        log::warn!("{error}");
+                    }
+                }
+            }
             self.notice = Some(
                 "Camera profile folder cleared. Reopen the RAW to apply the new profile selection."
                     .to_owned(),
@@ -753,7 +764,7 @@ impl AurawApp {
         }
     }
 
-    fn persist_performance_settings(&self) {
+    fn persist_performance_settings(&self) -> bool {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.raw_cache_limit,
             thumbnail_workers: self.library.thumbnail_worker_count(),
@@ -766,10 +777,18 @@ impl AurawApp {
             last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
             ..Default::default()
         };
-        if let Err(error) =
-            crate::performance_settings::save(self.performance_settings_path.as_deref(), settings)
-        {
-            log::warn!("{error}");
+        let Some(settings_path) = self.performance_settings_path.as_deref() else {
+            return false;
+        };
+        match crate::performance_settings::save(
+            Some(settings_path),
+            settings,
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("{error}");
+                false
+            }
         }
     }
 
@@ -836,6 +855,7 @@ impl AurawApp {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_path_labeled_with_options(
         &mut self,
         path: PathBuf,
@@ -1439,12 +1459,25 @@ impl AurawApp {
                 } => {
                     self.picker_pending = false;
                     self.camera_profile_folder_importing_label = None;
-                    self.camera_profile_folder = Some(path);
+                    let previous_folder = self.camera_profile_folder.replace(path);
                     self.camera_profile_folder_label = Some(label.clone());
                     self.camera_profile_auto_detect = false;
                     self.last_camera_profile = None;
                     self.raw_cache.clear();
-                    self.persist_performance_settings();
+                    if self.persist_performance_settings() {
+                        if let Some(previous_folder) = previous_folder {
+                            if self.camera_profile_folder.as_deref()
+                                != Some(previous_folder.as_path())
+                            {
+                                if let Err(error) = crate::android::remove_camera_profile_mirror(
+                                    &self.android_app,
+                                    &previous_folder,
+                                ) {
+                                    log::warn!("{error}");
+                                }
+                            }
+                        }
+                    }
                     self.notice = Some(format!(
                         "Camera profile folder '{label}' imported with {profiles} DCP {}. Reopen the RAW to apply the new profile selection.",
                         if profiles == 1 { "profile" } else { "profiles" }

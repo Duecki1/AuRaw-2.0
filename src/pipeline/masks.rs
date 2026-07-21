@@ -234,6 +234,7 @@ fn arc_u8_is_empty(values: &Arc<[u8]>) -> bool {
 }
 
 impl InpaintPatch {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_linear(
         source_width: u32,
         source_height: u32,
@@ -269,19 +270,22 @@ impl InpaintPatch {
             || self.source_height == 0
             || self.width == 0
             || self.height == 0
-            || self.x.checked_add(self.width).is_none_or(|right| right > self.source_width)
-            || self.y.checked_add(self.height).is_none_or(|bottom| bottom > self.source_height)
+            || self
+                .x
+                .checked_add(self.width)
+                .is_none_or(|right| right > self.source_width)
+            || self
+                .y
+                .checked_add(self.height)
+                .is_none_or(|bottom| bottom > self.source_height)
         {
             return false;
         }
-        let Some(pixels) = usize::try_from(self.width)
-            .ok()
-            .and_then(|width| {
-                usize::try_from(self.height)
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-        else {
+        let Some(pixels) = usize::try_from(self.width).ok().and_then(|width| {
+            usize::try_from(self.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        }) else {
             return false;
         };
         if self.mask.len() != pixels {
@@ -319,7 +323,7 @@ impl InpaintPatch {
         let g = decode(self.rgba[base + 1]);
         let b = decode(self.rgba[base + 2]);
         let rec2020 = [
-            0.627_403_9 * r + 0.329_283_0 * g + 0.043_313_1 * b,
+            0.627_403_9 * r + 0.329_283 * g + 0.043_313_1 * b,
             0.069_097_3 * r + 0.919_540_4 * g + 0.011_362_3 * b,
             0.016_391_4 * r + 0.088_013_3 * g + 0.895_595_3 * b,
         ];
@@ -330,7 +334,6 @@ impl InpaintPatch {
             f16::from_f32(1.0).to_bits(),
         ])
     }
-
 
     /// Bilinearly samples replacement RGB while keeping the inpainting mask
     /// strictly binary. The nearest persisted mask texel is thresholded to
@@ -362,8 +365,8 @@ impl InpaintPatch {
         {
             return None;
         }
-        let mask_index = (nearest_y - patch_y0) as usize * self.width as usize
-            + (nearest_x - patch_x0) as usize;
+        let mask_index =
+            (nearest_y - patch_y0) as usize * self.width as usize + (nearest_x - patch_x0) as usize;
         if self.mask[mask_index] < 128 {
             return None;
         }
@@ -384,8 +387,8 @@ impl InpaintPatch {
         ];
         let mut rgb = [0.0f32; 3];
         for (sample_x, sample_y, weight) in samples {
-            let index = (sample_y - self.y) as usize * self.width as usize
-                + (sample_x - self.x) as usize;
+            let index =
+                (sample_y - self.y) as usize * self.width as usize + (sample_x - self.x) as usize;
             let pixel = self.linear_rgba16f_at(index)?;
             rgb[0] += f16::from_bits(pixel[0]).to_f32() * weight;
             rgb[1] += f16::from_bits(pixel[1]).to_f32() * weight;
@@ -475,7 +478,9 @@ mod base64_arc_u16 {
             .decode(encoded)
             .map_err(serde::de::Error::custom)?;
         if bytes.len() % 2 != 0 {
-            return Err(serde::de::Error::custom("RGBA16F payload has an odd byte length"));
+            return Err(serde::de::Error::custom(
+                "RGBA16F payload has an odd byte length",
+            ));
         }
         let values = bytes
             .chunks_exact(2)
@@ -484,7 +489,6 @@ mod base64_arc_u16 {
         Ok(values.into())
     }
 }
-
 
 impl Default for BrushDab {
     fn default() -> Self {
@@ -1050,16 +1054,10 @@ impl MaskStack {
         image_width: u32,
         image_height: u32,
     ) -> Vec<u8> {
-        self.rasterize_layer_coverage(
-            layer,
-            atlas_width,
-            atlas_height,
-            image_width,
-            image_height,
-        )
-        .into_par_iter()
-        .map(|value| (value * 255.0 + 0.5) as u8)
-        .collect()
+        self.rasterize_layer_coverage(layer, atlas_width, atlas_height, image_width, image_height)
+            .into_par_iter()
+            .map(|value| (value * 255.0 + 0.5) as u8)
+            .collect()
     }
 
     /// Full-precision GPU mask coverage. R16F avoids the 1/255 opacity steps
@@ -1072,16 +1070,10 @@ impl MaskStack {
         image_width: u32,
         image_height: u32,
     ) -> Vec<u16> {
-        self.rasterize_layer_coverage(
-            layer,
-            atlas_width,
-            atlas_height,
-            image_width,
-            image_height,
-        )
-        .into_par_iter()
-        .map(|value| f16::from_f32(value).to_bits())
-        .collect()
+        self.rasterize_layer_coverage(layer, atlas_width, atlas_height, image_width, image_height)
+            .into_par_iter()
+            .map(|value| f16::from_f32(value).to_bits())
+            .collect()
     }
 
     pub fn rasterize_component_layer(
@@ -1516,7 +1508,6 @@ pub fn rasterize_brush_dabs(
         .collect()
 }
 
-
 /// Rasterizes the inpainting brush as a strict binary mask.
 ///
 /// Unlike the general-purpose local-adjustment brush rasterizer, this path has
@@ -1695,6 +1686,7 @@ fn rasterize_brush(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rasterize_radial(
     width: u32,
     height: u32,
@@ -1990,12 +1982,10 @@ mod tests {
 
         let foreground = stack.rasterize_layer(0, 96, 64, 800, 533);
         let background = stack.rasterize_layer(1, 96, 64, 800, 533);
-        assert!(
-            foreground
-                .iter()
-                .zip(background.iter())
-                .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255)
-        );
+        assert!(foreground
+            .iter()
+            .zip(background.iter())
+            .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255));
     }
 
     #[test]
@@ -2049,12 +2039,10 @@ mod tests {
         let normal = stack.rasterize_layer(0, 64, 64, 100, 100);
         stack.masks[0].invert = true;
         let inverted = stack.rasterize_layer(0, 64, 64, 100, 100);
-        assert!(
-            normal
-                .iter()
-                .zip(inverted.iter())
-                .all(|(normal, inverted)| *normal as u16 + *inverted as u16 == 255)
-        );
+        assert!(normal
+            .iter()
+            .zip(inverted.iter())
+            .all(|(normal, inverted)| *normal as u16 + *inverted as u16 == 255));
     }
 
     #[test]
@@ -2139,21 +2127,18 @@ mod tests {
         } else {
             panic!("object mask used unexpected geometry");
         }
-        assert!(
-            stack
-                .selected_component()
-                .unwrap()
-                .geometry
-                .is_initialized()
-        );
+        assert!(stack
+            .selected_component()
+            .unwrap()
+            .geometry
+            .is_initialized());
         let layer = stack.rasterize_layer(0, 2, 1, 2, 1);
-        assert!(layer[0] < 0.01);
-        assert!(layer[1] > 0.99);
+        assert_eq!(layer, [0, 255]);
     }
     #[test]
     fn inpaint_patches_remain_sparse_and_full_resolution() {
         use half::f16;
-        let rgba16f = vec![f16::from_f32(0.5).to_bits(); 2 * 1 * 4];
+        let rgba16f = vec![f16::from_f32(0.5).to_bits(); 8];
         let patch = InpaintPatch::new_linear(6000, 4000, 2500, 1800, 2, 1, rgba16f, vec![255, 255])
             .unwrap();
         let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch.clone()).unwrap();
@@ -2178,9 +2163,7 @@ mod tests {
         let both = compose_inpaint_strokes(&[first.clone(), second.clone()]).unwrap();
         assert_eq!(both.patches.len(), 2);
         assert_eq!(both.patches[1], second.patch);
-        let after_delete = compose_inpaint_strokes(&[first.clone()]).unwrap();
+        let after_delete = compose_inpaint_strokes(std::slice::from_ref(&first)).unwrap();
         assert_eq!(after_delete.patches[0], first.patch);
     }
-
-
 }

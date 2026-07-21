@@ -159,7 +159,7 @@ pub(crate) struct LibraryState {
 }
 
 impl LibraryState {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(not(target_os = "android"), test))]
     pub(crate) fn new(context: &egui::Context) -> Self {
         Self::new_with_workers(context, default_thumbnail_worker_count())
     }
@@ -1069,14 +1069,10 @@ fn duplicate_raw_and_sidecar(raw_path: &Path) -> Result<PathBuf, String> {
 #[cfg(not(target_os = "android"))]
 fn copy_file_create_new(source: &Path, destination: &Path) -> io::Result<()> {
     let mut input = OpenOptions::new().read(true).open(source)?;
-    let mut output = match OpenOptions::new()
+    let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(destination)
-    {
-        Ok(output) => output,
-        Err(error) => return Err(error),
-    };
+        .open(destination)?;
     let result = io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
     if result.is_err() {
         drop(output);
@@ -1265,7 +1261,8 @@ impl Library {
                                         Some((entry.info.source.clone(), entry.info.name.clone()));
                                 }
                                 #[cfg(not(target_os = "android"))]
-                                if let LibrarySource::File(path) = &entry.info.source {
+                                {
+                                    let LibrarySource::File(path) = &entry.info.source;
                                     let path = path.clone();
                                     let action_enabled = !app.library.file_action_in_progress();
                                     response.context_menu(|ui| {
@@ -1711,7 +1708,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::{mpsc, Arc, Mutex, RwLock};
+    use std::sync::{mpsc, Arc, RwLock};
     use std::time::{Duration, SystemTime};
 
     #[test]

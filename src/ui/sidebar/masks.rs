@@ -447,6 +447,7 @@ impl Sidebar {
         selected
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mask_group_context_menu(
         ui: &mut Ui,
         mask: &mut LocalMask,
@@ -510,6 +511,7 @@ impl Sidebar {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn submask_context_menu(
         ui: &mut Ui,
         component: &mut MaskComponent,
@@ -1887,52 +1889,4 @@ impl Sidebar {
         changed
     }
 
-    fn show_local_mask_adjustments(
-        ui: &mut Ui,
-        adjustment: &mut crate::pipeline::LocalAdjustments,
-        selected_tab: &mut ToneCurveTab,
-        selected_grade_tab: &mut ColorGradeTab,
-    ) -> bool {
-        let mut changed = false;
-        egui::CollapsingHeader::new("Light")
-            .default_open(true)
-            .show(ui, |ui| {
-                changed |= Self::show_local_mask_light(ui, adjustment);
-            });
-        egui::CollapsingHeader::new("Color")
-            .default_open(true)
-            .show(ui, |ui| {
-                changed |= Self::show_local_mask_color(ui, adjustment);
-            });
-        egui::CollapsingHeader::new("Effects")
-            .default_open(true)
-            .show(ui, |ui| {
-                changed |= Self::show_local_mask_effects(ui, adjustment);
-            });
-        egui::CollapsingHeader::new("Color Grading")
-            .default_open(false)
-            .show(ui, |ui| {
-                changed |= Self::show_local_mask_color_grading(ui, adjustment, selected_grade_tab);
-            });
-        egui::CollapsingHeader::new("Tone Curve")
-            .default_open(false)
-            .show(ui, |ui| {
-                changed |= Self::show_local_mask_tone_curve(ui, adjustment, selected_tab);
-            });
-        egui::CollapsingHeader::new("Color Mixer")
-            .default_open(false)
-            .show(ui, |ui| {
-                changed |= Self::show_local_mask_color_mixer(ui, adjustment);
-            });
-        changed
-    }
-
-    fn show_placeholder(ui: &mut Ui, title: &str, message: &str) {
-        ui.add_space(12.0);
-        ui.vertical_centered(|ui| {
-            ui.heading(title);
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(message).color(ui.visuals().weak_text_color()));
-        });
-    }
 }

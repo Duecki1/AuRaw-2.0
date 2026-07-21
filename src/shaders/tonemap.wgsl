@@ -258,6 +258,15 @@ fn scene_curve_decode(value: f32) -> f32 {
     return SCENE_MIDDLE_GREY * bounded / max(1.0 - bounded, 1e-6);
 }
 
+fn remap_scene_luminance(rgb: vec3<f32>, adjusted_luminance: f32) -> vec3<f32> {
+    let positive = max(rgb, vec3<f32>(0.0));
+    let luminance = max(dot(positive, LUMA), 0.0);
+    let chromaticity = positive / max(luminance, 1e-20);
+    let chroma_weight = smoothstep(1e-7, 1e-5, luminance);
+    let direction = mix(vec3<f32>(1.0), chromaticity, chroma_weight);
+    return direction * max(adjusted_luminance, 0.0);
+}
+
 fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
     if tone_curve_is_identity(0u) {
         return rgb;
@@ -266,10 +275,7 @@ fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
     let adjusted_luminance = scene_curve_decode(
         point_curve_value(0u, scene_curve_encode(luminance)),
     );
-    if luminance <= 1e-9 {
-        return vec3<f32>(adjusted_luminance);
-    }
-    return rgb * clamp(adjusted_luminance / luminance, 0.0, 256.0);
+    return remap_scene_luminance(rgb, adjusted_luminance);
 }
 
 fn apply_rgb_point_curves(rgb: vec3<f32>) -> vec3<f32> {

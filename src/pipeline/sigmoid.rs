@@ -119,9 +119,9 @@ fn generalized_loglogistic_sigmoid(
 
 const DEFAULT_SIGMOID_COEFFICIENTS: SigmoidCoefficients = SigmoidCoefficients {
     white_target: 1.0,
-    black_target: 0.000151999993,
-    paper_exposure: -1.47515213,
-    film_fog: 0.00138432207,
+    black_target: 0.000_152,
+    paper_exposure: -1.475_152_1,
+    film_fog: 0.001_384_322_1,
     film_power: 1.4909091,
     paper_power: 1.0,
     hue_preservation: 1.0,
@@ -264,9 +264,9 @@ mod tests {
         let c = coefficients(SigmoidParams::default());
         let expected = [
             (c.white_target, 1.0),
-            (c.black_target, 0.000151999993),
-            (c.paper_exposure.exp2(), 0.359695464),
-            (c.film_fog, 0.00138432207),
+            (c.black_target, 0.000_152),
+            (c.paper_exposure.exp2(), 0.359_695_46),
+            (c.film_fog, 0.001_384_322_1),
             (c.film_power, 1.4909091),
             (c.paper_power, 1.0),
         ];

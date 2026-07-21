@@ -38,7 +38,6 @@ impl CameraProfileMode {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CameraProfileCandidate {
     pub path: PathBuf,

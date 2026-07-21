@@ -1,9 +1,7 @@
 use super::{
     validate_raw_dimensions, CameraColorModel, CameraProfile, CameraProfileCandidate,
     CameraProfileMode, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint, LoadedRaw, RawThumbnail,
-    MAX_RAW_FILE_BYTES,
-    MAX_SENSOR_EDGE,
-    MAX_SENSOR_PIXELS,
+    MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
 };
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
 use anyhow::{anyhow, Context, Result};
@@ -48,6 +46,7 @@ const XYZ_TO_REC2020: [[f32; 3]; 3] = [
 ];
 
 #[allow(
+    clippy::upper_case_acronyms,
     dead_code,
     non_camel_case_types,
     non_snake_case,
@@ -95,15 +94,19 @@ pub fn load_raw_file_with_profile_selection(
         CameraProfileMode::Automatic => embedded_profile
             .as_ref()
             .and_then(|profile| profile.camera_calibration_signature.clone()),
-        CameraProfileMode::DcpProfiles => read_optional_profile(path)
-            .and_then(|profile| profile.camera_calibration_signature),
+        CameraProfileMode::DcpProfiles => {
+            read_optional_profile(path).and_then(|profile| profile.camera_calibration_signature)
+        }
         CameraProfileMode::MatrixOnly => None,
     };
 
     // SAFETY: LibRaw has identified the file and iparams strings are initialized.
     let (camera_make, camera_model) = unsafe {
         let iparams = &(*ctx.raw).rawdata.iparams;
-        (c_array_to_string(&iparams.make), c_array_to_string(&iparams.model))
+        (
+            c_array_to_string(&iparams.make),
+            c_array_to_string(&iparams.model),
+        )
     };
 
     let mut matches = match mode {
@@ -143,7 +146,8 @@ pub fn load_raw_file_with_profile_selection(
             camera_make, camera_model
         ));
     }
-    let external_profile = explicitly_selected.or_else(|| (!matches.is_empty()).then(|| matches.remove(0)));
+    let external_profile =
+        explicitly_selected.or_else(|| (!matches.is_empty()).then(|| matches.remove(0)));
 
     let (selected_profile_path, selected_profile) = if let Some(mut candidate) = external_profile {
         candidate.profile.camera_calibration_signature = raw_camera_signature;
@@ -547,8 +551,7 @@ unsafe fn thumbnail_from_processed(
     // Shrink before applying mirrored/rotated orientation. Applying it to the
     // full embedded preview creates another full-resolution allocation, which
     // is especially costly while Android still retains a Develop pipeline.
-    let mut oriented = decoded.thumbnail(maximum_edge, maximum_edge);
-    drop(decoded);
+    let mut oriented = crate::thumbnail_cache::downscale_to_fit(decoded, maximum_edge);
     let transform = match orientation {
         0 => image::metadata::Orientation::NoTransforms,
         1 => image::metadata::Orientation::FlipHorizontal,
@@ -597,7 +600,10 @@ fn find_matching_dcp_profiles(
 ) -> Result<Vec<MatchedDcpProfile>> {
     let metadata = fs::metadata(folder)
         .with_context(|| format!("inspect DCP profile folder {}", folder.display()))?;
-    anyhow::ensure!(metadata.is_dir(), "configured DCP profile path is not a folder");
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "configured DCP profile path is not a folder"
+    );
 
     let make_key = normalize_camera_name(camera_make);
     let model_key = normalize_camera_name(camera_model);
@@ -617,7 +623,10 @@ fn find_matching_dcp_profiles(
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) => {
-                log::warn!("could not read DCP directory {}: {error}", directory.display());
+                log::warn!(
+                    "could not read DCP directory {}: {error}",
+                    directory.display()
+                );
                 continue;
             }
         };
@@ -667,13 +676,7 @@ fn find_matching_dcp_profiles(
                     continue;
                 }
             };
-            let score = dcp_match_score(
-                &profile,
-                &path,
-                &make_key,
-                &model_key,
-                &combined_key,
-            );
+            let score = dcp_match_score(&profile, &path, &make_key, &model_key, &combined_key);
             if score <= 0 {
                 continue;
             }
@@ -691,7 +694,11 @@ fn find_matching_dcp_profiles(
         right
             .score
             .cmp(&left.score)
-            .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
             .then_with(|| {
                 left.path
                     .to_string_lossy()
@@ -784,7 +791,9 @@ fn dcp_match_score(
     };
 
     if !make_key.is_empty()
-        && (declared.contains(make_key) || filename.contains(make_key) || path_key.contains(make_key))
+        && (declared.contains(make_key)
+            || filename.contains(make_key)
+            || path_key.contains(make_key))
     {
         score += 25;
     }
@@ -1067,7 +1076,7 @@ unsafe fn loaded_raw_from_context(
     let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
     let calibration_compatible = dcp_profile
         .as_ref()
-        .map_or(true, DcpProfile::calibration_is_compatible);
+        .is_none_or(DcpProfile::calibration_is_compatible);
     let (cam_to_srgb, profile_weight, white_balance_model) = camera_to_working_matrix(
         color,
         physical_wb,
@@ -1081,9 +1090,7 @@ unsafe fn loaded_raw_from_context(
     // as either `[i64; 4]` or `[u32; 4]`, depending on the installed
     // headers. Normalize both representations and reject negative or
     // otherwise out-of-range metadata values.
-    let linear_max = color
-        .linear_max
-        .map(|value| u32::try_from(value).unwrap_or(0));
+    let linear_max = color.linear_max.map(normalize_libraw_linear_max);
     let white_levels = canonicalize_f32x4(
         white_levels(color.maximum, linear_max, physical_black_levels),
         cfa_map,
@@ -1092,7 +1099,7 @@ unsafe fn loaded_raw_from_context(
     let mut camera_profile = dcp_profile
         .map(|profile| CameraProfile::from_dcp(profile, profile_weight))
         .unwrap_or_default();
-    let baseline_exposure = color.dng_levels.baseline_exposure as f32;
+    let baseline_exposure = color.dng_levels.baseline_exposure;
     // LibRaw initializes a missing BaselineExposure to a sentinel below
     // -999 EV. It is finite, but applying it makes exp2(EV) underflow to
     // zero and turns every non-DNG/proprietary RAW preview black.
@@ -1121,8 +1128,8 @@ unsafe fn loaded_raw_from_context(
         camera_model: c_array_to_string(&iparams.model),
         lens_make: c_array_to_string(&lens.LensMake),
         lens_model: c_array_to_string(&lens.Lens),
-        focal_length: finite_positive_or_zero(other.focal_len as f32),
-        aperture: finite_positive_or_zero(other.aperture as f32),
+        focal_length: finite_positive_or_zero(other.focal_len),
+        aperture: finite_positive_or_zero(other.aperture),
         focus_distance: 0.0,
         cfa_kind,
         raw_pixels,
@@ -1139,6 +1146,16 @@ unsafe fn loaded_raw_from_context(
     })
 }
 
+fn normalize_libraw_linear_max<T>(value: T) -> u32
+where
+    u32: TryFrom<T>,
+{
+    u32::try_from(value).unwrap_or(0)
+}
+
+type ActivePixelData = (u32, u32, Vec<u16>, Vec<u8>, Vec<f32>);
+
+#[allow(clippy::too_many_arguments)]
 unsafe fn copy_active_pixels(
     raw: *mut ffi::libraw_data_t,
     raw_image: *const u16,
@@ -1154,7 +1171,7 @@ unsafe fn copy_active_pixels(
     cfa_map: [u8; 4],
     shared_black: u32,
     cblack: &[u32],
-) -> Result<(u32, u32, Vec<u16>, Vec<u8>, Vec<f32>)> {
+) -> Result<ActivePixelData> {
     let raw_width = raw_width as usize;
     let raw_height = raw_height as usize;
     let crop_x = crop_x as usize;
@@ -1457,7 +1474,7 @@ fn cam_to_working(xyz_to_cam: [[f32; 3]; 4], cdesc: [u8; 4]) -> [[f32; 4]; 3] {
     // physical planes (normally R, G1, B, G2). Fold profile columns by
     // cdesc only after each CFA plane has been normalized independently.
     let mut out = [[0.0; 4]; 3];
-    for physical_col in 0..4 {
+    for (physical_col, _) in cdesc.iter().enumerate() {
         let Some(rgb_col) = logical_rgb_channel(cdesc, physical_col) else {
             continue;
         };
@@ -2118,7 +2135,7 @@ fn dng_camera_to_working(
 
 fn fold_physical_camera_planes(physical: [[f32; 4]; 3], cdesc: [u8; 4]) -> [[f32; 4]; 3] {
     let mut out = [[0.0; 4]; 3];
-    for physical_col in 0..4 {
+    for (physical_col, _) in cdesc.iter().enumerate() {
         let Some(rgb_col) = logical_rgb_channel(cdesc, physical_col) else {
             continue;
         };
@@ -2455,13 +2472,14 @@ fn invert_4x4(matrix: [[f32; 4]; 4]) -> Option<[[f32; 4]; 4]> {
         for value in &mut augmented[pivot] {
             *value /= divisor;
         }
-        for row in 0..4 {
-            if row == pivot {
+        let pivot_values = augmented[pivot];
+        for (row_index, row) in augmented.iter_mut().enumerate() {
+            if row_index == pivot {
                 continue;
             }
-            let factor = augmented[row][pivot];
-            for col in 0..8 {
-                augmented[row][col] -= factor * augmented[pivot][col];
+            let factor = row[pivot];
+            for (value, pivot_value) in row.iter_mut().zip(pivot_values) {
+                *value -= factor * pivot_value;
             }
         }
     }
@@ -2530,13 +2548,14 @@ fn pseudoinverse(input: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
         for value in &mut temp[i] {
             *value /= pivot;
         }
-        for k in 0..3 {
-            if k == i {
+        let pivot_values = temp[i];
+        for (row_index, row) in temp.iter_mut().enumerate() {
+            if row_index == i {
                 continue;
             }
-            let scale = temp[k][i];
-            for j in 0..6 {
-                temp[k][j] -= temp[i][j] * scale;
+            let scale = row[i];
+            for (value, pivot_value) in row.iter_mut().zip(pivot_values) {
+                *value -= pivot_value * scale;
             }
         }
     }

@@ -184,7 +184,7 @@ impl ColorGrading {
     }
 }
 
-pub const CURRENT_PROCESS_VERSION: u32 = 5;
+pub const CURRENT_PROCESS_VERSION: u32 = 6;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -283,12 +283,11 @@ pub const DEFAULT_SCENE_EXPOSURE_EV: f32 = 0.7;
 
 impl ExposureParams {
     pub fn migrate_to_current_process(&mut self) {
-        // Version 5 introduces scale-aware presence kernels, global-airlight
-        // Dehaze, and the cascaded Glow diffusion. Older edits are migrated
-        // explicitly so saved processing state never adopts a new formula
-        // version accidentally.
+        // Version 6 fixes profile-highlight monotonicity, black-lift curve
+        // continuity, output-LUT shadow precision, and displayed grading hues.
+        // Older edits are marked as migrated before their next save.
         match self.process_version {
-            0..=4 => self.process_version = CURRENT_PROCESS_VERSION,
+            0..=5 => self.process_version = CURRENT_PROCESS_VERSION,
             CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently
@@ -424,7 +423,7 @@ mod tests {
     #[test]
     fn older_presence_formulas_migrate_to_the_current_version() {
         let mut params = ExposureParams {
-            process_version: 4,
+            process_version: CURRENT_PROCESS_VERSION - 1,
             ..ExposureParams::default()
         };
         params.migrate_to_current_process();

@@ -17,9 +17,8 @@ pub const LAMA_MODEL_BYTES: u64 = 208_044_816;
 pub const LAMA_MODEL_SHA256_HEX: &str =
     "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6";
 const LAMA_MODEL_SHA256: [u8; 32] = [
-    0x1f, 0xae, 0xf5, 0x30, 0x1d, 0x78, 0xdb, 0x7d, 0xda, 0x50, 0x2f, 0xe5, 0x99, 0x66,
-    0x95, 0x7e, 0xc4, 0xb7, 0x9d, 0xd6, 0x4e, 0x16, 0xf0, 0x3e, 0xd9, 0x69, 0x13, 0xc7,
-    0xa4, 0xeb, 0x68, 0xd6,
+    0x1f, 0xae, 0xf5, 0x30, 0x1d, 0x78, 0xdb, 0x7d, 0xda, 0x50, 0x2f, 0xe5, 0x99, 0x66, 0x95, 0x7e,
+    0xc4, 0xb7, 0x9d, 0xd6, 0x4e, 0x16, 0xf0, 0x3e, 0xd9, 0x69, 0x13, 0xc7, 0xa4, 0xeb, 0x68, 0xd6,
 ];
 pub const LAMA_EDGE: u32 = 512;
 const MAX_INPAINT_PIXELS: u64 = 20_000_000;
@@ -102,11 +101,7 @@ fn stroke_bounds(dabs: &[BrushDab], width: u32, height: u32) -> Option<(f32, f32
 
 /// Computes the actual square full-resolution area that will be fed to LaMa
 /// after resizing to 512x512. This mirrors AuRaw 1's ~1.5x padded context crop.
-pub fn inpaint_patch_rect(
-    dabs: &[BrushDab],
-    width: u32,
-    height: u32,
-) -> Option<InpaintPatchRect> {
+pub fn inpaint_patch_rect(dabs: &[BrushDab], width: u32, height: u32) -> Option<InpaintPatchRect> {
     let (min_x, min_y, max_x, max_y) = stroke_bounds(dabs, width, height)?;
     let shorter = width.min(height);
     let bounds_width = (max_x.ceil() as i64 - min_x.floor() as i64).max(1) as u32;
@@ -115,10 +110,9 @@ pub fn inpaint_patch_rect(
     let size = ((base as f32 * 1.5).ceil() as u32).max(64).min(shorter);
     let center_x = ((min_x + max_x) * 0.5).round() as i64;
     let center_y = ((min_y + max_y) * 0.5).round() as i64;
-    let x = (center_x - i64::from(size) / 2)
-        .clamp(0, i64::from(width.saturating_sub(size))) as u32;
-    let y = (center_y - i64::from(size) / 2)
-        .clamp(0, i64::from(height.saturating_sub(size))) as u32;
+    let x = (center_x - i64::from(size) / 2).clamp(0, i64::from(width.saturating_sub(size))) as u32;
+    let y =
+        (center_y - i64::from(size) / 2).clamp(0, i64::from(height.saturating_sub(size))) as u32;
     Some(InpaintPatchRect { x, y, size })
 }
 
@@ -134,8 +128,16 @@ pub fn inpaint_capture_rect(
     let halo = 32u32;
     let x0 = patch.x.saturating_sub(halo);
     let y0 = patch.y.saturating_sub(halo);
-    let x1 = patch.x.saturating_add(patch.size).saturating_add(halo).min(width);
-    let y1 = patch.y.saturating_add(patch.size).saturating_add(halo).min(height);
+    let x1 = patch
+        .x
+        .saturating_add(patch.size)
+        .saturating_add(halo)
+        .min(width);
+    let y1 = patch
+        .y
+        .saturating_add(patch.size)
+        .saturating_add(halo)
+        .min(height);
     (x1 > x0 && y1 > y0).then_some(InpaintCaptureRect {
         x: x0,
         y: y0,
@@ -244,10 +246,7 @@ fn remember_lama_model_identity(path: &Path) {
     let Ok(identity) = lama_model_identity(path) else {
         return;
     };
-    if let Ok(mut cached) = LAMA_VERIFIED_MODEL
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-    {
+    if let Ok(mut cached) = LAMA_VERIFIED_MODEL.get_or_init(|| Mutex::new(None)).lock() {
         *cached = Some(identity);
     }
 }
@@ -406,12 +405,7 @@ fn infer_lama(
 
     crate::ai_masks::initialize_runtime(runtime_path, runtime_sha256)?;
 
-    let local_dabs = localize_dabs(
-        &request.dabs,
-        &prepared,
-        prepared.width,
-        prepared.height,
-    );
+    let local_dabs = localize_dabs(&request.dabs, &prepared, prepared.width, prepared.height);
     anyhow::ensure!(
         !local_dabs.is_empty(),
         "erase stroke did not intersect its source crop"
@@ -434,6 +428,8 @@ fn infer_lama(
     // LaMa boundary explicit while preserving full-resolution crop selection.
     let image_values = build_lama_image_tensor(&prepared);
     let mask_values = build_lama_mask_tensor(&inference_mask, prepared.width);
+    let crop = inpaint_crop(&inference_mask, prepared.width, prepared.height)
+        .context("erase stroke did not cover any image pixels")?;
     let image_tensor = Tensor::from_array((
         [1usize, 3, LAMA_EDGE as usize, LAMA_EDGE as usize],
         image_values,
@@ -470,17 +466,20 @@ fn infer_lama(
     // strict binary replacement mask used by LaMa. RGB remains high precision;
     // compositing alpha is only 0 or 1.
     use half::f16;
-    let patch_pixels = usize::try_from(prepared.width)
+    let patch_pixels = usize::try_from(crop.size)
         .ok()
-        .and_then(|edge| edge.checked_mul(edge))
+        .and_then(|size| size.checked_mul(size))
         .context("inpainting patch dimensions overflow")?;
     let mut rgba16f = vec![0u16; patch_pixels.checked_mul(4).context("patch size overflow")?];
     let mut replacement_mask = vec![0u8; patch_pixels];
-    for local_y in 0..prepared.height {
-        for local_x in 0..prepared.width {
-            let source_index = (local_y * prepared.width + local_x) as usize;
-            let patch_index = source_index;
-            let generated_encoded = sample_lama_bilinear(&output, local_x, local_y, prepared.width);
+    for local_y in 0..crop.size {
+        for local_x in 0..crop.size {
+            let source_x = crop.x + local_x;
+            let source_y = crop.y + local_y;
+            let source_index = (source_y * prepared.width + source_x) as usize;
+            let patch_index = (local_y * crop.size + local_x) as usize;
+            let generated_encoded =
+                sample_lama_bilinear(&output, source_x, source_y, prepared.width);
             let generated = srgb_encoded_to_rec2020_linear(generated_encoded);
             let out = patch_index * 4;
             rgba16f[out] = f16::from_f32(generated[0]).to_bits();
@@ -494,10 +493,10 @@ fn infer_lama(
     InpaintPatch::new_linear(
         prepared.full_width,
         prepared.full_height,
-        prepared.origin_x,
-        prepared.origin_y,
-        prepared.width,
-        prepared.height,
+        prepared.origin_x + crop.x,
+        prepared.origin_y + crop.y,
+        crop.size,
+        crop.size,
         rgba16f,
         replacement_mask,
     )
@@ -560,12 +559,12 @@ fn build_lama_mask_tensor(mask: &[u8], width: u32) -> Vec<f32> {
         let src_y = (y * width / LAMA_EDGE).min(width - 1);
         for x in 0..LAMA_EDGE {
             let src_x = (x * width / LAMA_EDGE).min(width - 1);
-            output[(y * LAMA_EDGE + x) as usize] =
-                if mask[(src_y * width + src_x) as usize] >= 128 {
-                    1.0
-                } else {
-                    0.0
-                };
+            output[(y * LAMA_EDGE + x) as usize] = if mask[(src_y * width + src_x) as usize] >= 128
+            {
+                1.0
+            } else {
+                0.0
+            };
         }
     }
     output
@@ -577,12 +576,11 @@ fn build_lama_mask_tensor(mask: &[u8], width: u32) -> Vec<f32> {
 /// false-colour speckles than independent per-channel clipping in dark RAW data.
 fn rec2020_linear_to_model_srgb(rec2020: [f32; 3]) -> [f32; 3] {
     let mut rgb = [
-        1.660_491_0 * rec2020[0] - 0.587_641_1 * rec2020[1] - 0.072_849_9 * rec2020[2],
+        1.660_491 * rec2020[0] - 0.587_641_1 * rec2020[1] - 0.072_849_9 * rec2020[2],
         -0.124_550_5 * rec2020[0] + 1.132_899_9 * rec2020[1] - 0.008_349_4 * rec2020[2],
         -0.018_150_8 * rec2020[0] - 0.100_578_9 * rec2020[1] + 1.118_729_7 * rec2020[2],
     ];
-    let luminance = (0.212_672_9 * rgb[0] + 0.715_152_2 * rgb[1] + 0.072_175_0 * rgb[2])
-        .max(0.0);
+    let luminance = (0.212_672_9 * rgb[0] + 0.715_152_2 * rgb[1] + 0.072_175_0 * rgb[2]).max(0.0);
     let min_channel = rgb[0].min(rgb[1]).min(rgb[2]);
     if min_channel < 0.0 {
         let denominator = (luminance - min_channel).max(1e-8);
@@ -623,7 +621,7 @@ fn srgb_encoded_to_rec2020_linear(encoded: [f32; 3]) -> [f32; 3] {
     let g = decode(encoded[1]);
     let b = decode(encoded[2]);
     [
-        0.627_403_9 * r + 0.329_283_0 * g + 0.043_313_1 * b,
+        0.627_403_9 * r + 0.329_283 * g + 0.043_313_1 * b,
         0.069_097_3 * r + 0.919_540_4 * g + 0.011_362_3 * b,
         0.016_391_4 * r + 0.088_013_3 * g + 0.895_595_3 * b,
     ]
@@ -652,10 +650,10 @@ fn sample_lama_bilinear(output: &[f32], x: u32, y: u32, target_edge: u32) -> [f3
         output[channel * plane + sy * source_edge + sx] / 255.0
     };
     let mut rgb = [0.0; 3];
-    for channel in 0..3 {
+    for (channel, value) in rgb.iter_mut().enumerate() {
         let top = sample(channel, x0, y0) * (1.0 - tx) + sample(channel, x1, y0) * tx;
         let bottom = sample(channel, x0, y1) * (1.0 - tx) + sample(channel, x1, y1) * tx;
-        rgb[channel] = top * (1.0 - ty) + bottom * ty;
+        *value = top * (1.0 - ty) + bottom * ty;
     }
     rgb
 }
@@ -735,22 +733,18 @@ fn inpaint_crop(mask: &[u8], width: u32, height: u32) -> Option<SquareCrop> {
     // the bounds as context (roughly a 3x crop), shrinking the target inside
     // LaMa's 512x512 input and visibly reducing reconstruction detail.
     let base = bounds_width.max(bounds_height);
-    let size = ((base as f32 * 1.5).ceil() as u32)
-        .max(64)
-        .min(shorter);
+    let size = ((base as f32 * 1.5).ceil() as u32).max(64).min(shorter);
     let center_x = (min_x as i64 + max_x as i64) / 2;
     let center_y = (min_y as i64 + max_y as i64) / 2;
-    let x = (center_x - i64::from(size) / 2)
-        .clamp(0, i64::from(width.saturating_sub(size))) as u32;
-    let y = (center_y - i64::from(size) / 2)
-        .clamp(0, i64::from(height.saturating_sub(size))) as u32;
+    let x = (center_x - i64::from(size) / 2).clamp(0, i64::from(width.saturating_sub(size))) as u32;
+    let y =
+        (center_y - i64::from(size) / 2).clamp(0, i64::from(height.saturating_sub(size))) as u32;
     Some(SquareCrop { x, y, size })
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{SquareCrop, inpaint_crop};
+    use super::{inpaint_crop, SquareCrop};
 
     #[test]
     fn crop_stays_square_and_inside_image_near_edge() {

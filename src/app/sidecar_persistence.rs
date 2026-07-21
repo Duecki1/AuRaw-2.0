@@ -117,8 +117,8 @@ impl AurawApp {
         let generation = self.sidecar_generation;
         let revision = self.edit_commit_revision();
 
-        if !explicit {
-            if self.sidecar_saved_revision == Some(revision)
+        if !explicit
+            && (self.sidecar_saved_revision == Some(revision)
                 || self.sidecar_failed_revision == Some(revision)
                 || self
                     .sidecar_in_flight
@@ -126,10 +126,9 @@ impl AurawApp {
                 || self
                     .sidecar_pending
                     .iter()
-                    .any(|request| request.generation == generation && request.revision == revision)
-            {
-                return;
-            }
+                    .any(|request| request.generation == generation && request.revision == revision))
+        {
+            return;
         }
 
         let mut request = SidecarSaveRequest {
@@ -620,7 +619,7 @@ impl AurawApp {
             .name("auraw-developed-thumbnail".to_owned())
             .spawn(move || {
                 let result = (|| {
-                    let mut thumbnail = snapshot
+                    let thumbnail = snapshot
                         .read_thumbnail_blocking(&device, &queue, 512)
                         .map_err(|error| format!("GPU thumbnail readback failed: {error:#}"))?;
                     match &worker_target {
@@ -746,6 +745,7 @@ fn save_sidecar_request(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod sidecar_persistence_tests {
     use super::*;
 
