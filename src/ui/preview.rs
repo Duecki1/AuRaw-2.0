@@ -1,6 +1,6 @@
 use crate::app::{AurawApp, MaskDragState, MaskOverlayBlink, SidebarTab};
 use crate::pipeline::{
-    rasterize_brush_dabs, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
+    rasterize_brush_dabs, rasterize_inpaint_dabs_binary, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
     ObjectStroke,
 };
 use crate::ui::mask_component_color;
@@ -413,7 +413,7 @@ impl Preview {
                     center: uv,
                     opacity: 1.0,
                     size: app.inpaint_brush_size,
-                    feather: app.inpaint_brush_feather,
+                    feather: 0.0,
                 });
                 changed = true;
             }
@@ -428,7 +428,7 @@ impl Preview {
                     center: [previous[0] + dx * t, previous[1] + dy * t],
                     opacity: 1.0,
                     size: app.inpaint_brush_size,
-                    feather: app.inpaint_brush_feather,
+                    feather: 0.0,
                 });
                 changed = true;
             }
@@ -456,7 +456,7 @@ impl Preview {
             let height = (image_rect.height() * scale).round().max(1.0) as u32;
             let key = (app.inpaint_stroke.len(), width, height);
             if app.inpaint_stroke_texture_key != Some(key) {
-                let coverage = rasterize_brush_dabs(
+                let coverage = rasterize_inpaint_dabs_binary(
                     width,
                     height,
                     pipeline.width,

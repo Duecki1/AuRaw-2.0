@@ -859,7 +859,14 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
             return invalid("inpainting patch bounds are invalid");
         }
         validate_image(patch.width, patch.height, patch.mask.len(), 1)?;
-        validate_image(patch.width, patch.height, patch.rgba.len(), 4)?;
+        let pixels = patch.width as usize * patch.height as usize;
+        if !patch.rgba16f.is_empty() {
+            if patch.rgba16f.len() != pixels.saturating_mul(4) {
+                return invalid("inpainting RGBA16F patch dimensions are invalid");
+            }
+        } else {
+            validate_image(patch.width, patch.height, patch.rgba.len(), 4)?;
+        }
     }
 
     if stack.selected_mask.is_none() && stack.selected_component.is_some() {
@@ -930,7 +937,12 @@ fn preflight_encoded_images(edits: &EditState) -> Result<(), SidecarError> {
         }
     }
     for stroke in edits.inpainting.iter() {
-        for image_bytes in [stroke.patch.rgba.len(), stroke.patch.mask.len()] {
+        let rgba_bytes = if stroke.patch.rgba16f.is_empty() {
+            stroke.patch.rgba.len()
+        } else {
+            stroke.patch.rgba16f.len().saturating_mul(2)
+        };
+        for image_bytes in [rgba_bytes, stroke.patch.mask.len()] {
             let base64_bytes = (image_bytes as u64)
                 .div_ceil(3)
                 .checked_mul(4)
@@ -1190,15 +1202,13 @@ mod tests {
 
     #[test]
     fn inpainting_round_trip_preserves_individual_strokes() {
-        use crate::pipeline::{BrushDab, InpaintLayer, InpaintStroke};
+        use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke};
+        use half::f16;
 
         let mut edits = sample_edits();
-        let mut rgba = vec![0u8; 4 * 4 * 4];
-        let mut mask = vec![0u8; 4 * 4];
-        mask[5] = 255;
-        rgba[20..24].copy_from_slice(&[12, 34, 56, 255]);
-        let layer = InpaintLayer::new(4, 4, rgba, mask).unwrap();
-        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], &layer).unwrap();
+        let rgba16f = vec![f16::from_f32(0.25).to_bits(); 4];
+        let patch = InpaintPatch::new_linear(4, 4, 1, 1, 1, 1, rgba16f, vec![255]).unwrap();
+        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
         edits.inpainting = Arc::new(vec![stroke]);
 
         let encoded = encode(edits.clone()).unwrap();

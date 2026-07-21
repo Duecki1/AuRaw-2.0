@@ -40,6 +40,7 @@ impl AurawApp {
         self.inpaint_texture_key = None;
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
+        self.inpaint_source_cache = None;
         self.inpaint_pending_source = None;
         self.inpaint_active_dabs = None;
         self.inpaint_revision = 0;
@@ -65,13 +66,11 @@ impl AurawApp {
             return;
         }
 
-        let source = match self.capture_inpaint_source(frame).and_then(|source| {
-            if let Some(layer) = &self.inpaint_layer {
-                flatten_inpaint_source(source, layer)
-            } else {
-                Ok(source)
-            }
-        }) {
+        // Capture only the full-resolution RAW region needed by this stroke.
+        // This avoids the old preview-proxy source while keeping brush release
+        // fast: shader programs are reused and only a small local crop is
+        // allocated/read back.
+        let source = match self.capture_inpaint_source(frame, &self.inpaint_stroke) {
             Ok(source) => source,
             Err(error) => {
                 self.notice = Some(error);
@@ -90,49 +89,92 @@ impl AurawApp {
         }
     }
 
-    fn capture_inpaint_source(&self, frame: &eframe::Frame) -> Result<MaskRgbImage, String> {
+    fn capture_inpaint_source(
+        &self,
+        frame: &eframe::Frame,
+        dabs: &[BrushDab],
+    ) -> Result<PreparedInpaintSource, String> {
         let render_state = frame
             .wgpu_render_state()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let raw = self
-            .preview_raw
+        let full_raw = self
+            .loaded_raw
             .as_ref()
             .ok_or_else(|| "Open an image before using Inpainting.".to_owned())?;
+        let template = self
+            .gpu_pipeline
+            .as_ref()
+            .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
+        let patch = inpaint_patch_rect(dabs, full_raw.width, full_raw.height)
+            .ok_or_else(|| "The erase stroke does not cover the image.".to_owned())?;
+        let rect = inpaint_capture_rect(dabs, full_raw.width, full_raw.height)
+            .ok_or_else(|| "The erase stroke does not cover the image.".to_owned())?;
 
-        // Run LaMa on the pre-adjustment scene rather than the live edited
-        // output. The generated replacement can then be inserted back before
-        // Develop processing, allowing later global and mask adjustments to
-        // affect it exactly like the surrounding photo instead of baking the
-        // sliders into the patch at erase time.
+        let local_raw = crop_raw(full_raw, rect.x, rect.y, rect.width, rect.height);
         let empty_masks = MaskStack::default();
-        // Persist inpainting in the RAW's neutral scene-working basis. At
-        // display/export time the GPU maps that neutral basis through the live
-        // camera white-balance matrix before applying the current DCP/profile
-        // and all later global/local edits. This keeps temperature/tint editable
-        // instead of baking the values that happened to be active when erased.
         let mut neutral_exposure = self.exposure;
         neutral_exposure.temperature = 0.0;
         neutral_exposure.tint = 0.0;
-        let params = GpuParams::new(&neutral_exposure, &empty_masks, raw);
-        let pipeline = RawGpuPipeline::new_headless_with_quality(
+        let params = GpuParams::new_for_tile(
+            &neutral_exposure,
+            &empty_masks,
+            &local_raw,
+            rect.x as i32,
+            rect.y as i32,
+            full_raw.width,
+            full_raw.height,
+        );
+        let pipeline = RawGpuPipeline::new_headless_reusing_programs(
             &render_state.device,
             &render_state.queue,
-            raw,
+            &local_raw,
             &params,
-            ProcessingQuality::High,
+            ProcessingQuality::Preview,
+            template,
         )
-        .map_err(|error| format!("Could not prepare the inpainting scene: {error:#}"))?;
+        .map_err(|error| format!("Could not prepare the full-resolution inpainting crop: {error:#}"))?;
+        let patch_local_x = patch.x.saturating_sub(rect.x);
+        let patch_local_y = patch.y.saturating_sub(rect.y);
         let scene = pipeline
-            .render_inpaint_working_scene_blocking(
+            .render_inpaint_working_scene_region_resized_blocking(
                 &render_state.device,
                 &render_state.queue,
                 &params,
+                patch_local_x,
+                patch_local_y,
+                patch.size,
+                patch.size,
+                LAMA_EDGE,
+                LAMA_EDGE,
             )
-            .map_err(|error| format!("Could not read the inpainting scene: {error:#}"))?;
-        let rgba = scene_rec2020_to_srgb8(&scene)
-            .map_err(|error| format!("Could not encode the inpainting scene: {error}"))?;
-        MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
-            .ok_or_else(|| "The inpainting source has invalid dimensions.".to_owned())
+            .map_err(|error| format!("Could not read the inpainting crop: {error:#}"))?;
+        let expected = LAMA_EDGE as usize * LAMA_EDGE as usize * 3;
+        if scene.len() != expected || scene.iter().any(|value| !value.is_finite()) {
+            return Err("The inpainting crop has an invalid Rec.2020 working buffer.".to_owned());
+        }
+        let rgb_rec2020 = if let Some(layer) = &self.inpaint_layer {
+            flatten_inpaint_source_model_region(
+                scene,
+                layer,
+                patch.x,
+                patch.y,
+                patch.size,
+                full_raw.width,
+                full_raw.height,
+            )?
+        } else {
+            scene
+        };
+
+        Ok(PreparedInpaintSource {
+            rgb_rec2020,
+            width: patch.size,
+            height: patch.size,
+            origin_x: patch.x,
+            origin_y: patch.y,
+            full_width: full_raw.width,
+            full_height: full_raw.height,
+        })
     }
 
     fn start_inpaint_worker(&mut self, model_path: PathBuf) {
@@ -194,7 +236,7 @@ impl AurawApp {
             match result {
                 Ok(result) => {
                     let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
-                    if let Some(stroke) = InpaintStroke::from_result(dabs, &result) {
+                    if let Some(stroke) = InpaintStroke::from_result(dabs, result) {
                         self.inpaint_strokes.push(stroke);
                         self.rebuild_inpaint_layer();
                         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
@@ -321,83 +363,52 @@ impl AurawApp {
 }
 
 
-fn scene_rec2020_to_srgb8(scene: &[f32]) -> Result<Vec<u8>, String> {
-    if scene.len() % 3 != 0 {
-        return Err("scene RGB buffer has an invalid length".to_owned());
-    }
-    let mut rgba = Vec::with_capacity(scene.len() / 3 * 4);
-    for rgb in scene.chunks_exact(3) {
-        let r = 1.660_491_0 * rgb[0] - 0.587_641_1 * rgb[1] - 0.072_849_9 * rgb[2];
-        let g = -0.124_550_5 * rgb[0] + 1.132_899_9 * rgb[1] - 0.008_349_4 * rgb[2];
-        let b = -0.018_150_8 * rgb[0] - 0.100_578_9 * rgb[1] + 1.118_729_7 * rgb[2];
-        for value in [r, g, b] {
-            let linear = value.max(0.0);
-            let encoded = if linear <= 0.003_130_8 {
-                linear * 12.92
-            } else {
-                1.055 * linear.powf(1.0 / 2.4) - 0.055
-            };
-            rgba.push((encoded.clamp(0.0, 1.0) * 255.0).round() as u8);
-        }
-        rgba.push(255);
-    }
-    Ok(rgba)
-}
-
-fn flatten_inpaint_source(
-    source: MaskRgbImage,
+fn flatten_inpaint_source_model_region(
+    mut rgb_rec2020: Vec<f32>,
     layer: &InpaintLayer,
-) -> Result<MaskRgbImage, String> {
-    if source.width == 0 || source.height == 0 || layer.width == 0 || layer.height == 0 {
-        return Err("The inpainting layer has invalid dimensions.".to_owned());
+    origin_x: u32,
+    origin_y: u32,
+    size: u32,
+    full_width: u32,
+    full_height: u32,
+) -> Result<Vec<f32>, String> {
+    if size == 0 || full_width == 0 || full_height == 0 {
+        return Err("The inpainting source has invalid dimensions.".to_owned());
     }
-    let expected_source_pixels = usize::try_from(source.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(source.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-        .ok_or_else(|| "The inpainting source dimensions are too large.".to_owned())?;
-    let expected_source_bytes = expected_source_pixels
-        .checked_mul(4)
-        .ok_or_else(|| "The inpainting source dimensions are too large.".to_owned())?;
-    if source.rgba.len() != expected_source_bytes {
+    let expected = LAMA_EDGE as usize * LAMA_EDGE as usize * 3;
+    if rgb_rec2020.len() != expected {
         return Err("The inpainting source is incomplete.".to_owned());
     }
-    let expected_layer_pixels = usize::try_from(layer.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(layer.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-        .ok_or_else(|| "The inpainting layer dimensions are too large.".to_owned())?;
-    let expected_layer_bytes = expected_layer_pixels
-        .checked_mul(4)
-        .ok_or_else(|| "The inpainting layer dimensions are too large.".to_owned())?;
-    if layer.rgba.len() != expected_layer_bytes || layer.mask.len() != expected_layer_pixels {
-        return Err("The inpainting layer is incomplete.".to_owned());
-    }
-    let mut rgba = source.rgba.to_vec();
-    for y in 0..source.height {
-        let layer_y = ((y as f32 + 0.5) * layer.height as f32 / source.height as f32)
-            .floor()
-            .clamp(0.0, layer.height.saturating_sub(1) as f32) as u32;
-        for x in 0..source.width {
-            let layer_x = ((x as f32 + 0.5) * layer.width as f32 / source.width as f32)
-                .floor()
-                .clamp(0.0, layer.width.saturating_sub(1) as f32) as u32;
-            let layer_index = (layer_y as usize * layer.width as usize + layer_x as usize) as usize;
-            if layer.mask[layer_index] == 0 {
-                continue;
+    for patch in layer.patches.iter() {
+        if !patch.is_valid() {
+            continue;
+        }
+        for y in 0..LAMA_EDGE {
+            let global_y = origin_y as f32
+                + ((y as f32 + 0.5) * size as f32 / LAMA_EDGE as f32)
+                - 0.5;
+            for x in 0..LAMA_EDGE {
+                let global_x = origin_x as f32
+                    + ((x as f32 + 0.5) * size as f32 / LAMA_EDGE as f32)
+                    - 0.5;
+                let source_x = (global_x + 0.5) * patch.source_width as f32 / full_width as f32 - 0.5;
+                let source_y = (global_y + 0.5) * patch.source_height as f32 / full_height as f32 - 0.5;
+                let Some((replacement, alpha)) =
+                    patch.sample_linear_rec2020_bilinear_hard_mask(source_x, source_y)
+                else {
+                    continue;
+                };
+                if alpha <= 1e-6 {
+                    continue;
+                }
+                let destination = (y as usize * LAMA_EDGE as usize + x as usize) * 3;
+                for channel in 0..3 {
+                    rgb_rec2020[destination + channel] = rgb_rec2020[destination + channel]
+                        + (replacement[channel] - rgb_rec2020[destination + channel]) * alpha;
+                }
             }
-            let source_index = (y as usize * source.width as usize + x as usize) * 4;
-            let layer_rgba = layer_index * 4;
-            rgba[source_index..source_index + 4]
-                .copy_from_slice(&layer.rgba[layer_rgba..layer_rgba + 4]);
         }
     }
-    MaskRgbImage::new(source.width, source.height, rgba)
-        .ok_or_else(|| "The flattened inpainting source has invalid dimensions.".to_owned())
+    Ok(rgb_rec2020)
 }
+

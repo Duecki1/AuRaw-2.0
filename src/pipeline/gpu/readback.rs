@@ -83,6 +83,25 @@ pub(super) fn read_rgba8_texture_region_blocking(
     Ok(rgba)
 }
 
+const MAX_RGBA32_READBACK_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+
+fn rgba32_readback_rows_per_chunk(width: u32) -> Result<u32> {
+    if width == 0 {
+        return Err(anyhow!("GPU RGBA32F readback width is zero"));
+    }
+    let unpadded_bytes_per_row = width
+        .checked_mul(16)
+        .ok_or_else(|| anyhow!("GPU RGBA32F row byte count overflows"))?;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+    let rows = MAX_RGBA32_READBACK_CHUNK_BYTES / u64::from(padded_bytes_per_row);
+    if rows == 0 {
+        return Err(anyhow!(
+            "one GPU RGBA32F readback row ({padded_bytes_per_row} bytes) exceeds the chunk limit"
+        ));
+    }
+    Ok(rows.min(u64::from(u32::MAX)) as u32)
+}
+
 pub(super) fn read_rgba32_texture_region_rgb_blocking(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -105,40 +124,67 @@ pub(super) fn read_rgba32_texture_region_rgb_blocking(
         return Err(anyhow!("invalid GPU RGBA32F readback rectangle"));
     }
 
-    let (readback, padded_bytes_per_row) =
-        create_rgba32_readback_buffer(device, width, height, label);
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d { x, y, z: 0 },
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bytes_per_row),
-                rows_per_image: Some(height),
+    // WebGPU adapters commonly expose a 256 MiB max_buffer_size. A large
+    // full-resolution inpainting crop can legitimately exceed that even though
+    // the texture itself is valid (for example, ~19.3 MP × RGBA32F is ~295 MiB).
+    // Read the texture in bounded horizontal strips so no single MAP_READ buffer
+    // can approach the device limit. This also makes repeated inpainting strokes
+    // independent of the crop size instead of turning a large stroke into a fatal
+    // wgpu validation panic.
+    let rows_per_chunk = rgba32_readback_rows_per_chunk(width)?;
+    let capacity = usize::try_from(width)
+        .ok()
+        .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| anyhow!("GPU RGBA32F readback output size overflows"))?;
+    let mut rgb = Vec::with_capacity(capacity);
+    let mut row_offset = 0u32;
+
+    while row_offset < height {
+        let chunk_height = rows_per_chunk.min(height - row_offset);
+        let (readback, padded_bytes_per_row) =
+            create_rgba32_readback_buffer(device, width, chunk_height, label);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some(label),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x,
+                    y: y + row_offset,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
             },
-        },
-        wgpu::Extent3d {
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(chunk_height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height: chunk_height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = queue.submit(Some(encoder.finish()));
+        rgb.extend(map_rgba32_readback_rgb(
+            device,
+            &readback,
+            submission,
             width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    let submission = queue.submit(Some(encoder.finish()));
-    map_rgba32_readback_rgb(
-        device,
-        &readback,
-        submission,
-        width,
-        height,
-        padded_bytes_per_row,
-    )
+            chunk_height,
+            padded_bytes_per_row,
+        )?);
+        row_offset += chunk_height;
+    }
+
+    Ok(rgb)
 }
 
 pub(super) fn read_rgba32_texture_rgb_blocking(
@@ -149,26 +195,17 @@ pub(super) fn read_rgba32_texture_rgb_blocking(
     height: u32,
     label: &'static str,
 ) -> Result<Vec<f32>> {
-    let (readback, padded_bytes_per_row) =
-        create_rgba32_readback_buffer(device, width, height, label);
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-    encode_rgba32_texture_copy(
-        &mut encoder,
-        texture,
-        &readback,
-        width,
-        height,
-        padded_bytes_per_row,
-    );
-    let submission = queue.submit(Some(encoder.finish()));
-    map_rgba32_readback_rgb(
+    read_rgba32_texture_region_rgb_blocking(
         device,
-        &readback,
-        submission,
+        queue,
+        texture,
+        0,
+        0,
         width,
         height,
-        padded_bytes_per_row,
+        width,
+        height,
+        label,
     )
 }
 
@@ -187,33 +224,6 @@ pub(super) fn create_rgba32_readback_buffer(
         mapped_at_creation: false,
     });
     (buffer, padded_bytes_per_row)
-}
-
-pub(super) fn encode_rgba32_texture_copy(
-    encoder: &mut wgpu::CommandEncoder,
-    texture: &wgpu::Texture,
-    readback: &wgpu::Buffer,
-    width: u32,
-    height: u32,
-    padded_bytes_per_row: u32,
-) {
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bytes_per_row),
-                rows_per_image: Some(height),
-            },
-        },
-        texture_size(width, height),
-    );
 }
 
 pub(super) fn map_rgba32_readback_rgb(
@@ -262,4 +272,24 @@ pub(super) fn map_rgba32_readback_rgb(
         return Err(anyhow!("scene texture readback contains NaN or infinity"));
     }
     Ok(rgb)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{rgba32_readback_rows_per_chunk, MAX_RGBA32_READBACK_CHUNK_BYTES};
+
+    #[test]
+    fn rgba32_readback_chunks_stay_below_the_safe_buffer_budget() {
+        let width = 8_256u32;
+        let rows = rgba32_readback_rows_per_chunk(width).unwrap();
+        let padded = (width * 16).div_ceil(256) * 256;
+        assert!(u64::from(rows) * u64::from(padded) <= MAX_RGBA32_READBACK_CHUNK_BYTES);
+        assert!(rows > 0);
+    }
+
+    #[test]
+    fn rgba32_readback_rejects_zero_width() {
+        assert!(rgba32_readback_rows_per_chunk(0).is_err());
+    }
 }

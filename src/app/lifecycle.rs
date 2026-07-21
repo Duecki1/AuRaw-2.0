@@ -265,7 +265,6 @@ impl AurawApp {
             object_job_target: None,
             object_cache: None,
             inpaint_brush_size: 0.055,
-            inpaint_brush_feather: 0.55,
             inpaint_stroke: Vec::new(),
             inpaint_strokes: Vec::new(),
             last_inpaint_brush_point: None,
@@ -275,6 +274,7 @@ impl AurawApp {
             inpaint_texture_key: None,
             inpaint_stroke_texture: None,
             inpaint_stroke_texture_key: None,
+            inpaint_source_cache: None,
             inpaint_pending_source: None,
             inpaint_active_dabs: None,
             inpaint_revision: 0,
@@ -437,7 +437,6 @@ impl AurawApp {
             object_job_target: None,
             object_cache: None,
             inpaint_brush_size: 0.055,
-            inpaint_brush_feather: 0.55,
             inpaint_stroke: Vec::new(),
             inpaint_strokes: Vec::new(),
             last_inpaint_brush_point: None,
@@ -447,6 +446,7 @@ impl AurawApp {
             inpaint_texture_key: None,
             inpaint_stroke_texture: None,
             inpaint_stroke_texture_key: None,
+            inpaint_source_cache: None,
             inpaint_pending_source: None,
             inpaint_active_dabs: None,
             inpaint_revision: 0,
@@ -1367,6 +1367,11 @@ impl AurawApp {
                         "Initial GPU preview dispatch submitted in {:.3}s",
                         first_render_started.elapsed().as_secs_f64()
                     ));
+
+                    // Inpainting now captures only the required full-resolution
+                    // RAW crop when a stroke is released. Avoid precomputing and
+                    // retaining an unused preview-resolution proxy source here.
+                    let inpaint_source = None;
                     crate::diagnostics::record(format!(
                         "RAW open worker finished in {:.3}s",
                         open_started.elapsed().as_secs_f64()
@@ -1384,6 +1389,7 @@ impl AurawApp {
                         rendered_masks,
                         inpaint_strokes,
                         mask_source,
+                        inpaint_source,
                         lens_correction,
                         sidecar_target,
                         sidecar_generation,
@@ -1622,6 +1628,7 @@ impl AurawApp {
                 self.inpaint_texture_key = None;
                 self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
                 self.inpaint_revision = 0;
+                self.inpaint_source_cache = loaded.inpaint_source;
                 self.rehydrate_restored_mask_state();
                 if loaded.mask_source.is_some() {
                     self.mask_source_cache = loaded.mask_source;

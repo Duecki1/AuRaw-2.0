@@ -181,38 +181,25 @@ impl MaskRgbImage {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InpaintLayer {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Arc<[u8]>,
-    pub mask: Arc<[u8]>,
+    /// Sparse, ordered full-image-coordinate patches. Later patches overwrite
+    /// earlier patches where they overlap.
+    pub patches: Arc<[InpaintPatch]>,
 }
 
 impl InpaintLayer {
-    pub fn new(width: u32, height: u32, rgba: Vec<u8>, mask: Vec<u8>) -> Option<Self> {
-        let pixels = usize::try_from(width)
-            .ok()?
-            .checked_mul(usize::try_from(height).ok()?)?;
-        let rgba_len = pixels.checked_mul(4)?;
-        (rgba.len() == rgba_len && mask.len() == pixels).then(|| Self {
-            width,
-            height,
-            rgba: rgba.into(),
-            mask: mask.into(),
+    pub fn new(patches: Vec<InpaintPatch>) -> Option<Self> {
+        (!patches.is_empty() && patches.iter().all(InpaintPatch::is_valid)).then(|| Self {
+            patches: patches.into(),
         })
-    }
-
-    pub fn as_masked_rgba(&self) -> Vec<u8> {
-        let mut output = self.rgba.to_vec();
-        for (pixel, alpha) in output.chunks_exact_mut(4).zip(self.mask.iter().copied()) {
-            pixel[3] = alpha;
-        }
-        output
     }
 }
 
-/// Compact persisted result for one released inpainting brush stroke. Only the
-/// rectangle touched by the stroke is stored, rather than a full preview-sized
-/// RGBA image for every history entry.
+/// Compact persisted result for one released inpainting brush stroke.
+///
+/// New patches are stored as scene-linear Rec.2020 RGBA16F at the exact
+/// full-resolution image coordinates where LaMa was applied. `rgba` is kept
+/// only for backward compatibility with early AuRaw 2.0 sidecars that stored
+/// 8-bit sRGB proxy patches.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct InpaintPatch {
     pub source_width: u32,
@@ -221,75 +208,190 @@ pub struct InpaintPatch {
     pub y: u32,
     pub width: u32,
     pub height: u32,
-    #[serde(with = "base64_arc_bytes")]
+    #[serde(
+        default,
+        with = "base64_arc_u16",
+        skip_serializing_if = "arc_u16_is_empty"
+    )]
+    pub rgba16f: Arc<[u16]>,
+    /// Legacy AuRaw 2.0 8-bit sRGB storage. New patches leave this empty.
+    #[serde(
+        default,
+        with = "base64_arc_bytes",
+        skip_serializing_if = "arc_u8_is_empty"
+    )]
     pub rgba: Arc<[u8]>,
     #[serde(with = "base64_arc_bytes")]
     pub mask: Arc<[u8]>,
 }
 
+fn arc_u16_is_empty(values: &Arc<[u16]>) -> bool {
+    values.is_empty()
+}
+
+fn arc_u8_is_empty(values: &Arc<[u8]>) -> bool {
+    values.is_empty()
+}
+
 impl InpaintPatch {
-    pub fn from_layer(layer: &InpaintLayer) -> Option<Self> {
-        let pixels = usize::try_from(layer.width)
+    pub fn new_linear(
+        source_width: u32,
+        source_height: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        rgba16f: Vec<u16>,
+        mask: Vec<u8>,
+    ) -> Option<Self> {
+        let pixels = usize::try_from(width)
             .ok()?
-            .checked_mul(usize::try_from(layer.height).ok()?)?;
-        if layer.width == 0
-            || layer.height == 0
-            || layer.mask.len() != pixels
-            || layer.rgba.len() != pixels.checked_mul(4)?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        if mask.iter().any(|&value| value != 0 && value != 255) {
+            return None;
+        }
+        let patch = Self {
+            source_width,
+            source_height,
+            x,
+            y,
+            width,
+            height,
+            rgba16f: rgba16f.into(),
+            rgba: Vec::<u8>::new().into(),
+            mask: mask.into(),
+        };
+        (patch.rgba16f.len() == pixels.checked_mul(4)? && patch.is_valid()).then_some(patch)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        if self.source_width == 0
+            || self.source_height == 0
+            || self.width == 0
+            || self.height == 0
+            || self.x.checked_add(self.width).is_none_or(|right| right > self.source_width)
+            || self.y.checked_add(self.height).is_none_or(|bottom| bottom > self.source_height)
+        {
+            return false;
+        }
+        let Some(pixels) = usize::try_from(self.width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(self.height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+        else {
+            return false;
+        };
+        if self.mask.len() != pixels {
+            return false;
+        }
+        self.rgba16f.len() == pixels.saturating_mul(4)
+            || self.rgba.len() == pixels.saturating_mul(4)
+    }
+
+    /// Returns one replacement pixel in scene-linear Rec.2020 RGBA16F.
+    /// Legacy sRGB8 patches are converted on demand so old sidecars remain usable.
+    pub fn linear_rgba16f_at(&self, index: usize) -> Option<[u16; 4]> {
+        let base = index.checked_mul(4)?;
+        if self.rgba16f.len() >= base + 4 {
+            return Some([
+                self.rgba16f[base],
+                self.rgba16f[base + 1],
+                self.rgba16f[base + 2],
+                self.rgba16f[base + 3],
+            ]);
+        }
+        if self.rgba.len() < base + 4 {
+            return None;
+        }
+        use half::f16;
+        let decode = |value: u8| {
+            let encoded = f32::from(value) / 255.0;
+            if encoded <= 0.04045 {
+                encoded / 12.92
+            } else {
+                ((encoded + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let r = decode(self.rgba[base]);
+        let g = decode(self.rgba[base + 1]);
+        let b = decode(self.rgba[base + 2]);
+        let rec2020 = [
+            0.627_403_9 * r + 0.329_283_0 * g + 0.043_313_1 * b,
+            0.069_097_3 * r + 0.919_540_4 * g + 0.011_362_3 * b,
+            0.016_391_4 * r + 0.088_013_3 * g + 0.895_595_3 * b,
+        ];
+        Some([
+            f16::from_f32(rec2020[0]).to_bits(),
+            f16::from_f32(rec2020[1]).to_bits(),
+            f16::from_f32(rec2020[2]).to_bits(),
+            f16::from_f32(1.0).to_bits(),
+        ])
+    }
+
+
+    /// Bilinearly samples replacement RGB while keeping the inpainting mask
+    /// strictly binary. The nearest persisted mask texel is thresholded to
+    /// either 0 or 1; fractional legacy mask bytes are never used as alpha.
+    /// This preserves filtered RGB when projecting a full-resolution patch into
+    /// a preview without reintroducing feathering at the replacement boundary.
+    pub fn sample_linear_rec2020_bilinear_hard_mask(
+        &self,
+        source_x: f32,
+        source_y: f32,
+    ) -> Option<([f32; 3], f32)> {
+        if !self.is_valid() || !source_x.is_finite() || !source_y.is_finite() {
+            return None;
+        }
+        use half::f16;
+        let patch_x0 = i64::from(self.x);
+        let patch_y0 = i64::from(self.y);
+        let patch_x1 = i64::from(self.x + self.width);
+        let patch_y1 = i64::from(self.y + self.height);
+
+        // Pixel centers use integer source coordinates. Nearest-mask sampling
+        // deliberately produces a hard 0/1 decision even when scaling.
+        let nearest_x = (source_x + 0.5).floor() as i64;
+        let nearest_y = (source_y + 0.5).floor() as i64;
+        if nearest_x < patch_x0
+            || nearest_y < patch_y0
+            || nearest_x >= patch_x1
+            || nearest_y >= patch_y1
         {
             return None;
         }
-
-        let mut min_x = layer.width;
-        let mut min_y = layer.height;
-        let mut max_x = 0u32;
-        let mut max_y = 0u32;
-        let mut found = false;
-        for y in 0..layer.height {
-            for x in 0..layer.width {
-                let index = y as usize * layer.width as usize + x as usize;
-                if layer.mask[index] == 0 {
-                    continue;
-                }
-                found = true;
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-        }
-        if !found {
+        let mask_index = (nearest_y - patch_y0) as usize * self.width as usize
+            + (nearest_x - patch_x0) as usize;
+        if self.mask[mask_index] < 128 {
             return None;
         }
 
-        let width = max_x.checked_sub(min_x)?.checked_add(1)?;
-        let height = max_y.checked_sub(min_y)?.checked_add(1)?;
-        let patch_pixels = usize::try_from(width)
-            .ok()?
-            .checked_mul(usize::try_from(height).ok()?)?;
-        let mut rgba = vec![0u8; patch_pixels.checked_mul(4)?];
-        let mut mask = vec![0u8; patch_pixels];
-        for local_y in 0..height {
-            let source_start = ((min_y + local_y) as usize * layer.width as usize
-                + min_x as usize) as usize;
-            let source_end = source_start + width as usize;
-            let patch_start = local_y as usize * width as usize;
-            let patch_end = patch_start + width as usize;
-            mask[patch_start..patch_end].copy_from_slice(&layer.mask[source_start..source_end]);
-            rgba[patch_start * 4..patch_end * 4]
-                .copy_from_slice(&layer.rgba[source_start * 4..source_end * 4]);
+        let sx = source_x.clamp(self.x as f32, (self.x + self.width - 1) as f32);
+        let sy = source_y.clamp(self.y as f32, (self.y + self.height - 1) as f32);
+        let x0 = sx.floor() as u32;
+        let y0 = sy.floor() as u32;
+        let x1 = (x0 + 1).min(self.x + self.width - 1);
+        let y1 = (y0 + 1).min(self.y + self.height - 1);
+        let tx = sx - x0 as f32;
+        let ty = sy - y0 as f32;
+        let samples = [
+            (x0, y0, (1.0 - tx) * (1.0 - ty)),
+            (x1, y0, tx * (1.0 - ty)),
+            (x0, y1, (1.0 - tx) * ty),
+            (x1, y1, tx * ty),
+        ];
+        let mut rgb = [0.0f32; 3];
+        for (sample_x, sample_y, weight) in samples {
+            let index = (sample_y - self.y) as usize * self.width as usize
+                + (sample_x - self.x) as usize;
+            let pixel = self.linear_rgba16f_at(index)?;
+            rgb[0] += f16::from_bits(pixel[0]).to_f32() * weight;
+            rgb[1] += f16::from_bits(pixel[1]).to_f32() * weight;
+            rgb[2] += f16::from_bits(pixel[2]).to_f32() * weight;
         }
-
-        Some(Self {
-            source_width: layer.width,
-            source_height: layer.height,
-            x: min_x,
-            y: min_y,
-            width,
-            height,
-            rgba: rgba.into(),
-            mask: mask.into(),
-        })
+        Some((rgb, 1.0))
     }
 }
 
@@ -301,89 +403,21 @@ pub struct InpaintStroke {
 }
 
 impl InpaintStroke {
-    pub fn from_result(dabs: Vec<BrushDab>, layer: &InpaintLayer) -> Option<Self> {
-        Some(Self {
-            dabs,
-            patch: InpaintPatch::from_layer(layer)?,
-        })
+    pub fn from_result(mut dabs: Vec<BrushDab>, patch: InpaintPatch) -> Option<Self> {
+        for dab in &mut dabs {
+            dab.opacity = if dab.opacity > 0.0 { 1.0 } else { 0.0 };
+            dab.feather = 0.0;
+        }
+        patch.is_valid().then_some(Self { dabs, patch })
     }
 }
 
-/// Rebuilds the live display/export layer from the retained stroke list. Later
-/// strokes overwrite earlier strokes where their patches overlap.
+/// Rebuilds the live display/export layer without expanding patches into a
+/// preview-sized or full-resolution framebuffer. Keeping the patch list sparse
+/// avoids proxy upscaling artifacts and prevents distant strokes from forcing a
+/// huge dense allocation.
 pub fn compose_inpaint_strokes(strokes: &[InpaintStroke]) -> Option<InpaintLayer> {
-    let target = strokes.last()?;
-    let width = target.patch.source_width;
-    let height = target.patch.source_height;
-    let pixels = usize::try_from(width)
-        .ok()?
-        .checked_mul(usize::try_from(height).ok()?)?;
-    let mut rgba = vec![0u8; pixels.checked_mul(4)?];
-    let mut mask = vec![0u8; pixels];
-
-    for stroke in strokes {
-        let patch = &stroke.patch;
-        if patch.source_width == 0
-            || patch.source_height == 0
-            || patch.width == 0
-            || patch.height == 0
-            || patch.x.checked_add(patch.width)? > patch.source_width
-            || patch.y.checked_add(patch.height)? > patch.source_height
-        {
-            return None;
-        }
-        let patch_pixels = usize::try_from(patch.width)
-            .ok()?
-            .checked_mul(usize::try_from(patch.height).ok()?)?;
-        if patch.mask.len() != patch_pixels || patch.rgba.len() != patch_pixels.checked_mul(4)? {
-            return None;
-        }
-
-        let target_x0 = ((u64::from(patch.x) * u64::from(width)) / u64::from(patch.source_width))
-            .min(u64::from(width)) as u32;
-        let target_y0 = ((u64::from(patch.y) * u64::from(height))
-            / u64::from(patch.source_height))
-            .min(u64::from(height)) as u32;
-        let target_x1 = ((u64::from(patch.x + patch.width) * u64::from(width))
-            .div_ceil(u64::from(patch.source_width)))
-            .min(u64::from(width)) as u32;
-        let target_y1 = ((u64::from(patch.y + patch.height) * u64::from(height))
-            .div_ceil(u64::from(patch.source_height)))
-            .min(u64::from(height)) as u32;
-
-        for target_y in target_y0..target_y1 {
-            let source_y = ((target_y as f32 + 0.5) * patch.source_height as f32
-                / height as f32)
-                .floor()
-                .clamp(0.0, patch.source_height.saturating_sub(1) as f32) as u32;
-            if source_y < patch.y || source_y >= patch.y + patch.height {
-                continue;
-            }
-            let local_y = source_y - patch.y;
-            for target_x in target_x0..target_x1 {
-                let source_x = ((target_x as f32 + 0.5) * patch.source_width as f32
-                    / width as f32)
-                    .floor()
-                    .clamp(0.0, patch.source_width.saturating_sub(1) as f32) as u32;
-                if source_x < patch.x || source_x >= patch.x + patch.width {
-                    continue;
-                }
-                let local_x = source_x - patch.x;
-                let patch_index = local_y as usize * patch.width as usize + local_x as usize;
-                if patch.mask[patch_index] == 0 {
-                    continue;
-                }
-                let destination = target_y as usize * width as usize + target_x as usize;
-                mask[destination] = patch.mask[patch_index];
-                let source_rgba = patch_index * 4;
-                let destination_rgba = destination * 4;
-                rgba[destination_rgba..destination_rgba + 4]
-                    .copy_from_slice(&patch.rgba[source_rgba..source_rgba + 4]);
-            }
-        }
-    }
-
-    InpaintLayer::new(width, height, rgba, mask)
+    InpaintLayer::new(strokes.iter().map(|stroke| stroke.patch.clone()).collect())
 }
 
 mod base64_arc_bytes {
@@ -412,6 +446,45 @@ mod base64_arc_bytes {
             .map_err(serde::de::Error::custom)
     }
 }
+
+mod base64_arc_u16 {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S>(values: &Arc<[u16]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut bytes = Vec::with_capacity(values.len() * 2);
+        for value in values.iter().copied() {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        serializer.collect_str(&base64::display::Base64Display::new(
+            &bytes,
+            &base64::engine::general_purpose::STANDARD,
+        ))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u16]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(serde::de::Error::custom)?;
+        if bytes.len() % 2 != 0 {
+            return Err(serde::de::Error::custom("RGBA16F payload has an odd byte length"));
+        }
+        let values = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        Ok(values.into())
+    }
+}
+
 
 impl Default for BrushDab {
     fn default() -> Self {
@@ -1443,6 +1516,96 @@ pub fn rasterize_brush_dabs(
         .collect()
 }
 
+
+/// Rasterizes the inpainting brush as a strict binary mask.
+///
+/// Unlike the general-purpose local-adjustment brush rasterizer, this path has
+/// no feather ramp and no sub-pixel antialias coverage. Any pixel whose center
+/// lies inside at least one positive-opacity dab is exactly 255; every other
+/// pixel is exactly 0. `BrushDab::feather` is intentionally ignored so legacy
+/// sidecars cannot reintroduce soft inpainting edges.
+pub fn rasterize_inpaint_dabs_binary(
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+    dabs: &[BrushDab],
+) -> Vec<u8> {
+    if width == 0 || height == 0 || dabs.is_empty() {
+        return vec![0; width as usize * height as usize];
+    }
+
+    #[derive(Clone, Copy)]
+    struct BinaryDab {
+        center_x: f32,
+        center_y: f32,
+        radius_x: f32,
+        radius_y: f32,
+        min_x: i32,
+        max_x: i32,
+        min_y: i32,
+        max_y: i32,
+    }
+
+    let image_min = image_width.min(image_height).max(1) as f32;
+    let specs = dabs
+        .iter()
+        .filter(|dab| dab.opacity > 0.0)
+        .map(|dab| {
+            let radius_image = dab.size.clamp(0.0025, 0.5) * image_min;
+            let radius_x = radius_image * width as f32 / image_width.max(1) as f32;
+            let radius_y = radius_image * height as f32 / image_height.max(1) as f32;
+            let center_x = dab.center[0] * width as f32;
+            let center_y = dab.center[1] * height as f32;
+            let bbox_x = radius_x.ceil().max(1.0) as i32;
+            let bbox_y = radius_y.ceil().max(1.0) as i32;
+            BinaryDab {
+                center_x,
+                center_y,
+                radius_x,
+                radius_y,
+                min_x: (center_x.floor() as i32 - bbox_x).max(0),
+                max_x: (center_x.ceil() as i32 + bbox_x).min(width as i32 - 1),
+                min_y: (center_y.floor() as i32 - bbox_y).max(0),
+                max_y: (center_y.ceil() as i32 + bbox_y).min(height as i32 - 1),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if specs.is_empty() {
+        return vec![0; width as usize * height as usize];
+    }
+
+    const ROW_BAND_HEIGHT: usize = 64;
+    let row_stride = width as usize;
+    let mut out = vec![0u8; row_stride * height as usize];
+    out.par_chunks_mut(row_stride * ROW_BAND_HEIGHT)
+        .enumerate()
+        .for_each(|(band_index, band)| {
+            let band_start_y = band_index * ROW_BAND_HEIGHT;
+            let band_height = band.len() / row_stride;
+            let band_end_y = band_start_y + band_height - 1;
+            for spec in &specs {
+                if spec.max_y < band_start_y as i32 || spec.min_y > band_end_y as i32 {
+                    continue;
+                }
+                let min_y = spec.min_y.max(band_start_y as i32);
+                let max_y = spec.max_y.min(band_end_y as i32);
+                for y in min_y..=max_y {
+                    let dy = (y as f32 + 0.5 - spec.center_y) / spec.radius_y.max(0.5);
+                    let row_offset = (y as usize - band_start_y) * row_stride;
+                    for x in spec.min_x..=spec.max_x {
+                        let dx = (x as f32 + 0.5 - spec.center_x) / spec.radius_x.max(0.5);
+                        if dx * dx + dy * dy <= 1.0 {
+                            band[row_offset + x as usize] = 255;
+                        }
+                    }
+                }
+            }
+        });
+    out
+}
+
 fn rasterize_brush(
     width: u32,
     height: u32,
@@ -1701,6 +1864,45 @@ mod tests {
     }
 
     #[test]
+    fn inpaint_brush_mask_is_binary_and_ignores_feather() {
+        let hard = rasterize_inpaint_dabs_binary(
+            64,
+            64,
+            64,
+            64,
+            &[BrushDab {
+                center: [0.5, 0.5],
+                size: 0.2,
+                feather: 0.0,
+                opacity: 1.0,
+            }],
+        );
+        let formerly_soft = rasterize_inpaint_dabs_binary(
+            64,
+            64,
+            64,
+            64,
+            &[BrushDab {
+                center: [0.5, 0.5],
+                size: 0.2,
+                feather: 1.0,
+                opacity: 1.0,
+            }],
+        );
+        assert_eq!(hard, formerly_soft);
+        assert!(hard.iter().all(|&value| value == 0 || value == 255));
+        assert_eq!(hard[32 * 64 + 32], 255);
+        assert_eq!(hard[0], 0);
+    }
+
+    #[test]
+    fn new_linear_inpaint_patch_rejects_fractional_mask_alpha() {
+        let rgba16f = vec![0u16; 4];
+        assert!(InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, rgba16f.clone(), vec![128]).is_none());
+        assert!(InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, rgba16f, vec![255]).is_some());
+    }
+
+    #[test]
     fn brush_eraser_removes_existing_coverage() {
         let mut stack = MaskStack::default();
         stack.add_mask(MaskKind::Brush);
@@ -1949,44 +2151,36 @@ mod tests {
         assert!(layer[1] > 0.99);
     }
     #[test]
-    fn inpaint_patch_is_cropped_and_recomposed() {
-        let mut rgba = vec![0u8; 4 * 3 * 4];
-        let mut mask = vec![0u8; 4 * 3];
-        for (x, value) in [(1usize, 80u8), (2usize, 160u8)] {
-            let index = 4 + x;
-            mask[index] = 255;
-            rgba[index * 4..index * 4 + 4].copy_from_slice(&[value, 2, 3, 255]);
-        }
-        let layer = InpaintLayer::new(4, 3, rgba, mask).unwrap();
-        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], &layer).unwrap();
-        assert_eq!((stroke.patch.x, stroke.patch.y), (1, 1));
-        assert_eq!((stroke.patch.width, stroke.patch.height), (2, 1));
-
+    fn inpaint_patches_remain_sparse_and_full_resolution() {
+        use half::f16;
+        let rgba16f = vec![f16::from_f32(0.5).to_bits(); 2 * 1 * 4];
+        let patch = InpaintPatch::new_linear(6000, 4000, 2500, 1800, 2, 1, rgba16f, vec![255, 255])
+            .unwrap();
+        let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch.clone()).unwrap();
         let composed = compose_inpaint_strokes(&[stroke]).unwrap();
-        assert_eq!(composed.width, 4);
-        assert_eq!(composed.height, 3);
-        assert_eq!(composed.mask[5], 255);
-        assert_eq!(composed.mask[6], 255);
-        assert_eq!(composed.rgba[5 * 4], 80);
-        assert_eq!(composed.rgba[6 * 4], 160);
+        assert_eq!(composed.patches.len(), 1);
+        assert_eq!(composed.patches[0].source_width, 6000);
+        assert_eq!(composed.patches[0].source_height, 4000);
+        assert_eq!(composed.patches[0].x, 2500);
+        assert_eq!(composed.patches[0].rgba16f, patch.rgba16f);
     }
 
     #[test]
-    fn later_inpaint_stroke_overwrites_earlier_patch() {
-        let make_stroke = |value: u8| {
-            let mut rgba = vec![0u8; 2 * 2 * 4];
-            let mut mask = vec![0u8; 2 * 2];
-            mask[3] = 255;
-            rgba[12..16].copy_from_slice(&[value, value, value, 255]);
-            let layer = InpaintLayer::new(2, 2, rgba, mask).unwrap();
-            InpaintStroke::from_result(Vec::new(), &layer).unwrap()
+    fn later_inpaint_stroke_remains_last_for_overwrite_order() {
+        use half::f16;
+        let make_stroke = |value: f32| {
+            let rgba16f = vec![f16::from_f32(value).to_bits(); 4];
+            let patch = InpaintPatch::new_linear(2, 2, 1, 1, 1, 1, rgba16f, vec![255]).unwrap();
+            InpaintStroke::from_result(Vec::new(), patch).unwrap()
         };
-        let first = make_stroke(40);
-        let second = make_stroke(220);
-        let both = compose_inpaint_strokes(&[first.clone(), second]).unwrap();
-        assert_eq!(both.rgba[12], 220);
-        let after_delete = compose_inpaint_strokes(&[first]).unwrap();
-        assert_eq!(after_delete.rgba[12], 40);
+        let first = make_stroke(0.25);
+        let second = make_stroke(0.75);
+        let both = compose_inpaint_strokes(&[first.clone(), second.clone()]).unwrap();
+        assert_eq!(both.patches.len(), 2);
+        assert_eq!(both.patches[1], second.patch);
+        let after_delete = compose_inpaint_strokes(&[first.clone()]).unwrap();
+        assert_eq!(after_delete.patches[0], first.patch);
     }
+
 
 }
