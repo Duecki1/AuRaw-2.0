@@ -20,8 +20,8 @@ use resources::*;
 #[cfg(test)]
 mod tests;
 
-const GPU_PARAMS_ABI_VERSION: u32 = 1;
-const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 6_960;
+const GPU_PARAMS_ABI_VERSION: u32 = 2;
+const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 7_008;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
@@ -304,6 +304,12 @@ pub struct GpuParams {
     cam_to_srgb_0: [f32; 4],
     cam_to_srgb_1: [f32; 4],
     cam_to_srgb_2: [f32; 4],
+    // Maps the neutral scene-working basis retained by inpainting to the
+    // current camera-WB scene-working basis. This keeps global temperature and
+    // tint editable after an erase rather than baking them into generated RGB.
+    inpaint_wb_0: [f32; 4],
+    inpaint_wb_1: [f32; 4],
+    inpaint_wb_2: [f32; 4],
     black_levels: [f32; 4],
     white_levels: [f32; 4],
     width: u32,
@@ -415,6 +421,69 @@ fn pack_color_grade_options(grading: crate::pipeline::ColorGrading) -> [f32; 4] 
     ]
 }
 
+fn matrix3_from_rows4(rows: [[f32; 4]; 3]) -> [[f32; 3]; 3] {
+    rows.map(|row| [row[0], row[1], row[2]])
+}
+
+fn invert_matrix3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    Some([
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv,
+        ],
+    ])
+}
+
+fn multiply_matrix3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for row in 0..3 {
+        for col in 0..3 {
+            out[row][col] = a[row][0] * b[0][col]
+                + a[row][1] * b[1][col]
+                + a[row][2] * b[2][col];
+        }
+    }
+    out
+}
+
+fn rows4_from_matrix3(matrix: [[f32; 3]; 3]) -> [[f32; 4]; 3] {
+    matrix.map(|row| [row[0], row[1], row[2], 0.0])
+}
+
+fn inpaint_neutral_to_current_transform(
+    neutral: [[f32; 4]; 3],
+    current: [[f32; 4]; 3],
+) -> [[f32; 4]; 3] {
+    let neutral3 = matrix3_from_rows4(neutral);
+    let current3 = matrix3_from_rows4(current);
+    let Some(neutral_inverse) = invert_matrix3(neutral3) else {
+        return [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+    };
+    rows4_from_matrix3(multiply_matrix3(current3, neutral_inverse))
+}
+
 impl GpuParams {
     pub fn new(exposure: &ExposureParams, masks: &MaskStack, raw: &LoadedRaw) -> Self {
         Self::new_for_tile(exposure, masks, raw, 0, 0, raw.width, raw.height)
@@ -435,6 +504,8 @@ impl GpuParams {
                 .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
             exposure.tint.clamp(-100.0, 100.0),
         );
+        let inpaint_wb_transform =
+            inpaint_neutral_to_current_transform(raw.cam_to_srgb, camera_transform);
         let mut profile_layout = raw.camera_profile.gpu_layout();
         profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
         let sigmoid = sigmoid_coefficients(exposure.sigmoid);
@@ -748,6 +819,9 @@ impl GpuParams {
             cam_to_srgb_0: camera_transform[0],
             cam_to_srgb_1: camera_transform[1],
             cam_to_srgb_2: camera_transform[2],
+            inpaint_wb_0: inpaint_wb_transform[0],
+            inpaint_wb_1: inpaint_wb_transform[1],
+            inpaint_wb_2: inpaint_wb_transform[2],
             black_levels: raw.black_levels,
             white_levels: raw.white_levels,
             width: raw.width,
@@ -943,6 +1017,7 @@ pub struct RawGpuPipeline {
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
     mask_texture: wgpu::Texture,
+    inpaint_texture: wgpu::Texture,
     mask_atlas_edge: u32,
     profile_buffer: wgpu::Buffer,
     profile_buffer_size_bytes: u64,
@@ -1276,6 +1351,28 @@ impl RawGpuPipeline {
             },
         );
 
+        let inpaint_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw pre-adjustment inpaint layer"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+        });
+        let empty_inpaint = vec![0u8; raw.width as usize * raw.height as usize * 4];
+        queue.write_texture(
+            copy_texture(&inpaint_texture),
+            &empty_inpaint,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width * 4),
+                rows_per_image: Some(raw.height),
+            },
+            size,
+        );
+
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let display_linear_view =
             display_linear_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1293,6 +1390,7 @@ impl RawGpuPipeline {
         let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let black_view = black_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let inpaint_view = inpaint_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor {
             label: Some("auraw local-mask array view"),
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -1635,6 +1733,7 @@ impl RawGpuPipeline {
                             wgpu::TextureSampleType::Float { filterable: true },
                         ),
                         sampler_entry(28),
+                        texture_entry(32, wgpu::TextureSampleType::Float { filterable: false }),
                     ],
                 })
             });
@@ -2192,6 +2291,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 28,
                     resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 32,
+                    resource: wgpu::BindingResource::TextureView(&inpaint_view),
                 },
             ],
         });
@@ -2831,6 +2934,7 @@ impl RawGpuPipeline {
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
             mask_texture,
+            inpaint_texture,
             mask_atlas_edge,
             profile_buffer,
             profile_buffer_size_bytes,
@@ -2877,6 +2981,72 @@ impl RawGpuPipeline {
                 height: self.mask_atlas_edge,
                 depth_or_array_layers: 1,
             },
+        );
+        Ok(())
+    }
+
+    /// Uploads the persisted baseline inpainting result into this pipeline's
+    /// local geometry. `tile_origin_*` and `full_*` map crop/export pipelines
+    /// back to full-image normalized coordinates. The RGB bytes are sRGB; the
+    /// alpha channel is the replacement mask consumed before Develop edits.
+    pub fn update_inpaint_layer(
+        &self,
+        queue: &wgpu::Queue,
+        layer: Option<&crate::pipeline::InpaintLayer>,
+        tile_origin_x: i32,
+        tile_origin_y: i32,
+        full_width: u32,
+        full_height: u32,
+    ) -> Result<()> {
+        let mut rgba = vec![0u8; self.width as usize * self.height as usize * 4];
+        if let Some(layer) = layer {
+            let pixels = layer.width as usize * layer.height as usize;
+            if layer.width == 0
+                || layer.height == 0
+                || layer.rgba.len() != pixels.saturating_mul(4)
+                || layer.mask.len() != pixels
+                || full_width == 0
+                || full_height == 0
+            {
+                return Err(anyhow!("invalid inpaint layer for GPU upload"));
+            }
+            for y in 0..self.height {
+                let global_y = tile_origin_y + y as i32;
+                if global_y < 0 || global_y >= full_height as i32 {
+                    continue;
+                }
+                let sy = (((global_y as f32 + 0.5) * layer.height as f32 / full_height as f32)
+                    .floor() as u32)
+                    .min(layer.height - 1);
+                for x in 0..self.width {
+                    let global_x = tile_origin_x + x as i32;
+                    if global_x < 0 || global_x >= full_width as i32 {
+                        continue;
+                    }
+                    let sx = (((global_x as f32 + 0.5) * layer.width as f32 / full_width as f32)
+                        .floor() as u32)
+                        .min(layer.width - 1);
+                    let source = sy as usize * layer.width as usize + sx as usize;
+                    let alpha = layer.mask[source];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let src = source * 4;
+                    let dst = (y as usize * self.width as usize + x as usize) * 4;
+                    rgba[dst..dst + 3].copy_from_slice(&layer.rgba[src..src + 3]);
+                    rgba[dst + 3] = alpha;
+                }
+            }
+        }
+        queue.write_texture(
+            copy_texture(&self.inpaint_texture),
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.width * 4),
+                rows_per_image: Some(self.height),
+            },
+            texture_size(self.width, self.height),
         );
         Ok(())
     }
@@ -3286,16 +3456,48 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         params: &GpuParams,
     ) -> Result<Vec<f32>> {
+        self.render_scene_conversion_blocking(
+            device,
+            queue,
+            params,
+            "write_regression_scene",
+        )
+    }
+
+    /// Renders the neutral scene-working image used as LaMa input. Unlike the
+    /// regression rendition this stops before DCP HueSatMap/default exposure so
+    /// an inpainted replacement can be reinserted at exactly the same stage.
+    pub fn render_inpaint_working_scene_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: &GpuParams,
+    ) -> Result<Vec<f32>> {
+        self.render_scene_conversion_blocking(
+            device,
+            queue,
+            params,
+            "write_inpaint_working_scene",
+        )
+    }
+
+    fn render_scene_conversion_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: &GpuParams,
+        entry_point: &str,
+    ) -> Result<Vec<f32>> {
         if self.scene_format != wgpu::TextureFormat::Rgba32Float {
             return Err(anyhow!(
-                "regression scene rendering requires ProcessingQuality::High (RGBA32Float)"
+                "scene conversion requires ProcessingQuality::High (RGBA32Float)"
             ));
         }
 
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
         let size = texture_size(self.width, self.height);
         let working_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw regression scene-linear Rec.2020"),
+            label: Some("auraw scene conversion RGBA32F"),
             size,
             mip_level_count: 1,
             sample_count: 1,
@@ -3319,7 +3521,7 @@ impl RawGpuPipeline {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("auraw regression scene layout"),
+            label: Some("auraw scene conversion layout"),
             entries: &[
                 buffer_entry(0),
                 texture_entry(1, wgpu::TextureSampleType::Uint),
@@ -3335,7 +3537,7 @@ impl RawGpuPipeline {
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("auraw regression scene bind group"),
+            label: Some("auraw scene conversion bind group"),
             layout: &layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -3369,19 +3571,19 @@ impl RawGpuPipeline {
             ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("auraw regression scene shader"),
+            label: Some("auraw scene conversion shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER_REGRESSION_SCENE.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("auraw regression scene pipeline layout"),
+            label: Some("auraw scene conversion pipeline layout"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("auraw regression scene pipeline"),
+            label: Some("auraw scene conversion pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: Some("write_regression_scene"),
+            entry_point: Some(entry_point),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -3390,15 +3592,15 @@ impl RawGpuPipeline {
             device,
             self.width,
             self.height,
-            "auraw regression readback",
+            "auraw scene conversion readback",
         );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw regression scene encoder"),
+            label: Some("auraw scene conversion encoder"),
         });
         self.encode_raw_stage(&mut encoder, params);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("auraw regression scene conversion"),
+                label: Some("auraw scene conversion pass"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&pipeline);

@@ -448,6 +448,18 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
             tile_pipeline
                 .upload_raw_tile(queue, &tile_raw)
                 .with_context(|| format!("upload export tile {}", global_index + 1))?;
+            tile_pipeline
+                .update_inpaint_layer(
+                    queue,
+                    inpaint,
+                    tile.global_origin_x,
+                    tile.global_origin_y,
+                    raw.width,
+                    raw.height,
+                )
+                .with_context(|| {
+                    format!("upload inpainting for export tile {}", global_index + 1)
+                })?;
 
             let params = GpuParams::new_for_tile(
                 exposure,
@@ -495,15 +507,6 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
                 .checked_add(source_row_values)
                 .context("source export row end overflow")?;
             let source_y = band_y + local_y;
-            if let Some(inpaint) = inpaint {
-                composite_inpaint_row(
-                    &mut band[start..end],
-                    raw.width,
-                    source_y,
-                    raw.height,
-                    inpaint,
-                )?;
-            }
             resizer.push_source_row(
                 source_y,
                 &band[start..end],
@@ -517,76 +520,6 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
     stream.finish().context("finish streaming PNG data")?;
     writer.finish().context("finish PNG file")?;
     Ok(())
-}
-
-fn composite_inpaint_row(
-    row: &mut [f32],
-    source_width: u32,
-    source_y: u32,
-    source_height: u32,
-    inpaint: &InpaintLayer,
-) -> Result<()> {
-    anyhow::ensure!(
-        row.len() == checked_rgb_len(source_width, 1)?,
-        "inpaint export row length does not match source width"
-    );
-    if inpaint.width == 0 || inpaint.height == 0 || source_width == 0 || source_height == 0 {
-        return Ok(());
-    }
-    let inpaint_pixels = usize::try_from(inpaint.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(inpaint.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-        .context("inpaint export dimensions overflow")?;
-    let inpaint_rgba_len = inpaint_pixels
-        .checked_mul(4)
-        .context("inpaint export byte count overflow")?;
-    anyhow::ensure!(
-        inpaint.rgba.len() == inpaint_rgba_len && inpaint.mask.len() == inpaint_pixels,
-        "inpaint export layer buffers are incomplete"
-    );
-    let sample_y = ((source_y as f32 + 0.5) * inpaint.height as f32 / source_height as f32)
-        .floor()
-        .clamp(0.0, inpaint.height.saturating_sub(1) as f32) as u32;
-    for source_x in 0..source_width {
-        let sample_x = ((source_x as f32 + 0.5) * inpaint.width as f32 / source_width as f32)
-            .floor()
-            .clamp(0.0, inpaint.width.saturating_sub(1) as f32) as u32;
-        let sample = (sample_y as usize * inpaint.width as usize + sample_x as usize) as usize;
-        let alpha = inpaint.mask[sample] as f32 / 255.0;
-        if alpha <= 0.0 {
-            continue;
-        }
-        let rgba = sample * 4;
-        let srgb = [
-            srgb_decode_u8(inpaint.rgba[rgba]),
-            srgb_decode_u8(inpaint.rgba[rgba + 1]),
-            srgb_decode_u8(inpaint.rgba[rgba + 2]),
-        ];
-        let rec2020 = [
-            0.627_403_9 * srgb[0] + 0.329_283_0 * srgb[1] + 0.043_313_1 * srgb[2],
-            0.069_097_3 * srgb[0] + 0.919_540_4 * srgb[1] + 0.011_362_3 * srgb[2],
-            0.016_391_4 * srgb[0] + 0.088_013_3 * srgb[1] + 0.895_595_3 * srgb[2],
-        ];
-        let destination = source_x as usize * 3;
-        for channel in 0..3 {
-            row[destination + channel] +=
-                (rec2020[channel] - row[destination + channel]) * alpha;
-        }
-    }
-    Ok(())
-}
-
-fn srgb_decode_u8(value: u8) -> f32 {
-    let value = value as f32 / 255.0;
-    if value <= 0.040_45 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 #[derive(Clone, Copy, Debug)]

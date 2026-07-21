@@ -17,6 +17,9 @@
 @group(0) @binding(29) var display_linear_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(30) var glow_work_tex: texture_2d<f32>;
 @group(0) @binding(31) var glow_work_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
+// Baseline inpainting is stored as sRGB bytes plus alpha and inserted before
+// all Develop adjustments, so both global and masked adjustments affect it.
+@group(0) @binding(32) var inpaint_tex: texture_2d<f32>;
 
 struct LocalAdjustmentMix {
     tone0: vec4<f32>,
@@ -66,7 +69,32 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     // camera-specific matrix assembled on the CPU. Preserve the matrix result
     // until all DCP stages are complete: gamut remapping between HueSatMap,
     // exposure, LookTable and ProfileToneCurve changes the profile itself.
-    return cam_to_working(camera_rgb);
+    let working = cam_to_working(camera_rgb);
+
+    // LaMa is run on a neutral pre-adjustment rendition. Decode its retained
+    // sRGB replacement back to linear Rec.2020 and splice it into the same
+    // scene-working surface as the demosaiced RAW. From this point onward the
+    // replacement follows the exact same profile, global, mask, Effects,
+    // grading, vignette, sigmoid and output-transform path as surrounding pixels.
+    let replacement = textureLoad(inpaint_tex, clamp_pos(pos), 0);
+    if replacement.a <= 1e-6 {
+        return working;
+    }
+    let encoded = clamp(replacement.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let lo = encoded / 12.92;
+    let hi = pow((encoded + 0.055) / 1.055, vec3<f32>(2.4));
+    let cutoff = step(vec3<f32>(0.04045), encoded);
+    let linear_srgb = mix(lo, hi, cutoff);
+    let replacement_neutral = SRGB_TO_REC2020 * linear_srgb;
+    // Inpaint pixels are generated in the RAW's neutral camera-WB working
+    // basis. Remap them through the live camera transform so global
+    // temperature/tint changes remain non-destructive after the erase.
+    let replacement_working = vec3<f32>(
+        dot(params.inpaint_wb_0.xyz, replacement_neutral),
+        dot(params.inpaint_wb_1.xyz, replacement_neutral),
+        dot(params.inpaint_wb_2.xyz, replacement_neutral),
+    );
+    return mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
 }
 
 fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {

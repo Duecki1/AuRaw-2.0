@@ -390,6 +390,16 @@ impl AurawApp {
             program_template,
         )
         .map_err(|error| format!("Could not prepare the original RAW for masking: {error:#}"))?;
+        reference_pipeline
+            .update_inpaint_layer(
+                &render_state.queue,
+                self.inpaint_layer.as_ref(),
+                0,
+                0,
+                raw.width,
+                raw.height,
+            )
+            .map_err(|error| format!("Could not prepare erased pixels for masking: {error:#}"))?;
         reference_pipeline.recompute(&render_state.queue, &render_state.device, &params);
         let rgba = reference_pipeline
             .read_output_region_blocking(
@@ -407,13 +417,6 @@ impl AurawApp {
             rgba,
         )
         .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
-        let source = if let Some(layer) = &self.inpaint_layer {
-            flatten_inpaint_source(source, layer).map_err(|error| {
-                format!("Could not apply the erased image to the AI-mask source: {error}")
-            })?
-        } else {
-            source
-        };
         self.mask_source_cache = Some(source);
         Ok(())
     }

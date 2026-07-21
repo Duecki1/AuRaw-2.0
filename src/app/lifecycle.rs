@@ -1306,6 +1306,19 @@ impl AurawApp {
                         .map_err(|error| {
                             format!("range-mask source setup failed: {error:#}")
                         })?;
+                        let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
+                        reference_pipeline
+                            .update_inpaint_layer(
+                                &queue,
+                                composed_inpaint.as_ref(),
+                                0,
+                                0,
+                                source_raw.width,
+                                source_raw.height,
+                            )
+                            .map_err(|error| {
+                                format!("range-mask inpainting setup failed: {error:#}")
+                            })?;
                         reference_pipeline.recompute(&queue, &device, &reference_params);
                         let rgba = reference_pipeline
                             .read_output_region_blocking(
@@ -1325,13 +1338,6 @@ impl AurawApp {
                             rgba,
                         )
                         .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
-                        let source = if let Some(layer) = compose_inpaint_strokes(&inpaint_strokes) {
-                            flatten_inpaint_source(source, &layer).map_err(|error| {
-                                format!("could not apply inpainting to mask source: {error}")
-                            })?
-                        } else {
-                            source
-                        };
                         install_missing_range_sources(&mut rendered_masks, &source);
                         mask_source = Some(source);
                     }
@@ -1344,6 +1350,17 @@ impl AurawApp {
                         &rendered_masks,
                         &preview_raw,
                     )?;
+                    let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
+                    pipeline
+                        .update_inpaint_layer(
+                            &queue,
+                            composed_inpaint.as_ref(),
+                            0,
+                            0,
+                            preview_raw.width,
+                            preview_raw.height,
+                        )
+                        .map_err(|error| format!("preview inpainting setup failed: {error:#}"))?;
                     let first_render_started = Instant::now();
                     pipeline.recompute(&queue, &device, &params);
                     crate::diagnostics::record(format!(

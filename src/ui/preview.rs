@@ -442,28 +442,6 @@ impl Preview {
 
     fn paint_inpaint_overlay(ui: &Ui, app: &mut AurawApp, image_rect: Rect, preview_rect: Rect) {
         let painter = ui.painter_at(preview_rect);
-        if let Some(layer) = &app.inpaint_layer {
-            if app.inpaint_texture_key != Some(app.inpaint_texture_revision) {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [layer.width as usize, layer.height as usize],
-                    &layer.as_masked_rgba(),
-                );
-                if let Some(texture) = app.inpaint_texture.as_mut() {
-                    texture.set(image, egui::TextureOptions::LINEAR);
-                } else {
-                    app.inpaint_texture = Some(ui.ctx().load_texture(
-                        "auraw-inpaint-result",
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                }
-                app.inpaint_texture_key = Some(app.inpaint_texture_revision);
-            }
-            if let Some(texture) = &app.inpaint_texture {
-                painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
-            }
-        }
-
         if app.sidebar_tab != SidebarTab::Inpainting {
             return;
         }
