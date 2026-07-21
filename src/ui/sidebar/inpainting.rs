@@ -35,15 +35,6 @@ impl Sidebar {
                 0.0025,
                 Some("Brush radius relative to the shorter image edge."),
             );
-            adjustment_slider(
-                ui,
-                "Feather",
-                &mut app.inpaint_brush_feather,
-                0.0..=1.0,
-                2,
-                0.01,
-                Some("Softens the edge used to blend the generated pixels."),
-            );
         });
 
         ui.add_space(4.0);

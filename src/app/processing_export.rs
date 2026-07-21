@@ -179,6 +179,9 @@ impl AurawApp {
             return;
         }
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        // Inpainting now captures a full-resolution local RAW crop per stroke.
+        // Do not spend load/rebuild time generating an unused preview proxy source.
+        let inpaint_source = None;
 
         let mut renderer = render_state.renderer.write();
         if let Some(old) = self.gpu_pipeline.take() {
@@ -252,6 +255,7 @@ impl AurawApp {
         self.loaded_raw = Some(full_raw);
         self.preview_raw = Some(preview_raw);
         self.gpu_pipeline = Some(pipeline);
+        self.inpaint_source_cache = inpaint_source;
         self.preview_zoom = 1.0;
         self.preview_center = [0.5, 0.5];
         self.preview_visible_uv = PreviewUvRect {
@@ -499,6 +503,7 @@ impl AurawApp {
             return;
         }
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        let inpaint_source = None;
 
         let mut renderer = render_state.renderer.write();
         if let Some(old) = self.gpu_pipeline.take() {
@@ -521,6 +526,7 @@ impl AurawApp {
 
         self.preview_raw = Some(preview_raw);
         self.gpu_pipeline = Some(pipeline);
+        self.inpaint_source_cache = inpaint_source;
         self.target_exposure = self.exposure;
         self.pending_stage = None;
         self.preview_detail_pending_stage = None;

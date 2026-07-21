@@ -245,6 +245,50 @@ const SHADER_ADJUSTMENTS: &str = concat!(
     include_str!("../shaders/adjustments.wgsl")
 );
 
+const SHADER_INPAINT_DOWNSAMPLE: &str = r#"
+struct ResizeParams {
+    source_origin_x: u32,
+    source_origin_y: u32,
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<uniform> params: ResizeParams;
+@group(0) @binding(1) var source_tex: texture_2d<f32>;
+@group(0) @binding(2) var output_tex: texture_storage_2d<rgba32float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= params.output_width || gid.y >= params.output_height {
+        return;
+    }
+    let src_x = params.source_origin_x
+        + min((gid.x * params.source_width) / params.output_width, params.source_width - 1u);
+    let src_y = params.source_origin_y
+        + min((gid.y * params.source_height) / params.output_height, params.source_height - 1u);
+    let sample = textureLoad(source_tex, vec2<i32>(i32(src_x), i32(src_y)), 0);
+    textureStore(output_tex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(sample.xyz, 1.0));
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct InpaintResizeParams {
+    source_origin_x: u32,
+    source_origin_y: u32,
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuParams {
@@ -1357,17 +1401,17 @@ impl RawGpuPipeline {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+            view_formats: &[wgpu::TextureFormat::Rgba16Float],
         });
-        let empty_inpaint = vec![0u8; raw.width as usize * raw.height as usize * 4];
+        let empty_inpaint = vec![0u16; raw.width as usize * raw.height as usize * 4];
         queue.write_texture(
             copy_texture(&inpaint_texture),
-            &empty_inpaint,
+            bytemuck::cast_slice(&empty_inpaint),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(raw.width * 4),
+                bytes_per_row: Some(raw.width * 8),
                 rows_per_image: Some(raw.height),
             },
             size,
@@ -2987,8 +3031,8 @@ impl RawGpuPipeline {
 
     /// Uploads the persisted baseline inpainting result into this pipeline's
     /// local geometry. `tile_origin_*` and `full_*` map crop/export pipelines
-    /// back to full-image normalized coordinates. The RGB bytes are sRGB; the
-    /// alpha channel is the replacement mask consumed before Develop edits.
+    /// back to full-image normalized coordinates. RGB is scene-linear Rec.2020
+    /// RGBA16F; alpha is the replacement mask consumed before Develop edits.
     pub fn update_inpaint_layer(
         &self,
         queue: &wgpu::Queue,
@@ -2998,52 +3042,76 @@ impl RawGpuPipeline {
         full_width: u32,
         full_height: u32,
     ) -> Result<()> {
-        let mut rgba = vec![0u8; self.width as usize * self.height as usize * 4];
+        use half::f16;
+        let mut rgba16f = vec![0u16; self.width as usize * self.height as usize * 4];
         if let Some(layer) = layer {
-            let pixels = layer.width as usize * layer.height as usize;
-            if layer.width == 0
-                || layer.height == 0
-                || layer.rgba.len() != pixels.saturating_mul(4)
-                || layer.mask.len() != pixels
-                || full_width == 0
-                || full_height == 0
-            {
-                return Err(anyhow!("invalid inpaint layer for GPU upload"));
+            if full_width == 0 || full_height == 0 {
+                return Err(anyhow!("invalid inpaint coordinate space for GPU upload"));
             }
-            for y in 0..self.height {
-                let global_y = tile_origin_y + y as i32;
-                if global_y < 0 || global_y >= full_height as i32 {
-                    continue;
+            // Project only each sparse patch's covered rectangle into this
+            // pipeline. This keeps preview refresh cost proportional to healed
+            // area instead of image_pixels × stroke_count.
+            for patch in layer.patches.iter() {
+                if !patch.is_valid() {
+                    return Err(anyhow!("invalid inpaint patch for GPU upload"));
                 }
-                let sy = (((global_y as f32 + 0.5) * layer.height as f32 / full_height as f32)
-                    .floor() as u32)
-                    .min(layer.height - 1);
-                for x in 0..self.width {
-                    let global_x = tile_origin_x + x as i32;
-                    if global_x < 0 || global_x >= full_width as i32 {
+                let global_x0 = ((u64::from(patch.x) * u64::from(full_width))
+                    / u64::from(patch.source_width)) as i64;
+                let global_y0 = ((u64::from(patch.y) * u64::from(full_height))
+                    / u64::from(patch.source_height)) as i64;
+                let global_x1 = ((u64::from(patch.x + patch.width) * u64::from(full_width))
+                    .div_ceil(u64::from(patch.source_width))) as i64;
+                let global_y1 = ((u64::from(patch.y + patch.height) * u64::from(full_height))
+                    .div_ceil(u64::from(patch.source_height))) as i64;
+
+                let local_x0 = (global_x0 - i64::from(tile_origin_x))
+                    .clamp(0, i64::from(self.width)) as u32;
+                let local_y0 = (global_y0 - i64::from(tile_origin_y))
+                    .clamp(0, i64::from(self.height)) as u32;
+                let local_x1 = (global_x1 - i64::from(tile_origin_x))
+                    .clamp(0, i64::from(self.width)) as u32;
+                let local_y1 = (global_y1 - i64::from(tile_origin_y))
+                    .clamp(0, i64::from(self.height)) as u32;
+
+                for y in local_y0..local_y1 {
+                    let global_y = tile_origin_y + y as i32;
+                    if global_y < 0 || global_y >= full_height as i32 {
                         continue;
                     }
-                    let sx = (((global_x as f32 + 0.5) * layer.width as f32 / full_width as f32)
-                        .floor() as u32)
-                        .min(layer.width - 1);
-                    let source = sy as usize * layer.width as usize + sx as usize;
-                    let alpha = layer.mask[source];
-                    if alpha == 0 {
-                        continue;
+                    let source_y = (global_y as f32 + 0.5) * patch.source_height as f32
+                        / full_height as f32
+                        - 0.5;
+                    for x in local_x0..local_x1 {
+                        let global_x = tile_origin_x + x as i32;
+                        if global_x < 0 || global_x >= full_width as i32 {
+                            continue;
+                        }
+                        let source_x = (global_x as f32 + 0.5) * patch.source_width as f32
+                            / full_width as f32
+                            - 0.5;
+                        let Some((rgb, alpha)) =
+                            patch.sample_linear_rec2020_bilinear_hard_mask(source_x, source_y)
+                        else {
+                            continue;
+                        };
+                        if alpha <= 1e-6 {
+                            continue;
+                        }
+                        let destination = (y as usize * self.width as usize + x as usize) * 4;
+                        rgba16f[destination] = f16::from_f32(rgb[0]).to_bits();
+                        rgba16f[destination + 1] = f16::from_f32(rgb[1]).to_bits();
+                        rgba16f[destination + 2] = f16::from_f32(rgb[2]).to_bits();
+                        rgba16f[destination + 3] = f16::from_f32(alpha).to_bits();
                     }
-                    let src = source * 4;
-                    let dst = (y as usize * self.width as usize + x as usize) * 4;
-                    rgba[dst..dst + 3].copy_from_slice(&layer.rgba[src..src + 3]);
-                    rgba[dst + 3] = alpha;
                 }
             }
         }
         queue.write_texture(
             copy_texture(&self.inpaint_texture),
-            &rgba,
+            bytemuck::cast_slice(&rgba16f),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.width * 4),
+                bytes_per_row: Some(self.width * 8),
                 rows_per_image: Some(self.height),
             },
             texture_size(self.width, self.height),
@@ -3456,6 +3524,11 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         params: &GpuParams,
     ) -> Result<Vec<f32>> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "regression scene conversion requires ProcessingQuality::High (RGBA32Float)"
+            ));
+        }
         self.render_scene_conversion_blocking(
             device,
             queue,
@@ -3488,11 +3561,11 @@ impl RawGpuPipeline {
         params: &GpuParams,
         entry_point: &str,
     ) -> Result<Vec<f32>> {
-        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
-            return Err(anyhow!(
-                "scene conversion requires ProcessingQuality::High (RGBA32Float)"
-            ));
-        }
+        // The conversion target/readback is always RGBA32Float. The local source
+        // pipeline may use RGBA16Float intermediates so its already-compiled preview
+        // programs can be reused without a brush-release compile stall. The readback
+        // remains scene-linear Rec.2020 f32 all the way to the explicit LaMa model
+        // boundary; no 8-bit intermediate is created here.
 
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
         let size = texture_size(self.width, self.height);
@@ -3588,12 +3661,6 @@ impl RawGpuPipeline {
             cache: None,
         });
 
-        let (readback, padded_bytes_per_row) = create_rgba32_readback_buffer(
-            device,
-            self.width,
-            self.height,
-            "auraw scene conversion readback",
-        );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw scene conversion encoder"),
         });
@@ -3607,22 +3674,142 @@ impl RawGpuPipeline {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
         }
-        encode_rgba32_texture_copy(
-            &mut encoder,
-            &working_texture,
-            &readback,
-            self.width,
-            self.height,
-            padded_bytes_per_row,
-        );
-        let submission = queue.submit(Some(encoder.finish()));
-        map_rgba32_readback_rgb(
+        // Submit the render first, then use the shared chunked RGBA32F readback.
+        // Queue submission ordering guarantees every copy sees the completed
+        // working texture, while each MAP_READ buffer stays well below wgpu's
+        // max_buffer_size instead of allocating one crop-sized buffer.
+        queue.submit(Some(encoder.finish()));
+        read_rgba32_texture_rgb_blocking(
             device,
-            &readback,
-            submission,
+            queue,
+            &working_texture,
             self.width,
             self.height,
-            padded_bytes_per_row,
+            "auraw scene conversion readback",
+        )
+    }
+
+    pub fn render_inpaint_working_scene_region_resized_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: &GpuParams,
+        source_x: u32,
+        source_y: u32,
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Vec<f32>> {
+        if source_width == 0
+            || source_height == 0
+            || output_width == 0
+            || output_height == 0
+            || source_x.checked_add(source_width).map_or(true, |right| right > self.width)
+            || source_y.checked_add(source_height).map_or(true, |bottom| bottom > self.height)
+        {
+            return Err(anyhow!("invalid inpainting resize rectangle"));
+        }
+
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw inpaint working resize RGBA32F"),
+            size: texture_size(output_width, output_height),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[wgpu::TextureFormat::Rgba32Float],
+        });
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_view = self
+            .scene_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let resize_params = InpaintResizeParams {
+            source_origin_x: source_x,
+            source_origin_y: source_y,
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let resize_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("auraw inpaint resize params"),
+            contents: bytemuck::bytes_of(&resize_params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("auraw inpaint resize layout"),
+            entries: &[
+                buffer_entry(0),
+                texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+                storage_texture_entry(
+                    2,
+                    wgpu::TextureFormat::Rgba32Float,
+                    wgpu::StorageTextureAccess::WriteOnly,
+                ),
+            ],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("auraw inpaint resize bind group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: resize_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("auraw inpaint resize shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_INPAINT_DOWNSAMPLE.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("auraw inpaint resize pipeline layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("auraw inpaint resize pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw inpaint resize encoder"),
+        });
+        self.encode_raw_stage(&mut encoder, params);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("auraw inpaint resize pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(output_width.div_ceil(8), output_height.div_ceil(8), 1);
+        }
+        queue.submit(Some(encoder.finish()));
+        read_rgba32_texture_rgb_blocking(
+            device,
+            queue,
+            &output_texture,
+            output_width,
+            output_height,
+            "auraw scene conversion readback",
         )
     }
 
