@@ -158,11 +158,10 @@ impl AurawApp {
             flatten_inpaint_source_model_region(
                 scene,
                 layer,
-                patch.x,
-                patch.y,
+                [patch.x, patch.y],
                 patch.size,
-                full_raw.width,
-                full_raw.height,
+                [full_raw.width, full_raw.height],
+                full_raw.cam_to_srgb,
             )?
         } else {
             scene
@@ -380,12 +379,13 @@ impl AurawApp {
 fn flatten_inpaint_source_model_region(
     mut rgb_rec2020: Vec<f32>,
     layer: &InpaintLayer,
-    origin_x: u32,
-    origin_y: u32,
+    origin: [u32; 2],
     size: u32,
-    full_width: u32,
-    full_height: u32,
+    full_dimensions: [u32; 2],
+    legacy_camera_to_working: [[f32; 4]; 3],
 ) -> Result<Vec<f32>, String> {
+    let [origin_x, origin_y] = origin;
+    let [full_width, full_height] = full_dimensions;
     if size == 0 || full_width == 0 || full_height == 0 {
         return Err("The inpainting source has invalid dimensions.".to_owned());
     }
@@ -407,14 +407,16 @@ fn flatten_inpaint_source_model_region(
                     (global_x + 0.5) * patch.source_width as f32 / full_width as f32 - 0.5;
                 let source_y =
                     (global_y + 0.5) * patch.source_height as f32 / full_height as f32 - 0.5;
-                let Some((replacement, alpha)) =
-                    patch.sample_linear_rec2020_bilinear_hard_mask(source_x, source_y)
+                let Some((mut replacement, alpha)) =
+                    patch.sample_linear_rec2020_bilinear(source_x, source_y)
                 else {
                     continue;
                 };
                 if alpha <= 1e-6 {
                     continue;
                 }
+                replacement =
+                    patch.resolve_neutral_working_rgb(replacement, legacy_camera_to_working);
                 let destination = (y as usize * LAMA_EDGE as usize + x as usize) * 3;
                 for channel in 0..3 {
                     rgb_rec2020[destination + channel] = rgb_rec2020[destination + channel]

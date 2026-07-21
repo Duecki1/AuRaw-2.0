@@ -1,13 +1,46 @@
 use super::{
-    color_grade_hue_turns, highlight_final_read_slot, highlight_stage_slots,
-    pack_local_point_curve, processing_work_format, shader_highlight_method, work_shader_source,
-    HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS, SHADER_ADJUSTMENTS,
-    SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
-    SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1,
-    SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5, SHADER_XTRANS_P6,
-    SHADER_XTRANS_P7,
+    color_grade_hue_turns, composite_inpaint_rgba16f, highlight_final_read_slot,
+    highlight_stage_slots, pack_local_point_curve, processing_work_format, shader_highlight_method,
+    work_shader_source, HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS,
+    SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
+    SHADER_BAYER_RCD_P4, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
+    SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5,
+    SHADER_XTRANS_P6, SHADER_XTRANS_P7,
 };
 use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
+
+#[test]
+fn overlapping_soft_inpaint_patches_compose_in_stroke_order() {
+    use half::f16;
+
+    let mut destination = [
+        f16::from_f32(0.2).to_bits(),
+        f16::from_f32(0.4).to_bits(),
+        f16::from_f32(0.6).to_bits(),
+        f16::from_f32(0.5).to_bits(),
+    ];
+    composite_inpaint_rgba16f(&mut destination, [0.8, 0.2, 0.1], 0.25);
+    let decoded = destination.map(|value| f16::from_bits(value).to_f32());
+    assert!((decoded[3] - 0.625).abs() < 1e-3);
+    let expected = [0.44, 0.32, 0.4];
+    for channel in 0..3 {
+        assert!((decoded[channel] - expected[channel]).abs() < 1e-3);
+    }
+
+    let same_rgb = [0.35, 0.45, 0.55];
+    let mut opaque = [
+        f16::from_f32(same_rgb[0]).to_bits(),
+        f16::from_f32(same_rgb[1]).to_bits(),
+        f16::from_f32(same_rgb[2]).to_bits(),
+        f16::from_f32(1.0).to_bits(),
+    ];
+    composite_inpaint_rgba16f(&mut opaque, same_rgb, 0.2);
+    let unchanged = opaque.map(|value| f16::from_bits(value).to_f32());
+    assert!((unchanged[3] - 1.0).abs() < 1e-6);
+    for channel in 0..3 {
+        assert!((unchanged[channel] - same_rgb[channel]).abs() < 1e-3);
+    }
+}
 
 #[test]
 fn compute_shaders_parse_and_validate() {
@@ -500,9 +533,9 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
             color_indices,
             wb_coeffs: [1.0; 4],
             cam_to_srgb: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
+                [1.15, 0.08, 0.02, 0.0],
+                [0.03, 0.87, 0.04, 0.0],
+                [0.01, 0.06, 0.72, 0.0],
             ],
             black_levels: [0.0; 4],
             black_levels_per_pixel: vec![0.0; (width * height) as usize],
@@ -547,6 +580,46 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
         assert_eq!(regression.len(), (width * height * 3) as usize);
         assert!(regression.iter().all(|value| value.is_finite()));
 
+        let inpaint_working = pipeline
+            .render_inpaint_working_scene_blocking(&device, &queue, &params)
+            .unwrap_or_else(|error| {
+                panic!("{cfa_kind:?} inpaint working-scene render failed: {error:#}")
+            });
+        let resized_width = 6;
+        let resized_height = 5;
+        let resized_origin_x = 2;
+        let resized_origin_y = 3;
+        let resized_working = pipeline
+            .render_inpaint_working_scene_region_resized_blocking(
+                &device,
+                &queue,
+                &params,
+                resized_origin_x,
+                resized_origin_y,
+                resized_width,
+                resized_height,
+                resized_width,
+                resized_height,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{cfa_kind:?} resized inpaint working-scene render failed: {error:#}")
+            });
+        for y in 0..resized_height {
+            for x in 0..resized_width {
+                let full = (((y + resized_origin_y) * width + x + resized_origin_x) * 3) as usize;
+                let resized = ((y * resized_width + x) * 3) as usize;
+                for channel in 0..3 {
+                    assert!(
+                        (resized_working[resized + channel]
+                            - inpaint_working[full + channel])
+                            .abs()
+                            < 1e-5,
+                        "{cfa_kind:?} resized inpaint channel {channel} bypassed the camera-to-working transform"
+                    );
+                }
+            }
+        }
+
         let camera_scene = pipeline
             .read_scene_texture_blocking(&device, &queue)
             .unwrap_or_else(|error| {
@@ -554,6 +627,10 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
             });
         assert_eq!(camera_scene.len(), (width * height * 3) as usize);
         assert!(camera_scene.iter().all(|value| value.is_finite()));
+        assert!(camera_scene
+            .iter()
+            .zip(&inpaint_working)
+            .any(|(camera, working)| (camera - working).abs() > 1e-3));
     }
 }
 

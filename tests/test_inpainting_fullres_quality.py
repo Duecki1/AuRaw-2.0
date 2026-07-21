@@ -61,26 +61,54 @@ def test_lama_boundary_keeps_wide_gamut_source_float_until_tensor_build() -> Non
     assert "rec2020_linear_to_model_srgb" in INPAINT
 
 
-def test_inpainting_mask_is_strictly_binary_without_feather_ui() -> None:
+def test_resized_inpaint_capture_converts_camera_rgb_and_antialiases() -> None:
+    resize_shader = GPU[
+        GPU.index('const SHADER_INPAINT_DOWNSAMPLE: &str = r#"') : GPU.index(
+            '"#;', GPU.index('const SHADER_INPAINT_DOWNSAMPLE: &str = r#"')
+        )
+    ]
+    for row in range(3):
+        assert f"dot(params.cam_to_working_{row}.xyz, camera_rgb)" in resize_shader
+    assert "sample_camera_bilinear" in resize_shader
+    assert "samples_x = clamp(u32(ceil(scale.x)), 1u, 8u)" in resize_shader
+    assert "samples_y = clamp(u32(ceil(scale.y)), 1u, 8u)" in resize_shader
+
+    resize_params = GPU[
+        GPU.index("let resize_params = InpaintResizeParams {") : GPU.index(
+            "};", GPU.index("let resize_params = InpaintResizeParams {")
+        )
+    ]
+    for row in range(3):
+        assert f"cam_to_working_{row}: params.cam_to_srgb_{row}" in resize_params
+
+
+def test_inpainting_keeps_binary_model_mask_and_soft_composite_edge() -> None:
     infer = INPAINT[INPAINT.index("fn infer_lama("):INPAINT.index("fn localize_dabs(")]
     assert "rasterize_inpaint_dabs_binary" in infer
-    assert "soft_mask" not in infer
-    assert "replacement_mask[patch_index] = inference_mask[source_index];" in infer
+    assert "rasterize_brush_dabs" in infer
+    assert "build_lama_mask_tensor(&inference_mask" in infer
+    assert "replacement_mask[patch_index] = composite_mask[source_index];" in infer
     assert "inpaint_brush_feather" not in APP
     assert '"Feather"' not in INPAINT_SIDEBAR
     assert "feather: 0.0" in PREVIEW
-    assert "value != 0 && value != 255" in MASKS
-    assert "if self.mask[mask_index] < 128" in MASKS
-    assert "Some((rgb, 1.0))" in MASKS
+    assert "alpha += f32::from(self.mask[index])" in MASKS
+    assert "alpha.clamp(0.0, 1.0)" in MASKS
 
 
-def test_sparse_patch_projection_filters_rgb_but_keeps_hard_mask() -> None:
-    assert "pub fn sample_linear_rec2020_bilinear_hard_mask(" in MASKS
-    assert "Nearest-mask sampling" in MASKS
-    assert "premultiplied" not in MASKS[MASKS.index("pub fn sample_linear_rec2020_bilinear_hard_mask("):MASKS.index("#[derive(Clone, Debug, PartialEq, serde::Deserialize", MASKS.index("pub fn sample_linear_rec2020_bilinear_hard_mask("))]
+def test_sparse_patch_projection_filters_rgb_and_coverage() -> None:
+    assert "pub fn sample_linear_rec2020_bilinear(" in MASKS
+    sampler = MASKS[
+        MASKS.index("pub fn sample_linear_rec2020_bilinear(") : MASKS.index(
+            "#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]",
+            MASKS.index("pub fn sample_linear_rec2020_bilinear("),
+        )
+    ]
+    assert "self.has_valid_storage_layout()" in sampler
+    assert "self.is_valid()" not in sampler
     upload = GPU[GPU.index("pub fn update_inpaint_layer("):GPU.index("pub const fn mask_atlas_edge")]
-    assert "sample_linear_rec2020_bilinear_hard_mask(source_x, source_y)" in upload
-    assert "f16::from_f32(alpha)" in upload
+    assert "sample_linear_rec2020_bilinear(source_x, source_y)" in upload
+    assert "composite_inpaint_rgba16f(" in upload
+    assert "source_alpha + retained_destination" in GPU
     assert "return mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));" in ADJUSTMENTS
 
 

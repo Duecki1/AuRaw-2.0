@@ -9,7 +9,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::pipeline::{rasterize_inpaint_dabs_binary, BrushDab, InpaintPatch};
+use crate::pipeline::{
+    rasterize_brush_dabs, rasterize_inpaint_dabs_binary, BrushDab, InpaintPatch,
+};
 
 pub const LAMA_MODEL_URL: &str =
     "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx";
@@ -411,24 +413,33 @@ fn infer_lama(
         "erase stroke did not intersect its source crop"
     );
 
-    // Inpainting uses one strict binary mask end-to-end. There is no feather
-    // ramp and no antialias coverage: every source pixel is either untouched
-    // (0) or fully replaced (255). The same hard mask is fed to LaMa and
-    // persisted for compositing, so the model and replacement boundary agree.
-    let inference_mask = rasterize_inpaint_dabs_binary(
+    let painted_mask = rasterize_inpaint_dabs_binary(
         prepared.width,
         prepared.height,
         prepared.width,
         prepared.height,
         &local_dabs,
     );
+    let composite_dabs = feathered_composite_dabs(&local_dabs, prepared.width);
+    let composite_mask = rasterize_brush_dabs(
+        prepared.width,
+        prepared.height,
+        prepared.width,
+        prepared.height,
+        &composite_dabs,
+    );
+    let inference_mask = composite_mask
+        .iter()
+        .zip(&painted_mask)
+        .map(|(&soft, &painted)| u8::from(painted >= 128 || soft > 0) * 255)
+        .collect::<Vec<_>>();
     // The prepared source is already the exact square full-resolution LaMa crop
     // downsampled on the GPU to 512x512, so the worker no longer needs a large
     // full-resolution Rec.2020 buffer just to shrink it again. This keeps the
     // LaMa boundary explicit while preserving full-resolution crop selection.
     let image_values = build_lama_image_tensor(&prepared);
     let mask_values = build_lama_mask_tensor(&inference_mask, prepared.width);
-    let crop = inpaint_crop(&inference_mask, prepared.width, prepared.height)
+    let crop = inpaint_crop(&composite_mask, prepared.width, prepared.height)
         .context("erase stroke did not cover any image pixels")?;
     let image_tensor = Tensor::from_array((
         [1usize, 3, LAMA_EDGE as usize, LAMA_EDGE as usize],
@@ -462,9 +473,9 @@ fn infer_lama(
         run_lama_session(session, image_tensor, mask_tensor)?
     };
 
-    // Persist generated pixels in scene-linear Rec.2020 RGBA16F with the same
-    // strict binary replacement mask used by LaMa. RGB remains high precision;
-    // compositing alpha is only 0 or 1.
+    // Keep LaMa's inference mask binary, but persist a separate antialiased
+    // coverage ramp. The small generated margin hides both model and resize
+    // discontinuities without softening the fully replaced painted core.
     use half::f16;
     let patch_pixels = usize::try_from(crop.size)
         .ok()
@@ -486,7 +497,7 @@ fn infer_lama(
             rgba16f[out + 1] = f16::from_f32(generated[1]).to_bits();
             rgba16f[out + 2] = f16::from_f32(generated[2]).to_bits();
             rgba16f[out + 3] = f16::from_f32(1.0).to_bits();
-            replacement_mask[patch_index] = inference_mask[source_index];
+            replacement_mask[patch_index] = composite_mask[source_index];
         }
     }
 
@@ -536,6 +547,23 @@ fn localize_dabs(
         .collect()
 }
 
+fn feathered_composite_dabs(dabs: &[BrushDab], patch_edge: u32) -> Vec<BrushDab> {
+    let edge = patch_edge.max(1) as f32;
+    let feather_pixels = (3.0 * edge / LAMA_EDGE as f32).clamp(1.5, 12.0);
+    dabs.iter()
+        .map(|dab| {
+            let inner_radius = dab.size.clamp(0.0025, 0.5) * edge;
+            let outer_radius = inner_radius + feather_pixels;
+            BrushDab {
+                center: dab.center,
+                opacity: if dab.opacity > 0.0 { 1.0 } else { 0.0 },
+                size: outer_radius / edge,
+                feather: (feather_pixels / outer_radius).clamp(0.0, 1.0),
+            }
+        })
+        .collect()
+}
+
 fn build_lama_image_tensor(source: &PreparedInpaintSource) -> Vec<f32> {
     let plane = (LAMA_EDGE * LAMA_EDGE) as usize;
     let mut output = vec![0.0f32; plane * 3];
@@ -556,15 +584,20 @@ fn build_lama_image_tensor(source: &PreparedInpaintSource) -> Vec<f32> {
 fn build_lama_mask_tensor(mask: &[u8], width: u32) -> Vec<f32> {
     let mut output = vec![0.0f32; (LAMA_EDGE * LAMA_EDGE) as usize];
     for y in 0..LAMA_EDGE {
-        let src_y = (y * width / LAMA_EDGE).min(width - 1);
+        let src_y0 = (u64::from(y) * u64::from(width) / u64::from(LAMA_EDGE)) as u32;
+        let src_y1 = ((u64::from(y + 1) * u64::from(width)).div_ceil(u64::from(LAMA_EDGE)) as u32)
+            .max(src_y0 + 1)
+            .min(width);
         for x in 0..LAMA_EDGE {
-            let src_x = (x * width / LAMA_EDGE).min(width - 1);
-            output[(y * LAMA_EDGE + x) as usize] = if mask[(src_y * width + src_x) as usize] >= 128
-            {
-                1.0
-            } else {
-                0.0
-            };
+            let src_x0 = (u64::from(x) * u64::from(width) / u64::from(LAMA_EDGE)) as u32;
+            let src_x1 = ((u64::from(x + 1) * u64::from(width)).div_ceil(u64::from(LAMA_EDGE))
+                as u32)
+                .max(src_x0 + 1)
+                .min(width);
+            let covered = (src_y0..src_y1).any(|source_y| {
+                (src_x0..src_x1).any(|source_x| mask[(source_y * width + source_x) as usize] >= 128)
+            });
+            output[(y * LAMA_EDGE + x) as usize] = f32::from(covered);
         }
     }
     output
@@ -629,16 +662,12 @@ fn srgb_encoded_to_rec2020_linear(encoded: [f32; 3]) -> [f32; 3] {
 
 fn sample_lama_bilinear(output: &[f32], x: u32, y: u32, target_edge: u32) -> [f32; 3] {
     let source_edge = LAMA_EDGE as usize;
-    let fx = if target_edge > 1 {
-        x as f32 * (LAMA_EDGE - 1) as f32 / (target_edge - 1) as f32
-    } else {
-        0.0
+    let map_coordinate = |coordinate: u32| {
+        (((coordinate as f32 + 0.5) * LAMA_EDGE as f32 / target_edge.max(1) as f32) - 0.5)
+            .clamp(0.0, (LAMA_EDGE - 1) as f32)
     };
-    let fy = if target_edge > 1 {
-        y as f32 * (LAMA_EDGE - 1) as f32 / (target_edge - 1) as f32
-    } else {
-        0.0
-    };
+    let fx = map_coordinate(x);
+    let fy = map_coordinate(y);
     let x0 = fx.floor() as usize;
     let y0 = fy.floor() as usize;
     let x1 = (x0 + 1).min(source_edge - 1);
@@ -744,7 +773,11 @@ fn inpaint_crop(mask: &[u8], width: u32, height: u32) -> Option<SquareCrop> {
 
 #[cfg(test)]
 mod tests {
-    use super::{inpaint_crop, SquareCrop};
+    use super::{
+        build_lama_mask_tensor, feathered_composite_dabs, inpaint_crop, sample_lama_bilinear,
+        SquareCrop, LAMA_EDGE,
+    };
+    use crate::pipeline::BrushDab;
 
     #[test]
     fn crop_stays_square_and_inside_image_near_edge() {
@@ -785,5 +818,51 @@ mod tests {
             size: 3,
         };
         assert_eq!(crop, crop);
+    }
+
+    #[test]
+    fn model_mask_max_pools_thin_full_resolution_coverage() {
+        let width = LAMA_EDGE * 2;
+        let mut mask = vec![0u8; (width * width) as usize];
+        mask[(width + 1) as usize] = 255;
+        let model_mask = build_lama_mask_tensor(&mask, width);
+        assert_eq!(model_mask[0], 1.0);
+    }
+
+    #[test]
+    fn lama_output_sampling_uses_shared_pixel_centers() {
+        let plane = (LAMA_EDGE * LAMA_EDGE) as usize;
+        let mut output = vec![0.0f32; plane * 3];
+        for channel in 0..3 {
+            for y in 0..LAMA_EDGE as usize {
+                for x in 0..LAMA_EDGE as usize {
+                    output[channel * plane + y * LAMA_EDGE as usize + x] = x as f32;
+                }
+            }
+        }
+        let target_edge = LAMA_EDGE * 4;
+        let x = 1000;
+        let expected_model_x = ((x as f32 + 0.5) * LAMA_EDGE as f32 / target_edge as f32 - 0.5)
+            .clamp(0.0, (LAMA_EDGE - 1) as f32);
+        let sampled = sample_lama_bilinear(&output, x, 777, target_edge);
+        for channel in sampled {
+            assert!((channel - expected_model_x / 255.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn composite_feather_preserves_the_painted_core() {
+        let edge = 1024;
+        let original = BrushDab {
+            center: [0.5, 0.5],
+            opacity: 1.0,
+            size: 0.2,
+            feather: 0.0,
+        };
+        let feathered = feathered_composite_dabs(&[original], edge)[0];
+        let outer_radius = feathered.size * edge as f32;
+        let opaque_radius = outer_radius * (1.0 - feathered.feather);
+        assert!((opaque_radius - original.size * edge as f32).abs() < 1e-4);
+        assert!(outer_radius > opaque_radius);
     }
 }

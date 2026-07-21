@@ -168,8 +168,8 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
 
 
 def test_revised_adjustment_formulas_increment_the_process_version() -> None:
-    assert "CURRENT_PROCESS_VERSION: u32 = 6" in BASIC
-    assert "0..=5 => self.process_version = CURRENT_PROCESS_VERSION" in BASIC
+    assert "CURRENT_PROCESS_VERSION: u32 = 7" in BASIC
+    assert "0..=6 => self.process_version = CURRENT_PROCESS_VERSION" in BASIC
 
 
 def test_presence_and_color_controls_use_perceptual_bounded_mappings() -> None:
