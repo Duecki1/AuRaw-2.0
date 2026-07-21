@@ -255,23 +255,76 @@ struct ResizeParams {
     output_height: u32,
     _pad0: u32,
     _pad1: u32,
+    cam_to_working_0: vec4<f32>,
+    cam_to_working_1: vec4<f32>,
+    cam_to_working_2: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: ResizeParams;
 @group(0) @binding(1) var source_tex: texture_2d<f32>;
 @group(0) @binding(2) var output_tex: texture_storage_2d<rgba32float, write>;
 
+fn sample_camera_bilinear(position: vec2<f32>) -> vec3<f32> {
+    let dimensions = vec2<i32>(textureDimensions(source_tex));
+    let coordinate = position - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(coordinate));
+    let fraction = fract(coordinate);
+    let maximum = dimensions - vec2<i32>(1);
+    let p00 = clamp(base, vec2<i32>(0), maximum);
+    let p10 = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), maximum);
+    let p01 = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), maximum);
+    let p11 = clamp(base + vec2<i32>(1), vec2<i32>(0), maximum);
+    let top = mix(
+        textureLoad(source_tex, p00, 0).xyz,
+        textureLoad(source_tex, p10, 0).xyz,
+        fraction.x,
+    );
+    let bottom = mix(
+        textureLoad(source_tex, p01, 0).xyz,
+        textureLoad(source_tex, p11, 0).xyz,
+        fraction.x,
+    );
+    return mix(top, bottom, fraction.y);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.output_width || gid.y >= params.output_height {
         return;
     }
-    let src_x = params.source_origin_x
-        + min((gid.x * params.source_width) / params.output_width, params.source_width - 1u);
-    let src_y = params.source_origin_y
-        + min((gid.y * params.source_height) / params.output_height, params.source_height - 1u);
-    let sample = textureLoad(source_tex, vec2<i32>(i32(src_x), i32(src_y)), 0);
-    textureStore(output_tex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(sample.xyz, 1.0));
+    let scale = vec2<f32>(
+        f32(params.source_width) / f32(params.output_width),
+        f32(params.source_height) / f32(params.output_height),
+    );
+    let samples_x = clamp(u32(ceil(scale.x)), 1u, 8u);
+    let samples_y = clamp(u32(ceil(scale.y)), 1u, 8u);
+    let footprint_origin = vec2<f32>(
+        f32(params.source_origin_x) + f32(gid.x) * scale.x,
+        f32(params.source_origin_y) + f32(gid.y) * scale.y,
+    );
+    var camera_rgb = vec3<f32>(0.0);
+    for (var sample_y = 0u; sample_y < 8u; sample_y = sample_y + 1u) {
+        if sample_y >= samples_y { break; }
+        for (var sample_x = 0u; sample_x < 8u; sample_x = sample_x + 1u) {
+            if sample_x >= samples_x { break; }
+            let offset = vec2<f32>(
+                (f32(sample_x) + 0.5) / f32(samples_x),
+                (f32(sample_y) + 0.5) / f32(samples_y),
+            ) * scale;
+            camera_rgb = camera_rgb + sample_camera_bilinear(footprint_origin + offset);
+        }
+    }
+    camera_rgb = camera_rgb / f32(samples_x * samples_y);
+    let working_rgb = vec3<f32>(
+        dot(params.cam_to_working_0.xyz, camera_rgb),
+        dot(params.cam_to_working_1.xyz, camera_rgb),
+        dot(params.cam_to_working_2.xyz, camera_rgb),
+    );
+    textureStore(
+        output_tex,
+        vec2<i32>(i32(gid.x), i32(gid.y)),
+        vec4<f32>(working_rgb, 1.0),
+    );
 }
 "#;
 
@@ -286,7 +339,12 @@ struct InpaintResizeParams {
     output_height: u32,
     _pad0: u32,
     _pad1: u32,
+    cam_to_working_0: [f32; 4],
+    cam_to_working_1: [f32; 4],
+    cam_to_working_2: [f32; 4],
 }
+
+const _: () = assert!(std::mem::size_of::<InpaintResizeParams>() == 80);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -583,6 +641,26 @@ fn inpaint_neutral_to_current_transform(
         ];
     };
     rows4_from_matrix3(multiply_matrix3(current3, neutral_inverse))
+}
+
+fn composite_inpaint_rgba16f(destination: &mut [u16], rgb: [f32; 3], alpha: f32) {
+    debug_assert_eq!(destination.len(), 4);
+    use half::f16;
+
+    let source_alpha = alpha.clamp(0.0, 1.0);
+    let destination_alpha = f16::from_bits(destination[3]).to_f32().clamp(0.0, 1.0);
+    let retained_destination = destination_alpha * (1.0 - source_alpha);
+    let output_alpha = source_alpha + retained_destination;
+    if output_alpha <= 1e-6 {
+        destination.fill(0);
+        return;
+    }
+    for channel in 0..3 {
+        let previous = f16::from_bits(destination[channel]).to_f32();
+        let output = (rgb[channel] * source_alpha + previous * retained_destination) / output_alpha;
+        destination[channel] = f16::from_f32(output).to_bits();
+    }
+    destination[3] = f16::from_f32(output_alpha).to_bits();
 }
 
 impl GpuParams {
@@ -1076,6 +1154,7 @@ pub struct RawGpuPipeline {
     _tone_guide_b: wgpu::Texture,
     mask_texture: wgpu::Texture,
     inpaint_texture: wgpu::Texture,
+    legacy_inpaint_camera_to_working: [[f32; 4]; 3],
     mask_atlas_edge: u32,
     profile_buffer: wgpu::Buffer,
     profile_buffer_size_bytes: u64,
@@ -2996,6 +3075,7 @@ impl RawGpuPipeline {
             _tone_guide_b: tone_guide_b,
             mask_texture,
             inpaint_texture,
+            legacy_inpaint_camera_to_working: raw.cam_to_srgb,
             mask_atlas_edge,
             profile_buffer,
             profile_buffer_size_bytes,
@@ -3064,7 +3144,6 @@ impl RawGpuPipeline {
         full_width: u32,
         full_height: u32,
     ) -> Result<()> {
-        use half::f16;
         let mut rgba16f = vec![0u16; self.width as usize * self.height as usize * 4];
         if let Some(layer) = layer {
             if full_width == 0 || full_height == 0 {
@@ -3113,19 +3192,24 @@ impl RawGpuPipeline {
                         let source_x = (global_x as f32 + 0.5) * patch.source_width as f32
                             / full_width as f32
                             - 0.5;
-                        let Some((rgb, alpha)) =
-                            patch.sample_linear_rec2020_bilinear_hard_mask(source_x, source_y)
+                        let Some((mut rgb, alpha)) =
+                            patch.sample_linear_rec2020_bilinear(source_x, source_y)
                         else {
                             continue;
                         };
                         if alpha <= 1e-6 {
                             continue;
                         }
+                        rgb = patch.resolve_neutral_working_rgb(
+                            rgb,
+                            self.legacy_inpaint_camera_to_working,
+                        );
                         let destination = (y as usize * self.width as usize + x as usize) * 4;
-                        rgba16f[destination] = f16::from_f32(rgb[0]).to_bits();
-                        rgba16f[destination + 1] = f16::from_f32(rgb[1]).to_bits();
-                        rgba16f[destination + 2] = f16::from_f32(rgb[2]).to_bits();
-                        rgba16f[destination + 3] = f16::from_f32(alpha).to_bits();
+                        composite_inpaint_rgba16f(
+                            &mut rgba16f[destination..destination + 4],
+                            rgb,
+                            alpha,
+                        );
                     }
                 }
             }
@@ -3754,6 +3838,9 @@ impl RawGpuPipeline {
             output_height,
             _pad0: 0,
             _pad1: 0,
+            cam_to_working_0: params.cam_to_srgb_0,
+            cam_to_working_1: params.cam_to_srgb_1,
+            cam_to_working_2: params.cam_to_srgb_2,
         };
         let resize_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("auraw inpaint resize params"),

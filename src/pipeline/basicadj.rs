@@ -184,7 +184,7 @@ impl ColorGrading {
     }
 }
 
-pub const CURRENT_PROCESS_VERSION: u32 = 6;
+pub const CURRENT_PROCESS_VERSION: u32 = 7;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -283,11 +283,11 @@ pub const DEFAULT_SCENE_EXPOSURE_EV: f32 = 0.7;
 
 impl ExposureParams {
     pub fn migrate_to_current_process(&mut self) {
-        // Version 6 fixes profile-highlight monotonicity, black-lift curve
-        // continuity, output-LUT shadow precision, and displayed grading hues.
+        // Version 7 fixes the inpainting working-space conversion and blends
+        // generated patches through an antialiased coverage edge.
         // Older edits are marked as migrated before their next save.
         match self.process_version {
-            0..=5 => self.process_version = CURRENT_PROCESS_VERSION,
+            0..=6 => self.process_version = CURRENT_PROCESS_VERSION,
             CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently

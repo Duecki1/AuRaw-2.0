@@ -208,6 +208,10 @@ pub struct InpaintPatch {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+    /// Zero identifies RGBA16F patches written by the former camera-RGB
+    /// capture bug. Version one is neutral scene-linear Rec.2020.
+    #[serde(default)]
+    pub working_space_version: u8,
     #[serde(
         default,
         with = "base64_arc_u16",
@@ -248,9 +252,6 @@ impl InpaintPatch {
         let pixels = usize::try_from(width)
             .ok()?
             .checked_mul(usize::try_from(height).ok()?)?;
-        if mask.iter().any(|&value| value != 0 && value != 255) {
-            return None;
-        }
         let patch = Self {
             source_width,
             source_height,
@@ -258,6 +259,7 @@ impl InpaintPatch {
             y,
             width,
             height,
+            working_space_version: 1,
             rgba16f: rgba16f.into(),
             rgba: Vec::<u8>::new().into(),
             mask: mask.into(),
@@ -265,7 +267,7 @@ impl InpaintPatch {
         (patch.rgba16f.len() == pixels.checked_mul(4)? && patch.is_valid()).then_some(patch)
     }
 
-    pub fn is_valid(&self) -> bool {
+    fn has_valid_storage_layout(&self) -> bool {
         if self.source_width == 0
             || self.source_height == 0
             || self.width == 0
@@ -288,11 +290,40 @@ impl InpaintPatch {
         }) else {
             return false;
         };
-        if self.mask.len() != pixels {
+        if self.mask.len() != pixels || self.working_space_version > 1 {
             return false;
         }
-        self.rgba16f.len() == pixels.saturating_mul(4)
-            || self.rgba.len() == pixels.saturating_mul(4)
+        let Some(expected) = pixels.checked_mul(4) else {
+            return false;
+        };
+        if self.rgba16f.is_empty() {
+            return self.rgba.len() == expected;
+        }
+        self.rgba16f.len() == expected && (self.rgba.is_empty() || self.rgba.len() == expected)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.has_valid_storage_layout()
+            && (self.rgba16f.is_empty()
+                || self
+                    .rgba16f
+                    .iter()
+                    .all(|value| half::f16::from_bits(*value).is_finite()))
+    }
+
+    pub fn needs_legacy_camera_to_working(&self) -> bool {
+        self.working_space_version == 0 && !self.rgba16f.is_empty()
+    }
+
+    pub fn resolve_neutral_working_rgb(
+        &self,
+        rgb: [f32; 3],
+        legacy_camera_to_working: [[f32; 4]; 3],
+    ) -> [f32; 3] {
+        if !self.needs_legacy_camera_to_working() {
+            return rgb;
+        }
+        legacy_camera_to_working.map(|row| row[0] * rgb[0] + row[1] * rgb[1] + row[2] * rgb[2])
     }
 
     /// Returns one replacement pixel in scene-linear Rec.2020 RGBA16F.
@@ -335,17 +366,15 @@ impl InpaintPatch {
         ])
     }
 
-    /// Bilinearly samples replacement RGB while keeping the inpainting mask
-    /// strictly binary. The nearest persisted mask texel is thresholded to
-    /// either 0 or 1; fractional legacy mask bytes are never used as alpha.
-    /// This preserves filtered RGB when projecting a full-resolution patch into
-    /// a preview without reintroducing feathering at the replacement boundary.
-    pub fn sample_linear_rec2020_bilinear_hard_mask(
+    /// Bilinearly samples replacement RGB and its independently persisted
+    /// coverage. New patches have a short full-opacity-to-zero edge ramp;
+    /// legacy binary masks remain compatible and gain antialiasing when scaled.
+    pub fn sample_linear_rec2020_bilinear(
         &self,
         source_x: f32,
         source_y: f32,
     ) -> Option<([f32; 3], f32)> {
-        if !self.is_valid() || !source_x.is_finite() || !source_y.is_finite() {
+        if !self.has_valid_storage_layout() || !source_x.is_finite() || !source_y.is_finite() {
             return None;
         }
         use half::f16;
@@ -354,8 +383,6 @@ impl InpaintPatch {
         let patch_x1 = i64::from(self.x + self.width);
         let patch_y1 = i64::from(self.y + self.height);
 
-        // Pixel centers use integer source coordinates. Nearest-mask sampling
-        // deliberately produces a hard 0/1 decision even when scaling.
         let nearest_x = (source_x + 0.5).floor() as i64;
         let nearest_y = (source_y + 0.5).floor() as i64;
         if nearest_x < patch_x0
@@ -365,12 +392,6 @@ impl InpaintPatch {
         {
             return None;
         }
-        let mask_index =
-            (nearest_y - patch_y0) as usize * self.width as usize + (nearest_x - patch_x0) as usize;
-        if self.mask[mask_index] < 128 {
-            return None;
-        }
-
         let sx = source_x.clamp(self.x as f32, (self.x + self.width - 1) as f32);
         let sy = source_y.clamp(self.y as f32, (self.y + self.height - 1) as f32);
         let x0 = sx.floor() as u32;
@@ -386,15 +407,21 @@ impl InpaintPatch {
             (x1, y1, tx * ty),
         ];
         let mut rgb = [0.0f32; 3];
+        let mut alpha = 0.0f32;
         for (sample_x, sample_y, weight) in samples {
             let index =
                 (sample_y - self.y) as usize * self.width as usize + (sample_x - self.x) as usize;
             let pixel = self.linear_rgba16f_at(index)?;
-            rgb[0] += f16::from_bits(pixel[0]).to_f32() * weight;
-            rgb[1] += f16::from_bits(pixel[1]).to_f32() * weight;
-            rgb[2] += f16::from_bits(pixel[2]).to_f32() * weight;
+            let linear = pixel.map(|value| f16::from_bits(value).to_f32());
+            if !linear.iter().all(|value| value.is_finite()) {
+                return None;
+            }
+            rgb[0] += linear[0] * weight;
+            rgb[1] += linear[1] * weight;
+            rgb[2] += linear[2] * weight;
+            alpha += f32::from(self.mask[index]) * (weight / 255.0);
         }
-        Some((rgb, 1.0))
+        (alpha > 1e-6).then_some((rgb, alpha.clamp(0.0, 1.0)))
     }
 }
 
@@ -1510,11 +1537,9 @@ pub fn rasterize_brush_dabs(
 
 /// Rasterizes the inpainting brush as a strict binary mask.
 ///
-/// Unlike the general-purpose local-adjustment brush rasterizer, this path has
-/// no feather ramp and no sub-pixel antialias coverage. Any pixel whose center
-/// lies inside at least one positive-opacity dab is exactly 255; every other
-/// pixel is exactly 0. `BrushDab::feather` is intentionally ignored so legacy
-/// sidecars cannot reintroduce soft inpainting edges.
+/// Unlike the display-compositing coverage, the model mask has no feather ramp
+/// or sub-pixel coverage. `BrushDab::feather` is intentionally ignored because
+/// LaMa requires a binary input mask.
 pub fn rasterize_inpaint_dabs_binary(
     width: u32,
     height: u32,
@@ -1888,10 +1913,58 @@ mod tests {
     }
 
     #[test]
-    fn new_linear_inpaint_patch_rejects_fractional_mask_alpha() {
+    fn new_linear_inpaint_patch_preserves_soft_composite_alpha() {
         let rgba16f = vec![0u16; 4];
-        assert!(InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, rgba16f.clone(), vec![128]).is_none());
-        assert!(InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, rgba16f, vec![255]).is_some());
+        let patch = InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, rgba16f, vec![128]).unwrap();
+        let (_, alpha) = patch.sample_linear_rec2020_bilinear(0.0, 0.0).unwrap();
+        assert!((alpha - 128.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inpaint_patch_rejects_partial_or_non_finite_linear_payloads() {
+        use half::f16;
+
+        let mut partial =
+            InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, vec![0u16; 4], vec![255]).unwrap();
+        partial.rgba16f = vec![0u16; 3].into();
+        assert!(!partial.is_valid());
+
+        let mut non_finite =
+            InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, vec![0u16; 4], vec![255]).unwrap();
+        Arc::make_mut(&mut non_finite.rgba16f)[0] = f16::NAN.to_bits();
+        assert!(!non_finite.is_valid());
+        assert!(non_finite
+            .sample_linear_rec2020_bilinear(0.0, 0.0)
+            .is_none());
+    }
+
+    #[test]
+    fn legacy_linear_inpaint_patch_is_mapped_from_camera_rgb() {
+        let mut patch =
+            InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, vec![0u16; 4], vec![255]).unwrap();
+        let matrix = [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0, 0.0],
+            [0.0, 0.0, 4.0, 0.0],
+        ];
+        let current = patch.resolve_neutral_working_rgb([0.1, 0.2, 0.3], matrix);
+        assert_eq!(current, [0.1, 0.2, 0.3]);
+
+        patch.working_space_version = 0;
+        let migrated = patch.resolve_neutral_working_rgb([0.1, 0.2, 0.3], matrix);
+        assert_eq!(migrated, [0.2, 0.6, 1.2]);
+    }
+
+    #[test]
+    fn missing_inpaint_working_space_version_loads_as_legacy() {
+        let patch = InpaintPatch::new_linear(1, 1, 0, 0, 1, 1, vec![0u16; 4], vec![255]).unwrap();
+        let mut document = serde_json::to_value(patch).unwrap();
+        document
+            .as_object_mut()
+            .unwrap()
+            .remove("working_space_version");
+        let legacy: InpaintPatch = serde_json::from_value(document).unwrap();
+        assert!(legacy.needs_legacy_camera_to_working());
     }
 
     #[test]
