@@ -680,7 +680,19 @@ impl AurawApp {
             else {
                 return;
             };
-            (strokes.clone(), *brush_size, *edge_refine)
+            let captured_brush_size = strokes
+                .iter()
+                .filter_map(|stroke| (stroke.brush_size > 0.0).then_some(stroke.brush_size))
+                .fold(0.0f32, f32::max);
+            (
+                strokes.clone(),
+                if captured_brush_size > 0.0 {
+                    captured_brush_size
+                } else {
+                    *brush_size
+                },
+                *edge_refine,
+            )
         };
         let cache = self
             .object_cache

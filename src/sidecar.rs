@@ -1596,10 +1596,12 @@ mod tests {
                     ObjectStroke {
                         points: vec![[0.25, 0.25], [0.5, 0.5]],
                         positive: true,
+                        brush_size: 0.0,
                     },
                     ObjectStroke {
                         points: vec![[0.75, 0.75]],
                         positive: false,
+                        brush_size: 0.0,
                     },
                 ],
             },

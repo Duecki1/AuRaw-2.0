@@ -399,7 +399,8 @@ impl Preview {
         let dy = uv[1] - previous[1];
         let distance_px =
             ((dx * image_rect.width()).powi(2) + (dy * image_rect.height()).powi(2)).sqrt();
-        let radius_px = app.inpaint_brush_size * image_rect.width().min(image_rect.height());
+        let dab_size = zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom);
+        let radius_px = dab_size * image_rect.width().min(image_rect.height());
         let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
         let mut changed = false;
         if first_dab {
@@ -407,7 +408,7 @@ impl Preview {
                 app.inpaint_stroke.push(BrushDab {
                     center: uv,
                     opacity: 1.0,
-                    size: app.inpaint_brush_size,
+                    size: dab_size,
                     feather: 0.0,
                 });
                 changed = true;
@@ -422,7 +423,7 @@ impl Preview {
                 app.inpaint_stroke.push(BrushDab {
                     center: [previous[0] + dx * t, previous[1] + dy * t],
                     opacity: 1.0,
-                    size: app.inpaint_brush_size,
+                    size: dab_size,
                     feather: 0.0,
                 });
                 changed = true;
@@ -488,7 +489,8 @@ impl Preview {
             .pointer_hover_pos()
             .filter(|position| preview_rect.contains(*position))
         {
-            let radius = app.inpaint_brush_size * image_rect.width().min(image_rect.height());
+            let radius = zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom)
+                * image_rect.width().min(image_rect.height());
             painter.circle_stroke(pointer, radius.max(1.5), Stroke::new(1.5, Color32::WHITE));
         }
     }
@@ -601,7 +603,8 @@ impl Preview {
                     let distance_px = ((dx * image_rect.width()).powi(2)
                         + (dy * image_rect.height()).powi(2))
                     .sqrt();
-                    let radius_px = *size * image_rect.width().min(image_rect.height());
+                    let dab_size = zoom_scaled_brush_size(*size, app.preview_zoom);
+                    let radius_px = dab_size * image_rect.width().min(image_rect.height());
                     let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
 
                     // Pointer-down frames with no movement used to append a
@@ -613,7 +616,7 @@ impl Preview {
                             dabs.push(BrushDab {
                                 center: uv,
                                 opacity,
-                                size: *size,
+                                size: dab_size,
                                 feather: *feather,
                             });
                             changed = true;
@@ -628,7 +631,7 @@ impl Preview {
                             dabs.push(BrushDab {
                                 center: [previous[0] + dx * t, previous[1] + dy * t],
                                 opacity,
-                                size: *size,
+                                size: dab_size,
                                 feather: *feather,
                             });
                             changed = true;
@@ -781,12 +784,14 @@ impl Preview {
                     let distance_px = ((dx * image_rect.width()).powi(2)
                         + (dy * image_rect.height()).powi(2))
                     .sqrt();
-                    let radius_px = *brush_size * image_rect.width().min(image_rect.height());
+                    let stroke_brush_size = zoom_scaled_brush_size(*brush_size, app.preview_zoom);
+                    let radius_px = stroke_brush_size * image_rect.width().min(image_rect.height());
                     let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
                     if first_point {
                         strokes.push(ObjectStroke {
                             points: vec![uv],
                             positive,
+                            brush_size: stroke_brush_size,
                         });
                         changed = true;
                     } else if distance_px >= spacing_px * 0.75 {
@@ -1016,13 +1021,15 @@ impl Preview {
                     };
                     match &component.geometry {
                         MaskGeometry::Brush { size, .. } => {
-                            let radius = *size * image_rect.width().min(image_rect.height());
-                            painter.circle_stroke(pointer, radius, Stroke::new(1.5, cursor_color));
+                            let radius = zoom_scaled_brush_size(*size, app.preview_zoom)
+                                * image_rect.width().min(image_rect.height());
+                            painter.circle_stroke(pointer, radius.max(1.5), Stroke::new(1.5, cursor_color));
                         }
                         MaskGeometry::Object {
                             mask, brush_size, ..
                         } if mask.is_none() => {
-                            let radius = *brush_size * image_rect.width().min(image_rect.height());
+                            let radius = zoom_scaled_brush_size(*brush_size, app.preview_zoom)
+                                * image_rect.width().min(image_rect.height());
                             painter.circle_stroke(
                                 pointer,
                                 radius.max(1.5),
@@ -1542,6 +1549,15 @@ fn group_coverage_rgba(
         rgba.extend_from_slice(&[red, green, blue, ((alpha as u16 * 92) / 255) as u8]);
     }
     rgba
+}
+
+/// Converts a brush tool size into the image-relative radius captured by a dab.
+///
+/// Tool sizes are defined at fit zoom (1x). Dividing by the current preview
+/// zoom keeps the brush footprint constant in screen space: zooming in paints
+/// fewer source pixels for detail work, while zooming out covers more.
+fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32) -> f32 {
+    tool_size.max(0.0) / preview_zoom.max(1.0)
 }
 
 fn screen_to_normalized(rect: Rect, point: Pos2) -> [f32; 2] {

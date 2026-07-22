@@ -33,7 +33,7 @@ impl Sidebar {
                 0.0025..=0.25,
                 3,
                 0.0025,
-                Some("Brush radius relative to the shorter image edge."),
+                Some("Brush stays the same size on screen; zoom in for a smaller, more precise image-space footprint."),
             );
         });
 

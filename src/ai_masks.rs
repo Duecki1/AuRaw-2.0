@@ -1888,8 +1888,8 @@ fn sampled_object_prompts(
     let width = source_width.max(1) as f32;
     let height = source_height.max(1) as f32;
     let image_min = source_width.min(source_height).max(1) as f32;
-    let radius_x = brush_size.clamp(0.0025, 0.5) * image_min / width;
-    let radius_y = brush_size.clamp(0.0025, 0.5) * image_min / height;
+    let radius_x = brush_size.clamp(f32::EPSILON, 0.5) * image_min / width;
+    let radius_y = brush_size.clamp(f32::EPSILON, 0.5) * image_min / height;
     let gap_x = (radius_x * 0.85).max(6.0 / width);
     let gap_y = (radius_y * 0.85).max(6.0 / height);
     let center = [
@@ -1944,7 +1944,7 @@ fn object_prompt_focus(
     let width = source_width.max(1) as f32;
     let height = source_height.max(1) as f32;
     let image_min = source_width.min(source_height).max(1) as f32;
-    let radius = brush_size.clamp(0.0025, 0.5) * image_min;
+    let radius = brush_size.clamp(f32::EPSILON, 0.5) * image_min;
     let padding_x = (radius * 1.35 + 8.0) / width;
     let padding_y = (radius * 1.35 + 8.0) / height;
     ObjectPromptFocus {
@@ -2727,6 +2727,7 @@ mod object_mask_tests {
         ObjectStroke {
             points: points.to_vec(),
             positive,
+            brush_size: 0.0,
         }
     }
 
