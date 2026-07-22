@@ -57,11 +57,7 @@ impl AurawApp {
             return;
         }
         #[cfg(not(target_os = "android"))]
-        if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
-            self.notice = Some(
-                "Choose a trusted ONNX Runtime library under Settings before using Inpainting."
-                    .to_owned(),
-            );
+        if !self.validate_onnx_runtime_for_ai() {
             self.inpaint_stroke.clear();
             self.last_inpaint_brush_point = None;
             return;
