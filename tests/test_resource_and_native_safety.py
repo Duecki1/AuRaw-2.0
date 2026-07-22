@@ -166,3 +166,13 @@ def test_rust_compile_surface_regressions_are_absent() -> None:
     assert "use crate::ui::mask_component_color;" not in sidebar
     assert "offset_of!(super::GpuParams, process_info), 880" in gpu_tests
     assert "offset_of!(super::GpuParams, mask_counts), 896" in gpu_tests
+
+
+def test_large_object_mask_models_resume_after_transient_download_failures() -> None:
+    sam_download = AI[AI.index("fn download_sam_model("):AI.index("fn infer_object_mask(")]
+    vitmatte_download = AI[AI.index("fn download_vitmatte_model<F>"):AI.index("struct MatteCrop")]
+    for downloader in (sam_download, vitmatte_download):
+        assert 'header("Range", range.as_str())' in downloader
+        assert "const MAX_ATTEMPTS: usize = 5" in downloader
+        assert "file.sync_data()" in downloader
+        assert "timeout_recv_body(Some(Duration::from_secs(30 * 60)))" in downloader

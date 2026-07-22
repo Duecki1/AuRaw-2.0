@@ -836,68 +836,162 @@ where
         .unwrap_or_default()
         .as_nanos();
     let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
+    const MAX_ATTEMPTS: usize = 5;
+
     let result = (|| -> Result<()> {
         let config = ureq::Agent::config_builder()
             .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(10 * 60)))
+            .timeout_connect(Some(Duration::from_secs(45)))
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
             .build();
         let agent: ureq::Agent = config.into();
-        let mut response = agent
-            .get(VITMATTE_MODEL_URL)
-            .call()
-            .context("download ViTMatte ONNX model")?;
-        if let Some(length) = response.body().content_length() {
-            anyhow::ensure!(
-                length == VITMATTE_MODEL_BYTES,
-                "ViTMatte server declared {length} bytes, expected {VITMATTE_MODEL_BYTES}"
-            );
-        }
-        let mut reader = response.body_mut().as_reader();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        let mut downloaded = 0u64;
-        let mut hasher = Sha256Context::new(&SHA256);
-        let mut buffer = [0u8; 256 * 1024];
-        loop {
-            let read = reader.read(&mut buffer).context("read ViTMatte download")?;
-            if read == 0 {
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            let mut downloaded = fs::metadata(&temporary)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            if downloaded > VITMATTE_MODEL_BYTES {
+                fs::remove_file(&temporary)
+                    .context("remove oversized partial ViTMatte model")?;
+                downloaded = 0;
+            }
+            if downloaded == VITMATTE_MODEL_BYTES
+                && sha256_file_hex(&temporary).ok().as_deref() == Some(VITMATTE_MODEL_SHA256_HEX)
+            {
+                fs::rename(&temporary, path)
+                    .with_context(|| format!("publish resumed ViTMatte model to {}", path.display()))?;
+                return Ok(());
+            }
+            if downloaded > 0 {
+                progress(downloaded, VITMATTE_MODEL_BYTES);
+            }
+
+            let response_result = if downloaded > 0 {
+                let range = format!("bytes={downloaded}-");
+                agent
+                    .get(VITMATTE_MODEL_URL)
+                    .header("Range", range.as_str())
+                    .call()
+            } else {
+                agent.get(VITMATTE_MODEL_URL).call()
+            };
+            let mut response = match response_result {
+                Ok(response) => response,
+                Err(error) => {
+                    last_error = Some(anyhow::Error::new(error).context(format!(
+                        "download ViTMatte ONNX model (attempt {}/{MAX_ATTEMPTS})",
+                        attempt + 1
+                    )));
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            let resuming = downloaded > 0 && response.status().as_u16() == 206;
+            if downloaded > 0 && !resuming {
+                downloaded = 0;
+            }
+            if let Some(length) = response.body().content_length() {
+                let declared_total = if resuming {
+                    downloaded
+                        .checked_add(length)
+                        .context("ViTMatte response length overflow")?
+                } else {
+                    length
+                };
+                anyhow::ensure!(
+                    declared_total == VITMATTE_MODEL_BYTES,
+                    "ViTMatte server declared {declared_total} total bytes, expected {VITMATTE_MODEL_BYTES}"
+                );
+            }
+
+            let mut options = OpenOptions::new();
+            options.write(true).create(true);
+            if resuming {
+                options.append(true);
+            } else {
+                options.truncate(true);
+            }
+            let mut file = options
+                .open(&temporary)
+                .with_context(|| format!("open partial ViTMatte model {}", temporary.display()))?;
+            let mut reader = response.body_mut().as_reader();
+            let mut buffer = [0u8; 256 * 1024];
+            let mut transfer_error: Option<anyhow::Error> = None;
+
+            loop {
+                let read = match reader.read(&mut buffer) {
+                    Ok(read) => read,
+                    Err(error) => {
+                        let _ = file.sync_data();
+                        transfer_error = Some(anyhow::Error::new(error).context(format!(
+                            "read ViTMatte download (attempt {}/{MAX_ATTEMPTS})",
+                            attempt + 1
+                        )));
+                        break;
+                    }
+                };
+                if read == 0 {
+                    break;
+                }
+                downloaded = downloaded
+                    .checked_add(read as u64)
+                    .context("ViTMatte download byte count overflow")?;
+                anyhow::ensure!(
+                    downloaded <= VITMATTE_MODEL_BYTES,
+                    "ViTMatte download exceeded its pinned {VITMATTE_MODEL_BYTES}-byte size"
+                );
+                file.write_all(&buffer[..read])
+                    .context("write ViTMatte ONNX model")?;
+                progress(downloaded, VITMATTE_MODEL_BYTES);
+            }
+
+            if let Some(error) = transfer_error {
+                last_error = Some(error);
+                if attempt + 1 < MAX_ATTEMPTS {
+                    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
+                    continue;
+                }
                 break;
             }
-            downloaded = downloaded
-                .checked_add(read as u64)
-                .context("ViTMatte download byte count overflow")?;
-            anyhow::ensure!(
-                downloaded <= VITMATTE_MODEL_BYTES,
-                "ViTMatte download exceeded its pinned {VITMATTE_MODEL_BYTES}-byte size"
-            );
-            hasher.update(&buffer[..read]);
-            file.write_all(&buffer[..read])
-                .context("write ViTMatte ONNX model")?;
-            progress(downloaded, VITMATTE_MODEL_BYTES);
+
+            file.sync_all().context("flush ViTMatte ONNX model")?;
+            if downloaded < VITMATTE_MODEL_BYTES {
+                last_error = Some(anyhow::anyhow!(
+                    "ViTMatte download ended early at {downloaded} / {VITMATTE_MODEL_BYTES} bytes"
+                ));
+                if attempt + 1 < MAX_ATTEMPTS {
+                    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
+                    continue;
+                }
+                break;
+            }
+
+            let actual = sha256_file_hex(&temporary).context("hash ViTMatte ONNX model")?;
+            if actual == VITMATTE_MODEL_SHA256_HEX {
+                fs::rename(&temporary, path)
+                    .with_context(|| format!("publish ViTMatte model to {}", path.display()))?;
+                return Ok(());
+            }
+
+            // The full byte count with a wrong digest is not a resumable
+            // prefix. Discard it and retry cleanly; the pinned SHA-256 remains
+            // the final trust boundary.
+            fs::remove_file(&temporary).context("remove corrupt ViTMatte partial")?;
+            last_error = Some(anyhow::anyhow!(
+                "ViTMatte model SHA-256 mismatch (expected {VITMATTE_MODEL_SHA256_HEX})"
+            ));
+            if attempt + 1 < MAX_ATTEMPTS {
+                std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
+            }
         }
-        file.sync_all().context("flush ViTMatte ONNX model")?;
-        anyhow::ensure!(
-            downloaded == VITMATTE_MODEL_BYTES,
-            "ViTMatte model size mismatch: received {downloaded}, expected {VITMATTE_MODEL_BYTES}"
-        );
-        let actual = hasher
-            .finish()
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        anyhow::ensure!(
-            actual == VITMATTE_MODEL_SHA256_HEX,
-            "ViTMatte model SHA-256 mismatch (expected {VITMATTE_MODEL_SHA256_HEX})"
-        );
-        fs::rename(&temporary, path)
-            .with_context(|| format!("publish ViTMatte model to {}", path.display()))?;
-        Ok(())
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("download ViTMatte ONNX model failed")))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -1504,73 +1598,170 @@ fn download_sam_model(
         .unwrap_or_default()
         .as_nanos();
     let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
+    let max_bytes = sam_model_max_bytes(label);
+    let fallback_total = if label.contains("encoder") {
+        109_000_000
+    } else {
+        16_500_000
+    };
+    const MAX_ATTEMPTS: usize = 5;
+
     let result = (|| -> Result<()> {
         let config = ureq::Agent::config_builder()
             .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(10 * 60)))
+            .timeout_connect(Some(Duration::from_secs(45)))
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            // Large Hugging Face/Xet model transfers can briefly stall or be
+            // throttled. Keep a generous end-to-end body allowance; transient
+            // disconnects are handled below by resuming the .part file.
+            .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
             .build();
         let agent: ureq::Agent = config.into();
-        let mut response = agent
-            .get(url)
-            .call()
-            .with_context(|| format!("download {label}"))?;
-        let max_bytes = sam_model_max_bytes(label);
-        let total = response.body().content_length().unwrap_or_else(|| {
-            if label.contains("encoder") {
-                109_000_000
-            } else {
-                16_500_000
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            let mut downloaded = fs::metadata(&temporary)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            if downloaded > max_bytes {
+                fs::remove_file(&temporary)
+                    .with_context(|| format!("remove oversized partial {label}"))?;
+                downloaded = 0;
             }
-        });
-        anyhow::ensure!(
-            total <= max_bytes,
-            "{label} response declares {total} bytes, above the {max_bytes}-byte limit"
-        );
-        let mut reader = response.body_mut().as_reader();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        let mut downloaded = 0u64;
-        let mut hasher = Sha256Context::new(&SHA256);
-        let mut buffer = [0u8; 256 * 1024];
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .with_context(|| format!("read {label}"))?;
-            if read == 0 {
+            if downloaded > 0
+                && sha256_file_hex(&temporary).ok().as_deref() == Some(expected_sha256)
+            {
+                fs::rename(&temporary, path)
+                    .with_context(|| format!("publish resumed {label} to {}", path.display()))?;
+                return Ok(());
+            }
+
+            if downloaded > 0 {
+                let _ = events.send(ObjectMaskEvent::DownloadProgress {
+                    label,
+                    downloaded,
+                    total: fallback_total.max(downloaded),
+                });
+            }
+
+            let response_result = if downloaded > 0 {
+                let range = format!("bytes={downloaded}-");
+                agent.get(url).header("Range", range.as_str()).call()
+            } else {
+                agent.get(url).call()
+            };
+
+            let mut response = match response_result {
+                Ok(response) => response,
+                Err(error) => {
+                    last_error = Some(anyhow::Error::new(error)
+                        .context(format!("download {label} (attempt {}/{MAX_ATTEMPTS})", attempt + 1)));
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            // Hugging Face normally honors Range with 206. If a proxy/CDN
+            // ignores it and sends 200, restart this attempt from byte zero
+            // rather than appending a second full model to the partial file.
+            let resuming = downloaded > 0 && response.status().as_u16() == 206;
+            if downloaded > 0 && !resuming {
+                downloaded = 0;
+            }
+
+            let declared_remaining = response.body().content_length();
+            let total = match declared_remaining {
+                Some(length) if resuming => downloaded
+                    .checked_add(length)
+                    .context("model response length overflow")?,
+                Some(length) => length,
+                None => fallback_total.max(downloaded),
+            };
+            anyhow::ensure!(
+                total <= max_bytes,
+                "{label} response declares {total} bytes, above the {max_bytes}-byte limit"
+            );
+
+            let mut options = OpenOptions::new();
+            options.write(true).create(true);
+            if resuming {
+                options.append(true);
+            } else {
+                options.truncate(true);
+            }
+            let mut file = options
+                .open(&temporary)
+                .with_context(|| format!("open partial {label} download {}", temporary.display()))?;
+            let mut reader = response.body_mut().as_reader();
+            let mut buffer = [0u8; 256 * 1024];
+            let mut transfer_error: Option<anyhow::Error> = None;
+
+            loop {
+                let read = match reader.read(&mut buffer) {
+                    Ok(read) => read,
+                    Err(error) => {
+                        // Persist everything already received before retrying so
+                        // the next request can continue with an HTTP Range.
+                        let _ = file.sync_data();
+                        transfer_error = Some(anyhow::Error::new(error).context(format!(
+                            "read {label} (attempt {}/{MAX_ATTEMPTS})",
+                            attempt + 1
+                        )));
+                        break;
+                    }
+                };
+                if read == 0 {
+                    break;
+                }
+                downloaded = downloaded
+                    .checked_add(read as u64)
+                    .context("model download byte count overflow")?;
+                anyhow::ensure!(
+                    downloaded <= max_bytes,
+                    "{label} download exceeded the {max_bytes}-byte limit"
+                );
+                file.write_all(&buffer[..read])
+                    .with_context(|| format!("write {label}"))?;
+                let _ = events.send(ObjectMaskEvent::DownloadProgress {
+                    label,
+                    downloaded,
+                    total: total.max(downloaded),
+                });
+            }
+
+            if let Some(error) = transfer_error {
+                last_error = Some(error);
+                if attempt + 1 < MAX_ATTEMPTS {
+                    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
+                    continue;
+                }
                 break;
             }
-            downloaded = downloaded
-                .checked_add(read as u64)
-                .context("model download byte count overflow")?;
-            anyhow::ensure!(
-                downloaded <= max_bytes,
-                "{label} download exceeded the {max_bytes}-byte limit"
-            );
-            hasher.update(&buffer[..read]);
-            file.write_all(&buffer[..read])
-                .with_context(|| format!("write {label}"))?;
-            let _ = events.send(ObjectMaskEvent::DownloadProgress {
-                label,
-                downloaded,
-                total: total.max(downloaded),
-            });
+
+            file.sync_all().with_context(|| format!("flush {label}"))?;
+            let actual = sha256_file_hex(&temporary)
+                .with_context(|| format!("hash downloaded {label}"))?;
+            if actual == expected_sha256 {
+                fs::rename(&temporary, path)
+                    .with_context(|| format!("publish {label} to {}", path.display()))?;
+                return Ok(());
+            }
+
+            // A close-delimited CDN response can end early without a useful
+            // Content-Length. Treat a hash mismatch as resumable first; the
+            // byte cap and final SHA-256 pin still prevent accepting bad data.
+            last_error = Some(anyhow::anyhow!(
+                "{label} SHA-256 mismatch after receiving {downloaded} bytes"
+            ));
+            if attempt + 1 < MAX_ATTEMPTS {
+                std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
+            }
         }
-        file.sync_all().with_context(|| format!("flush {label}"))?;
-        let actual = hasher
-            .finish()
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        anyhow::ensure!(actual == expected_sha256, "{label} SHA-256 mismatch");
-        fs::rename(&temporary, path)
-            .with_context(|| format!("publish {label} to {}", path.display()))?;
-        Ok(())
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("download {label} failed")))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
