@@ -94,11 +94,15 @@ def test_lensfun_search_radius_has_an_explicit_signed_type() -> None:
     assert "let radius_limit: i32 = match raw.cfa_kind" in LENSFUN
 
 
-def test_lens_correction_preserves_bayer_green_phase() -> None:
+def test_lens_correction_preserves_bayer_green_phase_without_nearest_neighbor_warping() -> None:
     assert "fn lensfun_rgb_channel(cfa_index: u8)" in LENSFUN
     assert "_ => 1" in LENSFUN
-    assert "nearest_matching_sample(raw, source_x, source_y, cfa_index)" in LENSFUN
-    assert "raw.color_indices[center] == channel" in LENSFUN
+    assert "sample_corrected_cfa_subpixel(" in LENSFUN
+    assert "sample_bayer_phase_bilinear(" in LENSFUN
+    assert "bayer_axis_samples(" in LENSFUN
+    assert "raw.color_indices.get(index).copied() != Some(channel)" in LENSFUN
+    correction_loop = LENSFUN[LENSFUN.index("fn correct_mosaic") : LENSFUN.index("fn build_vignette_gain_map")]
+    assert "nearest_matching_sample(raw, source_x, source_y, cfa_index)" not in correction_loop
 
 
 def test_manual_profile_selection_remains_available_without_camera_match() -> None:

@@ -186,6 +186,49 @@ fn bayer_from_yuv(y: f32, uv: vec2<f32>) -> vec3<f32> {
     return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
 }
 
+fn bayer_median5(a: f32, b: f32, c: f32, d: f32, e: f32) -> f32 {
+    var v0 = a;
+    var v1 = b;
+    var v2 = c;
+    var v3 = d;
+    var v4 = e;
+    var t = 0.0;
+    if v0 > v1 { t = v0; v0 = v1; v1 = t; }
+    if v3 > v4 { t = v3; v3 = v4; v4 = t; }
+    if v0 > v2 { t = v0; v0 = v2; v2 = t; }
+    if v1 > v2 { t = v1; v1 = v2; v2 = t; }
+    if v0 > v3 { t = v0; v0 = v3; v3 = t; }
+    if v2 > v3 { t = v2; v2 = v3; v3 = t; }
+    if v1 > v4 { t = v1; v1 = v4; v4 = t; }
+    if v1 > v2 { t = v1; v1 = v2; v2 = t; }
+    if v3 > v4 { t = v3; v3 = v4; v4 = t; }
+    if v2 > v3 { t = v2; v2 = v3; v3 = t; }
+    return v2;
+}
+
+fn bayer_reference_false_color_guard(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    // RCD is intentionally detail preserving, but one-pixel chroma outliers can
+    // survive on hair, fabric, and other near-Nyquist detail. A five-sample
+    // cross median removes only isolated U/V excursions while keeping the
+    // center luminance untouched. The adaptive blend is zero for coherent real
+    // color and rises only when the center chroma disagrees strongly with all
+    // four immediate neighbors.
+    let uv0 = bayer_uv(rgb);
+    let uvn = bayer_uv(rcd_reference_at(clamp_pos(pos + vec2<i32>(0, -1))));
+    let uvs = bayer_uv(rcd_reference_at(clamp_pos(pos + vec2<i32>(0,  1))));
+    let uvw = bayer_uv(rcd_reference_at(clamp_pos(pos + vec2<i32>(-1, 0))));
+    let uve = bayer_uv(rcd_reference_at(clamp_pos(pos + vec2<i32>( 1, 0))));
+    let median = vec2<f32>(
+        bayer_median5(uv0.x, uvn.x, uvs.x, uvw.x, uve.x),
+        bayer_median5(uv0.y, uvn.y, uvs.y, uvw.y, uve.y),
+    );
+    let disagreement = length(uv0 - median);
+    let strength = 0.55 * smoothstep(0.006, 0.055, disagreement);
+    if strength <= 1e-6 { return rgb; }
+    let y = dot(rgb, vec3<f32>(0.2627, 0.6780, 0.0593));
+    return bayer_from_yuv(y, mix(uv0, median, strength));
+}
+
 fn bayer_phase2(offset: i32) -> f32 {
     return select(1.0, -1.0, (abs(offset) & 1) == 1);
 }
@@ -354,6 +397,8 @@ fn bayer_rcd_output(@builtin(global_invocation_id) gid: vec3<u32>) {
         camera_rgb = mix(low_detail_rgb_at(pos), reference, dual_high_weight(pos));
     } else if params.demosaic_mode >= 0.5 {
         camera_rgb = frequency_chroma_at(pos, reference);
+    } else {
+        camera_rgb = bayer_reference_false_color_guard(pos, reference);
     }
     camera_rgb = apply_ca(pos, camera_rgb);
     camera_rgb = apply_chroma_denoise(pos, camera_rgb);
