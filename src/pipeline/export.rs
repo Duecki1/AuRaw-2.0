@@ -1,7 +1,7 @@
 use super::{
-    build_proxy, export_mask_atlas_edge, extract_padded_tile, mask_atlas_edge,
+    export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
     required_export_tile_halo, ExposureParams, GpuParams, IccOutputTransform, InpaintLayer,
-    LoadedRaw, MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, TilePlan,
+    LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan,
     TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use anyhow::{Context, Result};
@@ -249,6 +249,27 @@ pub fn spawn_tiled_png_export(
                     tile_spec.core_edge = 1024;
                 }
                 let tile_spec = bounded_tile_spec(tile_spec, raw.width)?;
+                if is_direct_export_destination(&worker_path) {
+                    return export_tiled_png(
+                        ExportContext {
+                            device: &device,
+                            queue: &queue,
+                            events: &worker_sender,
+                        },
+                        ExportRequest {
+                            raw: &raw,
+                            exposure: &exposure,
+                            masks: &masks,
+                            inpaint: inpaint.as_ref(),
+                            path: &worker_path,
+                            tile_spec,
+                            output_width,
+                            output_height,
+                            keep_metadata: settings.keep_metadata,
+                            metadata: &metadata,
+                        },
+                    );
+                }
                 let temporary = temporary_export_path(&worker_path)?;
                 let export_result = export_tiled_png(
                     ExportContext {
@@ -305,9 +326,9 @@ pub fn spawn_tiled_png_export(
     receiver
 }
 
-/// JPEG export uses the exact same full-quality tiled render as PNG, then
-/// converts the lossless staged result to a quality-controlled JPEG. Keeping
-/// the render path shared ensures both formats match visually.
+/// JPEG export uses the exact same full-quality tiled render as PNG, writing
+/// the rendered RGB8 rows into a bounded disk-backed staging raster before
+/// JPEG compression. Keeping the render path shared ensures both formats match.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_jpeg_export(
     device: wgpu::Device,
@@ -358,6 +379,28 @@ pub fn spawn_tiled_jpeg_export(
                     tile_spec.core_edge = 1024;
                 }
                 let tile_spec = bounded_tile_spec(tile_spec, raw.width)?;
+                if is_direct_export_destination(&worker_path) {
+                    return export_tiled_jpeg(
+                        ExportContext {
+                            device: &device,
+                            queue: &queue,
+                            events: &worker_sender,
+                        },
+                        ExportRequest {
+                            raw: &raw,
+                            exposure: &exposure,
+                            masks: &masks,
+                            inpaint: inpaint.as_ref(),
+                            path: &worker_path,
+                            tile_spec,
+                            output_width,
+                            output_height,
+                            keep_metadata: settings.keep_metadata,
+                            metadata: &metadata,
+                        },
+                        settings.jpeg_quality,
+                    );
+                }
                 let temporary = temporary_export_path(&worker_path)?;
                 let export_result = export_tiled_jpeg(
                     ExportContext {
@@ -444,11 +487,8 @@ enum ExportRowFormat {
 
 fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
     validate_export_dimensions(request.output_width, request.output_height)?;
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(request.path)
-        .with_context(|| format!("create temporary export {}", request.path.display()))?;
+    let file = open_export_destination(request.path)
+        .with_context(|| format!("create export {}", request.path.display()))?;
     let mut info = png::Info::with_size(request.output_width, request.output_height);
     info.color_type = png::ColorType::Rgba;
     info.bit_depth = png::BitDepth::Eight;
@@ -555,54 +595,41 @@ fn render_tiled_srgb<W: Write>(
         export_mask_edge
     ));
 
-    // Global tone anchors are stable on a compact CFA-preserving proxy. Reuse
-    // the already-created export pipeline instead of compiling a second GPU
-    // pipeline: pad the proxy to the fixed tile allocation, analyze only the
-    // proxy bounds, then restore native tile data during the real render pass.
+    // Preserve the original full-resolution tone statistics exactly. Every
+    // native source pixel contributes once, while halo pixels are excluded via
+    // the per-tile histogram bounds. Reuse one padded RAW allocation so this
+    // exact prepass still benefits from the allocation/copy optimizations.
     let tone_analysis_started = Instant::now();
-    let tone_proxy_edge = first_raw.width.min(first_raw.height);
-    let tone_raw = build_proxy(
-        raw,
-        ProxySpec {
-            max_edge: tone_proxy_edge,
-        },
-    );
-    let tone_canvas = extract_padded_tile(
-        &tone_raw,
-        super::ExportTile {
-            core_x: 0,
-            core_y: 0,
-            core_width: tone_raw.width,
-            core_height: tone_raw.height,
-            local_core_x: 0,
-            local_core_y: 0,
-            padded_width: first_raw.width,
-            padded_height: first_raw.height,
-            global_origin_x: 0,
-            global_origin_y: 0,
-        },
-    );
+    let mut tone_scratch = first_raw.clone();
     tile_pipeline.begin_export_tone_analysis(queue, device);
-    tile_pipeline
-        .upload_raw_tile(queue, &tone_canvas)
-        .context("upload export tone-analysis proxy")?;
-    let tone_params = GpuParams::new_for_tile(
-        exposure,
-        masks,
-        &tone_canvas,
-        0,
-        0,
-        tone_raw.width,
-        tone_raw.height,
-    )
-    .with_tone_histogram_bounds(0, 0, tone_raw.width, tone_raw.height);
-    tile_pipeline.accumulate_export_tone_tile(queue, device, &tone_params);
+    for (index, tile) in plan.tiles.iter().copied().enumerate() {
+        if index != 0 {
+            extract_padded_tile_into(raw, tile, &mut tone_scratch);
+        }
+        tile_pipeline
+            .upload_raw_tile(queue, &tone_scratch)
+            .with_context(|| format!("upload tone-analysis tile {}", index + 1))?;
+        let tone_params = GpuParams::new_for_tile(
+            exposure,
+            masks,
+            &tone_scratch,
+            tile.global_origin_x,
+            tile.global_origin_y,
+            raw.width,
+            raw.height,
+        )
+        .with_tone_histogram_bounds(
+            tile.local_core_x,
+            tile.local_core_y,
+            tile.core_width,
+            tile.core_height,
+        );
+        tile_pipeline.accumulate_export_tone_tile(queue, device, &tone_params);
+    }
     tile_pipeline.finish_export_tone_analysis(queue, device);
     crate::diagnostics::record(format!(
-        "Proxy tone-analysis queued in {:.3}s at {}x{} instead of {} native-resolution tiles",
+        "Exact full-resolution tone-analysis prepass queued in {:.3}s across {} tiles",
         tone_analysis_started.elapsed().as_secs_f64(),
-        tone_raw.width,
-        tone_raw.height,
         plan.tile_count()
     ));
 
@@ -614,6 +641,10 @@ fn render_tiled_srgb<W: Write>(
         output_height,
         row_format,
     )?;
+    // Reuse one padded RAW allocation for the entire export. Queue::write_texture
+    // copies each tile before this buffer is rewritten, so reuse is safe and
+    // avoids allocator churn proportional to tile count.
+    let mut tile_scratch = first_raw.clone();
 
     let total_tiles = plan.tile_count();
     let mut completed_tiles = 0usize;
@@ -640,13 +671,9 @@ fn render_tiled_srgb<W: Write>(
             .enumerate()
         {
             let global_index = band_start + absolute_index;
-            let tile_raw = if global_index == 0 {
-                first_raw.clone()
-            } else {
-                extract_padded_tile(raw, tile)
-            };
+            extract_padded_tile_into(raw, tile, &mut tile_scratch);
             tile_pipeline
-                .upload_raw_tile(queue, &tile_raw)
+                .upload_raw_tile(queue, &tile_scratch)
                 .with_context(|| format!("upload export tile {}", global_index + 1))?;
             tile_pipeline
                 .update_inpaint_layer(
@@ -664,7 +691,7 @@ fn render_tiled_srgb<W: Write>(
             let params = GpuParams::new_for_tile(
                 exposure,
                 masks,
-                &tile_raw,
+                &tile_scratch,
                 tile.global_origin_x,
                 tile.global_origin_y,
                 raw.width,
@@ -682,11 +709,13 @@ fn render_tiled_srgb<W: Write>(
                 )
                 .with_context(|| format!("queue export tile readback {}", global_index + 1))?;
 
-            // Queue this tile before consuming the previous tile. GPU rendering
-            // and copy can therefore overlap CPU stitching/resizing/encoding.
-            if let Some((previous_tile, previous_index, previous_readback)) =
-                pending_readback.take()
-            {
+            // Queue this tile before consuming the previous tile. Using
+            // `replace` here also lets Rust infer the concrete pending-readback
+            // handle type from `readback` before we call methods on the older
+            // handle. GPU rendering/copy can therefore overlap CPU stitching,
+            // resizing, and encoding without requiring a public type annotation.
+            let previous = pending_readback.replace((tile, global_index, readback));
+            if let Some((previous_tile, previous_index, previous_readback)) = previous {
                 let rgb = previous_readback
                     .finish(device)
                     .with_context(|| format!("read export tile {}", previous_index + 1))?;
@@ -710,7 +739,6 @@ fn render_tiled_srgb<W: Write>(
                     total_tiles,
                 });
             }
-            pending_readback = Some((tile, global_index, readback));
         }
 
         if let Some((last_tile, last_index, last_readback)) = pending_readback.take() {
@@ -749,6 +777,8 @@ fn render_tiled_srgb<W: Write>(
     resizer.finish(&output_transform, output)?;
     Ok(())
 }
+
+
 
 fn export_tiled_jpeg(
     context: ExportContext<'_>,
@@ -839,6 +869,16 @@ fn write_final_jpeg(
     output_height: u32,
 ) -> Result<()> {
     if !keep_metadata {
+        if is_direct_export_destination(output_path) {
+            let mut input = BufReader::new(
+                fs::File::open(encoded_path)
+                    .with_context(|| format!("open staged JPEG {}", encoded_path.display()))?,
+            );
+            let mut output = BufWriter::new(open_export_destination(output_path)?);
+            std::io::copy(&mut input, &mut output).context("copy JPEG to direct export destination")?;
+            output.flush().context("flush direct JPEG export")?;
+            return Ok(());
+        }
         return fs::rename(encoded_path, output_path).with_context(|| {
             format!(
                 "publish staged JPEG {} to {}",
@@ -866,10 +906,7 @@ fn write_final_jpeg(
     let segment_len = u16::try_from(segment_len)
         .context("JPEG EXIF metadata exceeds the APP1 segment limit")?;
 
-    let output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output_path)
+    let output = open_export_destination(output_path)
         .with_context(|| format!("create final JPEG {}", output_path.display()))?;
     let mut output = BufWriter::new(output);
     output.write_all(&soi).context("write JPEG SOI marker")?;
@@ -1348,18 +1385,61 @@ fn bounded_tile_spec(mut spec: TileSpec, source_width: u32) -> Result<TileSpec> 
     Ok(spec)
 }
 
+fn is_direct_export_destination(path: &Path) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::is_direct_export_path(path)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn open_export_destination(destination: &Path) -> Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if is_direct_export_destination(destination) {
+        options.truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    options
+        .open(destination)
+        .with_context(|| format!("open export destination {}", destination.display()))
+}
+
 fn temporary_export_path(destination: &Path) -> Result<PathBuf> {
-    let parent = destination
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)
+    let direct = is_direct_export_destination(destination);
+    let parent = if direct {
+        #[cfg(target_os = "android")]
+        {
+            crate::android::direct_export_temp_dir(destination)
+                .context("Android direct export has no temporary staging directory")?
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            unreachable!("direct export destinations only exist on Android")
+        }
+    } else {
+        destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    };
+    fs::create_dir_all(&parent)
         .with_context(|| format!("create export directory {}", parent.display()))?;
-    let name = destination
-        .file_name()
-        .and_then(|value| value.to_str())
-        .context("export path has no valid file name")?;
-    cleanup_stale_export_parts(parent, name);
+    let name = if direct {
+        "auraw-direct-export"
+    } else {
+        destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("export path has no valid file name")?
+    };
+    cleanup_stale_export_parts(&parent, name);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

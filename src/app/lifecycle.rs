@@ -498,6 +498,7 @@ impl AurawApp {
         let Some(folder) = dialog.pick_folder() else {
             return;
         };
+        crate::pipeline::invalidate_dcp_profile_index();
         self.camera_profile_folder_label = folder
             .file_name()
             .and_then(|name| name.to_str())
@@ -533,6 +534,7 @@ impl AurawApp {
     pub(crate) fn clear_camera_profile_folder(&mut self) {
         let previous_folder = self.camera_profile_folder.take();
         if previous_folder.is_some() || self.camera_profile_auto_detect {
+            crate::pipeline::invalidate_dcp_profile_index();
             self.camera_profile_folder_label = None;
             self.camera_profile_auto_detect = false;
             self.last_camera_profile = None;
@@ -557,6 +559,7 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn auto_detect_camera_profile_folder(&mut self) {
+        crate::pipeline::invalidate_dcp_profile_index();
         self.camera_profile_auto_detect = true;
         match crate::performance_settings::detected_adobe_camera_profile_folder() {
             Some(folder) => {
@@ -1456,6 +1459,7 @@ impl AurawApp {
                 } => {
                     self.picker_pending = false;
                     self.camera_profile_folder_importing_label = None;
+                    crate::pipeline::invalidate_dcp_profile_index();
                     let previous_folder = self.camera_profile_folder.replace(path);
                     self.camera_profile_folder_label = Some(label.clone());
                     self.camera_profile_auto_detect = false;

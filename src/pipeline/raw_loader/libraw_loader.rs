@@ -1,15 +1,18 @@
 use super::{
     validate_raw_dimensions, CameraColorModel, CameraProfile, CameraProfileCandidate,
-    CameraProfileMode, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint, LoadedRaw, RawThumbnail,
+    CameraProfileMode, CameraWhiteBalanceModel, CfaKind, CompactPixelMap, DngColorEndpoint, LoadedRaw, RawThumbnail,
     MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
 };
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::Cursor;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -593,29 +596,51 @@ struct MatchedDcpProfile {
     profile: DcpProfile,
 }
 
-fn find_matching_dcp_profiles(
-    folder: &Path,
-    camera_make: &str,
-    camera_model: &str,
-) -> Result<Vec<MatchedDcpProfile>> {
+#[derive(Clone)]
+struct IndexedDcpProfile {
+    path: PathBuf,
+    name: String,
+    profile: DcpProfile,
+}
+
+#[derive(Clone)]
+struct CachedDcpIndex {
+    root_modified: Option<SystemTime>,
+    profiles: Arc<Vec<IndexedDcpProfile>>,
+}
+
+static DCP_PROFILE_INDEX: OnceLock<Mutex<HashMap<PathBuf, CachedDcpIndex>>> = OnceLock::new();
+
+fn dcp_profile_index_cache() -> &'static Mutex<HashMap<PathBuf, CachedDcpIndex>> {
+    DCP_PROFILE_INDEX.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) fn invalidate_dcp_profile_index() {
+    if let Some(cache) = DCP_PROFILE_INDEX.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.clear();
+        }
+    }
+}
+
+fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
     let metadata = fs::metadata(folder)
         .with_context(|| format!("inspect DCP profile folder {}", folder.display()))?;
-    anyhow::ensure!(
-        metadata.is_dir(),
-        "configured DCP profile path is not a folder"
-    );
+    anyhow::ensure!(metadata.is_dir(), "configured DCP profile path is not a folder");
+    let cache_key = fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+    let root_modified = metadata.modified().ok();
 
-    let make_key = normalize_camera_name(camera_make);
-    let model_key = normalize_camera_name(camera_model);
-    let combined_key = normalize_camera_name(&format!("{camera_make} {camera_model}"));
-    if model_key.is_empty() {
-        return Ok(Vec::new());
+    if let Ok(cache) = dcp_profile_index_cache().lock() {
+        if let Some(index) = cache.get(&cache_key) {
+            if index.root_modified == root_modified {
+                return Ok(Arc::clone(&index.profiles));
+            }
+        }
     }
 
     let mut stack = vec![(folder.to_path_buf(), 0usize)];
     let mut scanned = 0usize;
-    let mut matches = Vec::new();
-
+    let mut profiles = Vec::new();
     'scan: while let Some((directory, depth)) = stack.pop() {
         if depth > MAX_DCP_SCAN_DEPTH {
             continue;
@@ -623,18 +648,13 @@ fn find_matching_dcp_profiles(
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) => {
-                log::warn!(
-                    "could not read DCP directory {}: {error}",
-                    directory.display()
-                );
+                log::warn!("could not read DCP directory {}: {error}", directory.display());
                 continue;
             }
         };
         for entry in entries {
             if scanned >= MAX_DCP_SCAN_FILES {
-                log::warn!(
-                    "stopped DCP profile scan after {MAX_DCP_SCAN_FILES} filesystem entries"
-                );
+                log::warn!("stopped DCP profile scan after {MAX_DCP_SCAN_FILES} filesystem entries");
                 break 'scan;
             }
             scanned += 1;
@@ -657,11 +677,11 @@ fn find_matching_dcp_profiles(
                 continue;
             }
             let path = entry.path();
-            let is_dcp = path
+            if !path
                 .extension()
                 .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("dcp"));
-            if !is_dcp {
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dcp"))
+            {
                 continue;
             }
             match entry.metadata() {
@@ -676,18 +696,59 @@ fn find_matching_dcp_profiles(
                     continue;
                 }
             };
-            let score = dcp_match_score(&profile, &path, &make_key, &model_key, &combined_key);
-            if score <= 0 {
-                continue;
-            }
             let name = dcp_profile_display_name(&profile, &path);
-            matches.push(MatchedDcpProfile {
-                score,
-                path,
-                name,
-                profile,
-            });
+            profiles.push(IndexedDcpProfile { path, name, profile });
         }
+    }
+
+    let profiles = Arc::new(profiles);
+    if let Ok(mut cache) = dcp_profile_index_cache().lock() {
+        cache.insert(
+            cache_key,
+            CachedDcpIndex {
+                root_modified,
+                profiles: Arc::clone(&profiles),
+            },
+        );
+    }
+    crate::diagnostics::record(format!(
+        "Indexed {} DCP profiles after scanning {scanned} filesystem entries",
+        profiles.len()
+    ));
+    Ok(profiles)
+}
+
+fn find_matching_dcp_profiles(
+    folder: &Path,
+    camera_make: &str,
+    camera_model: &str,
+) -> Result<Vec<MatchedDcpProfile>> {
+    let make_key = normalize_camera_name(camera_make);
+    let model_key = normalize_camera_name(camera_model);
+    let combined_key = normalize_camera_name(&format!("{camera_make} {camera_model}"));
+    if model_key.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let index = indexed_dcp_profiles(folder)?;
+    let mut matches = Vec::new();
+    for indexed in index.iter() {
+        let score = dcp_match_score(
+            &indexed.profile,
+            &indexed.path,
+            &make_key,
+            &model_key,
+            &combined_key,
+        );
+        if score <= 0 {
+            continue;
+        }
+        matches.push(MatchedDcpProfile {
+            score,
+            path: indexed.path.clone(),
+            name: indexed.name.clone(),
+            profile: indexed.profile.clone(),
+        });
     }
 
     matches.sort_by(|left, right| {
@@ -1067,6 +1128,7 @@ unsafe fn loaded_raw_from_context(
         height,
         sizes.raw_pitch as usize,
         sizes.flip,
+        cfa_kind,
         cdesc,
         cfa_map,
         color.black,
@@ -1153,7 +1215,13 @@ where
     u32::try_from(value).unwrap_or(0)
 }
 
-type ActivePixelData = (u32, u32, Vec<u16>, Vec<u8>, Vec<f32>);
+type ActivePixelData = (
+    u32,
+    u32,
+    Vec<u16>,
+    CompactPixelMap<u8>,
+    CompactPixelMap<f32>,
+);
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn copy_active_pixels(
@@ -1167,6 +1235,7 @@ unsafe fn copy_active_pixels(
     height: u32,
     raw_pitch: usize,
     flip: i32,
+    cfa_kind: CfaKind,
     cdesc: [u8; 4],
     cfa_map: [u8; 4],
     shared_black: u32,
@@ -1214,26 +1283,70 @@ unsafe fn copy_active_pixels(
         .try_reserve_exact(output_len)
         .context("reserve oriented RAW pixel buffer")?;
     pixels.resize(output_len, 0);
-    let mut colors = Vec::new();
-    colors
-        .try_reserve_exact(output_len)
-        .context("reserve oriented CFA buffer")?;
-    let mut black_map = Vec::new();
-    black_map
-        .try_reserve_exact(output_len)
-        .context("reserve oriented black-level buffer")?;
 
-    for y in 0..out_height {
-        for x in 0..out_width {
-            let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
-            let raw_x = crop_x + src_x;
-            let raw_y = crop_y + src_y;
+    // Copy the actual mosaic first. The common unrotated case can move whole
+    // rows at once instead of performing one pointer calculation per pixel.
+    if flip == 0 {
+        for y in 0..height {
+            let raw_y = crop_y + y;
             let row_offset = raw_y
                 .checked_mul(pitch)
                 .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
             let row_ptr = (raw_image as *const u8).add(row_offset) as *const u16;
-            pixels[y * out_width + x] = *row_ptr.add(raw_x);
+            let source = std::slice::from_raw_parts(row_ptr.add(crop_x), width);
+            let destination = &mut pixels[y * out_width..(y + 1) * out_width];
+            destination.copy_from_slice(source);
+        }
+    } else {
+        for y in 0..out_height {
+            for x in 0..out_width {
+                let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
+                let raw_x = crop_x + src_x;
+                let raw_y = crop_y + src_y;
+                let row_offset = raw_y
+                    .checked_mul(pitch)
+                    .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
+                let row_ptr = (raw_image as *const u8).add(row_offset) as *const u16;
+                pixels[y * out_width + x] = *row_ptr.add(raw_x);
+            }
+        }
+    }
 
+    // CFA channels and metadata black levels are periodic for supported Bayer
+    // and X-Trans mosaics. Store one exact repeating cell instead of allocating
+    // 1 + 4 bytes for every photosite. The period combines the CFA cycle with
+    // LibRaw's optional row/column black-level pattern; rotated images swap the
+    // pattern axes. If metadata ever describes a period as large as the image,
+    // this naturally becomes an exact dense map rather than approximating it.
+    let cfa_period = match cfa_kind {
+        CfaKind::Bayer => 2usize,
+        CfaKind::XTrans => 6usize,
+    };
+    let (black_rows, black_cols) = black_pattern_dimensions(cblack).unwrap_or((1, 1));
+    let source_period_x = lcm_usize(cfa_period, black_cols).max(1);
+    let source_period_y = lcm_usize(cfa_period, black_rows).max(1);
+    let (period_width, period_height) = if matches!(flip, 5 | 6) {
+        (source_period_y.min(out_width), source_period_x.min(out_height))
+    } else {
+        (source_period_x.min(out_width), source_period_y.min(out_height))
+    };
+    let pattern_len = period_width
+        .checked_mul(period_height)
+        .ok_or_else(|| anyhow!("RAW metadata pattern dimensions overflow"))?;
+    let mut colors = Vec::new();
+    colors
+        .try_reserve_exact(pattern_len)
+        .context("reserve compact oriented CFA pattern")?;
+    let mut black_map = Vec::new();
+    black_map
+        .try_reserve_exact(pattern_len)
+        .context("reserve compact oriented black-level pattern")?;
+
+    for y in 0..period_height {
+        for x in 0..period_width {
+            let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
+            let raw_x = crop_x + src_x;
+            let raw_y = crop_y + src_y;
             let libraw_color = ffi::libraw_COLOR(raw, raw_y as i32, raw_x as i32);
             if !(0..=3).contains(&libraw_color) {
                 return Err(anyhow!(
@@ -1245,9 +1358,6 @@ unsafe fn copy_active_pixels(
                     "LibRaw used undescribed CFA channel {libraw_color} at {raw_x},{raw_y}"
                 ));
             }
-            // Preserve four independent CFA planes, but canonicalize
-            // them to R, G1, B, G2 so the GPU can keep G1/G2 calibration
-            // separate without carrying a second channel-map uniform.
             colors.push(cfa_map[libraw_color as usize]);
             black_map.push(effective_black_level(
                 shared_black,
@@ -1258,6 +1368,21 @@ unsafe fn copy_active_pixels(
             ));
         }
     }
+
+    let colors = CompactPixelMap::repeating(
+        out_width as u32,
+        out_height as u32,
+        period_width as u32,
+        period_height as u32,
+        colors,
+    );
+    let black_map = CompactPixelMap::repeating(
+        out_width as u32,
+        out_height as u32,
+        period_width as u32,
+        period_height as u32,
+        black_map,
+    );
 
     Ok((
         out_width as u32,
@@ -1408,6 +1533,21 @@ fn black_levels(black: u32, cblack: &[u32]) -> [f32; 4] {
         *value += cblack.get(index).copied().unwrap_or(0) as f32;
     }
     out
+}
+
+fn gcd_usize(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a.max(1)
+}
+
+fn lcm_usize(a: usize, b: usize) -> usize {
+    a.checked_div(gcd_usize(a.max(1), b.max(1)))
+        .and_then(|value| value.checked_mul(b.max(1)))
+        .unwrap_or(usize::MAX)
 }
 
 fn effective_black_level(

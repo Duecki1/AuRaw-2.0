@@ -4,6 +4,7 @@ use super::color_profile::CameraProfile;
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ops::Index;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +135,201 @@ pub(crate) struct CameraWhiteBalanceModel {
     pub color: CameraColorModel,
 }
 
+
+#[derive(Clone, Debug)]
+pub struct CompactPixelMap<T> {
+    width: u32,
+    height: u32,
+    storage_width: u32,
+    storage_height: u32,
+    values: Vec<T>,
+}
+
+impl<T> CompactPixelMap<T> {
+    pub fn dense(width: u32, height: u32, values: Vec<T>) -> Self {
+        debug_assert_eq!(values.len(), (width as usize).saturating_mul(height as usize));
+        Self { width, height, storage_width: width, storage_height: height, values }
+    }
+
+    pub fn repeating(
+        width: u32,
+        height: u32,
+        storage_width: u32,
+        storage_height: u32,
+        values: Vec<T>,
+    ) -> Self {
+        debug_assert!(storage_width > 0 && storage_height > 0);
+        debug_assert_eq!(values.len(), (storage_width as usize).saturating_mul(storage_height as usize));
+        Self { width, height, storage_width, storage_height, values }
+    }
+
+    pub fn len(&self) -> usize {
+        (self.width as usize).saturating_mul(self.height as usize)
+    }
+
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn storage_width(&self) -> u32 { self.storage_width }
+    pub fn storage_height(&self) -> u32 { self.storage_height }
+    pub fn storage_slice(&self) -> &[T] { &self.values }
+
+    fn storage_index(&self, index: usize) -> usize {
+        let width = self.width.max(1) as usize;
+        let x = index % width;
+        let y = index / width;
+        (y % self.storage_height.max(1) as usize) * self.storage_width.max(1) as usize
+            + (x % self.storage_width.max(1) as usize)
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        (index < self.len()).then(|| &self.values[self.storage_index(index)])
+    }
+
+    pub fn iter(&self) -> CompactPixelMapIter<'_, T> {
+        CompactPixelMapIter { map: self, next: 0 }
+    }
+}
+
+impl<T: Copy> CompactPixelMap<T> {
+    /// Appends one logical row without materializing the whole logical map.
+    /// Repeating maps are copied a pattern-row slice at a time, avoiding a
+    /// modulo/division pair for every pixel in hot GPU-upload paths.
+    pub fn append_row_to(&self, y: u32, output: &mut Vec<T>) {
+        if y >= self.height || self.width == 0 || self.values.is_empty() {
+            return;
+        }
+        let storage_width = self.storage_width.max(1) as usize;
+        let storage_y = (y % self.storage_height.max(1)) as usize;
+        let start = storage_y * storage_width;
+        let pattern = &self.values[start..start + storage_width];
+        let mut remaining = self.width as usize;
+        while remaining >= pattern.len() {
+            output.extend_from_slice(pattern);
+            remaining -= pattern.len();
+        }
+        if remaining > 0 {
+            output.extend_from_slice(&pattern[..remaining]);
+        }
+    }
+}
+
+impl<T: Copy + PartialEq> CompactPixelMap<T> {
+    pub fn compact_from_dense(width: u32, height: u32, values: Vec<T>, max_period: u32) -> Self {
+        if width == 0 || height == 0 || values.is_empty() {
+            return Self::dense(width, height, values);
+        }
+        // Dense full-resolution correction maps can contain tens of millions of
+        // values. Avoid an expensive period search there; the LibRaw loader
+        // constructs compact maps directly for the normal periodic case.
+        if values.len() > 4_000_000 {
+            return Self::dense(width, height, values);
+        }
+        let candidates = [1u32, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
+        for ph in candidates.into_iter().filter(|p| *p <= height && *p <= max_period.max(1)) {
+            for pw in candidates.into_iter().filter(|p| *p <= width && *p <= max_period.max(1)) {
+                let mut matches = true;
+                'outer: for y in 0..height {
+                    for x in 0..width {
+                        let a = values[(y * width + x) as usize];
+                        let b = values[((y % ph) * width + (x % pw)) as usize];
+                        if a != b {
+                            matches = false;
+                            break 'outer;
+                        }
+                    }
+                }
+                if matches {
+                    let mut pattern = Vec::with_capacity((pw * ph) as usize);
+                    for y in 0..ph {
+                        pattern.extend_from_slice(
+                            &values[(y * width) as usize..(y * width + pw) as usize],
+                        );
+                    }
+                    return Self::repeating(width, height, pw, ph, pattern);
+                }
+            }
+        }
+        Self::dense(width, height, values)
+    }
+
+    pub fn subregion_clamped(
+        &self,
+        origin_x: i64,
+        origin_y: i64,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let source_width = self.width.max(1) as i64;
+        let source_height = self.height.max(1) as i64;
+        let fully_inside = origin_x >= 0
+            && origin_y >= 0
+            && origin_x + i64::from(width) <= source_width
+            && origin_y + i64::from(height) <= source_height;
+        let repeating = self.storage_width < self.width || self.storage_height < self.height;
+
+        if fully_inside && repeating {
+            let pattern_width = self.storage_width.min(width.max(1));
+            let pattern_height = self.storage_height.min(height.max(1));
+            let mut pattern = Vec::with_capacity((pattern_width * pattern_height) as usize);
+            for y in 0..pattern_height {
+                for x in 0..pattern_width {
+                    let source_x = (origin_x + i64::from(x)) as u32;
+                    let source_y = (origin_y + i64::from(y)) as u32;
+                    pattern.push(self[(source_y * self.width + source_x) as usize]);
+                }
+            }
+            return Self::repeating(width, height, pattern_width, pattern_height, pattern);
+        }
+
+        let mut values = Vec::with_capacity((width as usize).saturating_mul(height as usize));
+        for y in 0..height {
+            let source_y = (origin_y + i64::from(y)).clamp(0, source_height - 1) as u32;
+            for x in 0..width {
+                let source_x = (origin_x + i64::from(x)).clamp(0, source_width - 1) as u32;
+                values.push(self[(source_y * self.width + source_x) as usize]);
+            }
+        }
+        // Clamped border tiles are not strictly periodic at the duplicated
+        // edges. Keep the exact dense values rather than spending time trying
+        // many full-tile period candidates that cannot match.
+        Self::dense(width, height, values)
+    }
+}
+
+impl<T> Index<usize> for CompactPixelMap<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &Self::Output {
+        assert!(index < self.len(), "compact pixel-map index out of bounds");
+        &self.values[self.storage_index(index)]
+    }
+}
+
+pub struct CompactPixelMapIter<'a, T> {
+    map: &'a CompactPixelMap<T>,
+    next: usize,
+}
+
+impl<'a, T> Iterator for CompactPixelMapIter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = self.next;
+        if index >= self.map.len() { return None; }
+        self.next += 1;
+        Some(&self.map[index])
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.map.len().saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a, T> ExactSizeIterator for CompactPixelMapIter<'a, T> {}
+
+impl<'a, T> IntoIterator for &'a CompactPixelMap<T> {
+    type Item = &'a T;
+    type IntoIter = CompactPixelMapIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter { self.iter() }
+}
+
 #[derive(Clone, Debug)]
 pub struct LoadedRaw {
     pub width: u32,
@@ -152,14 +348,14 @@ pub struct LoadedRaw {
     pub focus_distance: f32,
     pub cfa_kind: CfaKind,
     pub raw_pixels: Vec<u16>,
-    pub color_indices: Vec<u8>,
+    pub color_indices: CompactPixelMap<u8>,
     pub wb_coeffs: [f32; 4],
     pub cam_to_srgb: [[f32; 4]; 3],
     pub black_levels: [f32; 4],
     /// Effective LibRaw black level for every oriented active-area photosite.
     /// This includes the shared level, per-CFA-plane offsets, and an optional
     /// repeating row/column pattern from `cblack[4..]`.
-    pub black_levels_per_pixel: Vec<f32>,
+    pub black_levels_per_pixel: CompactPixelMap<f32>,
     pub white_levels: [f32; 4],
     /// DCP creative profile stages and retained embedded camera ICC data.
     pub camera_profile: CameraProfile,
@@ -283,12 +479,20 @@ pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail
 }
 
 #[cfg(libraw_available)]
+pub(crate) fn invalidate_dcp_profile_index() {
+    libraw_loader::invalidate_dcp_profile_index();
+}
+
+#[cfg(not(libraw_available))]
+pub(crate) fn invalidate_dcp_profile_index() {}
+
+#[cfg(libraw_available)]
 mod libraw_loader;
 
 #[cfg(all(test, libraw_available))]
 mod tests {
     use super::{
-        CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, LoadedRaw,
+        CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, CompactPixelMap, LoadedRaw,
         GLOBAL_TEMPERATURE_LIMIT,
     };
 
@@ -305,7 +509,7 @@ mod tests {
             focus_distance: 0.0,
             cfa_kind: CfaKind::Bayer,
             raw_pixels: vec![0],
-            color_indices: vec![0],
+            color_indices: CompactPixelMap::dense(1, 1, vec![0]),
             wb_coeffs: [2.0, 1.0, 1.5, 1.0],
             cam_to_srgb: [
                 [1.0, 0.0, 0.0, 0.0],
@@ -313,7 +517,7 @@ mod tests {
                 [0.0, 0.0, 1.0, 0.0],
             ],
             black_levels: [0.0; 4],
-            black_levels_per_pixel: vec![0.0],
+            black_levels_per_pixel: CompactPixelMap::dense(1, 1, vec![0.0]),
             white_levels: [1.0; 4],
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,

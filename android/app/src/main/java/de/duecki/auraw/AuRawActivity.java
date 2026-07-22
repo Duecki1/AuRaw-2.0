@@ -1683,6 +1683,67 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
+    /** Creates a pending MediaStore destination and transfers its writable fd to Rust. */
+    public String createPendingExport(String requestedName, String mimeType) throws Exception {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return "";
+        }
+        String normalizedMime = normalizeExportMimeType(mimeType);
+        String displayName = safeImageName(requestedName, normalizedMime);
+        ContentResolver resolver = getContentResolver();
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, displayName);
+        values.put(MediaStore.Images.Media.MIME_TYPE, normalizedMime);
+        values.put(
+                MediaStore.Images.Media.RELATIVE_PATH,
+                Environment.DIRECTORY_PICTURES + "/AuRaw");
+        values.put(MediaStore.Images.Media.IS_PENDING, 1);
+        Uri uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) {
+            throw new IllegalStateException("Android MediaStore could not create the image");
+        }
+        boolean transferred = false;
+        try {
+            ParcelFileDescriptor descriptor = resolver.openFileDescriptor(uri, "w");
+            if (descriptor == null) {
+                throw new IllegalStateException("Android MediaStore returned no file descriptor");
+            }
+            int fd;
+            try {
+                fd = descriptor.detachFd();
+                transferred = true;
+            } finally {
+                descriptor.close();
+            }
+            String location = Environment.DIRECTORY_PICTURES + "/AuRaw/" + displayName;
+            return fd + "\t" + uri + "\t" + location;
+        } finally {
+            if (!transferred) {
+                resolver.delete(uri, null, null);
+            }
+        }
+    }
+
+    /** Publishes or deletes a MediaStore destination previously created above. */
+    public void finishPendingExport(String uriText, int successFlag) throws Exception {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || uriText == null || uriText.isEmpty()) {
+            return;
+        }
+        ContentResolver resolver = getContentResolver();
+        Uri uri = Uri.parse(uriText);
+        boolean success = successFlag != 0;
+        if (!success) {
+            resolver.delete(uri, null, null);
+            return;
+        }
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.IS_PENDING, 0);
+        if (resolver.update(uri, values, null, null) <= 0) {
+            resolver.delete(uri, null, null);
+            throw new IllegalStateException("Android MediaStore could not publish the image");
+        }
+    }
+
     /** Publishes a completed cache image to Pictures/AuRaw without showing a picker. */
     public void publishImage(String cachedPath, String displayName, String mimeType) {
         runOnUiThread(() -> beginPublishImage(cachedPath, displayName, mimeType));

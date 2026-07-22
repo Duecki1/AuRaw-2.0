@@ -1,4 +1,4 @@
-use crate::pipeline::LoadedRaw;
+use crate::pipeline::{CompactPixelMap, LoadedRaw};
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::{Mutex, OnceLock};
@@ -171,7 +171,7 @@ fn sampled_u16_fingerprint(values: &[u16]) -> u64 {
     hash
 }
 
-fn sampled_u8_fingerprint(values: &[u8]) -> u64 {
+fn sampled_u8_fingerprint(values: &CompactPixelMap<u8>) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for index in sample_indices(values.len()) {
         hash = fnv1a_step(hash, values[index]);
@@ -179,7 +179,7 @@ fn sampled_u8_fingerprint(values: &[u8]) -> u64 {
     hash
 }
 
-fn sampled_f32_fingerprint(values: &[f32]) -> u64 {
+fn sampled_f32_fingerprint(values: &CompactPixelMap<f32>) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for index in sample_indices(values.len()) {
         for byte in values[index].to_bits().to_le_bytes() {
@@ -189,7 +189,7 @@ fn sampled_f32_fingerprint(values: &[f32]) -> u64 {
     hash
 }
 
-fn sampled_cfa_counts(values: &[u8]) -> [usize; 4] {
+fn sampled_cfa_counts(values: &CompactPixelMap<u8>) -> [usize; 4] {
     let mut counts = [0usize; 4];
     for index in sample_indices(values.len()) {
         if let Some(count) = counts.get_mut(usize::from(values[index])) {
