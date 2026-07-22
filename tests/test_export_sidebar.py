@@ -23,7 +23,13 @@ def test_sidebar_has_exactly_four_requested_tabs() -> None:
     for kind in ("Brush", "Radial", "Linear", "Subject", "Background", "Object", "Landscape", "LuminanceRange", "ColorRange", "DepthRange"):
         assert f"MaskKind::{kind}" in SIDEBAR
     assert "fn show_inpainting" in SIDEBAR
-    assert '"Paint over unwanted content"' in SIDEBAR
+    assert '"Paint over unwanted content"' not in SIDEBAR
+    assert '"Scene-referred RAW controls"' not in SIDEBAR
+    assert 'ui.heading("Adjustments")' not in SIDEBAR
+    assert 'ui.heading("Masks")' not in SIDEBAR
+    assert 'ui.heading("Inpainting")' not in SIDEBAR
+    assert 'ui.heading("Export")' not in SIDEBAR
+    assert 'ui.small_button("Reset all")' in SIDEBAR
     assert '"Drag on the image. Releasing each stroke runs the local LaMa eraser."' in SIDEBAR
 
 
@@ -34,6 +40,9 @@ def test_export_button_only_lives_in_export_sidebar_tab() -> None:
     assert "fn show_export" in SIDEBAR
     assert SIDEBAR.index("fn show_export") < SIDEBAR.index(button)
     assert "app.export_png(frame)" in SIDEBAR
+    assert 'egui::Button::new("Export JPEG…")' in SIDEBAR
+    assert "app.export_jpeg(frame)" in SIDEBAR
+    assert "jpeg_quality" in SIDEBAR
 
 
 def test_export_resize_modes_and_metadata_controls_are_wired() -> None:
@@ -80,6 +89,10 @@ def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
     assert "self.export_settings," in APP
     assert "ExportMetadata::from_raw" in APP
     assert "settings.keep_metadata" in EXPORT
+    assert "settings.jpeg_quality" in EXPORT
+    assert "spawn_tiled_jpeg_export" in EXPORT
+    assert "JpegEncoder::new_with_quality" in EXPORT
+    assert 'write_all(b"Exif\\0\\0")' in EXPORT
 
 
 def test_export_halo_covers_cumulative_spatial_support() -> None:

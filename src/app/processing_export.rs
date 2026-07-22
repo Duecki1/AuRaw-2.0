@@ -1243,11 +1243,54 @@ impl AurawApp {
             path.set_extension("png");
         }
 
-        self.start_export(path, frame);
+        self.start_export(path, frame, ExportFormat::Png);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn export_jpeg(&mut self, frame: &eframe::Frame) {
+        if !self.can_export() {
+            return;
+        }
+
+        let default_name = self
+            .current_path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{name}-auraw.jpg"))
+            .unwrap_or_else(|| "auraw-export.jpg".to_owned());
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("JPEG image", &["jpg", "jpeg"])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let has_jpeg_extension = matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some(extension)
+                if extension.eq_ignore_ascii_case("jpg")
+                    || extension.eq_ignore_ascii_case("jpeg")
+        );
+        if !has_jpeg_extension {
+            path.set_extension("jpg");
+        }
+
+        self.start_export(path, frame, ExportFormat::Jpeg);
     }
 
     #[cfg(target_os = "android")]
     pub(crate) fn export_png(&mut self, frame: &eframe::Frame) {
+        self.export_android(frame, ExportFormat::Png);
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn export_jpeg(&mut self, frame: &eframe::Frame) {
+        self.export_android(frame, ExportFormat::Jpeg);
+    }
+
+    #[cfg(target_os = "android")]
+    fn export_android(&mut self, frame: &eframe::Frame, format: ExportFormat) {
         if !self.can_export() {
             return;
         }
@@ -1265,11 +1308,11 @@ impl AurawApp {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let path = export_dir.join(format!("AuRaw-{timestamp}.png"));
-        self.start_export(path, frame);
+        let path = export_dir.join(format!("AuRaw-{timestamp}.{}", format.extension()));
+        self.start_export(path, frame, format);
     }
 
-    fn start_export(&mut self, path: PathBuf, frame: &eframe::Frame) {
+    fn start_export(&mut self, path: PathBuf, frame: &eframe::Frame, format: ExportFormat) {
         if !self.can_export() {
             return;
         }
@@ -1290,18 +1333,33 @@ impl AurawApp {
             .map(str::to_owned)
             .or_else(|| self.current_label.clone());
         let metadata = ExportMetadata::from_raw(raw, source_file_name);
-        self.export_receiver = Some(spawn_tiled_png_export(
-            render_state.device.clone(),
-            render_state.queue.clone(),
-            Arc::clone(raw),
-            self.exposure,
-            self.masks.clone(),
-            self.inpaint_layer.clone(),
-            path,
-            TileSpec::default(),
-            self.export_settings,
-            metadata,
-        ));
+        let receiver = match format {
+            ExportFormat::Png => spawn_tiled_png_export(
+                render_state.device.clone(),
+                render_state.queue.clone(),
+                Arc::clone(raw),
+                self.exposure,
+                self.masks.clone(),
+                self.inpaint_layer.clone(),
+                path,
+                TileSpec::default(),
+                self.export_settings,
+                metadata,
+            ),
+            ExportFormat::Jpeg => spawn_tiled_jpeg_export(
+                render_state.device.clone(),
+                render_state.queue.clone(),
+                Arc::clone(raw),
+                self.exposure,
+                self.masks.clone(),
+                self.inpaint_layer.clone(),
+                path,
+                TileSpec::default(),
+                self.export_settings,
+                metadata,
+            ),
+        };
+        self.export_receiver = Some(receiver);
         self.export_progress = Some((0, 0));
         self.notice = None;
     }
@@ -1357,15 +1415,32 @@ impl AurawApp {
 
                             #[cfg(target_os = "android")]
                             {
+                                let format = match path
+                                    .extension()
+                                    .and_then(|extension| extension.to_str())
+                                {
+                                    Some(extension)
+                                        if extension.eq_ignore_ascii_case("jpg")
+                                            || extension.eq_ignore_ascii_case("jpeg") =>
+                                    {
+                                        ExportFormat::Jpeg
+                                    }
+                                    _ => ExportFormat::Png,
+                                };
+                                let fallback_name = format!(
+                                    "AuRaw-export.{}",
+                                    format.extension()
+                                );
                                 let display_name = path
                                     .file_name()
                                     .and_then(|name| name.to_str())
-                                    .unwrap_or("AuRaw-export.png")
+                                    .unwrap_or(&fallback_name)
                                     .to_owned();
-                                match crate::android::publish_png(
+                                match crate::android::publish_image(
                                     &self.android_app,
                                     &path,
                                     &display_name,
+                                    format.mime_type(),
                                 ) {
                                     Ok(()) => {
                                         self.export_publish_pending = true;
@@ -1403,7 +1478,7 @@ impl AurawApp {
             if total == 0 {
                 "Preparing tiled export…".to_owned()
             } else {
-                format!("Exporting PNG — tile {completed}/{total}")
+                format!("Exporting image — tile {completed}/{total}")
             }
         } else if self.export_publish_pending {
             "Saving to Pictures/AuRaw…".to_owned()

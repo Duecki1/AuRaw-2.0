@@ -742,10 +742,11 @@ fn hex_digit(value: u8) -> Result<u8, String> {
     }
 }
 
-pub fn publish_png(
+pub fn publish_image(
     app: &AndroidApp,
     path: &std::path::Path,
     display_name: &str,
+    mime_type: &str,
 ) -> Result<(), String> {
     let path = path
         .to_str()
@@ -758,15 +759,28 @@ pub fn publish_png(
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
         let path = env.new_string(path)?;
         let display_name = env.new_string(display_name)?;
+        let mime_type = env.new_string(mime_type)?;
         env.call_method(
             activity,
-            jni::jni_str!("publishPng"),
-            jni::jni_sig!((JString, JString) -> void),
-            &[JValue::Object(&path), JValue::Object(&display_name)],
+            jni::jni_str!("publishImage"),
+            jni::jni_sig!((JString, JString, JString) -> void),
+            &[
+                JValue::Object(&path),
+                JValue::Object(&display_name),
+                JValue::Object(&mime_type),
+            ],
         )?;
         Ok(())
     })
-    .map_err(|error| format!("could not publish Android PNG: {error:#}"))
+    .map_err(|error| format!("could not publish Android image: {error:#}"))
+}
+
+pub fn publish_png(
+    app: &AndroidApp,
+    path: &std::path::Path,
+    display_name: &str,
+) -> Result<(), String> {
+    publish_image(app, path, display_name, "image/png")
 }
 
 #[unsafe(no_mangle)]

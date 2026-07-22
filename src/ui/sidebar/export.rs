@@ -1,13 +1,5 @@
 impl Sidebar {
     fn show_export(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        ui.heading("Export");
-        ui.label(
-            egui::RichText::new("PNG · sRGB · high-quality processing")
-                .size(11.5)
-                .color(ui.visuals().weak_text_color()),
-        );
-        ui.add_space(6.0);
-
         let source_dimensions = app.loaded_raw.as_ref().map(|raw| (raw.width, raw.height));
         ui.group(|ui| {
             ui.set_width(ui.available_width());
@@ -88,8 +80,21 @@ impl Sidebar {
             ui.strong("Metadata");
             ui.checkbox(&mut app.export_settings.keep_metadata, "Keep metadata")
                 .on_hover_text(
-                    "Embeds available camera, source-file, original-size, software, and orientation metadata in the PNG.",
+                    "Embeds available camera, source-file, original-size, software, and orientation metadata in the exported image.",
                 );
+        });
+
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("JPEG");
+            ui.add(
+                egui::Slider::new(&mut app.export_settings.jpeg_quality, 1..=100)
+                    .text("Quality"),
+            )
+            .on_hover_text(
+                "Higher quality keeps more detail and produces a larger JPEG file.",
+            );
         });
 
         ui.add_space(10.0);
@@ -98,13 +103,17 @@ impl Sidebar {
                 .checked_output_dimensions(width, height)
                 .is_ok()
         });
-        let button =
+        let export_enabled = app.can_export() && dimensions_valid;
+        let png_button =
             egui::Button::new("Export PNG…").min_size(egui::vec2(ui.available_width(), 30.0));
-        if ui
-            .add_enabled(app.can_export() && dimensions_valid, button)
-            .clicked()
-        {
+        if ui.add_enabled(export_enabled, png_button).clicked() {
             app.export_png(frame);
+        }
+        ui.add_space(4.0);
+        let jpeg_button =
+            egui::Button::new("Export JPEG…").min_size(egui::vec2(ui.available_width(), 30.0));
+        if ui.add_enabled(export_enabled, jpeg_button).clicked() {
+            app.export_jpeg(frame);
         }
         if !app.can_export() {
             ui.label(

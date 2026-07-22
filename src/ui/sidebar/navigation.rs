@@ -56,20 +56,17 @@ impl Sidebar {
         layout: ScreenLayout,
         frame: &eframe::Frame,
     ) {
+        // Keep the action in a single compact row. Calling `with_layout` directly
+        // on the scroll area's vertical UI lets the child inherit the full remaining
+        // height, so `Align::Center` vertically centers the button and stretches the
+        // whole Develop panel after the title row was removed.
         ui.horizontal(|ui| {
-            ui.heading("Adjustments");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Reset all").clicked() {
                     app.reset_develop_adjustments();
                 }
             });
         });
-        ui.label(
-            egui::RichText::new("Scene-referred RAW controls")
-                .size(11.5)
-                .color(ui.visuals().weak_text_color()),
-        );
-        ui.add_space(2.0);
         ui.separator();
 
         Self::show_camera_profile_selector(ui, app, frame);

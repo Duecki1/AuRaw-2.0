@@ -316,7 +316,7 @@ impl Preview {
         preview_rect: Rect,
         touch_navigation: bool,
     ) -> bool {
-        const HOLD_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+        const HOLD_TIME: std::time::Duration = std::time::Duration::from_millis(350);
         const MAX_STATIONARY_DISTANCE: f32 = 12.0;
 
         let (pressed, down, released, pointer, any_touches, multi_touch) = ui.input(|input| {

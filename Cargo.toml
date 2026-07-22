@@ -18,6 +18,7 @@ rayon = "1.10"
 log = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 png = "0.18"
+memmap2 = "0.9"
 anyhow = "1.0"
 base64 = "0.22"
 ureq = { version = "3.1", default-features = false, features = ["rustls"] }

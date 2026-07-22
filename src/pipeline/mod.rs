@@ -18,7 +18,7 @@ pub use color_profile::{
     RenderingIntent, ToneCurve,
 };
 pub use export::{
-    spawn_tiled_png_export, ExportEvent, ExportMetadata, ExportResizeMode, ExportSettings,
+    spawn_tiled_jpeg_export, spawn_tiled_png_export, ExportEvent, ExportFormat, ExportMetadata, ExportResizeMode, ExportSettings,
     MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};

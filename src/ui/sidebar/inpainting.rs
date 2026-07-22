@@ -5,8 +5,10 @@ impl Sidebar {
         _layout: ScreenLayout,
         _frame: &eframe::Frame,
     ) {
+        // This action used to share a horizontal row with the removed heading.
+        // Preserve that compact row so the right-to-left child cannot consume and
+        // center itself inside the entire remaining scroll-area height.
         ui.horizontal(|ui| {
-            ui.heading("Inpainting");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let clear = ui.add_enabled(
                     !app.inpaint_strokes.is_empty() && !app.inpaint_busy(),
@@ -17,12 +19,6 @@ impl Sidebar {
                 }
             });
         });
-        ui.label(
-            egui::RichText::new("Paint over unwanted content")
-                .size(11.5)
-                .color(ui.visuals().weak_text_color()),
-        );
-        ui.add_space(2.0);
         ui.separator();
 
         ui.add_enabled_ui(!app.inpaint_busy(), |ui| {

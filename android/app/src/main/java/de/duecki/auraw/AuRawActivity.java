@@ -69,6 +69,7 @@ public final class AuRawActivity extends NativeActivity {
 
     private String pendingExportPath;
     private String pendingExportName;
+    private String pendingExportMimeType;
 
     static {
         System.loadLibrary("auraw");
@@ -1626,23 +1627,30 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    /** Publishes a completed cache PNG to Pictures/AuRaw without showing a picker. */
-    public void publishPng(String cachedPath, String displayName) {
-        runOnUiThread(() -> beginPublishPng(cachedPath, displayName));
+    /** Publishes a completed cache image to Pictures/AuRaw without showing a picker. */
+    public void publishImage(String cachedPath, String displayName, String mimeType) {
+        runOnUiThread(() -> beginPublishImage(cachedPath, displayName, mimeType));
     }
 
-    private void beginPublishPng(String cachedPath, String displayName) {
+    /** Backward-compatible entry point retained for older native builds. */
+    public void publishPng(String cachedPath, String displayName) {
+        publishImage(cachedPath, displayName, "image/png");
+    }
+
+    private void beginPublishImage(String cachedPath, String displayName, String mimeType) {
+        String normalizedMime = normalizeExportMimeType(mimeType);
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
                 && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             pendingExportPath = cachedPath;
             pendingExportName = displayName;
+            pendingExportMimeType = normalizedMime;
             requestPermissions(
                     new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
                     WRITE_EXPORT_PERMISSION);
             return;
         }
-        startPublishThread(cachedPath, displayName);
+        startPublishThread(cachedPath, displayName, normalizedMime);
     }
 
     @Override
@@ -1656,12 +1664,14 @@ public final class AuRawActivity extends NativeActivity {
         }
         String cachedPath = pendingExportPath;
         String displayName = pendingExportName;
+        String mimeType = pendingExportMimeType;
         pendingExportPath = null;
         pendingExportName = null;
+        pendingExportMimeType = null;
         if (grantResults.length > 0
                 && grantResults[0] == PackageManager.PERMISSION_GRANTED
                 && cachedPath != null) {
-            startPublishThread(cachedPath, displayName);
+            startPublishThread(cachedPath, displayName, normalizeExportMimeType(mimeType));
         } else {
             if (cachedPath != null) {
                 new File(cachedPath).delete();
@@ -1672,21 +1682,25 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    private void startPublishThread(String cachedPath, String displayName) {
+    private void startPublishThread(String cachedPath, String displayName, String mimeType) {
         new Thread(
-                () -> publishPngInBackground(cachedPath, displayName),
-                "AuRaw PNG publish").start();
+                () -> publishImageInBackground(cachedPath, displayName, mimeType),
+                "AuRaw image publish").start();
     }
 
-    private void publishPngInBackground(String cachedPath, String requestedName) {
+    private void publishImageInBackground(
+            String cachedPath,
+            String requestedName,
+            String mimeType) {
         File cachedFile = new File(cachedPath);
-        String displayName = safePngName(requestedName);
+        String normalizedMime = normalizeExportMimeType(mimeType);
+        String displayName = safeImageName(requestedName, normalizedMime);
         try {
             String location;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                location = publishPngScoped(cachedFile, displayName);
+                location = publishImageScoped(cachedFile, displayName, normalizedMime);
             } else {
-                location = publishPngLegacy(cachedFile, displayName);
+                location = publishImageLegacy(cachedFile, displayName, normalizedMime);
             }
             nativeOnExportPublished(location, "");
         } catch (Exception error) {
@@ -1698,11 +1712,14 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    private String publishPngScoped(File cachedFile, String displayName) throws Exception {
+    private String publishImageScoped(
+            File cachedFile,
+            String displayName,
+            String mimeType) throws Exception {
         ContentResolver resolver = getContentResolver();
         ContentValues values = new ContentValues();
         values.put(MediaStore.Images.Media.DISPLAY_NAME, displayName);
-        values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+        values.put(MediaStore.Images.Media.MIME_TYPE, mimeType);
         values.put(
                 MediaStore.Images.Media.RELATIVE_PATH,
                 Environment.DIRECTORY_PICTURES + "/AuRaw");
@@ -1736,7 +1753,10 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     @SuppressWarnings("deprecation")
-    private String publishPngLegacy(File cachedFile, String displayName) throws Exception {
+    private String publishImageLegacy(
+            File cachedFile,
+            String displayName,
+            String mimeType) throws Exception {
         File pictures = Environment.getExternalStoragePublicDirectory(
                 Environment.DIRECTORY_PICTURES);
         File directory = new File(pictures, "AuRaw");
@@ -1751,7 +1771,7 @@ public final class AuRawActivity extends NativeActivity {
         MediaScannerConnection.scanFile(
                 this,
                 new String[]{destination.getAbsolutePath()},
-                new String[]{"image/png"},
+                new String[]{mimeType},
                 null);
         return destination.getAbsolutePath();
     }
@@ -1761,23 +1781,37 @@ public final class AuRawActivity extends NativeActivity {
         if (!candidate.exists()) {
             return candidate;
         }
-        String stem = displayName.substring(0, displayName.length() - 4);
+        int dot = displayName.lastIndexOf('.');
+        String stem = dot > 0 ? displayName.substring(0, dot) : displayName;
+        String extension = dot > 0 ? displayName.substring(dot) : "";
         for (int suffix = 1; ; suffix++) {
-            candidate = new File(directory, stem + "-" + suffix + ".png");
+            candidate = new File(directory, stem + "-" + suffix + extension);
             if (!candidate.exists()) {
                 return candidate;
             }
         }
     }
 
-    private static String safePngName(String requestedName) {
-        String name = requestedName == null ? "AuRaw-export.png" : requestedName;
+    private static String normalizeExportMimeType(String mimeType) {
+        return "image/jpeg".equalsIgnoreCase(mimeType) ? "image/jpeg" : "image/png";
+    }
+
+    private static String safeImageName(String requestedName, String mimeType) {
+        boolean jpeg = "image/jpeg".equalsIgnoreCase(mimeType);
+        String extension = jpeg ? ".jpg" : ".png";
+        String fallback = jpeg ? "AuRaw-export.jpg" : "AuRaw-export.png";
+        String name = requestedName == null ? fallback : requestedName;
         name = name.replaceAll("[^A-Za-z0-9._-]", "_");
         if (name.isEmpty()) {
-            name = "AuRaw-export.png";
+            name = fallback;
         }
-        if (!name.toLowerCase(Locale.ROOT).endsWith(".png")) {
-            name += ".png";
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (jpeg) {
+            if (!lower.endsWith(".jpg") && !lower.endsWith(".jpeg")) {
+                name += extension;
+            }
+        } else if (!lower.endsWith(extension)) {
+            name += extension;
         }
         return name;
     }

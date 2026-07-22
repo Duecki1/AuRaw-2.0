@@ -16,9 +16,6 @@ struct MaskRenameDialog {
 
 impl Sidebar {
     fn show_masks(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
-        ui.heading("Masks");
-        ui.add_space(4.0);
-
         if app.ai_masks_need_update() {
             ui.group(|ui| {
                 ui.set_width(ui.available_width());
