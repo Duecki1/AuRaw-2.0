@@ -507,6 +507,35 @@ fn create_cpu_session(model_path: &Path) -> Result<Session> {
         .with_context(|| format!("load ONNX model on CPU from {}", model_path.display()))
 }
 
+/// SAM 2.1's Hiera encoder is unusually sensitive to CPU graph/layout fusions in
+/// some Windows ONNX Runtime builds. A runtime can load successfully and run
+/// simpler models while still producing NaN/Inf feature maps for this encoder.
+/// Keep this one session deliberately conservative so object selection remains
+/// deterministic across user-selected Windows runtimes.
+#[cfg(windows)]
+fn create_windows_sam_encoder_session(model_path: &Path) -> Result<Session> {
+    use ort::session::builder::GraphOptimizationLevel;
+
+    let mut builder = Session::builder()
+        .context("create conservative Windows SAM encoder session")?
+        .with_memory_pattern(false)
+        .map_err(|error| anyhow::anyhow!("disable Windows SAM memory pattern: {error}"))?
+        .with_parallel_execution(false)
+        .map_err(|error| anyhow::anyhow!("force sequential Windows SAM execution: {error}"))?
+        .with_intra_threads(1)
+        .map_err(|error| anyhow::anyhow!("limit Windows SAM encoder to one inference thread: {error}"))?
+        .with_optimization_level(GraphOptimizationLevel::Disable)
+        .map_err(|error| anyhow::anyhow!("disable Windows SAM graph optimizations: {error}"))?
+        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+        .map_err(|error| anyhow::anyhow!("configure conservative Windows SAM CPU provider: {error}"))?;
+    builder.commit_from_file(model_path).with_context(|| {
+        format!(
+            "load SAM 2.1 encoder with conservative Windows CPU settings from {}",
+            model_path.display()
+        )
+    })
+}
+
 #[cfg(target_os = "linux")]
 fn running_from_appimage() -> bool {
     std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some()
@@ -2342,13 +2371,20 @@ fn encode_sam_image(
     };
     #[cfg(not(target_os = "android"))]
     let tensors = {
-        if cache_object_ai_sessions() {
+        #[cfg(target_os = "windows")]
+        {
+            // Do not use the generic desktop session for the SAM image encoder
+            // on Windows. Some otherwise-valid ONNX Runtime CPU DLLs produce
+            // non-finite Hiera feature maps when the default graph/layout
+            // optimizations are enabled. The conservative session is slower but
+            // avoids the native-runtime numerical failure that makes Object Mask
+            // unusable.
             let sessions = SAM_ENCODER_SESSION.get_or_init(|| Mutex::new(None));
             let mut guard = sessions
                 .lock()
                 .map_err(|_| anyhow::anyhow!("SAM encoder session lock was poisoned"))?;
             if guard.is_none() {
-                *guard = Some(create_session(encoder_path)?);
+                *guard = Some(create_windows_sam_encoder_session(encoder_path)?);
             }
             run_sam_encoder(
                 guard
@@ -2356,9 +2392,27 @@ fn encode_sam_image(
                     .context("SAM encoder session is unavailable")?,
                 input,
             )?
-        } else {
-            let mut session = create_session(encoder_path)?;
-            run_sam_encoder(&mut session, input)?
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if cache_object_ai_sessions() {
+                let sessions = SAM_ENCODER_SESSION.get_or_init(|| Mutex::new(None));
+                let mut guard = sessions
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("SAM encoder session lock was poisoned"))?;
+                if guard.is_none() {
+                    *guard = Some(create_session(encoder_path)?);
+                }
+                run_sam_encoder(
+                    guard
+                        .as_mut()
+                        .context("SAM encoder session is unavailable")?,
+                    input,
+                )?
+            } else {
+                let mut session = create_session(encoder_path)?;
+                run_sam_encoder(&mut session, input)?
+            }
         }
     };
 
@@ -2383,10 +2437,73 @@ fn run_sam_encoder(
         .run(ort::inputs![input])
         .context("run SAM 2.1 image encoder")?;
     Ok((
-        extract_f32_output(&outputs, 0, "high-resolution feature 0")?,
-        extract_f32_output(&outputs, 1, "high-resolution feature 1")?,
-        extract_f32_output(&outputs, 2, "image embedding")?,
+        extract_sam_encoder_output(&outputs, 0, "high-resolution feature 0")?,
+        extract_sam_encoder_output(&outputs, 1, "high-resolution feature 1")?,
+        extract_sam_encoder_output(&outputs, 2, "image embedding")?,
     ))
+}
+
+fn extract_sam_encoder_output(
+    outputs: &ort::session::SessionOutputs<'_>,
+    index: usize,
+    label: &str,
+) -> Result<SamTensorData> {
+    let value = outputs
+        .values()
+        .nth(index)
+        .with_context(|| format!("SAM 2.1 returned no {label}"))?;
+    let (shape, data) = value
+        .try_extract_tensor::<f32>()
+        .with_context(|| format!("read SAM 2.1 {label}"))?;
+
+    let non_finite = data.iter().filter(|value| !value.is_finite()).count();
+    #[cfg(target_os = "windows")]
+    let values = if non_finite > 0 {
+        // A very small number of isolated NaN/Inf values has been observed from
+        // third-party Windows ORT CPU DLLs even with conservative session
+        // settings. Replacing a handful with neutral zeros is safer than making
+        // Object Mask unusable, but never accept broadly-corrupted feature maps.
+        let repair_limit = 64usize.max(data.len() / 100_000);
+        anyhow::ensure!(
+            non_finite <= repair_limit,
+            "SAM 2.1 {label} is numerically corrupted: {non_finite} of {} values are non-finite even with conservative Windows CPU inference. Select a current Microsoft x64 CPU onnxruntime.dll and restart AuRaw",
+            data.len()
+        );
+        log::warn!(
+            "SAM 2.1 {label} contained {non_finite} isolated non-finite values on Windows; replacing them with zero"
+        );
+        data.iter()
+            .map(|value| if value.is_finite() { *value } else { 0.0 })
+            .collect::<Vec<_>>()
+    } else {
+        data.to_vec()
+    };
+    #[cfg(not(target_os = "windows"))]
+    let values = {
+        anyhow::ensure!(
+            non_finite == 0,
+            "SAM 2.1 {label} contains non-finite values"
+        );
+        data.to_vec()
+    };
+
+    let shape = shape
+        .iter()
+        .map(|dimension| usize::try_from(*dimension).context("negative SAM tensor dimension"))
+        .collect::<Result<Vec<_>>>()?;
+    let expected = shape.iter().try_fold(1usize, |product, dimension| {
+        product
+            .checked_mul(*dimension)
+            .context("SAM tensor shape overflow")
+    })?;
+    anyhow::ensure!(
+        expected == values.len(),
+        "SAM tensor shape does not match its data"
+    );
+    Ok(SamTensorData {
+        shape,
+        values: values.into(),
+    })
 }
 
 fn extract_f32_output(
