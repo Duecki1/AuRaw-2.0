@@ -285,7 +285,13 @@ impl AurawApp {
             self.preview_detail_urgent = true;
         }
 
-        if self.preview_zoom > DETAIL_ZOOM_START || self.preview_navigation.is_some() {
+        // Only maintain the tiny navigation proxy while actually zoomed. Keeping
+        // it alive after returning to fit view made later slider edits briefly
+        // swap the entire preview to a 512 px backing texture on slower packaged
+        // builds (AppImage/Windows), which looked like a one-frame pixelation
+        // flash. Fit view now stays on the normal-resolution proxy throughout
+        // interactive edits.
+        if self.preview_zoom > DETAIL_ZOOM_START {
             self.navigation_pending_stage = Some(match self.navigation_pending_stage {
                 Some(existing) => existing.min(stage),
                 None => stage,
@@ -389,11 +395,19 @@ impl AurawApp {
     }
 
     pub(crate) fn preview_base_pipeline(&self) -> Option<&RawGpuPipeline> {
-        // Keep the normal adjusted full-frame proxy as the zoom backing while
-        // it is current. The tiny navigation proxy is only needed after an edit
-        // makes that normal proxy stale; otherwise selecting it here needlessly
-        // downgrades 101-150% zoom even before the detail crop is ready.
-        let use_navigation = self.preview_navigation.is_some() && self.pending_stage.is_some();
+        // Never replace fit view with the tiny navigation proxy. On slower
+        // packaged builds the 512 px proxy could remain visible for a frame or
+        // two after every slider movement, making the whole preview visibly
+        // pixelate. The navigation proxy is only a zoom/pan fallback while a
+        // high-resolution detail crop is catching up.
+        let detail_is_current = self
+            .preview_detail
+            .as_ref()
+            .is_some_and(|detail| detail.revision == self.preview_revision);
+        let use_navigation = self.preview_zoom > DETAIL_ZOOM_START
+            && !detail_is_current
+            && self.preview_navigation.is_some()
+            && self.pending_stage.is_some();
         if use_navigation {
             self.preview_navigation
                 .as_ref()
@@ -872,6 +886,18 @@ impl AurawApp {
         let should_exist = self.preview_zoom > DETAIL_ZOOM_START;
         let should_update = self.navigation_pending_stage.is_some();
         if !should_exist && !should_update {
+            // Drop the low-resolution navigation backing as soon as fit view is
+            // stable again. This also prevents a stale zoom proxy from being
+            // considered during a later fit-view slider edit.
+            if let Some(render_state) = frame.wgpu_render_state() {
+                if let Some(old) = self.preview_navigation.take() {
+                    if let Some(texture_id) = old.pipeline.egui_texture_id {
+                        render_state.renderer.write().free_texture(&texture_id);
+                    }
+                }
+            } else {
+                self.preview_navigation = None;
+            }
             return;
         }
         let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
