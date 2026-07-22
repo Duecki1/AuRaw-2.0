@@ -196,3 +196,18 @@ def test_linux_appimage_ai_uses_stable_cpu_and_nonpersistent_object_sessions() -
     assert 'return Ok(None);' in linux
     assert 'fn cache_object_ai_sessions() -> bool' in AI
     assert '!running_from_appimage()' in AI
+
+
+def test_windows_sam_encoder_uses_conservative_numeric_session() -> None:
+    assert '#[cfg(windows)]\nfn create_windows_sam_encoder_session' in AI
+    block = AI[
+        AI.index('#[cfg(windows)]\nfn create_windows_sam_encoder_session'):
+        AI.index('#[cfg(target_os = "linux")]\nfn running_from_appimage')
+    ]
+    assert 'with_parallel_execution(false)' in block
+    assert 'with_intra_threads(1)' in block
+    assert 'GraphOptimizationLevel::Disable' in block
+    assert 'with_arena_allocator(false)' in block
+    assert 'extract_sam_encoder_output' in AI
+    assert 'non_finite <= repair_limit' in AI
+    assert 'numerically corrupted' in AI
