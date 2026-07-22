@@ -51,3 +51,7 @@ __pycache__/
 
 STATIC_CHECKS_CAMERA_PROFILE.txt
 STATIC_CHECKS.txt
+
+gradle/
+gradlew
+gradlew.bat
