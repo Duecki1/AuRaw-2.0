@@ -1202,9 +1202,7 @@ impl Sidebar {
                     mask: generated_mask,
                     feather,
                     brush_size,
-                    brush_feather,
                     edge_refine,
-                    detailed_edges,
                     strokes,
                 } => {
                     *brush_mode = BrushMode::Paint;
@@ -1221,16 +1219,7 @@ impl Sidebar {
                         0.0025..=0.25,
                         3,
                         0.0025,
-                        Some("Uses the same radius and on-canvas falloff as a regular Brush mask."),
-                    );
-                    geometry_changed |= adjustment_slider(
-                        ui,
-                        "Feather",
-                        brush_feather,
-                        0.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Uses the same soft brush edge as a regular Brush mask. It only guides object selection."),
+                        Some("Controls the radius of the hard-edged on-canvas object selection brush."),
                     );
                     ui.add_space(4.0);
                     geometry_changed |= adjustment_slider(
@@ -1253,16 +1242,6 @@ impl Sidebar {
                     );
                     geometry_changed |= refine_changed;
                     if refine_changed && !strokes.is_empty() {
-                        *request_object = true;
-                    }
-                    let detailed_changed = ui
-                        .checkbox(detailed_edges, "Enhanced fine edges")
-                        .on_hover_text(
-                            "Runs a stronger edge-aware pass for hair and fur in the uncertain boundary band. This is not alpha matting.",
-                        )
-                        .changed();
-                    geometry_changed |= detailed_changed;
-                    if detailed_changed && !strokes.is_empty() {
                         *request_object = true;
                     }
                     ui.horizontal_wrapped(|ui| {

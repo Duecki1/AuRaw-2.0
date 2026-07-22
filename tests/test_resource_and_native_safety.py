@@ -39,6 +39,9 @@ def test_downloaded_model_is_size_and_sha256_pinned() -> None:
     assert "create_new(true)" in AI
     assert "file.sync_all()" in AI
     assert "verify_model(path)" in AI
+    assert "VITMATTE_MODEL_SHA256_HEX" in AI
+    assert "downloaded <= VITMATTE_MODEL_BYTES" in AI
+    assert "verify_vitmatte_model(path)" in AI
 
 
 def test_desktop_requires_runtime_before_model_download() -> None:

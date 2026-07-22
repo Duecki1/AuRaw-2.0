@@ -138,3 +138,25 @@ def test_mask_input_and_cursor_are_clipped_to_the_visible_preview() -> None:
     assert "Self::paint_mask_overlay(ui, app, image_rect, visible_screen)" in PREVIEW
     assert "let painter = ui.painter_at(preview_rect);" in PREVIEW
     assert "painter_image_clipped" in PREVIEW
+
+
+def test_object_prompt_brush_is_hard_edged_without_a_feather_setting() -> None:
+    object_variant = MASKS[MASKS.index("    Object {"):MASKS.index("    LuminanceRange {", MASKS.index("    Object {"))]
+    assert "brush_feather" not in object_variant
+    assert "fn object_prompt_dabs(strokes: &[ObjectStroke], size: f32)" in MASKS
+    prompt_dabs = MASKS[MASKS.index("fn object_prompt_dabs"):MASKS.index("#[derive(Clone, Copy)]", MASKS.index("fn object_prompt_dabs"))]
+    assert "feather: 0.0" in prompt_dabs
+    assert '"Enhanced fine edges"' not in SIDEBAR
+
+
+def test_object_masks_always_run_vitmatte_fine_edge_refinement() -> None:
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    app = APP
+    spawn = ai[ai.index("pub fn spawn_object_mask"):ai.index("fn infer_object_mask", ai.index("pub fn spawn_object_mask"))]
+    assert "ensure_vitmatte_model(&vitmatte_path" in spawn
+    assert "request.detailed_edges" not in ai
+    infer = ai[ai.index("fn infer_object_mask"):ai.index("fn edge_aware_refine")]
+    assert "full_mask = refine_mask_with_vitmatte(" in infer
+    assert "if request.detailed_edges" not in infer
+    request = app[app.index("pub(crate) fn request_object_mask"):app.index("fn start_object_worker")]
+    assert "let vitmatte_ready = self.vitmatte_model_path().exists();" in request

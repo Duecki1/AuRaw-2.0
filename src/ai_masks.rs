@@ -19,12 +19,22 @@ const BIREFNET_MODEL_SHA256: [u8; 32] = [
     0x56, 0x00, 0x02, 0x43, 0x76, 0xf5, 0x72, 0xa5, 0x57, 0x87, 0x0a, 0x5e, 0xb0, 0xaf, 0xb1, 0xe5,
     0x96, 0x16, 0x36, 0xbe, 0xf4, 0xe1, 0xe2, 0x21, 0x32, 0x02, 0x54, 0x67, 0xd0, 0xf0, 0x33, 0x33,
 ];
+pub const VITMATTE_MODEL_BYTES: u64 = 103_885_865;
+pub const VITMATTE_MODEL_URL: &str = "https://huggingface.co/Xenova/vitmatte-small-composition-1k/resolve/5e04250c42d7a03dc125b13adb415a47584ec60b/onnx/model.onnx";
+pub const VITMATTE_MODEL_SHA256_HEX: &str =
+    "bf28d2e0be2c073286e88d60ad649d7123da2749a2d99133fd1098d5887e0225";
+const VITMATTE_MAX_EDGE_DESKTOP: u32 = 1280;
+const VITMATTE_MAX_EDGE_ANDROID: u32 = 768;
+const VITMATTE_SIZE_DIVISOR: u32 = 32;
+
 const MODEL_SIZE: u32 = 1024;
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 #[cfg(not(target_os = "android"))]
 static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+#[cfg(not(target_os = "android"))]
+static VITMATTE_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 #[cfg(not(target_os = "android"))]
 static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
@@ -73,6 +83,7 @@ impl Letterbox {
 
 pub fn spawn_subject_mask(
     model_path: PathBuf,
+    vitmatte_path: PathBuf,
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
     width: u32,
@@ -87,9 +98,17 @@ pub fn spawn_subject_mask(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
                     ensure_model(&model_path, &worker_sender)?;
+                    ensure_vitmatte_model(&vitmatte_path, |downloaded, total| {
+                        let _ = worker_sender.send(SubjectMaskEvent::DownloadProgress {
+                            label: "ViTMatte edge-refinement model",
+                            downloaded,
+                            total,
+                        });
+                    })?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
                     infer_subject(
                         &model_path,
+                        &vitmatte_path,
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
                         width,
@@ -538,6 +557,7 @@ pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
 
 fn infer_subject(
     model_path: &Path,
+    vitmatte_path: &Path,
     runtime_path: Option<&Path>,
     runtime_sha256: Option<&str>,
     width: u32,
@@ -606,7 +626,15 @@ fn infer_subject(
         width,
         height,
     )?;
-    refine_subject_mask_edges(&mut mask, image.as_raw(), width, height)?;
+    mask = refine_mask_with_vitmatte(
+        vitmatte_path,
+        image.as_raw(),
+        width,
+        height,
+        &mask,
+        1.0,
+    )
+    .context("refine subject edges with ViTMatte")?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -755,6 +783,385 @@ fn restore_from_letterbox(
         .into_iter()
         .map(|probability| (probability.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
         .collect())
+}
+
+
+fn ensure_vitmatte_model<F>(path: &Path, mut progress: F) -> Result<()>
+where
+    F: FnMut(u64, u64),
+{
+    match verify_vitmatte_model(path) {
+        Ok(()) => return Ok(()),
+        Err(error) if path.exists() => {
+            log::warn!(
+                "discarding invalid ViTMatte cache {}: {error:#}",
+                path.display()
+            );
+            fs::remove_file(path)
+                .with_context(|| format!("remove invalid ViTMatte model {}", path.display()))?;
+        }
+        Err(_) => {}
+    }
+    download_vitmatte_model(path, &mut progress)?;
+    verify_vitmatte_model(path).context("verify published ViTMatte ONNX model")
+}
+
+fn verify_vitmatte_model(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("read ViTMatte model metadata {}", path.display()))?;
+    anyhow::ensure!(metadata.is_file(), "ViTMatte cache is not a regular file");
+    anyhow::ensure!(
+        metadata.len() == VITMATTE_MODEL_BYTES,
+        "ViTMatte model size mismatch: found {}, expected {VITMATTE_MODEL_BYTES}",
+        metadata.len()
+    );
+    let actual = sha256_file_hex(path)?;
+    anyhow::ensure!(
+        actual == VITMATTE_MODEL_SHA256_HEX,
+        "ViTMatte model SHA-256 mismatch (expected {VITMATTE_MODEL_SHA256_HEX})"
+    );
+    Ok(())
+}
+
+fn download_vitmatte_model<F>(path: &Path, progress: &mut F) -> Result<()>
+where
+    F: FnMut(u64, u64),
+{
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create model cache {}", parent.display()))?;
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
+    let result = (|| -> Result<()> {
+        let config = ureq::Agent::config_builder()
+            .https_only(true)
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .timeout_recv_body(Some(Duration::from_secs(10 * 60)))
+            .build();
+        let agent: ureq::Agent = config.into();
+        let mut response = agent
+            .get(VITMATTE_MODEL_URL)
+            .call()
+            .context("download ViTMatte ONNX model")?;
+        if let Some(length) = response.body().content_length() {
+            anyhow::ensure!(
+                length == VITMATTE_MODEL_BYTES,
+                "ViTMatte server declared {length} bytes, expected {VITMATTE_MODEL_BYTES}"
+            );
+        }
+        let mut reader = response.body_mut().as_reader();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("create {}", temporary.display()))?;
+        let mut downloaded = 0u64;
+        let mut hasher = Sha256Context::new(&SHA256);
+        let mut buffer = [0u8; 256 * 1024];
+        loop {
+            let read = reader.read(&mut buffer).context("read ViTMatte download")?;
+            if read == 0 {
+                break;
+            }
+            downloaded = downloaded
+                .checked_add(read as u64)
+                .context("ViTMatte download byte count overflow")?;
+            anyhow::ensure!(
+                downloaded <= VITMATTE_MODEL_BYTES,
+                "ViTMatte download exceeded its pinned {VITMATTE_MODEL_BYTES}-byte size"
+            );
+            hasher.update(&buffer[..read]);
+            file.write_all(&buffer[..read])
+                .context("write ViTMatte ONNX model")?;
+            progress(downloaded, VITMATTE_MODEL_BYTES);
+        }
+        file.sync_all().context("flush ViTMatte ONNX model")?;
+        anyhow::ensure!(
+            downloaded == VITMATTE_MODEL_BYTES,
+            "ViTMatte model size mismatch: received {downloaded}, expected {VITMATTE_MODEL_BYTES}"
+        );
+        let actual = hasher
+            .finish()
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        anyhow::ensure!(
+            actual == VITMATTE_MODEL_SHA256_HEX,
+            "ViTMatte model SHA-256 mismatch (expected {VITMATTE_MODEL_SHA256_HEX})"
+        );
+        fs::rename(&temporary, path)
+            .with_context(|| format!("publish ViTMatte model to {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MatteCrop {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn matte_crop_for_mask(mask: &[u8], width: u32, height: u32) -> Option<MatteCrop> {
+    let width_usize = width as usize;
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+    for (index, &value) in mask.iter().enumerate() {
+        if value <= 4 {
+            continue;
+        }
+        let x = (index % width_usize) as u32;
+        let y = (index / width_usize) as u32;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        found = true;
+    }
+    if !found {
+        return None;
+    }
+    let subject_width = max_x - min_x + 1;
+    let subject_height = max_y - min_y + 1;
+    let margin = ((subject_width.max(subject_height) as f32 * 0.08).round() as u32)
+        .clamp(24, width.max(height).max(24));
+    let x0 = min_x.saturating_sub(margin);
+    let y0 = min_y.saturating_sub(margin);
+    let x1 = max_x.saturating_add(margin).min(width - 1);
+    let y1 = max_y.saturating_add(margin).min(height - 1);
+    Some(MatteCrop {
+        x: x0,
+        y: y0,
+        width: x1 - x0 + 1,
+        height: y1 - y0 + 1,
+    })
+}
+
+fn build_vitmatte_trimap(mask: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut unknown = vec![false; mask.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let value = mask[index];
+            let foreground = value >= 128;
+            let mut boundary = (8..=247).contains(&value);
+            if !boundary {
+                let min_y = y.saturating_sub(1);
+                let max_y = (y + 1).min(height - 1);
+                let min_x = x.saturating_sub(1);
+                let max_x = (x + 1).min(width - 1);
+                'neighbors: for ny in min_y..=max_y {
+                    for nx in min_x..=max_x {
+                        if (mask[ny * width + nx] >= 128) != foreground {
+                            boundary = true;
+                            break 'neighbors;
+                        }
+                    }
+                }
+            }
+            unknown[index] = boundary;
+        }
+    }
+
+    let radius = ((width.min(height) as f32 / 64.0).round() as usize).clamp(6, 24);
+    for _ in 0..radius {
+        let source = unknown.clone();
+        unknown
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, value) in row.iter_mut().enumerate() {
+                    if *value {
+                        continue;
+                    }
+                    let min_y = y.saturating_sub(1);
+                    let max_y = (y + 1).min(height - 1);
+                    let min_x = x.saturating_sub(1);
+                    let max_x = (x + 1).min(width - 1);
+                    *value = (min_y..=max_y).any(|ny| {
+                        (min_x..=max_x).any(|nx| source[ny * width + nx])
+                    });
+                }
+            });
+    }
+
+    mask.iter()
+        .zip(unknown)
+        .map(|(&value, unknown)| {
+            if unknown {
+                128
+            } else if value >= 128 {
+                255
+            } else {
+                0
+            }
+        })
+        .collect()
+}
+
+fn padded_to_divisor(value: u32, divisor: u32) -> u32 {
+    value.div_ceil(divisor) * divisor
+}
+
+fn refine_mask_with_vitmatte(
+    model_path: &Path,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    coarse_mask: &[u8],
+    strength: f32,
+) -> Result<Vec<u8>> {
+    let pixels = usize::try_from(u64::from(width) * u64::from(height))
+        .context("ViTMatte source dimensions overflow")?;
+    anyhow::ensure!(coarse_mask.len() == pixels, "ViTMatte coarse-mask size mismatch");
+    anyhow::ensure!(rgba.len() == pixels.saturating_mul(4), "ViTMatte RGB size mismatch");
+    let Some(crop) = matte_crop_for_mask(coarse_mask, width, height) else {
+        return Ok(coarse_mask.to_vec());
+    };
+
+    let source = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())
+        .context("invalid ViTMatte source image")?;
+    let crop_image = image::imageops::crop_imm(&source, crop.x, crop.y, crop.width, crop.height).to_image();
+    let full_mask_image = ImageBuffer::<Luma<u8>, _>::from_raw(width, height, coarse_mask.to_vec())
+        .context("invalid ViTMatte coarse mask")?;
+    let crop_mask = image::imageops::crop_imm(&full_mask_image, crop.x, crop.y, crop.width, crop.height).to_image();
+
+    let max_edge = if cfg!(target_os = "android") {
+        VITMATTE_MAX_EDGE_ANDROID
+    } else {
+        VITMATTE_MAX_EDGE_DESKTOP
+    };
+    let scale = (max_edge as f64 / crop.width.max(crop.height) as f64).min(1.0);
+    let model_width = ((crop.width as f64 * scale).round() as u32).max(1);
+    let model_height = ((crop.height as f64 * scale).round() as u32).max(1);
+    let resized_image = if model_width == crop.width && model_height == crop.height {
+        crop_image
+    } else {
+        image::imageops::resize(&crop_image, model_width, model_height, FilterType::Lanczos3)
+    };
+    let resized_mask = if model_width == crop.width && model_height == crop.height {
+        crop_mask
+    } else {
+        image::imageops::resize(&crop_mask, model_width, model_height, FilterType::Lanczos3)
+    };
+    let trimap = build_vitmatte_trimap(
+        resized_mask.as_raw(),
+        model_width as usize,
+        model_height as usize,
+    );
+    if !trimap.iter().any(|&value| value == 128) {
+        return Ok(coarse_mask.to_vec());
+    }
+
+    let padded_width = padded_to_divisor(model_width, VITMATTE_SIZE_DIVISOR);
+    let padded_height = padded_to_divisor(model_height, VITMATTE_SIZE_DIVISOR);
+    let plane = usize::try_from(u64::from(padded_width) * u64::from(padded_height))
+        .context("ViTMatte padded dimensions overflow")?;
+    let mut input = vec![0.0f32; plane * 4];
+    // This ONNX conversion was published with mean/std = 0.5 and trimap
+    // rescaling by 1/255, so RGB maps to [-1, 1] and trimap to {0,.5,1}.
+    for y in 0..model_height as usize {
+        for x in 0..model_width as usize {
+            let source_index = y * model_width as usize + x;
+            let pixel = resized_image.as_raw();
+            let rgba_index = source_index * 4;
+            let destination = y * padded_width as usize + x;
+            input[destination] = pixel[rgba_index] as f32 / 127.5 - 1.0;
+            input[plane + destination] = pixel[rgba_index + 1] as f32 / 127.5 - 1.0;
+            input[plane * 2 + destination] = pixel[rgba_index + 2] as f32 / 127.5 - 1.0;
+            input[plane * 3 + destination] = trimap[source_index] as f32 / 255.0;
+        }
+    }
+    let input = Tensor::from_array((
+        [1usize, 4, padded_height as usize, padded_width as usize],
+        input,
+    ))
+    .context("create ViTMatte input tensor")?;
+
+    #[cfg(target_os = "android")]
+    let (output_width, output_height, alpha) = {
+        let mut session = create_session(model_path)?;
+        run_vitmatte_session(&mut session, input)?
+    };
+    #[cfg(not(target_os = "android"))]
+    let (output_width, output_height, alpha) = {
+        let sessions = VITMATTE_SESSION.get_or_init(|| Mutex::new(None));
+        let mut session = sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ViTMatte session lock was poisoned"))?;
+        if session.is_none() {
+            *session = Some(create_session(model_path)?);
+        }
+        run_vitmatte_session(
+            session
+                .as_mut()
+                .context("ViTMatte session initialization produced no session")?,
+            input,
+        )?
+    };
+
+    let alpha_image = ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)
+        .context("invalid ViTMatte alpha buffer")?;
+    let alpha_crop = image::imageops::crop_imm(&alpha_image, 0, 0, model_width.min(output_width), model_height.min(output_height)).to_image();
+    let alpha_full = image::imageops::resize(&alpha_crop, crop.width, crop.height, FilterType::Lanczos3);
+    let trimap_image = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(model_width, model_height, trimap)
+        .context("invalid ViTMatte trimap buffer")?;
+    let trimap_full = image::imageops::resize(&trimap_image, crop.width, crop.height, FilterType::Nearest);
+
+    let mut output = coarse_mask.to_vec();
+    let strength = strength.clamp(0.0, 1.0);
+    for y in 0..crop.height as usize {
+        for x in 0..crop.width as usize {
+            let crop_index = y * crop.width as usize + x;
+            if trimap_full.as_raw()[crop_index] != 128 {
+                continue;
+            }
+            let target = (crop.y as usize + y) * width as usize + crop.x as usize + x;
+            let predicted = (alpha_full.as_raw()[crop_index].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            let coarse = coarse_mask[target] as f32;
+            let refined = coarse * (1.0 - strength) + predicted as f32 * strength;
+            output[target] = refined.clamp(0.0, 255.0).round() as u8;
+        }
+    }
+    Ok(output)
+}
+
+fn run_vitmatte_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32, u32, Vec<f32>)> {
+    let outputs = session
+        .run(ort::inputs![input])
+        .context("run ViTMatte ONNX inference")?;
+    let output = outputs.values().next().context("ViTMatte returned no output tensors")?;
+    let (shape, alphas) = output
+        .try_extract_tensor::<f32>()
+        .context("read ViTMatte output tensor")?;
+    anyhow::ensure!(
+        shape.len() == 4 && shape[0] == 1 && shape[1] == 1,
+        "unexpected ViTMatte output shape {shape:?}; expected [1, 1, H, W]"
+    );
+    let height = usize::try_from(shape[2]).context("ViTMatte output height is invalid")?;
+    let width = usize::try_from(shape[3]).context("ViTMatte output width is invalid")?;
+    let elements = width.checked_mul(height).context("ViTMatte output dimensions overflow")?;
+    anyhow::ensure!(alphas.len() == elements, "ViTMatte output tensor length mismatch");
+    anyhow::ensure!(alphas.iter().all(|value| value.is_finite()), "ViTMatte output contains non-finite alpha values");
+    Ok((
+        u32::try_from(width).context("ViTMatte output width exceeds u32")?,
+        u32::try_from(height).context("ViTMatte output height exceeds u32")?,
+        alphas.to_vec(),
+    ))
 }
 
 /// Joint-bilateral cleanup of the upscaled BiRefNet probability map. The
@@ -946,7 +1353,6 @@ pub struct ObjectMaskRequest {
     pub strokes: Vec<crate::pipeline::ObjectStroke>,
     pub brush_size: f32,
     pub edge_refine: f32,
-    pub detailed_edges: bool,
     pub cache: Option<ObjectInferenceCache>,
 }
 
@@ -974,6 +1380,7 @@ pub enum ObjectMaskEvent {
 pub fn spawn_object_mask(
     encoder_path: PathBuf,
     decoder_path: PathBuf,
+    vitmatte_path: PathBuf,
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
     request: ObjectMaskRequest,
@@ -999,11 +1406,19 @@ pub fn spawn_object_mask(
                         SAM21_DECODER_SHA256_HEX,
                         &worker_sender,
                     )?;
+                    ensure_vitmatte_model(&vitmatte_path, |downloaded, total| {
+                        let _ = worker_sender.send(ObjectMaskEvent::DownloadProgress {
+                            label: "ViTMatte edge-refinement model",
+                            downloaded,
+                            total,
+                        });
+                    })?;
                     let decoder_only = request.cache.is_some();
                     let _ = worker_sender.send(ObjectMaskEvent::Inferencing { decoder_only });
                     infer_object_mask(
                         &encoder_path,
                         &decoder_path,
+                        &vitmatte_path,
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
                         request,
@@ -1166,6 +1581,7 @@ fn download_sam_model(
 fn infer_object_mask(
     encoder_path: &Path,
     decoder_path: &Path,
+    vitmatte_path: &Path,
     runtime_path: Option<&Path>,
     runtime_sha256: Option<&str>,
     request: ObjectMaskRequest,
@@ -1300,7 +1716,6 @@ fn infer_object_mask(
         decoded.height,
         refine_guidance.as_raw(),
         request.edge_refine,
-        request.detailed_edges,
     );
     let crop_mask = resize_probability_u8(
         &refined,
@@ -1316,6 +1731,15 @@ fn infer_object_mask(
         full_mask[target_start..target_start + crop.width as usize]
             .copy_from_slice(&crop_mask[source_start..source_start + crop.width as usize]);
     }
+    full_mask = refine_mask_with_vitmatte(
+        vitmatte_path,
+        source.as_raw(),
+        request.source_width,
+        request.source_height,
+        &full_mask,
+        (0.65 + request.edge_refine.clamp(0.0, 1.0) * 0.35).clamp(0.0, 1.0),
+    )
+    .context("refine object edges with ViTMatte")?;
     cache.low_res_logits = resize_f32(
         &decoded.selected_logits,
         decoded.width,
@@ -2190,18 +2614,13 @@ fn edge_aware_refine(
     height: u32,
     rgba: &[u8],
     strength: f32,
-    detailed_edges: bool,
 ) -> Vec<f32> {
     let strength = strength.clamp(0.0, 1.0);
     if strength <= 0.001 || rgba.len() != width as usize * height as usize * 4 {
         return mask;
     }
-    let radius = if detailed_edges {
-        (2.0 + strength * 4.0).round() as i32
-    } else {
-        (1.0 + strength * 2.5).round() as i32
-    };
-    let iterations = if detailed_edges { 2 } else { 1 };
+    let radius = (2.0 + strength * 4.0).round() as i32;
+    let iterations = 2;
     let sigma_space = radius.max(1) as f32 * 0.75;
     let sigma_color = 0.04 + (1.0 - strength) * 0.10;
     let width_usize = width as usize;

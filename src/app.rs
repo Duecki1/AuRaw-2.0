@@ -1,6 +1,7 @@
 use crate::ai_masks::{
     spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent,
     ObjectMaskRequest, SubjectMaskEvent, BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE,
+    VITMATTE_MODEL_BYTES,
 };
 use crate::inpainting::{
     inpaint_capture_rect, inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintRequest,

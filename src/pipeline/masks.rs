@@ -608,15 +608,8 @@ pub enum MaskGeometry {
         /// on-canvas object prompt brush and is captured before SAM inference.
         #[serde(default = "default_object_brush_size")]
         brush_size: f32,
-        /// Softness of the temporary object prompt brush. This uses the same
-        /// dab falloff as the regular Brush mask and disappears after SAM
-        /// returns the refined object selection.
-        #[serde(default = "default_object_brush_feather")]
-        brush_feather: f32,
         #[serde(default = "default_object_edge_refine")]
         edge_refine: f32,
-        #[serde(default)]
-        detailed_edges: bool,
         #[serde(default)]
         strokes: Vec<ObjectStroke>,
     },
@@ -640,10 +633,6 @@ pub enum MaskGeometry {
 
 fn default_object_brush_size() -> f32 {
     0.055
-}
-
-fn default_object_brush_feather() -> f32 {
-    0.55
 }
 
 fn default_object_edge_refine() -> f32 {
@@ -679,9 +668,7 @@ impl MaskGeometry {
                 mask: None,
                 feather: 0.0,
                 brush_size: default_object_brush_size(),
-                brush_feather: default_object_brush_feather(),
                 edge_refine: default_object_edge_refine(),
-                detailed_edges: false,
                 strokes: Vec::new(),
             },
             MaskKind::LuminanceRange => Self::LuminanceRange {
@@ -1313,11 +1300,10 @@ fn rasterize_component(
         MaskGeometry::Object {
             mask: None,
             brush_size,
-            brush_feather,
             strokes,
             ..
         } => {
-            let dabs = object_prompt_dabs(strokes, *brush_size, *brush_feather);
+            let dabs = object_prompt_dabs(strokes, *brush_size);
             rasterize_brush(width, height, image_width, image_height, &dabs)
         }
         MaskGeometry::LuminanceRange {
@@ -1540,7 +1526,7 @@ fn linear_srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn object_prompt_dabs(strokes: &[ObjectStroke], size: f32, feather: f32) -> Vec<BrushDab> {
+fn object_prompt_dabs(strokes: &[ObjectStroke], size: f32) -> Vec<BrushDab> {
     let dab_count = strokes.iter().map(|stroke| stroke.points.len()).sum();
     let mut dabs = Vec::with_capacity(dab_count);
     for stroke in strokes {
@@ -1549,7 +1535,7 @@ fn object_prompt_dabs(strokes: &[ObjectStroke], size: f32, feather: f32) -> Vec<
             center,
             opacity,
             size,
-            feather,
+            feather: 0.0,
         }));
     }
     dabs
@@ -2230,20 +2216,19 @@ mod tests {
         assert!(layer[32 * 64 + 32] < 32);
     }
     #[test]
-    fn object_prompt_overlay_uses_the_regular_soft_brush_rasterizer() {
+    fn object_prompt_overlay_uses_a_hard_edged_brush() {
         let point = [0.45, 0.6];
         let size = 0.12;
-        let feather = 0.63;
 
-        let mut brush_stack = MaskStack::default();
-        brush_stack.add_mask(MaskKind::Brush);
+        let mut hard_brush_stack = MaskStack::default();
+        hard_brush_stack.add_mask(MaskKind::Brush);
         if let MaskGeometry::Brush { dabs, .. } =
-            &mut brush_stack.selected_component_mut().unwrap().geometry
+            &mut hard_brush_stack.selected_component_mut().unwrap().geometry
         {
             dabs.push(BrushDab {
                 center: point,
                 size,
-                feather,
+                feather: 0.0,
                 opacity: 1.0,
             });
         }
@@ -2253,23 +2238,21 @@ mod tests {
         if let MaskGeometry::Object {
             mask,
             brush_size,
-            brush_feather,
             strokes,
             ..
         } = &mut object_stack.selected_component_mut().unwrap().geometry
         {
             *mask = None;
             *brush_size = size;
-            *brush_feather = feather;
             strokes.push(ObjectStroke {
                 points: vec![point],
                 positive: true,
             });
         }
 
-        let brush = brush_stack.rasterize_component_layer(0, 0, 96, 64, 960, 640);
+        let hard_brush = hard_brush_stack.rasterize_component_layer(0, 0, 96, 64, 960, 640);
         let object = object_stack.rasterize_component_layer(0, 0, 96, 64, 960, 640);
-        assert_eq!(object, brush);
+        assert_eq!(object, hard_brush);
     }
 
     #[test]
