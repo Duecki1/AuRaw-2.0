@@ -1,5 +1,5 @@
 use super::{needs_canonical_mask_source, AppTab, AurawApp, LensCorrectionState};
-use crate::pipeline::{ExposureParams, MaskGeometry, MaskStack};
+use crate::pipeline::{ExposureParams, InpaintStroke, MaskGeometry, MaskStack};
 use eframe::egui;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -93,11 +93,24 @@ struct EditSnapshot {
     /// creates a new one.
     masks: Arc<MaskStack>,
     mask_selection: MaskSelection,
+    /// Inpainting patches can be much larger than ordinary adjustment state.
+    /// Share them across unrelated snapshots and only clone the vector when an
+    /// inpainting edit actually changes.
+    inpainting: Arc<Vec<InpaintStroke>>,
     lens: LensEditState,
 }
 
 impl EditSnapshot {
     fn capture(exposure: &ExposureParams, masks: &MaskStack, lens: &LensCorrectionState) -> Self {
+        Self::capture_with_inpainting(exposure, masks, lens, &[])
+    }
+
+    fn capture_with_inpainting(
+        exposure: &ExposureParams,
+        masks: &MaskStack,
+        lens: &LensCorrectionState,
+        inpainting: &[InpaintStroke],
+    ) -> Self {
         let mut contents = masks.clone();
         contents.selected_mask = None;
         contents.selected_component = None;
@@ -106,6 +119,7 @@ impl EditSnapshot {
             exposure: *exposure,
             mask_selection: MaskSelection::capture(masks, &contents),
             masks: contents,
+            inpainting: Arc::new(inpainting.to_vec()),
             lens: LensEditState::capture(lens),
         }
     }
@@ -115,7 +129,9 @@ impl EditSnapshot {
         exposure: &ExposureParams,
         masks: &MaskStack,
         lens: &LensCorrectionState,
+        inpainting: &[InpaintStroke],
         mask_contents_match: bool,
+        inpainting_contents_match: bool,
     ) -> Self {
         let contents = if mask_contents_match {
             Arc::clone(&self.masks)
@@ -125,10 +141,16 @@ impl EditSnapshot {
             contents.selected_component = None;
             Arc::new(contents)
         };
+        let inpainting = if inpainting_contents_match {
+            Arc::clone(&self.inpainting)
+        } else {
+            Arc::new(inpainting.to_vec())
+        };
         Self {
             exposure: *exposure,
             mask_selection: MaskSelection::capture(masks, &contents),
             masks: contents,
+            inpainting,
             lens: LensEditState::capture(lens),
         }
     }
@@ -142,6 +164,10 @@ impl EditSnapshot {
         self.mask_selection.apply_to(&mut masks);
         masks
     }
+
+    fn materialize_inpainting(&self) -> Vec<InpaintStroke> {
+        (*self.inpainting).clone()
+    }
 }
 
 pub(super) struct EditHistory {
@@ -150,8 +176,10 @@ pub(super) struct EditHistory {
     current: EditSnapshot,
     interaction_pending: bool,
     mask_interaction_pending: bool,
+    inpainting_interaction_pending: bool,
     change_observed: bool,
     mask_change_observed: bool,
+    inpainting_change_observed: bool,
     restoring_snapshot: bool,
     committed_revision: u64,
 }
@@ -168,8 +196,10 @@ impl EditHistory {
             current: EditSnapshot::capture(exposure, masks, lens),
             interaction_pending: false,
             mask_interaction_pending: false,
+            inpainting_interaction_pending: false,
             change_observed: false,
             mask_change_observed: false,
+            inpainting_change_observed: false,
             restoring_snapshot: false,
             committed_revision: 0,
         }
@@ -188,13 +218,25 @@ impl EditHistory {
         masks: &MaskStack,
         lens: &LensCorrectionState,
     ) {
+        self.reset_with_inpainting(exposure, masks, lens, &[]);
+    }
+
+    pub(super) fn reset_with_inpainting(
+        &mut self,
+        exposure: &ExposureParams,
+        masks: &MaskStack,
+        lens: &LensCorrectionState,
+        inpainting: &[InpaintStroke],
+    ) {
         self.undo.clear();
         self.redo.clear();
-        self.current = EditSnapshot::capture(exposure, masks, lens);
+        self.current = EditSnapshot::capture_with_inpainting(exposure, masks, lens, inpainting);
         self.interaction_pending = false;
         self.mask_interaction_pending = false;
+        self.inpainting_interaction_pending = false;
         self.change_observed = false;
         self.mask_change_observed = false;
+        self.inpainting_change_observed = false;
         self.restoring_snapshot = false;
     }
 
@@ -208,6 +250,13 @@ impl EditHistory {
         if !self.restoring_snapshot {
             self.change_observed = true;
             self.mask_change_observed = true;
+        }
+    }
+
+    fn note_inpainting_change(&mut self) {
+        if !self.restoring_snapshot {
+            self.change_observed = true;
+            self.inpainting_change_observed = true;
         }
     }
 
@@ -228,10 +277,25 @@ impl EditHistory {
         lens: &LensCorrectionState,
         interaction_active: bool,
     ) {
+        self.observe_with_inpainting(exposure, masks, lens, &[], interaction_active);
+    }
+
+    pub(super) fn observe_with_inpainting(
+        &mut self,
+        exposure: &ExposureParams,
+        masks: &MaskStack,
+        lens: &LensCorrectionState,
+        inpainting: &[InpaintStroke],
+        interaction_active: bool,
+    ) {
         self.current.remember_selection(masks);
         if self.mask_change_observed {
             self.mask_interaction_pending = true;
             self.mask_change_observed = false;
+        }
+        if self.inpainting_change_observed {
+            self.inpainting_interaction_pending = true;
+            self.inpainting_change_observed = false;
         }
         if self.change_observed {
             self.interaction_pending = true;
@@ -241,7 +305,7 @@ impl EditHistory {
             return;
         }
 
-        self.commit_current_state(exposure, masks, lens);
+        self.commit_current_state(exposure, masks, lens, inpainting);
     }
 
     fn commit_current_state(
@@ -249,10 +313,14 @@ impl EditHistory {
         exposure: &ExposureParams,
         masks: &MaskStack,
         lens: &LensCorrectionState,
+        inpainting: &[InpaintStroke],
     ) {
         let mask_change_pending = self.mask_interaction_pending || self.mask_change_observed;
+        let inpainting_change_pending =
+            self.inpainting_interaction_pending || self.inpainting_change_observed;
         self.change_observed = false;
         self.mask_change_observed = false;
+        self.inpainting_change_observed = false;
         // Mask equality can walk every brush dab and cached range image. Only
         // pay for it after a mask edit path explicitly signalled a semantic
         // change. The length check is O(1) and preserves the normal lens-change
@@ -264,24 +332,37 @@ impl EditHistory {
         } else {
             true
         };
+        let inpainting_contents_match = if inpainting_change_pending {
+            self.current.inpainting.as_slice() == inpainting
+        } else {
+            true
+        };
         if self.current.exposure == *exposure
             && mask_contents_match
+            && inpainting_contents_match
             && self.current.lens.matches(lens)
         {
             self.current.remember_selection(masks);
             self.interaction_pending = false;
             self.mask_interaction_pending = false;
+            self.inpainting_interaction_pending = false;
             return;
         }
 
-        let next = self
-            .current
-            .capture_successor(exposure, masks, lens, mask_contents_match);
+        let next = self.current.capture_successor(
+            exposure,
+            masks,
+            lens,
+            inpainting,
+            mask_contents_match,
+            inpainting_contents_match,
+        );
         let previous = std::mem::replace(&mut self.current, next);
         Self::push_bounded(&mut self.undo, previous);
         self.redo.clear();
         self.interaction_pending = false;
         self.mask_interaction_pending = false;
+        self.inpainting_interaction_pending = false;
         self.committed_revision = self.committed_revision.wrapping_add(1);
     }
 
@@ -295,8 +376,10 @@ impl EditHistory {
         !self.undo.is_empty()
             || self.interaction_pending
             || self.mask_interaction_pending
+            || self.inpainting_interaction_pending
             || self.change_observed
             || self.mask_change_observed
+            || self.inpainting_change_observed
     }
 
     pub(super) fn can_redo(
@@ -308,8 +391,10 @@ impl EditHistory {
         let _ = (exposure, masks, lens);
         !self.interaction_pending
             && !self.mask_interaction_pending
+            && !self.inpainting_interaction_pending
             && !self.change_observed
             && !self.mask_change_observed
+            && !self.inpainting_change_observed
             && !self.redo.is_empty()
     }
 
@@ -319,13 +404,25 @@ impl EditHistory {
         masks: &MaskStack,
         lens: &LensCorrectionState,
     ) -> Option<(EditSnapshot, bool)> {
-        self.commit_current_state(exposure, masks, lens);
+        self.undo_with_inpainting(exposure, masks, lens, &[])
+            .map(|(snapshot, masks_changed, _)| (snapshot, masks_changed))
+    }
+
+    fn undo_with_inpainting(
+        &mut self,
+        exposure: &ExposureParams,
+        masks: &MaskStack,
+        lens: &LensCorrectionState,
+        inpainting: &[InpaintStroke],
+    ) -> Option<(EditSnapshot, bool, bool)> {
+        self.commit_current_state(exposure, masks, lens, inpainting);
         let target = self.undo.pop_back()?;
         let masks_changed = !Arc::ptr_eq(&target.masks, &self.current.masks);
+        let inpainting_changed = !Arc::ptr_eq(&target.inpainting, &self.current.inpainting);
         let present = std::mem::replace(&mut self.current, target.clone());
         Self::push_bounded(&mut self.redo, present);
         self.committed_revision = self.committed_revision.wrapping_add(1);
-        Some((target, masks_changed))
+        Some((target, masks_changed, inpainting_changed))
     }
 
     fn redo(
@@ -334,16 +431,28 @@ impl EditHistory {
         masks: &MaskStack,
         lens: &LensCorrectionState,
     ) -> Option<(EditSnapshot, bool)> {
+        self.redo_with_inpainting(exposure, masks, lens, &[])
+            .map(|(snapshot, masks_changed, _)| (snapshot, masks_changed))
+    }
+
+    fn redo_with_inpainting(
+        &mut self,
+        exposure: &ExposureParams,
+        masks: &MaskStack,
+        lens: &LensCorrectionState,
+        inpainting: &[InpaintStroke],
+    ) -> Option<(EditSnapshot, bool, bool)> {
         // Normally semantic state already matches `current`. Settling here
         // also makes programmatic edits immediately before Redo behave like a
         // new branch, rather than overwriting them with stale history.
-        self.commit_current_state(exposure, masks, lens);
+        self.commit_current_state(exposure, masks, lens, inpainting);
         let target = self.redo.pop_back()?;
         let masks_changed = !Arc::ptr_eq(&target.masks, &self.current.masks);
+        let inpainting_changed = !Arc::ptr_eq(&target.inpainting, &self.current.inpainting);
         let present = std::mem::replace(&mut self.current, target.clone());
         Self::push_bounded(&mut self.undo, present);
         self.committed_revision = self.committed_revision.wrapping_add(1);
-        Some((target, masks_changed))
+        Some((target, masks_changed, inpainting_changed))
     }
 
     fn committed_revision(&self) -> u64 {
@@ -370,6 +479,10 @@ impl AurawApp {
         self.edit_history.note_mask_change();
     }
 
+    pub(crate) fn note_inpainting_edit_changed(&mut self) {
+        self.edit_history.note_inpainting_change();
+    }
+
     pub(crate) fn edit_commit_revision(&self) -> u64 {
         self.edit_history
             .committed_revision()
@@ -386,17 +499,22 @@ impl AurawApp {
 
     pub(crate) fn reset_edit_history(&mut self) {
         self.history_lens_restore_masks = None;
-        self.edit_history
-            .reset(&self.exposure, &self.masks, &self.lens_correction);
+        self.edit_history.reset_with_inpainting(
+            &self.exposure,
+            &self.masks,
+            &self.lens_correction,
+            &self.inpaint_strokes,
+        );
     }
 
     pub(crate) fn observe_edit_history(&mut self, ctx: &egui::Context) {
         let interaction_active =
             ctx.input(|input| input.pointer.any_down()) || ctx.egui_wants_keyboard_input();
-        self.edit_history.observe(
+        self.edit_history.observe_with_inpainting(
             &self.exposure,
             &self.masks,
             &self.lens_correction,
+            &self.inpaint_strokes,
             interaction_active,
         );
     }
@@ -406,8 +524,13 @@ impl AurawApp {
     /// the UI state while persistence snapshots the previous baseline.
     pub(crate) fn commit_edit_history_now(&mut self) {
         self.finish_mask_geometry_interaction();
-        self.edit_history
-            .observe(&self.exposure, &self.masks, &self.lens_correction, false);
+        self.edit_history.observe_with_inpainting(
+            &self.exposure,
+            &self.masks,
+            &self.lens_correction,
+            &self.inpaint_strokes,
+            false,
+        );
     }
 
     pub(crate) fn can_undo_edit(&self) -> bool {
@@ -426,22 +549,28 @@ impl AurawApp {
 
     pub(crate) fn undo_edit(&mut self) {
         self.finish_mask_geometry_interaction();
-        let snapshot = self
-            .edit_history
-            .undo(&self.exposure, &self.masks, &self.lens_correction);
-        if let Some((snapshot, masks_changed)) = snapshot {
-            self.apply_edit_snapshot(snapshot, masks_changed);
+        let snapshot = self.edit_history.undo_with_inpainting(
+            &self.exposure,
+            &self.masks,
+            &self.lens_correction,
+            &self.inpaint_strokes,
+        );
+        if let Some((snapshot, masks_changed, inpainting_changed)) = snapshot {
+            self.apply_edit_snapshot(snapshot, masks_changed, inpainting_changed);
             self.notice = Some("Undid edit.".to_owned());
         }
     }
 
     pub(crate) fn redo_edit(&mut self) {
         self.finish_mask_geometry_interaction();
-        let snapshot = self
-            .edit_history
-            .redo(&self.exposure, &self.masks, &self.lens_correction);
-        if let Some((snapshot, masks_changed)) = snapshot {
-            self.apply_edit_snapshot(snapshot, masks_changed);
+        let snapshot = self.edit_history.redo_with_inpainting(
+            &self.exposure,
+            &self.masks,
+            &self.lens_correction,
+            &self.inpaint_strokes,
+        );
+        if let Some((snapshot, masks_changed, inpainting_changed)) = snapshot {
+            self.apply_edit_snapshot(snapshot, masks_changed, inpainting_changed);
             self.notice = Some("Redid edit.".to_owned());
         }
     }
@@ -467,7 +596,12 @@ impl AurawApp {
         }
     }
 
-    fn apply_edit_snapshot(&mut self, snapshot: EditSnapshot, masks_changed: bool) {
+    fn apply_edit_snapshot(
+        &mut self,
+        snapshot: EditSnapshot,
+        masks_changed: bool,
+        inpainting_changed: bool,
+    ) {
         let lens_changed = !snapshot.lens.matches(&self.lens_correction);
 
         self.edit_history.set_restoring_snapshot(true);
@@ -477,6 +611,12 @@ impl AurawApp {
             self.masks = snapshot.materialize_masks();
         } else {
             snapshot.mask_selection.apply_to(&mut self.masks);
+        }
+        if inpainting_changed {
+            self.inpaint_strokes = snapshot.materialize_inpainting();
+            self.rebuild_inpaint_layer();
+            self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+            self.note_inpainting_changed_for_ai_masks();
         }
         snapshot.lens.apply_to(&mut self.lens_correction);
         self.rehydrate_restored_mask_state();
@@ -491,6 +631,9 @@ impl AurawApp {
         } else {
             if masks_changed {
                 self.mark_all_mask_layers_dirty();
+            }
+            if inpainting_changed {
+                self.queue_preview_processing(crate::pipeline::ProcessingStage::Output);
             }
             self.mark_pipeline_dirty();
         }
