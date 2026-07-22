@@ -1,4 +1,14 @@
 use super::*;
+use std::cell::RefCell;
+
+
+std::thread_local! {
+    // Queue::write_texture copies the supplied bytes before returning, so these
+    // bounded per-thread staging vectors can be safely reused for every tile.
+    // This removes repeated multi-megabyte allocations from tiled export.
+    static BLACK_UPLOAD_SCRATCH: RefCell<Vec<f32>> = RefCell::new(Vec::new());
+    static COLOR_UPLOAD_SCRATCH: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+}
 
 pub(super) fn tone_analysis_scale() -> u32 {
     if cfg!(target_os = "android") {
@@ -205,7 +215,12 @@ pub(super) fn validate_raw(raw: &LoadedRaw) -> Result<()> {
             pixels
         ));
     }
-    if raw.color_indices.iter().any(|channel| *channel > 3) {
+    if raw
+        .color_indices
+        .storage_slice()
+        .iter()
+        .any(|channel| *channel > 3)
+    {
         return Err(anyhow!("CFA index map contains a channel above 3"));
     }
     if raw
@@ -243,20 +258,53 @@ pub(super) fn validate_raw(raw: &LoadedRaw) -> Result<()> {
         ));
     }
 
-    for (index, (&black, &channel)) in raw
-        .black_levels_per_pixel
-        .iter()
-        .zip(&raw.color_indices)
-        .enumerate()
-    {
-        let white = raw.white_levels[channel as usize];
-        if !black.is_finite() || white <= black {
-            return Err(anyhow!(
-                "invalid black/white range at pixel {index}: black={black}, white={white}"
-            ));
+    // Compact calibration maps repeat exactly. Validate one joint period rather
+    // than walking tens of millions of logical pixels on every pipeline build.
+    // Dense/non-periodic fallbacks still validate the full image.
+    let period_width = joint_period(
+        raw.color_indices.storage_width(),
+        raw.black_levels_per_pixel.storage_width(),
+        raw.width,
+    );
+    let period_height = joint_period(
+        raw.color_indices.storage_height(),
+        raw.black_levels_per_pixel.storage_height(),
+        raw.height,
+    );
+    for y in 0..period_height {
+        for x in 0..period_width {
+            let index = (y * raw.width + x) as usize;
+            let black = raw.black_levels_per_pixel[index];
+            let channel = raw.color_indices[index];
+            let white = raw.white_levels[channel as usize];
+            if !black.is_finite() || white <= black {
+                return Err(anyhow!(
+                    "invalid black/white range at pixel {index}: black={black}, white={white}"
+                ));
+            }
         }
     }
     Ok(())
+}
+
+
+fn joint_period(left: u32, right: u32, logical: u32) -> u32 {
+    fn gcd(mut a: u64, mut b: u64) -> u64 {
+        while b != 0 {
+            let remainder = a % b;
+            a = b;
+            b = remainder;
+        }
+        a.max(1)
+    }
+
+    let left = u64::from(left.max(1));
+    let right = u64::from(right.max(1));
+    let lcm = left
+        .checked_div(gcd(left, right))
+        .and_then(|value| value.checked_mul(right))
+        .unwrap_or(u64::from(logical));
+    lcm.min(u64::from(logical)).max(1) as u32
 }
 
 pub(super) fn texture_array_entry(
@@ -343,17 +391,68 @@ pub(super) fn create_black_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[wgpu::TextureFormat::R32Float],
     });
-    queue.write_texture(
-        copy_texture(&texture),
-        bytemuck::cast_slice(&raw.black_levels_per_pixel),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(raw.width * 4),
-            rows_per_image: Some(raw.height),
-        },
-        texture_size(raw.width, raw.height),
-    );
+    upload_black_texture(queue, &texture, raw);
     texture
+}
+
+pub(super) fn upload_black_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    raw: &LoadedRaw,
+) {
+    if raw.black_levels_per_pixel.storage_width() == raw.width
+        && raw.black_levels_per_pixel.storage_height() == raw.height
+    {
+        queue.write_texture(
+            copy_texture(texture),
+            bytemuck::cast_slice(raw.black_levels_per_pixel.storage_slice()),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width * 4),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+        return;
+    }
+
+    const MAX_EXPANSION_BYTES: usize = 8 * 1024 * 1024;
+    let width = raw.width as usize;
+    let row_bytes = width.saturating_mul(std::mem::size_of::<f32>()).max(1);
+    let rows_per_chunk = (MAX_EXPANSION_BYTES / row_bytes).max(1).min(raw.height as usize);
+    BLACK_UPLOAD_SCRATCH.with(|scratch| {
+        let mut values = scratch.borrow_mut();
+        values.clear();
+        let required_capacity = width.saturating_mul(rows_per_chunk);
+        if values.capacity() < required_capacity {
+            let additional = required_capacity - values.capacity();
+            values.reserve(additional);
+        }
+        let mut row_start = 0u32;
+        while row_start < raw.height {
+            let rows = (rows_per_chunk as u32).min(raw.height - row_start);
+            values.clear();
+            for y in row_start..row_start + rows {
+                raw.black_levels_per_pixel.append_row_to(y, &mut *values);
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: row_start, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(values.as_slice()),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(raw.width * 4),
+                    rows_per_image: Some(rows),
+                },
+                texture_size(raw.width, rows),
+            );
+            row_start += rows;
+        }
+    });
 }
 
 pub(super) fn create_color_texture(
@@ -371,17 +470,67 @@ pub(super) fn create_color_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[wgpu::TextureFormat::R8Uint],
     });
-    queue.write_texture(
-        copy_texture(&texture),
-        &raw.color_indices,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(raw.width),
-            rows_per_image: Some(raw.height),
-        },
-        texture_size(raw.width, raw.height),
-    );
+    upload_color_texture(queue, &texture, raw);
     texture
+}
+
+pub(super) fn upload_color_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    raw: &LoadedRaw,
+) {
+    if raw.color_indices.storage_width() == raw.width
+        && raw.color_indices.storage_height() == raw.height
+    {
+        queue.write_texture(
+            copy_texture(texture),
+            raw.color_indices.storage_slice(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+        return;
+    }
+
+    const MAX_EXPANSION_BYTES: usize = 8 * 1024 * 1024;
+    let width = raw.width as usize;
+    let rows_per_chunk = (MAX_EXPANSION_BYTES / width.max(1)).max(1).min(raw.height as usize);
+    COLOR_UPLOAD_SCRATCH.with(|scratch| {
+        let mut values = scratch.borrow_mut();
+        values.clear();
+        let required_capacity = width.saturating_mul(rows_per_chunk);
+        if values.capacity() < required_capacity {
+            let additional = required_capacity - values.capacity();
+            values.reserve(additional);
+        }
+        let mut row_start = 0u32;
+        while row_start < raw.height {
+            let rows = (rows_per_chunk as u32).min(raw.height - row_start);
+            values.clear();
+            for y in row_start..row_start + rows {
+                raw.color_indices.append_row_to(y, &mut *values);
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: row_start, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                values.as_slice(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(raw.width),
+                    rows_per_image: Some(rows),
+                },
+                texture_size(raw.width, rows),
+            );
+            row_start += rows;
+        }
+    });
 }
 
 pub(super) fn copy_texture(texture: &wgpu::Texture) -> wgpu::TexelCopyTextureInfo<'_> {

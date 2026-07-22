@@ -31,14 +31,15 @@ pub use masks::{
     MaskRgbImage, MaskStack, ObjectStroke, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 pub use processing::{
-    affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile, ExportTile,
+    affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile, extract_padded_tile_into, ExportTile,
     required_export_tile_halo, ProcessingStage, ProxySpec, TilePlan, TileSpec, EXPORT_TILE_HALO,
     MIN_EXPORT_TILE_HALO,
 };
+pub(crate) use raw_loader::invalidate_dcp_profile_index;
 pub use raw_loader::{
     is_supported_raw_path, load_raw_file, load_raw_file_with_dcp,
     load_raw_file_with_profile_config, load_raw_file_with_profile_selection, load_raw_thumbnail,
-    CameraProfileCandidate, CameraProfileMode, CfaKind, LoadedRaw, RawThumbnail,
+    CameraProfileCandidate, CameraProfileMode, CfaKind, CompactPixelMap, LoadedRaw, RawThumbnail,
     SUPPORTED_RAW_EXTENSIONS,
 };
 pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};

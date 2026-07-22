@@ -1,4 +1,4 @@
-use super::LoadedRaw;
+use super::{CompactPixelMap, LoadedRaw};
 use anyhow::{anyhow, Result};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -560,7 +560,7 @@ mod imp {
             wb_coeffs: raw.wb_coeffs,
             cam_to_srgb: raw.cam_to_srgb,
             black_levels: raw.black_levels,
-            black_levels_per_pixel,
+            black_levels_per_pixel: CompactPixelMap::compact_from_dense(raw.width, raw.height, black_levels_per_pixel, 64),
             white_levels: raw.white_levels,
             camera_profile: raw.camera_profile.clone(),
             camera_profile_source: raw.camera_profile_source.clone(),

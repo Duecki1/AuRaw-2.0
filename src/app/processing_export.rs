@@ -1334,8 +1334,29 @@ impl AurawApp {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let path = export_dir.join(format!("AuRaw-{timestamp}.{}", format.extension()));
-        self.start_export(path, frame, format);
+        let display_name = format!("AuRaw-{timestamp}.{}", format.extension());
+        match crate::android::prepare_direct_export(
+            &self.android_app,
+            &export_dir,
+            &display_name,
+            format.mime_type(),
+        ) {
+            Ok(Some(path)) => {
+                let direct_path = path.clone();
+                self.start_export(path, frame, format);
+                if self.export_receiver.is_none() {
+                    crate::android::cancel_direct_export(&self.android_app, &direct_path);
+                }
+            }
+            Ok(None) => {
+                // Android 8/9 still need the legacy cache + permission flow.
+                self.start_export(export_dir.join(display_name), frame, format);
+            }
+            Err(error) => {
+                log::warn!("direct Android export unavailable, falling back to cache: {error}");
+                self.start_export(export_dir.join(display_name), frame, format);
+            }
+        }
     }
 
     fn start_export(&mut self, path: PathBuf, frame: &eframe::Frame, format: ExportFormat) {
@@ -1611,13 +1632,32 @@ impl AurawApp {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let destination = export_dir.join(format!(
+        let cached_destination = export_dir.join(format!(
             "{stem}-auraw-{timestamp}.{}",
             format.extension()
         ));
+        let gallery_name = format!("{stem}-auraw.{}", format.extension());
+        let destination = match crate::android::prepare_direct_export(
+            &self.android_app,
+            &export_dir,
+            &gallery_name,
+            format.mime_type(),
+        ) {
+            Ok(Some(path)) => path,
+            Ok(None) => cached_destination,
+            Err(error) => {
+                log::warn!("direct Android batch export unavailable, falling back to cache: {error}");
+                cached_destination
+            }
+        };
+        let direct_path = crate::android::is_direct_export_path(&destination)
+            .then(|| destination.clone());
         self.start_export(destination, frame, format);
         self.active_tab = AppTab::Library;
         if self.export_receiver.is_none() {
+            if let Some(path) = direct_path {
+                crate::android::cancel_direct_export(&self.android_app, &path);
+            }
             self.complete_android_library_batch_export_item(Err(format!(
                 "{display_name}: could not start export"
             )));
@@ -1881,7 +1921,7 @@ impl AurawApp {
         #[cfg(not(target_os = "android"))]
         let mut batch_result: Option<Result<PathBuf, String>> = None;
         #[cfg(target_os = "android")]
-        let mut android_batch_error: Option<String> = None;
+        let mut android_batch_result: Option<Result<(), String>> = None;
         for event in events {
             match event {
                 ExportEvent::Progress {
@@ -1907,62 +1947,88 @@ impl AurawApp {
 
                             #[cfg(target_os = "android")]
                             {
-                                let format = match path
-                                    .extension()
-                                    .and_then(|extension| extension.to_str())
-                                {
-                                    Some(extension)
-                                        if extension.eq_ignore_ascii_case("jpg")
-                                            || extension.eq_ignore_ascii_case("jpeg") =>
-                                    {
-                                        ExportFormat::Jpeg
-                                    }
-                                    _ => ExportFormat::Png,
-                                };
-                                let fallback_name =
-                                    format!("AuRaw-export.{}", format.extension());
-                                let display_name = self
-                                    .library_batch_export
-                                    .as_ref()
-                                    .and_then(|batch| batch.current.as_ref())
-                                    .map(|job| {
-                                        let stem = std::path::Path::new(&job.display_name)
-                                            .file_stem()
-                                            .and_then(|stem| stem.to_str())
-                                            .filter(|stem| !stem.is_empty())
-                                            .unwrap_or("AuRaw-export");
-                                        format!("{stem}-auraw.{}", format.extension())
-                                    })
-                                    .or_else(|| {
-                                        path.file_name()
-                                            .and_then(|name| name.to_str())
-                                            .map(str::to_owned)
-                                    })
-                                    .unwrap_or(fallback_name);
-                                match crate::android::publish_image(
-                                    &self.android_app,
-                                    &path,
-                                    &display_name,
-                                    format.mime_type(),
-                                ) {
-                                    Ok(()) => {
-                                        self.export_publish_pending = true;
-                                        self.notice = Some("Saving to Pictures/AuRaw…".to_owned());
-                                    }
-                                    Err(error) => {
-                                        let _ = std::fs::remove_file(&path);
-                                        if self.library_batch_export.is_some() {
-                                            android_batch_error = Some(error.clone());
+                                if crate::android::is_direct_export_path(&path) {
+                                    match crate::android::finalize_direct_export(
+                                        &self.android_app,
+                                        &path,
+                                    ) {
+                                        Ok(location) => {
+                                            if self.library_batch_export.is_some() {
+                                                android_batch_result = Some(Ok(()));
+                                            } else {
+                                                self.notice = Some(format!("Exported to {location}"));
+                                            }
                                         }
-                                        self.notice = Some(format!("Export failed: {error}"));
+                                        Err(error) => {
+                                            if self.library_batch_export.is_some() {
+                                                android_batch_result = Some(Err(error.clone()));
+                                            }
+                                            self.notice = Some(format!("Export failed: {error}"));
+                                            log::error!("Android direct export finalize failed: {error}");
+                                        }
+                                    }
+                                } else {
+                                    let format = match path
+                                        .extension()
+                                        .and_then(|extension| extension.to_str())
+                                    {
+                                        Some(extension)
+                                            if extension.eq_ignore_ascii_case("jpg")
+                                                || extension.eq_ignore_ascii_case("jpeg") =>
+                                        {
+                                            ExportFormat::Jpeg
+                                        }
+                                        _ => ExportFormat::Png,
+                                    };
+                                    let fallback_name =
+                                        format!("AuRaw-export.{}", format.extension());
+                                    let display_name = self
+                                        .library_batch_export
+                                        .as_ref()
+                                        .and_then(|batch| batch.current.as_ref())
+                                        .map(|job| {
+                                            let stem = std::path::Path::new(&job.display_name)
+                                                .file_stem()
+                                                .and_then(|stem| stem.to_str())
+                                                .filter(|stem| !stem.is_empty())
+                                                .unwrap_or("AuRaw-export");
+                                            format!("{stem}-auraw.{}", format.extension())
+                                        })
+                                        .or_else(|| {
+                                            path.file_name()
+                                                .and_then(|name| name.to_str())
+                                                .map(str::to_owned)
+                                        })
+                                        .unwrap_or(fallback_name);
+                                    match crate::android::publish_image(
+                                        &self.android_app,
+                                        &path,
+                                        &display_name,
+                                        format.mime_type(),
+                                    ) {
+                                        Ok(()) => {
+                                            self.export_publish_pending = true;
+                                            self.notice =
+                                                Some("Saving to Pictures/AuRaw…".to_owned());
+                                        }
+                                        Err(error) => {
+                                            let _ = std::fs::remove_file(&path);
+                                            if self.library_batch_export.is_some() {
+                                                android_batch_result = Some(Err(error.clone()));
+                                            }
+                                            self.notice = Some(format!("Export failed: {error}"));
+                                        }
                                     }
                                 }
                             }
                         }
                         Err(error) => {
                             #[cfg(target_os = "android")]
-                            if self.library_batch_export.is_some() {
-                                android_batch_error = Some(error.clone());
+                            {
+                                crate::android::cancel_all_direct_exports(&self.android_app);
+                                if self.library_batch_export.is_some() {
+                                    android_batch_result = Some(Err(error.clone()));
+                                }
                             }
                             self.notice = Some(format!("Export failed: {error}"));
                             log::error!("export failed: {error}");
@@ -1991,12 +2057,15 @@ impl AurawApp {
         }
 
         #[cfg(target_os = "android")]
-        if let Some(error) = android_batch_error {
-            self.complete_android_library_batch_export_item(Err(error));
+        if let Some(result) = android_batch_result {
+            self.complete_android_library_batch_export_item(result);
         } else if disconnected && self.library_batch_export.is_some() {
+            crate::android::cancel_all_direct_exports(&self.android_app);
             self.complete_android_library_batch_export_item(Err(
                 "export worker stopped unexpectedly".to_owned(),
             ));
+        } else if disconnected {
+            crate::android::cancel_all_direct_exports(&self.android_app);
         }
     }
 

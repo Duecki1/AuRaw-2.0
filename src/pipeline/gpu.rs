@@ -3377,26 +3377,8 @@ impl RawGpuPipeline {
             },
             texture_size(raw.width, raw.height),
         );
-        queue.write_texture(
-            copy_texture(&self.color_texture),
-            &raw.color_indices,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(raw.width),
-                rows_per_image: Some(raw.height),
-            },
-            texture_size(raw.width, raw.height),
-        );
-        queue.write_texture(
-            copy_texture(&self.black_texture),
-            bytemuck::cast_slice(&raw.black_levels_per_pixel),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(raw.width * 4),
-                rows_per_image: Some(raw.height),
-            },
-            texture_size(raw.width, raw.height),
-        );
+        upload_color_texture(queue, &self.color_texture, raw);
+        upload_black_texture(queue, &self.black_texture, raw);
         Ok(())
     }
 

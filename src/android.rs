@@ -6,7 +6,7 @@ use jni::{
     EnvUnowned, JValue, JavaVM,
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs::{self, File},
     os::fd::FromRawFd,
     path::{Path, PathBuf},
@@ -55,6 +55,14 @@ pub enum ExportPublishResult {
 }
 
 #[derive(Debug)]
+struct DirectExportTarget {
+    file: File,
+    uri: String,
+    location: String,
+    temp_dir: PathBuf,
+}
+
+#[derive(Debug)]
 pub enum CameraProfileFolderResult {
     /// Android returned a tree URI and AuRaw started mirroring its DCP files.
     /// Keep the picker transaction pending until Picked/Failed arrives.
@@ -74,6 +82,7 @@ static RESULTS: OnceLock<Mutex<VecDeque<PickerResult>>> = OnceLock::new();
 static CAMERA_PROFILE_FOLDER_RESULTS: OnceLock<Mutex<VecDeque<CameraProfileFolderResult>>> =
     OnceLock::new();
 static EXPORT_RESULTS: OnceLock<Mutex<VecDeque<ExportPublishResult>>> = OnceLock::new();
+static DIRECT_EXPORTS: OnceLock<Mutex<HashMap<PathBuf, DirectExportTarget>>> = OnceLock::new();
 static EGUI_CONTEXT: Mutex<Option<eframe::egui::Context>> = Mutex::new(None);
 static BACK_NAVIGATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static BACK_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -92,6 +101,10 @@ fn camera_profile_folder_results() -> &'static Mutex<VecDeque<CameraProfileFolde
 
 fn export_results() -> &'static Mutex<VecDeque<ExportPublishResult>> {
     EXPORT_RESULTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn direct_exports() -> &'static Mutex<HashMap<PathBuf, DirectExportTarget>> {
+    DIRECT_EXPORTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn request_repaint() {
@@ -767,6 +780,137 @@ fn hex_digit(value: u8) -> Result<u8, String> {
         b'A'..=b'F' => Ok(value - b'A' + 10),
         _ => Err("invalid percent escape in Android library record".to_owned()),
     }
+}
+
+pub fn prepare_direct_export(
+    app: &AndroidApp,
+    temp_dir: &Path,
+    display_name: &str,
+    mime_type: &str,
+) -> Result<Option<PathBuf>, String> {
+    let encoded = with_activity(app, |env, activity| {
+        let display_name = env.new_string(display_name)?;
+        let mime_type = env.new_string(mime_type)?;
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("createPendingExport"),
+                jni::jni_sig!((JString, JString) -> JString),
+                &[JValue::Object(&display_name), JValue::Object(&mime_type)],
+            )?
+            .l()?;
+        let string = env.cast_local::<JString>(object)?;
+        Ok(string.to_string())
+    })
+    .map_err(|error| format!("could not create Android MediaStore export destination: {error:#}"))?;
+    if encoded.is_empty() {
+        return Ok(None);
+    }
+    let mut fields = encoded.splitn(3, '\t');
+    let fd = fields
+        .next()
+        .ok_or_else(|| "Android export descriptor is missing its fd".to_owned())?
+        .parse::<i32>()
+        .map_err(|error| format!("invalid Android export fd: {error}"))?;
+    if fd < 0 {
+        return Err("Android export descriptor returned a negative fd".to_owned());
+    }
+    // SAFETY: Java detached this fd from ParcelFileDescriptor and transferred
+    // sole ownership to native code. Create the guard immediately so any later
+    // parse/validation error still closes the descriptor.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let uri = fields
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Android export descriptor is missing its URI".to_owned())?
+        .to_owned();
+    let location = fields
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Android export descriptor is missing its location".to_owned())?
+        .to_owned();
+    let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
+    let target = DirectExportTarget {
+        file,
+        uri,
+        location,
+        temp_dir: temp_dir.to_path_buf(),
+    };
+    direct_exports()
+        .lock()
+        .map_err(|_| "Android direct-export state is poisoned".to_owned())?
+        .insert(path.clone(), target);
+    Ok(Some(path))
+}
+
+pub fn is_direct_export_path(path: &Path) -> bool {
+    direct_exports()
+        .lock()
+        .ok()
+        .is_some_and(|targets| targets.contains_key(path))
+}
+
+pub fn direct_export_temp_dir(path: &Path) -> Option<PathBuf> {
+    direct_exports()
+        .lock()
+        .ok()?
+        .get(path)
+        .map(|target| target.temp_dir.clone())
+}
+
+pub fn finalize_direct_export(app: &AndroidApp, path: &Path) -> Result<String, String> {
+    let target = direct_exports()
+        .lock()
+        .map_err(|_| "Android direct-export state is poisoned".to_owned())?
+        .remove(path)
+        .ok_or_else(|| "Android direct-export destination is no longer available".to_owned())?;
+    // Close the detached fd before publishing the MediaStore row.
+    let DirectExportTarget { file, uri, location, .. } = target;
+    drop(file);
+    if let Err(error) = finish_pending_export(app, &uri, true) {
+        let _ = finish_pending_export(app, &uri, false);
+        return Err(error);
+    }
+    Ok(location)
+}
+
+pub fn cancel_direct_export(app: &AndroidApp, path: &Path) {
+    let target = direct_exports().lock().ok().and_then(|mut targets| targets.remove(path));
+    if let Some(target) = target {
+        let DirectExportTarget { file, uri, .. } = target;
+        drop(file);
+        if let Err(error) = finish_pending_export(app, &uri, false) {
+            log::warn!("could not delete failed Android direct export: {error}");
+        }
+    }
+}
+
+pub fn cancel_all_direct_exports(app: &AndroidApp) {
+    let targets = direct_exports()
+        .lock()
+        .map(|mut targets| targets.drain().map(|(_, target)| target).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for target in targets {
+        let DirectExportTarget { file, uri, .. } = target;
+        drop(file);
+        if let Err(error) = finish_pending_export(app, &uri, false) {
+            log::warn!("could not delete failed Android direct export: {error}");
+        }
+    }
+}
+
+fn finish_pending_export(app: &AndroidApp, uri: &str, success: bool) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        let uri = env.new_string(uri)?;
+        env.call_method(
+            activity,
+            jni::jni_str!("finishPendingExport"),
+            jni::jni_sig!((JString, i32) -> void),
+            &[JValue::Object(&uri), JValue::Int(if success { 1 } else { 0 })],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not finalize Android MediaStore export: {error:#}"))
 }
 
 pub fn publish_image(
