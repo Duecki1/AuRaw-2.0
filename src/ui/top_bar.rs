@@ -11,6 +11,39 @@ impl TopBar {
         Self::show_desktop(ui, app, frame);
     }
 
+    #[cfg(target_os = "android")]
+    pub(crate) fn back_icon_button(ui: &mut Ui, size: egui::Vec2) -> egui::Response {
+        let response = ui.add_sized(size, egui::Button::new(""));
+        let visuals = ui.style().interact(&response);
+        let stroke = egui::Stroke::new(
+            visuals.fg_stroke.width.max(2.0),
+            visuals.fg_stroke.color,
+        );
+        let center = response.rect.center();
+        let arm = response.rect.height() * 0.18;
+        let shaft_left = center.x - arm * 0.55;
+        let shaft_right = center.x + arm * 0.90;
+        ui.painter().line_segment(
+            [egui::pos2(shaft_left, center.y), egui::pos2(shaft_right, center.y)],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(shaft_left, center.y),
+                egui::pos2(shaft_left + arm, center.y - arm),
+            ],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(shaft_left, center.y),
+                egui::pos2(shaft_left + arm, center.y + arm),
+            ],
+            stroke,
+        );
+        response.on_hover_text("Back to Library")
+    }
+
     fn history_icon_button(
         ui: &mut Ui,
         enabled: bool,
@@ -62,77 +95,50 @@ impl TopBar {
 
     #[cfg(target_os = "android")]
     fn show_android(ui: &mut Ui, app: &mut AurawApp, _frame: &eframe::Frame) {
-        let mut requested_tab = None;
-        ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
+        // Android uses a native navigation stack instead of persistent page tabs:
+        // Library -> tap thumbnail -> Develop, and system Back returns to Library.
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
         ui.horizontal(|ui| {
-            let tab_width = (ui.available_width() / 3.0).max(1.0);
-            for (tab, label) in [
-                (AppTab::Library, "Library"),
-                (AppTab::Develop, "Develop"),
-                (AppTab::Settings, "Settings"),
-            ] {
-                let button = egui::Button::new(label)
-                    .selected(app.active_tab == tab)
-                    .corner_radius(0.0);
-                if ui.add_sized(egui::vec2(tab_width, 42.0), button).clicked() {
-                    requested_tab = Some(tab);
-                }
+            if Self::back_icon_button(ui, egui::vec2(42.0, 36.0)).clicked() {
+                app.activate_tab(AppTab::Library);
+            }
+            if Self::history_icon_button(
+                ui,
+                app.can_undo_edit(),
+                false,
+                egui::vec2(42.0, 36.0),
+                "Undo the last edit",
+            )
+            .clicked()
+            {
+                app.undo_edit();
+            }
+            if Self::history_icon_button(
+                ui,
+                app.can_redo_edit(),
+                true,
+                egui::vec2(42.0, 36.0),
+                "Redo the last edit",
+            )
+            .clicked()
+            {
+                app.redo_edit();
+            }
+            if ui
+                .add_enabled(
+                    app.can_save_edits(),
+                    egui::Button::new(if app.sidecar_save_in_progress() {
+                        "Saving…"
+                    } else {
+                        "Save"
+                    }),
+                )
+                .clicked()
+            {
+                app.save_edits_now();
             }
         });
-        if let Some(tab) = requested_tab {
-            app.activate_tab(tab);
-        }
 
-        if app.active_tab == AppTab::Develop {
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if Self::history_icon_button(
-                    ui,
-                    app.can_undo_edit(),
-                    false,
-                    egui::vec2(42.0, 36.0),
-                    "Undo the last edit",
-                )
-                .clicked()
-                {
-                    app.undo_edit();
-                }
-                if Self::history_icon_button(
-                    ui,
-                    app.can_redo_edit(),
-                    true,
-                    egui::vec2(42.0, 36.0),
-                    "Redo the last edit",
-                )
-                .clicked()
-                {
-                    app.redo_edit();
-                }
-                if ui
-                    .add_enabled(
-                        app.can_save_edits(),
-                        egui::Button::new(if app.sidecar_save_in_progress() {
-                            "Saving…"
-                        } else {
-                            "Save"
-                        }),
-                    )
-                    .clicked()
-                {
-                    app.save_edits_now();
-                }
-            });
-        }
-
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(&app.status)
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            )
-            .wrap(),
-        );
     }
 
     #[cfg(not(target_os = "android"))]
@@ -211,14 +217,6 @@ impl TopBar {
                 }
             }
 
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(&app.status)
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                )
-                .wrap(),
-            );
         });
     }
 }

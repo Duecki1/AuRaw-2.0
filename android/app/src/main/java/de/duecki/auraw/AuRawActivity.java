@@ -16,12 +16,16 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.graphics.Insets;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.util.Log;
+import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Toast;
+import android.window.OnBackInvokedDispatcher;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -73,7 +77,53 @@ public final class AuRawActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        configureSystemBarsAndInsets();
         scavengeTemporaryRawFiles();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    () -> {
+                        if (!nativeOnBackRequested()) {
+                            finish();
+                        }
+                    });
+        }
+    }
+
+    private void configureSystemBarsAndInsets() {
+        // Android 15 enforces edge-to-edge for targetSdk 35. Keep the native
+        // rendering surface edge-to-edge, but report the actual system-bar and
+        // cutout insets to Rust so egui reserves those areas for content. This
+        // keeps controls between the status/navigation bars on every bar mode.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            View decorView = getWindow().getDecorView();
+            decorView.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+                Insets safeInsets = windowInsets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                nativeOnSystemInsetsChanged(
+                        safeInsets.left, safeInsets.top, safeInsets.right, safeInsets.bottom);
+                return windowInsets;
+            });
+            decorView.requestApplyInsets();
+        } else {
+            // Pre-Android 11 uses the platform's normal decor fitting, so egui
+            // must not add a second inset on top of it.
+            nativeOnSystemInsetsChanged(0, 0, 0, 0);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override
+    public void onBackPressed() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ dispatches through OnBackInvokedDispatcher above.
+            super.onBackPressed();
+            return;
+        }
+        if (!nativeOnBackRequested()) {
+            super.onBackPressed();
+        }
     }
 
     private void scavengeTemporaryRawFiles() {
@@ -105,6 +155,11 @@ public final class AuRawActivity extends NativeActivity {
             }
         }
     }
+
+    private static native boolean nativeOnBackRequested();
+
+    private static native void nativeOnSystemInsetsChanged(
+            int left, int top, int right, int bottom);
 
     private static native void nativeOnFilePicked(
             String cachedPath,

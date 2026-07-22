@@ -1,35 +1,48 @@
-from tests.source_helpers import read_source_tree
 from pathlib import Path
+
+from tests.source_helpers import read_source_tree
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = read_source_tree(ROOT / "src/app.rs")
 TOP_BAR = (ROOT / "src/ui/top_bar.rs").read_text(encoding="utf-8")
+LIBRARY = (ROOT / "src/ui/library.rs").read_text(encoding="utf-8")
+EFRAME = (ROOT / "src/app/eframe_impl.rs").read_text(encoding="utf-8")
+ANDROID_RS = (ROOT / "src/android.rs").read_text(encoding="utf-8")
+ACTIVITY = (ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java").read_text(
+    encoding="utf-8"
+)
 
 
-def test_android_tabs_fill_the_available_width() -> None:
-    assert '#[cfg(target_os = "android")]' in TOP_BAR
-    assert 'let tab_width = (ui.available_width() / 3.0).max(1.0);' in TOP_BAR
-    assert 'egui::vec2(tab_width, 42.0)' in TOP_BAR
-    assert 'egui::Button::new(label)' in TOP_BAR
-    assert '.selected(app.active_tab == tab)' in TOP_BAR
-    for label in ("Library", "Develop", "Settings"):
-        assert f'(AppTab::{label}, "{label}")' in TOP_BAR
+def android_top_bar_source() -> str:
+    start = TOP_BAR.index('#[cfg(target_os = "android")]\n    fn show_android')
+    end = TOP_BAR.index('#[cfg(not(target_os = "android"))]', start)
+    return TOP_BAR[start:end]
 
 
-def test_android_content_swipes_move_between_adjacent_tabs() -> None:
-    assert "struct AndroidTabSwipe" in APP
-    assert "finish_android_tab_swipe_frame" in APP
-    assert "_central.response.rect" in APP
-    assert "next_tab(swipe.starting_tab)" in APP
-    assert "previous_tab(swipe.starting_tab)" in APP
-    assert "HORIZONTAL_DOMINANCE" in APP
-    assert "VIEWPORT_SWIPE_FRACTION" in APP
+def test_android_removes_persistent_page_tab_buttons() -> None:
+    android_bar = android_top_bar_source()
+    assert "tab_width" not in android_bar
+    assert 'Button::new("Library")' not in android_bar
+    assert 'Button::new("Develop")' not in android_bar
+    assert 'Button::new("Settings")' not in android_bar
+    assert 'if self.active_tab == AppTab::Develop' in EFRAME
+    assert 'Panel::top("top_bar")' in EFRAME
 
 
-def test_android_swipes_yield_to_editing_gestures() -> None:
-    assert "slider_scroll_locked(ctx)" in APP
-    assert "input.multi_touch().is_some()" in APP
-    assert "self.preview_touch_navigation_active" in APP
-    assert "self.sidebar_tab == SidebarTab::Masks" in APP
-    assert "preview_zoom > 1.0" in APP
-    assert "HORIZONTAL_INTENT_POINTS" in APP
+def test_android_library_has_count_refresh_and_settings_without_path() -> None:
+    assert '"{count} RAW {}"' in LIBRARY
+    assert 'egui::Button::new("Refresh")' in LIBRARY
+    assert 'if ui.button("Settings").clicked()' in LIBRARY
+    assert 'app.activate_tab(AppTab::Settings);' in LIBRARY
+    assert '#[cfg(not(target_os = "android"))]\n        if let Some(location)' in LIBRARY
+
+
+def test_android_system_back_returns_develop_or_settings_to_library() -> None:
+    assert "OnBackInvokedDispatcher.PRIORITY_DEFAULT" in ACTIVITY
+    assert "nativeOnBackRequested()" in ACTIVITY
+    assert "nativeOnBackRequested" in ANDROID_RS
+    assert "BACK_NAVIGATION_ACTIVE" in ANDROID_RS
+    assert "BACK_REQUESTED" in ANDROID_RS
+    assert "if crate::android::take_back_request()" in EFRAME
+    assert "self.activate_tab(AppTab::Library);" in EFRAME
+    assert "self.active_tab != AppTab::Library" in EFRAME

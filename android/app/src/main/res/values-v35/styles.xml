@@ -4,6 +4,7 @@
         <item name="android:fontFamily">sans</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowFullscreen">false</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
         <item name="android:colorAccent">#607D8B</item>
     </style>
 </resources>
