@@ -160,3 +160,24 @@ def test_object_masks_always_run_vitmatte_fine_edge_refinement() -> None:
     assert "if request.detailed_edges" not in infer
     request = app[app.index("pub(crate) fn request_object_mask"):app.index("fn start_object_worker")]
     assert "let vitmatte_ready = self.vitmatte_model_path().exists();" in request
+
+
+def test_all_canvas_brushes_keep_constant_screen_size_across_zoom() -> None:
+    assert "fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32) -> f32" in PREVIEW
+    assert "tool_size.max(0.0) / preview_zoom.max(1.0)" in PREVIEW
+
+    # Local adjustment brush dabs capture the zoom-adjusted image-space radius.
+    assert "let dab_size = zoom_scaled_brush_size(*size, app.preview_zoom);" in PREVIEW
+    assert "size: dab_size" in PREVIEW
+
+    # Object prompt strokes capture their zoom-adjusted radius so delayed SAM
+    # inference/recalculation does not depend on whatever zoom happens to be active later.
+    assert "let stroke_brush_size = zoom_scaled_brush_size(*brush_size, app.preview_zoom);" in PREVIEW
+    assert "brush_size: stroke_brush_size" in PREVIEW
+    assert "let captured_size = if stroke.brush_size > 0.0" in MASKS
+
+
+def test_inpainting_brush_uses_the_same_zoom_scaled_screen_space_radius() -> None:
+    assert "let dab_size = zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom);" in PREVIEW
+    assert "zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom)" in PREVIEW
+    assert "dab.size.clamp(f32::EPSILON, 0.5)" in (ROOT / "src/inpainting.rs").read_text(encoding="utf-8")

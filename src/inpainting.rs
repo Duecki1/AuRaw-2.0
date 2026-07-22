@@ -90,7 +90,7 @@ fn stroke_bounds(dabs: &[BrushDab], width: u32, height: u32) -> Option<(f32, f32
         if dab.opacity <= 0.0 {
             continue;
         }
-        let radius = dab.size.clamp(0.0025, 0.5) * image_min + 2.0;
+        let radius = dab.size.clamp(f32::EPSILON, 0.5) * image_min + 2.0;
         let cx = dab.center[0] * width as f32;
         let cy = dab.center[1] * height as f32;
         min_x = min_x.min(cx - radius);
@@ -510,7 +510,7 @@ fn localize_dabs(
         .filter_map(|dab| {
             let center_x = dab.center[0] * source.full_width as f32 - source.origin_x as f32;
             let center_y = dab.center[1] * source.full_height as f32 - source.origin_y as f32;
-            let radius = dab.size.clamp(0.0025, 0.5) * full_min;
+            let radius = dab.size.clamp(f32::EPSILON, 0.5) * full_min;
             if center_x + radius < 0.0
                 || center_y + radius < 0.0
                 || center_x - radius > local_width as f32
@@ -536,7 +536,7 @@ fn feathered_composite_dabs(dabs: &[BrushDab], patch_edge: u32) -> Vec<BrushDab>
     let feather_pixels = (3.0 * edge / LAMA_EDGE as f32).clamp(1.5, 12.0);
     dabs.iter()
         .map(|dab| {
-            let inner_radius = dab.size.clamp(0.0025, 0.5) * edge;
+            let inner_radius = dab.size.clamp(f32::EPSILON, 0.5) * edge;
             let outer_radius = inner_radius + feather_pixels;
             BrushDab {
                 center: dab.center,

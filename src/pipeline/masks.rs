@@ -141,6 +141,11 @@ pub struct ObjectStroke {
     /// negative strokes explicitly mark background.
     pub points: Vec<[f32; 2]>,
     pub positive: bool,
+    /// Image-relative radius captured when the stroke starts. New code stores
+    /// the zoom-adjusted value so the tool remains a constant on-screen size.
+    /// Zero means a legacy sidecar and falls back to the component tool size.
+    #[serde(default)]
+    pub brush_size: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -899,6 +904,9 @@ impl MaskStack {
                             .map(|source| crop_mask_image(source, u0, v0, du, dv));
                         *brush_size *= image_scale;
                         for stroke in strokes {
+                            if stroke.brush_size > 0.0 {
+                                stroke.brush_size *= image_scale;
+                            }
                             for point in &mut stroke.points {
                                 remap_point(point);
                             }
@@ -1531,10 +1539,15 @@ fn object_prompt_dabs(strokes: &[ObjectStroke], size: f32) -> Vec<BrushDab> {
     let mut dabs = Vec::with_capacity(dab_count);
     for stroke in strokes {
         let opacity = if stroke.positive { 1.0 } else { -1.0 };
+        let captured_size = if stroke.brush_size > 0.0 {
+            stroke.brush_size
+        } else {
+            size
+        };
         dabs.extend(stroke.points.iter().copied().map(|center| BrushDab {
             center,
             opacity,
-            size,
+            size: captured_size,
             feather: 0.0,
         }));
     }
@@ -1602,7 +1615,7 @@ pub fn rasterize_inpaint_dabs_binary(
         .iter()
         .filter(|dab| dab.opacity > 0.0)
         .map(|dab| {
-            let radius_image = dab.size.clamp(0.0025, 0.5) * image_min;
+            let radius_image = dab.size.clamp(f32::EPSILON, 0.5) * image_min;
             let radius_x = radius_image * width as f32 / image_width.max(1) as f32;
             let radius_y = radius_image * height as f32 / image_height.max(1) as f32;
             let center_x = dab.center[0] * width as f32;
@@ -1670,7 +1683,7 @@ fn rasterize_brush(
     let image_min = image_width.min(image_height).max(1) as f32;
     let mut specs = Vec::with_capacity(dabs.len());
     for dab in dabs {
-        let radius_image = dab.size.clamp(0.0025, 0.5) * image_min;
+        let radius_image = dab.size.clamp(f32::EPSILON, 0.5) * image_min;
         let radius_x = radius_image * width as f32 / image_width.max(1) as f32;
         let radius_y = radius_image * height as f32 / image_height.max(1) as f32;
         let bbox_x = radius_x.ceil().max(1.0) as i32 + 1;
@@ -2247,6 +2260,7 @@ mod tests {
             strokes.push(ObjectStroke {
                 points: vec![point],
                 positive: true,
+                brush_size: 0.0,
             });
         }
 
@@ -2272,6 +2286,7 @@ mod tests {
             strokes.push(ObjectStroke {
                 points: vec![[0.75, 0.5]],
                 positive: true,
+                brush_size: 0.0,
             });
         } else {
             panic!("object mask used unexpected geometry");

@@ -1136,7 +1136,7 @@ impl Sidebar {
                         0.0025..=0.25,
                         3,
                         0.0025,
-                        Some("Brush radius relative to the shorter image edge."),
+                        Some("Brush stays the same size on screen; zoom in for finer image-space detail."),
                     );
                     geometry_changed |= adjustment_slider(
                         ui,
@@ -1219,7 +1219,7 @@ impl Sidebar {
                         0.0025..=0.25,
                         3,
                         0.0025,
-                        Some("Controls the radius of the hard-edged on-canvas object selection brush."),
+                        Some("Controls the hard-edged selection brush. Its on-screen size stays constant while zooming for finer detail."),
                     );
                     ui.add_space(4.0);
                     geometry_changed |= adjustment_slider(
