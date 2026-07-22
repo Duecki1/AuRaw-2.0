@@ -6,6 +6,9 @@ use crate::pipeline::{
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui};
 
+const MIN_PREVIEW_ZOOM: f32 = 0.70;
+const MAX_PREVIEW_ZOOM: f32 = 32.0;
+
 pub struct Preview;
 
 impl Preview {
@@ -58,7 +61,7 @@ impl Preview {
             outer_rect.size(),
             geometry_width as f32 / geometry_height.max(1) as f32,
         );
-        app.preview_zoom = app.preview_zoom.clamp(1.0, 32.0);
+        app.preview_zoom = app.preview_zoom.clamp(MIN_PREVIEW_ZOOM, MAX_PREVIEW_ZOOM);
         clamp_preview_center(
             &mut app.preview_center,
             outer_rect.size(),
@@ -66,7 +69,16 @@ impl Preview {
         );
         let mut image_rect =
             zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
-        let mut interaction_rect = outer_rect.intersect(image_rect);
+        let visible_image_rect = outer_rect.intersect(image_rect);
+        let mut interaction_rect = if app.sidebar_tab == SidebarTab::Masks {
+            // Geometry handles for radial/linear masks are allowed to live in
+            // the pasteboard around the image, so the mask canvas must receive
+            // pointer input across the whole preview panel. Brush-like tools
+            // still filter their pointer to the visible image below.
+            outer_rect
+        } else {
+            visible_image_rect
+        };
         if interaction_rect.width() <= 0.0 || interaction_rect.height() <= 0.0 {
             interaction_rect = outer_rect;
         }
@@ -281,13 +293,18 @@ impl Preview {
 
             if app.sidebar_tab == SidebarTab::Masks {
                 if !touch_navigation && !fit_gesture {
-                    Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response);
+                    Self::handle_mask_interaction(
+                        ui,
+                        app,
+                        image_rect,
+                        visible_screen,
+                        outer_rect,
+                        &response,
+                    );
                 }
-                // Keep every mask interaction and overlay clipped to the visible
-                // preview. A zoomed image rect can extend behind the sidebar, and
-                // touch input reports a pointer position there even though that
-                // area belongs to the UI rather than the canvas.
-                Self::paint_mask_overlay(ui, app, image_rect, visible_screen);
+                // Coverage stays clipped to the image, while geometry/transform
+                // handles may extend into the surrounding preview pasteboard.
+                Self::paint_mask_overlay(ui, app, image_rect, visible_screen, outer_rect);
                 Self::paint_tool_hint(ui, app, visible_screen);
             }
         }
@@ -500,6 +517,7 @@ impl Preview {
         app: &mut AurawApp,
         image_rect: Rect,
         preview_rect: Rect,
+        overlay_rect: Rect,
         response: &egui::Response,
     ) {
         let Some(mask_index) = app.masks.selected_mask else {
@@ -527,9 +545,22 @@ impl Preview {
             return;
         }
         app.active_mask_tool = Some(kind);
+        let geometry_can_leave_image = matches!(kind, MaskKind::Radial | MaskKind::Linear)
+            && (app.mask_drag.is_some()
+                || app
+                    .masks
+                    .masks
+                    .get(mask_index)
+                    .and_then(|mask| mask.components.get(component_index))
+                    .is_some_and(|component| component.geometry.is_initialized()));
+        let pointer_bounds = if geometry_can_leave_image {
+            overlay_rect
+        } else {
+            preview_rect
+        };
         let pointer = response
             .interact_pointer_pos()
-            .filter(|position| preview_rect.contains(*position));
+            .filter(|position| pointer_bounds.contains(*position));
         let primary_down = pointer.is_some()
             && response.is_pointer_button_down_on()
             && ui.input(|input| input.pointer.primary_down());
@@ -550,7 +581,11 @@ impl Preview {
         if ui.input(|input| input.any_touches()) {
             app.begin_mask_touch_gesture(mask_index, component_index);
         }
-        let uv = screen_to_normalized(image_rect, pointer);
+        let uv = if matches!(kind, MaskKind::Radial | MaskKind::Linear) {
+            screen_to_normalized_unclamped(image_rect, pointer)
+        } else {
+            screen_to_normalized(image_rect, pointer)
+        };
         let color_was_sampled = app
             .masks
             .masks
@@ -673,8 +708,8 @@ impl Preview {
                         pointer: origin,
                         center: original_center,
                     }) => {
-                        center[0] = (original_center[0] + uv[0] - origin[0]).clamp(0.0, 1.0);
-                        center[1] = (original_center[1] + uv[1] - origin[1]).clamp(0.0, 1.0);
+                        center[0] = original_center[0] + uv[0] - origin[0];
+                        center[1] = original_center[1] + uv[1] - origin[1];
                         changed = true;
                     }
                     Some(MaskDragState::ResizeRadial { axis }) => {
@@ -735,12 +770,8 @@ impl Preview {
                         start: original_start,
                         end: original_end,
                     }) => {
-                        let min_x = original_start[0].min(original_end[0]);
-                        let max_x = original_start[0].max(original_end[0]);
-                        let min_y = original_start[1].min(original_end[1]);
-                        let max_y = original_start[1].max(original_end[1]);
-                        let dx = (uv[0] - origin[0]).clamp(-min_x, 1.0 - max_x);
-                        let dy = (uv[1] - origin[1]).clamp(-min_y, 1.0 - max_y);
+                        let dx = uv[0] - origin[0];
+                        let dy = uv[1] - origin[1];
                         *start = [original_start[0] + dx, original_start[1] + dy];
                         *end = [original_end[0] + dx, original_end[1] + dy];
                         changed = true;
@@ -760,8 +791,8 @@ impl Preview {
                             original_angle + shortest_angle_delta(pointer_angle, current_angle);
                         let half_length = original_vector.length() * 0.5;
                         let half_vector = egui::vec2(angle.cos(), angle.sin()) * half_length;
-                        *start = screen_to_normalized(image_rect, midpoint - half_vector);
-                        *end = screen_to_normalized(image_rect, midpoint + half_vector);
+                        *start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);
+                        *end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);
                         changed = true;
                     }
                     _ => {}
@@ -846,7 +877,13 @@ impl Preview {
         }
     }
 
-    fn paint_mask_overlay(ui: &Ui, app: &mut AurawApp, image_rect: Rect, preview_rect: Rect) {
+    fn paint_mask_overlay(
+        ui: &Ui,
+        app: &mut AurawApp,
+        image_rect: Rect,
+        preview_rect: Rect,
+        overlay_rect: Rect,
+    ) {
         let Some(mask_index) = app.masks.selected_mask else {
             return;
         };
@@ -859,7 +896,7 @@ impl Preview {
             .map(mask_component_color)
             .unwrap_or(Color32::from_rgb(78, 163, 255));
         let subtract = Color32::from_rgb(255, 105, 105);
-        let painter = ui.painter_at(preview_rect);
+        let painter = ui.painter_at(overlay_rect);
 
         // An untouched mask remains visible after its selection flashes. Once
         // local adjustments exist, selection still flashes for orientation but
@@ -895,15 +932,22 @@ impl Preview {
                 .pointer_interact_pos()
                 .is_some_and(|position| preview_rect.contains(position));
         if pointer_editing {
-            let editing_live_mask = neutral
-                && selected_component.is_some_and(|index| {
-                    app.masks.masks[mask_index]
-                        .components
-                        .get(index)
-                        .is_some_and(|component| {
-                            !matches!(component.kind, MaskKind::Subject | MaskKind::Background)
-                        })
-                });
+            let editing_live_mask = selected_component.is_some_and(|index| {
+                app.masks.masks[mask_index]
+                    .components
+                    .get(index)
+                    .is_some_and(|component| {
+                        // Object-mask prompt strokes must remain visible while
+                        // drawing even when the group already has adjustments: the
+                        // painted prompt is exactly what the AI model will see.
+                        component.kind == MaskKind::Object
+                            || (neutral
+                                && !matches!(
+                                    component.kind,
+                                    MaskKind::Subject | MaskKind::Background
+                                ))
+                    })
+            });
             coverage_target = if editing_live_mask {
                 selected_component.map(Some)
             } else {
@@ -1025,9 +1069,7 @@ impl Preview {
                                 * image_rect.width().min(image_rect.height());
                             painter.circle_stroke(pointer, radius.max(1.5), Stroke::new(1.5, cursor_color));
                         }
-                        MaskGeometry::Object {
-                            mask, brush_size, ..
-                        } if mask.is_none() => {
+                        MaskGeometry::Object { brush_size, .. } => {
                             let radius = zoom_scaled_brush_size(*brush_size, app.preview_zoom)
                                 * image_rect.width().min(image_rect.height());
                             painter.circle_stroke(
@@ -1378,7 +1420,7 @@ fn transform_preview_about_screen_points(
         (anchor_screen.y - current_image_rect.top()) / current_image_rect.height().max(1.0),
     ];
 
-    *zoom = (previous_zoom * zoom_factor).clamp(1.0, 32.0);
+    *zoom = (previous_zoom * zoom_factor).clamp(MIN_PREVIEW_ZOOM, MAX_PREVIEW_ZOOM);
     let new_size = base_size * *zoom;
     let new_min = Pos2::new(
         target_screen.x - anchor_uv[0] * new_size.x,
@@ -1557,13 +1599,18 @@ fn group_coverage_rgba(
 /// zoom keeps the brush footprint constant in screen space: zooming in paints
 /// fewer source pixels for detail work, while zooming out covers more.
 fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32) -> f32 {
-    tool_size.max(0.0) / preview_zoom.max(1.0)
+    tool_size.max(0.0) / preview_zoom.max(MIN_PREVIEW_ZOOM)
 }
 
 fn screen_to_normalized(rect: Rect, point: Pos2) -> [f32; 2] {
+    let uv = screen_to_normalized_unclamped(rect, point);
+    [uv[0].clamp(0.0, 1.0), uv[1].clamp(0.0, 1.0)]
+}
+
+fn screen_to_normalized_unclamped(rect: Rect, point: Pos2) -> [f32; 2] {
     [
-        ((point.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
-        ((point.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
+        (point.x - rect.left()) / rect.width().max(1.0),
+        (point.y - rect.top()) / rect.height().max(1.0),
     ]
 }
 

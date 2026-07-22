@@ -17,6 +17,7 @@ impl AurawApp {
         }
         self.inpaint_stroke.clear();
         self.inpaint_strokes.clear();
+        self.note_inpainting_edit_changed();
         self.last_inpaint_brush_point = None;
         self.inpaint_layer = None;
         self.inpaint_texture = None;
@@ -245,6 +246,7 @@ impl AurawApp {
                         ) {
                             Ok(()) => {
                                 self.inpaint_strokes.push(stroke);
+                                self.note_inpainting_edit_changed();
                                 self.rebuild_inpaint_layer();
                                 self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
                                 self.note_inpainting_changed_for_ai_masks();
@@ -276,6 +278,7 @@ impl AurawApp {
             return;
         }
         self.inpaint_strokes.remove(index);
+        self.note_inpainting_edit_changed();
         self.rebuild_inpaint_layer();
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.note_inpainting_changed_for_ai_masks();
@@ -284,7 +287,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    fn rebuild_inpaint_layer(&mut self) {
+    pub(crate) fn rebuild_inpaint_layer(&mut self) {
         self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
         self.inpaint_texture = None;
         self.inpaint_texture_key = None;

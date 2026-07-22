@@ -131,13 +131,23 @@ def test_ai_subject_edges_use_high_resolution_rgb_guidance() -> None:
     assert "weighted_probability" in ai
     assert "center_probability * 0.40 + guided * 0.60" in ai
 
-def test_mask_input_and_cursor_are_clipped_to_the_visible_preview() -> None:
-    assert "Self::handle_mask_interaction(ui, app, image_rect, visible_screen, &response)" in PREVIEW
-    assert ".filter(|position| preview_rect.contains(*position))" in PREVIEW
-    assert "let primary_down = pointer.is_some()" in PREVIEW
-    assert "Self::paint_mask_overlay(ui, app, image_rect, visible_screen)" in PREVIEW
-    assert "let painter = ui.painter_at(preview_rect);" in PREVIEW
+def test_mask_brushes_stay_on_image_but_geometry_handles_can_leave_preview() -> None:
+    assert "let mut interaction_rect = if app.sidebar_tab == SidebarTab::Masks" in PREVIEW
+    assert "let geometry_can_leave_image = matches!(kind, MaskKind::Radial | MaskKind::Linear)" in PREVIEW
+    assert "let pointer_bounds = if geometry_can_leave_image" in PREVIEW
+    assert "screen_to_normalized_unclamped(image_rect, pointer)" in PREVIEW
+    assert "Self::paint_mask_overlay(ui, app, image_rect, visible_screen, outer_rect)" in PREVIEW
+    assert "let painter = ui.painter_at(overlay_rect);" in PREVIEW
+    # Raster coverage and brush cursors still use the visible image clip.
     assert "painter_image_clipped" in PREVIEW
+    assert ".filter(|position| preview_rect.contains(*position))" in PREVIEW
+
+
+def test_object_prompt_overlay_stays_visible_over_adjusted_masks_while_drawing() -> None:
+    overlay = PREVIEW[PREVIEW.index("fn paint_mask_overlay"):PREVIEW.index("fn paint_coverage_texture")]
+    assert "component.kind == MaskKind::Object" in overlay
+    assert "painted prompt is exactly what the AI model will see" in overlay
+    assert "selected_component.map(Some)" in overlay
 
 
 def test_object_prompt_brush_is_hard_edged_without_a_feather_setting() -> None:
@@ -164,7 +174,7 @@ def test_object_masks_always_run_vitmatte_fine_edge_refinement() -> None:
 
 def test_all_canvas_brushes_keep_constant_screen_size_across_zoom() -> None:
     assert "fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32) -> f32" in PREVIEW
-    assert "tool_size.max(0.0) / preview_zoom.max(1.0)" in PREVIEW
+    assert "tool_size.max(0.0) / preview_zoom.max(MIN_PREVIEW_ZOOM)" in PREVIEW
 
     # Local adjustment brush dabs capture the zoom-adjusted image-space radius.
     assert "let dab_size = zoom_scaled_brush_size(*size, app.preview_zoom);" in PREVIEW
@@ -181,3 +191,19 @@ def test_inpainting_brush_uses_the_same_zoom_scaled_screen_space_radius() -> Non
     assert "let dab_size = zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom);" in PREVIEW
     assert "zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom)" in PREVIEW
     assert "dab.size.clamp(f32::EPSILON, 0.5)" in (ROOT / "src/inpainting.rs").read_text(encoding="utf-8")
+
+
+def test_preview_can_zoom_out_below_fit_without_changing_fit_baseline() -> None:
+    assert "const MIN_PREVIEW_ZOOM: f32 = 0.70;" in PREVIEW
+    assert "app.preview_zoom = app.preview_zoom.clamp(MIN_PREVIEW_ZOOM, MAX_PREVIEW_ZOOM);" in PREVIEW
+    assert "(previous_zoom * zoom_factor).clamp(MIN_PREVIEW_ZOOM, MAX_PREVIEW_ZOOM)" in PREVIEW
+    assert "app.preview_zoom = 1.0;" in PREVIEW
+
+
+def test_radial_and_linear_move_rotate_are_not_clamped_to_image_bounds() -> None:
+    assert "center[0] = original_center[0] + uv[0] - origin[0];" in PREVIEW
+    assert "center[1] = original_center[1] + uv[1] - origin[1];" in PREVIEW
+    assert "let dx = uv[0] - origin[0];" in PREVIEW
+    assert "let dy = uv[1] - origin[1];" in PREVIEW
+    assert "*start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);" in PREVIEW
+    assert "*end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);" in PREVIEW
