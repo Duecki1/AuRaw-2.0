@@ -32,7 +32,8 @@ pub use masks::{
 };
 pub use processing::{
     affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile, ExportTile,
-    ProcessingStage, ProxySpec, TilePlan, TileSpec, EXPORT_TILE_HALO,
+    required_export_tile_halo, ProcessingStage, ProxySpec, TilePlan, TileSpec, EXPORT_TILE_HALO,
+    MIN_EXPORT_TILE_HALO,
 };
 pub use raw_loader::{
     is_supported_raw_path, load_raw_file, load_raw_file_with_dcp,

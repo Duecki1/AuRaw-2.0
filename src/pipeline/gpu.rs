@@ -3570,6 +3570,37 @@ impl RawGpuPipeline {
         Ok(rgba)
     }
 
+    /// Queues a display-linear RGBA32F copy and immediately returns a mapped
+    /// readback handle. Export can submit the next tile before waiting on this
+    /// handle, overlapping GPU work with CPU readback/encoding.
+    pub(crate) fn begin_display_linear_region_readback(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<PendingRgba32Readback> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "display-linear export readback requires ProcessingQuality::High (RGBA32Float)"
+            ));
+        }
+        begin_rgba32_texture_region_rgb_readback(
+            device,
+            queue,
+            &self.display_linear_texture,
+            x,
+            y,
+            width,
+            height,
+            self.width,
+            self.height,
+            "auraw pipelined display-linear export readback",
+        )
+    }
+
     /// Copies a post-tone-map, display-linear Rec.2020 sub-rectangle as
     /// tightly packed RGB32F. High-quality export uses this surface so any
     /// resize occurs before the output transfer function and after demosaic.

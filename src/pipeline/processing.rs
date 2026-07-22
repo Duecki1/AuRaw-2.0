@@ -1,4 +1,4 @@
-use super::{ExposureParams, LoadedRaw};
+use super::{ExposureParams, LoadedRaw, MaskStack};
 
 /// Earliest pipeline stage that must be executed after a parameter change.
 /// Stages are ordered from most expensive/upstream to cheapest/downstream.
@@ -313,6 +313,47 @@ const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_PREP_SUPPORT
 /// Rounded up to the 8-pixel guide/workgroup alignment.
 pub const EXPORT_TILE_HALO: u32 = EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8;
 
+/// Smallest safe export halo when optional spatial effects are neutral.
+/// Highlight reconstruction, demosaic, and the tone guide remain active.
+pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_PREP_SUPPORT
+    + HIGHLIGHT_GUIDED_SUPPORT
+    + DEMOSAIC_CHAIN_SUPPORT
+    + TONE_GUIDE_SUPPORT
+    + COLOR_MIXER_SUPPORT)
+    .div_ceil(8)
+    * 8;
+
+/// Returns the halo actually required by the current edit. Neutral Glow and
+/// local spatial controls should not force every tile to process their full
+/// support radius. This is especially important on Android, where a 280 px
+/// halo around a 768 px core nearly triples the processed area.
+pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -> u32 {
+    let mut support = HIGHLIGHT_PREP_SUPPORT
+        + HIGHLIGHT_GUIDED_SUPPORT
+        + DEMOSAIC_CHAIN_SUPPORT
+        + TONE_GUIDE_SUPPORT
+        + COLOR_MIXER_SUPPORT;
+
+    let local_spatial_active = exposure.texture.abs() > 1e-6
+        || exposure.clarity.abs() > 1e-6
+        || exposure.dehaze.abs() > 1e-6
+        || masks.masks.iter().any(|mask| {
+            mask.enabled
+                && (mask.adjustments.texture.abs() > 1e-6
+                    || mask.adjustments.clarity.abs() > 1e-6
+                    || mask.adjustments.dehaze.abs() > 1e-6)
+        });
+    if local_spatial_active {
+        support += LOCAL_EFFECTS_SUPPORT;
+    }
+
+    if exposure.glow_amount.abs() > 1e-6 {
+        support += GLOW_SUPPORT;
+    }
+
+    support.div_ceil(8) * 8
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TileSpec {
     pub core_edge: u32,
@@ -448,9 +489,10 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
 #[cfg(test)]
 mod tests {
     use super::{
-        affected_stage, build_proxy, crop_raw, ProcessingStage, ProxySpec, TilePlan, TileSpec,
+        affected_stage, build_proxy, crop_raw, required_export_tile_halo, ProcessingStage, ProxySpec,
+        TilePlan, TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO,
     };
-    use crate::pipeline::{CameraProfile, CfaKind, ExposureParams, LoadedRaw};
+    use crate::pipeline::{CameraProfile, CfaKind, ExposureParams, LoadedRaw, MaskStack};
 
     #[test]
     fn develop_adjustments_only_invalidate_output() {
@@ -486,6 +528,21 @@ mod tests {
         ] {
             assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Tone));
         }
+    }
+
+    #[test]
+    fn export_halo_shrinks_when_wide_radius_effects_are_neutral() {
+        let masks = MaskStack::default();
+        let mut exposure = ExposureParams::default();
+        assert_eq!(
+            required_export_tile_halo(&exposure, &masks),
+            MIN_EXPORT_TILE_HALO
+        );
+
+        exposure.glow_amount = 1.0;
+        assert!(required_export_tile_halo(&exposure, &masks) > MIN_EXPORT_TILE_HALO);
+        exposure.clarity = 1.0;
+        assert_eq!(required_export_tile_halo(&exposure, &masks), EXPORT_TILE_HALO);
     }
 
     #[test]
