@@ -23,15 +23,15 @@ impl Sidebar {
             ui.group(|ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
-                    "Inpainting changed the image used by existing Subject, Not Subject, or Object masks.",
+                    "The image used by existing masks changed. Refresh masks to rebuild content-aware masks and mask sources without deleting your edits.",
                 );
                 ui.add_space(4.0);
                 if app.ai_mask_update_busy() {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Updating AI masks from the erased image…");
+                        ui.label("Refreshing masks…");
                     });
-                } else if ui.button("Update all AI masks").clicked() {
+                } else if ui.button("Update masks").clicked() {
                     app.request_update_all_ai_masks(frame);
                 }
             });
@@ -728,6 +728,10 @@ impl Sidebar {
         mask.name = Self::copied_mask_name(&app.masks.masks, &mask.name);
         if invert {
             mask.invert = !mask.invert;
+            // "Duplicate & Invert" is used to build a complementary mask,
+            // not a second copy of the same local grade. Start the new mask
+            // with neutral adjustments so only its coverage is duplicated.
+            mask.adjustments.reset();
         }
         let insert_at = mask_index + 1;
         app.masks.masks.insert(insert_at, mask);

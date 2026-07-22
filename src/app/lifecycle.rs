@@ -1111,13 +1111,12 @@ impl AurawApp {
 
                 let result = (|| {
                     let (
-                        mut rendered_exposure,
+                        rendered_exposure,
                         mut rendered_masks,
                         inpaint_strokes,
                         saved_lens,
                         mut sidecar_warning,
                         mut sidecar_needs_rewrite,
-                        using_default_edits,
                     ) = if let Some(edits) = edit_override {
                         (
                             edits.exposure,
@@ -1126,7 +1125,6 @@ impl AurawApp {
                             Some(edits.lens),
                             None,
                             true,
-                            false,
                         )
                     } else {
                         match loaded_sidecar {
@@ -1142,7 +1140,6 @@ impl AurawApp {
                                     Some(loaded.edits.lens),
                                     warning,
                                     loaded.migrated,
-                                    false,
                                 )
                             }
                             Ok(None) => (
@@ -1152,7 +1149,6 @@ impl AurawApp {
                                 None,
                                 None,
                                 false,
-                                true,
                             ),
                             Err(error) => (
                                 initial_exposure,
@@ -1163,21 +1159,10 @@ impl AurawApp {
                                     "Could not load this RAW's sidecar; using default edits: {error}"
                                 )),
                                 false,
-                                true,
                             ),
                         }
                     };
                     let original_raw = decoded.map_err(|error| format!("{error:#}"))?;
-                    // Adobe-compatible DCPs already carry their baseline exposure/tone
-                    // rendition. Start a newly opened profiled RAW at user Exposure 0,
-                    // matching the neutral slider position used by Lightroom/ACR. Keep
-                    // existing sidecars and explicit edits untouched.
-                    if using_default_edits
-                        && (original_raw.camera_profile_source.is_some()
-                            || original_raw.camera_profile.has_dcp_rendering_stages())
-                    {
-                        rendered_exposure.exposure = 0.0;
-                    }
                     crate::diagnostics::record(format!(
                         "Edit state: process_version={} exposure={:.3} temperature={:.3} tint={:.3} saturation={:.3} vibrance={:.3} demosaic={:?} highlight={:?} masks={}",
                         rendered_exposure.process_version,

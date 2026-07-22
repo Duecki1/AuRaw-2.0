@@ -483,9 +483,9 @@ impl AurawApp {
 
         if lens_changed {
             // Lens correction rebuilds image geometry. Keep the snapshot's
-            // masks aside so the rebuild can upload and restore the masks that
-            // belonged to that exact lens state instead of using the normal
-            // destructive "clear masks" lens-change behavior.
+            // masks aside so the rebuild uploads the mask stack that belongs
+            // to that exact historical lens state before marking generated
+            // mask sources as needing an explicit refresh.
             self.history_lens_restore_masks = Some(std::mem::take(&mut self.masks));
             self.mark_lens_correction_dirty();
         } else {
@@ -599,7 +599,7 @@ mod tests {
 
         let (restored, masks_changed) = history.undo(&exposure, &masks, &lens).unwrap();
         assert!(!masks_changed);
-        assert_eq!(restored.exposure.exposure, 0.7);
+        assert_eq!(restored.exposure.exposure, 0.0);
         assert!(history.undo.is_empty());
 
         exposure = restored.exposure;
@@ -741,7 +741,7 @@ mod tests {
         exposure.exposure = 0.9;
         history.note_change();
         history.observe(&exposure, &masks, &lens, true);
-        exposure.exposure = 0.7;
+        exposure.exposure = 0.0;
         history.observe(&exposure, &masks, &lens, false);
         assert!(history.can_redo(&exposure, &masks, &lens));
 

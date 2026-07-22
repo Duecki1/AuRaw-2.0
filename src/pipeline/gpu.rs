@@ -776,7 +776,11 @@ impl GpuParams {
 
         Self {
             black_point: exposure.black_point,
-            exposure: exposure.exposure,
+            // Keep the global Exposure slider centered at 0 in the edit/UI
+            // model while retaining the historical scene-referred +0.7 EV
+            // baseline in the renderer. Local mask exposure is packed above
+            // without this offset, so it remains a purely relative control.
+            exposure: exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
             temperature: exposure
                 .temperature
                 .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),

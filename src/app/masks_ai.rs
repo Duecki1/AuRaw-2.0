@@ -159,11 +159,7 @@ impl AurawApp {
     }
 
     pub(crate) fn ai_masks_need_update(&self) -> bool {
-        if !self.ai_masks_need_update {
-            return false;
-        }
-        let (subject, objects) = self.generated_ai_mask_targets();
-        subject || !objects.is_empty()
+        self.ai_masks_need_update && !self.masks.masks.is_empty()
     }
 
     fn generated_ai_mask_targets(&self) -> (bool, VecDeque<(usize, usize)>) {
@@ -196,8 +192,18 @@ impl AurawApp {
         (subject, objects)
     }
 
-    pub(crate) fn note_inpainting_changed_for_ai_masks(&mut self) {
-        let (has_subject, object_targets) = self.generated_ai_mask_targets();
+    fn has_range_mask_targets(&self) -> bool {
+        self.masks.masks.iter().any(|mask| {
+            mask.components.iter().any(|component| {
+                matches!(
+                    &component.geometry,
+                    MaskGeometry::LuminanceRange { .. } | MaskGeometry::ColorRange { .. }
+                )
+            })
+        })
+    }
+
+    fn invalidate_generated_mask_sources(&mut self) {
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
         self.object_cache = None;
@@ -207,7 +213,22 @@ impl AurawApp {
         self.ai_mask_update_subject_pending = false;
         self.ai_mask_update_object_queue.clear();
         self.ai_mask_update_failed = false;
-        self.ai_masks_need_update = has_subject || !object_targets.is_empty();
+    }
+
+    pub(crate) fn note_inpainting_changed_for_ai_masks(&mut self) {
+        let (has_subject, object_targets) = self.generated_ai_mask_targets();
+        let has_ranges = self.has_range_mask_targets();
+        self.invalidate_generated_mask_sources();
+        self.ai_masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
+    }
+
+    pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
+        let has_masks = !self.masks.masks.is_empty();
+        self.invalidate_generated_mask_sources();
+        // Manual/geometric masks remain intact and are immediately reused.
+        // Source-dependent masks can then be regenerated explicitly from the
+        // newly corrected (or uncorrected) image geometry.
+        self.ai_masks_need_update = has_masks;
     }
 
     pub(crate) fn request_update_all_ai_masks(&mut self, frame: &eframe::Frame) {
@@ -216,12 +237,15 @@ impl AurawApp {
             return;
         }
         let (update_subject, object_targets) = self.generated_ai_mask_targets();
-        if !update_subject && object_targets.is_empty() {
+        let update_ranges = self.has_range_mask_targets();
+        if self.masks.masks.is_empty() {
             self.ai_masks_need_update = false;
             return;
         }
         #[cfg(not(target_os = "android"))]
-        if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
+        if (update_subject || !object_targets.is_empty())
+            && (self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none())
+        {
             self.notice = Some(
                 "Choose an ONNX Runtime library under Settings before updating AI masks."
                     .to_owned(),
@@ -229,14 +253,46 @@ impl AurawApp {
             return;
         }
 
-        // Force a new canonical source because the previous cache predates the
-        // latest erased stroke. capture_mask_source renders the unadjusted RAW
-        // and composites the current inpainting layer over it.
-        self.mask_source_cache = None;
-        self.subject_mask_cache = None;
-        self.object_cache = None;
-        if let Err(error) = self.capture_mask_source(frame) {
-            self.notice = Some(error);
+        if update_subject || !object_targets.is_empty() || update_ranges {
+            // Force a new canonical source because lens correction or
+            // inpainting changed the image under content-aware masks.
+            self.mask_source_cache = None;
+            self.subject_mask_cache = None;
+            self.object_cache = None;
+            if let Err(error) = self.capture_mask_source(frame) {
+                self.notice = Some(error);
+                return;
+            }
+
+            if update_ranges {
+                let source = self.mask_source_cache.clone();
+                let mut range_layers_changed = Vec::new();
+                for (mask_index, mask) in self.masks.masks.iter_mut().enumerate() {
+                    let mut changed = false;
+                    for component in &mut mask.components {
+                        match &mut component.geometry {
+                            MaskGeometry::LuminanceRange { source: target, .. }
+                            | MaskGeometry::ColorRange { source: target, .. } => {
+                                *target = source.clone();
+                                changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if changed {
+                        range_layers_changed.push(mask_index);
+                    }
+                }
+                for mask_index in range_layers_changed {
+                    self.mark_mask_geometry_dirty(mask_index);
+                }
+            }
+        }
+
+        if !update_subject && object_targets.is_empty() {
+            self.ai_masks_need_update = false;
+            self.notice = Some("Masks were refreshed for the current image geometry.".to_owned());
+            self.egui_ctx.request_repaint();
             return;
         }
 
@@ -323,7 +379,7 @@ impl AurawApp {
             );
         } else {
             self.ai_masks_need_update = false;
-            self.notice = Some("All AI masks were updated from the erased image.".to_owned());
+            self.notice = Some("Masks were refreshed for the current image geometry.".to_owned());
         }
         self.egui_ctx.request_repaint();
     }

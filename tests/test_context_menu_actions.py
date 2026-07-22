@@ -32,6 +32,15 @@ def test_mask_and_component_context_menus_have_requested_actions() -> None:
     assert "Copy a component first" in MASK_UI
 
 
+def test_duplicate_and_invert_resets_the_new_mask_adjustments() -> None:
+    copy = MASK_UI[
+        MASK_UI.index("fn insert_mask_group_copy") : MASK_UI.index("fn duplicate_mask_component")
+    ]
+    invert_branch = copy[copy.index("if invert {") : copy.index("let insert_at")]
+    assert "mask.invert = !mask.invert" in invert_branch
+    assert "mask.adjustments.reset()" in invert_branch
+
+
 def test_mask_rename_uses_a_dialog_instead_of_inline_context_text_fields() -> None:
     group_menu = MASK_UI[MASK_UI.index("fn mask_group_context_menu"):MASK_UI.index("fn submask_context_menu")]
     component_menu = MASK_UI[MASK_UI.index("fn submask_context_menu"):MASK_UI.index("fn mask_group_clipboard_id")]
