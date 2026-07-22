@@ -57,6 +57,13 @@ Subject and Background selection uses the BiRefNet General Lite (Swin-Tiny) ONNX
 
 Local inference uses Microsoft ONNX Runtime through the Rust `ort` bindings. ONNX Runtime is licensed under the MIT License; `ort` is dual-licensed under MIT or Apache-2.0.
 
+
+## ViTMatte
+
+Subject and Not Subject masks use ViTMatte Small (Composition-1k) as a second-stage alpha-matting refiner after BiRefNet. Object masks use the same refiner automatically after SAM 2.1 selection. AuRaw derives a conservative trimap from the coarse mask and applies ViTMatte only in the uncertain boundary band, preserving known foreground/background interiors.
+
+AuRaw downloads the ONNX export from the `Xenova/vitmatte-small-composition-1k` Hugging Face repository only after the existing AI-model download consent. The exact file is pinned by size and SHA-256 before use. The upstream `hustvl/vitmatte-small-composition-1k` model is licensed under the Apache License 2.0.
+
 ## Segment Anything 2.1
 
 Promptable Object selection uses the SAM 2.1 Hiera Tiny image encoder and mask decoder originally developed by Meta AI Research. AuRaw downloads ONNX exports from the `akiyamanx/sam2.1-hiera-tiny-onnx` Hugging Face repository only after explicit user consent. The files are verified against pinned SHA-256 digests before use. SAM 2.1 and the redistributed ONNX weights are licensed under the Apache License 2.0.

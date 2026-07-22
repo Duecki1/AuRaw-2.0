@@ -247,7 +247,7 @@ impl AurawApp {
 
         if update_subject {
             let path = self.birefnet_model_path();
-            if path.exists() {
+            if path.exists() && self.vitmatte_model_path().exists() {
                 self.start_subject_worker(path);
             } else {
                 self.subject_consent_open = true;
@@ -294,7 +294,8 @@ impl AurawApp {
             }
 
             let (encoder, decoder) = self.sam21_model_paths();
-            if encoder.exists() && decoder.exists() {
+            let vitmatte_ready = self.vitmatte_model_path().exists();
+            if encoder.exists() && decoder.exists() && vitmatte_ready {
                 self.start_object_worker(mask_index, component_index, encoder, decoder);
             } else {
                 self.object_pending_target = Some((mask_index, component_index));
@@ -439,7 +440,8 @@ impl AurawApp {
             return;
         }
         let path = self.birefnet_model_path();
-        if path.exists() {
+        let vitmatte = self.vitmatte_model_path();
+        if path.exists() && vitmatte.exists() {
             self.start_subject_worker(path);
         } else {
             self.subject_consent_open = true;
@@ -456,7 +458,8 @@ impl AurawApp {
             return;
         };
         self.subject_download_progress = None;
-        self.subject_inferencing = model_path.exists();
+        let vitmatte_path = self.vitmatte_model_path();
+        self.subject_inferencing = model_path.exists() && vitmatte_path.exists();
         #[cfg(not(target_os = "android"))]
         let runtime_path = self.onnx_runtime_path.clone();
         #[cfg(not(target_os = "android"))]
@@ -467,6 +470,7 @@ impl AurawApp {
         let runtime_sha256 = None;
         self.subject_receiver = Some(spawn_subject_mask(
             model_path,
+            vitmatte_path,
             runtime_path,
             runtime_sha256,
             source.width,
@@ -630,7 +634,8 @@ impl AurawApp {
             return;
         }
         let (encoder, decoder) = self.sam21_model_paths();
-        if encoder.exists() && decoder.exists() {
+        let vitmatte_ready = self.vitmatte_model_path().exists();
+        if encoder.exists() && decoder.exists() && vitmatte_ready {
             self.start_object_worker(mask_index, component_index, encoder, decoder);
         } else {
             self.object_pending_target = Some((mask_index, component_index));
@@ -657,7 +662,7 @@ impl AurawApp {
                 Some("The original image source is unavailable for object selection.".to_owned());
             return;
         };
-        let (strokes, brush_size, edge_refine, detailed_edges) = {
+        let (strokes, brush_size, edge_refine) = {
             let Some(component) = self
                 .masks
                 .masks
@@ -670,13 +675,12 @@ impl AurawApp {
                 strokes,
                 brush_size,
                 edge_refine,
-                detailed_edges,
                 ..
             } = &component.geometry
             else {
                 return;
             };
-            (strokes.clone(), *brush_size, *edge_refine, *detailed_edges)
+            (strokes.clone(), *brush_size, *edge_refine)
         };
         let cache = self
             .object_cache
@@ -690,7 +694,6 @@ impl AurawApp {
             strokes,
             brush_size,
             edge_refine,
-            detailed_edges,
             cache,
         };
         self.object_generation = self.object_generation.wrapping_add(1);
@@ -711,6 +714,7 @@ impl AurawApp {
         self.object_receiver = Some(spawn_object_mask(
             encoder_path,
             decoder_path,
+            self.vitmatte_model_path(),
             runtime_path,
             runtime_sha256,
             request,
@@ -841,6 +845,15 @@ impl AurawApp {
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
             .unwrap_or_else(std::env::temp_dir);
         root.join("auraw/models/birefnet-general-lite.onnx")
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn vitmatte_model_path(&self) -> PathBuf {
+        let root = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(std::env::temp_dir);
+        root.join("auraw/models/vitmatte-small-composition-1k.onnx")
     }
 
     #[cfg(not(target_os = "android"))]
@@ -980,6 +993,14 @@ impl AurawApp {
             .join("models/birefnet-general-lite.onnx")
     }
 
+    #[cfg(target_os = "android")]
+    fn vitmatte_model_path(&self) -> PathBuf {
+        self.android_app
+            .internal_data_path()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("models/vitmatte-small-composition-1k.onnx")
+    }
+
     fn show_subject_dialogs(&mut self, ctx: &egui::Context) {
         if self.subject_consent_open {
             egui::Window::new("Download subject-selection model?")
@@ -988,14 +1009,14 @@ impl AurawApp {
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     ui.set_max_width(520.0);
-                    ui.label("Subject masks use BiRefNet; Not Subject is the inverse of that probability map, not an independent background model.");
+                    ui.label("Subject masks use BiRefNet for the coarse selection, then ViTMatte refines uncertain boundaries for hair, fur, and translucent edge detail. Not Subject is the exact inverse of the refined subject alpha.");
                     ui.label(format!(
-                        "The first use downloads {:.0} MB from the rembg GitHub release and stores it in AuRaw's cache.",
-                        BIREFNET_MODEL_BYTES as f64 / 1_000_000.0
+                        "The first use downloads about {:.0} MB total and stores both ONNX models in AuRaw's cache.",
+                        (BIREFNET_MODEL_BYTES + VITMATTE_MODEL_BYTES) as f64 / 1_000_000.0
                     ));
-                    ui.label("Model license: MIT. The model is optional and can be used only after this download.");
+                    ui.label("Model licenses: BiRefNet MIT; ViTMatte Apache-2.0. The models are optional and used only after this download.");
                     ui.label("Inference is local. No photograph is uploaded.");
-                    ui.label("When you continue, your device connects directly to GitHub. GitHub receives connection data such as your IP address and request time under its own privacy statement. AuRaw sends no account identifier or telemetry.");
+                    ui.label("When you continue, your device connects directly to GitHub for BiRefNet and Hugging Face for ViTMatte. Those services receive connection data such as your IP address and request time under their own privacy policies. AuRaw sends no account identifier or telemetry.");
                     ui.horizontal_wrapped(|ui| {
                         ui.hyperlink_to(
                             "GitHub privacy statement",
@@ -1005,6 +1026,13 @@ impl AurawApp {
                         ui.hyperlink_to(
                             "MIT model license",
                             "https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE",
+                        );
+                        ui.separator();
+                        ui.hyperlink_to("Hugging Face privacy policy", "https://huggingface.co/privacy");
+                        ui.separator();
+                        ui.hyperlink_to(
+                            "ViTMatte Apache-2.0 license",
+                            "https://huggingface.co/hustvl/vitmatte-small-composition-1k",
                         );
                     });
                     #[cfg(not(target_os = "android"))]
@@ -1066,12 +1094,13 @@ impl AurawApp {
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     ui.set_max_width(520.0);
-                    ui.label("Object masks use SAM 2.1 Hiera Tiny with separate image encoder and prompt decoder models.");
+                    ui.label("Object masks use SAM 2.1 Hiera Tiny followed automatically by ViTMatte trimap-guided alpha matting for fine hair, fur, and semi-transparent boundaries.");
                     ui.label(format!(
-                        "The first use downloads about {:.0} MB and stores both ONNX files in AuRaw's model cache.",
-                        SAM21_MODEL_BYTES_ESTIMATE as f64 / 1_000_000.0
+                        "The first use downloads about {:.0} MB for SAM plus {:.0} MB for ViTMatte and stores the ONNX files in AuRaw's model cache.",
+                        SAM21_MODEL_BYTES_ESTIMATE as f64 / 1_000_000.0,
+                        VITMATTE_MODEL_BYTES as f64 / 1_000_000.0
                     ));
-                    ui.label("Model license: Apache-2.0. The models are optional and can be used only after this download.");
+                    ui.label("Model licenses: Apache-2.0. The models are optional and can be used only after this download.");
                     ui.label("Inference is local. No photograph or prompt stroke is uploaded.");
                     ui.label("When you continue, your device connects directly to Hugging Face. Hugging Face receives connection data such as your IP address and request time under its own privacy policy. AuRaw sends no account identifier or telemetry.");
                     ui.horizontal_wrapped(|ui| {

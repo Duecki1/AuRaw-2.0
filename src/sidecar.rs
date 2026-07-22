@@ -749,18 +749,16 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                     mask,
                     feather,
                     brush_size,
-                    brush_feather,
                     edge_refine,
                     strokes,
                     ..
                 } => {
                     finite(
                         "object mask settings",
-                        &[*feather, *brush_size, *brush_feather, *edge_refine],
+                        &[*feather, *brush_size, *edge_refine],
                     )?;
                     bounded("object mask feather", *feather, 0.0, 1.0)?;
                     bounded("object brush size", *brush_size, 0.0, 16.0)?;
-                    bounded("object brush feather", *brush_feather, 0.0, 1.0)?;
                     bounded("object edge refine", *edge_refine, 0.0, 1.0)?;
                     if strokes.len() > MAX_OBJECT_STROKES {
                         return invalid("object mask contains too many strokes");
@@ -1593,9 +1591,7 @@ mod tests {
                 mask: Some(MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap()),
                 feather: 0.1,
                 brush_size: 0.08,
-                brush_feather: 0.45,
                 edge_refine: 0.7,
-                detailed_edges: true,
                 strokes: vec![
                     ObjectStroke {
                         points: vec![[0.25, 0.25], [0.5, 0.5]],
