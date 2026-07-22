@@ -42,9 +42,11 @@ impl Preview {
         }
 
         let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
-        // The displayed backing texture may switch between the normal proxy and
-        // the tiny full-frame navigation proxy while an adjustment is being
-        // dragged. Those independently downscaled proxies can differ by a pixel
+        // While zoomed, the displayed backing texture may switch between the
+        // normal proxy and the tiny full-frame navigation proxy while an
+        // adjustment is being dragged. Fit view deliberately never makes that
+        // swap, avoiding a packaged-build pixelation flash. The independently
+        // downscaled proxies can differ by a pixel
         // after integer rounding, which gives them a slightly different aspect
         // ratio. Deriving zoom geometry from whichever texture happens to be
         // active makes that texture swap look like camera motion: visible UVs

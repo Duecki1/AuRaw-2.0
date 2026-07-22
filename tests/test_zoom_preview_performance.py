@@ -74,10 +74,14 @@ def test_navigation_proxy_is_full_frame_but_intentionally_very_low_resolution() 
     assert "navigation_dirty_mask_layers" in APP
 
 
-def test_current_normal_proxy_is_not_replaced_by_tiny_navigation_proxy() -> None:
-    assert "let use_navigation = self.preview_navigation.is_some() && self.pending_stage.is_some();" in PROCESSING_EXPORT
-    assert "preview_zoom > DETAIL_ZOOM_START || self.pending_stage.is_some()" not in PROCESSING_EXPORT
-    assert "Keep the normal adjusted full-frame proxy as the zoom backing" in PROCESSING_EXPORT
+def test_fit_view_never_flashes_the_tiny_navigation_proxy_during_edits() -> None:
+    assert "let detail_is_current = self" in PROCESSING_EXPORT
+    assert "let use_navigation = self.preview_zoom > DETAIL_ZOOM_START" in PROCESSING_EXPORT
+    assert "&& !detail_is_current" in PROCESSING_EXPORT
+    assert "Fit view now stays on the normal-resolution proxy throughout" in PROCESSING_EXPORT
+    assert "Drop the low-resolution navigation backing as soon as fit view is" in PROCESSING_EXPORT
+    assert "if self.preview_zoom > DETAIL_ZOOM_START {" in PROCESSING_EXPORT
+    assert "self.preview_zoom > DETAIL_ZOOM_START || self.preview_navigation.is_some()" not in PROCESSING_EXPORT
 
 
 def test_preview_geometry_does_not_change_when_backing_proxy_switches() -> None:
