@@ -668,6 +668,7 @@ impl AurawApp {
                 frame,
                 Some(selection),
                 Some(edit_override),
+                None,
             );
         }
 
@@ -736,7 +737,7 @@ impl AurawApp {
         let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
             raw_path: path.clone(),
         };
-        self.open_path_labeled(path, label, false, sidecar_target, frame);
+        self.open_path_labeled(path, label, false, sidecar_target, frame, None);
     }
 
     pub(crate) fn raw_cache_limit(&self) -> usize {
@@ -846,6 +847,7 @@ impl AurawApp {
         delete_after_decode: bool,
         sidecar_target: crate::sidecar::SidecarTarget,
         frame: &eframe::Frame,
+        raw_fd_guard: Option<std::fs::File>,
     ) {
         self.open_path_labeled_with_options(
             path,
@@ -855,6 +857,7 @@ impl AurawApp {
             frame,
             None,
             None,
+            raw_fd_guard,
         );
     }
 
@@ -869,12 +872,13 @@ impl AurawApp {
         // None = use sidecar selection; Some(None) = automatic; Some(Some(path)) = explicit DCP.
         profile_selection_override: Option<Option<PathBuf>>,
         edit_override: Option<SidecarEditState>,
+        raw_fd_guard: Option<std::fs::File>,
     ) {
         if self.load_receiver.is_some()
             || self.export_receiver.is_some()
             || self.export_publish_pending
         {
-            if delete_after_decode {
+            if delete_after_decode && raw_fd_guard.is_none() {
                 remove_temporary_raw(&path);
             }
             self.notice = Some(if self.load_receiver.is_some() {
@@ -885,7 +889,7 @@ impl AurawApp {
             return;
         }
         let Some(render_state) = frame.wgpu_render_state() else {
-            if delete_after_decode {
+            if delete_after_decode && raw_fd_guard.is_none() {
                 remove_temporary_raw(&path);
             }
             self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
@@ -1022,10 +1026,12 @@ impl AurawApp {
         self.lens_correction = LensCorrectionState::default();
         self.lens_correction_dirty = false;
         self.reset_edit_history();
-        let source_path = (!delete_after_decode).then_some(path.clone());
+        let fd_backed_source = raw_fd_guard.is_some();
+        let source_path = (!delete_after_decode && !fd_backed_source).then_some(path.clone());
         let repaint = self.egui_ctx.clone();
         let (sender, receiver) = mpsc::channel();
-        let cleanup_path_on_spawn_failure = delete_after_decode.then(|| path.clone());
+        let cleanup_path_on_spawn_failure =
+            (delete_after_decode && !fd_backed_source).then(|| path.clone());
         #[cfg(target_os = "android")]
         let sidecar_android_app = self.android_app.clone();
 
@@ -1107,7 +1113,10 @@ impl AurawApp {
                         decode_started.elapsed().as_secs_f64()
                     )),
                 }
-                if delete_after_decode {
+                // The descriptor must remain open until LibRaw has finished reading the
+                // `/proc/self/fd/<n>` path. It can be closed immediately after decode.
+                drop(raw_fd_guard);
+                if delete_after_decode && !fd_backed_source {
                     remove_temporary_raw(&path);
                 }
 
@@ -1509,6 +1518,7 @@ impl AurawApp {
                             frame,
                             Some(selection),
                             Some(edit_override),
+                            document.raw_fd_guard,
                         );
                     } else {
                         self.open_path_labeled(
@@ -1517,6 +1527,7 @@ impl AurawApp {
                             document.delete_after_decode,
                             sidecar_target,
                             frame,
+                            document.raw_fd_guard,
                         );
                     }
                 }

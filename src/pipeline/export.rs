@@ -1,7 +1,8 @@
 use super::{
-    export_mask_atlas_edge, extract_padded_tile, mask_atlas_edge, ExposureParams, GpuParams,
-    IccOutputTransform, InpaintLayer, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline,
-    TilePlan, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    build_proxy, export_mask_atlas_edge, extract_padded_tile, mask_atlas_edge,
+    required_export_tile_halo, ExposureParams, GpuParams, IccOutputTransform, InpaintLayer,
+    LoadedRaw, MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, TilePlan,
+    TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use anyhow::{Context, Result};
 use eframe::wgpu;
@@ -231,6 +232,22 @@ pub fn spawn_tiled_png_export(
             let result = (|| -> Result<()> {
                 let (output_width, output_height) =
                     settings.checked_output_dimensions(raw.width, raw.height)?;
+                let mut tile_spec = tile_spec;
+                let required_halo = required_export_tile_halo(&exposure, &masks);
+                tile_spec.halo = if tile_spec.halo == EXPORT_TILE_HALO {
+                    required_halo
+                } else {
+                    tile_spec.halo.max(required_halo)
+                };
+                if cfg!(target_os = "android")
+                    && tile_spec.core_edge == 768
+                    && tile_spec.halo <= 192
+                {
+                    // Neutral/low-radius edits can amortize the halo with a
+                    // larger core while keeping the padded allocation close to
+                    // the old worst-case footprint; wide-radius edits stay at 768 px.
+                    tile_spec.core_edge = 1024;
+                }
                 let tile_spec = bounded_tile_spec(tile_spec, raw.width)?;
                 let temporary = temporary_export_path(&worker_path)?;
                 let export_result = export_tiled_png(
@@ -324,6 +341,22 @@ pub fn spawn_tiled_jpeg_export(
             let result = (|| -> Result<()> {
                 let (output_width, output_height) =
                     settings.checked_output_dimensions(raw.width, raw.height)?;
+                let mut tile_spec = tile_spec;
+                let required_halo = required_export_tile_halo(&exposure, &masks);
+                tile_spec.halo = if tile_spec.halo == EXPORT_TILE_HALO {
+                    required_halo
+                } else {
+                    tile_spec.halo.max(required_halo)
+                };
+                if cfg!(target_os = "android")
+                    && tile_spec.core_edge == 768
+                    && tile_spec.halo <= 192
+                {
+                    // Neutral/low-radius edits can amortize the halo with a
+                    // larger core while keeping the padded allocation close to
+                    // the old worst-case footprint; wide-radius edits stay at 768 px.
+                    tile_spec.core_edge = 1024;
+                }
                 let tile_spec = bounded_tile_spec(tile_spec, raw.width)?;
                 let temporary = temporary_export_path(&worker_path)?;
                 let export_result = export_tiled_jpeg(
@@ -382,12 +415,14 @@ pub fn spawn_tiled_jpeg_export(
     receiver
 }
 
+#[derive(Clone, Copy)]
 struct ExportContext<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     events: &'a mpsc::Sender<ExportEvent>,
 }
 
+#[derive(Clone, Copy)]
 struct ExportRequest<'a> {
     raw: &'a LoadedRaw,
     exposure: &'a ExposureParams,
@@ -401,7 +436,58 @@ struct ExportRequest<'a> {
     metadata: &'a ExportMetadata,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportRowFormat {
+    Rgb8,
+    Rgba8,
+}
+
 fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
+    validate_export_dimensions(request.output_width, request.output_height)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(request.path)
+        .with_context(|| format!("create temporary export {}", request.path.display()))?;
+    let mut info = png::Info::with_size(request.output_width, request.output_height);
+    info.color_type = png::ColorType::Rgba;
+    info.bit_depth = png::BitDepth::Eight;
+    if request.keep_metadata {
+        info.exif_metadata = Some(Cow::Owned(build_exif_payload(
+            request.metadata,
+            request.output_width,
+            request.output_height,
+        )));
+    }
+    let mut encoder =
+        png::Encoder::with_info(BufWriter::new(file), info).context("configure PNG encoder")?;
+    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    if request.keep_metadata {
+        add_png_text_metadata(
+            &mut encoder,
+            request.metadata,
+            request.output_width,
+            request.output_height,
+        )?;
+    }
+    let mut writer = encoder
+        .write_header()
+        .with_context(|| format!("write PNG header for {}", request.path.display()))?;
+    let mut stream = writer
+        .stream_writer_with_size(64 * 1024)
+        .context("create streaming PNG writer")?;
+    render_tiled_srgb(context, request, &mut stream, ExportRowFormat::Rgba8)?;
+    stream.finish().context("finish streaming PNG data")?;
+    writer.finish().context("finish PNG file")?;
+    Ok(())
+}
+
+fn render_tiled_srgb<W: Write>(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    output: &mut W,
+    row_format: ExportRowFormat,
+) -> Result<()> {
     let ExportContext {
         device,
         queue,
@@ -412,18 +498,18 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         exposure,
         masks,
         inpaint,
-        path,
+        path: _,
         tile_spec,
         output_width,
         output_height,
-        keep_metadata,
-        metadata,
+        keep_metadata: _,
+        metadata: _,
     } = request;
     let export_started = Instant::now();
     validate_export_dimensions(output_width, output_height)?;
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
     crate::diagnostics::record(format!(
-        "Tiled export plan: output={}x{} tiles={} core={} halo={} keep_metadata={keep_metadata}",
+        "Tiled export plan: output={}x{} tiles={} core={} halo={} row_format={row_format:?}",
         output_width,
         output_height,
         plan.tile_count(),
@@ -469,77 +555,65 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         export_mask_edge
     ));
 
-    // Establish one histogram from every full-resolution source pixel before
-    // rendering output tiles. Reusing the tile pipeline keeps peak memory
-    // bounded; restricting each dispatch to its core avoids counting halos.
+    // Global tone anchors are stable on a compact CFA-preserving proxy. Reuse
+    // the already-created export pipeline instead of compiling a second GPU
+    // pipeline: pad the proxy to the fixed tile allocation, analyze only the
+    // proxy bounds, then restore native tile data during the real render pass.
     let tone_analysis_started = Instant::now();
+    let tone_proxy_edge = first_raw.width.min(first_raw.height);
+    let tone_raw = build_proxy(
+        raw,
+        ProxySpec {
+            max_edge: tone_proxy_edge,
+        },
+    );
+    let tone_canvas = extract_padded_tile(
+        &tone_raw,
+        super::ExportTile {
+            core_x: 0,
+            core_y: 0,
+            core_width: tone_raw.width,
+            core_height: tone_raw.height,
+            local_core_x: 0,
+            local_core_y: 0,
+            padded_width: first_raw.width,
+            padded_height: first_raw.height,
+            global_origin_x: 0,
+            global_origin_y: 0,
+        },
+    );
     tile_pipeline.begin_export_tone_analysis(queue, device);
-    for (index, tile) in plan.tiles.iter().copied().enumerate() {
-        let tile_raw = if index == 0 {
-            first_raw.clone()
-        } else {
-            extract_padded_tile(raw, tile)
-        };
-        tile_pipeline
-            .upload_raw_tile(queue, &tile_raw)
-            .with_context(|| format!("upload tone-analysis tile {}", index + 1))?;
-        let params = GpuParams::new_for_tile(
-            exposure,
-            masks,
-            &tile_raw,
-            tile.global_origin_x,
-            tile.global_origin_y,
-            raw.width,
-            raw.height,
-        )
-        .with_tone_histogram_bounds(
-            tile.local_core_x,
-            tile.local_core_y,
-            tile.core_width,
-            tile.core_height,
-        );
-        tile_pipeline.accumulate_export_tone_tile(queue, device, &params);
-    }
+    tile_pipeline
+        .upload_raw_tile(queue, &tone_canvas)
+        .context("upload export tone-analysis proxy")?;
+    let tone_params = GpuParams::new_for_tile(
+        exposure,
+        masks,
+        &tone_canvas,
+        0,
+        0,
+        tone_raw.width,
+        tone_raw.height,
+    )
+    .with_tone_histogram_bounds(0, 0, tone_raw.width, tone_raw.height);
+    tile_pipeline.accumulate_export_tone_tile(queue, device, &tone_params);
     tile_pipeline.finish_export_tone_analysis(queue, device);
     crate::diagnostics::record(format!(
-        "Full-resolution tone-analysis prepass queued in {:.3}s across {} tiles",
+        "Proxy tone-analysis queued in {:.3}s at {}x{} instead of {} native-resolution tiles",
         tone_analysis_started.elapsed().as_secs_f64(),
+        tone_raw.width,
+        tone_raw.height,
         plan.tile_count()
     ));
-    crate::diagnostics::record(format!(
-        "Export preparation reached PNG creation after {:.3}s",
-        export_started.elapsed().as_secs_f64()
-    ));
 
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("create temporary export {}", path.display()))?;
-    let mut info = png::Info::with_size(output_width, output_height);
-    info.color_type = png::ColorType::Rgba;
-    info.bit_depth = png::BitDepth::Eight;
-    if keep_metadata {
-        info.exif_metadata = Some(Cow::Owned(build_exif_payload(
-            metadata,
-            output_width,
-            output_height,
-        )));
-    }
-    let mut encoder =
-        png::Encoder::with_info(BufWriter::new(file), info).context("configure PNG encoder")?;
-    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-    if keep_metadata {
-        add_png_text_metadata(&mut encoder, metadata, output_width, output_height)?;
-    }
-    let mut writer = encoder
-        .write_header()
-        .with_context(|| format!("write PNG header for {}", path.display()))?;
-    let mut stream = writer
-        .stream_writer_with_size(64 * 1024)
-        .context("create streaming PNG writer")?;
     let output_transform = IccOutputTransform::srgb();
-    let mut resizer = LinearLightResizer::new(raw.width, raw.height, output_width, output_height)?;
+    let mut resizer = LinearLightResizer::new_with_format(
+        raw.width,
+        raw.height,
+        output_width,
+        output_height,
+        row_format,
+    )?;
 
     let total_tiles = plan.tile_count();
     let mut completed_tiles = 0usize;
@@ -559,6 +633,7 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         band.try_reserve_exact(band_values)
             .context("reserve bounded export source band")?;
         band.resize(band_values, 0.0f32);
+        let mut pending_readback = None;
         for (absolute_index, tile) in plan.tiles[band_start..tile_index]
             .iter()
             .copied()
@@ -596,8 +671,8 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
                 raw.height,
             );
             tile_pipeline.dispatch_export_tile(queue, device, &params);
-            let rgb = tile_pipeline
-                .read_display_linear_region_blocking(
+            let readback = tile_pipeline
+                .begin_display_linear_region_readback(
                     device,
                     queue,
                     tile.local_core_x,
@@ -605,14 +680,49 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
                     tile.core_width,
                     tile.core_height,
                 )
-                .with_context(|| format!("read export tile {}", global_index + 1))?;
+                .with_context(|| format!("queue export tile readback {}", global_index + 1))?;
 
-            stitch_linear_tile_into_band(&mut band, raw.width, band_y, tile, &rgb)?;
+            // Queue this tile before consuming the previous tile. GPU rendering
+            // and copy can therefore overlap CPU stitching/resizing/encoding.
+            if let Some((previous_tile, previous_index, previous_readback)) =
+                pending_readback.take()
+            {
+                let rgb = previous_readback
+                    .finish(device)
+                    .with_context(|| format!("read export tile {}", previous_index + 1))?;
+                stitch_linear_tile_into_band(
+                    &mut band,
+                    raw.width,
+                    band_y,
+                    previous_tile,
+                    &rgb,
+                )?;
+                completed_tiles += 1;
+                if !first_progress_logged {
+                    first_progress_logged = true;
+                    crate::diagnostics::record(format!(
+                        "First export tile completed after {:.3}s; pipelined GPU readback is active",
+                        export_started.elapsed().as_secs_f64()
+                    ));
+                }
+                let _ = events.send(ExportEvent::Progress {
+                    completed_tiles,
+                    total_tiles,
+                });
+            }
+            pending_readback = Some((tile, global_index, readback));
+        }
+
+        if let Some((last_tile, last_index, last_readback)) = pending_readback.take() {
+            let rgb = last_readback
+                .finish(device)
+                .with_context(|| format!("read export tile {}", last_index + 1))?;
+            stitch_linear_tile_into_band(&mut band, raw.width, band_y, last_tile, &rgb)?;
             completed_tiles += 1;
             if !first_progress_logged {
                 first_progress_logged = true;
                 crate::diagnostics::record(format!(
-                    "First export tile completed after {:.3}s; preparation plus first blocking readback is complete",
+                    "First export tile completed after {:.3}s; pipelined GPU readback is active",
                     export_started.elapsed().as_secs_f64()
                 ));
             }
@@ -632,13 +742,11 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
                 .checked_add(source_row_values)
                 .context("source export row end overflow")?;
             let source_y = band_y + local_y;
-            resizer.push_source_row(source_y, &band[start..end], &output_transform, &mut stream)?;
+            resizer.push_source_row(source_y, &band[start..end], &output_transform, output)?;
         }
     }
 
-    resizer.finish(&output_transform, &mut stream)?;
-    stream.finish().context("finish streaming PNG data")?;
-    writer.finish().context("finish PNG file")?;
+    resizer.finish(&output_transform, output)?;
     Ok(())
 }
 
@@ -648,49 +756,37 @@ fn export_tiled_jpeg(
     quality: u8,
 ) -> Result<()> {
     let quality = quality.clamp(1, 100);
-    // Stage the shared full-quality tiled renderer as a lossless PNG. This
-    // deliberately reuses the exact PNG render path so JPEG and PNG exports
-    // have identical processing, sizing, masks, and inpainting.
-    let staged_png = temporary_export_path(request.path)?;
-    let staged_request = ExportRequest {
-        raw: request.raw,
-        exposure: request.exposure,
-        masks: request.masks,
-        inpaint: request.inpaint,
-        path: &staged_png,
-        tile_spec: request.tile_spec,
-        output_width: request.output_width,
-        output_height: request.output_height,
-        // The intermediate is private and lossless; only the final JPEG gets
-        // user-requested metadata.
-        keep_metadata: false,
-        metadata: request.metadata,
-    };
-    if let Err(error) = export_tiled_png(context, staged_request) {
-        let _ = fs::remove_file(&staged_png);
-        return Err(error);
-    }
-
-    // Convert the staged PNG into a disk-backed RGB raster one row at a time.
-    // JPEG's encoder can then read 8x8 blocks through GenericImageView without
-    // holding a full-resolution RGB/RGBA image in the Android heap.
     let staged_rgb = temporary_export_path(request.path)?;
     let encoded_jpeg = temporary_export_path(request.path)?;
     let encode_result = (|| -> Result<()> {
-        stage_png_as_rgb(
-            &staged_png,
-            &staged_rgb,
-            request.output_width,
-            request.output_height,
-        )?;
+        // Render directly into a disk-backed RGB8 raster. This removes the old
+        // full PNG encode -> PNG decode -> RGB staging round trip while keeping
+        // peak Android heap use bounded.
+        {
+            let rgb_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged_rgb)
+                .with_context(|| format!("create staged RGB raster {}", staged_rgb.display()))?;
+            let mut rgb_writer = BufWriter::new(rgb_file);
+            render_tiled_srgb(context, request, &mut rgb_writer, ExportRowFormat::Rgb8)?;
+            rgb_writer.flush().context("flush staged RGB raster")?;
+        }
+
         let rgb_file = fs::File::open(&staged_rgb)
             .with_context(|| format!("open staged RGB raster {}", staged_rgb.display()))?;
-        // SAFETY: the mapped file is opened read-only and remains alive for the
-        // lifetime of the mapping; AuRaw does not mutate or truncate it until
-        // after JPEG encoding finishes and the mapping has been dropped.
+        // SAFETY: the file remains open and immutable for the lifetime of the
+        // read-only mapping; it is deleted only after JPEG encoding completes.
         let mapped = unsafe { memmap2::MmapOptions::new().map(&rgb_file) }
             .with_context(|| format!("map staged RGB raster {}", staged_rgb.display()))?;
-        let image = MappedRgbImage::new(mapped, request.output_width, request.output_height)?;
+        let expected = u64::from(request.output_width)
+            .checked_mul(u64::from(request.output_height))
+            .and_then(|pixels| pixels.checked_mul(3))
+            .context("staged RGB image size overflow")?;
+        anyhow::ensure!(
+            u64::try_from(mapped.len()).unwrap_or(u64::MAX) == expected,
+            "staged RGB raster length does not match its dimensions"
+        );
 
         let file = OpenOptions::new()
             .write(true)
@@ -704,10 +800,18 @@ fn export_tiled_jpeg(
                 quality,
             );
             encoder
-                .encode_image(&image)
+                .encode(
+                    &mapped[..],
+                    request.output_width,
+                    request.output_height,
+                    image::ExtendedColorType::Rgb8,
+                )
                 .with_context(|| format!("encode JPEG {}", request.path.display()))?;
         }
         writer.flush().context("flush staged JPEG")?;
+        drop(mapped);
+        drop(rgb_file);
+
         write_final_jpeg(
             &encoded_jpeg,
             request.path,
@@ -718,115 +822,12 @@ fn export_tiled_jpeg(
         )?;
         Ok(())
     })();
-    let _ = fs::remove_file(&staged_png);
     let _ = fs::remove_file(&staged_rgb);
     let _ = fs::remove_file(&encoded_jpeg);
     if encode_result.is_err() {
         let _ = fs::remove_file(request.path);
     }
     encode_result
-}
-
-fn stage_png_as_rgb(
-    png_path: &Path,
-    rgb_path: &Path,
-    expected_width: u32,
-    expected_height: u32,
-) -> Result<()> {
-    let input = fs::File::open(png_path)
-        .with_context(|| format!("open staged PNG {}", png_path.display()))?;
-    let decoder = png::Decoder::new(BufReader::new(input));
-    let mut reader = decoder.read_info().context("read staged PNG header")?;
-    let info = reader.info();
-    anyhow::ensure!(
-        info.width == expected_width && info.height == expected_height,
-        "staged PNG dimensions do not match requested JPEG dimensions"
-    );
-    let (color_type, bit_depth) = reader.output_color_type();
-    anyhow::ensure!(
-        color_type == png::ColorType::Rgba && bit_depth == png::BitDepth::Eight,
-        "staged PNG has an unexpected pixel format"
-    );
-
-    let output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(rgb_path)
-        .with_context(|| format!("create staged RGB raster {}", rgb_path.display()))?;
-    let mut output = BufWriter::new(output);
-    let rgba_row_len = usize::try_from(expected_width)
-        .ok()
-        .and_then(|width| width.checked_mul(4))
-        .context("staged PNG row size overflow")?;
-    let rgb_row_len = usize::try_from(expected_width)
-        .ok()
-        .and_then(|width| width.checked_mul(3))
-        .context("staged RGB row size overflow")?;
-    let mut rgb_row = Vec::new();
-    rgb_row
-        .try_reserve_exact(rgb_row_len)
-        .context("reserve staged RGB row")?;
-    rgb_row.resize(rgb_row_len, 0);
-
-    let mut rows = 0u32;
-    while let Some(row) = reader.next_row().context("decode staged PNG row")? {
-        let rgba = row.data();
-        anyhow::ensure!(
-            rgba.len() == rgba_row_len,
-            "staged PNG row has an unexpected length"
-        );
-        for (rgb, rgba) in rgb_row.chunks_exact_mut(3).zip(rgba.chunks_exact(4)) {
-            rgb.copy_from_slice(&rgba[..3]);
-        }
-        output
-            .write_all(&rgb_row)
-            .with_context(|| format!("write staged RGB row {rows}"))?;
-        rows += 1;
-    }
-    anyhow::ensure!(
-        rows == expected_height,
-        "staged PNG produced {rows} rows; expected {expected_height}"
-    );
-    output.flush().context("flush staged RGB raster")?;
-    Ok(())
-}
-
-struct MappedRgbImage {
-    data: memmap2::Mmap,
-    width: u32,
-    height: u32,
-}
-
-impl MappedRgbImage {
-    fn new(data: memmap2::Mmap, width: u32, height: u32) -> Result<Self> {
-        let expected = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|pixels| pixels.checked_mul(3))
-            .context("mapped RGB image size overflow")?;
-        anyhow::ensure!(
-            u64::try_from(data.len()).unwrap_or(u64::MAX) == expected,
-            "mapped RGB raster length does not match its dimensions"
-        );
-        Ok(Self {
-            data,
-            width,
-            height,
-        })
-    }
-}
-
-impl image::GenericImageView for MappedRgbImage {
-    type Pixel = image::Rgb<u8>;
-
-    fn dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
-        assert!(x < self.width && y < self.height, "JPEG pixel is out of bounds");
-        let index = (y as usize * self.width as usize + x as usize) * 3;
-        image::Rgb([self.data[index], self.data[index + 1], self.data[index + 2]])
-    }
 }
 
 fn write_final_jpeg(
@@ -908,6 +909,7 @@ struct LinearLightResizer {
     pending_rows: Vec<Option<Vec<f32>>>,
     next_source_row: u32,
     next_output_row: u32,
+    row_format: ExportRowFormat,
 }
 
 impl LinearLightResizer {
@@ -916,6 +918,22 @@ impl LinearLightResizer {
         source_height: u32,
         output_width: u32,
         output_height: u32,
+    ) -> Result<Self> {
+        Self::new_with_format(
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            ExportRowFormat::Rgba8,
+        )
+    }
+
+    fn new_with_format(
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+        row_format: ExportRowFormat,
     ) -> Result<Self> {
         validate_export_dimensions(output_width, output_height)?;
         anyhow::ensure!(
@@ -941,6 +959,7 @@ impl LinearLightResizer {
             pending_rows,
             next_source_row: 0,
             next_output_row: 0,
+            row_format,
         })
     }
 
@@ -1047,10 +1066,10 @@ impl LinearLightResizer {
             let row = self.pending_rows[self.next_output_row as usize]
                 .take()
                 .context("completed resize row has no accumulated pixels")?;
-            let encoded = encode_srgb_row(&row, output_transform)?;
+            let encoded = encode_srgb_row_with_format(&row, output_transform, self.row_format)?;
             output
                 .write_all(&encoded)
-                .with_context(|| format!("write output PNG row {}", self.next_output_row))?;
+                .with_context(|| format!("write output row {}", self.next_output_row))?;
             self.next_output_row += 1;
         }
         Ok(())
@@ -1206,12 +1225,26 @@ fn resize_horizontal_row(source: &[f32], weights: &[Vec<SampleWeight>]) -> Resul
 }
 
 fn encode_srgb_row(row: &[f32], transform: &IccOutputTransform) -> Result<Vec<u8>> {
+    encode_srgb_row_with_format(row, transform, ExportRowFormat::Rgba8)
+}
+
+fn encode_srgb_row_with_format(
+    row: &[f32],
+    transform: &IccOutputTransform,
+    row_format: ExportRowFormat,
+) -> Result<Vec<u8>> {
     anyhow::ensure!(
         row.len().is_multiple_of(3),
         "linear RGB row has an invalid length"
     );
     let pixels = row.len() / 3;
-    let bytes = pixels.checked_mul(4).context("encoded row overflow")?;
+    let channels = match row_format {
+        ExportRowFormat::Rgb8 => 3,
+        ExportRowFormat::Rgba8 => 4,
+    };
+    let bytes = pixels
+        .checked_mul(channels)
+        .context("encoded row overflow")?;
     let mut encoded = Vec::new();
     encoded
         .try_reserve_exact(bytes)
@@ -1225,7 +1258,9 @@ fn encode_srgb_row(row: &[f32], transform: &IccOutputTransform) -> Result<Vec<u8
         for value in device {
             encoded.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
         }
-        encoded.push(255);
+        if row_format == ExportRowFormat::Rgba8 {
+            encoded.push(255);
+        }
     }
     Ok(encoded)
 }
@@ -1273,19 +1308,15 @@ fn checked_rgb_len(width: u32, height: u32) -> Result<usize> {
 }
 
 fn validate_tile_spec(spec: TileSpec) -> Result<()> {
-    let maximum_core = if cfg!(target_os = "android") {
-        768
-    } else {
-        1024
-    };
+    let maximum_core = 1024;
     let scale = if cfg!(target_os = "android") { 8 } else { 4 };
     anyhow::ensure!(
         (64..=maximum_core).contains(&spec.core_edge),
         "export tile core must be between 64 and {maximum_core} pixels"
     );
     anyhow::ensure!(
-        (EXPORT_TILE_HALO..=512).contains(&spec.halo),
-        "export halo must be between {EXPORT_TILE_HALO} and 512 pixels"
+        (MIN_EXPORT_TILE_HALO..=512).contains(&spec.halo),
+        "export halo must be between {MIN_EXPORT_TILE_HALO} and 512 pixels"
     );
     anyhow::ensure!(
         spec.core_edge.is_multiple_of(scale) && spec.halo.is_multiple_of(scale),
@@ -1568,9 +1599,9 @@ fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_heigh
 mod tests {
     use super::{
         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
-        publish_completed_export, stitch_linear_tile_into_band, validate_export_dimensions,
-        ExportMetadata, ExportResizeMode, ExportSettings, LinearLightResizer, EXPORT_TILE_HALO,
-        MAX_EXPORT_EDGE,
+        encode_srgb_row_with_format, publish_completed_export, stitch_linear_tile_into_band,
+        validate_export_dimensions, ExportMetadata, ExportResizeMode, ExportRowFormat,
+        ExportSettings, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
     };
     use crate::pipeline::ExportTile;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1617,6 +1648,21 @@ mod tests {
         assert_eq!(&exif[..4], &[b'I', b'I', 42, 0]);
         assert!(exif.windows(9).any(|window| window == b"CameraCo\0"));
         assert!(exif.windows(8).any(|window| window == b"Model X\0"));
+    }
+
+    #[test]
+    fn jpeg_rows_omit_png_alpha_bytes() {
+        let transform = crate::pipeline::IccOutputTransform::srgb();
+        let rgba = encode_srgb_row(&[0.18, 0.18, 0.18], &transform).unwrap();
+        let rgb = encode_srgb_row_with_format(
+            &[0.18, 0.18, 0.18],
+            &transform,
+            ExportRowFormat::Rgb8,
+        )
+        .unwrap();
+        assert_eq!(rgba.len(), 4);
+        assert_eq!(rgb.len(), 3);
+        assert_eq!(&rgba[..3], &rgb);
     }
 
     #[test]

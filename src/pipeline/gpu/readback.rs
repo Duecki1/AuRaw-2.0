@@ -83,6 +83,113 @@ pub(super) fn read_rgba8_texture_region_blocking(
     Ok(rgba)
 }
 
+
+pub(crate) struct PendingRgba32Readback {
+    readback: wgpu::Buffer,
+    submission: wgpu::SubmissionIndex,
+    receiver: std::sync::mpsc::Receiver<Result<(), String>>,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+}
+
+impl PendingRgba32Readback {
+    pub(crate) fn finish(self, device: &wgpu::Device) -> Result<Vec<f32>> {
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(self.submission),
+                timeout: None,
+            })
+            .map_err(|error| anyhow!("GPU poll failed during pipelined export readback: {error}"))?;
+        self.receiver
+            .recv()
+            .map_err(|_| anyhow!("GPU export readback callback was dropped"))?
+            .map_err(|error| anyhow!("GPU export readback mapping failed: {error}"))?;
+
+        let mapped = self.readback.get_mapped_range(..);
+        let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
+        for row in 0..self.height as usize {
+            let row_start = row * self.padded_bytes_per_row as usize;
+            for pixel in mapped[row_start..row_start + self.width as usize * 16]
+                .chunks_exact(16)
+            {
+                rgb.push(f32::from_le_bytes(pixel[0..4].try_into().expect("RGBA32F red")));
+                rgb.push(f32::from_le_bytes(pixel[4..8].try_into().expect("RGBA32F green")));
+                rgb.push(f32::from_le_bytes(pixel[8..12].try_into().expect("RGBA32F blue")));
+            }
+        }
+        drop(mapped);
+        self.readback.unmap();
+        if rgb.iter().any(|value| !value.is_finite()) {
+            return Err(anyhow!("display-linear export readback contains NaN or infinity"));
+        }
+        Ok(rgb)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn begin_rgba32_texture_region_rgb_readback(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    texture_width: u32,
+    texture_height: u32,
+    label: &'static str,
+) -> Result<PendingRgba32Readback> {
+    let right = x
+        .checked_add(width)
+        .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
+    let bottom = y
+        .checked_add(height)
+        .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
+    if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
+        return Err(anyhow!("invalid GPU RGBA32F readback rectangle"));
+    }
+
+    let (readback, padded_bytes_per_row) =
+        create_rgba32_readback_buffer(device, width, height, label);
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let submission = queue.submit(Some(encoder.finish()));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    readback.map_async(wgpu::MapMode::Read, .., move |result| {
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+    Ok(PendingRgba32Readback {
+        readback,
+        submission,
+        receiver,
+        width,
+        height,
+        padded_bytes_per_row,
+    })
+}
+
 const MAX_RGBA32_READBACK_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 
 fn rgba32_readback_rows_per_chunk(width: u32) -> Result<u32> {

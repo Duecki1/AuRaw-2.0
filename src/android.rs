@@ -22,6 +22,9 @@ pub struct PickedDocument {
     pub display_name: String,
     pub library_uri: String,
     pub delete_after_decode: bool,
+    /// Keeps an Android content-provider descriptor alive while LibRaw reads
+    /// `/proc/self/fd/<n>`. Dropping the guard closes the descriptor.
+    pub raw_fd_guard: Option<File>,
 }
 
 #[derive(Clone, Debug)]
@@ -864,6 +867,7 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePicked<'lo
                     display_name,
                     library_uri,
                     delete_after_decode: temporary,
+                    raw_fd_guard: None,
                 })
             };
 
@@ -875,6 +879,56 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePicked<'lo
         })
         .resolve_with::<LogContextErrorAndDefault, _>(|| {
             "AuRawActivity.nativeOnFilePicked".to_owned()
+        });
+}
+
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePickedFd<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    fd: jni::sys::jint,
+    display_name: JString<'local>,
+    library_uri: JString<'local>,
+    error: JString<'local>,
+) {
+    unowned_env
+        .with_env(|_env| -> jni::errors::Result<()> {
+            let display_name = display_name.to_string();
+            let library_uri = library_uri.to_string();
+            let error = error.to_string();
+
+            let result = if !error.is_empty() {
+                if fd >= 0 {
+                    // SAFETY: a non-negative descriptor passed to this callback has
+                    // already been detached by Java and is owned by native code.
+                    drop(unsafe { File::from_raw_fd(fd) });
+                }
+                PickerResult::Failed(error)
+            } else if fd < 0 {
+                PickerResult::Failed("Android returned an invalid RAW file descriptor".to_owned())
+            } else {
+                // SAFETY: Java detached this descriptor specifically for Rust ownership.
+                // The File guard is carried with the picker result and remains alive until
+                // LibRaw has completed decoding `/proc/self/fd/<fd>`.
+                let guard = unsafe { File::from_raw_fd(fd) };
+                PickerResult::Picked(PickedDocument {
+                    path: PathBuf::from(format!("/proc/self/fd/{fd}")),
+                    display_name,
+                    library_uri,
+                    delete_after_decode: false,
+                    raw_fd_guard: Some(guard),
+                })
+            };
+
+            if let Ok(mut queue) = results().lock() {
+                queue.push_back(result);
+            }
+            request_repaint();
+            Ok(())
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "AuRawActivity.nativeOnFilePickedFd".to_owned()
         });
 }
 

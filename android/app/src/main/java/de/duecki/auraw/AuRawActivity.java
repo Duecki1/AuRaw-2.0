@@ -169,6 +169,12 @@ public final class AuRawActivity extends NativeActivity {
             String error,
             boolean temporary);
 
+    private static native void nativeOnFilePickedFd(
+            int fd,
+            String displayName,
+            String libraryUri,
+            String error);
+
     private static native void nativeOnImportBatchFinished(
             int importedCount,
             int failedCount,
@@ -634,7 +640,7 @@ public final class AuRawActivity extends NativeActivity {
         StoredRaw stored = null;
         try {
             stored = importDocumentIntoLibrary(uri, displayName);
-            materializeLibraryRaw(stored.uri, stored.displayName);
+            deliverLibraryRawFd(stored.uri, stored.displayName);
         } catch (Exception error) {
             if (stored != null) {
                 deleteStoredRaw(stored.uri);
@@ -784,9 +790,9 @@ public final class AuRawActivity extends NativeActivity {
         new Thread(
                 () -> {
                     try {
-                        materializeLibraryRaw(Uri.parse(uriText), displayName);
+                        deliverLibraryRawFd(Uri.parse(uriText), displayName);
                     } catch (Exception error) {
-                        nativeOnFilePicked("", displayName, uriText, error.toString(), false);
+                        nativeOnFilePickedFd(-1, displayName, uriText, error.toString());
                     }
                 },
                 "AuRaw library open").start();
@@ -1358,6 +1364,24 @@ public final class AuRawActivity extends NativeActivity {
         } finally {
             if (!completed && !partial.delete() && partial.exists()) {
                 partial.deleteOnExit();
+            }
+        }
+    }
+
+    private void deliverLibraryRawFd(Uri source, String displayName) throws Exception {
+        verifyRawLibraryIdentity(source, displayName);
+        int fd = openRawLibraryFd(source.toString());
+        boolean handedOff = false;
+        try {
+            nativeOnFilePickedFd(fd, displayName, source.toString(), "");
+            handedOff = true;
+        } finally {
+            if (!handedOff) {
+                try {
+                    ParcelFileDescriptor.adoptFd(fd).close();
+                } catch (Exception ignored) {
+                    // The native side owns the descriptor only after a successful handoff.
+                }
             }
         }
     }
