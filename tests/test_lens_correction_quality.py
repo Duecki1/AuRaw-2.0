@@ -106,3 +106,17 @@ def test_manual_profile_selection_remains_available_without_camera_match() -> No
     assert "let camera = find_camera(&database" in LENSFUN
     assert "find_lens(&database, camera, selection)" in LENSFUN
     assert "no Lensfun camera match" in LENSFUN
+
+
+def test_lens_toggle_preserves_masks_and_requests_refresh() -> None:
+    processing_export = (ROOT / "src/app/processing_export.rs").read_text(encoding="utf-8")
+    masks_ui = (ROOT / "src/ui/sidebar/masks.rs").read_text(encoding="utf-8")
+    lens_rebuild = processing_export[
+        processing_export.index("fn apply_pending_lens_correction") : processing_export.index(
+            "pub(crate) fn note_preview_motion"
+        )
+    ]
+    assert "self.masks.clear()" not in lens_rebuild
+    assert "let preview_masks = self.masks.clone();" in lens_rebuild
+    assert "self.note_lens_correction_changed_for_masks();" in lens_rebuild
+    assert 'ui.button("Update masks")' in masks_ui

@@ -56,7 +56,7 @@ class DcpProfileSelectionTests(unittest.TestCase):
         self.assertIn('pub camera_model: Option<String>', profile)
 
 
-    def test_dcp_rendering_matches_adobe_stage_order_and_neutral_defaults(self) -> None:
+    def test_dcp_rendering_matches_adobe_stage_order_and_zero_centered_global_exposure(self) -> None:
         adjustments = read_source_tree(Path("src/shaders/adjustments.wgsl"))
         profile = read_source_tree(Path("src/shaders/profile.wgsl"))
         gpu = read_source_tree(Path("src/pipeline/gpu.rs"))
@@ -79,8 +79,12 @@ class DcpProfileSelectionTests(unittest.TestCase):
         self.assertIn("profile_tone_display_shoulder", adjustments)
         self.assertIn("var display_linear = darktable_sigmoid(graded)", adjustments)
         self.assertNotIn("var display_linear = clamp(graded", adjustments)
-        self.assertIn("has_dcp_rendering_stages", lifecycle)
-        self.assertIn("rendered_exposure.exposure = 0.0", lifecycle)
+        self.assertIn("GLOBAL_EXPOSURE_BACKEND_OFFSET_EV", gpu)
+        self.assertIn(
+            "exposure: exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV",
+            gpu,
+        )
+        self.assertNotIn("rendered_exposure.exposure = 0.0", lifecycle)
 
     def test_profile_preferences_are_persisted_and_cache_aware(self) -> None:
         persistence = read_source_tree(Path("src/performance_settings.rs"))

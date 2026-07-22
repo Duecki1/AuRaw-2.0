@@ -184,7 +184,7 @@ impl ColorGrading {
     }
 }
 
-pub const CURRENT_PROCESS_VERSION: u32 = 7;
+pub const CURRENT_PROCESS_VERSION: u32 = 8;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -276,18 +276,22 @@ pub struct ExposureParams {
     pub color_grading: ColorGrading,
 }
 
-/// Exposure lift used for a newly opened image in the modern scene-referred
-/// workflow. `Default` remains a neutral processing state so regression and
-/// API callers can explicitly request an unmodified linear rendering.
-pub const DEFAULT_SCENE_EXPOSURE_EV: f32 = 0.7;
+/// Fixed backend exposure lift applied only to the global Exposure control.
+/// The user-facing/global edit value is centered at 0 EV; local-mask Exposure
+/// remains an unbiased relative adjustment.
+pub const GLOBAL_EXPOSURE_BACKEND_OFFSET_EV: f32 = 0.7;
 
 impl ExposureParams {
     pub fn migrate_to_current_process(&mut self) {
-        // Version 7 fixes the inpainting working-space conversion and blends
-        // generated patches through an antialiased coverage edge.
-        // Older edits are marked as migrated before their next save.
+        // Version 8 rebases the persisted global Exposure control so 0 is the
+        // neutral UI value while the historical +0.7 EV rendition lift moves
+        // to the backend. Subtracting the lift here preserves the exact render
+        // of older sidecars after the backend starts adding it automatically.
         match self.process_version {
-            0..=6 => self.process_version = CURRENT_PROCESS_VERSION,
+            0..=7 => {
+                self.exposure -= GLOBAL_EXPOSURE_BACKEND_OFFSET_EV;
+                self.process_version = CURRENT_PROCESS_VERSION;
+            }
             CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently
@@ -311,10 +315,7 @@ impl ExposureParams {
     }
 
     pub fn scene_referred_default() -> Self {
-        Self {
-            exposure: DEFAULT_SCENE_EXPOSURE_EV,
-            ..Self::default()
-        }
+        Self::default()
     }
 }
 
@@ -372,7 +373,7 @@ impl Default for ExposureParams {
 mod tests {
     use super::{
         DemosaicMode, ExposureParams, PointCurve, CURRENT_PROCESS_VERSION,
-        DEFAULT_SCENE_EXPOSURE_EV,
+        GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
     };
     use crate::pipeline::SigmoidParams;
 
@@ -385,13 +386,13 @@ mod tests {
     }
 
     #[test]
-    fn neutral_default_and_initial_rendition_are_distinct() {
+    fn global_exposure_defaults_to_zero_in_the_edit_model() {
         let neutral = ExposureParams::default();
         assert_eq!(neutral.exposure, 0.0);
         assert_eq!(neutral.black_point, 0.0);
 
         let rendition = ExposureParams::scene_referred_default();
-        assert_eq!(rendition.exposure, DEFAULT_SCENE_EXPOSURE_EV);
+        assert_eq!(rendition.exposure, 0.0);
         assert_eq!(rendition.black_point, 0.0);
         assert_eq!(rendition.sigmoid, SigmoidParams::default());
         assert_eq!(rendition.contrast, 0.0);
@@ -424,9 +425,11 @@ mod tests {
     fn older_presence_formulas_migrate_to_the_current_version() {
         let mut params = ExposureParams {
             process_version: CURRENT_PROCESS_VERSION - 1,
+            exposure: GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
             ..ExposureParams::default()
         };
         params.migrate_to_current_process();
         assert_eq!(params.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(params.exposure, 0.0);
     }
 }

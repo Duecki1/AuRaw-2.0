@@ -153,10 +153,15 @@ impl AurawApp {
         } else {
             Arc::new(build_proxy(&full_raw, preview_spec))
         };
-        let restored_history_masks = self.history_lens_restore_masks.take();
-        let empty_masks = MaskStack::default();
-        let preview_masks = restored_history_masks.as_ref().unwrap_or(&empty_masks);
-        let params = GpuParams::new(&self.exposure, preview_masks, &preview_raw);
+        if let Some(restored_masks) = self.history_lens_restore_masks.take() {
+            self.masks = restored_masks;
+            self.rehydrate_restored_mask_state();
+        }
+        // Lens correction must never destroy local edits. Rebuild the GPU
+        // preview with the existing mask stack, then mark source-dependent
+        // masks as stale so the user can explicitly refresh them.
+        let preview_masks = self.masks.clone();
+        let params = GpuParams::new(&self.exposure, &preview_masks, &preview_raw);
         let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
             &render_state.device,
             &render_state.queue,
@@ -172,10 +177,26 @@ impl AurawApp {
                 return;
             }
         };
-        if let Err(error) =
-            Self::upload_preview_masks(&pipeline, &render_state.queue, preview_masks, &preview_raw)
-        {
+        if let Err(error) = Self::upload_preview_masks(
+            &pipeline,
+            &render_state.queue,
+            &preview_masks,
+            &preview_raw,
+        ) {
             self.notice = Some(error);
+            return;
+        }
+        if let Err(error) = pipeline.update_inpaint_layer(
+            &render_state.queue,
+            self.inpaint_layer.as_ref(),
+            0,
+            0,
+            preview_raw.width,
+            preview_raw.height,
+        ) {
+            self.notice = Some(format!(
+                "Could not rebuild lens-corrected preview inpainting: {error:#}"
+            ));
             return;
         }
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
@@ -202,55 +223,11 @@ impl AurawApp {
         pipeline.register_egui_texture(&render_state.device, &mut renderer);
         drop(renderer);
 
-        // Existing local masks are tied to the previous image geometry. Clear
-        // them rather than silently applying them to shifted content.
-        self.masks.clear();
-        self.reset_inpainting_state();
-        self.active_mask_tool = None;
-        self.brush_mode = BrushMode::Paint;
-        self.mask_drag = None;
-        self.last_brush_point = None;
-        self.mask_touch_gesture_backup = None;
-        self.mask_interaction_dirty_layer = None;
-        self.mask_interaction_last_upload = None;
-        self.mask_interaction_has_uncommitted_change = false;
-        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
-        self.mask_overlay_texture = None;
-        self.mask_overlay_texture_key = None;
-        self.mask_overlay_blink = None;
-        self.mask_thumbnail_group_textures.clear();
-        self.mask_thumbnail_component_mask = None;
-        self.mask_thumbnail_component_textures.clear();
-        self.mask_thumbnail_revision = self.mask_overlay_revision;
-        self.mask_source_cache = None;
-        self.subject_mask_cache = None;
-        self.ai_masks_need_update = false;
-        self.ai_mask_update_active = false;
-        self.ai_mask_update_subject_pending = false;
-        self.ai_mask_update_object_queue.clear();
-        self.ai_mask_update_failed = false;
-        self.subject_consent_open = false;
-        self.subject_receiver = None;
-        self.subject_download_progress = None;
-        self.subject_inferencing = false;
-        self.object_consent_open = false;
-        self.object_pending_target = None;
-        self.object_receiver = None;
-        self.object_download_progress = None;
-        self.object_inferencing = false;
-        self.object_decoder_only = false;
-        self.object_generation = self.object_generation.wrapping_add(1);
-        self.object_job_generation = 0;
-        self.object_job_target = None;
-        self.object_cache = None;
+        self.rehydrate_restored_mask_state();
+        self.note_lens_correction_changed_for_masks();
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
-
-        if let Some(restored_masks) = restored_history_masks {
-            self.masks = restored_masks;
-            self.rehydrate_restored_mask_state();
-        }
 
         self.loaded_raw = Some(full_raw);
         self.preview_raw = Some(preview_raw);

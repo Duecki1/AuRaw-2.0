@@ -327,13 +327,6 @@ impl CameraProfile {
         }
     }
 
-    pub(crate) fn has_dcp_rendering_stages(&self) -> bool {
-        self.baseline_exposure_offset.abs() > 1e-6
-            || self.hue_sat_maps.iter().any(Option::is_some)
-            || self.look_table.is_some()
-            || self.tone_curve.is_some()
-    }
-
     pub(crate) fn gpu_layout(&self) -> ProfileGpuLayout {
         ProfileGpuLayout::new(self)
     }
