@@ -377,6 +377,32 @@ pub(crate) enum MaskOverlayBlink {
     ComponentThenGroup,
 }
 
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Debug)]
+struct LibraryBatchExportJob {
+    source: PathBuf,
+    destination: PathBuf,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Debug)]
+struct LibraryBatchExportJob {
+    uri: String,
+    display_name: String,
+}
+
+#[derive(Debug)]
+struct LibraryBatchExportState {
+    pending: VecDeque<LibraryBatchExportJob>,
+    current: Option<LibraryBatchExportJob>,
+    total: usize,
+    completed: usize,
+    failures: Vec<String>,
+    cancel_requested: bool,
+    format: ExportFormat,
+    settings: ExportSettings,
+}
+
 pub struct AurawApp {
     pub current_path: Option<PathBuf>,
     pub(crate) original_raw: Option<Arc<LoadedRaw>>,
@@ -479,6 +505,7 @@ pub struct AurawApp {
     loading_label: Option<String>,
     export_receiver: Option<mpsc::Receiver<ExportEvent>>,
     export_progress: Option<(usize, usize)>,
+    library_batch_export: Option<LibraryBatchExportState>,
     export_publish_pending: bool,
     image_status: String,
     current_label: Option<String>,

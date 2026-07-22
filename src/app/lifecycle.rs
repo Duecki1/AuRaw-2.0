@@ -243,6 +243,7 @@ impl AurawApp {
             loading_label: None,
             export_receiver: None,
             export_progress: None,
+            library_batch_export: None,
             export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
             current_label: None,
@@ -413,6 +414,7 @@ impl AurawApp {
             loading_label: None,
             export_receiver: None,
             export_progress: None,
+            library_batch_export: None,
             export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
             current_label: None,
@@ -1485,7 +1487,11 @@ impl AurawApp {
             match result {
                 crate::android::PickerResult::Picked(document) => {
                     self.library.refresh(&self.egui_ctx);
-                    self.active_tab = AppTab::Develop;
+                    self.active_tab = if self.library_batch_export.is_some() {
+                        AppTab::Library
+                    } else {
+                        AppTab::Develop
+                    };
                     let sidecar_target = crate::sidecar::SidecarTarget::Android {
                         raw_uri: document.library_uri,
                         display_name: document.display_name.clone(),
@@ -1546,11 +1552,15 @@ impl AurawApp {
                 }
                 crate::android::PickerResult::Failed(error) => {
                     let was_profile_reload = self.pending_android_profile_reload.take().is_some();
-                    self.notice = Some(if was_profile_reload {
-                        format!("Could not reload RAW for camera profile: {error}")
+                    if self.library_batch_export.is_some() && !was_profile_reload {
+                        self.complete_android_library_batch_export_item(Err(error));
                     } else {
-                        format!("Could not import the selected file: {error}")
-                    });
+                        self.notice = Some(if was_profile_reload {
+                            format!("Could not reload RAW for camera profile: {error}")
+                        } else {
+                            format!("Could not import the selected file: {error}")
+                        });
+                    }
                 }
             }
         }
@@ -1684,10 +1694,12 @@ impl AurawApp {
                     loaded.sidecar_needs_rewrite,
                 );
                 log::info!("loaded RAW preview for {}", loaded.label);
+                self.on_library_batch_load_finished(true, frame);
             }
             Err(error) => {
                 self.notice = Some(format!("Failed to decode or render RAW: {error}"));
                 log::error!("RAW load failed: {error}");
+                self.on_library_batch_load_finished(false, frame);
             }
         }
     }

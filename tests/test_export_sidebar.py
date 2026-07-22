@@ -125,3 +125,11 @@ def test_export_tone_statistics_cover_native_resolution_tile_cores() -> None:
     assert ".with_tone_histogram_bounds(" in EXPORT
     assert "tone_histogram_bounds: [u32; 4]" in gpu
     assert "params.tone_histogram_bounds" in tone
+
+
+def test_export_sidebar_shows_live_progress_bar() -> None:
+    assert "export_progress_state" in SIDEBAR
+    assert "egui::ProgressBar::new" in SIDEBAR
+    assert "Preparing export…" in SIDEBAR
+    assert "tiles" in SIDEBAR
+

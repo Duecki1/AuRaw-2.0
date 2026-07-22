@@ -584,6 +584,30 @@ pub fn remove_raw_sidecar(
     Ok(())
 }
 
+pub fn duplicate_library_document(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+) -> Result<String, String> {
+    let raw_uri_owned = raw_uri.to_owned();
+    let display_name_owned = display_name.to_owned();
+    with_activity(app, |env, activity| {
+        let raw_uri = env.new_string(&raw_uri_owned)?;
+        let display_name = env.new_string(&display_name_owned)?;
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("duplicateRawLibraryDocument"),
+                jni::jni_sig!((JString, JString) -> JString),
+                &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
+            )?
+            .l()?;
+        let name = env.cast_local::<JString>(object)?;
+        Ok(name.to_string())
+    })
+    .map_err(|error| format!("could not duplicate Android RAW library item: {error:#}"))
+}
+
 pub fn delete_library_document(
     app: &AndroidApp,
     raw_uri: &str,

@@ -1364,10 +1364,465 @@ impl AurawApp {
         self.notice = None;
     }
 
+    pub(crate) fn export_progress_state(&self) -> Option<(usize, usize)> {
+        self.export_progress
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn library_batch_export_progress(&self) -> Option<(usize, usize)> {
+        self.library_batch_export
+            .as_ref()
+            .map(|batch| (batch.completed, batch.total))
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn library_batch_export_progress(&self) -> Option<(usize, usize)> {
+        self.library_batch_export
+            .as_ref()
+            .map(|batch| (batch.completed, batch.total))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn library_batch_export_status(
+        &self,
+    ) -> Option<(usize, usize, usize, Option<String>, bool)> {
+        self.library_batch_export.as_ref().map(|batch| {
+            let failed = batch.failures.len();
+            let current = batch.current.as_ref().map(|job| {
+                job.source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("image")
+                    .to_owned()
+            });
+            (
+                batch.completed,
+                batch.total,
+                failed,
+                current,
+                batch.cancel_requested,
+            )
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn cancel_library_batch_export(&mut self) {
+        let finish_now = if let Some(batch) = self.library_batch_export.as_mut() {
+            batch.cancel_requested = true;
+            batch.pending.clear();
+            batch.current.is_none()
+        } else {
+            false
+        };
+        if finish_now {
+            self.finish_library_batch_export();
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn library_batch_export_status(
+        &self,
+    ) -> Option<(usize, usize, usize, Option<String>, bool)> {
+        self.library_batch_export.as_ref().map(|batch| {
+            (
+                batch.completed,
+                batch.total,
+                batch.failures.len(),
+                batch.current.as_ref().map(|job| job.display_name.clone()),
+                batch.cancel_requested,
+            )
+        })
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn cancel_library_batch_export(&mut self) {
+        let finish_now = if let Some(batch) = self.library_batch_export.as_mut() {
+            batch.cancel_requested = true;
+            batch.pending.clear();
+            batch.current.is_none()
+        } else {
+            false
+        };
+        if finish_now {
+            self.finish_library_batch_export();
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn start_android_library_exports(
+        &mut self,
+        targets: Vec<(String, String)>,
+        settings: ExportSettings,
+        format: ExportFormat,
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        if self.load_receiver.is_some()
+            || self.export_receiver.is_some()
+            || self.export_publish_pending
+            || self.library_batch_export.is_some()
+        {
+            self.notice = Some("Wait for the current load or export to finish.".to_owned());
+            return;
+        }
+
+        let pending = targets
+            .into_iter()
+            .map(|(uri, display_name)| LibraryBatchExportJob { uri, display_name })
+            .collect::<VecDeque<_>>();
+        let total = pending.len();
+        self.library_batch_export = Some(LibraryBatchExportState {
+            pending,
+            current: None,
+            total,
+            completed: 0,
+            failures: Vec::new(),
+            cancel_requested: false,
+            format,
+            settings,
+        });
+        self.export_settings = settings;
+        self.active_tab = AppTab::Library;
+        self.notice = Some(format!(
+            "Preparing to export {total} {}…",
+            if total == 1 { "image" } else { "images" }
+        ));
+        self.start_next_library_export();
+    }
+
+    #[cfg(target_os = "android")]
+    fn start_next_library_export(&mut self) {
+        loop {
+            let next = {
+                let Some(batch) = self.library_batch_export.as_mut() else {
+                    return;
+                };
+                if batch.current.is_some() {
+                    return;
+                }
+                if batch.cancel_requested {
+                    None
+                } else {
+                    batch.pending.pop_front().map(|job| {
+                        batch.current = Some(job.clone());
+                        job
+                    })
+                }
+            };
+
+            let Some(job) = next else {
+                self.finish_library_batch_export();
+                return;
+            };
+
+            match crate::android::open_library_document(
+                &self.android_app,
+                &job.uri,
+                &job.display_name,
+            ) {
+                Ok(()) => {
+                    self.picker_pending = true;
+                    self.notice = None;
+                    self.status = format!("Opening {}…", job.display_name);
+                    self.active_tab = AppTab::Library;
+                    return;
+                }
+                Err(error) => {
+                    if let Some(batch) = self.library_batch_export.as_mut() {
+                        batch.failures.push(format!("{}: {error}", job.display_name));
+                        batch.completed += 1;
+                        batch.current = None;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn on_library_batch_load_finished(&mut self, success: bool, frame: &eframe::Frame) {
+        let Some(batch) = self.library_batch_export.as_ref() else {
+            return;
+        };
+        let Some(current) = batch.current.as_ref() else {
+            return;
+        };
+
+        if !success {
+            let name = current.display_name.clone();
+            if let Some(batch) = self.library_batch_export.as_mut() {
+                batch.failures.push(format!("{name}: RAW load failed"));
+                batch.completed += 1;
+                batch.current = None;
+            }
+            self.start_next_library_export();
+            return;
+        }
+
+        let format = batch.format;
+        let settings = batch.settings;
+        let display_name = current.display_name.clone();
+        self.export_settings = settings;
+        let Some(data_dir) = self.android_app.internal_data_path() else {
+            self.complete_android_library_batch_export_item(Err(format!(
+                "{display_name}: Android did not provide an app data directory"
+            )));
+            return;
+        };
+        let export_dir = data_dir.join("cache").join("exports");
+        if let Err(error) = std::fs::create_dir_all(&export_dir) {
+            self.complete_android_library_batch_export_item(Err(format!(
+                "{display_name}: could not prepare export cache: {error}"
+            )));
+            return;
+        }
+        let stem = std::path::Path::new(&display_name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("AuRaw-export");
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let destination = export_dir.join(format!(
+            "{stem}-auraw-{timestamp}.{}",
+            format.extension()
+        ));
+        self.start_export(destination, frame, format);
+        self.active_tab = AppTab::Library;
+        if self.export_receiver.is_none() {
+            self.complete_android_library_batch_export_item(Err(format!(
+                "{display_name}: could not start export"
+            )));
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn complete_android_library_batch_export_item(&mut self, result: Result<(), String>) {
+        if let Some(batch) = self.library_batch_export.as_mut() {
+            let name = batch
+                .current
+                .as_ref()
+                .map(|job| job.display_name.clone())
+                .unwrap_or_else(|| "image".to_owned());
+            if let Err(error) = result {
+                batch.failures.push(if error.starts_with(&name) {
+                    error
+                } else {
+                    format!("{name}: {error}")
+                });
+            }
+            batch.completed += 1;
+            batch.current = None;
+        }
+        self.start_next_library_export();
+    }
+
+    #[cfg(target_os = "android")]
+    fn finish_library_batch_export(&mut self) {
+        let Some(batch) = self.library_batch_export.take() else {
+            return;
+        };
+        let succeeded = batch.completed.saturating_sub(batch.failures.len());
+        self.active_tab = AppTab::Library;
+        self.notice = if batch.cancel_requested {
+            Some(format!(
+                "Batch export cancelled after {succeeded} of {} images exported.",
+                batch.total
+            ))
+        } else if batch.failures.is_empty() {
+            Some(format!(
+                "Exported {succeeded} {} to Pictures/AuRaw.",
+                if succeeded == 1 { "image" } else { "images" }
+            ))
+        } else {
+            Some(format!(
+                "Exported {succeeded} of {} images. {}",
+                batch.total,
+                batch.failures.join(" · ")
+            ))
+        };
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn start_library_exports(
+        &mut self,
+        jobs: Vec<(PathBuf, PathBuf)>,
+        settings: ExportSettings,
+        format: ExportFormat,
+        frame: &eframe::Frame,
+    ) {
+        if jobs.is_empty() {
+            return;
+        }
+        if self.load_receiver.is_some() || self.export_receiver.is_some() || self.library_batch_export.is_some() {
+            self.notice = Some("Wait for the current load or export to finish.".to_owned());
+            return;
+        }
+
+        let pending = jobs
+            .into_iter()
+            .map(|(source, destination)| LibraryBatchExportJob { source, destination })
+            .collect::<VecDeque<_>>();
+        let total = pending.len();
+        self.library_batch_export = Some(LibraryBatchExportState {
+            pending,
+            current: None,
+            total,
+            completed: 0,
+            failures: Vec::new(),
+            cancel_requested: false,
+            format,
+            settings,
+        });
+        self.export_settings = settings;
+        self.active_tab = AppTab::Library;
+        self.notice = Some(format!(
+            "Preparing to export {total} {}…",
+            if total == 1 { "image" } else { "images" }
+        ));
+        self.start_next_library_export(frame);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn start_next_library_export(&mut self, frame: &eframe::Frame) {
+        let next = {
+            let Some(batch) = self.library_batch_export.as_mut() else {
+                return;
+            };
+            if batch.current.is_some() {
+                return;
+            }
+            if batch.cancel_requested {
+                None
+            } else {
+                batch.pending.pop_front().map(|job| {
+                    batch.current = Some(job.clone());
+                    (job, batch.settings)
+                })
+            }
+        };
+
+        let Some((job, settings)) = next else {
+            self.finish_library_batch_export();
+            return;
+        };
+        self.export_settings = settings;
+        self.open_path(job.source, frame);
+        // Batch export is initiated from Library. Loading uses the normal RAW
+        // pipeline so sidecars, masks, inpainting, camera profiles and lens
+        // correction exactly match Develop, but the UI remains in Library.
+        self.active_tab = AppTab::Library;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn on_library_batch_load_finished(&mut self, success: bool, frame: &eframe::Frame) {
+        let Some(batch) = self.library_batch_export.as_ref() else {
+            return;
+        };
+        let Some(current) = batch.current.as_ref() else {
+            return;
+        };
+
+        if !success {
+            let source = current.source.display().to_string();
+            if let Some(batch) = self.library_batch_export.as_mut() {
+                batch.failures.push(format!("{source}: RAW load failed"));
+                batch.completed += 1;
+                batch.current = None;
+            }
+            self.start_next_library_export(frame);
+            return;
+        }
+
+        let destination = current.destination.clone();
+        let format = batch.format;
+        let settings = batch.settings;
+        self.export_settings = settings;
+        self.start_export(destination, frame, format);
+        if self.export_receiver.is_none() {
+            if let Some(batch) = self.library_batch_export.as_mut() {
+                let source = batch
+                    .current
+                    .as_ref()
+                    .map(|job| job.source.display().to_string())
+                    .unwrap_or_else(|| "image".to_owned());
+                batch.failures.push(format!("{source}: could not start export"));
+                batch.completed += 1;
+                batch.current = None;
+            }
+            self.start_next_library_export(frame);
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn complete_library_batch_export_item(
+        &mut self,
+        result: Result<PathBuf, String>,
+        frame: &eframe::Frame,
+    ) {
+        if let Some(batch) = self.library_batch_export.as_mut() {
+            let source = batch
+                .current
+                .as_ref()
+                .map(|job| job.source.display().to_string())
+                .unwrap_or_else(|| "image".to_owned());
+            if let Err(error) = result {
+                batch.failures.push(format!("{source}: {error}"));
+            }
+            batch.completed += 1;
+            batch.current = None;
+        }
+        self.start_next_library_export(frame);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn finish_library_batch_export(&mut self) {
+        let Some(batch) = self.library_batch_export.take() else {
+            return;
+        };
+        let succeeded = batch.completed.saturating_sub(batch.failures.len());
+        self.active_tab = AppTab::Library;
+        self.notice = if batch.cancel_requested {
+            let mut message = format!(
+                "Batch export cancelled after {succeeded} of {} images exported.",
+                batch.total
+            );
+            if !batch.failures.is_empty() {
+                message.push_str(&format!(" {} failed. {}", batch.failures.len(), batch.failures.join(" · ")));
+            }
+            Some(message)
+        } else if batch.failures.is_empty() {
+            Some(format!(
+                "Exported {succeeded} {}.",
+                if succeeded == 1 { "image" } else { "images" }
+            ))
+        } else {
+            Some(format!(
+                "Exported {succeeded} of {} images. {}",
+                batch.total,
+                batch.failures.join(" · ")
+            ))
+        };
+    }
+
     #[cfg(target_os = "android")]
     fn poll_android_export_publish(&mut self) {
         while let Some(result) = crate::android::take_export_publish_result() {
             self.export_publish_pending = false;
+            if self.library_batch_export.is_some() {
+                match result {
+                    crate::android::ExportPublishResult::Published(_) => {
+                        self.complete_android_library_batch_export_item(Ok(()));
+                    }
+                    crate::android::ExportPublishResult::Failed(error) => {
+                        log::error!("Android batch export publish failed: {error}");
+                        self.complete_android_library_batch_export_item(Err(error));
+                    }
+                }
+                continue;
+            }
             match result {
                 crate::android::ExportPublishResult::Published(location) => {
                     self.notice = Some(format!("Exported to {location}"));
@@ -1380,7 +1835,7 @@ impl AurawApp {
         }
     }
 
-    fn poll_export_worker(&mut self) {
+    fn poll_export_worker(&mut self, frame: &eframe::Frame) {
         let mut events = Vec::new();
         let mut disconnected = false;
         if let Some(receiver) = &self.export_receiver {
@@ -1397,6 +1852,10 @@ impl AurawApp {
         }
 
         let mut finished = false;
+        #[cfg(not(target_os = "android"))]
+        let mut batch_result: Option<Result<PathBuf, String>> = None;
+        #[cfg(target_os = "android")]
+        let mut android_batch_error: Option<String> = None;
         for event in events {
             match event {
                 ExportEvent::Progress {
@@ -1406,6 +1865,13 @@ impl AurawApp {
                 ExportEvent::Finished(result) => {
                     finished = true;
                     self.export_progress = None;
+
+                    #[cfg(not(target_os = "android"))]
+                    if self.library_batch_export.is_some() {
+                        batch_result = Some(result);
+                        continue;
+                    }
+
                     match result {
                         Ok(path) => {
                             #[cfg(not(target_os = "android"))]
@@ -1427,15 +1893,26 @@ impl AurawApp {
                                     }
                                     _ => ExportFormat::Png,
                                 };
-                                let fallback_name = format!(
-                                    "AuRaw-export.{}",
-                                    format.extension()
-                                );
-                                let display_name = path
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .unwrap_or(&fallback_name)
-                                    .to_owned();
+                                let fallback_name =
+                                    format!("AuRaw-export.{}", format.extension());
+                                let display_name = self
+                                    .library_batch_export
+                                    .as_ref()
+                                    .and_then(|batch| batch.current.as_ref())
+                                    .map(|job| {
+                                        let stem = std::path::Path::new(&job.display_name)
+                                            .file_stem()
+                                            .and_then(|stem| stem.to_str())
+                                            .filter(|stem| !stem.is_empty())
+                                            .unwrap_or("AuRaw-export");
+                                        format!("{stem}-auraw.{}", format.extension())
+                                    })
+                                    .or_else(|| {
+                                        path.file_name()
+                                            .and_then(|name| name.to_str())
+                                            .map(str::to_owned)
+                                    })
+                                    .unwrap_or(fallback_name);
                                 match crate::android::publish_image(
                                     &self.android_app,
                                     &path,
@@ -1448,12 +1925,19 @@ impl AurawApp {
                                     }
                                     Err(error) => {
                                         let _ = std::fs::remove_file(&path);
+                                        if self.library_batch_export.is_some() {
+                                            android_batch_error = Some(error.clone());
+                                        }
                                         self.notice = Some(format!("Export failed: {error}"));
                                     }
                                 }
                             }
                         }
                         Err(error) => {
+                            #[cfg(target_os = "android")]
+                            if self.library_batch_export.is_some() {
+                                android_batch_error = Some(error.clone());
+                            }
                             self.notice = Some(format!("Export failed: {error}"));
                             log::error!("export failed: {error}");
                         }
@@ -1468,6 +1952,25 @@ impl AurawApp {
                 self.export_progress = None;
                 self.notice = Some("Export worker stopped unexpectedly.".to_owned());
             }
+        }
+
+        #[cfg(not(target_os = "android"))]
+        if let Some(result) = batch_result {
+            self.complete_library_batch_export_item(result, frame);
+        } else if disconnected && self.library_batch_export.is_some() {
+            self.complete_library_batch_export_item(
+                Err("export worker stopped unexpectedly".to_owned()),
+                frame,
+            );
+        }
+
+        #[cfg(target_os = "android")]
+        if let Some(error) = android_batch_error {
+            self.complete_android_library_batch_export_item(Err(error));
+        } else if disconnected && self.library_batch_export.is_some() {
+            self.complete_android_library_batch_export_item(Err(
+                "export worker stopped unexpectedly".to_owned(),
+            ));
         }
     }
 
