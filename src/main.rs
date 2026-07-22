@@ -1,5 +1,9 @@
 #[cfg(not(target_os = "android"))]
 fn main() -> eframe::Result {
+    let args = std::env::args().collect::<Vec<_>>();
+    if let Some(code) = auraw::run_onnx_runtime_probe_cli(&args) {
+        std::process::exit(code);
+    }
     auraw::run_desktop()
 }
 

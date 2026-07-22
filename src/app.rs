@@ -523,6 +523,7 @@ pub struct AurawApp {
     object_download_progress: Option<(&'static str, u64, u64)>,
     object_inferencing: bool,
     object_decoder_only: bool,
+    object_error_dialog: Option<String>,
     object_generation: u64,
     object_job_generation: u64,
     object_job_target: Option<(usize, usize)>,

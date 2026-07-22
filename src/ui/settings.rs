@@ -275,12 +275,12 @@ impl Settings {
             ui.add_space(8.0);
             Self::group(ui, content_width, |ui| {
                 ui.heading("Subject selection runtime");
-                ui.add(
-                    egui::Label::new(
-                        "Choose a trusted ONNX Runtime 1.18 or newer shared library built for your hardware. AuRaw never downloads or dynamically loads a native runtime without this explicit selection. GPU provider libraries and their dependencies must remain beside it.",
-                    )
-                    .wrap(),
-                );
+                let runtime_help = if cfg!(target_os = "windows") {
+                    "Choose a trusted ONNX Runtime 1.18 or newer onnxruntime.dll that matches this AuRaw build's CPU architecture. AuRaw validates the DLL in an isolated helper process before AI tools use it. Windows AI masks currently use the core CPU execution provider for stability with user-selected runtimes."
+                } else {
+                    "Choose a trusted ONNX Runtime 1.18 or newer shared library built for your hardware. AuRaw never downloads or dynamically loads a native runtime without this explicit selection. GPU provider libraries and their dependencies must remain beside it."
+                };
+                ui.add(egui::Label::new(runtime_help).wrap());
                 ui.add_space(4.0);
                 if let Some(path) = &app.onnx_runtime_path {
                     ui.label("Selected runtime:");

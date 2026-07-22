@@ -39,6 +39,9 @@ static VITMATTE_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(not(target_os = "android"))]
+static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<(PathBuf, String, Option<String>)>>> =
+    OnceLock::new();
 
 #[derive(Debug)]
 pub enum SubjectMaskEvent {
@@ -283,6 +286,64 @@ fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Resul
 }
 
 #[cfg(not(target_os = "android"))]
+pub(crate) fn probe_runtime_subprocess(
+    runtime_path: &Path,
+    expected_sha256: &str,
+) -> Result<()> {
+    let runtime_path = fs::canonicalize(runtime_path)
+        .with_context(|| format!("resolve selected ONNX Runtime {}", runtime_path.display()))?;
+    let cache = RUNTIME_PROBE_CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let cached = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ONNX Runtime probe cache lock was poisoned"))?;
+        if let Some((cached_path, cached_sha256, cached_error)) = cached.as_ref() {
+            if cached_path == &runtime_path && cached_sha256 == expected_sha256 {
+                return match cached_error {
+                    Some(error) => Err(anyhow::anyhow!(error.clone())),
+                    None => Ok(()),
+                };
+            }
+        }
+    }
+
+    let executable = std::env::current_exe().context("locate AuRaw executable for ONNX Runtime probe")?;
+    let status = std::process::Command::new(&executable)
+        .arg("--auraw-onnx-runtime-probe")
+        .arg(&runtime_path)
+        .arg(expected_sha256)
+        .status()
+        .with_context(|| {
+            format!(
+                "start isolated ONNX Runtime probe with {}",
+                executable.display()
+            )
+        })?;
+    let error = if status.success() {
+        None
+    } else {
+        Some(format!(
+            "the selected ONNX Runtime failed AuRaw's isolated compatibility probe ({status}). Use a matching native {} ONNX Runtime DLL; on Windows the standard CPU package is the safest choice",
+            std::env::consts::ARCH
+        ))
+    };
+    let result = match &error {
+        Some(error) => Err(anyhow::anyhow!(error.clone())),
+        None => Ok(()),
+    };
+    let mut cached = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("ONNX Runtime probe cache lock was poisoned"))?;
+    *cached = Some((runtime_path, expected_sha256.to_owned(), error));
+    result
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn run_runtime_probe_process(runtime_path: &Path, expected_sha256: &str) -> Result<()> {
+    initialize_runtime(Some(runtime_path), Some(expected_sha256))
+}
+
+#[cfg(not(target_os = "android"))]
 pub(crate) fn initialize_runtime(
     runtime_path: Option<&Path>,
     expected_sha256: Option<&str>,
@@ -437,6 +498,8 @@ pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
 fn create_cpu_session(model_path: &Path) -> Result<Session> {
     let mut builder = Session::builder()
         .context("create CPU ONNX Runtime session")?
+        .with_memory_pattern(false)
+        .map_err(|error| anyhow::anyhow!("disable desktop ONNX memory pattern: {error}"))?
         .with_execution_providers([ort::ep::CPU::default().build()])
         .map_err(|error| anyhow::anyhow!("configure ONNX CPU execution provider: {error}"))?;
     builder
@@ -445,7 +508,34 @@ fn create_cpu_session(model_path: &Path) -> Result<Session> {
 }
 
 #[cfg(target_os = "linux")]
+fn running_from_appimage() -> bool {
+    std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some()
+}
+
+#[cfg(not(target_os = "android"))]
+fn cache_object_ai_sessions() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // AppImages frequently use a user-selected external ONNX Runtime. Keep
+        // the object-mask pipeline conservative there: do not retain the SAM
+        // encoder/decoder/ViTMatte sessions simultaneously between runs. This
+        // reduces peak resident memory and avoids stale provider state.
+        return !running_from_appimage();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
+    if running_from_appimage() {
+        log::info!(
+            "Running from AppImage; using the CPU ONNX provider for stable AI-mask inference"
+        );
+        return Ok(None);
+    }
     // Only register provider libraries that actually ship beside the selected
     // libonnxruntime. The ort crate/ONNX Runtime will fall back unsupported graph
     // nodes to CPU automatically inside a successfully-created session.
@@ -490,24 +580,14 @@ fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
 }
 
 #[cfg(target_os = "windows")]
-fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
-    let mut builder = Session::builder()
-        .context("create accelerated ONNX Runtime session")?
-        .with_execution_providers([
-            ort::ep::TensorRT::default().build(),
-            ort::ep::CUDA::default().build(),
-            ort::ep::DirectML::default().build(),
-        ])
-        .map_err(|error| anyhow::anyhow!("configure Windows ONNX execution providers: {error}"))?;
-    builder
-        .commit_from_file(model_path)
-        .map(Some)
-        .with_context(|| {
-            format!(
-                "load ONNX model with Windows acceleration from {}",
-                model_path.display()
-            )
-        })
+fn create_accelerated_session(_model_path: &Path) -> Result<Option<Session>> {
+    // A user-selected `onnxruntime.dll` may come from the CPU, CUDA, TensorRT,
+    // or DirectML distribution. Calling provider factory APIs that are absent
+    // from that exact build can cross a native ABI boundary before Rust gets a
+    // recoverable error. The CPU provider is guaranteed by the core runtime,
+    // so Windows uses it unless AuRaw later grows an explicit, validated
+    // provider-package selection UI.
+    Ok(None)
 }
 
 #[cfg(target_os = "macos")]
@@ -1052,7 +1132,12 @@ fn build_vitmatte_trimap(mask: &[u8], width: usize, height: usize) -> Vec<u8> {
             let index = y * width + x;
             let value = mask[index];
             let foreground = value >= 128;
-            let mut boundary = (8..=247).contains(&value);
+            // Do not classify every soft SAM probability as an unknown matte
+            // pixel. That made textured object interiors (glass, fabric, fur)
+            // entirely "unknown" and let ViTMatte punch speckled alpha holes
+            // through otherwise solid selections. Only the actual binary edge
+            // and a narrow ambiguous band around 0.5 become unknown.
+            let mut boundary = (96..=160).contains(&value);
             if !boundary {
                 let min_y = y.saturating_sub(1);
                 let max_y = (y + 1).min(height - 1);
@@ -1193,19 +1278,24 @@ fn refine_mask_with_vitmatte(
     };
     #[cfg(not(target_os = "android"))]
     let (output_width, output_height, alpha) = {
-        let sessions = VITMATTE_SESSION.get_or_init(|| Mutex::new(None));
-        let mut session = sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("ViTMatte session lock was poisoned"))?;
-        if session.is_none() {
-            *session = Some(create_session(model_path)?);
+        if cache_object_ai_sessions() {
+            let sessions = VITMATTE_SESSION.get_or_init(|| Mutex::new(None));
+            let mut session = sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("ViTMatte session lock was poisoned"))?;
+            if session.is_none() {
+                *session = Some(create_session(model_path)?);
+            }
+            run_vitmatte_session(
+                session
+                    .as_mut()
+                    .context("ViTMatte session initialization produced no session")?,
+                input,
+            )?
+        } else {
+            let mut session = create_session(model_path)?;
+            run_vitmatte_session(&mut session, input)?
         }
-        run_vitmatte_session(
-            session
-                .as_mut()
-                .context("ViTMatte session initialization produced no session")?,
-            input,
-        )?
     };
 
     let alpha_image = ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)
@@ -1922,15 +2012,25 @@ fn infer_object_mask(
         full_mask[target_start..target_start + crop.width as usize]
             .copy_from_slice(&crop_mask[source_start..source_start + crop.width as usize]);
     }
-    full_mask = refine_mask_with_vitmatte(
+    full_mask = match refine_mask_with_vitmatte(
         vitmatte_path,
         source.as_raw(),
         request.source_width,
         request.source_height,
         &full_mask,
         (0.65 + request.edge_refine.clamp(0.0, 1.0) * 0.35).clamp(0.0, 1.0),
-    )
-    .context("refine object edges with ViTMatte")?;
+    ) {
+        Ok(refined) => refined,
+        Err(error) => {
+            // ViTMatte is an edge refinement stage, not the source of the
+            // object selection. A provider/model failure must not discard a
+            // perfectly usable SAM mask and look like a cancelled operation.
+            log::warn!(
+                "ViTMatte object-edge refinement failed; using the cleaned SAM mask: {error:#}"
+            );
+            full_mask
+        }
+    };
     cache.low_res_logits = resize_f32(
         &decoded.selected_logits,
         decoded.width,
@@ -2242,19 +2342,24 @@ fn encode_sam_image(
     };
     #[cfg(not(target_os = "android"))]
     let tensors = {
-        let sessions = SAM_ENCODER_SESSION.get_or_init(|| Mutex::new(None));
-        let mut guard = sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SAM encoder session lock was poisoned"))?;
-        if guard.is_none() {
-            *guard = Some(create_session(encoder_path)?);
+        if cache_object_ai_sessions() {
+            let sessions = SAM_ENCODER_SESSION.get_or_init(|| Mutex::new(None));
+            let mut guard = sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("SAM encoder session lock was poisoned"))?;
+            if guard.is_none() {
+                *guard = Some(create_session(encoder_path)?);
+            }
+            run_sam_encoder(
+                guard
+                    .as_mut()
+                    .context("SAM encoder session is unavailable")?,
+                input,
+            )?
+        } else {
+            let mut session = create_session(encoder_path)?;
+            run_sam_encoder(&mut session, input)?
         }
-        run_sam_encoder(
-            guard
-                .as_mut()
-                .context("SAM encoder session is unavailable")?,
-            input,
-        )?
     };
 
     Ok(ObjectInferenceCache {
@@ -2396,25 +2501,39 @@ fn decode_sam_mask(
     };
     #[cfg(not(target_os = "android"))]
     let (masks, scores) = {
-        let sessions = SAM_DECODER_SESSION.get_or_init(|| Mutex::new(None));
-        let mut guard = sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SAM decoder session lock was poisoned"))?;
-        if guard.is_none() {
-            *guard = Some(create_session(decoder_path)?);
+        if cache_object_ai_sessions() {
+            let sessions = SAM_DECODER_SESSION.get_or_init(|| Mutex::new(None));
+            let mut guard = sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("SAM decoder session lock was poisoned"))?;
+            if guard.is_none() {
+                *guard = Some(create_session(decoder_path)?);
+            }
+            run_sam_decoder(
+                guard
+                    .as_mut()
+                    .context("SAM decoder session is unavailable")?,
+                image_embedding,
+                high_res_0,
+                high_res_1,
+                point_coords,
+                point_labels,
+                mask_input,
+                has_mask,
+            )?
+        } else {
+            let mut session = create_session(decoder_path)?;
+            run_sam_decoder(
+                &mut session,
+                image_embedding,
+                high_res_0,
+                high_res_1,
+                point_coords,
+                point_labels,
+                mask_input,
+                has_mask,
+            )?
         }
-        run_sam_decoder(
-            guard
-                .as_mut()
-                .context("SAM decoder session is unavailable")?,
-            image_embedding,
-            high_res_0,
-            high_res_1,
-            point_coords,
-            point_labels,
-            mask_input,
-            has_mask,
-        )?
     };
     select_sam_candidate(masks, scores, prompt_set, cache)
 }
@@ -2704,15 +2823,101 @@ fn keep_prompt_connected_component(
         }
     }
 
-    // Preserve the model's soft boundary around the selected component. A
-    // hard component cut at 0.5 would discard the very sub-threshold pixels
-    // that edge-aware refinement needs for hair, fur, and anti-aliased edges.
-    let keep_band = dilate_component_band(&keep, width_usize, height_usize, 16);
+    // SAM probabilities can contain small sub-threshold islands inside a
+    // visually solid object. Fill enclosed holes in the selected silhouette,
+    // then make the deep interior definitively opaque while keeping a narrow
+    // soft band for edge-aware/ViTMatte refinement. This prevents texture from
+    // appearing as pinholes without sacrificing hair or anti-aliased edges.
+    fill_enclosed_component_holes(&mut keep, width_usize, height_usize);
+    let background = keep.iter().map(|selected| !*selected).collect::<Vec<_>>();
+    let near_background = dilate_component_band(&background, width_usize, height_usize, 3);
+    let soft_band = dilate_component_band(&keep, width_usize, height_usize, 10);
     probabilities
         .into_iter()
-        .zip(keep_band)
-        .map(|(probability, selected)| if selected { probability } else { 0.0 })
+        .enumerate()
+        .map(|(index, probability)| {
+            if keep[index] {
+                if near_background[index] {
+                    probability.max(0.82)
+                } else {
+                    1.0
+                }
+            } else if soft_band[index] {
+                probability.min(0.49)
+            } else {
+                0.0
+            }
+        })
         .collect()
+}
+
+fn fill_enclosed_component_holes(selected: &mut [bool], width: usize, height: usize) {
+    use std::collections::VecDeque;
+
+    if width == 0 || height == 0 || selected.len() != width.saturating_mul(height) {
+        return;
+    }
+    let mut exterior = vec![false; selected.len()];
+    let mut queue = VecDeque::new();
+    let mut seed = |x: usize, y: usize, exterior: &mut [bool], queue: &mut VecDeque<usize>| {
+        let index = y * width + x;
+        if !selected[index] && !exterior[index] {
+            exterior[index] = true;
+            queue.push_back(index);
+        }
+    };
+    for x in 0..width {
+        seed(x, 0, &mut exterior, &mut queue);
+        if height > 1 {
+            seed(x, height - 1, &mut exterior, &mut queue);
+        }
+    }
+    for y in 0..height {
+        seed(0, y, &mut exterior, &mut queue);
+        if width > 1 {
+            seed(width - 1, y, &mut exterior, &mut queue);
+        }
+    }
+    while let Some(index) = queue.pop_front() {
+        let x = index % width;
+        let y = index / width;
+        for (nx, ny) in neighbors4(x, y, width, height) {
+            let next = ny * width + nx;
+            if !selected[next] && !exterior[next] {
+                exterior[next] = true;
+                queue.push_back(next);
+            }
+        }
+    }
+    // Preserve genuine large holes (for example the opening inside a handle)
+    // while removing tiny enclosed probability pinholes.
+    let max_hole_area = (selected.len() / 512).clamp(32, 2048);
+    let mut visited_holes = vec![false; selected.len()];
+    for start in 0..selected.len() {
+        if selected[start] || exterior[start] || visited_holes[start] {
+            continue;
+        }
+        let mut component = Vec::new();
+        visited_holes[start] = true;
+        queue.push_back(start);
+        while let Some(index) = queue.pop_front() {
+            component.push(index);
+            let x = index % width;
+            let y = index / width;
+            for (nx, ny) in neighbors4(x, y, width, height) {
+                let next = ny * width + nx;
+                if !selected[next] && !exterior[next] && !visited_holes[next] {
+                    visited_holes[next] = true;
+                    queue.push_back(next);
+                }
+            }
+        }
+        if component.len() <= max_hole_area {
+            for index in component {
+                selected[index] = true;
+            }
+        }
+    }
 }
 
 fn dilate_component_band(selected: &[bool], width: usize, height: usize, radius: u16) -> Vec<bool> {

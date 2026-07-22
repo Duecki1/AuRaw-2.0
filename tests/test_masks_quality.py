@@ -166,7 +166,8 @@ def test_object_masks_always_run_vitmatte_fine_edge_refinement() -> None:
     assert "ensure_vitmatte_model(&vitmatte_path" in spawn
     assert "request.detailed_edges" not in ai
     infer = ai[ai.index("fn infer_object_mask"):ai.index("fn edge_aware_refine")]
-    assert "full_mask = refine_mask_with_vitmatte(" in infer
+    assert "full_mask = match refine_mask_with_vitmatte(" in infer
+    assert "ViTMatte object-edge refinement failed; using the cleaned SAM mask" in infer
     assert "if request.detailed_edges" not in infer
     request = app[app.index("pub(crate) fn request_object_mask"):app.index("fn start_object_worker")]
     assert "let vitmatte_ready = self.vitmatte_model_path().exists();" in request
@@ -207,3 +208,14 @@ def test_radial_and_linear_move_rotate_are_not_clamped_to_image_bounds() -> None
     assert "let dy = uv[1] - origin[1];" in PREVIEW
     assert "*start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);" in PREVIEW
     assert "*end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);" in PREVIEW
+
+
+def test_object_mask_postprocessing_prevents_speckled_interior_holes() -> None:
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    keep = ai[ai.index("fn keep_prompt_connected_component"):ai.index("fn nearest_foreground")]
+    assert "fill_enclosed_component_holes" in keep
+    assert "probability.max(0.82)" in keep
+    assert "1.0" in keep
+    trimap = ai[ai.index("fn build_vitmatte_trimap"):ai.index("fn padded_to_divisor")]
+    assert "(96..=160).contains(&value)" in trimap
+    assert "(8..=247).contains(&value)" not in trimap

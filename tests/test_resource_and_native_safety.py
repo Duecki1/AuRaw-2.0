@@ -45,9 +45,19 @@ def test_downloaded_model_is_size_and_sha256_pinned() -> None:
 
 
 def test_desktop_requires_runtime_before_model_download() -> None:
-    assert '#[cfg(not(target_os = "android"))]\n        if self.onnx_runtime_path.is_none()' in APP
+    assert "validate_onnx_runtime_for_ai" in APP
     request = APP[APP.index("pub(crate) fn request_subject_mask"):APP.index("fn start_subject_worker")]
-    assert request.index("onnx_runtime_path.is_none()") < request.index("subject_consent_open = true")
+    assert request.index("validate_onnx_runtime_for_ai()") < request.index("subject_consent_open = true")
+
+
+def test_windows_runtime_is_isolated_and_uses_safe_cpu_fallback() -> None:
+    assert "--auraw-onnx-runtime-probe" in AI or "--auraw-onnx-runtime-probe" in APP
+    assert "probe_runtime_subprocess" in AI
+    windows = AI[AI.index('#[cfg(target_os = "windows")]\nfn create_accelerated_session'):AI.index('#[cfg(target_os = "macos")]')]
+    assert "Ok(None)" in windows
+    assert "ort::ep::TensorRT" not in windows
+    assert "ort::ep::CUDA" not in windows
+    assert "ort::ep::DirectML" not in windows
 
 
 def test_raw_geometry_is_rejected_before_unpack() -> None:
@@ -176,3 +186,13 @@ def test_large_object_mask_models_resume_after_transient_download_failures() -> 
         assert "const MAX_ATTEMPTS: usize = 5" in downloader
         assert "file.sync_data()" in downloader
         assert "timeout_recv_body(Some(Duration::from_secs(30 * 60)))" in downloader
+
+
+def test_linux_appimage_ai_uses_stable_cpu_and_nonpersistent_object_sessions() -> None:
+    assert 'fn running_from_appimage() -> bool' in AI
+    assert 'std::env::var_os("APPIMAGE").is_some()' in AI
+    linux = AI[AI.index('#[cfg(target_os = "linux")]\nfn create_accelerated_session'):AI.index('#[cfg(target_os = "windows")]')]
+    assert 'if running_from_appimage()' in linux
+    assert 'return Ok(None);' in linux
+    assert 'fn cache_object_ai_sessions() -> bool' in AI
+    assert '!running_from_appimage()' in AI

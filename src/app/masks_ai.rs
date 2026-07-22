@@ -231,6 +231,29 @@ impl AurawApp {
         self.ai_masks_need_update = has_masks;
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn validate_onnx_runtime_for_ai(&mut self) -> bool {
+        let (Some(runtime_path), Some(runtime_sha256)) = (
+            self.onnx_runtime_path.clone(),
+            self.onnx_runtime_sha256.clone(),
+        ) else {
+            self.notice = Some(
+                "Choose an ONNX Runtime library under Settings before using desktop AI tools."
+                    .to_owned(),
+            );
+            return false;
+        };
+        match crate::ai_masks::probe_runtime_subprocess(&runtime_path, &runtime_sha256) {
+            Ok(()) => true,
+            Err(error) => {
+                self.notice = Some(format!(
+                    "ONNX Runtime validation failed: {error:#}. Select a different onnxruntime.dll in Settings."
+                ));
+                false
+            }
+        }
+    }
+
     pub(crate) fn request_update_all_ai_masks(&mut self, frame: &eframe::Frame) {
         if self.ai_mask_update_busy() {
             self.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
@@ -243,13 +266,7 @@ impl AurawApp {
             return;
         }
         #[cfg(not(target_os = "android"))]
-        if (update_subject || !object_targets.is_empty())
-            && (self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none())
-        {
-            self.notice = Some(
-                "Choose an ONNX Runtime library under Settings before updating AI masks."
-                    .to_owned(),
-            );
+        if (update_subject || !object_targets.is_empty()) && !self.validate_onnx_runtime_for_ai() {
             return;
         }
 
@@ -484,11 +501,7 @@ impl AurawApp {
             return;
         }
         #[cfg(not(target_os = "android"))]
-        if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
-            self.notice = Some(
-                "Choose an ONNX Runtime library under Settings before using Subject or Not Subject masks."
-                    .to_owned(),
-            );
+        if !self.validate_onnx_runtime_for_ai() {
             return;
         }
         if let Err(error) = self.capture_mask_source(frame) {
@@ -656,12 +669,9 @@ impl AurawApp {
     }
 
     pub(crate) fn request_object_mask(&mut self, mask_index: usize, component_index: usize) {
+        self.object_error_dialog = None;
         #[cfg(not(target_os = "android"))]
-        if self.onnx_runtime_path.is_none() || self.onnx_runtime_sha256.is_none() {
-            self.notice = Some(
-                "Choose an ONNX Runtime library under Settings before using Object masks."
-                    .to_owned(),
-            );
+        if !self.validate_onnx_runtime_for_ai() {
             return;
         }
         let Some(component) = self
@@ -864,7 +874,9 @@ impl AurawApp {
                 }
                 (_, Ok(_)) => {}
                 (_, Err(error)) => {
-                    self.notice = Some(format!("Object selection failed: {error}"));
+                    let message = format!("Object selection failed: {error}");
+                    self.notice = Some(message.clone());
+                    self.object_error_dialog = Some(message);
                 }
             }
         }
@@ -1026,6 +1038,12 @@ impl AurawApp {
                 return;
             }
         };
+        if let Err(error) = crate::ai_masks::probe_runtime_subprocess(&path, &sha256) {
+            self.notice = Some(format!(
+                "This ONNX Runtime could not be loaded safely: {error:#}"
+            ));
+            return;
+        }
         match Self::persist_onnx_runtime_selection(Some((&path, &sha256))) {
             Ok(()) => {
                 self.onnx_runtime_path = Some(path);
@@ -1240,6 +1258,25 @@ impl AurawApp {
                     }
                 });
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+
+        if let Some(message) = self.object_error_dialog.clone() {
+            let mut close = false;
+            egui::Window::new("Object mask failed")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(420.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(message);
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            if close {
+                self.object_error_dialog = None;
+            }
         }
     }
 }

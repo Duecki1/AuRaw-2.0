@@ -56,6 +56,23 @@ fn native_options() -> eframe::NativeOptions {
     options
 }
 
+
+#[cfg(not(target_os = "android"))]
+pub fn run_onnx_runtime_probe_cli(args: &[String]) -> Option<i32> {
+    if args.len() != 4 || args.get(1).map(String::as_str) != Some("--auraw-onnx-runtime-probe") {
+        return None;
+    }
+    let path = std::path::Path::new(&args[2]);
+    let sha256 = &args[3];
+    match crate::ai_masks::run_runtime_probe_process(path, sha256) {
+        Ok(()) => Some(0),
+        Err(error) => {
+            eprintln!("AuRaw ONNX Runtime probe failed: {error:#}");
+            Some(2)
+        }
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop() -> eframe::Result {
     env_logger::init();
