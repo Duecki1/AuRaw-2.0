@@ -94,7 +94,6 @@ impl Preview {
             Sense::click_and_drag()
         };
         let response = ui.interact(interaction_rect, interaction_id, interaction_sense);
-        app.note_tab_swipe_surface(response.id);
 
         let mut moved = false;
         let (multi_touch, any_touches) = ui.input(|input| {

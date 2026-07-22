@@ -10,7 +10,10 @@ use std::{
     fs::{self, File},
     os::fd::FromRawFd,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, AtomicI32, Ordering},
+        Mutex, OnceLock,
+    },
 };
 
 #[derive(Debug)]
@@ -69,6 +72,12 @@ static CAMERA_PROFILE_FOLDER_RESULTS: OnceLock<Mutex<VecDeque<CameraProfileFolde
     OnceLock::new();
 static EXPORT_RESULTS: OnceLock<Mutex<VecDeque<ExportPublishResult>>> = OnceLock::new();
 static EGUI_CONTEXT: Mutex<Option<eframe::egui::Context>> = Mutex::new(None);
+static BACK_NAVIGATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static BACK_REQUESTED: AtomicBool = AtomicBool::new(false);
+static SYSTEM_INSET_LEFT_PX: AtomicI32 = AtomicI32::new(0);
+static SYSTEM_INSET_TOP_PX: AtomicI32 = AtomicI32::new(0);
+static SYSTEM_INSET_RIGHT_PX: AtomicI32 = AtomicI32::new(0);
+static SYSTEM_INSET_BOTTOM_PX: AtomicI32 = AtomicI32::new(0);
 
 fn results() -> &'static Mutex<VecDeque<PickerResult>> {
     RESULTS.get_or_init(|| Mutex::new(VecDeque::new()))
@@ -94,6 +103,25 @@ pub fn install_context(context: &eframe::egui::Context) {
     if let Ok(mut installed) = EGUI_CONTEXT.lock() {
         *installed = Some(context.clone());
     }
+}
+
+pub fn set_back_navigation_active(active: bool) {
+    BACK_NAVIGATION_ACTIVE.store(active, Ordering::Release);
+}
+
+pub fn take_back_request() -> bool {
+    BACK_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+pub fn system_bar_insets_points(pixels_per_point: f32) -> [f32; 4] {
+    let scale = pixels_per_point.max(0.5);
+    let to_points = |value: i32| value.max(0) as f32 / scale;
+    [
+        to_points(SYSTEM_INSET_LEFT_PX.load(Ordering::Acquire)),
+        to_points(SYSTEM_INSET_TOP_PX.load(Ordering::Acquire)),
+        to_points(SYSTEM_INSET_RIGHT_PX.load(Ordering::Acquire)),
+        to_points(SYSTEM_INSET_BOTTOM_PX.load(Ordering::Acquire)),
+    ]
 }
 
 pub fn take_picker_result() -> Option<PickerResult> {
@@ -739,6 +767,36 @@ pub fn publish_png(
         Ok(())
     })
     .map_err(|error| format!("could not publish Android PNG: {error:#}"))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnBackRequested<'local>(
+    _unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jni::sys::jboolean {
+    if !BACK_NAVIGATION_ACTIVE.load(Ordering::Acquire) {
+        return false;
+    }
+    BACK_REQUESTED.store(true, Ordering::Release);
+    request_repaint();
+    true
+}
+
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnSystemInsetsChanged<'local>(
+    _unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    left: jni::sys::jint,
+    top: jni::sys::jint,
+    right: jni::sys::jint,
+    bottom: jni::sys::jint,
+) {
+    SYSTEM_INSET_LEFT_PX.store(left.max(0), Ordering::Release);
+    SYSTEM_INSET_TOP_PX.store(top.max(0), Ordering::Release);
+    SYSTEM_INSET_RIGHT_PX.store(right.max(0), Ordering::Release);
+    SYSTEM_INSET_BOTTOM_PX.store(bottom.max(0), Ordering::Release);
+    request_repaint();
 }
 
 #[unsafe(no_mangle)]

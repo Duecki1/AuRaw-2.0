@@ -4,7 +4,36 @@ impl eframe::App for AurawApp {
         {
             self.poll_android_picker(frame);
             self.poll_android_export_publish();
-            self.prepare_android_tab_swipe_frame();
+            if crate::android::take_back_request() {
+                self.activate_tab(AppTab::Library);
+            }
+
+            let [left, top, right, bottom] =
+                crate::android::system_bar_insets_points(ui.ctx().pixels_per_point());
+            if top > 0.0 {
+                egui::Panel::top("android_status_bar_safe_area")
+                    .resizable(false)
+                    .exact_size(top)
+                    .show(ui, |_| {});
+            }
+            if bottom > 0.0 {
+                egui::Panel::bottom("android_navigation_bar_safe_area")
+                    .resizable(false)
+                    .exact_size(bottom)
+                    .show(ui, |_| {});
+            }
+            if left > 0.0 {
+                egui::Panel::left("android_left_system_safe_area")
+                    .resizable(false)
+                    .exact_size(left)
+                    .show(ui, |_| {});
+            }
+            if right > 0.0 {
+                egui::Panel::right("android_right_system_safe_area")
+                    .resizable(false)
+                    .exact_size(right)
+                    .show(ui, |_| {});
+            }
         }
 
         self.poll_load_worker(frame);
@@ -20,7 +49,12 @@ impl eframe::App for AurawApp {
         let sidebar_size = layout.sidebar_default_size(viewport_size);
 
         self.refresh_status();
+        #[cfg(not(target_os = "android"))]
         egui::Panel::top("top_bar").show(ui, |ui| TopBar::show(ui, self, frame));
+        #[cfg(target_os = "android")]
+        if self.active_tab == AppTab::Develop {
+            egui::Panel::top("top_bar").show(ui, |ui| TopBar::show(ui, self, frame));
+        }
 
         if self.active_tab == AppTab::Develop {
             match layout {
@@ -73,16 +107,12 @@ impl eframe::App for AurawApp {
                 } else {
                     egui::scroll_area::ScrollSource::default()
                 };
-                let scroll = egui::ScrollArea::vertical()
+                egui::ScrollArea::vertical()
                     .scroll_source(settings_scroll_source)
                     .auto_shrink([false, false])
                     .show(ui, |ui| Settings::show(ui, self, layout));
-                self.note_tab_swipe_surface(scroll.id);
             }
         });
-
-        #[cfg(target_os = "android")]
-        self.finish_android_tab_swipe_frame(ui.ctx(), _central.response.rect);
 
         self.apply_pending_lens_correction(frame);
         self.apply_pending_preview_quality(frame);
@@ -110,6 +140,13 @@ impl eframe::App for AurawApp {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
         #[cfg(target_os = "android")]
+        if self.active_tab != AppTab::Library {
+            // JNI back callbacks can arrive while NativeActivity's render loop is
+            // idle. Keep a low-frequency wake-up while an in-app Back destination
+            // exists so the request is consumed promptly on every device.
+            ui.ctx().request_repaint_after(Duration::from_millis(120));
+        }
+        #[cfg(target_os = "android")]
         if self.picker_pending {
             // Android's SAF result can be followed by an asynchronous copy (DCP
             // folders in particular may contain thousands of files). A repaint
@@ -128,6 +165,8 @@ impl eframe::App for AurawApp {
         // the next worker starts.
         self.poll_sidecar_save();
         self.poll_developed_thumbnail(frame);
+        #[cfg(target_os = "android")]
+        crate::android::set_back_navigation_active(self.active_tab != AppTab::Library);
     }
 
     fn on_exit(&mut self) {

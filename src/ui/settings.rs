@@ -20,6 +20,16 @@ impl Settings {
             ui.spacing_mut().item_spacing = egui::vec2(7.0, 6.0);
         }
 
+        #[cfg(target_os = "android")]
+        {
+            if crate::ui::top_bar::TopBar::back_icon_button(ui, egui::vec2(42.0, 36.0))
+                .clicked()
+            {
+                app.activate_tab(crate::app::AppTab::Library);
+            }
+            ui.add_space(4.0);
+        }
+
         ui.heading("Settings");
         ui.add_space(4.0);
 

@@ -1,6 +1,4 @@
-#[cfg(not(target_os = "android"))]
-use crate::app::AppTab;
-use crate::app::AurawApp;
+use crate::app::{AppTab, AurawApp};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::is_supported_raw_path;
 #[cfg(not(target_os = "android"))]
@@ -11,7 +9,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui}
 use std::cmp::Ordering as CmpOrdering;
 #[cfg(not(target_os = "android"))]
 use std::collections::BinaryHeap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(not(target_os = "android"))]
 use std::ffi::OsString;
 #[cfg(not(target_os = "android"))]
@@ -651,16 +649,24 @@ impl LibraryState {
         self.entries[index].developed_thumbnail = true;
     }
 
-    fn evict_old_textures(&mut self) {
+    fn evict_old_textures(&mut self, protected_indices: &HashSet<usize>) {
         let limit = if cfg!(target_os = "android") {
             ANDROID_TEXTURE_CACHE_LIMIT
         } else {
             DESKTOP_TEXTURE_CACHE_LIMIT
         };
-        self.evict_textures_to_limit(limit);
+        self.evict_textures_to_limit_protecting(limit, protected_indices);
     }
 
     fn evict_textures_to_limit(&mut self, limit: usize) {
+        self.evict_textures_to_limit_protecting(limit, &HashSet::new());
+    }
+
+    fn evict_textures_to_limit_protecting(
+        &mut self,
+        limit: usize,
+        protected_indices: &HashSet<usize>,
+    ) {
         let texture_count = self
             .entries
             .iter()
@@ -669,17 +675,42 @@ impl LibraryState {
         if texture_count <= limit {
             return;
         }
+        // Never evict thumbnails that are currently visible or inside the preload
+        // margin. On a desktop resize/fullscreen transition the number of active
+        // thumbnails can temporarily exceed the nominal cache limit. Evicting by
+        // LRU alone would repeatedly remove the first (top) visible rows because
+        // they are touched first every frame, making them oscillate between the
+        // texture and the "Loading preview…" placeholder.
+        let protected_texture_count = protected_indices
+            .iter()
+            .filter(|&&index| {
+                self.entries
+                    .get(index)
+                    .is_some_and(|entry| entry.texture.is_some())
+            })
+            .count();
+        let effective_limit = limit.max(protected_texture_count);
+        if texture_count <= effective_limit {
+            return;
+        }
+
         let mut candidates = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| entry.texture.is_some())
+            .filter(|(index, entry)| {
+                entry.texture.is_some() && !protected_indices.contains(index)
+            })
             .map(|(index, entry)| (entry.last_used, index))
             .collect::<Vec<_>>();
         candidates.sort_unstable();
-        for (_, index) in candidates.into_iter().take(texture_count - limit) {
+        for (_, index) in candidates
+            .into_iter()
+            .take(texture_count - effective_limit)
+        {
             self.entries[index].texture = None;
-            self.entries[index].thumbnail_size = None;
+            // Keep decoded dimensions after GPU texture eviction so restored thumbnails
+            // can still be center-cropped correctly in the fixed-height grid.
         }
     }
 }
@@ -1091,35 +1122,21 @@ impl Library {
         app.library.poll(ui.ctx());
 
         let mut refresh = false;
-        #[cfg(not(target_os = "android"))]
-        let mut choose_folder = false;
         #[cfg(target_os = "android")]
         let mut import_raw = false;
         let mut open_source = None;
         let mut library_action = None;
 
         ui.horizontal(|ui| {
-            ui.heading("Library");
-            ui.separator();
-            if app.library.scanning {
-                ui.spinner();
-            }
-            ui.label(
-                egui::RichText::new(&app.library.status)
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            );
+            let count = app.library.entries.len();
+            ui.strong(format!(
+                "{count} RAW {}",
+                if count == 1 { "file" } else { "files" }
+            ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                #[cfg(not(target_os = "android"))]
-                if ui
-                    .button(if app.library.location.is_some() {
-                        "Change Folder…"
-                    } else {
-                        "Open Folder…"
-                    })
-                    .clicked()
-                {
-                    choose_folder = true;
+                #[cfg(target_os = "android")]
+                if ui.button("Settings").clicked() {
+                    app.activate_tab(AppTab::Settings);
                 }
                 if ui
                     .add_enabled(
@@ -1133,6 +1150,7 @@ impl Library {
             });
         });
 
+        #[cfg(not(target_os = "android"))]
         if let Some(location) = app.library.location() {
             ui.label(
                 egui::RichText::new(location)
@@ -1140,19 +1158,6 @@ impl Library {
                     .color(ui.visuals().weak_text_color()),
             );
         }
-        #[cfg(target_os = "android")]
-        ui.label(
-            egui::RichText::new(if app
-                .library
-                .location()
-                .is_some_and(|location| location.starts_with("Download/"))
-            {
-                "Imports stay in the visible Download/AuRaw folder. Tap + to import one or more RAW files."
-            } else {
-                "Android 8–9 stores imports in the shown app folder without requesting storage permission. Tap + to import one or more RAW files."
-            })
-            .small(),
-        );
         ui.separator();
 
         if app.library.location.is_none() {
@@ -1163,7 +1168,7 @@ impl Library {
                     ui.add_space(8.0);
                     #[cfg(not(target_os = "android"))]
                     if ui.button("Open Folder…").clicked() {
-                        choose_folder = true;
+                        app.open_library_folder_dialog();
                     }
                 });
             });
@@ -1181,134 +1186,148 @@ impl Library {
             #[cfg(not(target_os = "android"))]
             let current_path = app.current_path.clone();
             let available = ui.available_width().max(1.0);
-            let target_width = if cfg!(target_os = "android") {
-                150.0
-            } else {
-                180.0
-            };
-            let gap = 10.0;
-            let columns = ((available + gap) / (target_width + gap)).floor().max(1.0) as usize;
-            let card_width =
-                ((available - gap * columns.saturating_sub(1) as f32) / columns as f32).max(108.0);
-            let row_height = thumbnail_card_height(card_width);
-            let total_rows = app.library.entries.len().div_ceil(columns);
+            let available_height = ui.available_height().max(1.0);
+            let gap = 6.0;
+            let target_thumbnail_height = responsive_thumbnail_target_height(
+                available,
+                available_height,
+                ui.ctx().pixels_per_point(),
+                cfg!(target_os = "android"),
+            );
+            let (placements, grid_height) = justified_thumbnail_layout(
+                &app.library.entries,
+                available,
+                target_thumbnail_height,
+                gap,
+            );
 
+            let mut protected_thumbnail_indices = HashSet::new();
             let scroll = egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show_rows(ui, row_height, total_rows, |ui, row_range| {
-                    for row_index in row_range {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = gap;
-                            let start = row_index * columns;
-                            let end = (start + columns).min(app.library.entries.len());
-                            for index in start..end {
-                                app.library.touch_and_request_thumbnail(index);
-                                let entry = &app.library.entries[index];
-                                let selected = match &entry.info.source {
-                                    #[cfg(not(target_os = "android"))]
-                                    LibrarySource::File(path) => {
-                                        current_path.as_deref() == Some(path)
-                                    }
-                                    #[cfg(target_os = "android")]
-                                    LibrarySource::Android { .. } => false,
-                                };
-                                let response = thumbnail_card(ui, entry, card_width, selected);
-                                #[cfg(target_os = "android")]
-                                let overflow_clicked = {
-                                    let source = entry.info.source.clone();
-                                    let name = entry.info.name.clone();
-                                    let menu_id = ui.make_persistent_id((
-                                        "android-library-card-overflow",
-                                        index,
-                                    ));
-                                    let overflow = crate::ui::android_overflow_menu(
-                                        ui,
-                                        response.rect,
-                                        menu_id,
-                                        38.0,
-                                        |ui| {
-                                            android_library_card_menu(
-                                                ui,
-                                                &source,
-                                                &name,
-                                                &mut open_source,
-                                                &mut library_action,
-                                            );
-                                        },
-                                    );
-                                    response.context_menu(|ui| {
-                                        android_library_card_menu(
-                                            ui,
-                                            &source,
-                                            &name,
-                                            &mut open_source,
-                                            &mut library_action,
-                                        );
-                                    });
-                                    overflow.clicked()
-                                };
-                                #[cfg(not(target_os = "android"))]
-                                let overflow_clicked = false;
+                .show_viewport(ui, |ui, viewport| {
+                    let (content_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(available, grid_height.max(1.0)),
+                        Sense::hover(),
+                    );
+                    let preload_viewport = viewport.expand(600.0);
 
-                                // egui reports a touch long-press as both a click and a
-                                // secondary click. Do not open the photo underneath either
-                                // the context menu or the visible Android overflow button.
-                                if response.clicked()
-                                    && !response.secondary_clicked()
-                                    && !overflow_clicked
+                    for (index, relative_rect) in placements.iter().copied().enumerate() {
+                        if !relative_rect.intersects(preload_viewport) {
+                            continue;
+                        }
+
+                        // Protect the complete preload window from cache eviction, not
+                        // only the currently painted rows. This keeps resize-driven layout
+                        // changes from immediately discarding thumbnails we are about to use.
+                        protected_thumbnail_indices.insert(index);
+                        app.library.touch_and_request_thumbnail(index);
+                        if !relative_rect.intersects(viewport) {
+                            continue;
+                        }
+                        let item_rect = relative_rect.translate(content_rect.min.to_vec2());
+
+                        let entry = &app.library.entries[index];
+                        let selected = match &entry.info.source {
+                            #[cfg(not(target_os = "android"))]
+                            LibrarySource::File(path) => current_path.as_deref() == Some(path),
+                            #[cfg(target_os = "android")]
+                            LibrarySource::Android { .. } => false,
+                        };
+                        let response = thumbnail_tile(ui, entry, item_rect, selected);
+                        #[cfg(target_os = "android")]
+                        let overflow_clicked = {
+                            let source = entry.info.source.clone();
+                            let name = entry.info.name.clone();
+                            let menu_id = ui.make_persistent_id((
+                                "android-library-card-overflow",
+                                index,
+                            ));
+                            let overflow = crate::ui::android_overflow_menu(
+                                ui,
+                                response.rect,
+                                menu_id,
+                                38.0,
+                                |ui| {
+                                    android_library_card_menu(
+                                        ui,
+                                        &source,
+                                        &name,
+                                        &mut open_source,
+                                        &mut library_action,
+                                    );
+                                },
+                            );
+                            response.context_menu(|ui| {
+                                android_library_card_menu(
+                                    ui,
+                                    &source,
+                                    &name,
+                                    &mut open_source,
+                                    &mut library_action,
+                                );
+                            });
+                            overflow.clicked()
+                        };
+                        #[cfg(not(target_os = "android"))]
+                        let overflow_clicked = false;
+
+                        // egui reports a touch long-press as both a click and a
+                        // secondary click. Do not open the photo underneath either
+                        // the context menu or the visible Android overflow button.
+                        if response.clicked()
+                            && !response.secondary_clicked()
+                            && !overflow_clicked
+                        {
+                            open_source =
+                                Some((entry.info.source.clone(), entry.info.name.clone()));
+                        }
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            let LibrarySource::File(path) = &entry.info.source;
+                            let path = path.clone();
+                            let action_enabled = !app.library.file_action_in_progress();
+                            response.context_menu(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        action_enabled,
+                                        egui::Button::new("Duplicate (RAW + sidecar)"),
+                                    )
+                                    .clicked()
                                 {
-                                    open_source =
-                                        Some((entry.info.source.clone(), entry.info.name.clone()));
+                                    library_action =
+                                        Some(LibraryCardAction::Duplicate(path.clone()));
+                                    ui.close();
                                 }
-                                #[cfg(not(target_os = "android"))]
+                                if ui
+                                    .add_enabled(
+                                        action_enabled,
+                                        egui::Button::new("Reset all adjustments"),
+                                    )
+                                    .clicked()
                                 {
-                                    let LibrarySource::File(path) = &entry.info.source;
-                                    let path = path.clone();
-                                    let action_enabled = !app.library.file_action_in_progress();
-                                    response.context_menu(|ui| {
-                                        if ui
-                                            .add_enabled(
-                                                action_enabled,
-                                                egui::Button::new("Duplicate (RAW + sidecar)"),
-                                            )
-                                            .clicked()
-                                        {
-                                            library_action =
-                                                Some(LibraryCardAction::Duplicate(path.clone()));
-                                            ui.close();
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                action_enabled,
-                                                egui::Button::new("Reset all adjustments"),
-                                            )
-                                            .clicked()
-                                        {
-                                            library_action = Some(
-                                                LibraryCardAction::ResetAdjustments(path.clone()),
-                                            );
-                                            ui.close();
-                                        }
-                                        ui.separator();
-                                        if ui
-                                            .add_enabled(
-                                                action_enabled,
-                                                egui::Button::new("Delete"),
-                                            )
-                                            .clicked()
-                                        {
-                                            library_action =
-                                                Some(LibraryCardAction::Delete(path.clone()));
-                                            ui.close();
-                                        }
-                                    });
+                                    library_action = Some(
+                                        LibraryCardAction::ResetAdjustments(path.clone()),
+                                    );
+                                    ui.close();
                                 }
-                            }
-                        });
+                                ui.separator();
+                                if ui
+                                    .add_enabled(
+                                        action_enabled,
+                                        egui::Button::new("Delete"),
+                                    )
+                                    .clicked()
+                                {
+                                    library_action =
+                                        Some(LibraryCardAction::Delete(path.clone()));
+                                    ui.close();
+                                }
+                            });
+                        }
                     }
                 });
-            app.note_tab_swipe_surface(scroll.id);
-            app.library.evict_old_textures();
+            app.library
+                .evict_old_textures(&protected_thumbnail_indices);
         }
 
         #[cfg(not(target_os = "android"))]
@@ -1414,10 +1433,6 @@ impl Library {
         if refresh {
             app.library.refresh(ui.ctx());
         }
-        #[cfg(not(target_os = "android"))]
-        if choose_folder {
-            app.open_library_folder_dialog();
-        }
         #[cfg(target_os = "android")]
         if import_raw {
             app.open_file_dialog(frame);
@@ -1439,53 +1454,204 @@ impl Library {
     }
 }
 
-fn thumbnail_card_height(width: f32) -> f32 {
-    (width - 14.0).max(80.0) + 54.0
+fn responsive_thumbnail_target_height(
+    available_width: f32,
+    available_height: f32,
+    pixels_per_point: f32,
+    android: bool,
+) -> f32 {
+    if android {
+        // Android's logical-point coordinate system already follows device density.
+        // Keep touch targets predictable instead of making them balloon on very dense phones.
+        return 120.0;
+    }
+
+    // egui sizes are already expressed in DPI-aware logical points, so using the raw
+    // pixels-per-point value as a direct multiplier would double-apply OS display scaling.
+    // Scale primarily with usable window area: a 4K/full-screen workspace should show
+    // substantially larger rows than a small laptop window, while preserving similar
+    // gallery density as the app is resized.
+    const REFERENCE_WIDTH: f32 = 1280.0;
+    const REFERENCE_HEIGHT: f32 = 720.0;
+    const BASE_HEIGHT: f32 = 140.0;
+
+    let width = if available_width.is_finite() {
+        available_width.max(1.0)
+    } else {
+        REFERENCE_WIDTH
+    };
+    let height = if available_height.is_finite() {
+        available_height.max(1.0)
+    } else {
+        REFERENCE_HEIGHT
+    };
+    let viewport_scale = ((width * height) / (REFERENCE_WIDTH * REFERENCE_HEIGHT))
+        .sqrt()
+        .clamp(0.90, 1.70);
+
+    // A restrained density adjustment helps very high-DPI desktop displays without
+    // fighting egui/OS scaling. sqrt keeps 150–200% scaling from becoming excessive.
+    let density_scale = if pixels_per_point.is_finite() {
+        pixels_per_point.max(1.0).sqrt().clamp(1.0, 1.20)
+    } else {
+        1.0
+    };
+
+    (BASE_HEIGHT * viewport_scale * density_scale).clamp(126.0, 270.0)
 }
 
-fn thumbnail_card(ui: &mut Ui, entry: &LibraryEntry, width: f32, selected: bool) -> egui::Response {
-    let image_edge = (width - 14.0).max(80.0);
-    let height = thumbnail_card_height(width);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
-    let visuals = ui.visuals();
-    let fill = if response.hovered() {
-        visuals.widgets.hovered.bg_fill
-    } else {
-        visuals.widgets.inactive.bg_fill
-    };
-    let stroke = if selected {
-        Stroke::new(2.0, visuals.selection.bg_fill)
-    } else if response.hovered() {
-        visuals.widgets.hovered.bg_stroke
-    } else {
-        Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color)
-    };
-    ui.painter()
-        .rect(rect, 5.0, fill, stroke, StrokeKind::Inside);
+fn balanced_justified_row_ranges(
+    aspects: &[f32],
+    available_width: f32,
+    target_height: f32,
+    gap: f32,
+) -> Vec<(usize, usize)> {
+    if aspects.is_empty() {
+        return Vec::new();
+    }
 
-    let image_well = egui::Rect::from_min_size(
-        rect.min + egui::vec2(7.0, 7.0),
-        egui::vec2(image_edge, image_edge),
+    // Treat every item as its aspect-ratio width plus the gap that follows it.
+    // This lets us estimate the ideal number of rows for the whole gallery
+    // before choosing any breaks, instead of greedily leaving a tiny orphan
+    // row at the end.
+    let gap_weight = gap / target_height.max(1.0);
+    let weights = aspects
+        .iter()
+        .map(|aspect| aspect.max(f32::EPSILON) + gap_weight)
+        .collect::<Vec<_>>();
+    let total_weight = weights.iter().sum::<f32>();
+    let target_row_weight = (available_width + gap) / target_height.max(1.0);
+    let row_count = (total_weight / target_row_weight.max(f32::EPSILON))
+        .round()
+        .clamp(1.0, aspects.len() as f32) as usize;
+
+    let mut ranges = Vec::with_capacity(row_count);
+    let mut start = 0usize;
+    let mut remaining_weight = total_weight;
+
+    for row_index in 0..row_count {
+        let rows_left = row_count - row_index;
+        if rows_left == 1 {
+            ranges.push((start, aspects.len()));
+            break;
+        }
+
+        let max_end = aspects.len() - (rows_left - 1);
+        let desired_weight = remaining_weight / rows_left as f32;
+        let mut end = start + 1;
+        let mut row_weight = weights[start];
+
+        // Pick the break closest to an equal share of the gallery's total
+        // visual width. Because every future row is reserved at least one
+        // image, the final row cannot collapse into a few oversized leftovers.
+        while end < max_end {
+            let with_next = row_weight + weights[end];
+            if (row_weight - desired_weight).abs()
+                <= (with_next - desired_weight).abs()
+            {
+                break;
+            }
+            row_weight = with_next;
+            end += 1;
+        }
+
+        ranges.push((start, end));
+        remaining_weight = (remaining_weight - row_weight).max(0.0);
+        start = end;
+    }
+
+    ranges
+}
+
+fn justified_thumbnail_layout(
+    entries: &[LibraryEntry],
+    available_width: f32,
+    target_height: f32,
+    gap: f32,
+) -> (Vec<egui::Rect>, f32) {
+    let available_width = available_width.max(1.0);
+    let target_height = target_height.max(1.0);
+    let gap = gap.max(0.0);
+    let aspects: Vec<f32> = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .thumbnail_size
+                .and_then(|[width, source_height]| {
+                    (width > 0 && source_height > 0)
+                        .then_some(width as f32 / source_height as f32)
+                })
+                .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
+                .unwrap_or(1.0)
+        })
+        .collect();
+
+    let row_ranges = balanced_justified_row_ranges(
+        &aspects,
+        available_width,
+        target_height,
+        gap,
     );
+    let mut placements = Vec::with_capacity(entries.len());
+    let mut y = 0.0;
+
+    for (row_start, row_end) in row_ranges {
+        let row_aspects = &aspects[row_start..row_end];
+        let item_count = row_aspects.len();
+        let aspect_sum = row_aspects.iter().sum::<f32>();
+        let gaps_width = gap * (item_count.saturating_sub(1) as f32);
+        let row_height = ((available_width - gaps_width).max(1.0)
+            / aspect_sum.max(f32::EPSILON))
+            .max(1.0);
+        let mut x = 0.0;
+
+        for (row_offset, aspect) in row_aspects.iter().copied().enumerate() {
+            // Give the final item the exact remaining width to absorb floating-
+            // point rounding and keep every row flush with the right edge.
+            let width = if row_offset + 1 == item_count {
+                (available_width - x).max(1.0)
+            } else {
+                row_height * aspect
+            };
+            placements.push(egui::Rect::from_min_size(
+                egui::pos2(x, y),
+                egui::vec2(width, row_height),
+            ));
+            x += width + gap;
+        }
+
+        y += row_height + gap;
+    }
+
+    let total_height = if placements.is_empty() {
+        0.0
+    } else {
+        (y - gap).max(0.0)
+    };
+    (placements, total_height)
+}
+
+fn thumbnail_tile(
+    ui: &mut Ui,
+    entry: &LibraryEntry,
+    rect: egui::Rect,
+    selected: bool,
+) -> egui::Response {
+    let response = ui.interact(
+        rect,
+        ui.make_persistent_id(("library-thumbnail-tile", entry.info.display_path.as_str())),
+        Sense::click(),
+    );
+    let visuals = ui.visuals();
+
     ui.painter()
-        .rect_filled(image_well, 3.0, Color32::from_rgb(17, 18, 20));
-    if let (Some(texture), Some([thumbnail_width, thumbnail_height])) =
-        (&entry.texture, entry.thumbnail_size)
-    {
-        let source = egui::vec2(thumbnail_width as f32, thumbnail_height as f32);
-        let scale = (image_well.width() / source.x)
-            .min(image_well.height() / source.y)
-            .max(0.0);
-        let image_rect = egui::Rect::from_center_size(image_well.center(), source * scale);
-        ui.painter().image(
-            texture.id(),
-            image_rect,
-            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        .rect_filled(rect, 0.0, Color32::from_rgb(17, 18, 20));
+    if let Some(texture) = &entry.texture {
+        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+        ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
     } else {
         ui.painter().text(
-            image_well.center(),
+            rect.center(),
             Align2::CENTER_CENTER,
             if entry.thumbnail_error.is_some() {
                 "Preview unavailable"
@@ -1499,29 +1665,33 @@ fn thumbnail_card(ui: &mut Ui, entry: &LibraryEntry, width: f32, selected: bool)
         );
     }
 
-    let text_left = rect.left() + 8.0;
-    ui.painter().text(
-        egui::pos2(text_left, image_well.bottom() + 8.0),
-        Align2::LEFT_TOP,
-        elide_middle(&entry.info.name, 25),
-        FontId::proportional(12.5),
-        visuals.text_color(),
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 0.0, Color32::from_white_alpha(14));
+    }
+    if selected {
+        ui.painter().rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(2.0, visuals.selection.bg_fill),
+            StrokeKind::Inside,
+        );
+    }
+
+    let overlay_height = 32.0_f32.min(rect.height());
+    let overlay = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.bottom() - overlay_height),
+        rect.right_bottom(),
     );
-    let detail = if entry.info.parent.is_empty() {
-        format_file_size(entry.info.bytes)
-    } else {
-        format!(
-            "{} · {}",
-            elide_middle(&entry.info.parent, 18),
-            format_file_size(entry.info.bytes)
-        )
-    };
+    ui.painter()
+        .rect_filled(overlay, 0.0, Color32::from_black_alpha(116));
+    let max_chars = ((rect.width() - 16.0) / 7.0).floor().max(8.0) as usize;
     ui.painter().text(
-        egui::pos2(text_left, image_well.bottom() + 29.0),
-        Align2::LEFT_TOP,
-        detail,
-        FontId::proportional(10.5),
-        visuals.weak_text_color(),
+        egui::pos2(rect.left() + 8.0, rect.bottom() - 7.0),
+        Align2::LEFT_BOTTOM,
+        elide_middle(&entry.info.name, max_chars),
+        FontId::proportional(12.5),
+        Color32::WHITE,
     );
 
     let mut tooltip = entry.info.display_path.clone();
@@ -1698,8 +1868,9 @@ mod tests {
     #[cfg(unix)]
     use super::LibrarySource;
     use super::{
-        duplicate_raw_and_sidecar, elide_middle, format_file_size, run_thumbnail_workers,
-        scan_folder, scan_folder_with_limit, LibraryState, LoadedLibraryThumbnail, ScanEvent,
+        balanced_justified_row_ranges, duplicate_raw_and_sidecar, elide_middle, format_file_size,
+        run_thumbnail_workers, scan_folder, scan_folder_with_limit, LibraryState,
+        LoadedLibraryThumbnail, ScanEvent,
         ThumbnailRequest, ThumbnailWorker,
     };
     use crate::pipeline::RawThumbnail;
@@ -1722,6 +1893,21 @@ mod tests {
         assert_eq!(format_file_size(500), "500 B");
         assert_eq!(format_file_size(1024), "1.0 KiB");
         assert_eq!(format_file_size(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    #[test]
+    fn justified_rows_rebalance_to_avoid_a_sparse_last_row() {
+        let aspects = vec![1.5; 13];
+        let rows = balanced_justified_row_ranges(&aspects, 1000.0, 140.0, 6.0);
+        let row_sizes = rows
+            .iter()
+            .map(|(start, end)| end - start)
+            .collect::<Vec<_>>();
+
+        assert_eq!(row_sizes.iter().sum::<usize>(), aspects.len());
+        assert!(row_sizes.len() >= 2);
+        assert!(row_sizes.iter().all(|count| *count >= 4));
+        assert!(row_sizes.iter().all(|count| *count <= 5));
     }
 
     #[test]

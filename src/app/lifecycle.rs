@@ -282,8 +282,6 @@ impl AurawApp {
             inpaint_receiver: None,
             inpaint_download_progress: None,
             inpaint_inferencing: false,
-            android_tab_swipe: AndroidTabSwipe::default(),
-            tab_swipe_surface_id: None,
         };
         if let Some(folder) = last_library_folder.filter(|folder| folder.is_dir()) {
             app.library.open_folder(folder, ctx);
@@ -454,8 +452,6 @@ impl AurawApp {
             inpaint_receiver: None,
             inpaint_download_progress: None,
             inpaint_inferencing: false,
-            android_tab_swipe: AndroidTabSwipe::default(),
-            tab_swipe_surface_id: None,
             android_app,
             picker_pending: false,
             camera_profile_folder_importing_label: None,
@@ -603,6 +599,8 @@ impl AurawApp {
         selection: Option<PathBuf>,
         frame: &eframe::Frame,
     ) {
+        #[cfg(target_os = "android")]
+        let _ = frame;
         if self.load_receiver.is_some()
             || self.export_receiver.is_some()
             || self.export_publish_pending

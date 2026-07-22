@@ -83,7 +83,8 @@ pub fn android_main(android_app: android_activity::AndroidApp) {
 
     let mut options = native_options();
     options.android_app = Some(android_app.clone());
-    options.viewport = eframe::egui::ViewportBuilder::default().with_fullscreen(true);
+    // Keep Android system status/navigation bars visible.
+    options.viewport = eframe::egui::ViewportBuilder::default();
 
     let result = eframe::run_native(
         "AuRaw",

@@ -34,10 +34,6 @@ use std::time::{Duration, Instant};
 mod edit_history;
 use edit_history::EditHistory;
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-mod android_tab_swipe;
-use android_tab_swipe::AndroidTabSwipe;
-
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) struct AndroidOriginalHold {
@@ -524,9 +520,6 @@ pub struct AurawApp {
     inpaint_download_progress: Option<(u64, u64)>,
     inpaint_inferencing: bool,
 
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    android_tab_swipe: AndroidTabSwipe,
-    tab_swipe_surface_id: Option<egui::Id>,
     #[cfg(target_os = "android")]
     android_app: android_activity::AndroidApp,
     #[cfg(target_os = "android")]
@@ -553,10 +546,8 @@ impl AurawApp {
             self.library.prepare_for_develop();
         }
         self.active_tab = tab;
-    }
-
-    pub(crate) fn note_tab_swipe_surface(&mut self, id: egui::Id) {
-        self.tab_swipe_surface_id = Some(id);
+        #[cfg(target_os = "android")]
+        crate::android::set_back_navigation_active(tab != AppTab::Library);
     }
 
     #[cfg(target_os = "android")]
