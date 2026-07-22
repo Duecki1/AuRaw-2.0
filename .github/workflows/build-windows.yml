@@ -104,15 +104,16 @@ jobs:
           export AURAW_SOURCE_REVISION="$revision"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$revision")"
 
+          # Build only the end-user application. The regression renderer is an
+          # internal CI/test helper and must never be shipped in release artifacts.
           cargo build \
             --locked \
             --release \
             --target x86_64-pc-windows-gnu \
-            --bins
+            --bin auraw
 
           release_dir="target/x86_64-pc-windows-gnu/release"
           test -f "$release_dir/auraw.exe"
-          test -f "$release_dir/auraw-regression-render.exe"
           test "$(git rev-parse --verify HEAD)" = "$revision"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
@@ -127,7 +128,6 @@ jobs:
           rm -rf dist
           mkdir -p "$package_dir"
           cp "$release_dir/auraw.exe" "$package_dir/"
-          cp "$release_dir/auraw-regression-render.exe" "$package_dir/"
           cp COPYING THIRD_PARTY_NOTICES.md README.md "$package_dir/"
 
           lensfun_db="$(find /mingw64/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
@@ -166,12 +166,19 @@ jobs:
             echo "Lensfun: $lensfun_version"
           } > "$package_dir/BUILD-INFO.txt"
 
-          (cd dist && zip -9 -r "$package_name.zip" "$package_name")
-          test -s "dist/$package_name.zip"
+          # Do not pre-zip the package before upload-artifact. GitHub already
+          # presents workflow artifacts as a downloadable ZIP, and pre-zipping
+          # caused a confusing ZIP-inside-ZIP download.
+          test -f "$package_dir/auraw.exe"
+          test ! -e "$package_dir/auraw-regression-render.exe"
+
+          # Publish hashes so downloaded binaries can be verified independently.
+          (cd "$package_dir" && sha256sum auraw.exe *.dll 2>/dev/null | sort -k2 > SHA256SUMS.txt || true)
+          test -s "$package_dir/SHA256SUMS.txt"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: AuRaw-windows-x86_64
-          path: dist/AuRaw-windows-x86_64.zip
+          path: dist/AuRaw-windows-x86_64/
           if-no-files-found: error
