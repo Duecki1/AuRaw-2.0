@@ -466,7 +466,8 @@ impl EditHistory {
 
 impl AurawApp {
     /// Signal a semantic edit after mutating CPU state. The history observer
-    /// will commit it on pointer release/text-focus loss. Persistence can watch
+    /// will commit it on pointer release (or immediately for non-pointer
+    /// changes). Persistence can watch
     /// `edit_commit_revision` and therefore never serialize every drag frame.
     pub(crate) fn note_edit_changed(&mut self) {
         self.edit_history.note_change();
@@ -508,8 +509,15 @@ impl AurawApp {
     }
 
     pub(crate) fn observe_edit_history(&mut self, ctx: &egui::Context) {
-        let interaction_active =
-            ctx.input(|input| input.pointer.any_down()) || ctx.egui_wants_keyboard_input();
+        // History transactions follow the pointer gesture itself, not the
+        // lifetime of keyboard focus. `egui_wants_keyboard_input()` can remain
+        // true after a text field/dialog has taken focus; using it here kept
+        // subsequent mask clicks and drags in the same pending transaction,
+        // so one Undo could roll back several otherwise independent mask
+        // edits. Mask renames are only applied when their dialog is saved, so
+        // they still enter history as one discrete change without extending
+        // the transaction across unrelated edits.
+        let interaction_active = ctx.input(|input| input.pointer.any_down());
         self.edit_history.observe_with_inpainting(
             &self.exposure,
             &self.masks,
@@ -793,6 +801,46 @@ mod tests {
         assert_eq!(redone_masks.masks.len(), 2);
         assert_eq!(redone_masks.selected_mask, Some(1));
         assert_eq!(redone_masks.selected_component, Some(0));
+    }
+
+    #[test]
+    fn separate_mask_gestures_are_separate_undo_steps() {
+        let (exposure, mut masks, lens) = state();
+        masks.add_mask(MaskKind::Brush).unwrap();
+        let mut history = EditHistory::new(&exposure, &masks, &lens);
+
+        masks.masks[0].opacity = 0.8;
+        history.note_mask_change();
+        history.observe(&exposure, &masks, &lens, true);
+        history.observe(&exposure, &masks, &lens, false);
+
+        masks.masks[0].opacity = 0.6;
+        history.note_mask_change();
+        history.observe(&exposure, &masks, &lens, true);
+        history.observe(&exposure, &masks, &lens, false);
+
+        let (first_undo, masks_changed) = history.undo(&exposure, &masks, &lens).unwrap();
+        assert!(masks_changed);
+        let first_masks = first_undo.materialize_masks();
+        assert_eq!(first_masks.masks[0].opacity, 0.8);
+
+        let (second_undo, masks_changed) = history
+            .undo(&exposure, &first_masks, &lens)
+            .unwrap();
+        assert!(masks_changed);
+        assert_eq!(second_undo.materialize_masks().masks[0].opacity, 1.0);
+
+        let (first_redo, masks_changed) = history
+            .redo(&exposure, &second_undo.materialize_masks(), &lens)
+            .unwrap();
+        assert!(masks_changed);
+        assert_eq!(first_redo.materialize_masks().masks[0].opacity, 0.8);
+
+        let (second_redo, masks_changed) = history
+            .redo(&exposure, &first_redo.materialize_masks(), &lens)
+            .unwrap();
+        assert!(masks_changed);
+        assert_eq!(second_redo.materialize_masks().masks[0].opacity, 0.6);
     }
 
     #[test]

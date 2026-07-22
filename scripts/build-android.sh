@@ -5,7 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ABI=${1:-arm64-v8a}
 PROFILE=${2:-release}
 API=26
-EXPECTED_NDK_VERSION=27.0.12077973
+EXPECTED_NDK_VERSION=28.2.13676358
 EXPECTED_CARGO_NDK_VERSION=4.1.2
 
 case "$ABI" in

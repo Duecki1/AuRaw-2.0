@@ -453,6 +453,61 @@ pub fn save_desktop(raw_path: &Path, edits: EditState) -> Result<PathBuf, Sideca
     Ok(path)
 }
 
+/// Reset image adjustments while retaining the mask definitions themselves.
+///
+/// A mask's geometry and properties (for example brush size/feather, painted
+/// dabs, gradient geometry, opacity, invert/combine state, enabled state and
+/// names) are editing structure rather than adjustment values. Reset actions
+/// therefore neutralize the global/local grades without destroying that mask
+/// structure.
+pub fn reset_adjustments_preserving_mask_properties(edits: &mut EditState) {
+    let previous = edits.exposure;
+    let mut exposure = ExposureParams::scene_referred_default();
+    // Keep the same application-level RAW reconstruction preferences used by
+    // the in-editor Reset all action. They are not creative image adjustments.
+    exposure.highlight_method = previous.highlight_method;
+    exposure.highlight_clip = previous.highlight_clip;
+    exposure.highlight_reconstruction = previous.highlight_reconstruction;
+    exposure.highlight_iterations = previous.highlight_iterations;
+    exposure.highlight_color_adaptation = previous.highlight_color_adaptation;
+    exposure.demosaic_mode = previous.demosaic_mode;
+    exposure.dual_threshold = previous.dual_threshold;
+    exposure.frequency_chroma = previous.frequency_chroma;
+    edits.exposure = exposure;
+    edits.camera_profile = None;
+    for mask in &mut Arc::make_mut(&mut edits.masks).masks {
+        mask.adjustments.reset();
+    }
+    edits.inpainting = Arc::new(Vec::new());
+    edits.lens = LensEditState::default();
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn reset_desktop_adjustments(raw_path: &Path) -> Result<bool, String> {
+    let Some(mut loaded) = load_desktop(raw_path).map_err(|error| error.to_string())? else {
+        return Ok(false);
+    };
+    reset_adjustments_preserving_mask_properties(&mut loaded.edits);
+    save_desktop(raw_path, loaded.edits).map_err(|error| error.to_string())?;
+
+    // The cached developed thumbnail represents the pre-reset grade. The
+    // normal fingerprint check would reject it too, but removing it here keeps
+    // the library from carrying a knowingly stale cache around.
+    for path in [
+        developed_thumbnail_path_for_raw(raw_path),
+        developed_thumbnail_fingerprint_path_for_raw(raw_path),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("could not remove {}: {error}", path.display()));
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Synchronous worker API. Call from the existing RAW decode worker, never the
 /// Android UI thread; the Java bridge materializes MediaStore data into a
 /// bounded private cache file before JSON parsing.
@@ -1309,6 +1364,50 @@ mod tests {
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits, edits);
         assert!(!loaded.migrated);
+    }
+
+    #[test]
+    fn reset_adjustments_preserves_mask_geometry_and_properties() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Brush).unwrap();
+        let brush = masks.masks.last_mut().unwrap();
+        brush.opacity = 0.37;
+        brush.invert = true;
+        brush.enabled = false;
+        brush.adjustments.exposure = 1.25;
+        let component = &mut brush.components[0];
+        component.invert = true;
+        component.enabled = false;
+        if let MaskGeometry::Brush {
+            size,
+            feather,
+            dabs,
+        } = &mut component.geometry
+        {
+            *size = 0.123;
+            *feather = 0.81;
+            dabs.push(crate::pipeline::BrushDab {
+                center: [0.2, 0.7],
+                opacity: 0.6,
+                size: 0.123,
+                feather: 0.81,
+            });
+        } else {
+            panic!("expected brush geometry");
+        }
+
+        let mut expected_masks = (*edits.masks).clone();
+        for mask in &mut expected_masks.masks {
+            mask.adjustments.reset();
+        }
+
+        reset_adjustments_preserving_mask_properties(&mut edits);
+
+        assert_eq!(edits.exposure, ExposureParams::scene_referred_default());
+        assert_eq!(*edits.masks, expected_masks);
+        assert!(edits.inpainting.is_empty());
+        assert_eq!(edits.lens, LensEditState::default());
     }
 
     #[test]

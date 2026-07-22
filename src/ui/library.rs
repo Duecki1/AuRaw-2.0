@@ -1642,12 +1642,12 @@ impl Library {
 
                     let total = paths.len();
                     let mut failures = Vec::new();
-                    let mut removed_count = 0usize;
+                    let mut reset_count = 0usize;
                     for path in &paths {
-                        match crate::sidecar::remove_desktop_edits(path) {
-                            Ok(removed) => {
-                                if removed {
-                                    removed_count += 1;
+                        match crate::sidecar::reset_desktop_adjustments(path) {
+                            Ok(reset) => {
+                                if reset {
+                                    reset_count += 1;
                                 }
                             },
                             Err(error) => failures.push(format!("{}: {error}", path.display())),
@@ -1657,7 +1657,7 @@ impl Library {
                     app.library.refresh(ui.ctx());
                     app.library.status = if failures.is_empty() {
                         format!(
-                            "Reset adjustments for {total} selected {} ({removed_count} changed)",
+                            "Reset adjustments for {total} selected {} ({reset_count} changed)",
                             if total == 1 { "image" } else { "images" }
                         )
                     } else {
