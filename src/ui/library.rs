@@ -1,9 +1,7 @@
 use crate::app::{AppTab, AurawApp};
+use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 #[cfg(not(target_os = "android"))]
-use crate::pipeline::is_supported_raw_path;
-#[cfg(not(target_os = "android"))]
-use crate::pipeline::load_raw_thumbnail;
-use crate::pipeline::RawThumbnail;
+use crate::pipeline::{is_supported_raw_path, load_raw_thumbnail};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
 #[cfg(not(target_os = "android"))]
 use std::cmp::Ordering as CmpOrdering;
@@ -134,6 +132,22 @@ struct ThumbnailWorker {
     repaint: egui::Context,
 }
 
+#[cfg(not(target_os = "android"))]
+#[derive(Clone)]
+struct LibraryExportDialog {
+    paths: Vec<PathBuf>,
+    settings: ExportSettings,
+    format: ExportFormat,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone)]
+struct LibraryExportDialog {
+    targets: Vec<(String, String)>,
+    settings: ExportSettings,
+    format: ExportFormat,
+}
+
 pub(crate) struct LibraryState {
     location: Option<String>,
     #[cfg(not(target_os = "android"))]
@@ -156,6 +170,7 @@ pub(crate) struct LibraryState {
     selection_mode: bool,
     #[cfg(not(target_os = "android"))]
     file_action_receiver: Option<mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
+    export_dialog: Option<LibraryExportDialog>,
 }
 
 impl LibraryState {
@@ -185,6 +200,7 @@ impl LibraryState {
             selected_sources: HashSet::new(),
             selection_mode: false,
             file_action_receiver: None,
+            export_dialog: None,
         }
     }
 
@@ -223,6 +239,7 @@ impl LibraryState {
             thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
             selected_sources: HashSet::new(),
             selection_mode: false,
+            export_dialog: None,
         };
         state.refresh(context);
         state
@@ -1055,6 +1072,7 @@ fn catalog_status(count: usize, warning_count: usize, truncated: bool) -> String
 
 #[cfg(not(target_os = "android"))]
 enum LibraryCardAction {
+    Export(Vec<PathBuf>),
     Duplicate(Vec<PathBuf>),
     ResetAdjustments(Vec<PathBuf>),
     Delete(Vec<PathBuf>),
@@ -1062,6 +1080,8 @@ enum LibraryCardAction {
 
 #[cfg(target_os = "android")]
 enum LibraryCardAction {
+    Export(Vec<(String, String)>),
+    Duplicate(Vec<(String, String)>),
     ResetAdjustments(Vec<(String, String)>),
     Delete(Vec<(String, String)>),
 }
@@ -1070,14 +1090,8 @@ enum LibraryCardAction {
 fn android_selection_menu(
     ui: &mut Ui,
     selected: &[(LibrarySource, String)],
-    open_source: &mut Option<(LibrarySource, String)>,
     library_action: &mut Option<LibraryCardAction>,
 ) {
-    if selected.len() == 1 && ui.button("Open").clicked() {
-        *open_source = Some(selected[0].clone());
-        ui.close();
-    }
-
     let targets = || {
         selected
             .iter()
@@ -1089,21 +1103,41 @@ fn android_selection_menu(
             })
             .collect::<Vec<_>>()
     };
+    let selected_count = selected.len();
 
-    let reset_label = if selected.len() == 1 {
-        "Reset all adjustments"
+    let export_label = if selected_count > 1 {
+        "Export selected…"
     } else {
+        "Export…"
+    };
+    if ui.button(export_label).clicked() {
+        *library_action = Some(LibraryCardAction::Export(targets()));
+        ui.close();
+    }
+    ui.separator();
+    let duplicate_label = if selected_count > 1 {
+        "Duplicate selected (RAW + sidecars)"
+    } else {
+        "Duplicate (RAW + sidecar)"
+    };
+    if ui.button(duplicate_label).clicked() {
+        *library_action = Some(LibraryCardAction::Duplicate(targets()));
+        ui.close();
+    }
+    let reset_label = if selected_count > 1 {
         "Reset adjustments for selected"
+    } else {
+        "Reset all adjustments"
     };
     if ui.button(reset_label).clicked() {
         *library_action = Some(LibraryCardAction::ResetAdjustments(targets()));
         ui.close();
     }
     ui.separator();
-    let delete_label = if selected.len() == 1 {
-        "Delete"
-    } else {
+    let delete_label = if selected_count > 1 {
         "Delete selected"
+    } else {
+        "Delete"
     };
     if ui.button(delete_label).clicked() {
         *library_action = Some(LibraryCardAction::Delete(targets()));
@@ -1185,6 +1219,85 @@ fn copy_file_create_new(source: &Path, destination: &Path) -> io::Result<()> {
     result.map(|_| ())
 }
 
+#[cfg(not(target_os = "android"))]
+fn unique_library_export_path(
+    folder: &Path,
+    source: &Path,
+    format: ExportFormat,
+    reserved: &mut HashSet<PathBuf>,
+) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("auraw-export");
+    let base = format!("{stem}-auraw");
+    let mut index = 1usize;
+    loop {
+        let name = if index == 1 {
+            format!("{base}.{}", format.extension())
+        } else {
+            format!("{base}-{index}.{}", format.extension())
+        };
+        let candidate = folder.join(name);
+        if !candidate.exists() && reserved.insert(candidate.clone()) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn library_export_jobs(
+    paths: &[PathBuf],
+    format: ExportFormat,
+) -> Option<Vec<(PathBuf, PathBuf)>> {
+    if paths.is_empty() {
+        return None;
+    }
+    if paths.len() == 1 {
+        let source = &paths[0];
+        let default_name = source
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{name}-auraw.{}", format.extension()))
+            .unwrap_or_else(|| format!("auraw-export.{}", format.extension()));
+        let mut dialog = rfd::FileDialog::new().set_file_name(default_name);
+        dialog = match format {
+            ExportFormat::Png => dialog.add_filter("PNG image", &["png"]),
+            ExportFormat::Jpeg => dialog.add_filter("JPEG image", &["jpg", "jpeg"]),
+        };
+        let mut destination = dialog.save_file()?;
+        let valid_extension = destination
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| match format {
+                ExportFormat::Png => extension.eq_ignore_ascii_case("png"),
+                ExportFormat::Jpeg => {
+                    extension.eq_ignore_ascii_case("jpg")
+                        || extension.eq_ignore_ascii_case("jpeg")
+                }
+            });
+        if !valid_extension {
+            destination.set_extension(format.extension());
+        }
+        return Some(vec![(source.clone(), destination)]);
+    }
+
+    let folder = rfd::FileDialog::new().pick_folder()?;
+    let mut reserved = HashSet::new();
+    Some(
+        paths
+            .iter()
+            .map(|source| {
+                let destination =
+                    unique_library_export_path(&folder, source, format, &mut reserved);
+                (source.clone(), destination)
+            })
+            .collect(),
+    )
+}
+
 pub struct Library;
 
 impl Library {
@@ -1222,7 +1335,6 @@ impl Library {
                         android_selection_menu(
                             ui,
                             &selected_android_items,
-                            &mut open_source,
                             &mut library_action,
                         );
                     });
@@ -1438,8 +1550,23 @@ impl Library {
                             };
                             let selected_count = context_paths.len();
                             let action_enabled = !app.library.file_action_in_progress()
+                                && app.library_batch_export_progress().is_none()
                                 && !context_paths.is_empty();
                             response.context_menu(|ui| {
+                                let export_label = if selected_count > 1 {
+                                    "Export selected…"
+                                } else {
+                                    "Export…"
+                                };
+                                if ui
+                                    .add_enabled(action_enabled, egui::Button::new(export_label))
+                                    .clicked()
+                                {
+                                    library_action =
+                                        Some(LibraryCardAction::Export(context_paths.clone()));
+                                    ui.close();
+                                }
+                                ui.separator();
                                 let duplicate_label = if selected_count > 1 {
                                     "Duplicate selected (RAW + sidecars)"
                                 } else {
@@ -1492,6 +1619,15 @@ impl Library {
         #[cfg(not(target_os = "android"))]
         if let Some(action) = library_action {
             match action {
+                LibraryCardAction::Export(paths) => {
+                    if !paths.is_empty() {
+                        app.library.export_dialog = Some(LibraryExportDialog {
+                            paths,
+                            settings: app.export_settings,
+                            format: ExportFormat::Jpeg,
+                        });
+                    }
+                }
                 LibraryCardAction::Duplicate(paths) => {
                     app.library.clear_selection();
                     app.library.duplicate_raws_with_sidecars(paths, ui.ctx());
@@ -1587,42 +1723,404 @@ impl Library {
 
         #[cfg(target_os = "android")]
         if let Some(action) = library_action {
-            let (verb, targets, operation): (
-                &str,
-                Vec<(String, String)>,
-                fn(&mut AurawApp, &str, &str) -> Result<(), String>,
-            ) = match action {
-                LibraryCardAction::ResetAdjustments(targets) => (
-                    "Reset adjustments for",
-                    targets,
-                    AurawApp::reset_android_library_adjustments,
-                ),
-                LibraryCardAction::Delete(targets) => (
-                    "Deleted",
-                    targets,
-                    AurawApp::delete_android_library_item,
-                ),
-            };
-
-            let total = targets.len();
-            let mut failures = Vec::new();
-            for (uri, display_name) in targets {
-                if let Err(error) = operation(app, &uri, &display_name) {
-                    failures.push(format!("{display_name}: {error}"));
+            match action {
+                LibraryCardAction::Export(targets) => {
+                    if !targets.is_empty() {
+                        app.library.export_dialog = Some(LibraryExportDialog {
+                            targets,
+                            settings: app.export_settings,
+                            format: ExportFormat::Jpeg,
+                        });
+                    }
+                }
+                LibraryCardAction::Duplicate(targets) => {
+                    let total = targets.len();
+                    let mut failures = Vec::new();
+                    for (uri, display_name) in targets {
+                        if let Err(error) = app.duplicate_android_library_item(&uri, &display_name) {
+                            failures.push(format!("{display_name}: {error}"));
+                        }
+                    }
+                    app.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
+                    app.library.refresh(ui.ctx());
+                    app.library.status = if failures.is_empty() {
+                        format!(
+                            "Duplicated {total} selected {}",
+                            if total == 1 { "image" } else { "images" }
+                        )
+                    } else {
+                        format!(
+                            "Duplicated {} of {total} selected images. {}",
+                            total.saturating_sub(failures.len()),
+                            failures.join(" · ")
+                        )
+                    };
+                }
+                LibraryCardAction::ResetAdjustments(targets) => {
+                    let total = targets.len();
+                    let mut failures = Vec::new();
+                    for (uri, display_name) in targets {
+                        if let Err(error) =
+                            app.reset_android_library_adjustments(&uri, &display_name)
+                        {
+                            failures.push(format!("{display_name}: {error}"));
+                        }
+                    }
+                    app.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
+                    app.library.refresh(ui.ctx());
+                    app.library.status = if failures.is_empty() {
+                        format!(
+                            "Reset adjustments for {total} selected {}",
+                            if total == 1 { "image" } else { "images" }
+                        )
+                    } else {
+                        format!(
+                            "Completed {} of {total} selected actions. {}",
+                            total.saturating_sub(failures.len()),
+                            failures.join(" · ")
+                        )
+                    };
+                }
+                LibraryCardAction::Delete(targets) => {
+                    let total = targets.len();
+                    let mut failures = Vec::new();
+                    for (uri, display_name) in targets {
+                        if let Err(error) = app.delete_android_library_item(&uri, &display_name) {
+                            failures.push(format!("{display_name}: {error}"));
+                        }
+                    }
+                    app.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
+                    app.library.refresh(ui.ctx());
+                    app.library.status = if failures.is_empty() {
+                        format!(
+                            "Deleted {total} selected {}",
+                            if total == 1 { "image" } else { "images" }
+                        )
+                    } else {
+                        format!(
+                            "Completed {} of {total} selected actions. {}",
+                            total.saturating_sub(failures.len()),
+                            failures.join(" · ")
+                        )
+                    };
                 }
             }
-            app.library.clear_selection();
-            crate::android::set_back_navigation_active(false);
-            app.library.refresh(ui.ctx());
-            app.library.status = if failures.is_empty() {
-                format!("{verb} {total} selected {}", if total == 1 { "image" } else { "images" })
-            } else {
-                format!(
-                    "Completed {} of {total} selected actions. {}",
-                    total.saturating_sub(failures.len()),
-                    failures.join(" · ")
-                )
-            };
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut close_export_dialog = false;
+            let mut confirm_export = false;
+            if let Some(dialog) = app.library.export_dialog.as_mut() {
+                let count = dialog.paths.len();
+                let title = if count == 1 {
+                    "Export image".to_owned()
+                } else {
+                    format!("Export {count} images")
+                };
+                egui::Window::new(title)
+                    .id(egui::Id::new("library-export-dialog"))
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(380.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Format");
+                            ui.selectable_value(&mut dialog.format, ExportFormat::Jpeg, "JPEG");
+                            ui.selectable_value(&mut dialog.format, ExportFormat::Png, "PNG");
+                        });
+                        ui.add_space(6.0);
+                        crate::ui::sidebar::export_settings_controls(
+                            ui,
+                            &mut dialog.settings,
+                            None,
+                            false,
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(if count > 1 {
+                                "A destination folder will be selected for the batch. File names are generated from each RAW name."
+                            } else {
+                                "Choose the output file after pressing Export."
+                            })
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                close_export_dialog = true;
+                            }
+                            let label = if count == 1 {
+                                "Export 1 image…".to_owned()
+                            } else {
+                                format!("Export {count} images…")
+                            };
+                            if ui.button(label).clicked() {
+                                confirm_export = true;
+                            }
+                        });
+                    });
+            }
+
+            if confirm_export {
+                if let Some(dialog) = app.library.export_dialog.clone() {
+                    if let Some(jobs) = library_export_jobs(&dialog.paths, dialog.format) {
+                        app.library.clear_selection();
+                        app.library.export_dialog = None;
+                        app.start_library_exports(
+                            jobs,
+                            dialog.settings,
+                            dialog.format,
+                            frame,
+                        );
+                    }
+                }
+            } else if close_export_dialog {
+                app.library.export_dialog = None;
+            }
+
+            let mut cancel_batch_export = false;
+            if let Some((completed, total, failed, current_name, cancelling)) =
+                app.library_batch_export_status()
+            {
+                if total > 1 {
+                    let exported = completed.saturating_sub(failed);
+                    let current_fraction = if current_name.is_some() {
+                        app.export_progress_state()
+                            .and_then(|(tiles_done, tiles_total)| {
+                                (tiles_total > 0).then(|| {
+                                    (tiles_done as f32 / tiles_total as f32).clamp(0.0, 1.0)
+                                })
+                            })
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let overall_fraction = if total == 0 {
+                        0.0
+                    } else {
+                        ((completed as f32 + current_fraction) / total as f32).clamp(0.0, 1.0)
+                    };
+
+                    egui::Window::new("Exporting images")
+                        .id(egui::Id::new("library-batch-export-progress-dialog"))
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(420.0)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                        .show(ui.ctx(), |ui| {
+                            ui.label(egui::RichText::new(format!(
+                                "{exported} / {total} exported"
+                            )).strong());
+                            ui.add_space(6.0);
+                            ui.add(
+                                egui::ProgressBar::new(overall_fraction)
+                                    .show_percentage()
+                                    .animate(!cancelling),
+                            );
+                            ui.add_space(6.0);
+
+                            if let Some(name) = current_name.as_deref() {
+                                let preparing = app
+                                    .export_progress_state()
+                                    .is_none_or(|(_, tiles_total)| tiles_total == 0);
+                                ui.label(if preparing {
+                                    format!("Preparing {name}…")
+                                } else {
+                                    format!("Exporting {name}…")
+                                });
+                            }
+                            if failed > 0 {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{failed} {} failed",
+                                        if failed == 1 { "image" } else { "images" }
+                                    ))
+                                    .small()
+                                    .color(ui.visuals().warn_fg_color),
+                                );
+                            }
+                            if cancelling {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Cancelling after the current image finishes…",
+                                    )
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                                );
+                            }
+
+                            ui.add_space(8.0);
+                            if ui
+                                .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                                .clicked()
+                            {
+                                cancel_batch_export = true;
+                            }
+                        });
+                }
+            }
+            if cancel_batch_export {
+                app.cancel_library_batch_export();
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let mut close_export_dialog = false;
+            let mut confirm_export = false;
+            if let Some(dialog) = app.library.export_dialog.as_mut() {
+                let count = dialog.targets.len();
+                let title = if count == 1 {
+                    "Export image".to_owned()
+                } else {
+                    format!("Export {count} images")
+                };
+                egui::Window::new(title)
+                    .id(egui::Id::new("android-library-export-dialog"))
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(380.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Format");
+                            ui.selectable_value(&mut dialog.format, ExportFormat::Jpeg, "JPEG");
+                            ui.selectable_value(&mut dialog.format, ExportFormat::Png, "PNG");
+                        });
+                        ui.add_space(6.0);
+                        crate::ui::sidebar::export_settings_controls(
+                            ui,
+                            &mut dialog.settings,
+                            None,
+                            false,
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Exports are saved to Pictures/AuRaw. File names are generated from each RAW name.",
+                            )
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                close_export_dialog = true;
+                            }
+                            let label = if count == 1 {
+                                "Export 1 image".to_owned()
+                            } else {
+                                format!("Export {count} images")
+                            };
+                            if ui.button(label).clicked() {
+                                confirm_export = true;
+                            }
+                        });
+                    });
+            }
+
+            if confirm_export {
+                if let Some(dialog) = app.library.export_dialog.clone() {
+                    app.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
+                    app.library.export_dialog = None;
+                    app.start_android_library_exports(
+                        dialog.targets,
+                        dialog.settings,
+                        dialog.format,
+                    );
+                }
+            } else if close_export_dialog {
+                app.library.export_dialog = None;
+            }
+
+            let mut cancel_batch_export = false;
+            if let Some((completed, total, failed, current_name, cancelling)) =
+                app.library_batch_export_status()
+            {
+                if total > 1 {
+                    let exported = completed.saturating_sub(failed);
+                    let current_fraction = if current_name.is_some() {
+                        app.export_progress_state()
+                            .and_then(|(tiles_done, tiles_total)| {
+                                (tiles_total > 0).then(|| {
+                                    (tiles_done as f32 / tiles_total as f32).clamp(0.0, 1.0)
+                                })
+                            })
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let overall_fraction = if total == 0 {
+                        0.0
+                    } else {
+                        ((completed as f32 + current_fraction) / total as f32).clamp(0.0, 1.0)
+                    };
+
+                    egui::Window::new("Exporting images")
+                        .id(egui::Id::new("android-library-batch-export-progress-dialog"))
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(360.0)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                        .show(ui.ctx(), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{exported} / {total} exported"))
+                                    .strong(),
+                            );
+                            ui.add_space(6.0);
+                            ui.add(
+                                egui::ProgressBar::new(overall_fraction)
+                                    .show_percentage()
+                                    .animate(!cancelling),
+                            );
+                            ui.add_space(6.0);
+                            if let Some(name) = current_name.as_deref() {
+                                let preparing = app
+                                    .export_progress_state()
+                                    .is_none_or(|(_, tiles_total)| tiles_total == 0);
+                                ui.label(if preparing {
+                                    format!("Preparing {name}…")
+                                } else {
+                                    format!("Exporting {name}…")
+                                });
+                            }
+                            if failed > 0 {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{failed} {} failed",
+                                        if failed == 1 { "image" } else { "images" }
+                                    ))
+                                    .small()
+                                    .color(ui.visuals().warn_fg_color),
+                                );
+                            }
+                            if cancelling {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Cancelling after the current image finishes…",
+                                    )
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                                );
+                            }
+                            ui.add_space(8.0);
+                            if ui
+                                .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                                .clicked()
+                            {
+                                cancel_batch_export = true;
+                            }
+                        });
+                }
+            }
+            if cancel_batch_export {
+                app.cancel_library_batch_export();
+            }
         }
 
         #[cfg(target_os = "android")]
@@ -1632,10 +2130,21 @@ impl Library {
             let rect = egui::Rect::from_min_size(bounds.right_bottom() - size, size);
             let response = ui.put(
                 rect,
-                egui::Button::new(egui::RichText::new("+").size(28.0))
+                egui::Button::new("")
                     .min_size(size)
                     .corner_radius(28)
                     .fill(ui.visuals().selection.bg_fill),
+            );
+            let center = response.rect.center();
+            let half = 9.0;
+            let stroke = egui::Stroke::new(2.5, ui.visuals().selection.stroke.color);
+            ui.painter().line_segment(
+                [egui::pos2(center.x - half, center.y), egui::pos2(center.x + half, center.y)],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [egui::pos2(center.x, center.y - half), egui::pos2(center.x, center.y + half)],
+                stroke,
             );
             if response.clicked() {
                 import_raw = true;

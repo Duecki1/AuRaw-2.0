@@ -256,6 +256,15 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
+    pub(crate) fn duplicate_android_library_item(
+        &mut self,
+        raw_uri: &str,
+        display_name: &str,
+    ) -> Result<String, String> {
+        crate::android::duplicate_library_document(&self.android_app, raw_uri, display_name)
+    }
+
+    #[cfg(target_os = "android")]
     pub(crate) fn delete_android_library_item(
         &mut self,
         raw_uri: &str,

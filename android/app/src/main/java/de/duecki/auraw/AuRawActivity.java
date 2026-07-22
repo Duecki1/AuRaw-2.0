@@ -816,6 +816,38 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
+    /** Duplicates a library RAW and its current sidecar into AuRaw's library. */
+    public String duplicateRawLibraryDocument(String rawUriText, String displayName) throws Exception {
+        Uri rawUri = Uri.parse(rawUriText);
+        verifyRawLibraryIdentity(rawUri, displayName);
+        StoredRaw duplicate = null;
+        String cachedSidecar = "";
+        try {
+            duplicate = storeRawInLibrary(rawUri, displayName);
+            cachedSidecar = materializeRawSidecar(rawUriText, displayName);
+            if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
+                publishRawSidecar(cachedSidecar, duplicate.uri.toString(), duplicate.displayName);
+            }
+            return duplicate.displayName;
+        } catch (Exception error) {
+            if (duplicate != null) {
+                try {
+                    deleteStoredRaw(duplicate.uri);
+                } catch (Exception ignored) {
+                    // Preserve the original failure; best-effort cleanup only.
+                }
+            }
+            throw error;
+        } finally {
+            if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
+                File staged = new File(cachedSidecar);
+                if (!staged.delete() && staged.exists()) {
+                    staged.deleteOnExit();
+                }
+            }
+        }
+    }
+
     /** Deletes a library RAW and its sidecar after validating AuRaw ownership. */
     public void deleteRawLibraryDocument(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);

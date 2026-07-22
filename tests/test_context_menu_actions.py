@@ -89,11 +89,16 @@ def test_android_thumbnail_long_press_enters_multi_selection_without_opening_pho
     assert 'ui.button("Cancel")' in LIBRARY
     assert "set_back_navigation_active(true)" in LIBRARY
     assert 'let LibrarySource::Android {' in LIBRARY
-    assert 'ui.button("Open")' in LIBRARY
+    assert '"Export selected…"' in LIBRARY
+    assert '"Duplicate selected (RAW + sidecars)"' in LIBRARY
     assert "reset_android_library_adjustments" in LIBRARY
     assert "delete_android_library_item" in LIBRARY
+    assert 'LibraryCardAction::Export(targets())' in LIBRARY
+    assert 'LibraryCardAction::Duplicate(targets())' in LIBRARY
+    assert 'jni::jni_str!("duplicateRawLibraryDocument")' in android_bridge
     assert 'jni::jni_str!("removeRawSidecar")' in android_bridge
     assert 'jni::jni_str!("deleteRawLibraryDocument")' in android_bridge
+    assert "public String duplicateRawLibraryDocument" in android_activity
     assert "public void removeRawSidecar" in android_activity
     assert "public void deleteRawLibraryDocument" in android_activity
 
@@ -114,6 +119,14 @@ def test_android_library_uses_one_shared_selection_overflow_instead_of_card_menu
     assert 'Delete selected' in LIBRARY
 
 
+def test_android_library_import_fab_draws_centered_plus_geometry() -> None:
+    assert 'egui::Button::new("")' in LIBRARY
+    assert 'let center = response.rect.center();' in LIBRARY
+    assert 'center.x - half' in LIBRARY
+    assert 'center.y - half' in LIBRARY
+    assert 'RichText::new("+")' not in LIBRARY
+
+
 def test_android_mask_cards_have_visible_overflow_menu_buttons() -> None:
     assert 'android-mask-group-overflow' in MASK_UI
     assert 'android-submask-overflow' in MASK_UI
@@ -121,3 +134,29 @@ def test_android_mask_cards_have_visible_overflow_menu_buttons() -> None:
     assert MASK_UI.count('&& !overflow_clicked') >= 2
     assert 'response.rect,\n                            menu_id,\n                            22.0,' in MASK_UI
     assert 'response.rect,\n                                    menu_id,\n                                    20.0,' in MASK_UI
+
+
+def test_desktop_library_export_context_menu_supports_single_and_batch_destinations() -> None:
+    assert '"Export selected…"' in LIBRARY
+    assert '"Export…"' in LIBRARY
+    assert 'LibraryCardAction::Export(context_paths.clone())' in LIBRARY
+    assert 'library-export-dialog' in LIBRARY
+    assert 'Export {count} images' in LIBRARY
+    assert 'rfd::FileDialog::new().pick_folder()' in LIBRARY
+    assert 'rfd::FileDialog::new().set_file_name(default_name)' in LIBRARY
+    assert 'start_library_exports(' in LIBRARY
+
+
+
+def test_library_batch_export_opens_dedicated_progress_dialog_with_cancel() -> None:
+    app = (ROOT / "src/app/processing_export.rs").read_text(encoding="utf-8")
+    assert 'library-batch-export-progress-dialog' in LIBRARY
+    assert '"Exporting images"' in LIBRARY
+    assert '"{exported} / {total} exported"' in LIBRARY
+    assert 'egui::ProgressBar::new(overall_fraction)' in LIBRARY
+    assert 'egui::Button::new("Cancel")' in LIBRARY
+    assert 'app.cancel_library_batch_export()' in LIBRARY
+    assert 'Cancelling after the current image finishes' in LIBRARY
+    assert 'cancel_requested: bool' in (ROOT / "src/app.rs").read_text(encoding="utf-8")
+    assert 'pub(crate) fn cancel_library_batch_export' in app
+    assert 'batch.pending.clear()' in app
