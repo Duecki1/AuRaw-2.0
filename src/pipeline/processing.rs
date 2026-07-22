@@ -157,30 +157,54 @@ pub fn build_region_proxy(
         super::CfaKind::XTrans => 6,
     };
 
+    // A reduced RAW proxy must keep every CFA phase in one synthetic Bayer/X-Trans
+    // cell spatially co-sited. The old implementation gave each output photosite
+    // its own non-overlapping `scale x scale` source block. At a 4x reduction,
+    // for example, the R and G samples beside each other in the proxy represented
+    // source regions four pixels apart. Demosaicing that synthetic mosaic turns
+    // ordinary high-contrast edges into strong green/magenta fringes.
+    //
+    // Instead, one complete output CFA cell summarizes one shared source macrocell
+    // of `scale * cfa_period` pixels. Each output phase averages only source
+    // photosites with that exact phase inside the shared macrocell. This preserves
+    // the sensor pattern while keeping R/G/B measurements registered to the same
+    // image area.
     for py in 0..height {
-        let source_y0 = y + py * scale;
-        let source_y1 = (y + (py + 1) * scale).min(y + region_height);
+        let output_phase_y = py % cfa_period;
+        let macro_y0 = y + (py / cfa_period) * scale * cfa_period;
+        let macro_y1 = (macro_y0 + scale * cfa_period).min(y + region_height);
         for px in 0..width {
-            let source_x0 = x + px * scale;
-            let source_x1 = (x + (px + 1) * scale).min(x + region_width);
-            let center_x = (source_x0 + (source_x1 - source_x0) / 2).min(raw.width - 1);
-            let center_y = (source_y0 + (source_y1 - source_y0) / 2).min(raw.height - 1);
+            let output_phase_x = px % cfa_period;
+            let macro_x0 = x + (px / cfa_period) * scale * cfa_period;
+            let macro_x1 = (macro_x0 + scale * cfa_period).min(x + region_width);
+            let center_x = (macro_x0 + (macro_x1.saturating_sub(macro_x0)) / 2)
+                .min(raw.width - 1);
+            let center_y = (macro_y0 + (macro_y1.saturating_sub(macro_y0)) / 2)
+                .min(raw.height - 1);
 
             // Anchor the synthetic proxy mosaic to the source region's real CFA
             // phase. Detail crops are aligned to the sensor period, preventing
             // a phase jump from appearing as coloured horizontal/vertical lines.
-            let phase_x = (x + px % cfa_period).min(raw.width - 1);
-            let phase_y = (y + py % cfa_period).min(raw.height - 1);
+            let phase_x = (x + output_phase_x).min(raw.width - 1);
+            let phase_y = (y + output_phase_y).min(raw.height - 1);
             let phase_index = (phase_y * raw.width + phase_x) as usize;
             let cfa = raw.color_indices[phase_index];
 
             let mut pixel_sum = 0u64;
             let mut black_sum = 0.0f64;
             let mut count = 0u32;
-            for sy in source_y0..source_y1 {
+            for sy in macro_y0..macro_y1 {
+                if (sy - y) % cfa_period != output_phase_y {
+                    continue;
+                }
                 let row = sy * raw.width;
-                for sx in source_x0..source_x1 {
+                for sx in macro_x0..macro_x1 {
+                    if (sx - x) % cfa_period != output_phase_x {
+                        continue;
+                    }
                     let index = (row + sx) as usize;
+                    // Exact CFA phase is the primary condition. Keep the channel
+                    // check as a safety net for unusual/non-periodic metadata.
                     if raw.color_indices[index] == cfa {
                         pixel_sum += u64::from(raw.raw_pixels[index]);
                         black_sum += f64::from(raw.black_levels_per_pixel[index]);

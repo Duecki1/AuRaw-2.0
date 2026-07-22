@@ -529,15 +529,16 @@ mod imp {
                 let coordinate_index = x * 6 + channel * 2;
                 let source_x = coordinates[coordinate_index];
                 let source_y = coordinates[coordinate_index + 1];
-                let source_index = nearest_matching_sample(raw, source_x, source_y, cfa_index);
-                let black = raw.black_levels_per_pixel[source_index];
-                let sample = f32::from(raw.raw_pixels[source_index]);
-                let gain = if vignette_enabled {
-                    vignette_gains[source_index].max(0.0)
-                } else {
-                    1.0
-                };
-                let corrected = black + (sample - black).max(0.0) * gain;
+                let (corrected, black) = sample_corrected_cfa_subpixel(
+                    raw,
+                    source_x,
+                    source_y,
+                    cfa_index,
+                    x,
+                    y,
+                    vignette_enabled,
+                    &vignette_gains,
+                );
                 raw_pixels[output_index] = corrected.round().clamp(0.0, f32::from(u16::MAX)) as u16;
                 black_levels_per_pixel[output_index] = black;
             }
@@ -624,6 +625,124 @@ mod imp {
                 coordinates[base + channel * 2 + 1] = y as f32;
             }
         }
+    }
+
+    fn sample_corrected_cfa_subpixel(
+        raw: &LoadedRaw,
+        x: f32,
+        y: f32,
+        channel: u8,
+        output_x: usize,
+        output_y: usize,
+        vignette_enabled: bool,
+        vignette_gains: &[f32],
+    ) -> (f32, f32) {
+        if raw.cfa_kind == crate::pipeline::CfaKind::Bayer && x.is_finite() && y.is_finite() {
+            if let Some(sample) = sample_bayer_phase_bilinear(
+                raw,
+                x,
+                y,
+                channel,
+                output_x,
+                output_y,
+                vignette_enabled,
+                vignette_gains,
+            ) {
+                return sample;
+            }
+        }
+
+        // X-Trans has an irregular 6x6 color layout, so keep the conservative
+        // same-color fallback there. Bayer is the common path and receives true
+        // subpixel interpolation below, which removes the nearest-neighbor
+        // stair-steps and color breaks that were visible after Lensfun warping.
+        let source_index = nearest_matching_sample(raw, x, y, channel);
+        corrected_sample_at(raw, source_index, vignette_enabled, vignette_gains)
+    }
+
+    fn sample_bayer_phase_bilinear(
+        raw: &LoadedRaw,
+        x: f32,
+        y: f32,
+        channel: u8,
+        output_x: usize,
+        output_y: usize,
+        vignette_enabled: bool,
+        vignette_gains: &[f32],
+    ) -> Option<(f32, f32)> {
+        let (x0, x1, tx) = bayer_axis_samples(x, raw.width, (output_x as u32) & 1)?;
+        let (y0, y1, ty) = bayer_axis_samples(y, raw.height, (output_y as u32) & 1)?;
+        let indices = [
+            (y0 * raw.width + x0) as usize,
+            (y0 * raw.width + x1) as usize,
+            (y1 * raw.width + x0) as usize,
+            (y1 * raw.width + x1) as usize,
+        ];
+        if indices
+            .iter()
+            .any(|&index| raw.color_indices.get(index).copied() != Some(channel))
+        {
+            return None;
+        }
+
+        let a = corrected_sample_at(raw, indices[0], vignette_enabled, vignette_gains);
+        let b = corrected_sample_at(raw, indices[1], vignette_enabled, vignette_gains);
+        let c = corrected_sample_at(raw, indices[2], vignette_enabled, vignette_gains);
+        let d = corrected_sample_at(raw, indices[3], vignette_enabled, vignette_gains);
+        let top = (lerp(a.0, b.0, tx), lerp(a.1, b.1, tx));
+        let bottom = (lerp(c.0, d.0, tx), lerp(c.1, d.1, tx));
+        Some((
+            lerp(top.0, bottom.0, ty),
+            lerp(top.1, bottom.1, ty),
+        ))
+    }
+
+    fn bayer_axis_samples(coordinate: f32, extent: u32, phase: u32) -> Option<(u32, u32, f32)> {
+        if extent == 0 {
+            return None;
+        }
+        let maximum = extent - 1;
+        let first = phase.min(maximum);
+        if first > maximum {
+            return None;
+        }
+        let last = first + ((maximum - first) / 2) * 2;
+        if first == last {
+            return Some((first, first, 0.0));
+        }
+
+        let lattice = ((coordinate - first as f32) * 0.5)
+            .clamp(0.0, ((last - first) / 2) as f32);
+        let lower_step = lattice.floor() as u32;
+        let upper_step = (lower_step + 1).min((last - first) / 2);
+        let lower = first + lower_step * 2;
+        let upper = first + upper_step * 2;
+        let mix = if lower == upper {
+            0.0
+        } else {
+            ((coordinate - lower as f32) / (upper - lower) as f32).clamp(0.0, 1.0)
+        };
+        Some((lower, upper, mix))
+    }
+
+    fn corrected_sample_at(
+        raw: &LoadedRaw,
+        index: usize,
+        vignette_enabled: bool,
+        vignette_gains: &[f32],
+    ) -> (f32, f32) {
+        let black = raw.black_levels_per_pixel[index];
+        let sample = f32::from(raw.raw_pixels[index]);
+        let gain = if vignette_enabled {
+            vignette_gains.get(index).copied().unwrap_or(1.0).max(0.0)
+        } else {
+            1.0
+        };
+        (black + (sample - black).max(0.0) * gain, black)
+    }
+
+    fn lerp(left: f32, right: f32, amount: f32) -> f32 {
+        left + (right - left) * amount
     }
 
     fn nearest_matching_sample(raw: &LoadedRaw, x: f32, y: f32, channel: u8) -> usize {

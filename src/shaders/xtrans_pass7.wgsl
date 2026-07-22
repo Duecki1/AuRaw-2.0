@@ -122,6 +122,23 @@ fn xt_median5(a0: f32, a1: f32, a2: f32, a3: f32, a4: f32) -> f32 {
     return c;
 }
 
+fn xt_reference_false_color_guard(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    let uv0 = xt_uv(rgb);
+    let uvn = xt_uv(xt_high(pos + vec2<i32>(0, -1)));
+    let uvs = xt_uv(xt_high(pos + vec2<i32>(0,  1)));
+    let uvw = xt_uv(xt_high(pos + vec2<i32>(-1, 0)));
+    let uve = xt_uv(xt_high(pos + vec2<i32>( 1, 0)));
+    let median = vec2<f32>(
+        xt_median5(uv0.x, uvn.x, uvs.x, uvw.x, uve.x),
+        xt_median5(uv0.y, uvn.y, uvs.y, uvw.y, uve.y),
+    );
+    let disagreement = length(uv0 - median);
+    let strength = 0.50 * smoothstep(0.006, 0.055, disagreement);
+    if strength <= 1e-6 { return rgb; }
+    let y = dot(rgb, vec3<f32>(0.2627, 0.6780, 0.0593));
+    return xt_from_yuv(y, mix(uv0, median, strength));
+}
+
 fn xt_frequency_chroma(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let uv0 = xt_frequency_uv(pos);
     // The reference FDC path applies a five-sample cross median to remove
@@ -267,6 +284,8 @@ fn xtrans_demosaic_finish(@builtin(global_invocation_id) gid: vec3<u32>) {
         camera_rgb = mix(xt_low_detail(pos), reference, xt_dual_weight(pos));
     } else if params.demosaic_mode >= 0.5 {
         camera_rgb = xt_frequency_chroma(pos, reference);
+    } else {
+        camera_rgb = xt_reference_false_color_guard(pos, reference);
     }
     camera_rgb = xt_apply_ca(pos, camera_rgb);
     camera_rgb = xt_chroma_denoise(pos, camera_rgb);
