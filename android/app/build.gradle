@@ -10,7 +10,7 @@ android {
     namespace "de.duecki.auraw"
     compileSdk 35
     buildToolsVersion "35.0.0"
-    ndkVersion "27.0.12077973"
+    ndkVersion "28.2.13676358"
 
     defaultConfig {
         applicationId "de.duecki.auraw"
@@ -25,6 +25,14 @@ android {
 
     sourceSets {
         main.jniLibs.srcDirs = ["src/main/jniLibs"]
+    }
+
+    // AGP 8.5.1+ page-aligns uncompressed JNI libraries for 16 KiB-page devices.
+    // Keep this explicit so a future packaging-default change cannot regress support.
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging false
+        }
     }
 
     buildTypes {

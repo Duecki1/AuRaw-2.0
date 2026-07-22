@@ -8,7 +8,7 @@ the application entry point and the system file-picker bridge.
 
 - Rust with the Android target for the device (normally
   `aarch64-linux-android`)
-- Android SDK 35 and Android NDK 27.0.12077973
+- Android SDK 35 and Android NDK 28.2.13676358
 - Android SDK CMake 3.22.1 (with its bundled Ninja), a JDK, host `libclang`, and Gradle 8.11.1 or newer in the Gradle 8 series (CI uses 8.11.1)
 - `cargo-ndk` 4.1.2 (`cargo install cargo-ndk --version 4.1.2 --locked`)
 
@@ -16,7 +16,7 @@ Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
 
 ```sh
 export ANDROID_SDK_ROOT="/home/duecki/Android/Sdk"
-export ANDROID_NDK_HOME="/home/duecki/Android/Sdk/ndk/27.0.12077973"
+export ANDROID_NDK_HOME="/home/duecki/Android/Sdk/ndk/28.2.13676358"
 rustup target add aarch64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 ```
@@ -41,6 +41,26 @@ gradle assembleDebug -PaurawAbi=arm64-v8a
 Running the same command from the `android` directory remains supported.
 
 The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+### 16 KB memory-page support
+
+Android builds use NDK r28c, whose linker emits 16 KB-compatible ELF LOAD
+segments by default. AGP 8.9.2 packages JNI libraries uncompressed with legacy
+packaging disabled, allowing the APK to retain 16 KB zip alignment for direct
+loading on Android 15+ devices that use 16 KB memory pages. The manifest does
+not force native-library extraction.
+
+After building an APK, verify both ELF LOAD alignment and APK zip alignment with:
+
+```sh
+./scripts/verify-android-16kb.sh android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+The verifier checks every 64-bit `.so` with the pinned NDK's `llvm-objdump` and
+runs Build Tools 35.0.0 `zipalign -c -P 16 -v 4`. CI runs the same check on the
+arm64 debug APK. Runtime testing should also be performed on a 16 KB Android 15
+or newer device/emulator (`adb shell getconf PAGE_SIZE` must report `16384`).
+
 To build only the native LibRaw and Rust library without packaging an APK:
 
 ```sh
