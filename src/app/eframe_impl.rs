@@ -5,7 +5,12 @@ impl eframe::App for AurawApp {
             self.poll_android_picker(frame);
             self.poll_android_export_publish();
             if crate::android::take_back_request() {
-                self.activate_tab(AppTab::Library);
+                if self.active_tab == AppTab::Library && self.library.has_selection() {
+                    self.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
+                } else {
+                    self.activate_tab(AppTab::Library);
+                }
             }
 
             let [left, top, right, bottom] =

@@ -7,10 +7,40 @@ use anyhow::{Context, Result};
 use eframe::wgpu;
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+impl ExportFormat {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+        }
+    }
+
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+        }
+    }
+
+    pub const fn mime_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExportResizeMode {
@@ -43,6 +73,7 @@ pub struct ExportSettings {
     pub percentage: f32,
     pub allow_upscale: bool,
     pub keep_metadata: bool,
+    pub jpeg_quality: u8,
 }
 
 impl Default for ExportSettings {
@@ -53,6 +84,7 @@ impl Default for ExportSettings {
             percentage: 100.0,
             allow_upscale: false,
             keep_metadata: true,
+            jpeg_quality: 90,
         }
     }
 }
@@ -250,6 +282,100 @@ pub fn spawn_tiled_png_export(
     if let Err(error) = spawn_result {
         let _ = sender.send(ExportEvent::Finished(Err(format!(
             "could not start export worker: {error}"
+        ))));
+    }
+
+    receiver
+}
+
+/// JPEG export uses the exact same full-quality tiled render as PNG, then
+/// converts the lossless staged result to a quality-controlled JPEG. Keeping
+/// the render path shared ensures both formats match visually.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_tiled_jpeg_export(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    raw: Arc<LoadedRaw>,
+    exposure: ExposureParams,
+    masks: MaskStack,
+    inpaint: Option<InpaintLayer>,
+    path: PathBuf,
+    tile_spec: TileSpec,
+    settings: ExportSettings,
+    metadata: ExportMetadata,
+) -> mpsc::Receiver<ExportEvent> {
+    let (sender, receiver) = mpsc::channel();
+    let worker_sender = sender.clone();
+    let worker_path = path.clone();
+
+    let spawn_result = std::thread::Builder::new()
+        .name("auraw-tiled-jpeg-export".to_owned())
+        .spawn(move || {
+            let worker_started = Instant::now();
+            crate::diagnostics::record(format!(
+                "JPEG export worker started: source={}x{} quality={} cfa={:?} requested_tile_core={} halo={}",
+                raw.width,
+                raw.height,
+                settings.jpeg_quality,
+                raw.cfa_kind,
+                tile_spec.core_edge,
+                tile_spec.halo,
+            ));
+            let result = (|| -> Result<()> {
+                let (output_width, output_height) =
+                    settings.checked_output_dimensions(raw.width, raw.height)?;
+                let tile_spec = bounded_tile_spec(tile_spec, raw.width)?;
+                let temporary = temporary_export_path(&worker_path)?;
+                let export_result = export_tiled_jpeg(
+                    ExportContext {
+                        device: &device,
+                        queue: &queue,
+                        events: &worker_sender,
+                    },
+                    ExportRequest {
+                        raw: &raw,
+                        exposure: &exposure,
+                        masks: &masks,
+                        inpaint: inpaint.as_ref(),
+                        path: &temporary,
+                        tile_spec,
+                        output_width,
+                        output_height,
+                        keep_metadata: settings.keep_metadata,
+                        metadata: &metadata,
+                    },
+                    settings.jpeg_quality,
+                );
+                if let Err(error) = export_result {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(error);
+                }
+                if let Err(error) = publish_completed_export(&temporary, &worker_path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(error);
+                }
+                Ok(())
+            })();
+            match &result {
+                Ok(()) => crate::diagnostics::record(format!(
+                    "JPEG export worker finished successfully in {:.3}s",
+                    worker_started.elapsed().as_secs_f64()
+                )),
+                Err(error) => crate::diagnostics::record(format!(
+                    "JPEG export worker failed after {:.3}s: {error:#}",
+                    worker_started.elapsed().as_secs_f64()
+                )),
+            }
+            let _ = worker_sender.send(ExportEvent::Finished(
+                result
+                    .map(|_| worker_path)
+                    .map_err(|error| format!("{error:#}")),
+            ));
+        });
+
+    if let Err(error) = spawn_result {
+        let _ = sender.send(ExportEvent::Finished(Err(format!(
+            "could not start JPEG export worker: {error}"
         ))));
     }
 
@@ -513,6 +639,249 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
     resizer.finish(&output_transform, &mut stream)?;
     stream.finish().context("finish streaming PNG data")?;
     writer.finish().context("finish PNG file")?;
+    Ok(())
+}
+
+fn export_tiled_jpeg(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    quality: u8,
+) -> Result<()> {
+    let quality = quality.clamp(1, 100);
+    // Stage the shared full-quality tiled renderer as a lossless PNG. This
+    // deliberately reuses the exact PNG render path so JPEG and PNG exports
+    // have identical processing, sizing, masks, and inpainting.
+    let staged_png = temporary_export_path(request.path)?;
+    let staged_request = ExportRequest {
+        raw: request.raw,
+        exposure: request.exposure,
+        masks: request.masks,
+        inpaint: request.inpaint,
+        path: &staged_png,
+        tile_spec: request.tile_spec,
+        output_width: request.output_width,
+        output_height: request.output_height,
+        // The intermediate is private and lossless; only the final JPEG gets
+        // user-requested metadata.
+        keep_metadata: false,
+        metadata: request.metadata,
+    };
+    if let Err(error) = export_tiled_png(context, staged_request) {
+        let _ = fs::remove_file(&staged_png);
+        return Err(error);
+    }
+
+    // Convert the staged PNG into a disk-backed RGB raster one row at a time.
+    // JPEG's encoder can then read 8x8 blocks through GenericImageView without
+    // holding a full-resolution RGB/RGBA image in the Android heap.
+    let staged_rgb = temporary_export_path(request.path)?;
+    let encoded_jpeg = temporary_export_path(request.path)?;
+    let encode_result = (|| -> Result<()> {
+        stage_png_as_rgb(
+            &staged_png,
+            &staged_rgb,
+            request.output_width,
+            request.output_height,
+        )?;
+        let rgb_file = fs::File::open(&staged_rgb)
+            .with_context(|| format!("open staged RGB raster {}", staged_rgb.display()))?;
+        // SAFETY: the mapped file is opened read-only and remains alive for the
+        // lifetime of the mapping; AuRaw does not mutate or truncate it until
+        // after JPEG encoding finishes and the mapping has been dropped.
+        let mapped = unsafe { memmap2::MmapOptions::new().map(&rgb_file) }
+            .with_context(|| format!("map staged RGB raster {}", staged_rgb.display()))?;
+        let image = MappedRgbImage::new(mapped, request.output_width, request.output_height)?;
+
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&encoded_jpeg)
+            .with_context(|| format!("create staged JPEG {}", encoded_jpeg.display()))?;
+        let mut writer = BufWriter::new(file);
+        {
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut writer,
+                quality,
+            );
+            encoder
+                .encode_image(&image)
+                .with_context(|| format!("encode JPEG {}", request.path.display()))?;
+        }
+        writer.flush().context("flush staged JPEG")?;
+        write_final_jpeg(
+            &encoded_jpeg,
+            request.path,
+            request.keep_metadata,
+            request.metadata,
+            request.output_width,
+            request.output_height,
+        )?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&staged_png);
+    let _ = fs::remove_file(&staged_rgb);
+    let _ = fs::remove_file(&encoded_jpeg);
+    if encode_result.is_err() {
+        let _ = fs::remove_file(request.path);
+    }
+    encode_result
+}
+
+fn stage_png_as_rgb(
+    png_path: &Path,
+    rgb_path: &Path,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<()> {
+    let input = fs::File::open(png_path)
+        .with_context(|| format!("open staged PNG {}", png_path.display()))?;
+    let decoder = png::Decoder::new(BufReader::new(input));
+    let mut reader = decoder.read_info().context("read staged PNG header")?;
+    let info = reader.info();
+    anyhow::ensure!(
+        info.width == expected_width && info.height == expected_height,
+        "staged PNG dimensions do not match requested JPEG dimensions"
+    );
+    let (color_type, bit_depth) = reader.output_color_type();
+    anyhow::ensure!(
+        color_type == png::ColorType::Rgba && bit_depth == png::BitDepth::Eight,
+        "staged PNG has an unexpected pixel format"
+    );
+
+    let output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(rgb_path)
+        .with_context(|| format!("create staged RGB raster {}", rgb_path.display()))?;
+    let mut output = BufWriter::new(output);
+    let rgba_row_len = usize::try_from(expected_width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .context("staged PNG row size overflow")?;
+    let rgb_row_len = usize::try_from(expected_width)
+        .ok()
+        .and_then(|width| width.checked_mul(3))
+        .context("staged RGB row size overflow")?;
+    let mut rgb_row = Vec::new();
+    rgb_row
+        .try_reserve_exact(rgb_row_len)
+        .context("reserve staged RGB row")?;
+    rgb_row.resize(rgb_row_len, 0);
+
+    let mut rows = 0u32;
+    while let Some(row) = reader.next_row().context("decode staged PNG row")? {
+        let rgba = row.data();
+        anyhow::ensure!(
+            rgba.len() == rgba_row_len,
+            "staged PNG row has an unexpected length"
+        );
+        for (rgb, rgba) in rgb_row.chunks_exact_mut(3).zip(rgba.chunks_exact(4)) {
+            rgb.copy_from_slice(&rgba[..3]);
+        }
+        output
+            .write_all(&rgb_row)
+            .with_context(|| format!("write staged RGB row {rows}"))?;
+        rows += 1;
+    }
+    anyhow::ensure!(
+        rows == expected_height,
+        "staged PNG produced {rows} rows; expected {expected_height}"
+    );
+    output.flush().context("flush staged RGB raster")?;
+    Ok(())
+}
+
+struct MappedRgbImage {
+    data: memmap2::Mmap,
+    width: u32,
+    height: u32,
+}
+
+impl MappedRgbImage {
+    fn new(data: memmap2::Mmap, width: u32, height: u32) -> Result<Self> {
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(3))
+            .context("mapped RGB image size overflow")?;
+        anyhow::ensure!(
+            u64::try_from(data.len()).unwrap_or(u64::MAX) == expected,
+            "mapped RGB raster length does not match its dimensions"
+        );
+        Ok(Self {
+            data,
+            width,
+            height,
+        })
+    }
+}
+
+impl image::GenericImageView for MappedRgbImage {
+    type Pixel = image::Rgb<u8>;
+
+    fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
+        assert!(x < self.width && y < self.height, "JPEG pixel is out of bounds");
+        let index = (y as usize * self.width as usize + x as usize) * 3;
+        image::Rgb([self.data[index], self.data[index + 1], self.data[index + 2]])
+    }
+}
+
+fn write_final_jpeg(
+    encoded_path: &Path,
+    output_path: &Path,
+    keep_metadata: bool,
+    metadata: &ExportMetadata,
+    output_width: u32,
+    output_height: u32,
+) -> Result<()> {
+    if !keep_metadata {
+        return fs::rename(encoded_path, output_path).with_context(|| {
+            format!(
+                "publish staged JPEG {} to {}",
+                encoded_path.display(),
+                output_path.display()
+            )
+        });
+    }
+
+    let mut input = BufReader::new(
+        fs::File::open(encoded_path)
+            .with_context(|| format!("open staged JPEG {}", encoded_path.display()))?,
+    );
+    let mut soi = [0u8; 2];
+    input.read_exact(&mut soi).context("read JPEG SOI marker")?;
+    anyhow::ensure!(soi == [0xff, 0xd8], "staged JPEG is missing its SOI marker");
+
+    let tiff = build_exif_payload(metadata, output_width, output_height);
+    let payload_len = 6usize
+        .checked_add(tiff.len())
+        .context("JPEG EXIF payload length overflow")?;
+    let segment_len = payload_len
+        .checked_add(2)
+        .context("JPEG EXIF segment length overflow")?;
+    let segment_len = u16::try_from(segment_len)
+        .context("JPEG EXIF metadata exceeds the APP1 segment limit")?;
+
+    let output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+        .with_context(|| format!("create final JPEG {}", output_path.display()))?;
+    let mut output = BufWriter::new(output);
+    output.write_all(&soi).context("write JPEG SOI marker")?;
+    output.write_all(&[0xff, 0xe1]).context("write JPEG APP1 marker")?;
+    output
+        .write_all(&segment_len.to_be_bytes())
+        .context("write JPEG APP1 length")?;
+    output
+        .write_all(b"Exif\0\0")
+        .context("write JPEG EXIF signature")?;
+    output.write_all(&tiff).context("write JPEG EXIF payload")?;
+    std::io::copy(&mut input, &mut output).context("copy JPEG image data")?;
+    output.flush().context("flush final JPEG")?;
     Ok(())
 }
 

@@ -19,7 +19,7 @@ def test_desktop_toolbar_toggles_original_and_edited_preview() -> None:
 def test_android_hold_shows_original_only_while_stationary() -> None:
     assert '#[cfg(target_os = "android")]' in PREVIEW
     assert "const HOLD_TIME" in PREVIEW
-    assert "Duration::from_secs(1)" in PREVIEW
+    assert "Duration::from_millis(350)" in PREVIEW
     assert "MAX_STATIONARY_DISTANCE" in PREVIEW
     assert "android_original_hold" in APP
     assert "input.pointer.primary_down()" in PREVIEW

@@ -10,8 +10,8 @@ use crate::inpainting::{
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_png_export, BrushDab, BrushMode, CameraProfileMode, ExportEvent, ExportMetadata,
-    ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog,
+    spawn_tiled_jpeg_export, spawn_tiled_png_export, BrushDab, BrushMode, CameraProfileMode,
+    ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog,
     LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
     ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS,

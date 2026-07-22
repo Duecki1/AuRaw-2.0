@@ -152,8 +152,10 @@ pub(crate) struct LibraryState {
     status: String,
     usage_clock: u64,
     thumbnail_workers: usize,
+    selected_sources: HashSet<LibrarySource>,
+    selection_mode: bool,
     #[cfg(not(target_os = "android"))]
-    file_action_receiver: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    file_action_receiver: Option<mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
 }
 
 impl LibraryState {
@@ -180,6 +182,8 @@ impl LibraryState {
             status: "Open a folder to build your RAW library.".to_owned(),
             usage_clock: 0,
             thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
+            selected_sources: HashSet::new(),
+            selection_mode: false,
             file_action_receiver: None,
         }
     }
@@ -217,6 +221,8 @@ impl LibraryState {
             status: String::new(),
             usage_clock: 0,
             thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
+            selected_sources: HashSet::new(),
+            selection_mode: false,
         };
         state.refresh(context);
         state
@@ -224,6 +230,23 @@ impl LibraryState {
 
     pub(crate) fn location(&self) -> Option<&str> {
         self.location.as_deref()
+    }
+
+    pub(crate) fn has_selection(&self) -> bool {
+        !self.selected_sources.is_empty()
+    }
+
+    pub(crate) fn selection_mode(&self) -> bool {
+        self.selection_mode
+    }
+
+    pub(crate) fn begin_selection(&mut self) {
+        self.selection_mode = true;
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.selected_sources.clear();
+        self.selection_mode = false;
     }
 
     #[cfg(not(target_os = "android"))]
@@ -271,20 +294,44 @@ impl LibraryState {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn duplicate_raw_with_sidecar(&mut self, raw_path: PathBuf, context: &egui::Context) {
+    fn duplicate_raws_with_sidecars(&mut self, raw_paths: Vec<PathBuf>, context: &egui::Context) {
         if self.file_action_receiver.is_some() {
             self.status = "Another library file action is still running.".to_owned();
+            return;
+        }
+        if raw_paths.is_empty() {
             return;
         }
 
         let (sender, receiver) = mpsc::channel();
         self.file_action_receiver = Some(receiver);
-        self.status = format!("Duplicating {}…", raw_path.display());
+        self.status = if raw_paths.len() == 1 {
+            format!("Duplicating {}…", raw_paths[0].display())
+        } else {
+            format!("Duplicating {} selected RAW files…", raw_paths.len())
+        };
         let repaint = context.clone();
         let spawn = std::thread::Builder::new()
             .name("auraw-library-duplicate".to_owned())
             .spawn(move || {
-                let result = duplicate_raw_and_sidecar(&raw_path);
+                let total = raw_paths.len();
+                let mut destinations = Vec::with_capacity(total);
+                let mut failures = Vec::new();
+                for raw_path in raw_paths {
+                    match duplicate_raw_and_sidecar(&raw_path) {
+                        Ok(destination) => destinations.push(destination),
+                        Err(error) => failures.push(error),
+                    }
+                }
+                let result = if failures.is_empty() {
+                    Ok(destinations)
+                } else {
+                    Err(format!(
+                        "Duplicated {} of {total} selected RAW files. {}",
+                        destinations.len(),
+                        failures.join(" · ")
+                    ))
+                };
                 let _ = sender.send(result);
                 repaint.request_repaint();
             });
@@ -450,13 +497,18 @@ impl LibraryState {
                 .as_ref()
                 .map(mpsc::Receiver::try_recv);
             match completed {
-                Some(Ok(Ok(destination))) => {
+                Some(Ok(Ok(destinations))) => {
                     self.file_action_receiver = None;
                     self.refresh(context);
-                    self.status = format!("Duplicated as {}", destination.display());
+                    self.status = if destinations.len() == 1 {
+                        format!("Duplicated as {}", destinations[0].display())
+                    } else {
+                        format!("Duplicated {} selected RAW files", destinations.len())
+                    };
                 }
                 Some(Ok(Err(error))) => {
                     self.file_action_receiver = None;
+                    self.refresh(context);
                     self.status = error;
                 }
                 Some(Err(mpsc::TryRecvError::Disconnected)) => {
@@ -515,6 +567,12 @@ impl LibraryState {
                         .enumerate()
                         .map(|(index, entry)| (entry.info.source.clone(), index))
                         .collect();
+                    self.selected_sources
+                        .retain(|source| self.entry_indices.contains_key(source));
+                    if self.selected_sources.is_empty() && !self.selection_mode {
+                        #[cfg(target_os = "android")]
+                        crate::android::set_back_navigation_active(false);
+                    }
                     self.scanning = false;
                     self.catalog_ready = true;
                     self.status = catalog_status(self.entries.len(), warning_count, truncated);
@@ -997,45 +1055,58 @@ fn catalog_status(count: usize, warning_count: usize, truncated: bool) -> String
 
 #[cfg(not(target_os = "android"))]
 enum LibraryCardAction {
-    Duplicate(PathBuf),
-    ResetAdjustments(PathBuf),
-    Delete(PathBuf),
+    Duplicate(Vec<PathBuf>),
+    ResetAdjustments(Vec<PathBuf>),
+    Delete(Vec<PathBuf>),
 }
 
 #[cfg(target_os = "android")]
 enum LibraryCardAction {
-    ResetAdjustments { uri: String, display_name: String },
-    Delete { uri: String, display_name: String },
+    ResetAdjustments(Vec<(String, String)>),
+    Delete(Vec<(String, String)>),
 }
 
 #[cfg(target_os = "android")]
-fn android_library_card_menu(
+fn android_selection_menu(
     ui: &mut Ui,
-    source: &LibrarySource,
-    name: &str,
+    selected: &[(LibrarySource, String)],
     open_source: &mut Option<(LibrarySource, String)>,
     library_action: &mut Option<LibraryCardAction>,
 ) {
-    let LibrarySource::Android {
-        uri, display_name, ..
-    } = source;
-    if ui.button("Open").clicked() {
-        *open_source = Some((source.clone(), name.to_owned()));
+    if selected.len() == 1 && ui.button("Open").clicked() {
+        *open_source = Some(selected[0].clone());
         ui.close();
     }
-    if ui.button("Reset all adjustments").clicked() {
-        *library_action = Some(LibraryCardAction::ResetAdjustments {
-            uri: uri.clone(),
-            display_name: display_name.clone(),
-        });
+
+    let targets = || {
+        selected
+            .iter()
+            .map(|(source, _)| {
+                let LibrarySource::Android {
+                    uri, display_name, ..
+                } = source;
+                (uri.clone(), display_name.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let reset_label = if selected.len() == 1 {
+        "Reset all adjustments"
+    } else {
+        "Reset adjustments for selected"
+    };
+    if ui.button(reset_label).clicked() {
+        *library_action = Some(LibraryCardAction::ResetAdjustments(targets()));
         ui.close();
     }
     ui.separator();
-    if ui.button("Delete").clicked() {
-        *library_action = Some(LibraryCardAction::Delete {
-            uri: uri.clone(),
-            display_name: display_name.clone(),
-        });
+    let delete_label = if selected.len() == 1 {
+        "Delete"
+    } else {
+        "Delete selected"
+    };
+    if ui.button(delete_label).clicked() {
+        *library_action = Some(LibraryCardAction::Delete(targets()));
         ui.close();
     }
 }
@@ -1127,17 +1198,80 @@ impl Library {
         let mut open_source = None;
         let mut library_action = None;
 
+        #[cfg(target_os = "android")]
+        let selected_android_items = app
+            .library
+            .entries
+            .iter()
+            .filter(|entry| app.library.selected_sources.contains(&entry.info.source))
+            .map(|entry| (entry.info.source.clone(), entry.info.name.clone()))
+            .collect::<Vec<_>>();
+
         ui.horizontal(|ui| {
-            let count = app.library.entries.len();
-            ui.strong(format!(
-                "{count} RAW {}",
-                if count == 1 { "file" } else { "files" }
-            ));
+            #[cfg(target_os = "android")]
+            if !selected_android_items.is_empty() {
+                ui.strong(format!("{} selected", selected_android_items.len()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        app.library.clear_selection();
+                        crate::android::set_back_navigation_active(false);
+                    }
+                    let anchor = ui.allocate_response(egui::vec2(48.0, 42.0), Sense::hover());
+                    let menu_id = ui.make_persistent_id("android-library-selection-overflow");
+                    crate::ui::android_overflow_menu(ui, anchor.rect, menu_id, 36.0, |ui| {
+                        android_selection_menu(
+                            ui,
+                            &selected_android_items,
+                            &mut open_source,
+                            &mut library_action,
+                        );
+                    });
+                });
+                return;
+            }
+
+            #[cfg(not(target_os = "android"))]
+            let desktop_selection_mode = app.library.selection_mode();
+            #[cfg(not(target_os = "android"))]
+            let desktop_selection_count = app.library.selected_sources.len();
+
+            #[cfg(not(target_os = "android"))]
+            if desktop_selection_mode {
+                ui.strong(format!("{desktop_selection_count} selected"));
+            } else {
+                let count = app.library.entries.len();
+                ui.strong(format!(
+                    "{count} RAW {}",
+                    if count == 1 { "file" } else { "files" }
+                ));
+            }
+            #[cfg(target_os = "android")]
+            {
+                let count = app.library.entries.len();
+                ui.strong(format!(
+                    "{count} RAW {}",
+                    if count == 1 { "file" } else { "files" }
+                ));
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 #[cfg(target_os = "android")]
                 if ui.button("Settings").clicked() {
                     app.activate_tab(AppTab::Settings);
                 }
+
+                #[cfg(not(target_os = "android"))]
+                if ui
+                    .button(if desktop_selection_mode { "Cancel" } else { "Select" })
+                    .clicked()
+                {
+                    if desktop_selection_mode {
+                        app.library.clear_selection();
+                    } else {
+                        app.library.begin_selection();
+                    }
+                }
+
                 if ui
                     .add_enabled(
                         app.library.location.is_some() && !app.library.scanning,
@@ -1227,99 +1361,124 @@ impl Library {
                         let item_rect = relative_rect.translate(content_rect.min.to_vec2());
 
                         let entry = &app.library.entries[index];
-                        let selected = match &entry.info.source {
-                            #[cfg(not(target_os = "android"))]
-                            LibrarySource::File(path) => current_path.as_deref() == Some(path),
-                            #[cfg(target_os = "android")]
-                            LibrarySource::Android { .. } => false,
+                        let source = entry.info.source.clone();
+                        let name = entry.info.name.clone();
+                        let selected = if app.library.selection_mode() {
+                            app.library.selected_sources.contains(&source)
+                        } else {
+                            match &source {
+                                #[cfg(not(target_os = "android"))]
+                                LibrarySource::File(path) => current_path.as_deref() == Some(path),
+                                #[cfg(target_os = "android")]
+                                LibrarySource::Android { .. } => false,
+                            }
                         };
                         let response = thumbnail_tile(ui, entry, item_rect, selected);
-                        #[cfg(target_os = "android")]
-                        let overflow_clicked = {
-                            let source = entry.info.source.clone();
-                            let name = entry.info.name.clone();
-                            let menu_id = ui.make_persistent_id((
-                                "android-library-card-overflow",
-                                index,
-                            ));
-                            let overflow = crate::ui::android_overflow_menu(
-                                ui,
-                                response.rect,
-                                menu_id,
-                                38.0,
-                                |ui| {
-                                    android_library_card_menu(
-                                        ui,
-                                        &source,
-                                        &name,
-                                        &mut open_source,
-                                        &mut library_action,
-                                    );
-                                },
-                            );
-                            response.context_menu(|ui| {
-                                android_library_card_menu(
-                                    ui,
-                                    &source,
-                                    &name,
-                                    &mut open_source,
-                                    &mut library_action,
-                                );
-                            });
-                            overflow.clicked()
-                        };
-                        #[cfg(not(target_os = "android"))]
-                        let overflow_clicked = false;
 
-                        // egui reports a touch long-press as both a click and a
-                        // secondary click. Do not open the photo underneath either
-                        // the context menu or the visible Android overflow button.
-                        if response.clicked()
-                            && !response.secondary_clicked()
-                            && !overflow_clicked
+                        #[cfg(target_os = "android")]
                         {
-                            open_source =
-                                Some((entry.info.source.clone(), entry.info.name.clone()));
+                            // egui maps a touch long-press to a secondary click. Enter
+                            // selection mode instead of opening a per-thumbnail menu.
+                            if response.secondary_clicked() {
+                                app.library.begin_selection();
+                                app.library.selected_sources.insert(source.clone());
+                                crate::android::set_back_navigation_active(true);
+                            } else if response.clicked() {
+                                if !app.library.selection_mode() {
+                                    open_source = Some((source.clone(), name.clone()));
+                                } else if !app.library.selected_sources.remove(&source) {
+                                    app.library.selected_sources.insert(source.clone());
+                                }
+
+                                if app.library.selection_mode() && app.library.selected_sources.is_empty() {
+                                    app.library.clear_selection();
+                                    crate::android::set_back_navigation_active(false);
+                                }
+                            }
                         }
+
                         #[cfg(not(target_os = "android"))]
                         {
-                            let LibrarySource::File(path) = &entry.info.source;
+                            let LibrarySource::File(path) = &source;
                             let path = path.clone();
-                            let action_enabled = !app.library.file_action_in_progress();
+
+                            if response.clicked() && !response.secondary_clicked() {
+                                if app.library.selection_mode() {
+                                    if !app.library.selected_sources.remove(&source) {
+                                        app.library.selected_sources.insert(source.clone());
+                                    }
+                                } else {
+                                    open_source = Some((source.clone(), name.clone()));
+                                }
+                            }
+
+                            // In desktop selection mode, right-click keeps the familiar
+                            // context menu but targets the complete selection. Right-clicking
+                            // an unselected thumbnail first adds it to that selection.
+                            if response.secondary_clicked()
+                                && app.library.selection_mode()
+                                && !app.library.selected_sources.contains(&source)
+                            {
+                                app.library.selected_sources.insert(source.clone());
+                            }
+
+                            let context_paths = if app.library.selection_mode() {
+                                app.library
+                                    .entries
+                                    .iter()
+                                    .filter(|candidate| {
+                                        app.library.selected_sources.contains(&candidate.info.source)
+                                    })
+                                    .filter_map(|candidate| match &candidate.info.source {
+                                        LibrarySource::File(path) => Some(path.clone()),
+                                    })
+                                    .collect::<Vec<_>>()
+                            } else {
+                                vec![path]
+                            };
+                            let selected_count = context_paths.len();
+                            let action_enabled = !app.library.file_action_in_progress()
+                                && !context_paths.is_empty();
                             response.context_menu(|ui| {
+                                let duplicate_label = if selected_count > 1 {
+                                    "Duplicate selected (RAW + sidecars)"
+                                } else {
+                                    "Duplicate (RAW + sidecar)"
+                                };
                                 if ui
-                                    .add_enabled(
-                                        action_enabled,
-                                        egui::Button::new("Duplicate (RAW + sidecar)"),
-                                    )
+                                    .add_enabled(action_enabled, egui::Button::new(duplicate_label))
                                     .clicked()
                                 {
                                     library_action =
-                                        Some(LibraryCardAction::Duplicate(path.clone()));
+                                        Some(LibraryCardAction::Duplicate(context_paths.clone()));
                                     ui.close();
                                 }
+                                let reset_label = if selected_count > 1 {
+                                    "Reset adjustments for selected"
+                                } else {
+                                    "Reset all adjustments"
+                                };
                                 if ui
-                                    .add_enabled(
-                                        action_enabled,
-                                        egui::Button::new("Reset all adjustments"),
-                                    )
+                                    .add_enabled(action_enabled, egui::Button::new(reset_label))
                                     .clicked()
                                 {
-                                    library_action = Some(
-                                        LibraryCardAction::ResetAdjustments(path.clone()),
-                                    );
+                                    library_action = Some(LibraryCardAction::ResetAdjustments(
+                                        context_paths.clone(),
+                                    ));
                                     ui.close();
                                 }
                                 ui.separator();
+                                let delete_label = if selected_count > 1 {
+                                    "Delete selected"
+                                } else {
+                                    "Delete"
+                                };
                                 if ui
-                                    .add_enabled(
-                                        action_enabled,
-                                        egui::Button::new("Delete"),
-                                    )
+                                    .add_enabled(action_enabled, egui::Button::new(delete_label))
                                     .clicked()
                                 {
                                     library_action =
-                                        Some(LibraryCardAction::Delete(path.clone()));
+                                        Some(LibraryCardAction::Delete(context_paths.clone()));
                                     ui.close();
                                 }
                             });
@@ -1333,54 +1492,93 @@ impl Library {
         #[cfg(not(target_os = "android"))]
         if let Some(action) = library_action {
             match action {
-                LibraryCardAction::Duplicate(path) => {
-                    app.library.duplicate_raw_with_sidecar(path, ui.ctx());
+                LibraryCardAction::Duplicate(paths) => {
+                    app.library.clear_selection();
+                    app.library.duplicate_raws_with_sidecars(paths, ui.ctx());
                 }
-                LibraryCardAction::ResetAdjustments(path) => {
-                    let was_current = app.detach_current_file_for_library_action(&path);
-                    match crate::sidecar::remove_desktop_edits(&path) {
-                        Ok(removed) => {
-                            app.library.refresh(ui.ctx());
-                            app.library.status = if removed {
-                                format!("Reset all adjustments for {}", path.display())
-                            } else {
-                                format!("{} already had no saved adjustments", path.display())
-                            };
-                            if was_current {
-                                app.open_path(path, frame);
-                            }
-                        }
-                        Err(error) => {
-                            app.library.status = error;
-                            if was_current {
-                                app.open_path(path, frame);
-                            }
+                LibraryCardAction::ResetAdjustments(paths) => {
+                    let current_to_reopen = app.current_path.as_ref().and_then(|current| {
+                        paths.iter().find(|path| *path == current).cloned()
+                    });
+                    if let Some(path) = current_to_reopen.as_deref() {
+                        app.detach_current_file_for_library_action(path);
+                    }
+
+                    let total = paths.len();
+                    let mut failures = Vec::new();
+                    let mut removed_count = 0usize;
+                    for path in &paths {
+                        match crate::sidecar::remove_desktop_edits(path) {
+                            Ok(removed) => {
+                                if removed {
+                                    removed_count += 1;
+                                }
+                            },
+                            Err(error) => failures.push(format!("{}: {error}", path.display())),
                         }
                     }
+                    app.library.clear_selection();
+                    app.library.refresh(ui.ctx());
+                    app.library.status = if failures.is_empty() {
+                        format!(
+                            "Reset adjustments for {total} selected {} ({removed_count} changed)",
+                            if total == 1 { "image" } else { "images" }
+                        )
+                    } else {
+                        format!(
+                            "Reset adjustments for {} of {total} selected images. {}",
+                            total.saturating_sub(failures.len()),
+                            failures.join(" · ")
+                        )
+                    };
+                    if let Some(path) = current_to_reopen {
+                        app.open_path(path, frame);
+                    }
                 }
-                LibraryCardAction::Delete(path) => {
-                    let was_current = app.detach_current_file_for_library_action(&path);
-                    match fs::remove_file(&path) {
-                        Ok(()) => {
-                            let cleanup = crate::sidecar::remove_desktop_edits(&path);
-                            if was_current {
-                                app.current_path = None;
+                LibraryCardAction::Delete(paths) => {
+                    let current_target = app.current_path.as_ref().and_then(|current| {
+                        paths.iter().find(|path| *path == current).cloned()
+                    });
+                    if let Some(path) = current_target.as_deref() {
+                        app.detach_current_file_for_library_action(path);
+                    }
+
+                    let total = paths.len();
+                    let mut failures = Vec::new();
+                    let mut cleanup_warnings = Vec::new();
+                    let mut deleted_current = false;
+                    for path in &paths {
+                        match fs::remove_file(path) {
+                            Ok(()) => {
+                                if current_target.as_ref() == Some(path) {
+                                    deleted_current = true;
+                                }
+                                if let Err(error) = crate::sidecar::remove_desktop_edits(path) {
+                                    cleanup_warnings.push(format!("{}: {error}", path.display()));
+                                }
                             }
-                            app.library.refresh(ui.ctx());
-                            app.library.status = match cleanup {
-                                Ok(_) => format!("Deleted {}", path.display()),
-                                Err(error) => format!(
-                                    "Deleted {}, but could not remove all related files: {error}",
-                                    path.display()
-                                ),
-                            };
+                            Err(error) => failures.push(format!("{}: {error}", path.display())),
                         }
-                        Err(error) => {
-                            app.library.status =
-                                format!("Could not delete {}: {error}", path.display());
-                            if was_current {
-                                app.open_path(path, frame);
-                            }
+                    }
+                    if deleted_current {
+                        app.current_path = None;
+                    }
+                    app.library.clear_selection();
+                    app.library.refresh(ui.ctx());
+                    let deleted = total.saturating_sub(failures.len());
+                    app.library.status = if failures.is_empty() && cleanup_warnings.is_empty() {
+                        format!(
+                            "Deleted {deleted} selected {}",
+                            if deleted == 1 { "image" } else { "images" }
+                        )
+                    } else {
+                        let mut details = failures;
+                        details.extend(cleanup_warnings);
+                        format!("Deleted {deleted} of {total} selected images. {}", details.join(" · "))
+                    };
+                    if !deleted_current {
+                        if let Some(path) = current_target {
+                            app.open_path(path, frame);
                         }
                     }
                 }
@@ -1389,31 +1587,46 @@ impl Library {
 
         #[cfg(target_os = "android")]
         if let Some(action) = library_action {
-            match action {
-                LibraryCardAction::ResetAdjustments { uri, display_name } => {
-                    match app.reset_android_library_adjustments(&uri, &display_name) {
-                        Ok(()) => {
-                            app.library.refresh(ui.ctx());
-                            app.library.status =
-                                format!("Reset all adjustments for {display_name}");
-                        }
-                        Err(error) => app.library.status = error,
-                    }
-                }
-                LibraryCardAction::Delete { uri, display_name } => {
-                    match app.delete_android_library_item(&uri, &display_name) {
-                        Ok(()) => {
-                            app.library.refresh(ui.ctx());
-                            app.library.status = format!("Deleted {display_name}");
-                        }
-                        Err(error) => app.library.status = error,
-                    }
+            let (verb, targets, operation): (
+                &str,
+                Vec<(String, String)>,
+                fn(&mut AurawApp, &str, &str) -> Result<(), String>,
+            ) = match action {
+                LibraryCardAction::ResetAdjustments(targets) => (
+                    "Reset adjustments for",
+                    targets,
+                    AurawApp::reset_android_library_adjustments,
+                ),
+                LibraryCardAction::Delete(targets) => (
+                    "Deleted",
+                    targets,
+                    AurawApp::delete_android_library_item,
+                ),
+            };
+
+            let total = targets.len();
+            let mut failures = Vec::new();
+            for (uri, display_name) in targets {
+                if let Err(error) = operation(app, &uri, &display_name) {
+                    failures.push(format!("{display_name}: {error}"));
                 }
             }
+            app.library.clear_selection();
+            crate::android::set_back_navigation_active(false);
+            app.library.refresh(ui.ctx());
+            app.library.status = if failures.is_empty() {
+                format!("{verb} {total} selected {}", if total == 1 { "image" } else { "images" })
+            } else {
+                format!(
+                    "Completed {} of {total} selected actions. {}",
+                    total.saturating_sub(failures.len()),
+                    failures.join(" · ")
+                )
+            };
         }
 
         #[cfg(target_os = "android")]
-        {
+        if !app.library.has_selection() {
             let bounds = ui.max_rect().shrink(16.0);
             let size = egui::vec2(56.0, 56.0);
             let rect = egui::Rect::from_min_size(bounds.right_bottom() - size, size);
@@ -1447,6 +1660,8 @@ impl Library {
                 }
                 #[cfg(target_os = "android")]
                 LibrarySource::Android { uri, .. } => {
+                    app.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
                     app.open_android_library_document(&uri, &display_name);
                 }
             }

@@ -113,3 +113,16 @@ def test_scoped_sidecars_read_newest_complete_generation_and_delete_by_identity(
     assert 'MediaStore.Downloads._ID + "=?' in deletion
     assert "scopedSidecarSelection()" in deletion
     assert "MediaStore.Downloads.EXTERNAL_CONTENT_URI" in deletion
+
+
+def test_android_export_publisher_supports_png_and_jpeg() -> None:
+    publish = method(
+        "public void publishImage",
+        "private static void copy(InputStream input, OutputStream output, long maximumBytes)",
+    )
+    assert '"image/png"' in publish
+    assert '"image/jpeg"' in publish
+    assert "normalizeExportMimeType" in publish
+    assert "MediaStore.Images.Media.MIME_TYPE" in publish
+    assert "safeImageName" in publish
+    assert 'jpeg ? ".jpg" : ".png"' in publish

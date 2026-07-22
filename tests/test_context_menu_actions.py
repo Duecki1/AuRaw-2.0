@@ -11,7 +11,8 @@ def test_library_cards_offer_destructive_and_duplicate_actions() -> None:
     assert "response.context_menu(|ui|" in LIBRARY
     assert "Duplicate (RAW + sidecar)" in LIBRARY
     assert "Reset all adjustments" in LIBRARY
-    assert 'egui::Button::new("Delete")' in LIBRARY
+    assert '"Delete selected"' in LIBRARY
+    assert 'egui::Button::new(delete_label)' in LIBRARY
     assert "duplicate_raw_and_sidecar" in LIBRARY
     assert "remove_desktop_edits" in LIBRARY
 
@@ -60,15 +61,33 @@ def test_mask_groups_have_serialized_final_inversion() -> None:
     assert "MAX_MASK_COMPONENTS" in SIDECAR
 
 
-def test_android_thumbnail_long_press_opens_context_menu_without_opening_photo() -> None:
+
+def test_desktop_library_select_mode_uses_existing_context_menu_for_bulk_actions() -> None:
+    assert 'if desktop_selection_mode { "Cancel" } else { "Select" }' in LIBRARY
+    assert 'app.library.begin_selection()' in LIBRARY
+    assert 'if app.library.selection_mode() {' in LIBRARY
+    assert 'selected_sources.remove(&source)' in LIBRARY
+    assert 'response.context_menu(|ui|' in LIBRARY
+    assert 'Duplicate selected (RAW + sidecars)' in LIBRARY
+    assert 'Reset adjustments for selected' in LIBRARY
+    assert 'Delete selected' in LIBRARY
+    assert 'LibraryCardAction::Duplicate(context_paths.clone())' in LIBRARY
+    assert 'LibraryCardAction::ResetAdjustments(' in LIBRARY
+    assert 'LibraryCardAction::Delete(context_paths.clone())' in LIBRARY
+
+def test_android_thumbnail_long_press_enters_multi_selection_without_opening_photo() -> None:
     android_bridge = (ROOT / "src/android.rs").read_text(encoding="utf-8")
     android_activity = (
         ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java"
     ).read_text(encoding="utf-8")
 
-    assert "response.clicked()" in LIBRARY
-    assert "!response.secondary_clicked()" in LIBRARY
-    assert "&& !overflow_clicked" in LIBRARY
+    assert "response.secondary_clicked()" in LIBRARY
+    assert "selected_sources.insert(source.clone())" in LIBRARY
+    assert "app.library.selection_mode() && app.library.selected_sources.is_empty()" in LIBRARY
+    assert "selected_sources.remove(&source)" in LIBRARY
+    assert '"{} selected"' in LIBRARY
+    assert 'ui.button("Cancel")' in LIBRARY
+    assert "set_back_navigation_active(true)" in LIBRARY
     assert 'let LibrarySource::Android {' in LIBRARY
     assert 'ui.button("Open")' in LIBRARY
     assert "reset_android_library_adjustments" in LIBRARY
@@ -79,7 +98,7 @@ def test_android_thumbnail_long_press_opens_context_menu_without_opening_photo()
     assert "public void deleteRawLibraryDocument" in android_activity
 
 
-def test_android_library_cards_have_visible_overflow_menu_buttons() -> None:
+def test_android_library_uses_one_shared_selection_overflow_instead_of_card_menus() -> None:
     ui = (ROOT / "src/ui/mod.rs").read_text(encoding="utf-8")
     assert 'fn android_overflow_menu' in ui
     assert 'painter.circle_filled(' in ui
@@ -87,9 +106,12 @@ def test_android_library_cards_have_visible_overflow_menu_buttons() -> None:
     assert 'Popup::menu(&response).show(add_contents)' in ui
     assert 'Do not use `Ui::menu_button` here' in ui
     assert 'RichText::new("⋮")' not in ui
-    assert 'android-library-card-overflow' in LIBRARY
-    assert 'android_library_card_menu(' in LIBRARY
-    assert '&& !overflow_clicked' in LIBRARY
+    assert 'android-library-selection-overflow' in LIBRARY
+    assert 'android_selection_menu(' in LIBRARY
+    assert 'android-library-card-overflow' not in LIBRARY
+    assert 'android_library_card_menu(' not in LIBRARY
+    assert 'Reset adjustments for selected' in LIBRARY
+    assert 'Delete selected' in LIBRARY
 
 
 def test_android_mask_cards_have_visible_overflow_menu_buttons() -> None:
