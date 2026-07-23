@@ -433,10 +433,18 @@ impl AurawApp {
     ) -> Result<(), String> {
         let edge = pipeline.mask_atlas_edge();
         for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {
+            let layer_started = std::time::Instant::now();
             let bytes = masks.rasterize_layer_f16(layer, edge, edge, raw.width, raw.height);
+            let raster_elapsed = layer_started.elapsed();
             pipeline
                 .update_mask_layer(queue, layer, &bytes)
                 .map_err(|error| format!("Could not update preview mask: {error:#}"))?;
+            crate::diagnostics::record(format!(
+                "Preview mask layer {} rasterized/uploaded in {:.3}s (raster {:.3}s)",
+                layer + 1,
+                layer_started.elapsed().as_secs_f64(),
+                raster_elapsed.as_secs_f64()
+            ));
         }
         Ok(())
     }

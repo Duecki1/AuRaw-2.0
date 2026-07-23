@@ -252,6 +252,27 @@ pub fn performance_settings_path(app: &AndroidApp) -> Result<PathBuf, String> {
     }
 }
 
+pub fn gpu_pipeline_cache_dir(app: &AndroidApp) -> Result<PathBuf, String> {
+    let path = with_activity(app, |env, activity| {
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("gpuPipelineCacheDir"),
+                jni::jni_sig!(() -> JString),
+                &[],
+            )?
+            .l()?;
+        let path = env.cast_local::<JString>(object)?;
+        Ok(path.to_string())
+    })
+    .map_err(|error| format!("could not locate Android GPU pipeline cache: {error:#}"))?;
+    if path.is_empty() {
+        Err("Android returned no GPU pipeline cache directory".to_owned())
+    } else {
+        Ok(PathBuf::from(path))
+    }
+}
+
 pub fn library_location(app: &AndroidApp) -> Result<String, String> {
     with_activity(app, |env, activity| {
         let object = env

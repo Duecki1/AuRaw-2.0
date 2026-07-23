@@ -22,11 +22,8 @@ const PROFILE_HUE_SAT_MAP_ENCODING: u16 = 51107;
 const PROFILE_LOOK_TABLE_ENCODING: u16 = 51108;
 const BASELINE_EXPOSURE_OFFSET: u16 = 51109;
 
-pub(super) fn profile_from_tags(
-    reader: &mut TiffReader,
-    tags: &[IfdEntry],
-) -> Result<Option<DcpProfile>> {
-    let has_profile = tags.iter().any(|tag| {
+fn has_profile_tags(tags: &[IfdEntry]) -> bool {
+    tags.iter().any(|tag| {
         matches!(
             tag.tag,
             PROFILE_HUE_SAT_MAP_DATA_1
@@ -39,8 +36,27 @@ pub(super) fn profile_from_tags(
                 | FORWARD_MATRIX_1
                 | FORWARD_MATRIX_2
         )
-    });
-    if !has_profile {
+    })
+}
+
+pub(super) fn profile_identity_from_tags(
+    reader: &mut TiffReader,
+    tags: &[IfdEntry],
+) -> Result<Option<(Option<String>, Option<String>)>> {
+    if !has_profile_tags(tags) {
+        return Ok(None);
+    }
+    Ok(Some((
+        read_ascii_tag(reader, tags, PROFILE_NAME)?,
+        read_ascii_tag(reader, tags, UNIQUE_CAMERA_MODEL)?,
+    )))
+}
+
+pub(super) fn profile_from_tags(
+    reader: &mut TiffReader,
+    tags: &[IfdEntry],
+) -> Result<Option<DcpProfile>> {
+    if !has_profile_tags(tags) {
         return Ok(None);
     }
 

@@ -45,6 +45,133 @@ fn raw_cache_key_for_target(target: &crate::sidecar::SidecarTarget) -> String {
     }
 }
 
+fn prewarm_dcp_profile_folder(folder: Option<std::path::PathBuf>) {
+    let Some(folder) = folder.filter(|folder| folder.is_dir()) else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("auraw-dcp-prewarm".to_owned())
+        .spawn(move || {
+            let started = Instant::now();
+            crate::pipeline::prewarm_dcp_profile_index(&folder);
+            crate::diagnostics::record(format!(
+                "DCP profile index prewarmed in {:.3}s",
+                started.elapsed().as_secs_f64()
+            ));
+        });
+}
+
+#[cfg(target_os = "android")]
+fn spawn_gpu_preview_prewarm(
+    cc: &eframe::CreationContext<'_>,
+    cache_root: Option<std::path::PathBuf>,
+) -> Option<mpsc::Receiver<Result<RawGpuPipeline, String>>> {
+    let render_state = cc.wgpu_render_state.as_ref()?;
+    let device = render_state.device.clone();
+    let queue = render_state.queue.clone();
+    let adapter_info = render_state.adapter.get_info();
+    let repaint = cc.egui_ctx.clone();
+    let (sender, receiver) = mpsc::channel();
+    let spawn_result = std::thread::Builder::new()
+        .name("auraw-gpu-preview-prewarm".to_owned())
+        .spawn(move || {
+            let started = Instant::now();
+            crate::diagnostics::record("GPU preview prewarm started at app initialization");
+
+            let persistent_cache = match cache_root.as_deref() {
+                Some(cache_root) => match crate::pipeline::PersistentGpuPipelineCache::load_or_create(
+                    &device,
+                    &adapter_info,
+                    cache_root,
+                ) {
+                    Ok(Some((cache, loaded_bytes))) => {
+                        if loaded_bytes == 0 {
+                            crate::diagnostics::record(format!(
+                                "GPU pipeline cache cold start: {}",
+                                cache.path().display()
+                            ));
+                        } else {
+                            crate::diagnostics::record(format!(
+                                "GPU pipeline cache loaded: {} bytes from {}",
+                                loaded_bytes,
+                                cache.path().display()
+                            ));
+                        }
+                        Some(cache)
+                    }
+                    Ok(None) => {
+                        crate::diagnostics::record(
+                            "GPU pipeline cache unavailable on this wgpu device/backend",
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        crate::diagnostics::record(format!(
+                            "GPU pipeline cache could not be initialized: {error:#}"
+                        ));
+                        None
+                    }
+                },
+                None => {
+                    crate::diagnostics::record(
+                        "GPU pipeline cache path unavailable; using in-process prewarm only",
+                    );
+                    None
+                }
+            };
+
+            let cache_to_persist = persistent_cache.clone();
+            let result = RawGpuPipeline::prewarm_preview_template_with_cache(
+                &device,
+                &queue,
+                CfaKind::Bayer,
+                persistent_cache,
+            )
+            .map_err(|error| format!("GPU preview prewarm failed: {error:#}"));
+            match &result {
+                Ok(_) => crate::diagnostics::record(format!(
+                    "GPU preview prewarm finished in {:.3}s",
+                    started.elapsed().as_secs_f64()
+                )),
+                Err(error) => crate::diagnostics::record(error),
+            }
+
+            // Deliver the compiled template immediately. Cache serialization is
+            // intentionally done afterwards so a RAW open waiting on prewarm
+            // never pays filesystem write latency.
+            let _ = sender.send(result);
+            repaint.request_repaint();
+
+            if let Some(cache) = cache_to_persist {
+                let cache_save_started = Instant::now();
+                match cache.persist() {
+                    Ok(bytes) if bytes > 0 => crate::diagnostics::record(format!(
+                        "GPU pipeline cache saved: {} bytes in {:.3}s to {}",
+                        bytes,
+                        cache_save_started.elapsed().as_secs_f64(),
+                        cache.path().display()
+                    )),
+                    Ok(_) => crate::diagnostics::record(format!(
+                        "GPU pipeline cache returned no persistent data for {}",
+                        cache.path().display()
+                    )),
+                    Err(error) => crate::diagnostics::record(format!(
+                        "GPU pipeline cache could not be saved: {error:#}"
+                    )),
+                }
+            }
+        });
+    match spawn_result {
+        Ok(_) => Some(receiver),
+        Err(error) => {
+            crate::diagnostics::record(format!(
+                "GPU preview prewarm thread could not start: {error}"
+            ));
+            None
+        }
+    }
+}
+
 fn append_notice(notice: &mut Option<String>, message: &str) {
     match notice {
         Some(existing) => {
@@ -141,6 +268,7 @@ impl AurawApp {
                 camera_profile_folder_label = None;
             }
         }
+        prewarm_dcp_profile_folder(camera_profile_folder.clone());
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -313,7 +441,13 @@ impl AurawApp {
         let performance_settings_path = crate::android::performance_settings_path(&android_app)
             .map_err(|error| log::warn!("{error}"))
             .ok();
+        let gpu_pipeline_cache_root = crate::android::gpu_pipeline_cache_dir(&android_app)
+            .map_err(|error| log::warn!("{error}"))
+            .ok();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
+        let gpu_preview_prewarm_receiver =
+            spawn_gpu_preview_prewarm(cc, gpu_pipeline_cache_root);
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -324,6 +458,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            gpu_preview_prewarm_receiver,
             preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
@@ -934,12 +1069,19 @@ impl AurawApp {
             self.preview_quality.label()
         ));
         let sidecar_generation = self.begin_sidecar_open();
-        {
+        // Keep the previous full-frame preview pipeline alive just long enough
+        // for the decode worker to clone its already-compiled compute programs.
+        // On Android/Vulkan, recompiling these shaders for every RAW can take
+        // several seconds. The old textures are released immediately after the
+        // new pipeline has been allocated on the worker.
+        let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
-            if let Some(old) = self.gpu_pipeline.take() {
-                if let Some(texture_id) = old.egui_texture_id {
-                    renderer.free_texture(&texture_id);
-                }
+            let old_pipeline = self.gpu_pipeline.take();
+            if let Some(texture_id) = old_pipeline
+                .as_ref()
+                .and_then(|pipeline| pipeline.egui_texture_id)
+            {
+                renderer.free_texture(&texture_id);
             }
             if let Some(old) = self.preview_detail.take() {
                 if let Some(texture_id) = old.pipeline.egui_texture_id {
@@ -951,7 +1093,10 @@ impl AurawApp {
                     renderer.free_texture(&texture_id);
                 }
             }
-        }
+            old_pipeline
+        };
+        #[cfg(target_os = "android")]
+        let startup_gpu_prewarm_receiver = self.gpu_preview_prewarm_receiver.take();
         self.original_raw = None;
         self.loaded_raw = None;
         self.preview_raw = None;
@@ -1207,8 +1352,14 @@ impl AurawApp {
                             "The saved camera profile was not found or did not match this camera; automatic profile selection was used instead.",
                         );
                     }
+                    let lens_started = Instant::now();
+                    let lens_catalog_started = Instant::now();
                     let mut lens_correction =
                         LensCorrectionState::from_catalog(lensfun_catalog(&original_raw));
+                    crate::diagnostics::record(format!(
+                        "Lensfun catalog lookup finished in {:.3}s",
+                        lens_catalog_started.elapsed().as_secs_f64()
+                    ));
                     if let Some(saved) = saved_lens {
                         lens_correction.selected_maker = saved.maker;
                         lens_correction.selected_model = saved.model;
@@ -1222,8 +1373,13 @@ impl AurawApp {
                     }
                     let full_raw = if lens_correction.enabled {
                         if let Some(selection) = lens_correction.selected_lens() {
+                            let lens_apply_started = Instant::now();
                             match apply_lensfun_correction(&original_raw, &selection) {
                                 Ok(corrected) => {
+                                    crate::diagnostics::record(format!(
+                                        "Lensfun full-resolution correction applied in {:.3}s",
+                                        lens_apply_started.elapsed().as_secs_f64()
+                                    ));
                                     lens_correction.applied = true;
                                     lens_correction.catalog.status = format!(
                                         "Automatically applied {} from RAW metadata",
@@ -1232,6 +1388,10 @@ impl AurawApp {
                                     Arc::new(corrected)
                                 }
                                 Err(error) => {
+                                    crate::diagnostics::record(format!(
+                                        "Lensfun full-resolution correction failed after {:.3}s",
+                                        lens_apply_started.elapsed().as_secs_f64()
+                                    ));
                                     lens_correction.enabled = false;
                                     lens_correction.applied = false;
                                     lens_correction.catalog.status = format!(
@@ -1252,6 +1412,10 @@ impl AurawApp {
                     } else {
                         Arc::clone(&original_raw)
                     };
+                    crate::diagnostics::record(format!(
+                        "Lensfun catalog/correction prepared in {:.3}s",
+                        lens_started.elapsed().as_secs_f64()
+                    ));
                     let preview_spec = ProxySpec {
                         max_edge: preview_quality_setting.proxy_edge(),
                     };
@@ -1277,25 +1441,92 @@ impl AurawApp {
                     // surfaces on every platform. Full-float remains mandatory
                     // for regression rendering and tiled export readback.
                     let preview_quality = ProcessingQuality::Preview;
+                    #[cfg(target_os = "android")]
+                    let mut startup_gpu_prewarm_template = None;
+                    #[cfg(target_os = "android")]
+                    if reusable_preview_pipeline.is_none() {
+                        if let Some(receiver) = startup_gpu_prewarm_receiver {
+                            let wait_started = Instant::now();
+                            match receiver.recv() {
+                                Ok(Ok(template)) => {
+                                    crate::diagnostics::record(format!(
+                                        "GPU preview startup prewarm available after {:.3}s wait",
+                                        wait_started.elapsed().as_secs_f64()
+                                    ));
+                                    startup_gpu_prewarm_template = Some(template);
+                                }
+                                Ok(Err(error)) => crate::diagnostics::record(error),
+                                Err(error) => crate::diagnostics::record(format!(
+                                    "GPU preview startup prewarm unavailable: {error}"
+                                )),
+                            }
+                        }
+                    }
+                    #[cfg(target_os = "android")]
+                    let reusable_program_template = reusable_preview_pipeline
+                        .as_ref()
+                        .or(startup_gpu_prewarm_template.as_ref());
+                    #[cfg(not(target_os = "android"))]
+                    let reusable_program_template = reusable_preview_pipeline.as_ref();
                     let pipeline_started = Instant::now();
-                    let pipeline = RawGpuPipeline::new_headless_with_quality(
-                        &device,
-                        &queue,
-                        &preview_raw,
-                        &initial_params,
-                        preview_quality,
-                    )
-                    .map_err(|error| format!("GPU preview setup failed: {error:#}"))?;
+                    let pipeline = if let Some(template) = reusable_program_template {
+                        match RawGpuPipeline::new_headless_reusing_programs(
+                            &device,
+                            &queue,
+                            &preview_raw,
+                            &initial_params,
+                            preview_quality,
+                            template,
+                        ) {
+                            Ok(pipeline) => {
+                                crate::diagnostics::record(
+                                    "GPU preview reused precompiled programs",
+                                );
+                                pipeline
+                            }
+                            Err(reuse_error) => {
+                                crate::diagnostics::record(format!(
+                                    "GPU preview program reuse unavailable ({reuse_error:#}); compiling programs"
+                                ));
+                                RawGpuPipeline::new_headless_with_quality(
+                                    &device,
+                                    &queue,
+                                    &preview_raw,
+                                    &initial_params,
+                                    preview_quality,
+                                )
+                                .map_err(|error| {
+                                    format!("GPU preview setup failed: {error:#}")
+                                })?
+                            }
+                        }
+                    } else {
+                        RawGpuPipeline::new_headless_with_quality(
+                            &device,
+                            &queue,
+                            &preview_raw,
+                            &initial_params,
+                            preview_quality,
+                        )
+                        .map_err(|error| format!("GPU preview setup failed: {error:#}"))?
+                    };
                     crate::diagnostics::record(format!(
                         "GPU preview pipeline created in {:.3}s",
                         pipeline_started.elapsed().as_secs_f64()
                     ));
+                    // Program handles have been cloned into `pipeline`; release
+                    // the previous preview textures before any additional mask
+                    // source pipeline is allocated.
+                    drop(reusable_preview_pipeline);
+                    #[cfg(target_os = "android")]
+                    drop(startup_gpu_prewarm_template);
 
                     // Range and promptable-object source images are canonical RAW renditions,
                     // not user edit data. Sidecars omit these large shared
                     // caches and reconstruct one source on this decode worker.
                     let mut mask_source = None;
                     if needs_canonical_mask_source(&rendered_masks) {
+                        let mask_source_started = Instant::now();
                         let source_edge = if cfg!(target_os = "android") {
                             1600
                         } else {
@@ -1360,17 +1591,27 @@ impl AurawApp {
                         .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
                         install_missing_range_sources(&mut rendered_masks, &source);
                         mask_source = Some(source);
+                        crate::diagnostics::record(format!(
+                            "Canonical mask source reconstructed in {:.3}s",
+                            mask_source_started.elapsed().as_secs_f64()
+                        ));
                     }
 
                     let params =
                         GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw);
+                    let mask_upload_started = Instant::now();
                     Self::upload_preview_masks(
                         &pipeline,
                         &queue,
                         &rendered_masks,
                         &preview_raw,
                     )?;
+                    crate::diagnostics::record(format!(
+                        "Preview masks rasterized/uploaded in {:.3}s",
+                        mask_upload_started.elapsed().as_secs_f64()
+                    ));
                     let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
+                    let inpaint_upload_started = Instant::now();
                     pipeline
                         .update_inpaint_layer(
                             &queue,
@@ -1381,6 +1622,10 @@ impl AurawApp {
                             preview_raw.height,
                         )
                         .map_err(|error| format!("preview inpainting setup failed: {error:#}"))?;
+                    crate::diagnostics::record(format!(
+                        "Preview inpaint layer uploaded in {:.3}s",
+                        inpaint_upload_started.elapsed().as_secs_f64()
+                    ));
                     let first_render_started = Instant::now();
                     pipeline.recompute(&queue, &device, &params);
                     crate::diagnostics::record(format!(

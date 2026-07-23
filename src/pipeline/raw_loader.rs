@@ -499,6 +499,14 @@ pub(crate) fn invalidate_dcp_profile_index() {
 pub(crate) fn invalidate_dcp_profile_index() {}
 
 #[cfg(libraw_available)]
+pub(crate) fn prewarm_dcp_profile_index(folder: &Path) {
+    libraw_loader::prewarm_dcp_profile_index(folder);
+}
+
+#[cfg(not(libraw_available))]
+pub(crate) fn prewarm_dcp_profile_index(_folder: &Path) {}
+
+#[cfg(libraw_available)]
 mod libraw_loader;
 
 #[cfg(all(test, libraw_available))]
