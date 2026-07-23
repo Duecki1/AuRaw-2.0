@@ -12,117 +12,88 @@ def method(start: str, end: str) -> str:
     return ACTIVITY[start_offset : ACTIVITY.index(end, start_offset)]
 
 
-def test_android_10_uses_scoped_storage_for_new_imports_and_location() -> None:
+def test_android_library_has_one_canonical_hidden_app_media_folder() -> None:
+    constants = ACTIVITY[ACTIVITY.index("private static final String LEGACY_MEDIASTORE_RAW_RELATIVE_PATH") : ACTIVITY.index("private static final Set<String> RAW_SUFFIXES")]
+    assert 'RAW_LIBRARY_DIRECTORY_NAME = ".library"' in constants
+    assert 'Environment.DIRECTORY_PICTURES + "/AuRaw"' in constants
+
     location = method("public String rawLibraryLocation()", "public String listRawLibrary()")
-    assert "Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q" in location
-    assert "return RAW_LIBRARY_RELATIVE_PATH" in location
-    assert "legacyRawLibraryDirectory().getAbsolutePath()" in location
+    assert "rawLibraryDirectory().getAbsolutePath()" in location
+    assert "Build.VERSION.SDK_INT" not in location
 
-    store = method(
-        "private StoredRaw storeRawInLibrary",
-        "private StoredRaw storeRawScoped",
-    )
-    assert "Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q" in store
-    assert store.index("storeRawScoped") < store.index("storeRawLegacy")
+    directory = method("private File externalMediaRootDirectory()", "private void startLegacyRawStorageMigration()")
+    assert "getExternalMediaDirs()" in directory
+    assert "new File(externalMediaRootDirectory(), RAW_LIBRARY_DIRECTORY_NAME)" in directory
+    assert 'new File(directory, ".nomedia")' in directory
 
 
-def test_android_10_catalog_keeps_legacy_upgrade_items_visible_and_bounded() -> None:
-    combined = method(
-        "private String listCombinedRawLibrary",
-        "private ArrayList<RawLibraryRecord> listScopedRawLibrary",
-    )
-    assert "records.addAll(listScopedRawLibrary())" in combined
-    assert "records.addAll(listLegacyRawLibrary())" in combined
+def test_all_new_raw_imports_write_directly_to_hidden_library() -> None:
+    store = method("private StoredRaw storeRawInLibrary", "private void deliverLibraryRawFd")
+    assert "return storeRawFile(source, requestedName);" in store
+    assert "MediaStore.Downloads" not in store
+    assert "rawLibraryDirectory()" in store
+    assert '".auraw-import-"' in store
+    assert "Uri.fromFile(destination)" in store
+
+
+def test_catalog_prefers_canonical_library_and_keeps_upgrade_fallbacks() -> None:
+    combined = method("private String listCombinedRawLibrary", "private ArrayList<RawLibraryRecord> listLegacyMediaStoreRawLibrary")
+    assert "listFileRawLibrary(rawLibraryDirectory())" in combined
+    assert "listFileRawLibrary(externalMediaRootDirectory())" in combined
+    assert "listLegacyMediaStoreRawLibrary()" in combined
     assert "Long.compare(right.modifiedSeconds, left.modifiedSeconds)" in combined
     assert "Set<String> seenUris" in combined
     assert "added > MAX_RAW_LIBRARY_FILES" in combined
 
 
-def test_raw_identity_accepts_legacy_items_by_scheme_after_an_os_upgrade() -> None:
-    identity = method(
-        "private void verifyRawLibraryIdentity",
-        "private void verifyLegacyRawLibraryIdentity",
-    )
-    assert "ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())" in identity
-    assert identity.index("verifyLegacyRawLibraryIdentity") < identity.index(
-        "Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q"
-    )
-
-    for signature, end in (
-        ("public void removeRawSidecar", "private void removeRawSidecarScoped"),
-        ("public String materializeRawSidecar", "private String materializeRawSidecarScoped"),
-        ("public String publishRawSidecar", "private String publishRawSidecarScoped"),
-    ):
-        dispatch = method(signature, end)
-        assert "ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())" in dispatch
-        assert "Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q" not in dispatch
+def test_file_identity_accepts_only_canonical_library_or_pre_migration_root() -> None:
+    identity = method("private void verifyFileRawLibraryIdentity", "private void verifyLegacyMediaStoreRawIdentity")
+    assert "rawLibraryDirectory().getCanonicalFile()" in identity
+    assert "externalMediaRootDirectory().getCanonicalFile()" in identity
+    assert "(!library.equals(parent) && !legacyRoot.equals(parent))" in identity
 
 
-def test_scoped_raw_identity_is_bound_to_one_owned_published_download() -> None:
-    identity = method(
-        "private void verifyScopedRawLibraryIdentity",
-        "private static String sidecarDisplayName",
-    )
+def test_legacy_mediastore_identity_is_read_only_compatibility_path() -> None:
+    identity = method("private void verifyLegacyMediaStoreRawIdentity", "private static String sidecarDisplayName")
     assert "ContentResolver.SCHEME_CONTENT.equals(rawUri.getScheme())" in identity
     assert "ContentUris.parseId(rawUri)" in identity
-    assert "ContentUris.withAppendedId(collection, expectedId).equals(rawUri)" in identity
-    for column in (
-        "MediaStore.Downloads._ID",
-        "MediaStore.Downloads.DISPLAY_NAME",
-        "MediaStore.Downloads.RELATIVE_PATH",
-        "MediaStore.Downloads.OWNER_PACKAGE_NAME",
-        "MediaStore.Downloads.IS_PENDING",
-    ):
-        assert column in identity
-    assert "expectedDisplayName.equals(storedName)" in identity
-    assert "RAW_LIBRARY_RELATIVE_PATH.equals(storedPath)" in identity
+    assert "MediaStore.Downloads.RELATIVE_PATH" in identity
+    assert "MediaStore.Downloads.OWNER_PACKAGE_NAME" in identity
+    assert "LEGACY_MEDIASTORE_RAW_RELATIVE_PATH.equals(storedPath)" in identity
     assert "getPackageName().equals(storedOwner)" in identity
-    assert "pending != 0" in identity
 
 
-def test_scoped_sidecars_read_newest_complete_generation_and_delete_by_identity() -> None:
-    materialize = method(
-        "private String materializeRawSidecarScoped",
-        "public String createRawSidecarCache",
-    )
-    assert "scopedSidecarUris(rawDisplayName)" in materialize
-    assert "generations.get(0)" in materialize
-    assert "openInputStream(newestGeneration)" in materialize
+def test_sidecars_for_new_library_are_atomic_sibling_files() -> None:
+    publish = method("private String publishRawSidecarFile", "private ArrayList<Uri> legacyMediaStoreSidecarUris")
+    assert "File.createTempFile(\".auraw-sidecar-\", \".part\", directory)" in publish
+    assert "StandardCopyOption.ATOMIC_MOVE" in publish
+    assert "StandardCopyOption.REPLACE_EXISTING" in publish
 
-    generations = method(
-        "private ArrayList<Uri> scopedSidecarUris",
-        "private int deleteScopedSidecarGeneration",
-    )
-    assert "scopedSidecarSelection()" in generations
-    assert 'MediaStore.Downloads._ID + " DESC"' in generations
-
-    selection = method(
-        "private static String scopedSidecarSelection",
-        "private String[] scopedSidecarSelectionArgs",
-    )
-    assert "MediaStore.Downloads.RELATIVE_PATH" in selection
-    assert "MediaStore.Downloads.OWNER_PACKAGE_NAME" in selection
-    assert 'MediaStore.Downloads.IS_PENDING + "=0' in selection
-    assert "MediaStore.Downloads.DISPLAY_NAME" in selection
-
-    deletion = method(
-        "private int deleteScopedSidecarGeneration",
-        "private static String scopedSidecarSelection",
-    )
-    assert "ContentUris.parseId(generation)" in deletion
-    assert 'MediaStore.Downloads._ID + "=?' in deletion
-    assert "scopedSidecarSelection()" in deletion
-    assert "MediaStore.Downloads.EXTERNAL_CONTENT_URI" in deletion
+    public_publish = method("public String publishRawSidecar", "private String publishRawSidecarLegacyMediaStore")
+    assert "new File(rawUri.getPath()).getParentFile()" in public_publish
+    assert "publishRawSidecarFile" in public_publish
 
 
-def test_android_export_publisher_supports_png_and_jpeg() -> None:
-    publish = method(
-        "public void publishImage",
-        "private static void copy(InputStream input, OutputStream output, long maximumBytes)",
-    )
+def test_upgrade_migration_moves_old_locations_and_only_deletes_after_copy() -> None:
+    migration = method("private void startLegacyRawStorageMigration", "private void deleteStoredRaw")
+    assert "migrateLegacyExternalMediaRoot()" in migration
+    assert "migrateLegacyMediaStoreRawLibrary()" in migration
+    assert "moveOrCopyLegacyFile" in migration
+    assert "copy(input, output, MAX_RAW_IMPORT_BYTES)" in migration
+    assert "partial.renameTo(destination)" in migration
+    assert "getContentResolver().delete(source, null, null) <= 0" in migration
+    assert "removeRawSidecarLegacyMediaStore(record.displayName)" in migration
+
+
+def test_android_export_publisher_targets_gallery_visible_pictures_auraw() -> None:
+    pending = method("public String createPendingExport", "public void finishPendingExport")
+    assert "MediaStore.Images.Media.RELATIVE_PATH" in pending
+    assert "EXPORT_RELATIVE_PATH" in pending
+    assert 'EXPORT_RELATIVE_PATH + "/" + displayName' in pending
+
+    publish = method("public void publishImage", "private static void copy(InputStream input, OutputStream output, long maximumBytes)")
     assert '"image/png"' in publish
     assert '"image/jpeg"' in publish
-    assert "normalizeExportMimeType" in publish
     assert "MediaStore.Images.Media.MIME_TYPE" in publish
-    assert "safeImageName" in publish
-    assert 'jpeg ? ".jpg" : ".png"' in publish
+    assert "MediaStore.Images.Media.RELATIVE_PATH" in publish
+    assert "EXPORT_RELATIVE_PATH" in publish

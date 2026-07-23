@@ -58,8 +58,11 @@ public final class AuRawActivity extends NativeActivity {
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
     private static final int MAX_THUMBNAIL_CACHE_FILES = 512;
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
-    private static final String RAW_LIBRARY_RELATIVE_PATH =
+    private static final String LEGACY_MEDIASTORE_RAW_RELATIVE_PATH =
             Environment.DIRECTORY_DOWNLOADS + "/AuRaw/";
+    private static final String RAW_LIBRARY_DIRECTORY_NAME = ".library";
+    private static final String EXPORT_RELATIVE_PATH =
+            Environment.DIRECTORY_PICTURES + "/AuRaw";
     private static final Set<String> RAW_SUFFIXES = new HashSet<>(Arrays.asList(
             "3fr", "ari", "arw", "bay", "bmq", "cap", "cine", "cr2", "cr3", "crw",
             "cs1", "dc2", "dcr", "dcs", "dng", "drf", "eip", "erf", "fff", "gpr",
@@ -80,6 +83,7 @@ public final class AuRawActivity extends NativeActivity {
         super.onCreate(savedInstanceState);
         configureSystemBarsAndInsets();
         scavengeTemporaryRawFiles();
+        startLegacyRawStorageMigration();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT,
@@ -135,7 +139,7 @@ public final class AuRawActivity extends NativeActivity {
                         || name.startsWith("auraw-thumbnail-"));
         deleteStaleFiles(cachedFiles);
 
-        File[] partialImports = legacyRawLibraryDirectory().listFiles((directory, name) ->
+        File[] partialImports = rawLibraryDirectory().listFiles((directory, name) ->
                 (name.startsWith(".auraw-import-") || name.startsWith(".auraw-sidecar-"))
                         && name.endsWith(".part"));
         deleteStaleFiles(partialImports);
@@ -701,13 +705,10 @@ public final class AuRawActivity extends NativeActivity {
 
     /** Human-readable storage location shown by the Rust library UI. */
     public String rawLibraryLocation() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return RAW_LIBRARY_RELATIVE_PATH;
-        }
-        return legacyRawLibraryDirectory().getAbsolutePath();
+        return rawLibraryDirectory().getAbsolutePath();
     }
 
-    /** Lists current MediaStore RAWs plus legacy file entries retained across upgrades. */
+    /** Lists the canonical .library plus any not-yet-migrated upgrade entries. */
     public String listRawLibrary() {
         try {
             return listCombinedRawLibrary();
@@ -803,21 +804,22 @@ public final class AuRawActivity extends NativeActivity {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
         if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            removeRawSidecarScoped(displayName);
+            removeRawSidecarLegacyMediaStore(displayName);
             return;
         }
-        File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
+        File sidecar = new File(
+                new File(rawUri.getPath()).getParentFile(), sidecarDisplayName(displayName));
         if (sidecar.exists() && !sidecar.delete()) {
             throw new IllegalStateException("Could not delete the RAW sidecar");
         }
     }
 
-    private void removeRawSidecarScoped(String rawDisplayName) {
+    private void removeRawSidecarLegacyMediaStore(String rawDisplayName) {
         boolean deletionFailed = false;
-        for (Uri generation : scopedSidecarUris(rawDisplayName)) {
-            deletionFailed |= deleteScopedSidecarGeneration(generation, rawDisplayName) <= 0;
+        for (Uri generation : legacyMediaStoreSidecarUris(rawDisplayName)) {
+            deletionFailed |= deleteLegacyMediaStoreSidecarGeneration(generation, rawDisplayName) <= 0;
         }
-        if (deletionFailed && !scopedSidecarUris(rawDisplayName).isEmpty()) {
+        if (deletionFailed && !legacyMediaStoreSidecarUris(rawDisplayName).isEmpty()) {
             throw new IllegalStateException("Android storage could not delete the RAW sidecar");
         }
     }
@@ -878,9 +880,10 @@ public final class AuRawActivity extends NativeActivity {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
         if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            return materializeRawSidecarScoped(displayName);
+            return materializeRawSidecarLegacyMediaStore(displayName);
         }
-        File sidecar = new File(legacyRawLibraryDirectory(), sidecarDisplayName(displayName));
+        File sidecar = new File(
+                new File(rawUri.getPath()).getParentFile(), sidecarDisplayName(displayName));
         if (!sidecar.isFile()) {
             return "";
         }
@@ -902,8 +905,8 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    private String materializeRawSidecarScoped(String rawDisplayName) throws Exception {
-        ArrayList<Uri> generations = scopedSidecarUris(rawDisplayName);
+    private String materializeRawSidecarLegacyMediaStore(String rawDisplayName) throws Exception {
+        ArrayList<Uri> generations = legacyMediaStoreSidecarUris(rawDisplayName);
         if (generations.isEmpty()) {
             return "";
         }
@@ -935,9 +938,9 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     /**
-     * Publishes a completed staging file beside its RAW. API 29+ uses a fresh
-     * pending MediaStore row, so readers never observe partial JSON. Android
-     * 8–9 copies to a sibling temporary file and atomically renames it.
+     * Publishes a completed staging file beside its RAW. New libraries use a
+     * same-directory temporary file and atomic replacement; old MediaStore rows
+     * remain supported only until their one-time migration succeeds.
      */
     public String publishRawSidecar(
             String cachedPath,
@@ -950,27 +953,28 @@ public final class AuRawActivity extends NativeActivity {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
         if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            return publishRawSidecarScoped(cached, displayName);
+            return publishRawSidecarLegacyMediaStore(cached, displayName);
         }
-        return publishRawSidecarLegacy(cached, displayName);
+        return publishRawSidecarFile(
+                cached, new File(rawUri.getPath()).getParentFile(), displayName);
     }
 
-    private String publishRawSidecarScoped(File cached, String rawDisplayName) throws Exception {
+    private String publishRawSidecarLegacyMediaStore(File cached, String rawDisplayName) throws Exception {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Scoped sidecars require Android 10 or newer");
+            throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
         }
         ContentResolver resolver = getContentResolver();
         String displayName = sidecarDisplayName(rawDisplayName);
         String stagedName = sidecarStagePrefix(rawDisplayName)
                 + Long.toUnsignedString(System.nanoTime());
-        ArrayList<Uri> oldSidecars = scopedSidecarUris(rawDisplayName);
+        ArrayList<Uri> oldSidecars = legacyMediaStoreSidecarUris(rawDisplayName);
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, stagedName);
         // MediaProvider may rewrite unknown extensions to match a specific
         // MIME type (for example `.auraw.json`). The unknown binary MIME keeps
         // AuRaw's exact custom filename intact.
         values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream");
-        values.put(MediaStore.Downloads.RELATIVE_PATH, RAW_LIBRARY_RELATIVE_PATH);
+        values.put(MediaStore.Downloads.RELATIVE_PATH, LEGACY_MEDIASTORE_RAW_RELATIVE_PATH);
         values.put(MediaStore.Downloads.IS_PENDING, 1);
         Uri destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
         if (destination == null) {
@@ -996,26 +1000,26 @@ public final class AuRawActivity extends NativeActivity {
             boolean removedOldRows = true;
             for (Uri oldSidecar : oldSidecars) {
                 if (!oldSidecar.equals(destination)) {
-                    removedOldRows &= deleteScopedSidecarGeneration(
+                    removedOldRows &= deleteLegacyMediaStoreSidecarGeneration(
                             oldSidecar, rawDisplayName) > 0;
                 }
             }
             if (!removedOldRows) {
-                return RAW_LIBRARY_RELATIVE_PATH + stagedName;
+                return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + stagedName;
             }
             values.clear();
             values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
             if (resolver.update(destination, values, null, null) <= 0) {
-                return RAW_LIBRARY_RELATIVE_PATH + stagedName;
+                return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + stagedName;
             }
             String actualName = queryStoredDisplayName(destination);
             if (!displayName.equals(actualName)) {
                 values.clear();
                 values.put(MediaStore.Downloads.DISPLAY_NAME, stagedName);
                 resolver.update(destination, values, null, null);
-                return RAW_LIBRARY_RELATIVE_PATH + queryStoredDisplayName(destination);
+                return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + queryStoredDisplayName(destination);
             }
-            return RAW_LIBRARY_RELATIVE_PATH + displayName;
+            return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + displayName;
         } finally {
             // Once the staged row is published it is a complete, discoverable
             // recovery generation. Preserve it if final renaming fails.
@@ -1025,8 +1029,10 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    private String publishRawSidecarLegacy(File cached, String rawDisplayName) throws Exception {
-        File directory = legacyRawLibraryDirectory();
+    private String publishRawSidecarFile(
+            File cached,
+            File directory,
+            String rawDisplayName) throws Exception {
         if (!directory.isDirectory() && !directory.mkdirs()) {
             throw new IllegalStateException("Could not create " + directory);
         }
@@ -1063,9 +1069,9 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    private ArrayList<Uri> scopedSidecarUris(String rawDisplayName) {
+    private ArrayList<Uri> legacyMediaStoreSidecarUris(String rawDisplayName) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Scoped sidecars require Android 10 or newer");
+            throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
         }
         ArrayList<Uri> result = new ArrayList<>();
         String displayName = sidecarDisplayName(rawDisplayName);
@@ -1074,8 +1080,8 @@ public final class AuRawActivity extends NativeActivity {
                 MediaStore.Downloads._ID,
                 MediaStore.Downloads.DISPLAY_NAME
         };
-        String selection = scopedSidecarSelection();
-        String[] args = scopedSidecarSelectionArgs(displayName, stagedPrefix);
+        String selection = legacyMediaStoreSidecarSelection();
+        String[] args = legacyMediaStoreSidecarSelectionArgs(displayName, stagedPrefix);
         try (Cursor cursor = getContentResolver().query(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 projection,
@@ -1100,16 +1106,16 @@ public final class AuRawActivity extends NativeActivity {
         return result;
     }
 
-    private int deleteScopedSidecarGeneration(Uri generation, String rawDisplayName) {
+    private int deleteLegacyMediaStoreSidecarGeneration(Uri generation, String rawDisplayName) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Scoped sidecars require Android 10 or newer");
+            throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
         }
         long generationId = ContentUris.parseId(generation);
         String displayName = sidecarDisplayName(rawDisplayName);
         String stagedPrefix = sidecarStagePrefix(rawDisplayName);
         String selection = MediaStore.Downloads._ID + "=? AND ("
-                + scopedSidecarSelection() + ")";
-        String[] sidecarArgs = scopedSidecarSelectionArgs(displayName, stagedPrefix);
+                + legacyMediaStoreSidecarSelection() + ")";
+        String[] sidecarArgs = legacyMediaStoreSidecarSelectionArgs(displayName, stagedPrefix);
         String[] args = new String[sidecarArgs.length + 1];
         args[0] = Long.toString(generationId);
         System.arraycopy(sidecarArgs, 0, args, 1, sidecarArgs.length);
@@ -1119,7 +1125,7 @@ public final class AuRawActivity extends NativeActivity {
                 args);
     }
 
-    private static String scopedSidecarSelection() {
+    private static String legacyMediaStoreSidecarSelection() {
         return MediaStore.Downloads.RELATIVE_PATH + "=? AND "
                 + MediaStore.Downloads.OWNER_PACKAGE_NAME + "=? AND "
                 + MediaStore.Downloads.IS_PENDING + "=0 AND ("
@@ -1127,9 +1133,9 @@ public final class AuRawActivity extends NativeActivity {
                 + MediaStore.Downloads.DISPLAY_NAME + " LIKE ? ESCAPE '\\')";
     }
 
-    private String[] scopedSidecarSelectionArgs(String displayName, String stagedPrefix) {
+    private String[] legacyMediaStoreSidecarSelectionArgs(String displayName, String stagedPrefix) {
         return new String[]{
-                RAW_LIBRARY_RELATIVE_PATH,
+                LEGACY_MEDIASTORE_RAW_RELATIVE_PATH,
                 getPackageName(),
                 displayName,
                 escapeLike(stagedPrefix) + "%"
@@ -1138,36 +1144,38 @@ public final class AuRawActivity extends NativeActivity {
 
     private void verifyRawLibraryIdentity(Uri rawUri, String expectedDisplayName) throws Exception {
         if (ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            verifyLegacyRawLibraryIdentity(rawUri, expectedDisplayName);
+            verifyFileRawLibraryIdentity(rawUri, expectedDisplayName);
             return;
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            verifyScopedRawLibraryIdentity(rawUri, expectedDisplayName);
+            verifyLegacyMediaStoreRawIdentity(rawUri, expectedDisplayName);
             return;
         }
         throw new IllegalArgumentException("The RAW library URI is invalid");
     }
 
-    private void verifyLegacyRawLibraryIdentity(
+    private void verifyFileRawLibraryIdentity(
             Uri rawUri,
             String expectedDisplayName) throws Exception {
         if (rawUri.getPath() == null || expectedDisplayName == null) {
             throw new IllegalArgumentException("The RAW library URI is invalid");
         }
         File raw = new File(rawUri.getPath()).getCanonicalFile();
-        File directory = legacyRawLibraryDirectory().getCanonicalFile();
+        File parent = raw.getParentFile();
+        File library = rawLibraryDirectory().getCanonicalFile();
+        File legacyRoot = externalMediaRootDirectory().getCanonicalFile();
         if (!expectedDisplayName.equals(raw.getName())
-                || raw.getParentFile() == null
-                || !directory.equals(raw.getParentFile())) {
+                || parent == null
+                || (!library.equals(parent) && !legacyRoot.equals(parent))) {
             throw new IllegalArgumentException("The RAW is outside AuRaw's library");
         }
     }
 
-    private void verifyScopedRawLibraryIdentity(
+    private void verifyLegacyMediaStoreRawIdentity(
             Uri rawUri,
             String expectedDisplayName) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Scoped RAW storage requires Android 10 or newer");
+            throw new IllegalStateException("Legacy MediaStore RAW storage requires Android 10 or newer");
         }
         Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
         if (expectedDisplayName == null
@@ -1216,7 +1224,7 @@ public final class AuRawActivity extends NativeActivity {
                     MediaStore.Downloads.IS_PENDING));
             if (storedId != expectedId
                     || !expectedDisplayName.equals(storedName)
-                    || !RAW_LIBRARY_RELATIVE_PATH.equals(storedPath)
+                    || !LEGACY_MEDIASTORE_RAW_RELATIVE_PATH.equals(storedPath)
                     || !getPackageName().equals(storedOwner)
                     || pending != 0
                     || cursor.moveToNext()) {
@@ -1289,57 +1297,11 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     private StoredRaw storeRawInLibrary(Uri source, String requestedName) throws Exception {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return storeRawScoped(source, requestedName);
-        }
-        return storeRawLegacy(source, requestedName);
+        return storeRawFile(source, requestedName);
     }
 
-    private StoredRaw storeRawScoped(Uri source, String requestedName) throws Exception {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Scoped RAW storage requires Android 10 or newer");
-        }
-        ContentResolver resolver = getContentResolver();
-        String displayName = uniqueScopedRawName(safeRawName(requestedName));
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
-        // Providers frequently mislabel camera RAWs as JPEG/TIFF. A specific
-        // MIME can make MediaProvider rewrite CR3/NEF/etc extensions, so keep
-        // the imported filename authoritative.
-        values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream");
-        values.put(MediaStore.Downloads.RELATIVE_PATH, RAW_LIBRARY_RELATIVE_PATH);
-        values.put(MediaStore.Downloads.IS_PENDING, 1);
-
-        Uri destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-        if (destination == null) {
-            throw new IllegalStateException("Android MediaStore could not create the RAW");
-        }
-        boolean published = false;
-        try {
-            try (InputStream input = resolver.openInputStream(source);
-                 OutputStream output = resolver.openOutputStream(destination, "w")) {
-                if (input == null || output == null) {
-                    throw new IllegalStateException("Android storage returned no RAW stream");
-                }
-                copy(input, output, MAX_RAW_IMPORT_BYTES);
-            }
-            values.clear();
-            values.put(MediaStore.Downloads.IS_PENDING, 0);
-            if (resolver.update(destination, values, null, null) <= 0) {
-                throw new IllegalStateException("Android MediaStore could not publish the RAW");
-            }
-            String storedDisplayName = queryStoredDisplayName(destination);
-            published = true;
-            return new StoredRaw(destination, storedDisplayName);
-        } finally {
-            if (!published) {
-                resolver.delete(destination, null, null);
-            }
-        }
-    }
-
-    private StoredRaw storeRawLegacy(Uri source, String requestedName) throws Exception {
-        File directory = legacyRawLibraryDirectory();
+    private StoredRaw storeRawFile(Uri source, String requestedName) throws Exception {
+        File directory = rawLibraryDirectory();
         if (!directory.isDirectory() && !directory.mkdirs()) {
             throw new IllegalStateException("Could not create " + directory);
         }
@@ -1349,7 +1311,7 @@ public final class AuRawActivity extends NativeActivity {
                 ".auraw-import-" + destination.getName() + ".part");
         boolean completed = false;
         try {
-            try (InputStream input = getContentResolver().openInputStream(source);
+            try (InputStream input = openLibraryInput(source);
                  OutputStream output = new FileOutputStream(partial)) {
                 if (input == null) {
                     throw new IllegalStateException("The document provider returned no input stream");
@@ -1417,15 +1379,18 @@ public final class AuRawActivity extends NativeActivity {
 
     private String listCombinedRawLibrary() {
         ArrayList<RawLibraryRecord> records = new ArrayList<>();
+        records.addAll(listFileRawLibrary(rawLibraryDirectory()));
+        try {
+            records.addAll(listFileRawLibrary(externalMediaRootDirectory()));
+        } catch (IllegalStateException error) {
+            Log.w(LOG_TAG, "Could not inspect the pre-.library RAW location", error);
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            records.addAll(listScopedRawLibrary());
             try {
-                records.addAll(listLegacyRawLibrary());
+                records.addAll(listLegacyMediaStoreRawLibrary());
             } catch (IllegalStateException error) {
-                Log.w(LOG_TAG, "Could not inspect the legacy RAW library", error);
+                Log.w(LOG_TAG, "Could not inspect the legacy MediaStore RAW library", error);
             }
-        } else {
-            records.addAll(listLegacyRawLibrary());
         }
         records.sort((left, right) -> {
             int modifiedOrder = Long.compare(right.modifiedSeconds, left.modifiedSeconds);
@@ -1454,9 +1419,9 @@ public final class AuRawActivity extends NativeActivity {
         return result.toString();
     }
 
-    private ArrayList<RawLibraryRecord> listScopedRawLibrary() {
+    private ArrayList<RawLibraryRecord> listLegacyMediaStoreRawLibrary() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Scoped RAW storage requires Android 10 or newer");
+            throw new IllegalStateException("Legacy MediaStore RAW storage requires Android 10 or newer");
         }
         ArrayList<RawLibraryRecord> result = new ArrayList<>();
         String[] projection = {
@@ -1468,7 +1433,7 @@ public final class AuRawActivity extends NativeActivity {
         String selection = MediaStore.Downloads.RELATIVE_PATH + "=? AND "
                 + MediaStore.Downloads.OWNER_PACKAGE_NAME + "=? AND "
                 + MediaStore.Downloads.IS_PENDING + "=0";
-        String[] selectionArgs = {RAW_LIBRARY_RELATIVE_PATH, getPackageName()};
+        String[] selectionArgs = {LEGACY_MEDIASTORE_RAW_RELATIVE_PATH, getPackageName()};
         try (Cursor cursor = getContentResolver().query(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 projection,
@@ -1495,7 +1460,7 @@ public final class AuRawActivity extends NativeActivity {
                 result.add(new RawLibraryRecord(
                         uri.toString(),
                         name,
-                        RAW_LIBRARY_RELATIVE_PATH + name,
+                        LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + name,
                         Math.max(0, cursor.getLong(sizeColumn)),
                         Math.max(0, cursor.getLong(modifiedColumn))));
             }
@@ -1503,9 +1468,9 @@ public final class AuRawActivity extends NativeActivity {
         return result;
     }
 
-    private ArrayList<RawLibraryRecord> listLegacyRawLibrary() {
+    private ArrayList<RawLibraryRecord> listFileRawLibrary(File directory) {
         ArrayList<RawLibraryRecord> result = new ArrayList<>();
-        File[] files = legacyRawLibraryDirectory().listFiles();
+        File[] files = directory.listFiles();
         if (files == null) {
             return result;
         }
@@ -1543,45 +1508,6 @@ public final class AuRawActivity extends NativeActivity {
                 .append(modifiedSeconds).append('\n');
     }
 
-    private String uniqueScopedRawName(String requestedName) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Scoped RAW storage requires Android 10 or newer");
-        }
-        if (!scopedRawNameExists(requestedName)) {
-            return requestedName;
-        }
-        int dot = requestedName.lastIndexOf('.');
-        String stem = dot > 0 ? requestedName.substring(0, dot) : requestedName;
-        String suffix = dot > 0 ? requestedName.substring(dot) : "";
-        for (int index = 1; ; index++) {
-            String candidate = stem + "-" + index + suffix;
-            if (!scopedRawNameExists(candidate)) {
-                return candidate;
-            }
-        }
-    }
-
-    private boolean scopedRawNameExists(String displayName) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Scoped RAW storage requires Android 10 or newer");
-        }
-        String[] projection = {MediaStore.Downloads._ID};
-        // Intentionally include pending rows so a crash-left import still
-        // reserves its display name instead of being overwritten/reused.
-        String selection = MediaStore.Downloads.RELATIVE_PATH + "=? AND "
-                + MediaStore.Downloads.DISPLAY_NAME + "=? AND "
-                + MediaStore.Downloads.OWNER_PACKAGE_NAME + "=?";
-        String[] args = {RAW_LIBRARY_RELATIVE_PATH, displayName, getPackageName()};
-        try (Cursor cursor = getContentResolver().query(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                args,
-                null)) {
-            return cursor != null && cursor.moveToFirst();
-        }
-    }
-
     private String queryStoredDisplayName(Uri uri) {
         String[] projection = {MediaStore.Downloads.DISPLAY_NAME};
         try (Cursor cursor = getContentResolver().query(uri, projection, null, null, null)) {
@@ -1597,7 +1523,7 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    private File legacyRawLibraryDirectory() {
+    private File externalMediaRootDirectory() {
         File[] mediaDirectories = getExternalMediaDirs();
         if (mediaDirectories != null) {
             for (File directory : mediaDirectories) {
@@ -1607,6 +1533,201 @@ public final class AuRawActivity extends NativeActivity {
             }
         }
         throw new IllegalStateException("Android shared media storage is unavailable");
+    }
+
+    private File rawLibraryDirectory() {
+        File directory = new File(externalMediaRootDirectory(), RAW_LIBRARY_DIRECTORY_NAME);
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IllegalStateException("Could not create " + directory);
+        }
+        File noMedia = new File(directory, ".nomedia");
+        try {
+            if (!noMedia.exists() && !noMedia.createNewFile()) {
+                Log.w(LOG_TAG, "Could not create .nomedia marker in " + directory);
+            }
+        } catch (Exception error) {
+            Log.w(LOG_TAG, "Could not create .nomedia marker in " + directory, error);
+        }
+        return directory;
+    }
+
+    private void startLegacyRawStorageMigration() {
+        new Thread(() -> {
+            try {
+                migrateLegacyExternalMediaRoot();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    migrateLegacyMediaStoreRawLibrary();
+                }
+            } catch (Exception error) {
+                Log.w(LOG_TAG, "Legacy RAW library migration did not complete", error);
+            }
+        }, "AuRaw RAW library migration").start();
+    }
+
+    private void migrateLegacyExternalMediaRoot() {
+        File root = externalMediaRootDirectory();
+        File library = rawLibraryDirectory();
+        File[] files = root.listFiles();
+        if (files == null) {
+            return;
+        }
+        for (File source : files) {
+            if (!source.isFile() || !isRawName(source.getName())) {
+                continue;
+            }
+            File destination = new File(library, source.getName());
+            if (destination.exists()) {
+                continue;
+            }
+            try {
+                moveOrCopyLegacyFile(source, destination, MAX_RAW_IMPORT_BYTES);
+            } catch (Exception error) {
+                Log.w(LOG_TAG, "Could not migrate legacy file RAW " + source.getName(), error);
+                continue;
+            }
+
+            File sourceSidecar = new File(root, sidecarDisplayName(source.getName()));
+            File destinationSidecar = new File(library, sidecarDisplayName(source.getName()));
+            if (sourceSidecar.isFile() && !destinationSidecar.exists()) {
+                try {
+                    moveOrCopyLegacyFile(sourceSidecar, destinationSidecar, MAX_SIDECAR_BYTES);
+                } catch (Exception error) {
+                    Log.w(LOG_TAG, "Could not migrate legacy file sidecar " + sourceSidecar.getName(), error);
+                }
+            }
+        }
+
+        // Recover a sidecar left behind if a previous run moved its RAW first
+        // and then failed while moving the sidecar. Do not attach a sidecar to
+        // a same-named collision that still has its original RAW in the root.
+        for (File sourceSidecar : files) {
+            String sidecarName = sourceSidecar.getName();
+            if (!sourceSidecar.isFile() || !sidecarName.endsWith(".auraw")) {
+                continue;
+            }
+            String rawName = sidecarName.substring(0, sidecarName.length() - ".auraw".length());
+            if (new File(root, rawName).exists()) {
+                continue;
+            }
+            File destinationRaw = new File(library, rawName);
+            File destinationSidecar = new File(library, sidecarName);
+            if (!destinationRaw.isFile() || destinationSidecar.exists()) {
+                continue;
+            }
+            try {
+                moveOrCopyLegacyFile(sourceSidecar, destinationSidecar, MAX_SIDECAR_BYTES);
+            } catch (Exception error) {
+                Log.w(LOG_TAG, "Could not recover legacy file sidecar " + sidecarName, error);
+            }
+        }
+    }
+
+    private void migrateLegacyMediaStoreRawLibrary() {
+        for (RawLibraryRecord record : listLegacyMediaStoreRawLibrary()) {
+            Uri source = Uri.parse(record.uri);
+            File destination = new File(rawLibraryDirectory(), safeRawName(record.displayName));
+            if (destination.exists()) {
+                continue;
+            }
+            File partial = new File(
+                    rawLibraryDirectory(), ".auraw-migrate-" + destination.getName() + ".part");
+            String cachedSidecar = "";
+            boolean rawPublished = false;
+            try {
+                try (InputStream input = getContentResolver().openInputStream(source);
+                     FileOutputStream output = new FileOutputStream(partial)) {
+                    if (input == null) {
+                        throw new IllegalStateException("Android storage returned no legacy RAW stream");
+                    }
+                    copy(input, output, MAX_RAW_IMPORT_BYTES);
+                    output.getFD().sync();
+                }
+                if (destination.exists() || !partial.renameTo(destination)) {
+                    throw new IllegalStateException("Could not migrate legacy RAW into " + rawLibraryDirectory());
+                }
+                rawPublished = true;
+
+                cachedSidecar = materializeRawSidecarLegacyMediaStore(record.displayName);
+                if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
+                    publishRawSidecarFile(new File(cachedSidecar), rawLibraryDirectory(), destination.getName());
+                }
+
+                if (getContentResolver().delete(source, null, null) <= 0) {
+                    throw new IllegalStateException(
+                            "Could not remove legacy MediaStore RAW after migration: " + source);
+                }
+                try {
+                    removeRawSidecarLegacyMediaStore(record.displayName);
+                } catch (Exception cleanupError) {
+                    Log.w(LOG_TAG, "Migrated RAW but could not remove every legacy sidecar", cleanupError);
+                }
+                rawPublished = false;
+            } catch (Exception error) {
+                Log.w(LOG_TAG, "Could not migrate legacy RAW " + record.displayName, error);
+                if (rawPublished) {
+                    if (!destination.delete() && destination.exists()) {
+                        destination.deleteOnExit();
+                    }
+                    File destinationSidecar = new File(
+                            rawLibraryDirectory(), sidecarDisplayName(destination.getName()));
+                    if (!destinationSidecar.delete() && destinationSidecar.exists()) {
+                        destinationSidecar.deleteOnExit();
+                    }
+                }
+            } finally {
+                if (!partial.delete() && partial.exists()) {
+                    partial.deleteOnExit();
+                }
+                if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
+                    File cached = new File(cachedSidecar);
+                    if (!cached.delete() && cached.exists()) {
+                        cached.deleteOnExit();
+                    }
+                }
+            }
+        }
+    }
+
+    private static void moveOrCopyLegacyFile(File source, File destination, long maximumBytes)
+            throws Exception {
+        try {
+            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE);
+            return;
+        } catch (AtomicMoveNotSupportedException unsupported) {
+            try {
+                Files.move(source.toPath(), destination.toPath());
+                return;
+            } catch (Exception ignored) {
+                // Fall through to bounded copy for odd vendor filesystems.
+            }
+        } catch (Exception ignored) {
+            // Fall through to bounded copy for odd vendor filesystems.
+        }
+
+        File partial = new File(destination.getParentFile(), ".auraw-move-" + destination.getName() + ".part");
+        boolean published = false;
+        try {
+            try (FileInputStream input = new FileInputStream(source);
+                 FileOutputStream output = new FileOutputStream(partial)) {
+                copy(input, output, maximumBytes);
+                output.getFD().sync();
+            }
+            if (!partial.renameTo(destination)) {
+                throw new IllegalStateException("Could not publish migrated file " + destination);
+            }
+            published = true;
+            if (!source.delete() && source.exists()) {
+                if (!destination.delete() && destination.exists()) {
+                    destination.deleteOnExit();
+                }
+                published = false;
+                throw new IllegalStateException("Could not remove old file " + source);
+            }
+        } finally {
+            if (!published && !partial.delete() && partial.exists()) {
+                partial.deleteOnExit();
+            }
+        }
     }
 
     private void deleteStoredRaw(Uri uri) {
@@ -1696,7 +1817,7 @@ public final class AuRawActivity extends NativeActivity {
         values.put(MediaStore.Images.Media.MIME_TYPE, normalizedMime);
         values.put(
                 MediaStore.Images.Media.RELATIVE_PATH,
-                Environment.DIRECTORY_PICTURES + "/AuRaw");
+                EXPORT_RELATIVE_PATH);
         values.put(MediaStore.Images.Media.IS_PENDING, 1);
         Uri uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
         if (uri == null) {
@@ -1715,7 +1836,7 @@ public final class AuRawActivity extends NativeActivity {
             } finally {
                 descriptor.close();
             }
-            String location = Environment.DIRECTORY_PICTURES + "/AuRaw/" + displayName;
+            String location = EXPORT_RELATIVE_PATH + "/" + displayName;
             return fd + "\t" + uri + "\t" + location;
         } finally {
             if (!transferred) {
@@ -1839,7 +1960,7 @@ public final class AuRawActivity extends NativeActivity {
         values.put(MediaStore.Images.Media.MIME_TYPE, mimeType);
         values.put(
                 MediaStore.Images.Media.RELATIVE_PATH,
-                Environment.DIRECTORY_PICTURES + "/AuRaw");
+                EXPORT_RELATIVE_PATH);
         values.put(MediaStore.Images.Media.IS_PENDING, 1);
 
         Uri uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
@@ -1861,7 +1982,7 @@ public final class AuRawActivity extends NativeActivity {
                 throw new IllegalStateException("Android MediaStore could not publish the image");
             }
             published = true;
-            return Environment.DIRECTORY_PICTURES + "/AuRaw/" + displayName;
+            return EXPORT_RELATIVE_PATH + "/" + displayName;
         } finally {
             if (!published) {
                 resolver.delete(uri, null, null);

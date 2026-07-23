@@ -220,7 +220,7 @@ impl LibraryState {
     ) -> Self {
         let location = crate::android::library_location(&android_app).unwrap_or_else(|error| {
             log::warn!("{error}");
-            "Download/AuRaw".to_owned()
+            "Android/media/de.duecki.auraw/.library".to_owned()
         });
         let mut state = Self {
             location: Some(location),
@@ -441,7 +441,7 @@ impl LibraryState {
         #[cfg(target_os = "android")]
         let worker = {
             let android_app = self.android_app.clone();
-            self.status = "Refreshing Download/AuRaw…".to_owned();
+            self.status = "Refreshing AuRaw library…".to_owned();
             std::thread::Builder::new()
                 .name("auraw-library".to_owned())
                 .spawn(move || {

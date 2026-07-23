@@ -90,21 +90,17 @@ def test_android_stream_import_is_bounded_and_makes_progress() -> None:
     assert "std::fs::read_dir(&export_dir)" not in android_export
 
 
-def test_android_sidecars_are_complete_discoverable_generations() -> None:
+def test_android_sidecars_are_complete_atomic_sibling_files() -> None:
     assert "MAX_SIDECAR_BYTES = 32L * 1024L * 1024L" in ANDROID_ACTIVITY
-    assert 'values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")' in ANDROID_ACTIVITY
-    assert "values.put(MediaStore.Downloads.IS_PENDING, 1)" in ANDROID_ACTIVITY
-    assert "sidecarStagePrefix(rawDisplayName)" in ANDROID_ACTIVITY
-    assert "contentPublished = true" in ANDROID_ACTIVITY
-    assert "removedOldRows &= deleteScopedSidecarGeneration" in ANDROID_ACTIVITY
-    assert "queryStoredDisplayName(destination)" in ANDROID_ACTIVITY
-    assert "String storedDisplayName = queryStoredDisplayName(destination);" in ANDROID_ACTIVITY
-    raw_store = ANDROID_ACTIVITY.index("private StoredRaw storeRawScoped")
-    assert ANDROID_ACTIVITY.index(
-        "String storedDisplayName = queryStoredDisplayName(destination);", raw_store
-    ) < ANDROID_ACTIVITY.index("published = true;", raw_store)
-    assert "return new StoredRaw(destination, storedDisplayName)" in ANDROID_ACTIVITY
-
+    assert 'RAW_LIBRARY_DIRECTORY_NAME = ".library"' in ANDROID_ACTIVITY
+    assert 'File.createTempFile(".auraw-sidecar-", ".part", directory)' in ANDROID_ACTIVITY
+    assert "StandardCopyOption.ATOMIC_MOVE" in ANDROID_ACTIVITY
+    assert "StandardCopyOption.REPLACE_EXISTING" in ANDROID_ACTIVITY
+    assert "publishRawSidecarFile" in ANDROID_ACTIVITY
+    raw_store = ANDROID_ACTIVITY.index("private StoredRaw storeRawFile")
+    assert ANDROID_ACTIVITY.index("rawLibraryDirectory()", raw_store) < ANDROID_ACTIVITY.index(
+        "Uri.fromFile(destination)", raw_store
+    )
 
 def test_sidecar_serialization_and_io_stay_off_the_render_thread() -> None:
     sidecar = (ROOT / "src/sidecar.rs").read_text(encoding="utf-8")
