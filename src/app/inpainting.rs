@@ -24,6 +24,10 @@ impl AurawApp {
         self.inpaint_texture_key = None;
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
+        self.inpaint_hovered_stroke = None;
+        self.inpaint_selected_stroke = None;
+        self.inpaint_focus_texture = None;
+        self.inpaint_focus_texture_key = None;
         self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.note_inpainting_changed_for_ai_masks();
@@ -41,6 +45,10 @@ impl AurawApp {
         self.inpaint_texture_key = None;
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
+        self.inpaint_hovered_stroke = None;
+        self.inpaint_selected_stroke = None;
+        self.inpaint_focus_texture = None;
+        self.inpaint_focus_texture_key = None;
         self.inpaint_source_cache = None;
         self.inpaint_pending_source = None;
         self.inpaint_active_dabs = None;
@@ -274,6 +282,14 @@ impl AurawApp {
             return;
         }
         self.inpaint_strokes.remove(index);
+        self.inpaint_hovered_stroke = None;
+        self.inpaint_selected_stroke = match self.inpaint_selected_stroke {
+            Some(selected) if selected == index => None,
+            Some(selected) if selected > index => Some(selected - 1),
+            selected => selected,
+        };
+        self.inpaint_focus_texture = None;
+        self.inpaint_focus_texture_key = None;
         self.note_inpainting_edit_changed();
         self.rebuild_inpaint_layer();
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
@@ -284,6 +300,15 @@ impl AurawApp {
     }
 
     pub(crate) fn rebuild_inpaint_layer(&mut self) {
+        if self
+            .inpaint_selected_stroke
+            .is_some_and(|index| index >= self.inpaint_strokes.len())
+        {
+            self.inpaint_selected_stroke = None;
+        }
+        self.inpaint_hovered_stroke = None;
+        self.inpaint_focus_texture = None;
+        self.inpaint_focus_texture_key = None;
         self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
         self.inpaint_texture = None;
         self.inpaint_texture_key = None;

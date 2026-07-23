@@ -25,3 +25,17 @@ def test_history_observer_tracks_inpainting_without_cloning_unrelated_snapshots(
     assert "inpainting_contents_match" in HISTORY
     assert "Arc::clone(&self.inpainting)" in HISTORY
     assert "self.current.inpainting.as_slice() == inpainting" in HISTORY
+
+
+def test_inpainting_stroke_rows_highlight_location_on_hover_and_click() -> None:
+    sidebar = (ROOT / "src/ui/sidebar/inpainting.rs").read_text(encoding="utf-8")
+    preview = (ROOT / "src/ui/preview.rs").read_text(encoding="utf-8")
+    app = (ROOT / "src/app.rs").read_text(encoding="utf-8")
+
+    assert "inpaint_hovered_stroke" in app
+    assert "inpaint_selected_stroke" in app
+    assert "stroke_response.hovered()" in sidebar
+    assert "stroke_response.clicked()" in sidebar
+    assert "rasterize_inpaint_dabs_binary" in preview
+    assert "inpaint_stroke_screen_bounds" in preview
+    assert 'format!("Stroke {}", index + 1)' in preview

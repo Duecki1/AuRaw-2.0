@@ -46,6 +46,7 @@ impl Sidebar {
         ui.separator();
         ui.add_space(4.0);
         ui.label(egui::RichText::new("Brush strokes").strong());
+        app.inpaint_hovered_stroke = None;
         if app.inpaint_strokes.is_empty() {
             ui.label(
                 egui::RichText::new("No completed strokes yet.")
@@ -61,12 +62,26 @@ impl Sidebar {
                     for index in (0..app.inpaint_strokes.len()).rev() {
                         let dab_count = app.inpaint_strokes[index].dabs.len();
                         ui.horizontal(|ui| {
-                            ui.label(format!("Stroke {}", index + 1));
-                            ui.label(
-                                egui::RichText::new(format!("{dab_count} dabs"))
-                                    .size(10.5)
-                                    .color(ui.visuals().weak_text_color()),
-                            );
+                            let selected = app.inpaint_selected_stroke == Some(index);
+                            let stroke_response = ui
+                                .selectable_label(
+                                    selected,
+                                    format!("◎  Stroke {}  ·  {dab_count} dabs", index + 1),
+                                )
+                                .on_hover_text("Show this stroke on the image. Click to keep it highlighted.");
+                            if stroke_response.hovered() {
+                                app.inpaint_hovered_stroke = Some(index);
+                                ui.ctx().request_repaint();
+                            }
+                            if stroke_response.clicked() {
+                                app.inpaint_selected_stroke = if selected {
+                                    None
+                                } else {
+                                    Some(index)
+                                };
+                                app.inpaint_focus_texture_key = None;
+                                ui.ctx().request_repaint();
+                            }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {

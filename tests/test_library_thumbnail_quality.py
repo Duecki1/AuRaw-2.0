@@ -42,3 +42,28 @@ def test_library_prefers_cached_developed_thumbnail_over_embedded_raw_preview() 
     raw = LIBRARY.index("load_raw_thumbnail(path, THUMBNAIL_EDGE)", cache)
     assert cache < raw
     assert "developed_thumbnail && !loaded.developed" in LIBRARY
+
+
+def test_uncached_edited_library_cards_render_raw_plus_sidecar_before_fallbacks() -> None:
+    render = LIBRARY.index("render_uncached_developed_thumbnail")
+    raw_cache = LIBRARY.index("load_desktop_raw_thumbnail", render)
+    embedded = LIBRARY.index("load_raw_thumbnail(path, THUMBNAIL_EDGE)", raw_cache)
+    assert render < raw_cache < embedded
+    assert "load_raw_file_with_profile_selection" in LIBRARY
+    assert "RawGpuPipeline::new_headless_with_quality" in LIBRARY
+    assert "save_developed_thumbnail_cache" in LIBRARY
+
+
+def test_library_sort_dropdown_supports_date_name_and_size_orders() -> None:
+    assert 'ComboBox::from_id_salt("library-sort-order")' in LIBRARY
+    for label in (
+        "Newest first",
+        "Oldest first",
+        "Name A–Z",
+        "Name Z–A",
+        "Largest first",
+        "Smallest first",
+    ):
+        assert label in LIBRARY
+    assert "self.sort_entries();" in LIBRARY
+    assert "self.rebuild_entry_indices();" in LIBRARY
