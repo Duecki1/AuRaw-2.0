@@ -1,3 +1,4 @@
+use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams,
@@ -9,6 +10,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
 use std::borrow::Cow;
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 mod readback;
@@ -1165,6 +1167,7 @@ pub struct RawGpuPipeline {
     output_lut_offset_bytes: u64,
     out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
+    pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
 }
 
 /// A cheap, thread-safe handle to one completed display output. Reading it on
@@ -1225,6 +1228,15 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         cfa_kind: CfaKind,
     ) -> Result<Self> {
+        Self::prewarm_preview_template_with_cache(device, queue, cfa_kind, None)
+    }
+
+    pub(crate) fn prewarm_preview_template_with_cache(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cfa_kind: CfaKind,
+        pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
+    ) -> Result<Self> {
         const EDGE: u32 = 16;
         let pixels = (EDGE * EDGE) as usize;
         let cfa_pattern = match cfa_kind {
@@ -1273,7 +1285,17 @@ impl RawGpuPipeline {
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let params = GpuParams::new(&exposure, &masks, &raw);
-        Self::new_headless_with_quality(device, queue, &raw, &params, ProcessingQuality::Preview)
+        Self::new_internal(
+            device,
+            queue,
+            None,
+            None,
+            pipeline_cache,
+            &raw,
+            &params,
+            ProcessingQuality::Preview,
+            None,
+        )
     }
 
     pub fn output_snapshot(&self) -> GpuOutputSnapshot {
@@ -1314,6 +1336,7 @@ impl RawGpuPipeline {
             queue,
             Some(renderer),
             None,
+            None,
             raw,
             params,
             quality,
@@ -1328,7 +1351,7 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(device, queue, None, None, raw, params, quality, None)
+        Self::new_internal(device, queue, None, None, None, raw, params, quality, None)
     }
 
     /// Creates a headless pipeline with an explicit normalized-mask atlas edge.
@@ -1345,6 +1368,7 @@ impl RawGpuPipeline {
         Self::new_internal(
             device,
             queue,
+            None,
             None,
             None,
             raw,
@@ -1371,6 +1395,7 @@ impl RawGpuPipeline {
             queue,
             None,
             Some(template),
+            template.pipeline_cache.clone(),
             raw,
             params,
             quality,
@@ -1395,6 +1420,7 @@ impl RawGpuPipeline {
             queue,
             None,
             Some(template),
+            template.pipeline_cache.clone(),
             raw,
             params,
             quality,
@@ -1408,6 +1434,7 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         renderer: Option<&mut egui_wgpu::Renderer>,
         program_template: Option<&Self>,
+        pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
         raw: &LoadedRaw,
         params: &GpuParams,
         quality: ProcessingQuality,
@@ -2741,7 +2768,7 @@ impl RawGpuPipeline {
                 module: shader,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: pipeline_cache.as_ref().map(|cache| cache.raw()),
             })
         };
 
@@ -3147,6 +3174,7 @@ impl RawGpuPipeline {
             output_lut_offset_bytes,
             out_texture,
             _out_view: out_view,
+            pipeline_cache,
         };
         Ok(pipeline)
     }
@@ -3834,7 +3862,7 @@ impl RawGpuPipeline {
             module: &shader,
             entry_point: Some(entry_point),
             compilation_options: Default::default(),
-            cache: None,
+            cache: self.pipeline_cache.as_ref().map(|cache| cache.raw()),
         });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3970,7 +3998,7 @@ impl RawGpuPipeline {
             module: &shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
-            cache: None,
+            cache: self.pipeline_cache.as_ref().map(|cache| cache.raw()),
         });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

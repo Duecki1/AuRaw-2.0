@@ -2,6 +2,7 @@ mod basicadj;
 mod color_profile;
 mod export;
 mod gpu;
+mod gpu_cache;
 mod lensfun;
 mod masks;
 mod processing;
@@ -22,6 +23,7 @@ pub use export::{
     MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};
+pub(crate) use gpu_cache::PersistentGpuPipelineCache;
 pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
 pub use masks::{
     compose_inpaint_strokes, ellipse_outline_points, export_mask_atlas_edge,
