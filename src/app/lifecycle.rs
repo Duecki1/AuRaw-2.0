@@ -61,6 +61,47 @@ fn prewarm_dcp_profile_folder(folder: Option<std::path::PathBuf>) {
         });
 }
 
+#[cfg(target_os = "android")]
+fn spawn_gpu_preview_prewarm(
+    cc: &eframe::CreationContext<'_>,
+) -> Option<mpsc::Receiver<Result<RawGpuPipeline, String>>> {
+    let render_state = cc.wgpu_render_state.as_ref()?;
+    let device = render_state.device.clone();
+    let queue = render_state.queue.clone();
+    let repaint = cc.egui_ctx.clone();
+    let (sender, receiver) = mpsc::channel();
+    let spawn_result = std::thread::Builder::new()
+        .name("auraw-gpu-preview-prewarm".to_owned())
+        .spawn(move || {
+            let started = Instant::now();
+            crate::diagnostics::record("GPU preview prewarm started at app initialization");
+            let result = RawGpuPipeline::prewarm_preview_template(
+                &device,
+                &queue,
+                CfaKind::Bayer,
+            )
+            .map_err(|error| format!("GPU preview prewarm failed: {error:#}"));
+            match &result {
+                Ok(_) => crate::diagnostics::record(format!(
+                    "GPU preview prewarm finished in {:.3}s",
+                    started.elapsed().as_secs_f64()
+                )),
+                Err(error) => crate::diagnostics::record(error),
+            }
+            let _ = sender.send(result);
+            repaint.request_repaint();
+        });
+    match spawn_result {
+        Ok(_) => Some(receiver),
+        Err(error) => {
+            crate::diagnostics::record(format!(
+                "GPU preview prewarm thread could not start: {error}"
+            ));
+            None
+        }
+    }
+}
+
 fn append_notice(notice: &mut Option<String>, message: &str) {
     match notice {
         Some(existing) => {
@@ -332,6 +373,7 @@ impl AurawApp {
             .ok();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
+        let gpu_preview_prewarm_receiver = spawn_gpu_preview_prewarm(cc);
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -342,6 +384,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            gpu_preview_prewarm_receiver,
             preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
@@ -978,6 +1021,8 @@ impl AurawApp {
             }
             old_pipeline
         };
+        #[cfg(target_os = "android")]
+        let startup_gpu_prewarm_receiver = self.gpu_preview_prewarm_receiver.take();
         self.original_raw = None;
         self.loaded_raw = None;
         self.preview_raw = None;
@@ -1322,8 +1367,35 @@ impl AurawApp {
                     // surfaces on every platform. Full-float remains mandatory
                     // for regression rendering and tiled export readback.
                     let preview_quality = ProcessingQuality::Preview;
+                    #[cfg(target_os = "android")]
+                    let mut startup_gpu_prewarm_template = None;
+                    #[cfg(target_os = "android")]
+                    if reusable_preview_pipeline.is_none() {
+                        if let Some(receiver) = startup_gpu_prewarm_receiver {
+                            let wait_started = Instant::now();
+                            match receiver.recv() {
+                                Ok(Ok(template)) => {
+                                    crate::diagnostics::record(format!(
+                                        "GPU preview startup prewarm available after {:.3}s wait",
+                                        wait_started.elapsed().as_secs_f64()
+                                    ));
+                                    startup_gpu_prewarm_template = Some(template);
+                                }
+                                Ok(Err(error)) => crate::diagnostics::record(error),
+                                Err(error) => crate::diagnostics::record(format!(
+                                    "GPU preview startup prewarm unavailable: {error}"
+                                )),
+                            }
+                        }
+                    }
+                    #[cfg(target_os = "android")]
+                    let reusable_program_template = reusable_preview_pipeline
+                        .as_ref()
+                        .or(startup_gpu_prewarm_template.as_ref());
+                    #[cfg(not(target_os = "android"))]
+                    let reusable_program_template = reusable_preview_pipeline.as_ref();
                     let pipeline_started = Instant::now();
-                    let pipeline = if let Some(template) = reusable_preview_pipeline.as_ref() {
+                    let pipeline = if let Some(template) = reusable_program_template {
                         match RawGpuPipeline::new_headless_reusing_programs(
                             &device,
                             &queue,
@@ -1334,7 +1406,7 @@ impl AurawApp {
                         ) {
                             Ok(pipeline) => {
                                 crate::diagnostics::record(
-                                    "GPU preview reused compiled programs from previous RAW",
+                                    "GPU preview reused precompiled programs",
                                 );
                                 pipeline
                             }
@@ -1372,6 +1444,8 @@ impl AurawApp {
                     // the previous preview textures before any additional mask
                     // source pipeline is allocated.
                     drop(reusable_preview_pipeline);
+                    #[cfg(target_os = "android")]
+                    drop(startup_gpu_prewarm_template);
 
                     // Range and promptable-object source images are canonical RAW renditions,
                     // not user edit data. Sidecars omit these large shared

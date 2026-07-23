@@ -1215,6 +1215,67 @@ impl GpuOutputSnapshot {
 }
 
 impl RawGpuPipeline {
+    /// Compiles the complete interactive preview compute program set against a
+    /// tiny synthetic RAW. The returned pipeline is only a program template:
+    /// later real RAWs allocate their own textures/bind groups while cloning
+    /// these already-compiled compute pipeline handles. This keeps startup
+    /// prewarming independent of image resolution and has no effect on output.
+    pub fn prewarm_preview_template(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cfa_kind: CfaKind,
+    ) -> Result<Self> {
+        const EDGE: u32 = 16;
+        let pixels = (EDGE * EDGE) as usize;
+        let cfa_pattern = match cfa_kind {
+            CfaKind::Bayer => vec![0u8, 1, 1, 2],
+            CfaKind::XTrans => vec![0u8, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0],
+        };
+        let cfa_period = match cfa_kind {
+            CfaKind::Bayer => (2, 2),
+            CfaKind::XTrans => (6, 6),
+        };
+        let raw = LoadedRaw {
+            width: EDGE,
+            height: EDGE,
+            camera_make: "AuRaw".to_owned(),
+            camera_model: "GPU prewarm".to_owned(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            focal_length: 0.0,
+            aperture: 0.0,
+            focus_distance: 0.0,
+            cfa_kind,
+            raw_pixels: vec![0u16; pixels],
+            color_indices: crate::pipeline::CompactPixelMap::repeating(
+                EDGE,
+                EDGE,
+                cfa_period.0,
+                cfa_period.1,
+                cfa_pattern,
+            ),
+            wb_coeffs: [1.0; 4],
+            cam_to_srgb: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            black_levels: [0.0; 4],
+            black_levels_per_pixel: crate::pipeline::CompactPixelMap::repeating(
+                EDGE, EDGE, 1, 1, vec![0.0f32],
+            ),
+            white_levels: [65535.0; 4],
+            camera_profile: crate::pipeline::CameraProfile::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
+            white_balance_model: None,
+        };
+        let exposure = ExposureParams::scene_referred_default();
+        let masks = MaskStack::default();
+        let params = GpuParams::new(&exposure, &masks, &raw);
+        Self::new_headless_with_quality(device, queue, &raw, &params, ProcessingQuality::Preview)
+    }
+
     pub fn output_snapshot(&self) -> GpuOutputSnapshot {
         GpuOutputSnapshot {
             texture: self.out_texture.clone(),
