@@ -57,6 +57,7 @@ mod imp {
 mod imp {
     use super::*;
     use anyhow::Context;
+    use rayon::prelude::*;
     use std::ffi::{c_char, c_int, c_void, CStr, CString};
     use std::path::{Path, PathBuf};
     use std::ptr;
@@ -522,26 +523,32 @@ mod imp {
                 fill_identity_coordinates(&mut coordinates, y, width);
             }
 
-            for x in 0..width {
-                let output_index = y * width + x;
-                let cfa_index = raw.color_indices[output_index];
-                let channel = lensfun_rgb_channel(cfa_index);
-                let coordinate_index = x * 6 + channel * 2;
-                let source_x = coordinates[coordinate_index];
-                let source_y = coordinates[coordinate_index + 1];
-                let (corrected, black) = sample_corrected_cfa_subpixel(
-                    raw,
-                    source_x,
-                    source_y,
-                    cfa_index,
-                    x,
-                    y,
-                    vignette_enabled,
-                    &vignette_gains,
-                );
-                raw_pixels[output_index] = corrected.round().clamp(0.0, f32::from(u16::MAX)) as u16;
-                black_levels_per_pixel[output_index] = black;
-            }
+            let row_start = y * width;
+            let row_end = row_start + width;
+            raw_pixels[row_start..row_end]
+                .par_iter_mut()
+                .zip(black_levels_per_pixel[row_start..row_end].par_iter_mut())
+                .enumerate()
+                .for_each(|(x, (output_sample, output_black))| {
+                    let output_index = row_start + x;
+                    let cfa_index = raw.color_indices[output_index];
+                    let channel = lensfun_rgb_channel(cfa_index);
+                    let coordinate_index = x * 6 + channel * 2;
+                    let source_x = coordinates[coordinate_index];
+                    let source_y = coordinates[coordinate_index + 1];
+                    let (corrected, black) = sample_corrected_cfa_subpixel(
+                        raw,
+                        source_x,
+                        source_y,
+                        cfa_index,
+                        x,
+                        y,
+                        vignette_enabled,
+                        &vignette_gains,
+                    );
+                    *output_sample = corrected.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+                    *output_black = black;
+                });
         }
 
         Ok(LoadedRaw {
@@ -596,11 +603,17 @@ mod imp {
             if applied == 0 {
                 continue;
             }
-            for (x, rgba_gain) in rgba_gains.iter().enumerate().take(width) {
-                let index = y * width + x;
-                let channel = lensfun_rgb_channel(raw.color_indices[index]);
-                gains[index] = rgba_gain.0[channel];
-            }
+            let row_start = y * width;
+            let row_end = row_start + width;
+            gains[row_start..row_end]
+                .par_iter_mut()
+                .zip(rgba_gains.par_iter())
+                .enumerate()
+                .for_each(|(x, (gain, rgba_gain))| {
+                    let index = row_start + x;
+                    let channel = lensfun_rgb_channel(raw.color_indices[index]);
+                    *gain = rgba_gain.0[channel];
+                });
         }
 
         Ok(gains)
