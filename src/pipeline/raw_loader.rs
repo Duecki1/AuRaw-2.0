@@ -410,6 +410,13 @@ pub fn load_raw_thumbnail(_path: &Path, _maximum_edge: u32) -> Result<RawThumbna
 }
 
 #[cfg(not(libraw_available))]
+pub fn load_raw_display_dimensions(_path: &Path) -> Result<[u32; 2]> {
+    Err(anyhow!(
+        "this build was compiled without LibRaw, so RAW dimensions are unavailable"
+    ))
+}
+
+#[cfg(not(libraw_available))]
 pub fn load_raw_file_with_dcp(_path: &Path, _profile_path: &Path) -> Result<LoadedRaw> {
     Err(anyhow!(
         "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
@@ -476,6 +483,11 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
 #[cfg(libraw_available)]
 pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     libraw_loader::load_raw_thumbnail(path, maximum_edge)
+}
+
+#[cfg(libraw_available)]
+pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
+    libraw_loader::load_raw_display_dimensions(path)
 }
 
 #[cfg(libraw_available)]
