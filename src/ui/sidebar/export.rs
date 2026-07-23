@@ -102,6 +102,14 @@ pub(crate) fn export_settings_controls(
 
 impl Sidebar {
     fn show_export(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+        // A vertical ScrollArea reports the scrollbar lane as available child
+        // width. Constrain the complete Export tab to the same content column
+        // used by the other Develop controls so the JPEG card and full-width
+        // buttons do not extend underneath that lane.
+        let content_width = (ui.available_width() - Self::SCROLLBAR_GUTTER).max(1.0);
+        ui.set_width(content_width);
+        ui.set_max_width(content_width);
+
         let source_dimensions = app.loaded_raw.as_ref().map(|raw| (raw.width, raw.height));
         export_settings_controls(ui, &mut app.export_settings, source_dimensions, true);
 

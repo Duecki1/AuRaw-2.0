@@ -20,7 +20,8 @@ pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
 #[cfg(not(target_os = "android"))]
-pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str = ".auraw-cache";
+pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str =
+    crate::thumbnail_cache::DESKTOP_THUMBNAIL_CACHE_DIR;
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-thumb.fingerprint";
 pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
@@ -136,35 +137,35 @@ pub fn sidecar_path_for_raw(raw_path: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Places the preview in a hidden sibling cache directory while preserving the
-/// complete RAW filename: `photos/photo.CR3` becomes
-/// `photos/.auraw-cache/photo.CR3.auraw-thumb.png`.
+/// Places the developed preview in AuRaw's private per-user cache rather than
+/// creating hidden files beside the user's RAW library.
 #[cfg(not(target_os = "android"))]
 pub fn developed_thumbnail_path_for_raw(raw_path: &Path) -> PathBuf {
-    let parent = raw_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut file_name = raw_path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("raw"));
-    file_name.push(DEVELOPED_THUMBNAIL_SUFFIX);
-    parent.join(DEVELOPED_THUMBNAIL_CACHE_DIR).join(file_name)
+    crate::thumbnail_cache::desktop_cache_path_for_raw(raw_path, DEVELOPED_THUMBNAIL_SUFFIX)
 }
 
 #[cfg(not(target_os = "android"))]
 fn developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
-    let parent = raw_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut file_name = raw_path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("raw"));
-    file_name.push(DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX);
-    parent.join(DEVELOPED_THUMBNAIL_CACHE_DIR).join(file_name)
+    crate::thumbnail_cache::desktop_cache_path_for_raw(
+        raw_path,
+        DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX,
+    )
+}
+
+#[cfg(not(target_os = "android"))]
+fn legacy_developed_thumbnail_path_for_raw(raw_path: &Path) -> PathBuf {
+    crate::thumbnail_cache::legacy_sibling_cache_path_for_raw(
+        raw_path,
+        DEVELOPED_THUMBNAIL_SUFFIX,
+    )
+}
+
+#[cfg(not(target_os = "android"))]
+fn legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
+    crate::thumbnail_cache::legacy_sibling_cache_path_for_raw(
+        raw_path,
+        DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX,
+    )
 }
 
 /// Returns a stable fingerprint of the current edit sidecar. Thumbnail workers
@@ -234,6 +235,7 @@ pub fn load_developed_thumbnail_cache(
 
 #[cfg(not(target_os = "android"))]
 pub fn developed_thumbnail_cache_is_fresh(raw_path: &Path) -> Result<bool, String> {
+    migrate_legacy_developed_thumbnail_cache(raw_path)?;
     let sidecar_path = sidecar_path_for_raw(raw_path);
     let cache_path = developed_thumbnail_path_for_raw(raw_path);
     let fingerprint_path = developed_thumbnail_fingerprint_path_for_raw(raw_path);
@@ -271,6 +273,7 @@ pub fn developed_thumbnail_cache_is_fresh(raw_path: &Path) -> Result<bool, Strin
         return Ok(false);
     };
     if cache_modified < raw_modified {
+        remove_legacy_developed_thumbnail_cache(raw_path);
         return Ok(false);
     }
 
@@ -280,9 +283,15 @@ pub fn developed_thumbnail_cache_is_fresh(raw_path: &Path) -> Result<bool, Strin
     let cached_fingerprint = match fs::read_to_string(&fingerprint_path) {
         Ok(value) => match u64::from_str_radix(value.trim(), 16) {
             Ok(value) => value,
-            Err(_) => return Ok(false),
+            Err(_) => {
+                remove_legacy_developed_thumbnail_cache(raw_path);
+                return Ok(false);
+            }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            remove_legacy_developed_thumbnail_cache(raw_path);
+            return Ok(false);
+        }
         Err(error) => {
             return Err(format!(
                 "could not read developed thumbnail fingerprint {}: {error}",
@@ -290,7 +299,9 @@ pub fn developed_thumbnail_cache_is_fresh(raw_path: &Path) -> Result<bool, Strin
             ))
         }
     };
-    Ok(desktop_sidecar_fingerprint(raw_path)? == Some(cached_fingerprint))
+    let fresh = desktop_sidecar_fingerprint(raw_path)? == Some(cached_fingerprint);
+    remove_legacy_developed_thumbnail_cache(raw_path);
+    Ok(fresh)
 }
 
 /// Atomically stores a GPU-rendered thumbnail, but only if the sidecar still
@@ -343,7 +354,73 @@ pub fn save_developed_thumbnail_cache(
         let _ = fs::remove_file(&fingerprint_path);
         return Err("edit sidecar changed while its thumbnail was being cached".to_owned());
     }
+    remove_legacy_developed_thumbnail_cache(raw_path);
     Ok(cache_path)
+}
+
+#[cfg(not(target_os = "android"))]
+fn migrate_legacy_developed_thumbnail_cache(raw_path: &Path) -> Result<(), String> {
+    let cache_path = developed_thumbnail_path_for_raw(raw_path);
+    let fingerprint_path = developed_thumbnail_fingerprint_path_for_raw(raw_path);
+    if cache_path.is_file() && fingerprint_path.is_file() {
+        return Ok(());
+    }
+
+    let legacy_cache = legacy_developed_thumbnail_path_for_raw(raw_path);
+    let legacy_fingerprint = legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path);
+    if !legacy_cache.is_file() || !legacy_fingerprint.is_file() {
+        return Ok(());
+    }
+
+    let raw_metadata = match fs::metadata(raw_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(()),
+    };
+    let cache_metadata = match fs::metadata(&legacy_cache) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            remove_legacy_developed_thumbnail_cache(raw_path);
+            return Ok(());
+        }
+    };
+    let cache_is_new_enough = cache_metadata
+        .modified()
+        .ok()
+        .zip(raw_metadata.modified().ok())
+        .is_some_and(|(cache_modified, raw_modified)| cache_modified >= raw_modified);
+    let Some(current_fingerprint) = desktop_sidecar_fingerprint(raw_path)? else {
+        remove_legacy_developed_thumbnail_cache(raw_path);
+        return Ok(());
+    };
+    let cached_fingerprint = fs::read_to_string(&legacy_fingerprint)
+        .ok()
+        .and_then(|value| u64::from_str_radix(value.trim(), 16).ok());
+    if !cache_is_new_enough || cached_fingerprint != Some(current_fingerprint) {
+        remove_legacy_developed_thumbnail_cache(raw_path);
+        return Ok(());
+    }
+
+    let thumbnail = match crate::thumbnail_cache::load_png(&legacy_cache, 8192) {
+        Ok(Some(thumbnail)) => thumbnail,
+        Ok(None) | Err(_) => {
+            remove_legacy_developed_thumbnail_cache(raw_path);
+            return Ok(());
+        }
+    };
+    if save_developed_thumbnail_cache(raw_path, &thumbnail, current_fingerprint).is_err() {
+        return Ok(());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn remove_legacy_developed_thumbnail_cache(raw_path: &Path) {
+    crate::thumbnail_cache::remove_legacy_cache_file(
+        &legacy_developed_thumbnail_path_for_raw(raw_path),
+    );
+    crate::thumbnail_cache::remove_legacy_cache_file(
+        &legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path),
+    );
 }
 
 #[cfg(not(target_os = "android"))]
@@ -352,6 +429,8 @@ pub fn remove_desktop_edits(raw_path: &Path) -> Result<bool, String> {
         sidecar_path_for_raw(raw_path),
         developed_thumbnail_path_for_raw(raw_path),
         developed_thumbnail_fingerprint_path_for_raw(raw_path),
+        legacy_developed_thumbnail_path_for_raw(raw_path),
+        legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path),
     ];
     let mut removed_any = false;
     for path in paths {
@@ -363,6 +442,7 @@ pub fn remove_desktop_edits(raw_path: &Path) -> Result<bool, String> {
             }
         }
     }
+    remove_legacy_developed_thumbnail_cache(raw_path);
     Ok(removed_any)
 }
 
@@ -497,6 +577,8 @@ pub fn reset_desktop_adjustments(raw_path: &Path) -> Result<bool, String> {
     for path in [
         developed_thumbnail_path_for_raw(raw_path),
         developed_thumbnail_fingerprint_path_for_raw(raw_path),
+        legacy_developed_thumbnail_path_for_raw(raw_path),
+        legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path),
     ] {
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -506,6 +588,7 @@ pub fn reset_desktop_adjustments(raw_path: &Path) -> Result<bool, String> {
             }
         }
     }
+    remove_legacy_developed_thumbnail_cache(raw_path);
     Ok(true)
 }
 
@@ -1745,11 +1828,12 @@ mod tests {
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn developed_thumbnail_cache_uses_hidden_sibling_directory() {
-        assert_eq!(
-            developed_thumbnail_path_for_raw(Path::new("photos/photo.CR3")),
-            Path::new("photos/.auraw-cache/photo.CR3.auraw-thumb.png")
-        );
+    fn developed_thumbnail_cache_uses_private_application_directory() {
+        let raw = Path::new("photos/photo.CR3");
+        let cache = developed_thumbnail_path_for_raw(raw);
+        assert!(cache.starts_with(crate::thumbnail_cache::desktop_thumbnail_cache_root()));
+        assert!(cache.to_string_lossy().ends_with(DEVELOPED_THUMBNAIL_SUFFIX));
+        assert_ne!(cache.parent(), raw.parent());
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1767,10 +1851,8 @@ mod tests {
         };
 
         let cache_path = save_developed_thumbnail_cache(&raw, &thumbnail, fingerprint).unwrap();
-        assert_eq!(
-            cache_path.parent().unwrap().file_name(),
-            Some(std::ffi::OsStr::new(DEVELOPED_THUMBNAIL_CACHE_DIR))
-        );
+        assert!(cache_path.starts_with(crate::thumbnail_cache::desktop_thumbnail_cache_root()));
+        assert_ne!(cache_path.parent(), raw.parent());
         let loaded = load_developed_thumbnail_cache(&raw, 512)
             .unwrap()
             .expect("developed thumbnail cache should load");
@@ -1780,6 +1862,8 @@ mod tests {
 
         fs::write(sidecar_path_for_raw(&raw), b"edit-two").unwrap();
         assert!(!developed_thumbnail_cache_is_fresh(&raw).unwrap());
+        let _ = fs::remove_file(developed_thumbnail_path_for_raw(&raw));
+        let _ = fs::remove_file(developed_thumbnail_fingerprint_path_for_raw(&raw));
         fs::remove_dir_all(directory).unwrap();
     }
 
