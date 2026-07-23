@@ -27,9 +27,11 @@ The catalog, visible rows, pending preview work, and GPU thumbnail cache are
 bounded so large photo folders do not need to be loaded into memory at once.
 
 On Android, the floating **+** button imports through the system document
-picker. Android 10 and newer keep imported RAW files in the user-visible
-`Download/AuRaw` collection without requesting broad storage permission. See
-[ANDROID.md](ANDROID.md) for the Android 8–9 fallback and scoped-storage details.
+picker. Imported RAW files are copied into AuRaw's hidden app-media library at
+`Android/media/de.duecki.auraw/.library`, without requesting broad storage
+permission. Exported images are separate and are published to `Pictures/AuRaw`
+so gallery apps can discover them. See [ANDROID.md](ANDROID.md) for migration
+and scoped-storage details.
 
 Develop edits are non-destructive. AuRaw restores exposure, color, effects,
 local masks, and lens selection from a versioned `<raw filename>.auraw`
@@ -38,8 +40,8 @@ Ctrl/Cmd+S) forces an immediate retry without modifying the RAW. Automatic
 saves use a short 0.9-second, non-sliding coalescing interval and wait for the
 current interaction to finish; snapshotting is O(1), while serialization and
 storage I/O stay on a worker. Desktop
-sidecars sit beside the source file; Android sidecars are visible siblings in
-the AuRaw library folder.
+sidecars sit beside the source file; Android sidecars are hidden siblings of
+the imported RAW inside AuRaw's `.library` folder.
 
 ## DCP camera profiles
 

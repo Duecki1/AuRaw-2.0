@@ -102,47 +102,42 @@ package one ABI at a time by passing the same name to the script and the Gradle
 The Library tab's floating **+** button launches Android's Storage Access
 Framework with `ACTION_OPEN_DOCUMENT`. Press and hold a thumbnail to open its
 context menu without also opening the photo; Android offers Open, Reset all
-adjustments, and Delete actions there. On Android 10 and newer, the activity
-imports the selected document into the app-owned MediaStore Downloads
-collection at `Download/AuRaw`. The folder remains visible to the user and the
-files survive app removal; app-owned Downloads items need no broad storage
-permission. The library queries MediaStore instead of attempting a filesystem
-directory scan, which keeps listing reliable under scoped storage.
+adjustments, and Delete actions there. Imported RAWs are copied into one
+canonical app-media folder:
 
-Embedded RAW previews are read lazily through a `ContentResolver` file
-descriptor and `/proc/self/fd`, so Android 10 does not depend on direct native
-path access. When a thumbnail is opened in Develop, the selected item is
-materialized into app-private cache for LibRaw and deleted immediately after
-decode. This also works with SD-card and cloud document providers offered by
-the system picker.
+`Android/media/de.duecki.auraw/.library`
 
-Android 8 and 9 cannot publish arbitrary RAW documents to a public Downloads
-folder without requesting the legacy storage permission. AuRaw therefore uses
-its external app-specific Downloads directory on those releases, shows the
-exact location in the Library, and does not prompt for import permission. That
-fallback directory is removed if the app is uninstalled. The legacy write
-permission in the manifest is used only when publishing exported PNGs on
-Android 8 and 9. After an app or OS upgrade to Android 10+, the Library merges
-those existing file-backed entries with `Download/AuRaw`; edits and deletion
-continue using each RAW's original storage backend.
+The `.library` directory is intentionally hidden and contains both imported RAW
+files and their `<RAW display name>.auraw` sidecars. AuRaw uses
+`getExternalMediaDirs()` to reach its own `Android/media` area, so imports do not
+need broad storage permission on Android 8 or newer. The Library scans only this
+canonical directory for new data.
 
-Non-destructive Develop settings are stored as a visible sibling named
-`<RAW display name>.auraw`. AuRaw loads it before the first preview render and
-saves only after an edit, undo, or redo has committed, so JSON serialization
-and storage I/O never run on the render thread. Automatic saves coalesce on a
-0.9-second interval that does not slide with every new value, then wait until
-the current interaction is idle. Android 10 and newer publish a
-complete staged MediaStore generation with `IS_PENDING`, then normalize it to
-the exact `.auraw` name; Android 8–9 use a same-directory temporary file and
-replace. Both paths use the same permission-free AuRaw library location and
-leave the camera RAW untouched.
+Older AuRaw builds used two different layouts: RAWs directly in the app-media
+root on Android 8–9 and app-owned MediaStore Downloads rows under
+`Download/AuRaw` on Android 10+. Current builds migrate those legacy entries to
+`.library`. A legacy item is removed only after its RAW and available sidecar
+have been copied successfully; not-yet-migrated entries remain readable as an
+upgrade fallback instead of being discarded. New imports never write to the old
+Downloads collection.
 
-The Export PNG button renders the full-resolution image to app-private cache
-and then publishes it as `Pictures/AuRaw/AuRaw-<timestamp>.png`. Android 10 and
-newer use MediaStore scoped storage, so gallery apps see the image without a
-permission prompt. Android 8 and 9 request legacy write permission on the first
-export, copy the PNG into the same public folder, and notify the media scanner.
-No export destination dialog is shown.
+Embedded RAW previews are read lazily through a file descriptor and
+`/proc/self/fd`. When a provider or LibRaw path cannot seek that descriptor, AuRaw
+materializes a temporary cache copy and removes it after decode. This also works
+with SD-card and cloud document providers offered by the system picker during
+import.
+
+Non-destructive Develop settings are stored beside the imported RAW as
+`<RAW display name>.auraw` inside `.library`. Saves are written to a temporary
+sibling first and then atomically replace the previous sidecar where the
+filesystem supports atomic moves, so readers do not observe partial JSON.
+
+Exports are deliberately separate from the hidden RAW library. PNG and JPEG
+exports are published to `Pictures/AuRaw`. Android 10 and newer use
+`MediaStore.Images` with that relative path, so gallery apps can discover the
+result without a permission prompt. Android 8 and 9 write to the same public
+Pictures folder, request legacy write permission only when needed for export,
+and notify the media scanner. No export destination dialog is shown.
 
 eframe is forced to use wgpu. wgpu includes Vulkan and GLES backends on
 Android, and AuRaw requests the adapter's actual 2D texture-size limit so RAWs
