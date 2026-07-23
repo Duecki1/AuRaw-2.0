@@ -5,6 +5,7 @@ use super::{
 };
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
 use anyhow::{anyhow, Context, Result};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
@@ -1383,18 +1384,32 @@ unsafe fn copy_active_pixels(
             destination.copy_from_slice(source);
         }
     } else {
-        for y in 0..out_height {
-            for x in 0..out_width {
-                let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
-                let raw_x = crop_x + src_x;
-                let raw_y = crop_y + src_y;
-                let row_offset = raw_y
-                    .checked_mul(pitch)
-                    .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
-                let row_ptr = (raw_image as *const u8).add(row_offset) as *const u16;
-                pixels[y * out_width + x] = *row_ptr.add(raw_x);
-            }
-        }
+        // Rotated RAWs cannot use contiguous row copies, but every destination
+        // row is independent. Spread those rows across Rayon workers instead of
+        // walking the entire 30–60 MP mosaic on one CPU core. Capture the source
+        // address as an integer so the immutable LibRaw buffer can be read from
+        // worker threads without sharing a mutable raw pointer wrapper.
+        let raw_image_addr = raw_image as usize;
+        pixels
+            .par_chunks_mut(out_width)
+            .enumerate()
+            .try_for_each(|(y, destination)| -> Result<()> {
+                for (x, output) in destination.iter_mut().enumerate() {
+                    let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
+                    let raw_x = crop_x + src_x;
+                    let raw_y = crop_y + src_y;
+                    let row_offset = raw_y
+                        .checked_mul(pitch)
+                        .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
+                    // SAFETY: crop bounds were validated above and LibRaw keeps
+                    // the decoded mosaic alive and immutable for this entire call.
+                    let row_ptr = unsafe {
+                        (raw_image_addr as *const u8).add(row_offset) as *const u16
+                    };
+                    *output = unsafe { *row_ptr.add(raw_x) };
+                }
+                Ok(())
+            })?;
     }
 
     // CFA channels and metadata black levels are periodic for supported Bayer

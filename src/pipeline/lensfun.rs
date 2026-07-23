@@ -491,65 +491,151 @@ mod imp {
         let width = raw.width as usize;
         let height = raw.height as usize;
         let mut raw_pixels = vec![0u16; raw.raw_pixels.len()];
-        let mut black_levels_per_pixel = vec![0.0f32; raw.black_levels_per_pixel.len()];
+        // Geometric interpolation of a constant black level is still exactly
+        // that same constant. Most modern Bayer RAWs (including the Sony ARWs
+        // in the loading benchmarks) use one uniform value, so avoid allocating
+        // and writing a dense f32 map with tens of millions of identical entries.
+        let uniform_black = raw
+            .black_levels_per_pixel
+            .storage_slice()
+            .first()
+            .copied()
+            .filter(|first| {
+                raw.black_levels_per_pixel
+                    .storage_slice()
+                    .iter()
+                    .all(|value| value == first)
+            });
+        let mut black_levels_per_pixel = uniform_black
+            .is_none()
+            .then(|| vec![0.0f32; raw.black_levels_per_pixel.len()]);
         let coordinate_enabled = flags
             & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_TCA | LF_MODIFY_SCALE)
             != 0;
         let vignette_enabled = flags & LF_MODIFY_VIGNETTING != 0;
-        let mut coordinates = vec![0.0f32; width.saturating_mul(6)];
+        // Lensfun's modifier is used serially to generate mapping rows, but the
+        // expensive CFA resampling is independent per output pixel. Batch a
+        // modest number of mapping rows before entering Rayon so we do not pay
+        // the cost of starting a parallel job once for every sensor row.
+        // 32 rows keeps the temporary coordinate buffer below ~6 MiB even for
+        // a 7k-wide RAW while reducing thousands of Rayon dispatches to a few
+        // hundred per image.
+        const ROW_BATCH: usize = 32;
+        let coordinate_row_len = width.saturating_mul(6);
+        let mut coordinates = vec![0.0f32; coordinate_row_len.saturating_mul(ROW_BATCH)];
+        let vignette_started = std::time::Instant::now();
         let vignette_gains = if vignette_enabled {
             build_vignette_gain_map(raw, modifier)?
         } else {
             Vec::new()
         };
+        if vignette_enabled {
+            crate::diagnostics::record(format!(
+                "Lensfun vignette gain map prepared in {:.3}s",
+                vignette_started.elapsed().as_secs_f64()
+            ));
+        }
 
-        for y in 0..height {
+        let warp_started = std::time::Instant::now();
+        for batch_y in (0..height).step_by(ROW_BATCH) {
+            let batch_rows = (height - batch_y).min(ROW_BATCH);
+            let coordinate_len = batch_rows.saturating_mul(coordinate_row_len);
+            let coordinate_batch = &mut coordinates[..coordinate_len];
+
             if coordinate_enabled {
-                // SAFETY: the output buffer has width*1*2*3 floats as required.
+                // Lensfun accepts a rectangular block and emits six floats per
+                // output pixel (R/G/B x/y). Generate the whole batch in one FFI
+                // call instead of invoking Lensfun once for every sensor row.
+                // SAFETY: the output buffer has width*batch_rows*2*3 floats.
                 let filled = unsafe {
                     lf_modifier_apply_subpixel_geometry_distortion(
                         modifier.0,
                         0.0,
-                        y as f32,
+                        batch_y as f32,
                         raw.width as c_int,
-                        1,
-                        coordinates.as_mut_ptr(),
+                        batch_rows as c_int,
+                        coordinate_batch.as_mut_ptr(),
                     )
                 };
                 if filled == 0 {
-                    fill_identity_coordinates(&mut coordinates, y, width);
+                    for local_y in 0..batch_rows {
+                        let y = batch_y + local_y;
+                        let row_coordinates = &mut coordinate_batch
+                            [local_y * coordinate_row_len..(local_y + 1) * coordinate_row_len];
+                        fill_identity_coordinates(row_coordinates, y, width);
+                    }
                 }
             } else {
-                fill_identity_coordinates(&mut coordinates, y, width);
+                for local_y in 0..batch_rows {
+                    let y = batch_y + local_y;
+                    let row_coordinates = &mut coordinate_batch
+                        [local_y * coordinate_row_len..(local_y + 1) * coordinate_row_len];
+                    fill_identity_coordinates(row_coordinates, y, width);
+                }
             }
 
-            let row_start = y * width;
-            let row_end = row_start + width;
-            raw_pixels[row_start..row_end]
-                .par_iter_mut()
-                .zip(black_levels_per_pixel[row_start..row_end].par_iter_mut())
-                .enumerate()
-                .for_each(|(x, (output_sample, output_black))| {
-                    let output_index = row_start + x;
-                    let cfa_index = raw.color_indices[output_index];
-                    let channel = lensfun_rgb_channel(cfa_index);
-                    let coordinate_index = x * 6 + channel * 2;
-                    let source_x = coordinates[coordinate_index];
-                    let source_y = coordinates[coordinate_index + 1];
-                    let (corrected, black) = sample_corrected_cfa_subpixel(
-                        raw,
-                        source_x,
-                        source_y,
-                        cfa_index,
-                        x,
-                        y,
-                        vignette_enabled,
-                        &vignette_gains,
-                    );
-                    *output_sample = corrected.round().clamp(0.0, f32::from(u16::MAX)) as u16;
-                    *output_black = black;
-                });
+            let pixel_start = batch_y * width;
+            let pixel_end = pixel_start + batch_rows * width;
+            if let Some(output_black_map) = black_levels_per_pixel.as_mut() {
+                raw_pixels[pixel_start..pixel_end]
+                    .par_iter_mut()
+                    .zip(output_black_map[pixel_start..pixel_end].par_iter_mut())
+                    .enumerate()
+                    .for_each(|(local_index, (output_sample, output_black))| {
+                        let local_y = local_index / width;
+                        let x = local_index % width;
+                        let y = batch_y + local_y;
+                        let output_index = pixel_start + local_index;
+                        let cfa_index = raw.color_indices[output_index];
+                        let channel = lensfun_rgb_channel(cfa_index);
+                        let coordinate_index = local_y * coordinate_row_len + x * 6 + channel * 2;
+                        let source_x = coordinate_batch[coordinate_index];
+                        let source_y = coordinate_batch[coordinate_index + 1];
+                        let (corrected, black) = sample_corrected_cfa_subpixel(
+                            raw,
+                            source_x,
+                            source_y,
+                            cfa_index,
+                            x,
+                            y,
+                            vignette_enabled,
+                            &vignette_gains,
+                        );
+                        *output_sample = corrected.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+                        *output_black = black;
+                    });
+            } else {
+                raw_pixels[pixel_start..pixel_end]
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(local_index, output_sample)| {
+                        let local_y = local_index / width;
+                        let x = local_index % width;
+                        let y = batch_y + local_y;
+                        let output_index = pixel_start + local_index;
+                        let cfa_index = raw.color_indices[output_index];
+                        let channel = lensfun_rgb_channel(cfa_index);
+                        let coordinate_index = local_y * coordinate_row_len + x * 6 + channel * 2;
+                        let source_x = coordinate_batch[coordinate_index];
+                        let source_y = coordinate_batch[coordinate_index + 1];
+                        let (corrected, _black) = sample_corrected_cfa_subpixel(
+                            raw,
+                            source_x,
+                            source_y,
+                            cfa_index,
+                            x,
+                            y,
+                            vignette_enabled,
+                            &vignette_gains,
+                        );
+                        *output_sample = corrected.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+                    });
+            }
         }
+        crate::diagnostics::record(format!(
+            "Lensfun coordinate warp/CFA resample finished in {:.3}s",
+            warp_started.elapsed().as_secs_f64()
+        ));
 
         Ok(LoadedRaw {
             width: raw.width,
@@ -567,7 +653,16 @@ mod imp {
             wb_coeffs: raw.wb_coeffs,
             cam_to_srgb: raw.cam_to_srgb,
             black_levels: raw.black_levels,
-            black_levels_per_pixel: CompactPixelMap::compact_from_dense(raw.width, raw.height, black_levels_per_pixel, 64),
+            black_levels_per_pixel: if let Some(black) = uniform_black {
+                CompactPixelMap::repeating(raw.width, raw.height, 1, 1, vec![black])
+            } else {
+                CompactPixelMap::compact_from_dense(
+                    raw.width,
+                    raw.height,
+                    black_levels_per_pixel.expect("non-uniform black map must be materialized"),
+                    64,
+                )
+            },
             white_levels: raw.white_levels,
             camera_profile: raw.camera_profile.clone(),
             camera_profile_source: raw.camera_profile_source.clone(),
@@ -581,36 +676,42 @@ mod imp {
         let height = raw.height as usize;
         let row_stride = c_int::try_from(width.saturating_mul(std::mem::size_of::<AlignedRgba>()))
             .context("Lensfun vignette row stride overflow")?;
-        let mut rgba_gains = vec![AlignedRgba([1.0; 4]); width];
+        const ROW_BATCH: usize = 32;
+        let mut rgba_gains = vec![AlignedRgba([1.0; 4]); width.saturating_mul(ROW_BATCH)];
         let mut gains = vec![1.0f32; raw.raw_pixels.len()];
 
-        for y in 0..height {
-            rgba_gains.fill(AlignedRgba([1.0; 4]));
-            // SAFETY: AlignedRgba is 16-byte aligned and contains four f32
-            // components. Lensfun modifies only this live row buffer.
-            let applied = unsafe {
+        for batch_y in (0..height).step_by(ROW_BATCH) {
+            let batch_rows = (height - batch_y).min(ROW_BATCH);
+            let batch_len = batch_rows * width;
+            let rgba_batch = &mut rgba_gains[..batch_len];
+            rgba_batch.fill(AlignedRgba([1.0; 4]));
+
+            // Apply vignetting to the whole rectangular batch. The buffer
+            // begins at unity, so if Lensfun reports no modification the data
+            // already represents the exact no-op gain map.
+            // SAFETY: the batch contains batch_rows rows of aligned RGBA f32
+            // values with the supplied row stride.
+            let _applied = unsafe {
                 lf_modifier_apply_color_modification(
                     modifier.0,
-                    rgba_gains.as_mut_ptr().cast(),
+                    rgba_batch.as_mut_ptr().cast(),
                     0.0,
-                    y as f32,
+                    batch_y as f32,
                     raw.width as c_int,
-                    1,
+                    batch_rows as c_int,
                     LF_CR_RGBA,
                     row_stride,
                 )
             };
-            if applied == 0 {
-                continue;
-            }
-            let row_start = y * width;
-            let row_end = row_start + width;
-            gains[row_start..row_end]
+
+            let pixel_start = batch_y * width;
+            let pixel_end = pixel_start + batch_len;
+            gains[pixel_start..pixel_end]
                 .par_iter_mut()
-                .zip(rgba_gains.par_iter())
+                .zip(rgba_batch.par_iter())
                 .enumerate()
-                .for_each(|(x, (gain, rgba_gain))| {
-                    let index = row_start + x;
+                .for_each(|(local_index, (gain, rgba_gain))| {
+                    let index = pixel_start + local_index;
                     let channel = lensfun_rgb_channel(raw.color_indices[index]);
                     *gain = rgba_gain.0[channel];
                 });
