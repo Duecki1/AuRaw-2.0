@@ -1,7 +1,7 @@
 use crate::app::{AppTab, AurawApp};
 use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 #[cfg(not(target_os = "android"))]
-use crate::pipeline::{is_supported_raw_path, load_raw_thumbnail};
+use crate::pipeline::{is_supported_raw_path, load_raw_display_dimensions, load_raw_thumbnail};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
 #[cfg(not(target_os = "android"))]
 use std::cmp::Ordering as CmpOrdering;
@@ -30,6 +30,9 @@ const MAX_PENDING_THUMBNAIL_RESULTS: usize = 32;
 const MAX_PENDING_THUMBNAILS: usize = 64;
 const DESKTOP_TEXTURE_CACHE_LIMIT: usize = 128;
 const ANDROID_TEXTURE_CACHE_LIMIT: usize = 48;
+const RESIDENT_THUMBNAIL_EDGE: u32 = 384;
+const DESKTOP_RESIDENT_THUMBNAIL_CACHE_LIMIT: usize = 256;
+const ANDROID_RESIDENT_THUMBNAIL_CACHE_LIMIT: usize = 72;
 #[cfg(target_os = "android")]
 const ANDROID_DEVELOP_TEXTURE_CACHE_LIMIT: usize = 10;
 const THUMBNAIL_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -76,6 +79,7 @@ struct LibraryFileInfo {
     name: String,
     parent: String,
     bytes: u64,
+    dimensions_hint: Option<[u32; 2]>,
     #[cfg(not(target_os = "android"))]
     modified: Option<SystemTime>,
 }
@@ -83,7 +87,19 @@ struct LibraryFileInfo {
 pub(crate) struct LibraryEntry {
     info: LibraryFileInfo,
     texture: Option<egui::TextureHandle>,
+    /// Small CPU-side fallback retained across GPU texture eviction so scrolling
+    /// back to a previously loaded card can repaint immediately without showing
+    /// the loading placeholder or waiting behind newer decode requests.
+    resident_thumbnail: Option<RawThumbnail>,
+    /// True only when `texture` was rebuilt from the smaller resident fallback.
+    /// The card stays visible while a full-resolution refresh is queued.
+    texture_is_resident: bool,
+    /// Exact decoded preview dimensions, when preview pixels are available.
     thumbnail_size: Option<[u32; 2]>,
+    /// Stable geometry used by the justified gallery. This is filled from RAW
+    /// header metadata before the catalog is shown and never replaced merely
+    /// because a preview texture finishes loading.
+    layout_size: Option<[u32; 2]>,
     thumbnail_error: Option<String>,
     thumbnail_queued: bool,
     developed_thumbnail: bool,
@@ -92,6 +108,7 @@ pub(crate) struct LibraryEntry {
 
 struct LoadedLibraryThumbnail {
     thumbnail: RawThumbnail,
+    resident_thumbnail: RawThumbnail,
     developed: bool,
 }
 
@@ -461,6 +478,11 @@ impl LibraryState {
                                 .parent()
                                 .map(|parent| parent.display().to_string())
                                 .unwrap_or_default();
+                            let dimensions_hint = crate::android::load_library_display_dimensions(
+                                &android_app,
+                                &document.uri,
+                            )
+                            .ok();
                             LibraryFileInfo {
                                 source: LibrarySource::Android {
                                     uri: document.uri,
@@ -472,6 +494,7 @@ impl LibraryState {
                                 name: document.display_name,
                                 parent,
                                 bytes: document.bytes,
+                                dimensions_hint,
                             }
                         })
                         .collect();
@@ -608,7 +631,11 @@ impl LibraryState {
                             if self.entries[index].developed_thumbnail && !loaded.developed {
                                 continue;
                             }
-                            let thumbnail = loaded.thumbnail;
+                            let LoadedLibraryThumbnail {
+                                thumbnail,
+                                resident_thumbnail,
+                                developed,
+                            } = loaded;
                             let image = egui::ColorImage::from_rgba_unmultiplied(
                                 [thumbnail.width as usize, thumbnail.height as usize],
                                 &thumbnail.rgba,
@@ -618,10 +645,13 @@ impl LibraryState {
                                 image,
                                 egui::TextureOptions::LINEAR,
                             ));
-                            self.entries[index].thumbnail_size =
-                                Some([thumbnail.width, thumbnail.height]);
+                            let decoded_size = [thumbnail.width, thumbnail.height];
+                            self.entries[index].thumbnail_size = Some(decoded_size);
+                            self.entries[index].layout_size.get_or_insert(decoded_size);
+                            self.entries[index].resident_thumbnail = Some(resident_thumbnail);
+                            self.entries[index].texture_is_resident = false;
                             self.entries[index].thumbnail_error = None;
-                            self.entries[index].developed_thumbnail = loaded.developed;
+                            self.entries[index].developed_thumbnail = developed;
                         }
                         Err(error) => {
                             if !self.entries[index].developed_thumbnail {
@@ -646,21 +676,48 @@ impl LibraryState {
         let _ = context;
     }
 
-    fn touch_and_request_thumbnail(&mut self, index: usize) {
+    fn touch_and_request_thumbnail(&mut self, index: usize, context: &egui::Context) {
+        let generation = self.generation.load(Ordering::Acquire);
+        self.usage_clock = self.usage_clock.wrapping_add(1).max(1);
+        let usage_clock = self.usage_clock;
+        let request_sender = self.request_sender.clone();
+
         let Some(entry) = self.entries.get_mut(index) else {
             return;
         };
-        self.usage_clock = self.usage_clock.wrapping_add(1).max(1);
-        entry.last_used = self.usage_clock;
-        if entry.texture.is_some() || entry.thumbnail_error.is_some() || entry.thumbnail_queued {
+        entry.last_used = usage_clock;
+
+        if entry.texture.is_none() {
+            if let Some(resident) = entry.resident_thumbnail.as_ref() {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [resident.width as usize, resident.height as usize],
+                    &resident.rgba,
+                );
+                entry.texture = Some(context.load_texture(
+                    format!("library-resident-thumbnail-{generation}-{index}-{usage_clock}"),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+                entry.texture_is_resident = entry
+                    .thumbnail_size
+                    .is_some_and(|size| size != [resident.width, resident.height]);
+            }
+        }
+
+        // A full GPU texture needs no work. A resident fallback remains visible
+        // while we opportunistically queue the full thumbnail again, so revisiting
+        // an evicted card never falls back to the loading placeholder.
+        if (entry.texture.is_some() && !entry.texture_is_resident)
+            || entry.thumbnail_error.is_some()
+            || entry.thumbnail_queued
+        {
             return;
         }
         let request = ThumbnailRequest {
-            generation: self.generation.load(Ordering::Acquire),
+            generation,
             source: entry.info.source.clone(),
         };
-        if self
-            .request_sender
+        if request_sender
             .as_ref()
             .is_some_and(|sender| sender.try_send(request).is_ok())
         {
@@ -718,7 +775,12 @@ impl LibraryState {
             image,
             egui::TextureOptions::LINEAR,
         ));
-        self.entries[index].thumbnail_size = Some([thumbnail.width, thumbnail.height]);
+        let decoded_size = [thumbnail.width, thumbnail.height];
+        let resident_thumbnail = make_resident_thumbnail(&thumbnail);
+        self.entries[index].thumbnail_size = Some(decoded_size);
+        self.entries[index].layout_size.get_or_insert(decoded_size);
+        self.entries[index].resident_thumbnail = Some(resident_thumbnail);
+        self.entries[index].texture_is_resident = false;
         self.entries[index].thumbnail_error = None;
         self.entries[index].thumbnail_queued = false;
         self.entries[index].developed_thumbnail = true;
@@ -731,6 +793,12 @@ impl LibraryState {
             DESKTOP_TEXTURE_CACHE_LIMIT
         };
         self.evict_textures_to_limit_protecting(limit, protected_indices);
+        let resident_limit = if cfg!(target_os = "android") {
+            ANDROID_RESIDENT_THUMBNAIL_CACHE_LIMIT
+        } else {
+            DESKTOP_RESIDENT_THUMBNAIL_CACHE_LIMIT
+        };
+        self.evict_resident_thumbnails_to_limit_protecting(resident_limit, protected_indices);
     }
 
     fn evict_textures_to_limit(&mut self, limit: usize) {
@@ -784,17 +852,70 @@ impl LibraryState {
             .take(texture_count - effective_limit)
         {
             self.entries[index].texture = None;
-            // Keep decoded dimensions after GPU texture eviction so restored thumbnails
-            // can still be center-cropped correctly in the fixed-height grid.
+            self.entries[index].texture_is_resident = false;
+            // Keep decoded dimensions and a bounded resident pixel fallback after GPU
+            // eviction. Returning to this card can rebuild a texture synchronously.
+        }
+    }
+
+    fn evict_resident_thumbnails_to_limit_protecting(
+        &mut self,
+        limit: usize,
+        protected_indices: &HashSet<usize>,
+    ) {
+        let resident_count = self
+            .entries
+            .iter()
+            .filter(|entry| entry.resident_thumbnail.is_some())
+            .count();
+        if resident_count <= limit {
+            return;
+        }
+
+        let protected_resident_count = protected_indices
+            .iter()
+            .filter(|&&index| {
+                self.entries
+                    .get(index)
+                    .is_some_and(|entry| entry.resident_thumbnail.is_some())
+            })
+            .count();
+        let effective_limit = limit.max(protected_resident_count);
+        if resident_count <= effective_limit {
+            return;
+        }
+
+        let mut candidates = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| {
+                entry.resident_thumbnail.is_some() && !protected_indices.contains(index)
+            })
+            .map(|(index, entry)| (entry.last_used, index))
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        for (_, index) in candidates
+            .into_iter()
+            .take(resident_count - effective_limit)
+        {
+            self.entries[index].resident_thumbnail = None;
         }
     }
 }
 
 fn new_library_entry(info: LibraryFileInfo) -> LibraryEntry {
+    // Keep gallery geometry immutable for the lifetime of the catalog entry.
+    // Header probing supplies the real display ratio for normal supported RAWs;
+    // 3:2 is only a last-resort fallback when metadata cannot be inspected.
+    let layout_size = Some(info.dimensions_hint.unwrap_or([3, 2]));
     LibraryEntry {
         info,
         texture: None,
+        resident_thumbnail: None,
+        texture_is_resident: false,
         thumbnail_size: None,
+        layout_size,
         thumbnail_error: None,
         thumbnail_queued: false,
         developed_thumbnail: false,
@@ -816,6 +937,38 @@ fn same_library_file_identity(left: &LibraryFileInfo, right: &LibraryFileInfo) -
     }
 }
 
+fn make_resident_thumbnail(thumbnail: &RawThumbnail) -> RawThumbnail {
+    if thumbnail.width <= RESIDENT_THUMBNAIL_EDGE && thumbnail.height <= RESIDENT_THUMBNAIL_EDGE {
+        return thumbnail.clone();
+    }
+
+    let Some(image) = image::RgbaImage::from_raw(
+        thumbnail.width,
+        thumbnail.height,
+        thumbnail.rgba.clone(),
+    ) else {
+        return thumbnail.clone();
+    };
+    let image = image::DynamicImage::ImageRgba8(image)
+        .thumbnail(RESIDENT_THUMBNAIL_EDGE, RESIDENT_THUMBNAIL_EDGE)
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    RawThumbnail {
+        width,
+        height,
+        rgba: image.into_raw(),
+    }
+}
+
+fn loaded_library_thumbnail(thumbnail: RawThumbnail, developed: bool) -> LoadedLibraryThumbnail {
+    let resident_thumbnail = make_resident_thumbnail(&thumbnail);
+    LoadedLibraryThumbnail {
+        thumbnail,
+        resident_thumbnail,
+        developed,
+    }
+}
+
 type ThumbnailLoader =
     Arc<dyn Fn(&LibrarySource) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static>;
 
@@ -826,10 +979,7 @@ fn load_desktop_library_thumbnail(
     let LibrarySource::File(path) = source;
     match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => {
-            return Ok(LoadedLibraryThumbnail {
-                thumbnail,
-                developed: true,
-            })
+            return Ok(loaded_library_thumbnail(thumbnail, true))
         }
         Ok(None) => {}
         Err(error) => log::warn!(
@@ -839,10 +989,7 @@ fn load_desktop_library_thumbnail(
     }
     match crate::thumbnail_cache::load_desktop_raw_thumbnail(path, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => {
-            return Ok(LoadedLibraryThumbnail {
-                thumbnail,
-                developed: false,
-            })
+            return Ok(loaded_library_thumbnail(thumbnail, false))
         }
         Ok(None) => {}
         Err(error) => log::warn!(
@@ -859,10 +1006,7 @@ fn load_desktop_library_thumbnail(
             path.display()
         );
     }
-    Ok(LoadedLibraryThumbnail {
-        thumbnail,
-        developed: false,
-    })
+    Ok(loaded_library_thumbnail(thumbnail, false))
 }
 
 #[cfg(target_os = "android")]
@@ -878,10 +1022,7 @@ fn load_android_library_thumbnail(
     } = source;
     match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => {
-            return Ok(LoadedLibraryThumbnail {
-                thumbnail,
-                developed: true,
-            })
+            return Ok(loaded_library_thumbnail(thumbnail, true))
         }
         Ok(None) => {}
         Err(error) => log::warn!(
@@ -896,10 +1037,7 @@ fn load_android_library_thumbnail(
         *modified_seconds,
         THUMBNAIL_EDGE,
     )
-    .map(|thumbnail| LoadedLibraryThumbnail {
-        thumbnail,
-        developed: false,
-    })
+    .map(|thumbnail| loaded_library_thumbnail(thumbnail, false))
 }
 
 fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize, load: ThumbnailLoader) {
@@ -1466,7 +1604,7 @@ impl Library {
                         // only the currently painted rows. This keeps resize-driven layout
                         // changes from immediately discarding thumbnails we are about to use.
                         protected_thumbnail_indices.insert(index);
-                        app.library.touch_and_request_thumbnail(index);
+                        app.library.touch_and_request_thumbnail(index, ui.ctx());
                         if !relative_rect.intersects(viewport) {
                             continue;
                         }
@@ -2300,13 +2438,14 @@ fn justified_thumbnail_layout(
         .iter()
         .map(|entry| {
             entry
-                .thumbnail_size
+                .layout_size
+                .or(entry.thumbnail_size)
                 .and_then(|[width, source_height]| {
                     (width > 0 && source_height > 0)
                         .then_some(width as f32 / source_height as f32)
                 })
                 .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
-                .unwrap_or(1.0)
+                .unwrap_or(1.5)
         })
         .collect();
 
@@ -2355,6 +2494,33 @@ fn justified_thumbnail_layout(
     (placements, total_height)
 }
 
+fn thumbnail_cover_uv(source_size: Option<[u32; 2]>, target_size: egui::Vec2) -> egui::Rect {
+    let Some([width, height]) = source_size.filter(|[width, height]| *width > 0 && *height > 0) else {
+        return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    };
+    if target_size.x <= 0.0 || target_size.y <= 0.0 {
+        return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    }
+
+    let source_aspect = width as f32 / height as f32;
+    let target_aspect = target_size.x / target_size.y;
+    if !source_aspect.is_finite() || !target_aspect.is_finite() {
+        return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    }
+
+    if source_aspect > target_aspect {
+        let visible = (target_aspect / source_aspect).clamp(0.0, 1.0);
+        let inset = (1.0 - visible) * 0.5;
+        egui::Rect::from_min_max(egui::pos2(inset, 0.0), egui::pos2(1.0 - inset, 1.0))
+    } else if source_aspect < target_aspect {
+        let visible = (source_aspect / target_aspect).clamp(0.0, 1.0);
+        let inset = (1.0 - visible) * 0.5;
+        egui::Rect::from_min_max(egui::pos2(0.0, inset), egui::pos2(1.0, 1.0 - inset))
+    } else {
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0))
+    }
+}
+
 fn thumbnail_tile(
     ui: &mut Ui,
     entry: &LibraryEntry,
@@ -2371,7 +2537,7 @@ fn thumbnail_tile(
     ui.painter()
         .rect_filled(rect, 0.0, Color32::from_rgb(17, 18, 20));
     if let Some(texture) = &entry.texture {
-        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+        let uv = thumbnail_cover_uv(entry.thumbnail_size, rect.size());
         ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
     } else {
         ui.painter().text(
@@ -2542,6 +2708,7 @@ fn scan_folder_with_limit(
             name: entry.file_name().to_string_lossy().into_owned(),
             parent: String::new(),
             bytes: file_metadata.as_ref().map_or(0, std::fs::Metadata::len),
+            dimensions_hint: None,
             modified: file_metadata.and_then(|metadata| metadata.modified().ok()),
         });
         if files.len() < maximum_files {
@@ -2559,7 +2726,20 @@ fn scan_folder_with_limit(
     }
     let mut files = files.into_vec();
     files.sort();
-    let files = files.into_iter().map(|ranked| ranked.info).collect();
+    let mut files = files.into_iter().map(|ranked| ranked.info).collect::<Vec<_>>();
+
+    // Reserve the final gallery geometry before any preview pixels arrive.
+    // LibRaw can expose display-oriented active dimensions from the header
+    // after open_file/identify without unpacking the sensor or decoding a
+    // thumbnail, so placeholders start at the same aspect ratio as the image.
+    for info in &mut files {
+        if is_cancelled() {
+            return Ok(None);
+        }
+        let LibrarySource::File(path) = &info.source;
+        info.dimensions_hint = load_raw_display_dimensions(path).ok();
+    }
+
     Ok(Some((files, warning_count, truncated)))
 }
 
@@ -2593,8 +2773,9 @@ mod tests {
     use super::LibrarySource;
     use super::{
         balanced_justified_row_ranges, duplicate_raw_and_sidecar, elide_middle, format_file_size,
-        run_thumbnail_workers, scan_folder, scan_folder_with_limit, LibraryState,
-        LoadedLibraryThumbnail, ScanEvent,
+        justified_thumbnail_layout, loaded_library_thumbnail, make_resident_thumbnail,
+        new_library_entry, run_thumbnail_workers, scan_folder,
+        scan_folder_with_limit, LibraryFileInfo, LibraryState, LoadedLibraryThumbnail, ScanEvent,
         ThumbnailRequest, ThumbnailWorker,
     };
     use crate::pipeline::RawThumbnail;
@@ -2634,6 +2815,83 @@ mod tests {
         assert!(row_sizes.iter().all(|count| *count <= 5));
     }
 
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn decoded_preview_does_not_change_reserved_gallery_geometry() {
+        let info = LibraryFileInfo {
+            source: LibrarySource::File(PathBuf::from("stable-layout.dng")),
+            display_path: "stable-layout.dng".to_owned(),
+            name: "stable-layout.dng".to_owned(),
+            parent: String::new(),
+            bytes: 1,
+            dimensions_hint: Some([6000, 4000]),
+            modified: None,
+        };
+        let mut entry = new_library_entry(info);
+        let (before, before_height) = justified_thumbnail_layout(
+            std::slice::from_ref(&entry),
+            900.0,
+            140.0,
+            6.0,
+        );
+
+        // Embedded previews can have a slightly different crop/aspect. Loading
+        // those pixels must not invalidate the geometry already reserved from
+        // the RAW header.
+        entry.thumbnail_size = Some([1600, 1200]);
+        let (after, after_height) = justified_thumbnail_layout(
+            std::slice::from_ref(&entry),
+            900.0,
+            140.0,
+            6.0,
+        );
+
+        assert_eq!(before, after);
+        assert_eq!(before_height, after_height);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn evicted_thumbnail_restores_from_resident_pixels_without_reloading() {
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+        let info = LibraryFileInfo {
+            source: LibrarySource::File(PathBuf::from("resident-restore.dng")),
+            display_path: "resident-restore.dng".to_owned(),
+            name: "resident-restore.dng".to_owned(),
+            parent: String::new(),
+            bytes: 1,
+            dimensions_hint: Some([6000, 4000]),
+            modified: None,
+        };
+        let mut entry = new_library_entry(info);
+        entry.thumbnail_size = Some([512, 341]);
+        entry.resident_thumbnail = Some(RawThumbnail {
+            width: 384,
+            height: 256,
+            rgba: vec![127; 384 * 256 * 4],
+        });
+        library.entries.push(entry);
+
+        library.touch_and_request_thumbnail(0, &context);
+
+        assert!(library.entries[0].texture.is_some());
+        assert!(library.entries[0].texture_is_resident);
+        assert!(!library.entries[0].thumbnail_queued);
+    }
+
+    #[test]
+    fn resident_thumbnail_is_bounded_and_keeps_aspect_ratio() {
+        let thumbnail = RawThumbnail {
+            width: 768,
+            height: 512,
+            rgba: vec![255; 768 * 512 * 4],
+        };
+        let resident = make_resident_thumbnail(&thumbnail);
+        assert_eq!([resident.width, resident.height], [384, 256]);
+        assert_eq!(resident.rgba.len(), 384 * 256 * 4);
+    }
+
     #[test]
     fn develop_pause_preserves_a_received_thumbnail_request() {
         let generation = 1;
@@ -2662,14 +2920,14 @@ mod tests {
                 1,
                 Arc::new(move |_| {
                     decode_started_sender.send(()).unwrap();
-                    Ok(LoadedLibraryThumbnail {
-                        thumbnail: RawThumbnail {
+                    Ok(loaded_library_thumbnail(
+                        RawThumbnail {
                             width: 1,
                             height: 1,
                             rgba: vec![0, 0, 0, 255],
                         },
-                        developed: false,
-                    })
+                        false,
+                    ))
                 }),
             );
         });

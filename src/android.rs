@@ -354,6 +354,36 @@ pub fn load_library_thumbnail(
     Ok(thumbnail)
 }
 
+pub fn load_library_display_dimensions(
+    app: &AndroidApp,
+    uri: &str,
+) -> Result<[u32; 2], String> {
+    let uri_string = uri.to_owned();
+    let fd = with_activity(app, |env, activity| {
+        let uri = env.new_string(&uri_string)?;
+        env.call_method(
+            activity,
+            jni::jni_str!("openRawLibraryFd"),
+            jni::jni_sig!((JString) -> i32),
+            &[JValue::Object(&uri)],
+        )?
+        .i()
+    })
+    .map_err(|error| format!("could not open Android RAW library item: {error:#}"))?;
+    if fd < 0 {
+        return Err("Android returned an invalid RAW file descriptor".to_owned());
+    }
+
+    // SAFETY: Java detached this descriptor from ParcelFileDescriptor and
+    // transferred sole ownership to Rust. `File` closes it exactly once.
+    let descriptor = unsafe { File::from_raw_fd(fd) };
+    let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
+    let result = crate::pipeline::load_raw_display_dimensions(&path)
+        .map_err(|error| format!("{error:#}"));
+    drop(descriptor);
+    result
+}
+
 fn load_library_thumbnail_from_fd(
     app: &AndroidApp,
     uri: &str,

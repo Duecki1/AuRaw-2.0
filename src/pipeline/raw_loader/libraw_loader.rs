@@ -227,6 +227,29 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
     Ok(loaded)
 }
 
+/// Reads the display-oriented active image dimensions from the RAW header only.
+/// This deliberately stops after LibRaw identify/open_file, so the library can
+/// reserve stable thumbnail geometry without unpacking sensor pixels or decoding
+/// the embedded preview.
+pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
+    validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW dimension input")?;
+    let ctx = open_libraw(path)?;
+
+    // SAFETY: open_libraw completed identify and owns the context exclusively.
+    let sizes = unsafe { &(*ctx.raw).rawdata.sizes };
+    let width = u32::from(sizes.width);
+    let height = u32::from(sizes.height);
+    anyhow::ensure!(width > 0 && height > 0, "LibRaw header reports empty active dimensions");
+
+    // LibRaw orientation 5/6 rotates the active image by 90/270 degrees. 180°
+    // keeps the same dimensions. Unknown orientations are left unswapped here;
+    // full RAW loading will still perform its stricter validation later.
+    Ok(match sizes.flip {
+        5 | 6 => [height, width],
+        _ => [width, height],
+    })
+}
+
 /// Loads a display-ready sRGB thumbnail without unpacking the sensor data when
 /// the RAW contains an embedded preview. Files without a usable embedded
 /// preview fall back to LibRaw's half-size preview processing on this worker
