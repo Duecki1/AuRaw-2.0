@@ -194,15 +194,19 @@ pub fn build_region_proxy(
             let mut pixel_sum = 0u64;
             let mut black_sum = 0.0f64;
             let mut count = 0u32;
-            for sy in macro_y0..macro_y1 {
-                if (sy - y) % cfa_period != output_phase_y {
-                    continue;
-                }
+
+            // `macro_*0 - region_origin` is always aligned to one complete CFA
+            // period, so the matching source phase starts at exactly
+            // `macro_*0 + output_phase_*`. Visit only those samples instead of
+            // scanning every photosite in the macrocell and discarding
+            // (period^2 - 1) / period^2 of them. This visits the exact same
+            // source coordinates as the previous filtered loops, but removes
+            // ~4x inner-loop work for Bayer and ~36x for X-Trans proxies.
+            let first_sy = macro_y0 + output_phase_y;
+            let first_sx = macro_x0 + output_phase_x;
+            for sy in (first_sy..macro_y1).step_by(cfa_period as usize) {
                 let row = sy * raw.width;
-                for sx in macro_x0..macro_x1 {
-                    if (sx - x) % cfa_period != output_phase_x {
-                        continue;
-                    }
+                for sx in (first_sx..macro_x1).step_by(cfa_period as usize) {
                     let index = (row + sx) as usize;
                     // Exact CFA phase is the primary condition. Keep the channel
                     // check as a safety net for unusual/non-periodic metadata.
