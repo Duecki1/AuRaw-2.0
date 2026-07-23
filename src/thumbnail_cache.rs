@@ -12,7 +12,8 @@ use std::time::UNIX_EPOCH;
 
 const RAW_THUMBNAIL_SUFFIX: &str = ".auraw-raw-thumb.png";
 const RAW_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-raw-thumb.fingerprint";
-const THUMBNAIL_CACHE_DIR: &str = ".auraw-cache";
+pub(crate) const DESKTOP_THUMBNAIL_CACHE_DIR: &str = "library-thumbnails";
+const LEGACY_THUMBNAIL_CACHE_DIR: &str = ".auraw-cache";
 const MAX_CACHED_THUMBNAIL_EDGE: u32 = 8192;
 const MAX_CACHED_THUMBNAIL_BYTES: u64 = 128 * 1024 * 1024;
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
@@ -140,7 +141,6 @@ pub(crate) fn fingerprint_file(path: &Path, maximum_bytes: u64) -> Result<u64, S
     Ok(fnv1a64(&bytes))
 }
 
-#[cfg(any(target_os = "android", test))]
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
@@ -158,6 +158,9 @@ pub(crate) fn load_desktop_raw_thumbnail(
     let cache_path = desktop_raw_thumbnail_path(raw_path);
     let fingerprint_path = desktop_raw_thumbnail_fingerprint_path(raw_path);
     if !cache_path.is_file() || !fingerprint_path.is_file() {
+        migrate_legacy_desktop_raw_thumbnail(raw_path)?;
+    }
+    if !cache_path.is_file() || !fingerprint_path.is_file() {
         return Ok(None);
     }
     let expected = desktop_raw_stamp(raw_path)?;
@@ -170,8 +173,12 @@ pub(crate) fn load_desktop_raw_thumbnail(
     if cached.trim() != expected {
         let _ = fs::remove_file(&cache_path);
         let _ = fs::remove_file(&fingerprint_path);
-        return Ok(None);
+        migrate_legacy_desktop_raw_thumbnail(raw_path)?;
+        if !cache_path.is_file() || !fingerprint_path.is_file() {
+            return Ok(None);
+        }
     }
+    remove_legacy_raw_thumbnail_cache(raw_path);
     load_png(&cache_path, maximum_edge)
 }
 
@@ -195,28 +202,170 @@ pub(crate) fn save_desktop_raw_thumbnail(
         let _ = fs::remove_file(&fingerprint_path);
         return Err("RAW changed while its thumbnail was being cached".to_owned());
     }
+    remove_legacy_raw_thumbnail_cache(raw_path);
     Ok(())
 }
 
 #[cfg(not(target_os = "android"))]
+fn migrate_legacy_desktop_raw_thumbnail(raw_path: &Path) -> Result<(), String> {
+    let legacy_cache =
+        legacy_sibling_cache_path_for_raw(raw_path, RAW_THUMBNAIL_SUFFIX);
+    let legacy_fingerprint =
+        legacy_sibling_cache_path_for_raw(raw_path, RAW_THUMBNAIL_FINGERPRINT_SUFFIX);
+    if !legacy_cache.is_file() || !legacy_fingerprint.is_file() {
+        return Ok(());
+    }
+
+    let expected = desktop_raw_stamp(raw_path)?;
+    let cached = match fs::read_to_string(&legacy_fingerprint) {
+        Ok(cached) => cached,
+        Err(_) => {
+            remove_legacy_raw_thumbnail_cache(raw_path);
+            return Ok(());
+        }
+    };
+    if cached.trim() != expected {
+        remove_legacy_raw_thumbnail_cache(raw_path);
+        return Ok(());
+    }
+
+    let thumbnail = match load_png(&legacy_cache, MAX_CACHED_THUMBNAIL_EDGE) {
+        Ok(Some(thumbnail)) => thumbnail,
+        Ok(None) | Err(_) => {
+            remove_legacy_raw_thumbnail_cache(raw_path);
+            return Ok(());
+        }
+    };
+    save_desktop_raw_thumbnail(raw_path, &thumbnail)
+}
+
+#[cfg(not(target_os = "android"))]
+fn remove_legacy_raw_thumbnail_cache(raw_path: &Path) {
+    remove_legacy_cache_file(&legacy_sibling_cache_path_for_raw(
+        raw_path,
+        RAW_THUMBNAIL_SUFFIX,
+    ));
+    remove_legacy_cache_file(&legacy_sibling_cache_path_for_raw(
+        raw_path,
+        RAW_THUMBNAIL_FINGERPRINT_SUFFIX,
+    ));
+}
+
+#[cfg(not(target_os = "android"))]
 fn desktop_raw_thumbnail_path(raw_path: &Path) -> PathBuf {
-    cache_sibling_path(raw_path, RAW_THUMBNAIL_SUFFIX)
+    desktop_cache_path_for_raw(raw_path, RAW_THUMBNAIL_SUFFIX)
 }
 
 #[cfg(not(target_os = "android"))]
 fn desktop_raw_thumbnail_fingerprint_path(raw_path: &Path) -> PathBuf {
-    cache_sibling_path(raw_path, RAW_THUMBNAIL_FINGERPRINT_SUFFIX)
+    desktop_cache_path_for_raw(raw_path, RAW_THUMBNAIL_FINGERPRINT_SUFFIX)
+}
+
+/// Returns AuRaw's private per-user thumbnail-cache root. Library previews are
+/// deliberately never written beside a user's photos.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn desktop_thumbnail_cache_root() -> PathBuf {
+    desktop_platform_cache_root()
+        .join("auraw")
+        .join(DESKTOP_THUMBNAIL_CACHE_DIR)
+}
+
+#[cfg(all(not(target_os = "android"), windows))]
+fn desktop_platform_cache_root() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .map(|home| home.join("AppData").join("Local"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+#[cfg(all(not(target_os = "android"), target_os = "macos"))]
+fn desktop_platform_cache_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library").join("Caches"))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+#[cfg(all(not(target_os = "android"), unix, not(target_os = "macos")))]
+fn desktop_platform_cache_root() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+#[cfg(all(not(target_os = "android"), not(any(unix, windows))))]
+fn desktop_platform_cache_root() -> PathBuf {
+    std::env::temp_dir()
+}
+
+/// Maps a RAW path to an opaque file inside AuRaw's private cache. Hashing the
+/// complete absolute/canonical path prevents equal filenames in different
+/// libraries from colliding without exposing the user's folder structure.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn desktop_cache_path_for_raw(raw_path: &Path, suffix: &str) -> PathBuf {
+    let identity = fs::canonicalize(raw_path).unwrap_or_else(|_| {
+        if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(raw_path)
+        }
+    });
+    let key = desktop_path_fingerprint(&identity);
+    desktop_thumbnail_cache_root()
+        .join(format!("{:02x}", key >> 56))
+        .join(format!("{key:016x}{suffix}"))
+}
+
+#[cfg(all(not(target_os = "android"), unix))]
+fn desktop_path_fingerprint(path: &Path) -> u64 {
+    use std::os::unix::ffi::OsStrExt;
+    fnv1a64(path.as_os_str().as_bytes())
+}
+
+#[cfg(all(not(target_os = "android"), windows))]
+fn desktop_path_fingerprint(path: &Path) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for word in path.as_os_str().encode_wide() {
+        for byte in word.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+#[cfg(all(not(target_os = "android"), not(any(unix, windows))))]
+fn desktop_path_fingerprint(path: &Path) -> u64 {
+    fnv1a64(path.to_string_lossy().as_bytes())
 }
 
 #[cfg(not(target_os = "android"))]
-fn cache_sibling_path(raw_path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn legacy_sibling_cache_path_for_raw(raw_path: &Path, suffix: &str) -> PathBuf {
     let parent = raw_path.parent().unwrap_or_else(|| Path::new("."));
     let mut file_name = raw_path
         .file_name()
         .map(OsString::from)
         .unwrap_or_else(|| OsString::from("raw"));
     file_name.push(suffix);
-    parent.join(THUMBNAIL_CACHE_DIR).join(file_name)
+    parent.join(LEGACY_THUMBNAIL_CACHE_DIR).join(file_name)
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn remove_legacy_cache_file(path: &Path) {
+    let parent = path.parent().map(Path::to_path_buf);
+    let _ = fs::remove_file(path);
+    if let Some(parent) = parent {
+        let _ = fs::remove_dir(parent);
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -324,10 +473,11 @@ mod tests {
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn desktop_cache_path_is_hidden_and_sibling_scoped() {
-        assert_eq!(
-            desktop_raw_thumbnail_path(Path::new("photos/a.CR3")),
-            Path::new("photos/.auraw-cache/a.CR3.auraw-raw-thumb.png")
-        );
+    fn desktop_cache_path_is_private_and_not_sibling_scoped() {
+        let raw = Path::new("photos/a.CR3");
+        let cache = desktop_raw_thumbnail_path(raw);
+        assert!(cache.starts_with(desktop_thumbnail_cache_root()));
+        assert!(cache.to_string_lossy().ends_with(RAW_THUMBNAIL_SUFFIX));
+        assert_ne!(cache.parent(), raw.parent());
     }
 }

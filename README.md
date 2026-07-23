@@ -25,6 +25,9 @@ folder recursively; embedded LibRaw previews are decoded in the background as
 their rows become visible. Selecting a thumbnail opens that RAW in Develop.
 The catalog, visible rows, pending preview work, and GPU thumbnail cache are
 bounded so large photo folders do not need to be loaded into memory at once.
+On desktop, generated library thumbnails live in AuRaw's private per-user
+operating-system cache (for example Local AppData, Library/Caches, or the XDG
+cache directory), never in the selected photo folder.
 
 On Android, the floating **+** button imports through the system document
 picker. Imported RAW files are copied into AuRaw's hidden app-media library at
