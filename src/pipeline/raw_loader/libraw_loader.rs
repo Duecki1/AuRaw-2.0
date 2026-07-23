@@ -12,7 +12,7 @@ use std::io::Cursor;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -81,14 +81,20 @@ pub fn load_raw_file_with_profile_selection(
 
     let c_path = path_to_libraw_cstring(path)?;
     let ctx = LibRawContext::new()?;
+    let identify_started = Instant::now();
     check_libraw(
         // SAFETY: `ctx.raw` is a live LibRaw handle owned by `ctx`, and `c_path` remains alive for the call.
         unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
         "open RAW file",
     )?;
+    crate::diagnostics::record(format!(
+        "LibRaw identify/open_file finished in {:.3}s",
+        identify_started.elapsed().as_secs_f64()
+    ));
     // SAFETY: opening the RAW populates identity and geometry metadata.
     unsafe { validate_opened_raw_geometry(&ctx) }?;
 
+    let profile_metadata_started = Instant::now();
     let embedded_profile = match mode {
         CameraProfileMode::MatrixOnly | CameraProfileMode::DcpProfiles => None,
         CameraProfileMode::Automatic => read_optional_profile(path),
@@ -102,6 +108,10 @@ pub fn load_raw_file_with_profile_selection(
         }
         CameraProfileMode::MatrixOnly => None,
     };
+    crate::diagnostics::record(format!(
+        "Embedded camera-profile metadata read in {:.3}s",
+        profile_metadata_started.elapsed().as_secs_f64()
+    ));
 
     // SAFETY: LibRaw has identified the file and iparams strings are initialized.
     let (camera_make, camera_model) = unsafe {
@@ -112,6 +122,7 @@ pub fn load_raw_file_with_profile_selection(
         )
     };
 
+    let external_profiles_started = Instant::now();
     let mut matches = match mode {
         CameraProfileMode::MatrixOnly => Vec::new(),
         CameraProfileMode::DcpProfiles | CameraProfileMode::Automatic => profile_folder
@@ -128,6 +139,10 @@ pub fn load_raw_file_with_profile_selection(
             })
             .unwrap_or_default(),
     };
+    crate::diagnostics::record(format!(
+        "External camera-profile lookup finished in {:.3}s",
+        external_profiles_started.elapsed().as_secs_f64()
+    ));
 
     let available_camera_profiles = matches
         .iter()
@@ -196,9 +211,19 @@ pub fn load_raw_file_with_profile_selection(
     };
 
     // SAFETY: the context is valid and exclusively owned by this worker.
+    let unpack_started = Instant::now();
     check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
+    crate::diagnostics::record(format!(
+        "LibRaw sensor unpack finished in {:.3}s",
+        unpack_started.elapsed().as_secs_f64()
+    ));
     // SAFETY: unpack succeeded and the converter validates all exposed buffers.
+    let materialize_started = Instant::now();
     let mut loaded = unsafe { loaded_raw_from_context(&ctx, selected_profile) }?;
+    crate::diagnostics::record(format!(
+        "Decoded mosaic materialization finished in {:.3}s",
+        materialize_started.elapsed().as_secs_f64()
+    ));
     loaded.camera_profile_source = selected_profile_path;
     loaded.available_camera_profiles = available_camera_profiles;
     Ok(loaded)
