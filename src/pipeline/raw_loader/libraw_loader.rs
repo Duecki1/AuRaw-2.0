@@ -5,6 +5,7 @@ use super::{
 };
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
 use anyhow::{anyhow, Context, Result};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
@@ -12,7 +13,7 @@ use std::io::Cursor;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -81,14 +82,20 @@ pub fn load_raw_file_with_profile_selection(
 
     let c_path = path_to_libraw_cstring(path)?;
     let ctx = LibRawContext::new()?;
+    let identify_started = Instant::now();
     check_libraw(
         // SAFETY: `ctx.raw` is a live LibRaw handle owned by `ctx`, and `c_path` remains alive for the call.
         unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
         "open RAW file",
     )?;
+    crate::diagnostics::record(format!(
+        "LibRaw identify/open_file finished in {:.3}s",
+        identify_started.elapsed().as_secs_f64()
+    ));
     // SAFETY: opening the RAW populates identity and geometry metadata.
     unsafe { validate_opened_raw_geometry(&ctx) }?;
 
+    let profile_metadata_started = Instant::now();
     let embedded_profile = match mode {
         CameraProfileMode::MatrixOnly | CameraProfileMode::DcpProfiles => None,
         CameraProfileMode::Automatic => read_optional_profile(path),
@@ -102,6 +109,10 @@ pub fn load_raw_file_with_profile_selection(
         }
         CameraProfileMode::MatrixOnly => None,
     };
+    crate::diagnostics::record(format!(
+        "Embedded camera-profile metadata read in {:.3}s",
+        profile_metadata_started.elapsed().as_secs_f64()
+    ));
 
     // SAFETY: LibRaw has identified the file and iparams strings are initialized.
     let (camera_make, camera_model) = unsafe {
@@ -112,6 +123,7 @@ pub fn load_raw_file_with_profile_selection(
         )
     };
 
+    let external_profiles_started = Instant::now();
     let mut matches = match mode {
         CameraProfileMode::MatrixOnly => Vec::new(),
         CameraProfileMode::DcpProfiles | CameraProfileMode::Automatic => profile_folder
@@ -128,6 +140,10 @@ pub fn load_raw_file_with_profile_selection(
             })
             .unwrap_or_default(),
     };
+    crate::diagnostics::record(format!(
+        "External camera-profile lookup finished in {:.3}s",
+        external_profiles_started.elapsed().as_secs_f64()
+    ));
 
     let available_camera_profiles = matches
         .iter()
@@ -196,9 +212,19 @@ pub fn load_raw_file_with_profile_selection(
     };
 
     // SAFETY: the context is valid and exclusively owned by this worker.
+    let unpack_started = Instant::now();
     check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
+    crate::diagnostics::record(format!(
+        "LibRaw sensor unpack finished in {:.3}s",
+        unpack_started.elapsed().as_secs_f64()
+    ));
     // SAFETY: unpack succeeded and the converter validates all exposed buffers.
+    let materialize_started = Instant::now();
     let mut loaded = unsafe { loaded_raw_from_context(&ctx, selected_profile) }?;
+    crate::diagnostics::record(format!(
+        "Decoded mosaic materialization finished in {:.3}s",
+        materialize_started.elapsed().as_secs_f64()
+    ));
     loaded.camera_profile_source = selected_profile_path;
     loaded.available_camera_profiles = available_camera_profiles;
     Ok(loaded)
@@ -217,7 +243,7 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
     if let Some(raw_profile) = read_optional_profile(path) {
         selected.camera_calibration_signature = raw_profile.camera_calibration_signature;
     }
-    let display_name = dcp_profile_display_name(&selected, profile_path);
+    let display_name = dcp_profile_display_name(selected.name.as_deref(), profile_path);
     let mut loaded = load_raw_file_with_selected_profile(path, Some(selected))?;
     loaded.camera_profile_source = Some(profile_path.to_path_buf());
     loaded.available_camera_profiles = vec![CameraProfileCandidate {
@@ -623,7 +649,8 @@ struct MatchedDcpProfile {
 struct IndexedDcpProfile {
     path: PathBuf,
     name: String,
-    profile: DcpProfile,
+    profile_name: Option<String>,
+    camera_model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -633,6 +660,7 @@ struct CachedDcpIndex {
 }
 
 static DCP_PROFILE_INDEX: OnceLock<Mutex<HashMap<PathBuf, CachedDcpIndex>>> = OnceLock::new();
+static DCP_PROFILE_SCAN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn dcp_profile_index_cache() -> &'static Mutex<HashMap<PathBuf, CachedDcpIndex>> {
     DCP_PROFILE_INDEX.get_or_init(|| Mutex::new(HashMap::new()))
@@ -646,6 +674,15 @@ pub(super) fn invalidate_dcp_profile_index() {
     }
 }
 
+pub(super) fn prewarm_dcp_profile_index(folder: &Path) {
+    if let Err(error) = indexed_dcp_profiles(folder) {
+        log::warn!(
+            "could not prewarm DCP profile index for {}: {error:#}",
+            folder.display()
+        );
+    }
+}
+
 fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
     let metadata = fs::metadata(folder)
         .with_context(|| format!("inspect DCP profile folder {}", folder.display()))?;
@@ -653,6 +690,20 @@ fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
     let cache_key = fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
     let root_modified = metadata.modified().ok();
 
+    if let Ok(cache) = dcp_profile_index_cache().lock() {
+        if let Some(index) = cache.get(&cache_key) {
+            if index.root_modified == root_modified {
+                return Ok(Arc::clone(&index.profiles));
+            }
+        }
+    }
+
+    // Startup prewarming and a very early RAW open can race. Serialize index
+    // construction so they never scan and parse the same profile tree twice.
+    let _scan_guard = DCP_PROFILE_SCAN_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .ok();
     if let Ok(cache) = dcp_profile_index_cache().lock() {
         if let Some(index) = cache.get(&cache_key) {
             if index.root_modified == root_modified {
@@ -711,16 +762,21 @@ fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
                 Ok(metadata) if metadata.len() > 0 && metadata.len() <= MAX_DCP_FILE_BYTES => {}
                 _ => continue,
             }
-            let profile = match DcpProfile::from_path(&path) {
-                Ok(Some(profile)) => profile,
+            let identity = match DcpProfile::identity_from_path(&path) {
+                Ok(Some(identity)) => identity,
                 Ok(None) => continue,
                 Err(error) => {
-                    log::warn!("ignoring invalid DCP profile {}: {error:#}", path.display());
+                    log::warn!("ignoring invalid DCP profile identity {}: {error:#}", path.display());
                     continue;
                 }
             };
-            let name = dcp_profile_display_name(&profile, &path);
-            profiles.push(IndexedDcpProfile { path, name, profile });
+            let name = dcp_profile_display_name(identity.name.as_deref(), &path);
+            profiles.push(IndexedDcpProfile {
+                path,
+                name,
+                profile_name: identity.name,
+                camera_model: identity.camera_model,
+            });
         }
     }
 
@@ -757,7 +813,8 @@ fn find_matching_dcp_profiles(
     let mut matches = Vec::new();
     for indexed in index.iter() {
         let score = dcp_match_score(
-            &indexed.profile,
+            indexed.camera_model.as_deref(),
+            indexed.profile_name.as_deref(),
             &indexed.path,
             &make_key,
             &model_key,
@@ -766,11 +823,22 @@ fn find_matching_dcp_profiles(
         if score <= 0 {
             continue;
         }
+        let profile = match DcpProfile::from_path(&indexed.path) {
+            Ok(Some(profile)) => profile,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!(
+                    "ignoring matched but invalid DCP profile {}: {error:#}",
+                    indexed.path.display()
+                );
+                continue;
+            }
+        };
         matches.push(MatchedDcpProfile {
             score,
             path: indexed.path.clone(),
             name: indexed.name.clone(),
-            profile: indexed.profile.clone(),
+            profile,
         });
     }
 
@@ -814,10 +882,8 @@ fn find_matching_dcp_profiles(
     Ok(matches)
 }
 
-fn dcp_profile_display_name(profile: &DcpProfile, path: &Path) -> String {
-    profile
-        .name
-        .as_deref()
+fn dcp_profile_display_name(profile_name: Option<&str>, path: &Path) -> String {
+    profile_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
@@ -830,15 +896,14 @@ fn dcp_profile_display_name(profile: &DcpProfile, path: &Path) -> String {
 }
 
 fn dcp_match_score(
-    profile: &DcpProfile,
+    camera_model: Option<&str>,
+    profile_name: Option<&str>,
     path: &Path,
     make_key: &str,
     model_key: &str,
     combined_key: &str,
 ) -> i32 {
-    let declared = profile
-        .camera_model
-        .as_deref()
+    let declared = camera_model
         .map(normalize_camera_name)
         .unwrap_or_default();
     let filename = path
@@ -846,9 +911,7 @@ fn dcp_match_score(
         .and_then(|stem| stem.to_str())
         .map(normalize_camera_name)
         .unwrap_or_default();
-    let profile_name = profile
-        .name
-        .as_deref()
+    let profile_name = profile_name
         .map(normalize_camera_name)
         .unwrap_or_default();
     let path_key = normalize_camera_name(&path.to_string_lossy());
@@ -1321,18 +1384,32 @@ unsafe fn copy_active_pixels(
             destination.copy_from_slice(source);
         }
     } else {
-        for y in 0..out_height {
-            for x in 0..out_width {
-                let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
-                let raw_x = crop_x + src_x;
-                let raw_y = crop_y + src_y;
-                let row_offset = raw_y
-                    .checked_mul(pitch)
-                    .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
-                let row_ptr = (raw_image as *const u8).add(row_offset) as *const u16;
-                pixels[y * out_width + x] = *row_ptr.add(raw_x);
-            }
-        }
+        // Rotated RAWs cannot use contiguous row copies, but every destination
+        // row is independent. Spread those rows across Rayon workers instead of
+        // walking the entire 30–60 MP mosaic on one CPU core. Capture the source
+        // address as an integer so the immutable LibRaw buffer can be read from
+        // worker threads without sharing a mutable raw pointer wrapper.
+        let raw_image_addr = raw_image as usize;
+        pixels
+            .par_chunks_mut(out_width)
+            .enumerate()
+            .try_for_each(|(y, destination)| -> Result<()> {
+                for (x, output) in destination.iter_mut().enumerate() {
+                    let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
+                    let raw_x = crop_x + src_x;
+                    let raw_y = crop_y + src_y;
+                    let row_offset = raw_y
+                        .checked_mul(pitch)
+                        .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
+                    // SAFETY: crop bounds were validated above and LibRaw keeps
+                    // the decoded mosaic alive and immutable for this entire call.
+                    let row_ptr = unsafe {
+                        (raw_image_addr as *const u8).add(row_offset) as *const u16
+                    };
+                    *output = unsafe { *row_ptr.add(raw_x) };
+                }
+                Ok(())
+            })?;
     }
 
     // CFA channels and metadata black levels are periodic for supported Bayer

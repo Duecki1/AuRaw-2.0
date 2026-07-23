@@ -10,7 +10,7 @@ use crate::inpainting::{
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_jpeg_export, spawn_tiled_png_export, BrushDab, BrushMode, CameraProfileMode,
+    spawn_tiled_jpeg_export, spawn_tiled_png_export, BrushDab, BrushMode, CameraProfileMode, CfaKind,
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog,
     LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
     ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO,
@@ -409,6 +409,8 @@ pub struct AurawApp {
     pub loaded_raw: Option<Arc<LoadedRaw>>,
     pub preview_raw: Option<Arc<LoadedRaw>>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
+    #[cfg(target_os = "android")]
+    gpu_preview_prewarm_receiver: Option<mpsc::Receiver<Result<RawGpuPipeline, String>>>,
     pub(crate) preview_quality: PreviewQuality,
     pub(crate) preview_zoom: f32,
     pub(crate) preview_center: [f32; 2],

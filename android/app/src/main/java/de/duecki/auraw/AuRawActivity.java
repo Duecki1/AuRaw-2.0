@@ -703,6 +703,11 @@ public final class AuRawActivity extends NativeActivity {
         return new File(getFilesDir(), "auraw-performance.json").getAbsolutePath();
     }
 
+    /** Private cache directory for adapter-specific wgpu/Vulkan pipeline blobs. */
+    public String gpuPipelineCacheDir() {
+        return new File(getCacheDir(), "gpu-pipeline-cache").getAbsolutePath();
+    }
+
     /** Human-readable storage location shown by the Rust library UI. */
     public String rawLibraryLocation() {
         return rawLibraryDirectory().getAbsolutePath();

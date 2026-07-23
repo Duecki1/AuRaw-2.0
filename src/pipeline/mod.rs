@@ -2,6 +2,7 @@ mod basicadj;
 mod color_profile;
 mod export;
 mod gpu;
+mod gpu_cache;
 mod lensfun;
 mod masks;
 mod processing;
@@ -22,6 +23,7 @@ pub use export::{
     MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};
+pub(crate) use gpu_cache::PersistentGpuPipelineCache;
 pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
 pub use masks::{
     compose_inpaint_strokes, ellipse_outline_points, export_mask_atlas_edge,
@@ -35,7 +37,7 @@ pub use processing::{
     required_export_tile_halo, ProcessingStage, ProxySpec, TilePlan, TileSpec, EXPORT_TILE_HALO,
     MIN_EXPORT_TILE_HALO,
 };
-pub(crate) use raw_loader::invalidate_dcp_profile_index;
+pub(crate) use raw_loader::{invalidate_dcp_profile_index, prewarm_dcp_profile_index};
 pub use raw_loader::{
     is_supported_raw_path, load_raw_file, load_raw_file_with_dcp,
     load_raw_file_with_profile_config, load_raw_file_with_profile_selection, load_raw_thumbnail,
