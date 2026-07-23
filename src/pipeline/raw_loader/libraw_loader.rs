@@ -659,6 +659,7 @@ struct CachedDcpIndex {
 }
 
 static DCP_PROFILE_INDEX: OnceLock<Mutex<HashMap<PathBuf, CachedDcpIndex>>> = OnceLock::new();
+static DCP_PROFILE_SCAN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn dcp_profile_index_cache() -> &'static Mutex<HashMap<PathBuf, CachedDcpIndex>> {
     DCP_PROFILE_INDEX.get_or_init(|| Mutex::new(HashMap::new()))
@@ -672,6 +673,15 @@ pub(super) fn invalidate_dcp_profile_index() {
     }
 }
 
+pub(super) fn prewarm_dcp_profile_index(folder: &Path) {
+    if let Err(error) = indexed_dcp_profiles(folder) {
+        log::warn!(
+            "could not prewarm DCP profile index for {}: {error:#}",
+            folder.display()
+        );
+    }
+}
+
 fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
     let metadata = fs::metadata(folder)
         .with_context(|| format!("inspect DCP profile folder {}", folder.display()))?;
@@ -679,6 +689,20 @@ fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
     let cache_key = fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
     let root_modified = metadata.modified().ok();
 
+    if let Ok(cache) = dcp_profile_index_cache().lock() {
+        if let Some(index) = cache.get(&cache_key) {
+            if index.root_modified == root_modified {
+                return Ok(Arc::clone(&index.profiles));
+            }
+        }
+    }
+
+    // Startup prewarming and a very early RAW open can race. Serialize index
+    // construction so they never scan and parse the same profile tree twice.
+    let _scan_guard = DCP_PROFILE_SCAN_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .ok();
     if let Ok(cache) = dcp_profile_index_cache().lock() {
         if let Some(index) = cache.get(&cache_key) {
             if index.root_modified == root_modified {

@@ -45,6 +45,22 @@ fn raw_cache_key_for_target(target: &crate::sidecar::SidecarTarget) -> String {
     }
 }
 
+fn prewarm_dcp_profile_folder(folder: Option<std::path::PathBuf>) {
+    let Some(folder) = folder.filter(|folder| folder.is_dir()) else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("auraw-dcp-prewarm".to_owned())
+        .spawn(move || {
+            let started = Instant::now();
+            crate::pipeline::prewarm_dcp_profile_index(&folder);
+            crate::diagnostics::record(format!(
+                "DCP profile index prewarmed in {:.3}s",
+                started.elapsed().as_secs_f64()
+            ));
+        });
+}
+
 fn append_notice(notice: &mut Option<String>, message: &str) {
     match notice {
         Some(existing) => {
@@ -141,6 +157,7 @@ impl AurawApp {
                 camera_profile_folder_label = None;
             }
         }
+        prewarm_dcp_profile_folder(camera_profile_folder.clone());
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -314,6 +331,7 @@ impl AurawApp {
             .map_err(|error| log::warn!("{error}"))
             .ok();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -934,12 +952,19 @@ impl AurawApp {
             self.preview_quality.label()
         ));
         let sidecar_generation = self.begin_sidecar_open();
-        {
+        // Keep the previous full-frame preview pipeline alive just long enough
+        // for the decode worker to clone its already-compiled compute programs.
+        // On Android/Vulkan, recompiling these shaders for every RAW can take
+        // several seconds. The old textures are released immediately after the
+        // new pipeline has been allocated on the worker.
+        let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
-            if let Some(old) = self.gpu_pipeline.take() {
-                if let Some(texture_id) = old.egui_texture_id {
-                    renderer.free_texture(&texture_id);
-                }
+            let old_pipeline = self.gpu_pipeline.take();
+            if let Some(texture_id) = old_pipeline
+                .as_ref()
+                .and_then(|pipeline| pipeline.egui_texture_id)
+            {
+                renderer.free_texture(&texture_id);
             }
             if let Some(old) = self.preview_detail.take() {
                 if let Some(texture_id) = old.pipeline.egui_texture_id {
@@ -951,7 +976,8 @@ impl AurawApp {
                     renderer.free_texture(&texture_id);
                 }
             }
-        }
+            old_pipeline
+        };
         self.original_raw = None;
         self.loaded_raw = None;
         self.preview_raw = None;
@@ -1208,8 +1234,13 @@ impl AurawApp {
                         );
                     }
                     let lens_started = Instant::now();
+                    let lens_catalog_started = Instant::now();
                     let mut lens_correction =
                         LensCorrectionState::from_catalog(lensfun_catalog(&original_raw));
+                    crate::diagnostics::record(format!(
+                        "Lensfun catalog lookup finished in {:.3}s",
+                        lens_catalog_started.elapsed().as_secs_f64()
+                    ));
                     if let Some(saved) = saved_lens {
                         lens_correction.selected_maker = saved.maker;
                         lens_correction.selected_model = saved.model;
@@ -1223,8 +1254,13 @@ impl AurawApp {
                     }
                     let full_raw = if lens_correction.enabled {
                         if let Some(selection) = lens_correction.selected_lens() {
+                            let lens_apply_started = Instant::now();
                             match apply_lensfun_correction(&original_raw, &selection) {
                                 Ok(corrected) => {
+                                    crate::diagnostics::record(format!(
+                                        "Lensfun full-resolution correction applied in {:.3}s",
+                                        lens_apply_started.elapsed().as_secs_f64()
+                                    ));
                                     lens_correction.applied = true;
                                     lens_correction.catalog.status = format!(
                                         "Automatically applied {} from RAW metadata",
@@ -1233,6 +1269,10 @@ impl AurawApp {
                                     Arc::new(corrected)
                                 }
                                 Err(error) => {
+                                    crate::diagnostics::record(format!(
+                                        "Lensfun full-resolution correction failed after {:.3}s",
+                                        lens_apply_started.elapsed().as_secs_f64()
+                                    ));
                                     lens_correction.enabled = false;
                                     lens_correction.applied = false;
                                     lens_correction.catalog.status = format!(
@@ -1283,18 +1323,55 @@ impl AurawApp {
                     // for regression rendering and tiled export readback.
                     let preview_quality = ProcessingQuality::Preview;
                     let pipeline_started = Instant::now();
-                    let pipeline = RawGpuPipeline::new_headless_with_quality(
-                        &device,
-                        &queue,
-                        &preview_raw,
-                        &initial_params,
-                        preview_quality,
-                    )
-                    .map_err(|error| format!("GPU preview setup failed: {error:#}"))?;
+                    let pipeline = if let Some(template) = reusable_preview_pipeline.as_ref() {
+                        match RawGpuPipeline::new_headless_reusing_programs(
+                            &device,
+                            &queue,
+                            &preview_raw,
+                            &initial_params,
+                            preview_quality,
+                            template,
+                        ) {
+                            Ok(pipeline) => {
+                                crate::diagnostics::record(
+                                    "GPU preview reused compiled programs from previous RAW",
+                                );
+                                pipeline
+                            }
+                            Err(reuse_error) => {
+                                crate::diagnostics::record(format!(
+                                    "GPU preview program reuse unavailable ({reuse_error:#}); compiling programs"
+                                ));
+                                RawGpuPipeline::new_headless_with_quality(
+                                    &device,
+                                    &queue,
+                                    &preview_raw,
+                                    &initial_params,
+                                    preview_quality,
+                                )
+                                .map_err(|error| {
+                                    format!("GPU preview setup failed: {error:#}")
+                                })?
+                            }
+                        }
+                    } else {
+                        RawGpuPipeline::new_headless_with_quality(
+                            &device,
+                            &queue,
+                            &preview_raw,
+                            &initial_params,
+                            preview_quality,
+                        )
+                        .map_err(|error| format!("GPU preview setup failed: {error:#}"))?
+                    };
                     crate::diagnostics::record(format!(
                         "GPU preview pipeline created in {:.3}s",
                         pipeline_started.elapsed().as_secs_f64()
                     ));
+                    // Program handles have been cloned into `pipeline`; release
+                    // the previous preview textures before any additional mask
+                    // source pipeline is allocated.
+                    drop(reusable_preview_pipeline);
 
                     // Range and promptable-object source images are canonical RAW renditions,
                     // not user edit data. Sidecars omit these large shared
