@@ -1068,9 +1068,9 @@ impl MaskStack {
                 image_height,
             );
             if component.invert {
-                for value in &mut coverage {
-                    *value = 1.0 - *value;
-                }
+                coverage
+                    .par_iter_mut()
+                    .for_each(|value| *value = 1.0 - *value);
             }
 
             let Some(existing) = combined.as_mut() else {
@@ -1086,19 +1086,22 @@ impl MaskStack {
             };
             match component.combine {
                 MaskCombineMode::Add => {
-                    for (dst, src) in existing.iter_mut().zip(coverage) {
-                        *dst = dst.max(src);
-                    }
+                    existing
+                        .par_iter_mut()
+                        .zip(coverage.into_par_iter())
+                        .for_each(|(dst, src)| *dst = dst.max(src));
                 }
                 MaskCombineMode::Subtract => {
-                    for (dst, src) in existing.iter_mut().zip(coverage) {
-                        *dst *= 1.0 - src;
-                    }
+                    existing
+                        .par_iter_mut()
+                        .zip(coverage.into_par_iter())
+                        .for_each(|(dst, src)| *dst *= 1.0 - src);
                 }
                 MaskCombineMode::Intersect => {
-                    for (dst, src) in existing.iter_mut().zip(coverage) {
-                        *dst *= src;
-                    }
+                    existing
+                        .par_iter_mut()
+                        .zip(coverage.into_par_iter())
+                        .for_each(|(dst, src)| *dst *= src);
                 }
             }
         }
@@ -1491,24 +1494,27 @@ fn sample_rgb_mask(
     width: u32,
     height: u32,
     source: &MaskRgbImage,
-    coverage: impl Fn([f32; 3]) -> f32,
+    coverage: impl Fn([f32; 3]) -> f32 + Sync,
 ) -> Vec<f32> {
-    let mut out = vec![0.0; width as usize * height as usize];
-    for y in 0..height {
-        let source_y = (y as u64 * source.height as u64 / height.max(1) as u64)
-            .min(source.height.saturating_sub(1) as u64) as usize;
-        for x in 0..width {
-            let source_x = (x as u64 * source.width as u64 / width.max(1) as u64)
-                .min(source.width.saturating_sub(1) as u64) as usize;
-            let index = (source_y * source.width as usize + source_x) * 4;
-            let rgb = [
-                source.rgba[index] as f32 / 255.0,
-                source.rgba[index + 1] as f32 / 255.0,
-                source.rgba[index + 2] as f32 / 255.0,
-            ];
-            out[y as usize * width as usize + x as usize] = coverage(rgb).clamp(0.0, 1.0);
-        }
-    }
+    let row_stride = width as usize;
+    let mut out = vec![0.0; row_stride * height as usize];
+    out.par_chunks_mut(row_stride)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let source_y = (y as u64 * source.height as u64 / height.max(1) as u64)
+                .min(source.height.saturating_sub(1) as u64) as usize;
+            for (x, value) in row.iter_mut().enumerate() {
+                let source_x = (x as u64 * source.width as u64 / width.max(1) as u64)
+                    .min(source.width.saturating_sub(1) as u64) as usize;
+                let index = (source_y * source.width as usize + source_x) * 4;
+                let rgb = [
+                    source.rgba[index] as f32 / 255.0,
+                    source.rgba[index + 1] as f32 / 255.0,
+                    source.rgba[index + 2] as f32 / 255.0,
+                ];
+                *value = coverage(rgb).clamp(0.0, 1.0);
+            }
+        });
     out
 }
 
@@ -1769,25 +1775,28 @@ fn rasterize_radial(
     rotation: f32,
     feather: f32,
 ) -> Vec<f32> {
-    let mut out = vec![0.0f32; width as usize * height as usize];
+    let row_stride = width as usize;
+    let mut out = vec![0.0f32; row_stride * height as usize];
     let cos_r = rotation.cos();
     let sin_r = rotation.sin();
     let rx = (radius[0].abs() * image_width.max(1) as f32).max(1.0);
     let ry = (radius[1].abs() * image_height.max(1) as f32).max(1.0);
     let inner = (1.0 - feather.clamp(0.0, 1.0) * 0.98).clamp(0.0, 0.995);
 
-    for y in 0..height {
-        let v = (y as f32 + 0.5) / height as f32;
-        let dy = (v - center[1]) * image_height.max(1) as f32;
-        for x in 0..width {
-            let u = (x as f32 + 0.5) / width as f32;
-            let dx = (u - center[0]) * image_width.max(1) as f32;
-            let local_x = cos_r * dx + sin_r * dy;
-            let local_y = -sin_r * dx + cos_r * dy;
-            let distance = ((local_x / rx).powi(2) + (local_y / ry).powi(2)).sqrt();
-            out[y as usize * width as usize + x as usize] = 1.0 - smoothstep(inner, 1.0, distance);
-        }
-    }
+    out.par_chunks_mut(row_stride)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let v = (y as f32 + 0.5) / height as f32;
+            let dy = (v - center[1]) * image_height.max(1) as f32;
+            for (x, value) in row.iter_mut().enumerate() {
+                let u = (x as f32 + 0.5) / width as f32;
+                let dx = (u - center[0]) * image_width.max(1) as f32;
+                let local_x = cos_r * dx + sin_r * dy;
+                let local_y = -sin_r * dx + cos_r * dy;
+                let distance = ((local_x / rx).powi(2) + (local_y / ry).powi(2)).sqrt();
+                *value = 1.0 - smoothstep(inner, 1.0, distance);
+            }
+        });
     out
 }
 
@@ -1800,7 +1809,8 @@ fn rasterize_linear(
     end: [f32; 2],
     feather: f32,
 ) -> Vec<f32> {
-    let mut out = vec![0.0f32; width as usize * height as usize];
+    let row_stride = width as usize;
+    let mut out = vec![0.0f32; row_stride * height as usize];
     let sx = start[0] * image_width.max(1) as f32;
     let sy = start[1] * image_height.max(1) as f32;
     let dx = (end[0] - start[0]) * image_width.max(1) as f32;
@@ -1810,14 +1820,16 @@ fn rasterize_linear(
     let edge0 = 0.5 - 0.5 * width_factor;
     let edge1 = 0.5 + 0.5 * width_factor;
 
-    for y in 0..height {
-        let py = (y as f32 + 0.5) / height as f32 * image_height.max(1) as f32;
-        for x in 0..width {
-            let px = (x as f32 + 0.5) / width as f32 * image_width.max(1) as f32;
-            let t = ((px - sx) * dx + (py - sy) * dy) / length_sq;
-            out[y as usize * width as usize + x as usize] = 1.0 - smoothstep(edge0, edge1, t);
-        }
-    }
+    out.par_chunks_mut(row_stride)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let py = (y as f32 + 0.5) / height as f32 * image_height.max(1) as f32;
+            for (x, value) in row.iter_mut().enumerate() {
+                let px = (x as f32 + 0.5) / width as f32 * image_width.max(1) as f32;
+                let t = ((px - sx) * dx + (py - sy) * dy) / length_sq;
+                *value = 1.0 - smoothstep(edge0, edge1, t);
+            }
+        });
     out
 }
 

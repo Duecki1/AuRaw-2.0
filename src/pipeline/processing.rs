@@ -1,4 +1,5 @@
 use super::{CompactPixelMap, ExposureParams, LoadedRaw, MaskStack};
+use rayon::prelude::*;
 
 /// Earliest pipeline stage that must be executed after a parameter change.
 /// Stages are ordered from most expensive/upstream to cheapest/downstream.
@@ -149,9 +150,11 @@ pub fn build_region_proxy(
 
     let width = region_width.div_ceil(scale);
     let height = region_height.div_ceil(scale);
-    let mut raw_pixels = Vec::with_capacity((width * height) as usize);
-    let mut color_indices = Vec::with_capacity((width * height) as usize);
-    let mut black_levels_per_pixel = Vec::with_capacity((width * height) as usize);
+    let len = (width * height) as usize;
+    let row_stride = width as usize;
+    let mut raw_pixels = vec![0u16; len];
+    let mut color_indices = vec![0u8; len];
+    let mut black_levels_per_pixel = vec![0.0f32; len];
 
     let cfa_period = match raw.cfa_kind {
         super::CfaKind::Bayer => 2,
@@ -170,65 +173,67 @@ pub fn build_region_proxy(
     // photosites with that exact phase inside the shared macrocell. This preserves
     // the sensor pattern while keeping R/G/B measurements registered to the same
     // image area.
-    for py in 0..height {
-        let output_phase_y = py % cfa_period;
-        let macro_y0 = y + (py / cfa_period) * scale * cfa_period;
-        let macro_y1 = (macro_y0 + scale * cfa_period).min(y + region_height);
-        for px in 0..width {
-            let output_phase_x = px % cfa_period;
-            let macro_x0 = x + (px / cfa_period) * scale * cfa_period;
-            let macro_x1 = (macro_x0 + scale * cfa_period).min(x + region_width);
-            let center_x = (macro_x0 + (macro_x1.saturating_sub(macro_x0)) / 2)
-                .min(raw.width - 1);
-            let center_y = (macro_y0 + (macro_y1.saturating_sub(macro_y0)) / 2)
-                .min(raw.height - 1);
+    raw_pixels
+        .par_chunks_mut(row_stride)
+        .zip(color_indices.par_chunks_mut(row_stride))
+        .zip(black_levels_per_pixel.par_chunks_mut(row_stride))
+        .enumerate()
+        .for_each(|(py, ((raw_row, cfa_row), black_row))| {
+            let py = py as u32;
+            let output_phase_y = py % cfa_period;
+            let macro_y0 = y + (py / cfa_period) * scale * cfa_period;
+            let macro_y1 = (macro_y0 + scale * cfa_period).min(y + region_height);
 
-            // Anchor the synthetic proxy mosaic to the source region's real CFA
-            // phase. Detail crops are aligned to the sensor period, preventing
-            // a phase jump from appearing as coloured horizontal/vertical lines.
-            let phase_x = (x + output_phase_x).min(raw.width - 1);
-            let phase_y = (y + output_phase_y).min(raw.height - 1);
-            let phase_index = (phase_y * raw.width + phase_x) as usize;
-            let cfa = raw.color_indices[phase_index];
+            for px in 0..width {
+                let output_phase_x = px % cfa_period;
+                let macro_x0 = x + (px / cfa_period) * scale * cfa_period;
+                let macro_x1 = (macro_x0 + scale * cfa_period).min(x + region_width);
+                let center_x = (macro_x0 + (macro_x1.saturating_sub(macro_x0)) / 2)
+                    .min(raw.width - 1);
+                let center_y = (macro_y0 + (macro_y1.saturating_sub(macro_y0)) / 2)
+                    .min(raw.height - 1);
 
-            let mut pixel_sum = 0u64;
-            let mut black_sum = 0.0f64;
-            let mut count = 0u32;
+                // Anchor the synthetic proxy mosaic to the source region's real CFA
+                // phase. Detail crops are aligned to the sensor period, preventing
+                // a phase jump from appearing as coloured horizontal/vertical lines.
+                let phase_x = (x + output_phase_x).min(raw.width - 1);
+                let phase_y = (y + output_phase_y).min(raw.height - 1);
+                let phase_index = (phase_y * raw.width + phase_x) as usize;
+                let cfa = raw.color_indices[phase_index];
 
-            // `macro_*0 - region_origin` is always aligned to one complete CFA
-            // period, so the matching source phase starts at exactly
-            // `macro_*0 + output_phase_*`. Visit only those samples instead of
-            // scanning every photosite in the macrocell and discarding
-            // (period^2 - 1) / period^2 of them. This visits the exact same
-            // source coordinates as the previous filtered loops, but removes
-            // ~4x inner-loop work for Bayer and ~36x for X-Trans proxies.
-            let first_sy = macro_y0 + output_phase_y;
-            let first_sx = macro_x0 + output_phase_x;
-            for sy in (first_sy..macro_y1).step_by(cfa_period as usize) {
-                let row = sy * raw.width;
-                for sx in (first_sx..macro_x1).step_by(cfa_period as usize) {
-                    let index = (row + sx) as usize;
-                    // Exact CFA phase is the primary condition. Keep the channel
-                    // check as a safety net for unusual/non-periodic metadata.
-                    if raw.color_indices[index] == cfa {
-                        pixel_sum += u64::from(raw.raw_pixels[index]);
-                        black_sum += f64::from(raw.black_levels_per_pixel[index]);
-                        count += 1;
+                let mut pixel_sum = 0u64;
+                let mut black_sum = 0.0f64;
+                let mut count = 0u32;
+
+                // Visit the exact same phase-matched samples as the serial path.
+                // Only independent output rows are distributed across Rayon workers;
+                // accumulation order inside every proxy photosite remains unchanged.
+                let first_sy = macro_y0 + output_phase_y;
+                let first_sx = macro_x0 + output_phase_x;
+                for sy in (first_sy..macro_y1).step_by(cfa_period as usize) {
+                    let row = sy * raw.width;
+                    for sx in (first_sx..macro_x1).step_by(cfa_period as usize) {
+                        let index = (row + sx) as usize;
+                        if raw.color_indices[index] == cfa {
+                            pixel_sum += u64::from(raw.raw_pixels[index]);
+                            black_sum += f64::from(raw.black_levels_per_pixel[index]);
+                            count += 1;
+                        }
                     }
                 }
-            }
 
-            if count == 0 {
-                let fallback = nearest_cfa_sample(raw, center_x, center_y, cfa, cfa_period);
-                raw_pixels.push(raw.raw_pixels[fallback]);
-                black_levels_per_pixel.push(raw.black_levels_per_pixel[fallback]);
-            } else {
-                raw_pixels.push((pixel_sum / u64::from(count)) as u16);
-                black_levels_per_pixel.push((black_sum / f64::from(count)) as f32);
+                let px = px as usize;
+                if count == 0 {
+                    let fallback = nearest_cfa_sample(raw, center_x, center_y, cfa, cfa_period);
+                    raw_row[px] = raw.raw_pixels[fallback];
+                    black_row[px] = raw.black_levels_per_pixel[fallback];
+                } else {
+                    raw_row[px] = (pixel_sum / u64::from(count)) as u16;
+                    black_row[px] = (black_sum / f64::from(count)) as f32;
+                }
+                cfa_row[px] = cfa;
             }
-            color_indices.push(cfa);
-        }
-    }
+        });
 
     LoadedRaw {
         width,
