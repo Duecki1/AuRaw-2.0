@@ -487,10 +487,6 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
 pub fn extract_padded_tile_into(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw) {
     tile_raw.width = tile.padded_width;
     tile_raw.height = tile.padded_height;
-    tile_raw.raw_pixels.resize(
-        (tile.padded_width as usize).saturating_mul(tile.padded_height as usize),
-        0,
-    );
     tile_raw.color_indices = raw.color_indices.subregion_clamped(
         i64::from(tile.global_origin_x),
         i64::from(tile.global_origin_y),
@@ -508,6 +504,16 @@ pub fn extract_padded_tile_into(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mu
 
 fn fill_padded_tile(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw) {
     let width = tile.padded_width as usize;
+    let height = tile.padded_height as usize;
+    // `extract_padded_tile` creates the first reusable export tile with an empty
+    // pixel buffer. Allocate the backing storage here so every caller of this
+    // helper gets the same invariant before row slices are taken. The reuse path
+    // may already have the right capacity, in which case `resize` is effectively
+    // free.
+    tile_raw
+        .raw_pixels
+        .resize(width.saturating_mul(height), 0);
+
     let source_width = raw.width as i64;
     let max_x = source_width.saturating_sub(1);
     let max_y = i64::from(raw.height.saturating_sub(1));
@@ -548,10 +554,111 @@ fn fill_padded_tile(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw)
 #[cfg(test)]
 mod tests {
     use super::{
-        affected_stage, build_proxy, crop_raw, required_export_tile_halo, ProcessingStage, ProxySpec,
-        TilePlan, TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO,
+        affected_stage, build_proxy, crop_raw, extract_padded_tile, extract_padded_tile_into,
+        required_export_tile_halo, ExportTile, ProcessingStage, ProxySpec, TilePlan, TileSpec,
+        EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO,
     };
-    use crate::pipeline::{CameraProfile, CfaKind, CompactPixelMap, ExposureParams, LoadedRaw, MaskStack};
+    use crate::pipeline::{
+        CameraProfile, CfaKind, CompactPixelMap, ExposureParams, LoadedRaw, MaskStack,
+    };
+
+    fn test_raw(width: u32, height: u32) -> LoadedRaw {
+        let pixels = (0..width * height)
+            .map(|value| value as u16)
+            .collect::<Vec<_>>();
+        LoadedRaw {
+            width,
+            height,
+            camera_make: "Test".to_owned(),
+            camera_model: String::new(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            focal_length: 0.0,
+            aperture: 0.0,
+            focus_distance: 0.0,
+            cfa_kind: CfaKind::Bayer,
+            raw_pixels: pixels,
+            color_indices: CompactPixelMap::dense(
+                width,
+                height,
+                vec![0; (width * height) as usize],
+            ),
+            wb_coeffs: [1.0; 4],
+            cam_to_srgb: [[0.0; 4]; 3],
+            black_levels: [0.0; 4],
+            black_levels_per_pixel: CompactPixelMap::dense(
+                width,
+                height,
+                vec![0.0; (width * height) as usize],
+            ),
+            white_levels: [1023.0; 4],
+            camera_profile: CameraProfile::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
+            white_balance_model: None,
+        }
+    }
+
+    #[test]
+    fn padded_tile_allocates_first_export_buffer_and_clamps_edges() {
+        let raw = test_raw(3, 2);
+        let tile = ExportTile {
+            core_x: 0,
+            core_y: 0,
+            core_width: 3,
+            core_height: 2,
+            local_core_x: 1,
+            local_core_y: 1,
+            padded_width: 5,
+            padded_height: 4,
+            global_origin_x: -1,
+            global_origin_y: -1,
+        };
+
+        let extracted = extract_padded_tile(&raw, tile);
+
+        assert_eq!(extracted.raw_pixels.len(), 20);
+        assert_eq!(&extracted.raw_pixels[0..5], &[0, 0, 1, 2, 2]);
+        assert_eq!(&extracted.raw_pixels[5..10], &[0, 0, 1, 2, 2]);
+        assert_eq!(&extracted.raw_pixels[10..15], &[3, 3, 4, 5, 5]);
+        assert_eq!(&extracted.raw_pixels[15..20], &[3, 3, 4, 5, 5]);
+    }
+
+    #[test]
+    fn padded_tile_reuse_resizes_buffer_for_new_tile_shape() {
+        let raw = test_raw(4, 3);
+        let first = ExportTile {
+            core_x: 0,
+            core_y: 0,
+            core_width: 2,
+            core_height: 2,
+            local_core_x: 0,
+            local_core_y: 0,
+            padded_width: 2,
+            padded_height: 2,
+            global_origin_x: 0,
+            global_origin_y: 0,
+        };
+        let second = ExportTile {
+            core_x: 0,
+            core_y: 0,
+            core_width: 4,
+            core_height: 3,
+            local_core_x: 1,
+            local_core_y: 1,
+            padded_width: 6,
+            padded_height: 5,
+            global_origin_x: -1,
+            global_origin_y: -1,
+        };
+
+        let mut scratch = extract_padded_tile(&raw, first);
+        extract_padded_tile_into(&raw, second, &mut scratch);
+
+        assert_eq!(scratch.raw_pixels.len(), 30);
+        assert_eq!(&scratch.raw_pixels[0..6], &[0, 0, 1, 2, 3, 3]);
+        assert_eq!(&scratch.raw_pixels[24..30], &[8, 8, 9, 10, 11, 11]);
+    }
 
     #[test]
     fn develop_adjustments_only_invalidate_output() {
