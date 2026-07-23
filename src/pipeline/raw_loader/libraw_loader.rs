@@ -242,7 +242,7 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
     if let Some(raw_profile) = read_optional_profile(path) {
         selected.camera_calibration_signature = raw_profile.camera_calibration_signature;
     }
-    let display_name = dcp_profile_display_name(&selected, profile_path);
+    let display_name = dcp_profile_display_name(selected.name.as_deref(), profile_path);
     let mut loaded = load_raw_file_with_selected_profile(path, Some(selected))?;
     loaded.camera_profile_source = Some(profile_path.to_path_buf());
     loaded.available_camera_profiles = vec![CameraProfileCandidate {
@@ -648,7 +648,8 @@ struct MatchedDcpProfile {
 struct IndexedDcpProfile {
     path: PathBuf,
     name: String,
-    profile: DcpProfile,
+    profile_name: Option<String>,
+    camera_model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -736,16 +737,21 @@ fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
                 Ok(metadata) if metadata.len() > 0 && metadata.len() <= MAX_DCP_FILE_BYTES => {}
                 _ => continue,
             }
-            let profile = match DcpProfile::from_path(&path) {
-                Ok(Some(profile)) => profile,
+            let identity = match DcpProfile::identity_from_path(&path) {
+                Ok(Some(identity)) => identity,
                 Ok(None) => continue,
                 Err(error) => {
-                    log::warn!("ignoring invalid DCP profile {}: {error:#}", path.display());
+                    log::warn!("ignoring invalid DCP profile identity {}: {error:#}", path.display());
                     continue;
                 }
             };
-            let name = dcp_profile_display_name(&profile, &path);
-            profiles.push(IndexedDcpProfile { path, name, profile });
+            let name = dcp_profile_display_name(identity.name.as_deref(), &path);
+            profiles.push(IndexedDcpProfile {
+                path,
+                name,
+                profile_name: identity.name,
+                camera_model: identity.camera_model,
+            });
         }
     }
 
@@ -782,7 +788,8 @@ fn find_matching_dcp_profiles(
     let mut matches = Vec::new();
     for indexed in index.iter() {
         let score = dcp_match_score(
-            &indexed.profile,
+            indexed.camera_model.as_deref(),
+            indexed.profile_name.as_deref(),
             &indexed.path,
             &make_key,
             &model_key,
@@ -791,11 +798,22 @@ fn find_matching_dcp_profiles(
         if score <= 0 {
             continue;
         }
+        let profile = match DcpProfile::from_path(&indexed.path) {
+            Ok(Some(profile)) => profile,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!(
+                    "ignoring matched but invalid DCP profile {}: {error:#}",
+                    indexed.path.display()
+                );
+                continue;
+            }
+        };
         matches.push(MatchedDcpProfile {
             score,
             path: indexed.path.clone(),
             name: indexed.name.clone(),
-            profile: indexed.profile.clone(),
+            profile,
         });
     }
 
@@ -839,10 +857,8 @@ fn find_matching_dcp_profiles(
     Ok(matches)
 }
 
-fn dcp_profile_display_name(profile: &DcpProfile, path: &Path) -> String {
-    profile
-        .name
-        .as_deref()
+fn dcp_profile_display_name(profile_name: Option<&str>, path: &Path) -> String {
+    profile_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
@@ -855,15 +871,14 @@ fn dcp_profile_display_name(profile: &DcpProfile, path: &Path) -> String {
 }
 
 fn dcp_match_score(
-    profile: &DcpProfile,
+    camera_model: Option<&str>,
+    profile_name: Option<&str>,
     path: &Path,
     make_key: &str,
     model_key: &str,
     combined_key: &str,
 ) -> i32 {
-    let declared = profile
-        .camera_model
-        .as_deref()
+    let declared = camera_model
         .map(normalize_camera_name)
         .unwrap_or_default();
     let filename = path
@@ -871,9 +886,7 @@ fn dcp_match_score(
         .and_then(|stem| stem.to_str())
         .map(normalize_camera_name)
         .unwrap_or_default();
-    let profile_name = profile
-        .name
-        .as_deref()
+    let profile_name = profile_name
         .map(normalize_camera_name)
         .unwrap_or_default();
     let path_key = normalize_camera_name(&path.to_string_lossy());

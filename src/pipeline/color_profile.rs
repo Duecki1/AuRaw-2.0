@@ -6,7 +6,7 @@ use std::path::Path;
 mod dcp;
 mod icc;
 
-use dcp::{profile_from_tags, TiffReader};
+use dcp::{profile_from_tags, profile_identity_from_tags, TiffReader};
 use icc::MatrixShaperProfile;
 
 #[cfg(test)]
@@ -197,6 +197,13 @@ impl DcpMatrixSet {
     }
 }
 
+
+#[derive(Clone, Debug, Default)]
+pub struct DcpProfileIdentity {
+    pub name: Option<String>,
+    pub camera_model: Option<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DcpProfile {
     pub name: Option<String>,
@@ -215,6 +222,30 @@ pub struct DcpProfile {
 }
 
 impl DcpProfile {
+    /// Reads only the tiny identity fields needed to index a DCP library.
+    /// Large hue/saturation maps, look tables, tone curves, and matrices are
+    /// intentionally left unread until a profile actually matches the camera.
+    pub fn identity_from_path(path: &Path) -> Result<Option<DcpProfileIdentity>> {
+        let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let mut signature = [0u8; 4];
+        if file.read_exact(&mut signature).is_err() {
+            return Ok(None);
+        }
+        let classic_tiff = signature == *b"II*\0" || signature == *b"MM\0*";
+        let big_tiff = signature == *b"II+\0" || signature == *b"MM\0+";
+        let standalone_dcp = signature == *b"IIRC" || signature == *b"MMCR";
+        if !classic_tiff && !big_tiff && !standalone_dcp {
+            return Ok(None);
+        }
+        file.seek(SeekFrom::Start(0))?;
+        let mut tiff = TiffReader::new(file)?;
+        let tags = tiff.read_primary_ifd()?;
+        let Some((name, camera_model)) = profile_identity_from_tags(&mut tiff, &tags)? else {
+            return Ok(None);
+        };
+        Ok(Some(DcpProfileIdentity { name, camera_model }))
+    }
+
     /// Reads profile tags from a DCP or from the first IFD of a DNG/TIFF.
     /// Non-TIFF files return `Ok(None)` so ordinary proprietary RAW loading is
     /// unaffected.
