@@ -1207,6 +1207,7 @@ impl AurawApp {
                             "The saved camera profile was not found or did not match this camera; automatic profile selection was used instead.",
                         );
                     }
+                    let lens_started = Instant::now();
                     let mut lens_correction =
                         LensCorrectionState::from_catalog(lensfun_catalog(&original_raw));
                     if let Some(saved) = saved_lens {
@@ -1252,6 +1253,10 @@ impl AurawApp {
                     } else {
                         Arc::clone(&original_raw)
                     };
+                    crate::diagnostics::record(format!(
+                        "Lensfun catalog/correction prepared in {:.3}s",
+                        lens_started.elapsed().as_secs_f64()
+                    ));
                     let preview_spec = ProxySpec {
                         max_edge: preview_quality_setting.proxy_edge(),
                     };
@@ -1296,6 +1301,7 @@ impl AurawApp {
                     // caches and reconstruct one source on this decode worker.
                     let mut mask_source = None;
                     if needs_canonical_mask_source(&rendered_masks) {
+                        let mask_source_started = Instant::now();
                         let source_edge = if cfg!(target_os = "android") {
                             1600
                         } else {
@@ -1360,17 +1366,27 @@ impl AurawApp {
                         .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
                         install_missing_range_sources(&mut rendered_masks, &source);
                         mask_source = Some(source);
+                        crate::diagnostics::record(format!(
+                            "Canonical mask source reconstructed in {:.3}s",
+                            mask_source_started.elapsed().as_secs_f64()
+                        ));
                     }
 
                     let params =
                         GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw);
+                    let mask_upload_started = Instant::now();
                     Self::upload_preview_masks(
                         &pipeline,
                         &queue,
                         &rendered_masks,
                         &preview_raw,
                     )?;
+                    crate::diagnostics::record(format!(
+                        "Preview masks rasterized/uploaded in {:.3}s",
+                        mask_upload_started.elapsed().as_secs_f64()
+                    ));
                     let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
+                    let inpaint_upload_started = Instant::now();
                     pipeline
                         .update_inpaint_layer(
                             &queue,
@@ -1381,6 +1397,10 @@ impl AurawApp {
                             preview_raw.height,
                         )
                         .map_err(|error| format!("preview inpainting setup failed: {error:#}"))?;
+                    crate::diagnostics::record(format!(
+                        "Preview inpaint layer uploaded in {:.3}s",
+                        inpaint_upload_started.elapsed().as_secs_f64()
+                    ));
                     let first_render_started = Instant::now();
                     pipeline.recompute(&queue, &device, &params);
                     crate::diagnostics::record(format!(
