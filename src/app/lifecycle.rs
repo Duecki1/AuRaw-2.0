@@ -64,10 +64,12 @@ fn prewarm_dcp_profile_folder(folder: Option<std::path::PathBuf>) {
 #[cfg(target_os = "android")]
 fn spawn_gpu_preview_prewarm(
     cc: &eframe::CreationContext<'_>,
+    cache_root: Option<std::path::PathBuf>,
 ) -> Option<mpsc::Receiver<Result<RawGpuPipeline, String>>> {
     let render_state = cc.wgpu_render_state.as_ref()?;
     let device = render_state.device.clone();
     let queue = render_state.queue.clone();
+    let adapter_info = render_state.adapter.get_info();
     let repaint = cc.egui_ctx.clone();
     let (sender, receiver) = mpsc::channel();
     let spawn_result = std::thread::Builder::new()
@@ -75,10 +77,55 @@ fn spawn_gpu_preview_prewarm(
         .spawn(move || {
             let started = Instant::now();
             crate::diagnostics::record("GPU preview prewarm started at app initialization");
-            let result = RawGpuPipeline::prewarm_preview_template(
+
+            let persistent_cache = match cache_root.as_deref() {
+                Some(cache_root) => match crate::pipeline::PersistentGpuPipelineCache::load_or_create(
+                    &device,
+                    &adapter_info,
+                    cache_root,
+                ) {
+                    Ok(Some((cache, loaded_bytes))) => {
+                        if loaded_bytes == 0 {
+                            crate::diagnostics::record(format!(
+                                "GPU pipeline cache cold start: {}",
+                                cache.path().display()
+                            ));
+                        } else {
+                            crate::diagnostics::record(format!(
+                                "GPU pipeline cache loaded: {} bytes from {}",
+                                loaded_bytes,
+                                cache.path().display()
+                            ));
+                        }
+                        Some(cache)
+                    }
+                    Ok(None) => {
+                        crate::diagnostics::record(
+                            "GPU pipeline cache unavailable on this wgpu device/backend",
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        crate::diagnostics::record(format!(
+                            "GPU pipeline cache could not be initialized: {error:#}"
+                        ));
+                        None
+                    }
+                },
+                None => {
+                    crate::diagnostics::record(
+                        "GPU pipeline cache path unavailable; using in-process prewarm only",
+                    );
+                    None
+                }
+            };
+
+            let cache_to_persist = persistent_cache.clone();
+            let result = RawGpuPipeline::prewarm_preview_template_with_cache(
                 &device,
                 &queue,
                 CfaKind::Bayer,
+                persistent_cache,
             )
             .map_err(|error| format!("GPU preview prewarm failed: {error:#}"));
             match &result {
@@ -88,8 +135,31 @@ fn spawn_gpu_preview_prewarm(
                 )),
                 Err(error) => crate::diagnostics::record(error),
             }
+
+            // Deliver the compiled template immediately. Cache serialization is
+            // intentionally done afterwards so a RAW open waiting on prewarm
+            // never pays filesystem write latency.
             let _ = sender.send(result);
             repaint.request_repaint();
+
+            if let Some(cache) = cache_to_persist {
+                let cache_save_started = Instant::now();
+                match cache.persist() {
+                    Ok(bytes) if bytes > 0 => crate::diagnostics::record(format!(
+                        "GPU pipeline cache saved: {} bytes in {:.3}s to {}",
+                        bytes,
+                        cache_save_started.elapsed().as_secs_f64(),
+                        cache.path().display()
+                    )),
+                    Ok(_) => crate::diagnostics::record(format!(
+                        "GPU pipeline cache returned no persistent data for {}",
+                        cache.path().display()
+                    )),
+                    Err(error) => crate::diagnostics::record(format!(
+                        "GPU pipeline cache could not be saved: {error:#}"
+                    )),
+                }
+            }
         });
     match spawn_result {
         Ok(_) => Some(receiver),
@@ -371,9 +441,13 @@ impl AurawApp {
         let performance_settings_path = crate::android::performance_settings_path(&android_app)
             .map_err(|error| log::warn!("{error}"))
             .ok();
+        let gpu_pipeline_cache_root = crate::android::gpu_pipeline_cache_dir(&android_app)
+            .map_err(|error| log::warn!("{error}"))
+            .ok();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
-        let gpu_preview_prewarm_receiver = spawn_gpu_preview_prewarm(cc);
+        let gpu_preview_prewarm_receiver =
+            spawn_gpu_preview_prewarm(cc, gpu_pipeline_cache_root);
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
