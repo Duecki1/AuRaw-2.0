@@ -1,9 +1,14 @@
 use crate::app::{AppTab, AurawApp};
 use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 #[cfg(not(target_os = "android"))]
-use crate::pipeline::{is_supported_raw_path, load_raw_display_dimensions, load_raw_thumbnail};
+use crate::pipeline::{
+    apply_lensfun_correction, build_proxy, compose_inpaint_strokes, is_supported_raw_path,
+    lensfun_catalog, load_raw_display_dimensions, load_raw_file_with_profile_selection,
+    load_raw_thumbnail, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage,
+    MaskStack, ProcessingQuality, ProxySpec,
+    RawGpuPipeline, MAX_LOCAL_MASKS,
+};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
-#[cfg(not(target_os = "android"))]
 use std::cmp::Ordering as CmpOrdering;
 #[cfg(not(target_os = "android"))]
 use std::collections::BinaryHeap;
@@ -19,6 +24,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
+#[cfg(not(target_os = "android"))]
+use std::sync::OnceLock;
 use std::time::Duration;
 #[cfg(not(target_os = "android"))]
 use std::time::SystemTime;
@@ -37,8 +44,43 @@ const ANDROID_RESIDENT_THUMBNAIL_CACHE_LIMIT: usize = 72;
 const ANDROID_DEVELOP_TEXTURE_CACHE_LIMIT: usize = 10;
 const THUMBNAIL_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const THUMBNAIL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(8);
+#[cfg(not(target_os = "android"))]
+const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
 pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 16;
 pub(crate) const MAX_ANDROID_THUMBNAIL_WORKERS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LibrarySortOrder {
+    #[default]
+    NewestFirst,
+    OldestFirst,
+    NameAscending,
+    NameDescending,
+    LargestFirst,
+    SmallestFirst,
+}
+
+impl LibrarySortOrder {
+    const ALL: [Self; 6] = [
+        Self::NewestFirst,
+        Self::OldestFirst,
+        Self::NameAscending,
+        Self::NameDescending,
+        Self::LargestFirst,
+        Self::SmallestFirst,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::NewestFirst => "Newest first",
+            Self::OldestFirst => "Oldest first",
+            Self::NameAscending => "Name A–Z",
+            Self::NameDescending => "Name Z–A",
+            Self::LargestFirst => "Largest first",
+            Self::SmallestFirst => "Smallest first",
+        }
+    }
+}
 
 pub(crate) fn default_thumbnail_worker_count() -> usize {
     if cfg!(target_os = "android") {
@@ -183,6 +225,7 @@ pub(crate) struct LibraryState {
     status: String,
     usage_clock: u64,
     thumbnail_workers: usize,
+    sort_order: LibrarySortOrder,
     selected_sources: HashSet<LibrarySource>,
     selection_mode: bool,
     #[cfg(not(target_os = "android"))]
@@ -214,6 +257,7 @@ impl LibraryState {
             status: "Open a folder to build your RAW library.".to_owned(),
             usage_clock: 0,
             thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
+            sort_order: LibrarySortOrder::default(),
             selected_sources: HashSet::new(),
             selection_mode: false,
             file_action_receiver: None,
@@ -254,6 +298,7 @@ impl LibraryState {
             status: String::new(),
             usage_clock: 0,
             thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
+            sort_order: LibrarySortOrder::default(),
             selected_sources: HashSet::new(),
             selection_mode: false,
             export_dialog: None,
@@ -290,6 +335,30 @@ impl LibraryState {
 
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
         self.thumbnail_workers
+    }
+
+    fn set_sort_order(&mut self, sort_order: LibrarySortOrder) {
+        if self.sort_order == sort_order {
+            return;
+        }
+        self.sort_order = sort_order;
+        self.sort_entries();
+    }
+
+    fn sort_entries(&mut self) {
+        let sort_order = self.sort_order;
+        self.entries
+            .sort_by(|left, right| compare_library_entries(left, right, sort_order));
+        self.rebuild_entry_indices();
+    }
+
+    fn rebuild_entry_indices(&mut self) {
+        self.entry_indices = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.info.source.clone(), index))
+            .collect();
     }
 
     pub(crate) fn set_thumbnail_worker_count(&mut self, workers: usize, context: &egui::Context) {
@@ -601,12 +670,7 @@ impl LibraryState {
                             new_library_entry(info)
                         })
                         .collect();
-                    self.entry_indices = self
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .map(|(index, entry)| (entry.info.source.clone(), index))
-                        .collect();
+                    self.sort_entries();
                     self.selected_sources
                         .retain(|source| self.entry_indices.contains_key(source));
                     if self.selected_sources.is_empty() && !self.selection_mode {
@@ -937,6 +1001,47 @@ fn same_library_file_identity(left: &LibraryFileInfo, right: &LibraryFileInfo) -
     }
 }
 
+fn compare_library_entries(
+    left: &LibraryEntry,
+    right: &LibraryEntry,
+    sort_order: LibrarySortOrder,
+) -> CmpOrdering {
+    let name_order = compare_library_names(&left.info, &right.info);
+
+    match sort_order {
+        LibrarySortOrder::NewestFirst => library_modified_key(&right.info)
+            .cmp(&library_modified_key(&left.info))
+            .then(name_order),
+        LibrarySortOrder::OldestFirst => library_modified_key(&left.info)
+            .cmp(&library_modified_key(&right.info))
+            .then(name_order),
+        LibrarySortOrder::NameAscending => name_order,
+        LibrarySortOrder::NameDescending => name_order.reverse(),
+        LibrarySortOrder::LargestFirst => right.info.bytes.cmp(&left.info.bytes).then(name_order),
+        LibrarySortOrder::SmallestFirst => left.info.bytes.cmp(&right.info.bytes).then(name_order),
+    }
+}
+
+fn compare_library_names(left: &LibraryFileInfo, right: &LibraryFileInfo) -> CmpOrdering {
+    left.name
+        .to_lowercase()
+        .cmp(&right.name.to_lowercase())
+        .then_with(|| left.display_path.cmp(&right.display_path))
+}
+
+#[cfg(not(target_os = "android"))]
+fn library_modified_key(info: &LibraryFileInfo) -> Option<SystemTime> {
+    info.modified
+}
+
+#[cfg(target_os = "android")]
+fn library_modified_key(info: &LibraryFileInfo) -> u64 {
+    let LibrarySource::Android {
+        modified_seconds, ..
+    } = &info.source;
+    *modified_seconds
+}
+
 fn make_resident_thumbnail(thumbnail: &RawThumbnail) -> RawThumbnail {
     if thumbnail.width <= RESIDENT_THUMBNAIL_EDGE && thumbnail.height <= RESIDENT_THUMBNAIL_EDGE {
         return thumbnail.clone();
@@ -973,6 +1078,267 @@ type ThumbnailLoader =
     Arc<dyn Fn(&LibrarySource) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static>;
 
 #[cfg(not(target_os = "android"))]
+struct DevelopedThumbnailGpu {
+    device: eframe::wgpu::Device,
+    queue: eframe::wgpu::Queue,
+}
+
+#[cfg(not(target_os = "android"))]
+static DEVELOPED_THUMBNAIL_GPU: OnceLock<Result<Mutex<DevelopedThumbnailGpu>, String>> =
+    OnceLock::new();
+
+#[cfg(not(target_os = "android"))]
+static DEVELOPED_THUMBNAIL_RENDER_GATE: Mutex<()> = Mutex::new(());
+
+#[cfg(not(target_os = "android"))]
+fn developed_thumbnail_gpu() -> Result<&'static Mutex<DevelopedThumbnailGpu>, String> {
+    let initialized = DEVELOPED_THUMBNAIL_GPU.get_or_init(|| {
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(
+            &eframe::wgpu::RequestAdapterOptions {
+                power_preference: eframe::wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            },
+        ))
+        .or_else(|_| {
+            pollster::block_on(instance.request_adapter(
+                &eframe::wgpu::RequestAdapterOptions {
+                    power_preference: eframe::wgpu::PowerPreference::LowPower,
+                    compatible_surface: None,
+                    force_fallback_adapter: true,
+                },
+            ))
+        })
+        .map_err(|error| format!("could not find a GPU for edited thumbnails: {error}"))?;
+        let adapter_info = adapter.get_info();
+        let adapter_limits = adapter.limits();
+        let required_dimension = DEVELOPED_THUMBNAIL_PROXY_EDGE.max(mask_atlas_edge());
+        if required_dimension > adapter_limits.max_texture_dimension_2d {
+            return Err(format!(
+                "edited thumbnails require a {required_dimension}-pixel GPU texture, but this adapter supports {}",
+                adapter_limits.max_texture_dimension_2d
+            ));
+        }
+        let mut required_limits = if adapter_info.backend == eframe::wgpu::Backend::Gl {
+            eframe::wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            eframe::wgpu::Limits::default()
+        };
+        required_limits.max_texture_dimension_2d = required_dimension;
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &eframe::wgpu::DeviceDescriptor {
+                label: Some("auraw library edited-thumbnail device"),
+                required_limits,
+                ..Default::default()
+            },
+        ))
+        .map_err(|error| format!("could not create the edited-thumbnail GPU device: {error}"))?;
+        Ok(Mutex::new(DevelopedThumbnailGpu { device, queue }))
+    });
+
+    match initialized {
+        Ok(gpu) => Ok(gpu),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn masks_need_canonical_source(masks: &MaskStack) -> bool {
+    masks.masks.iter().any(|mask| {
+        mask.components.iter().any(|component| {
+            matches!(
+                &component.geometry,
+                MaskGeometry::LuminanceRange { source: None, .. }
+                    | MaskGeometry::ColorRange { source: None, .. }
+            )
+        })
+    })
+}
+
+#[cfg(not(target_os = "android"))]
+fn install_missing_range_sources(masks: &mut MaskStack, source: &MaskRgbImage) {
+    for mask in &mut masks.masks {
+        for component in &mut mask.components {
+            match &mut component.geometry {
+                MaskGeometry::LuminanceRange { source: target, .. }
+                | MaskGeometry::ColorRange { source: target, .. }
+                    if target.is_none() =>
+                {
+                    *target = Some(source.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn render_uncached_developed_thumbnail(
+    path: &Path,
+    maximum_edge: u32,
+) -> Result<Option<RawThumbnail>, String> {
+    let loaded_sidecar = match crate::sidecar::load_desktop(path) {
+        Ok(Some(sidecar)) => sidecar,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "could not load edits for {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    let sidecar_fingerprint = crate::sidecar::desktop_sidecar_fingerprint(path)?
+        .ok_or_else(|| "edit sidecar disappeared before thumbnail rendering".to_owned())?;
+
+    // Full RAW decoding and the separate headless GPU are deliberately
+    // serialized. Embedded previews can still decode concurrently, while
+    // uncached edited cards avoid multiplying the larger sensor/GPU budget.
+    let _render_guard = DEVELOPED_THUMBNAIL_RENDER_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // A different worker may have completed the cache while this request was
+    // waiting for the render gate.
+    if let Some(thumbnail) =
+        crate::sidecar::load_developed_thumbnail_cache(path, maximum_edge)?
+    {
+        return Ok(Some(thumbnail));
+    }
+
+    let performance = crate::performance_settings::load(
+        crate::performance_settings::desktop_path().as_deref(),
+    );
+    let mut camera_profile_folder = performance.camera_profile_folder;
+    if performance.camera_profile_auto_detect
+        && camera_profile_folder
+            .as_ref()
+            .is_none_or(|folder| !folder.is_dir())
+    {
+        camera_profile_folder =
+            crate::performance_settings::detected_adobe_camera_profile_folder();
+    }
+    let requested_camera_profile = loaded_sidecar
+        .edits
+        .camera_profile
+        .as_ref()
+        .and_then(|relative| {
+            camera_profile_folder
+                .as_ref()
+                .map(|root| root.join(relative))
+        });
+    let full_raw = load_raw_file_with_profile_selection(
+        path,
+        performance.camera_profile_mode,
+        camera_profile_folder.as_deref(),
+        requested_camera_profile.as_deref(),
+    )
+    .map_err(|error| format!("could not decode edited RAW {}: {error:#}", path.display()))?;
+    let mut preview_raw = if full_raw.width.max(full_raw.height) > DEVELOPED_THUMBNAIL_PROXY_EDGE {
+        build_proxy(
+            &full_raw,
+            ProxySpec {
+                max_edge: DEVELOPED_THUMBNAIL_PROXY_EDGE,
+            },
+        )
+    } else {
+        full_raw
+    };
+
+    let edits = loaded_sidecar.edits;
+    if edits.lens.enabled {
+        let catalog = lensfun_catalog(&preview_raw);
+        let selected = catalog
+            .lenses
+            .iter()
+            .find(|lens| lens.maker == edits.lens.maker && lens.model == edits.lens.model)
+            .cloned()
+            .or_else(|| {
+                (!edits.lens.maker.is_empty() || !edits.lens.model.is_empty()).then(|| {
+                    LensfunLens {
+                        maker: edits.lens.maker.clone(),
+                        model: edits.lens.model.clone(),
+                    }
+                })
+            })
+            .or(catalog.auto_match);
+        if let Some(selected) = selected {
+            match apply_lensfun_correction(&preview_raw, &selected) {
+                Ok(corrected) => preview_raw = corrected,
+                Err(error) => log::warn!(
+                    "could not apply saved lens correction to library thumbnail {}: {error:#}",
+                    path.display()
+                ),
+            }
+        }
+    }
+
+    let mut masks = Arc::unwrap_or_clone(edits.masks);
+    let inpaint_strokes = Arc::unwrap_or_clone(edits.inpainting);
+    let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
+    let initial_params = GpuParams::new(&edits.exposure, &masks, &preview_raw);
+    let gpu = developed_thumbnail_gpu()?;
+    let gpu = gpu
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pipeline = RawGpuPipeline::new_headless_with_quality(
+        &gpu.device,
+        &gpu.queue,
+        &preview_raw,
+        &initial_params,
+        ProcessingQuality::Preview,
+    )
+    .map_err(|error| format!("could not prepare edited thumbnail rendering: {error:#}"))?;
+    pipeline
+        .update_inpaint_layer(
+            &gpu.queue,
+            composed_inpaint.as_ref(),
+            0,
+            0,
+            preview_raw.width,
+            preview_raw.height,
+        )
+        .map_err(|error| format!("could not apply thumbnail inpainting: {error:#}"))?;
+
+    if masks_need_canonical_source(&masks) {
+        let neutral_exposure = crate::pipeline::ExposureParams::scene_referred_default();
+        let neutral_masks = MaskStack::default();
+        let neutral_params = GpuParams::new(&neutral_exposure, &neutral_masks, &preview_raw);
+        pipeline.recompute(&gpu.queue, &gpu.device, &neutral_params);
+        let rgba = pipeline
+            .read_output_region_blocking(
+                &gpu.device,
+                &gpu.queue,
+                0,
+                0,
+                preview_raw.width,
+                preview_raw.height,
+            )
+            .map_err(|error| format!("could not build range-mask thumbnail source: {error:#}"))?;
+        let source = MaskRgbImage::new(preview_raw.width, preview_raw.height, rgba)
+            .ok_or_else(|| "range-mask thumbnail source has invalid dimensions".to_owned())?;
+        install_missing_range_sources(&mut masks, &source);
+    }
+
+    for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {
+        let edge = pipeline.mask_atlas_edge();
+        let values =
+            masks.rasterize_layer_f16(layer, edge, edge, preview_raw.width, preview_raw.height);
+        pipeline
+            .update_mask_layer(&gpu.queue, layer, &values)
+            .map_err(|error| format!("could not apply thumbnail local mask: {error:#}"))?;
+    }
+    let params = GpuParams::new(&edits.exposure, &masks, &preview_raw);
+    pipeline.recompute(&gpu.queue, &gpu.device, &params);
+    let thumbnail = pipeline
+        .output_snapshot()
+        .read_thumbnail_blocking(&gpu.device, &gpu.queue, maximum_edge)
+        .map_err(|error| format!("could not read edited thumbnail pixels: {error:#}"))?;
+    crate::sidecar::save_developed_thumbnail_cache(path, &thumbnail, sidecar_fingerprint)?;
+    Ok(Some(thumbnail))
+}
+
+#[cfg(not(target_os = "android"))]
 fn load_desktop_library_thumbnail(
     source: &LibrarySource,
 ) -> Result<LoadedLibraryThumbnail, String> {
@@ -986,6 +1352,16 @@ fn load_desktop_library_thumbnail(
             "could not use developed thumbnail cache for {}: {error}",
             path.display()
         ),
+    }
+    match render_uncached_developed_thumbnail(path, THUMBNAIL_EDGE) {
+        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
+        Ok(None) => {}
+        Err(error) => {
+            return Err(format!(
+                "could not render the edited RAW thumbnail for {}: {error}",
+                path.display()
+            ))
+        }
     }
     match crate::thumbnail_cache::load_desktop_raw_thumbnail(path, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => {
@@ -1531,6 +1907,21 @@ impl Library {
                 {
                     refresh = true;
                 }
+
+                let mut selected_sort = app.library.sort_order;
+                egui::ComboBox::from_id_salt("library-sort-order")
+                    .selected_text(selected_sort.label())
+                    .width(128.0)
+                    .show_ui(ui, |ui| {
+                        for sort_order in LibrarySortOrder::ALL {
+                            ui.selectable_value(
+                                &mut selected_sort,
+                                sort_order,
+                                sort_order.label(),
+                            );
+                        }
+                    });
+                app.library.set_sort_order(selected_sort);
             });
         });
 

@@ -198,7 +198,8 @@ pub fn desktop_sidecar_fingerprint(raw_path: &Path) -> Result<Option<u64>, Strin
 
 /// Loads a developed thumbnail only when it is newer than the RAW and its
 /// stored sidecar fingerprint exactly matches the current edit file. Missing or
-/// stale caches intentionally fall back to the embedded RAW thumbnail.
+/// stale caches are regenerated from the RAW plus its sidecar by the library
+/// thumbnail worker before any unedited embedded preview is considered.
 #[cfg(not(target_os = "android"))]
 pub fn load_developed_thumbnail_cache(
     raw_path: &Path,

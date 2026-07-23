@@ -460,6 +460,91 @@ impl Preview {
             return;
         }
 
+        let focused_stroke = app
+            .inpaint_hovered_stroke
+            .or(app.inpaint_selected_stroke)
+            .filter(|index| *index < app.inpaint_strokes.len());
+        if let Some(index) = focused_stroke {
+            let Some(pipeline) = app.gpu_pipeline.as_ref() else {
+                return;
+            };
+            let hovered = app.inpaint_hovered_stroke == Some(index);
+            let max_edge = if cfg!(target_os = "android") {
+                384.0
+            } else {
+                512.0
+            };
+            let scale = (max_edge / image_rect.width().max(image_rect.height())).min(1.0);
+            let width = (image_rect.width() * scale).round().max(1.0) as u32;
+            let height = (image_rect.height() * scale).round().max(1.0) as u32;
+            let key = (
+                index,
+                app.inpaint_texture_revision,
+                width,
+                height,
+                hovered,
+            );
+            if app.inpaint_focus_texture_key != Some(key) {
+                let coverage = rasterize_inpaint_dabs_binary(
+                    width,
+                    height,
+                    pipeline.width,
+                    pipeline.height,
+                    &app.inpaint_strokes[index].dabs,
+                );
+                let color = if hovered {
+                    Color32::from_rgb(255, 190, 70)
+                } else {
+                    Color32::from_rgb(77, 196, 255)
+                };
+                let rgba = coverage_rgba(coverage, color);
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [width as usize, height as usize],
+                    &rgba,
+                );
+                if let Some(texture) = app.inpaint_focus_texture.as_mut() {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    app.inpaint_focus_texture = Some(ui.ctx().load_texture(
+                        "auraw-inpaint-focused-stroke",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                app.inpaint_focus_texture_key = Some(key);
+            }
+            if let Some(texture) = &app.inpaint_focus_texture {
+                painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
+            }
+
+            if let Some(bounds) = inpaint_stroke_screen_bounds(
+                &app.inpaint_strokes[index].dabs,
+                image_rect,
+            ) {
+                let color = if hovered {
+                    Color32::from_rgb(255, 210, 105)
+                } else {
+                    Color32::from_rgb(115, 210, 255)
+                };
+                let bounds = bounds.intersect(preview_rect);
+                if bounds.is_positive() {
+                    painter.rect_stroke(
+                        bounds.expand(3.0),
+                        4.0,
+                        Stroke::new(2.0, color),
+                        egui::StrokeKind::Outside,
+                    );
+                    painter.text(
+                        bounds.left_top() + egui::vec2(4.0, -6.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("Stroke {}", index + 1),
+                        egui::FontId::proportional(11.0),
+                        color,
+                    );
+                }
+            }
+        }
+
         if !app.inpaint_stroke.is_empty() {
             let Some(pipeline) = app.gpu_pipeline.as_ref() else {
                 return;
@@ -1601,6 +1686,21 @@ fn group_coverage_rgba(
 /// fewer source pixels for detail work, while zooming out covers more.
 fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32) -> f32 {
     tool_size.max(0.0) / preview_zoom.max(MIN_PREVIEW_ZOOM)
+}
+
+fn inpaint_stroke_screen_bounds(dabs: &[BrushDab], image_rect: Rect) -> Option<Rect> {
+    let mut bounds: Option<Rect> = None;
+    let short_edge = image_rect.width().min(image_rect.height());
+    for dab in dabs {
+        let center = normalized_to_screen(image_rect, dab.center);
+        let radius = (dab.size * short_edge).max(1.0);
+        let dab_rect = Rect::from_center_size(center, egui::vec2(radius * 2.0, radius * 2.0));
+        bounds = Some(match bounds {
+            Some(existing) => existing.union(dab_rect),
+            None => dab_rect,
+        });
+    }
+    bounds
 }
 
 fn screen_to_normalized(rect: Rect, point: Pos2) -> [f32; 2] {
