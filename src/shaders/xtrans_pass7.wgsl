@@ -1,10 +1,11 @@
 // X-Trans finishing stage. Mode 0 keeps the Markesteijn-3 result. Mode 1
 // preserves its luminance while rejecting chroma energy at the 6x6 X-Trans
-// carrier frequencies. Mode 2 blends a low-detail interpolation through a
-// radius-2 Gaussian-smoothed Scharr mask, matching darktable's dual-demosaic
-// threshold mapping.
+// carrier frequencies. Mode 2 blends the Markesteijn reference with a separate
+// robust CFA reconstruction using a noise-adjusted, Gaussian-smoothed Scharr
+// detail signal plus low-branch support/coherence confidence.
 @group(0) @binding(26) var mark_high_read: texture_2d<f32>;
 @group(0) @binding(10) var xtrans_scene_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
+@group(0) @binding(23) var xtrans_dual_low_read: texture_2d<f32>;
 
 fn xt_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
@@ -158,25 +159,8 @@ fn xt_frequency_chroma(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return xt_from_yuv(y, uv);
 }
 
-fn xt_low_detail(pos: vec2<i32>) -> vec3<f32> {
-    var sum = vec3<f32>(0.0);
-    var weights = vec3<f32>(0.0);
-    let center_green = xt_high(pos).g;
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            let q = pos + vec2<i32>(dx, dy);
-            if !xt_in_bounds(q) { continue; }
-            let channel = color_at(q);
-            let spatial = 1.0 / (1.0 + f32(dx * dx + dy * dy));
-            let edge = 1.0 / (1.0 + 16.0 * abs(xt_high(q).g - center_green));
-            let weight = spatial * edge;
-            let value = raw_cfa_at(q);
-            if channel == 0u { sum.r += value * weight; weights.r += weight; }
-            if channel == 1u { sum.g += value * weight; weights.g += weight; }
-            if channel == 2u { sum.b += value * weight; weights.b += weight; }
-        }
-    }
-    return sum / max(weights, vec3<f32>(1e-6));
+fn xt_dual_low(pos: vec2<i32>) -> vec4<f32> {
+    return textureLoad(xtrans_dual_low_read, clamp_pos(pos), 0);
 }
 
 fn xt_luma(pos: vec2<i32>) -> f32 {
@@ -190,10 +174,10 @@ fn xt_scharr(pos: vec2<i32>) -> f32 {
     let w  = xt_luma(pos + vec2<i32>(-1,  0));
     let e  = xt_luma(pos + vec2<i32>( 1,  0));
     let sw = xt_luma(pos + vec2<i32>(-1,  1));
-    let s  = xt_luma(pos + vec2<i32>( 0,  1));
+    let ss = xt_luma(pos + vec2<i32>( 0,  1));
     let se = xt_luma(pos + vec2<i32>( 1,  1));
     let gx = 3.0 * (ne - nw) + 10.0 * (e - w) + 3.0 * (se - sw);
-    let gy = 3.0 * (sw - nw) + 10.0 * (s - n) + 3.0 * (se - ne);
+    let gy = 3.0 * (sw - nw) + 10.0 * (ss - n) + 3.0 * (se - ne);
     return sqrt(gx * gx + gy * gy) / 32.0;
 }
 
@@ -204,7 +188,7 @@ fn xt_gaussian5_weight(offset: i32) -> f32 {
     return 1.0;
 }
 
-fn xt_dual_weight(pos: vec2<i32>) -> f32 {
+fn xt_dual_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32 {
     var detail = 0.0;
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         let wy = xt_gaussian5_weight(dy);
@@ -216,7 +200,22 @@ fn xt_dual_weight(pos: vec2<i32>) -> f32 {
     detail /= 256.0;
     let threshold = 0.005 * pow(max(params.dual_threshold, 0.0), 1.1);
     if threshold <= 1e-7 { return 1.0; }
-    return smoothstep(threshold, max(4.0 * threshold, threshold + 1e-5), detail);
+
+    let variance = nr_component_variance(0.5 * (reference + low.rgb));
+    let noise_floor = 2.25 * sqrt(max(variance.x, 1e-10));
+    let detail_signal = max(detail - noise_floor, 0.0);
+    let edge_confidence = smoothstep(
+        threshold,
+        max(4.0 * threshold, threshold + 1e-5),
+        detail_signal,
+    );
+    let chroma_delta = length(xt_uv(reference) - xt_uv(low.rgb));
+    let chroma_sigma = max(sqrt(max(variance.y, 1e-10)), 0.0015);
+    let disagreement = smoothstep(3.0 * chroma_sigma, 8.0 * chroma_sigma, chroma_delta);
+    let low_confidence = clamp(low.a, 0.0, 1.0);
+    let alias_penalty = 0.45 * disagreement * (1.0 - 0.35 * edge_confidence);
+    let high_confidence = clamp(edge_confidence * (1.0 - alias_penalty), 0.0, 1.0);
+    return clamp(1.0 - low_confidence * (1.0 - high_confidence), 0.0, 1.0);
 }
 
 fn xt_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
@@ -323,7 +322,8 @@ fn xtrans_demosaic_finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     let reference = xt_high(pos);
     var camera_rgb = reference;
     if params.demosaic_mode >= 1.5 {
-        camera_rgb = mix(xt_low_detail(pos), reference, xt_dual_weight(pos));
+        let low = xt_dual_low(pos);
+        camera_rgb = mix(low.rgb, reference, xt_dual_weight(pos, reference, low));
     } else if params.demosaic_mode >= 0.5 {
         camera_rgb = xt_frequency_chroma(pos, reference);
     } else {

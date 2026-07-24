@@ -40,14 +40,43 @@ def build_scene() -> np.ndarray:
     neutral = np.where(edge, 0.68, 0.065).astype(np.float32)
     rgb[24:120, 24:112, :] = neutral[..., None]
 
-    # Difficult-frequency target: 1-3 px textiles plus coloured crossings.
-    fy = yy[24:120, 136:240]
-    fx = xx[24:120, 136:240]
+    # CFA alias suite: four deterministic near-Nyquist targets covering the
+    # common failure modes that motivate dual demosaic. Keeping them in one
+    # compact block lets Bayer and X-Trans fixtures share identical scene data.
+    # 1) woven fabric with chromatic diagonal modulation.
+    fy = yy[24:72, 136:188]
+    fx = xx[24:72, 136:188]
     weave = 0.32 + 0.16 * np.sign(np.sin(fx * np.pi / 2.0) * np.sin(fy * np.pi / 3.0))
     diagonal = 0.055 * np.sin((fx + 1.7 * fy) * np.pi / 2.5)
-    rgb[24:120, 136:240, 0] = weave + diagonal
-    rgb[24:120, 136:240, 1] = weave
-    rgb[24:120, 136:240, 2] = weave - diagonal
+    rgb[24:72, 136:188, 0] = weave + diagonal
+    rgb[24:72, 136:188, 1] = weave
+    rgb[24:72, 136:188, 2] = weave - diagonal
+
+    # 2) neutral radial zone plate: orientation-independent alias stress.
+    fy = yy[24:72, 188:240] - 48.0
+    fx = xx[24:72, 188:240] - 214.0
+    radius2 = fx * fx + fy * fy
+    zone = 0.34 + 0.20 * np.sin(0.095 * radius2)
+    rgb[24:72, 188:240, :] = zone[..., None]
+
+    # 3) fine diagonal foliage-like luminance with green-biased microcontrast.
+    fy = yy[72:120, 136:188]
+    fx = xx[72:120, 136:188]
+    leaf = 0.30 + 0.11 * np.sin((1.8 * fx + fy) * np.pi / 2.2)
+    leaf += 0.07 * np.sin((fx - 1.4 * fy) * np.pi / 3.1)
+    rgb[72:120, 136:188, 0] = leaf * 0.82
+    rgb[72:120, 136:188, 1] = leaf * 1.08
+    rgb[72:120, 136:188, 2] = leaf * 0.76
+
+    # 4) one/two-pixel chromatic stripe crossings: false-colour stress.
+    fy = yy[72:120, 188:240]
+    fx = xx[72:120, 188:240]
+    carrier = np.sign(np.sin(fx * np.pi / 1.5))
+    cross = np.sign(np.sin((fx + fy) * np.pi / 2.0))
+    base = 0.34 + 0.08 * np.sign(np.sin(fy * np.pi / 2.5))
+    rgb[72:120, 188:240, 0] = base + 0.09 * carrier
+    rgb[72:120, 188:240, 1] = base + 0.03 * cross
+    rgb[72:120, 188:240, 2] = base - 0.09 * carrier
 
     # Flat, underexposed, high-ISO-like patch with deterministic chroma noise.
     rng = np.random.default_rng(0xA0_52)

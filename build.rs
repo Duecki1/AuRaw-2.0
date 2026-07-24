@@ -22,6 +22,7 @@ fn main() {
         "src/shaders/pass2.wgsl",
         "src/shaders/pass3.wgsl",
         "src/shaders/pass4.wgsl",
+        "src/shaders/dual_demosaic.wgsl",
         "src/shaders/xtrans_pass1.wgsl",
         "src/shaders/xtrans_pass2.wgsl",
         "src/shaders/xtrans_pass3.wgsl",

@@ -4,6 +4,7 @@
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(9) var tex3_read: texture_2d<f32>;
 @group(0) @binding(10) var scene_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
+@group(0) @binding(23) var dual_low_read: texture_2d<f32>;
 
 const RCD_MARGIN: i32 = 9;
 
@@ -273,26 +274,8 @@ fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
     return bayer_from_yuv(center_y, center_uv - reject * carrier_alias);
 }
 
-fn low_detail_rgb_at(pos: vec2<i32>) -> vec3<f32> {
-    // VNG-style low-detail reconstruction: measured samples are accumulated
-    // per channel with a green-edge range weight, then colour-smoothed.
-    let center_g = ppg_green_at(pos);
-    var sum = vec3<f32>(0.0);
-    var weights = vec3<f32>(0.0);
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            let q = pos + vec2<i32>(dx, dy);
-            if !demosaic_in_bounds(q) { continue; }
-            let channel = color_at(q);
-            let spatial = 1.0 / (1.0 + f32(dx * dx + dy * dy));
-            let range = 1.0 / (1.0 + 16.0 * abs(ppg_green_at(q) - center_g));
-            let weight = spatial * range;
-            if channel == 0u { sum.r += raw_cfa_at(q) * weight; weights.r += weight; }
-            if channel == 1u { sum.g += raw_cfa_at(q) * weight; weights.g += weight; }
-            if channel == 2u { sum.b += raw_cfa_at(q) * weight; weights.b += weight; }
-        }
-    }
-    return sum / max(weights, vec3<f32>(1e-6));
+fn dual_low_at(pos: vec2<i32>) -> vec4<f32> {
+    return textureLoad(dual_low_read, clamp_pos(pos), 0);
 }
 
 fn reference_luma_at(pos: vec2<i32>) -> f32 {
@@ -306,10 +289,10 @@ fn scharr_detail_at(pos: vec2<i32>) -> f32 {
     let w  = reference_luma_at(pos + vec2<i32>(-1,  0));
     let e  = reference_luma_at(pos + vec2<i32>( 1,  0));
     let sw = reference_luma_at(pos + vec2<i32>(-1,  1));
-    let s  = reference_luma_at(pos + vec2<i32>( 0,  1));
+    let ss = reference_luma_at(pos + vec2<i32>( 0,  1));
     let se = reference_luma_at(pos + vec2<i32>( 1,  1));
     let gx = 3.0 * (ne - nw) + 10.0 * (e - w) + 3.0 * (se - sw);
-    let gy = 3.0 * (sw - nw) + 10.0 * (s - n) + 3.0 * (se - ne);
+    let gy = 3.0 * (sw - nw) + 10.0 * (ss - n) + 3.0 * (se - ne);
     return sqrt(gx * gx + gy * gy) / 32.0;
 }
 
@@ -320,7 +303,7 @@ fn gaussian5_weight(offset: i32) -> f32 {
     return 1.0;
 }
 
-fn dual_high_weight(pos: vec2<i32>) -> f32 {
+fn dual_high_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32 {
     var detail = 0.0;
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         let wy = gaussian5_weight(dy);
@@ -330,9 +313,29 @@ fn dual_high_weight(pos: vec2<i32>) -> f32 {
         }
     }
     detail /= 256.0;
+
     let threshold = 0.005 * pow(max(params.dual_threshold, 0.0), 1.1);
     if threshold <= 1e-7 { return 1.0; }
-    return smoothstep(threshold, max(4.0 * threshold, threshold + 1e-5), detail);
+
+    // Do not mistake sensor noise for real image detail. The low branch stores
+    // its own support/coherence confidence in alpha, so weak low estimates
+    // automatically fall back to RCD instead of smearing edges or borders.
+    let variance = nr_component_variance(0.5 * (reference + low.rgb));
+    let noise_floor = 2.25 * sqrt(max(variance.x, 1e-10));
+    let detail_signal = max(detail - noise_floor, 0.0);
+    let edge_confidence = smoothstep(
+        threshold,
+        max(4.0 * threshold, threshold + 1e-5),
+        detail_signal,
+    );
+
+    let chroma_delta = length(bayer_uv(reference) - bayer_uv(low.rgb));
+    let chroma_sigma = max(sqrt(max(variance.y, 1e-10)), 0.0015);
+    let disagreement = smoothstep(3.0 * chroma_sigma, 8.0 * chroma_sigma, chroma_delta);
+    let low_confidence = clamp(low.a, 0.0, 1.0);
+    let alias_penalty = 0.45 * disagreement * (1.0 - 0.35 * edge_confidence);
+    let high_confidence = clamp(edge_confidence * (1.0 - alias_penalty), 0.0, 1.0);
+    return clamp(1.0 - low_confidence * (1.0 - high_confidence), 0.0, 1.0);
 }
 
 fn warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
@@ -437,7 +440,8 @@ fn bayer_rcd_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     let reference = rcd_reference_at(pos);
     var camera_rgb = reference;
     if params.demosaic_mode >= 1.5 {
-        camera_rgb = mix(low_detail_rgb_at(pos), reference, dual_high_weight(pos));
+        let low = dual_low_at(pos);
+        camera_rgb = mix(low.rgb, reference, dual_high_weight(pos, reference, low));
     } else if params.demosaic_mode >= 0.5 {
         camera_rgb = frequency_chroma_at(pos, reference);
     } else {
