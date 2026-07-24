@@ -20,6 +20,7 @@ pub enum ExportFormat {
     #[default]
     Png,
     Jpeg,
+    Tiff,
 }
 
 impl ExportFormat {
@@ -27,6 +28,7 @@ impl ExportFormat {
         match self {
             Self::Png => "PNG",
             Self::Jpeg => "JPEG",
+            Self::Tiff => "TIFF",
         }
     }
 
@@ -34,6 +36,7 @@ impl ExportFormat {
         match self {
             Self::Png => "png",
             Self::Jpeg => "jpg",
+            Self::Tiff => "tif",
         }
     }
 
@@ -41,6 +44,45 @@ impl ExportFormat {
         match self {
             Self::Png => "image/png",
             Self::Jpeg => "image/jpeg",
+            Self::Tiff => "image/tiff",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportBitDepth {
+    Eight,
+    #[default]
+    Sixteen,
+    Float32Linear,
+}
+
+impl ExportBitDepth {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Eight => "8-bit integer",
+            Self::Sixteen => "16-bit integer",
+            Self::Float32Linear => "32-bit float / linear master",
+        }
+    }
+
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::Float32Linear)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportColorProfile {
+    #[default]
+    Srgb,
+    CustomIcc,
+}
+
+impl ExportColorProfile {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Srgb => "sRGB",
+            Self::CustomIcc => "Custom ICC",
         }
     }
 }
@@ -69,7 +111,7 @@ impl ExportResizeMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExportSettings {
     pub resize_mode: ExportResizeMode,
     pub edge_or_dimension: u32,
@@ -77,6 +119,9 @@ pub struct ExportSettings {
     pub allow_upscale: bool,
     pub keep_metadata: bool,
     pub jpeg_quality: u8,
+    pub bit_depth: ExportBitDepth,
+    pub color_profile: ExportColorProfile,
+    pub custom_icc_path: Option<PathBuf>,
 }
 
 impl Default for ExportSettings {
@@ -88,6 +133,9 @@ impl Default for ExportSettings {
             allow_upscale: false,
             keep_metadata: true,
             jpeg_quality: 90,
+            bit_depth: ExportBitDepth::Sixteen,
+            color_profile: ExportColorProfile::Srgb,
+            custom_icc_path: None,
         }
     }
 }
@@ -104,7 +152,7 @@ const MAX_EXPORT_BAND_BYTES: u64 = 192 * 1024 * 1024;
 const STALE_EXPORT_PART_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl ExportSettings {
-    pub fn output_dimensions(self, source_width: u32, source_height: u32) -> (u32, u32) {
+    pub fn output_dimensions(&self, source_width: u32, source_height: u32) -> (u32, u32) {
         let source_width = source_width.max(1);
         let source_height = source_height.max(1);
         if self.resize_mode == ExportResizeMode::Original {
@@ -133,7 +181,7 @@ impl ExportSettings {
     }
 
     pub fn checked_output_dimensions(
-        self,
+        &self,
         source_width: u32,
         source_height: u32,
     ) -> Result<(u32, u32)> {
@@ -257,6 +305,7 @@ pub fn spawn_tiled_png_export(
                 let (output_width, output_height) =
                     settings.checked_output_dimensions(geometry_width, geometry_height)?;
                 let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
+                let color = resolve_export_color(&settings)?;
                 export_to_destination(&worker_path, |path| {
                     export_tiled_png(
                         ExportContext {
@@ -276,6 +325,8 @@ pub fn spawn_tiled_png_export(
                             keep_metadata: settings.keep_metadata,
                             metadata: &metadata,
                             geometry,
+                            bit_depth: settings.bit_depth,
+                            color: &color,
                         },
                     )
                 })
@@ -306,9 +357,9 @@ pub fn spawn_tiled_png_export(
     receiver
 }
 
-/// JPEG export uses the exact same full-quality tiled render as PNG, writing
-/// the rendered RGB8 rows into a bounded disk-backed staging raster before
-/// JPEG compression. Keeping the render path shared ensures both formats match.
+/// JPEG export uses the exact same full-quality tiled render as PNG/TIFF,
+/// converting the float render through the selected output profile before
+/// writing RGB8 rows into a bounded disk-backed staging raster for compression.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_jpeg_export(
     device: wgpu::Device,
@@ -347,6 +398,9 @@ pub fn spawn_tiled_jpeg_export(
                 let (output_width, output_height) =
                     settings.checked_output_dimensions(geometry_width, geometry_height)?;
                 let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
+                let mut jpeg_settings = settings.clone();
+                jpeg_settings.bit_depth = ExportBitDepth::Eight;
+                let color = resolve_export_color(&jpeg_settings)?;
                 export_to_destination(&worker_path, |path| {
                     export_tiled_jpeg(
                         ExportContext {
@@ -366,6 +420,8 @@ pub fn spawn_tiled_jpeg_export(
                             keep_metadata: settings.keep_metadata,
                             metadata: &metadata,
                             geometry,
+                            bit_depth: ExportBitDepth::Eight,
+                            color: &color,
                         },
                         settings.jpeg_quality,
                     )
@@ -394,6 +450,77 @@ pub fn spawn_tiled_jpeg_export(
         ))));
     }
 
+    receiver
+}
+
+/// TIFF export shares the same full-quality tiled linear render, with 8/16-bit
+/// ICC-managed delivery or a 32-bit float linear Rec.2020 master.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_tiled_tiff_export(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    raw: Arc<LoadedRaw>,
+    geometry: GeometryTransform,
+    exposure: ExposureParams,
+    masks: MaskStack,
+    inpaint: Option<InpaintLayer>,
+    path: PathBuf,
+    tile_spec: TileSpec,
+    settings: ExportSettings,
+    metadata: ExportMetadata,
+) -> mpsc::Receiver<ExportEvent> {
+    let (sender, receiver) = mpsc::channel();
+    let worker_sender = sender.clone();
+    let worker_path = path.clone();
+
+    let spawn_result = std::thread::Builder::new()
+        .name("auraw-tiled-tiff-export".to_owned())
+        .spawn(move || {
+            let result = (|| -> Result<()> {
+                let geometry = geometry.sanitized();
+                let (geometry_width, geometry_height) =
+                    geometry.crop_pixel_dimensions(raw.width, raw.height);
+                let (output_width, output_height) =
+                    settings.checked_output_dimensions(geometry_width, geometry_height)?;
+                let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
+                let color = resolve_export_color(&settings)?;
+                export_to_destination(&worker_path, |path| {
+                    export_tiled_tiff(
+                        ExportContext {
+                            device: &device,
+                            queue: &queue,
+                            events: &worker_sender,
+                        },
+                        ExportRequest {
+                            raw: &raw,
+                            exposure: &exposure,
+                            masks: &masks,
+                            inpaint: inpaint.as_ref(),
+                            path,
+                            tile_spec,
+                            output_width,
+                            output_height,
+                            keep_metadata: settings.keep_metadata,
+                            metadata: &metadata,
+                            geometry,
+                            bit_depth: settings.bit_depth,
+                            color: &color,
+                        },
+                    )
+                })
+            })();
+            let _ = worker_sender.send(ExportEvent::Finished(
+                result
+                    .map(|_| worker_path)
+                    .map_err(|error| format!("{error:#}")),
+            ));
+        });
+
+    if let Err(error) = spawn_result {
+        let _ = sender.send(ExportEvent::Finished(Err(format!(
+            "could not start TIFF export worker: {error}"
+        ))));
+    }
     receiver
 }
 
@@ -455,16 +582,196 @@ struct ExportRequest<'a> {
     keep_metadata: bool,
     metadata: &'a ExportMetadata,
     geometry: GeometryTransform,
+    bit_depth: ExportBitDepth,
+    color: &'a ResolvedExportColor,
+}
+
+struct ResolvedExportColor {
+    transform: Option<IccOutputTransform>,
+    embedded_icc: Option<Vec<u8>>,
+    srgb: bool,
+}
+
+#[derive(Clone, Copy)]
+enum IccTransfer {
+    Linear,
+    Srgb,
+}
+
+fn built_in_srgb_icc() -> Vec<u8> {
+    build_matrix_shaper_icc(
+        "sRGB",
+        [
+            [0.436_074_7, 0.385_064_9, 0.143_080_4],
+            [0.222_504_5, 0.716_878_6, 0.060_616_9],
+            [0.013_932_2, 0.097_104_5, 0.714_173_3],
+        ],
+        IccTransfer::Srgb,
+    )
+}
+
+fn build_matrix_shaper_icc(
+    _name: &str,
+    matrix: [[f32; 3]; 3],
+    transfer: IccTransfer,
+) -> Vec<u8> {
+    fn fixed(value: f32) -> [u8; 4] {
+        ((value as f64 * 65_536.0).round() as i32).to_be_bytes()
+    }
+    fn xyz_tag(xyz: [f32; 3]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(20);
+        data.extend_from_slice(b"XYZ ");
+        data.extend_from_slice(&[0; 4]);
+        for value in xyz {
+            data.extend_from_slice(&fixed(value));
+        }
+        data
+    }
+    fn curve_tag(transfer: IccTransfer) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"curv");
+        data.extend_from_slice(&[0; 4]);
+        match transfer {
+            IccTransfer::Linear => {
+                data.extend_from_slice(&0u32.to_be_bytes());
+            }
+            IccTransfer::Srgb => {
+                const SAMPLES: u32 = 1024;
+                data.extend_from_slice(&SAMPLES.to_be_bytes());
+                for index in 0..SAMPLES {
+                    let encoded = index as f32 / (SAMPLES - 1) as f32;
+                    let linear = if encoded <= 0.04045 {
+                        encoded / 12.92
+                    } else {
+                        ((encoded + 0.055) / 1.055).powf(2.4)
+                    };
+                    let sample = (linear.clamp(0.0, 1.0) * 65_535.0).round() as u16;
+                    data.extend_from_slice(&sample.to_be_bytes());
+                }
+            }
+        }
+        while data.len() % 4 != 0 {
+            data.push(0);
+        }
+        data
+    }
+
+    let tags = [
+        (*b"wtpt", xyz_tag([0.9642, 1.0, 0.8249])),
+        (*b"rXYZ", xyz_tag([matrix[0][0], matrix[1][0], matrix[2][0]])),
+        (*b"gXYZ", xyz_tag([matrix[0][1], matrix[1][1], matrix[2][1]])),
+        (*b"bXYZ", xyz_tag([matrix[0][2], matrix[1][2], matrix[2][2]])),
+        (*b"rTRC", curve_tag(transfer)),
+        (*b"gTRC", curve_tag(transfer)),
+        (*b"bTRC", curve_tag(transfer)),
+    ];
+
+    let table_size = 128usize + 4 + tags.len() * 12;
+    let mut offsets = Vec::with_capacity(tags.len());
+    let mut cursor = table_size;
+    for (_, data) in &tags {
+        cursor = (cursor + 3) & !3;
+        offsets.push(cursor);
+        cursor += data.len();
+    }
+    let profile_size = cursor;
+
+    let mut profile = vec![0u8; table_size];
+    profile[0..4].copy_from_slice(&(profile_size as u32).to_be_bytes());
+    profile[8..12].copy_from_slice(&0x0210_0000u32.to_be_bytes());
+    profile[12..16].copy_from_slice(b"mntr");
+    profile[16..20].copy_from_slice(b"RGB ");
+    profile[20..24].copy_from_slice(b"XYZ ");
+    profile[24..26].copy_from_slice(&2026u16.to_be_bytes());
+    profile[26..28].copy_from_slice(&1u16.to_be_bytes());
+    profile[28..30].copy_from_slice(&1u16.to_be_bytes());
+    profile[36..40].copy_from_slice(b"acsp");
+    profile[40..44].copy_from_slice(b"APPL");
+    profile[64..68].copy_from_slice(&0u32.to_be_bytes());
+    profile[68..72].copy_from_slice(&fixed(0.9642));
+    profile[72..76].copy_from_slice(&fixed(1.0));
+    profile[76..80].copy_from_slice(&fixed(0.8249));
+    profile[80..84].copy_from_slice(b"AuRw");
+    profile[128..132].copy_from_slice(&(tags.len() as u32).to_be_bytes());
+    for (index, ((signature, data), offset)) in tags.iter().zip(&offsets).enumerate() {
+        let base = 132 + index * 12;
+        profile[base..base + 4].copy_from_slice(signature);
+        profile[base + 4..base + 8].copy_from_slice(&(*offset as u32).to_be_bytes());
+        profile[base + 8..base + 12].copy_from_slice(&(data.len() as u32).to_be_bytes());
+    }
+    for ((_, data), offset) in tags.iter().zip(offsets) {
+        while profile.len() < offset {
+            profile.push(0);
+        }
+        profile.extend_from_slice(data);
+    }
+    profile
+}
+
+fn resolve_export_color(settings: &ExportSettings) -> Result<ResolvedExportColor> {
+    if settings.bit_depth.is_float() {
+        return Ok(ResolvedExportColor {
+            transform: None,
+            embedded_icc: Some(build_matrix_shaper_icc(
+                "Linear Rec.2020",
+                [
+                    [0.673_424_1, 0.165_641_1, 0.125_128_6],
+                    [0.279_017_7, 0.675_340_2, 0.045_637_7],
+                    [-0.001_930_0, 0.029_978_4, 0.797_333_0],
+                ],
+                IccTransfer::Linear,
+            )),
+            srgb: false,
+        });
+    }
+
+    match settings.color_profile {
+        ExportColorProfile::Srgb => Ok(ResolvedExportColor {
+            transform: Some(IccOutputTransform::srgb()),
+            embedded_icc: None,
+            srgb: true,
+        }),
+        ExportColorProfile::CustomIcc => {
+            let path = settings
+                .custom_icc_path
+                .as_deref()
+                .context("select a custom ICC profile before exporting")?;
+            let bytes = fs::read(path)
+                .with_context(|| format!("read output ICC profile {}", path.display()))?;
+            anyhow::ensure!(
+                (132..=64 * 1024 * 1024).contains(&bytes.len()),
+                "output ICC profile has an invalid size"
+            );
+            let transform = IccOutputTransform::from_icc(
+                &bytes,
+                super::RenderingIntent::RelativeColorimetric,
+            )
+            .with_context(|| format!("build output transform from {}", path.display()))?;
+            Ok(ResolvedExportColor {
+                transform: Some(transform),
+                embedded_icc: Some(bytes),
+                srgb: false,
+            })
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExportRowFormat {
     Rgb8,
     Rgba8,
+    Rgb16Be,
+    Rgba16Be,
+    Rgb16Le,
+    RgbF32Le,
 }
 
 fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
     validate_export_dimensions(request.output_width, request.output_height)?;
+    anyhow::ensure!(
+        !request.bit_depth.is_float(),
+        "PNG export supports 8-bit or 16-bit integer output; use TIFF for a float/linear master"
+    );
     if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
         return export_tiled_png_geometry(context, request);
     }
@@ -472,7 +779,14 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         .with_context(|| format!("create export {}", request.path.display()))?;
     let mut info = png::Info::with_size(request.output_width, request.output_height);
     info.color_type = png::ColorType::Rgba;
-    info.bit_depth = png::BitDepth::Eight;
+    info.bit_depth = match request.bit_depth {
+        ExportBitDepth::Eight => png::BitDepth::Eight,
+        ExportBitDepth::Sixteen => png::BitDepth::Sixteen,
+        ExportBitDepth::Float32Linear => unreachable!("float PNG rejected above"),
+    };
+    if let Some(profile) = request.color.embedded_icc.as_ref() {
+        info.icc_profile = Some(Cow::Owned(profile.clone()));
+    }
     if request.keep_metadata {
         info.exif_metadata = Some(Cow::Owned(build_exif_payload(
             request.metadata,
@@ -482,7 +796,9 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
     }
     let mut encoder =
         png::Encoder::with_info(BufWriter::new(file), info).context("configure PNG encoder")?;
-    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    if request.color.srgb {
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    }
     if request.keep_metadata {
         add_png_text_metadata(
             &mut encoder,
@@ -497,20 +813,28 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
     let mut stream = writer
         .stream_writer_with_size(64 * 1024)
         .context("create streaming PNG writer")?;
-    render_tiled_srgb(context, request, &mut stream, ExportRowFormat::Rgba8)?;
+    let row_format = match request.bit_depth {
+        ExportBitDepth::Eight => ExportRowFormat::Rgba8,
+        ExportBitDepth::Sixteen => ExportRowFormat::Rgba16Be,
+        ExportBitDepth::Float32Linear => unreachable!("float PNG rejected above"),
+    };
+    render_tiled_output(context, request, &mut stream, row_format)?;
     stream.finish().context("finish streaming PNG data")?;
     writer.finish().context("finish PNG file")?;
     Ok(())
 }
 
-fn render_tiled_srgb<W: Write>(
+fn render_tiled_output<W: Write>(
     context: ExportContext<'_>,
     request: ExportRequest<'_>,
     output: &mut W,
     row_format: ExportRowFormat,
 ) -> Result<()> {
     validate_export_dimensions(request.output_width, request.output_height)?;
-    let output_transform = IccOutputTransform::srgb();
+    let output_transform = request
+        .color
+        .transform
+        .as_ref();
     let mut resizer = LinearLightResizer::new_with_format(
         request.raw.width,
         request.raw.height,
@@ -519,9 +843,9 @@ fn render_tiled_srgb<W: Write>(
         row_format,
     )?;
     stream_tiled_linear_rows(context, request, |source_y, source| {
-        resizer.push_source_row(source_y, source, &output_transform, output)
+        resizer.push_source_row(source_y, source, output_transform, output)
     })?;
-    resizer.finish(&output_transform, output)?;
+    resizer.finish(output_transform, output)?;
     Ok(())
 }
 
@@ -550,6 +874,8 @@ where
         keep_metadata: _,
         metadata: _,
         geometry,
+        bit_depth: _,
+        color: _,
     } = request;
     let export_started = Instant::now();
     validate_export_dimensions(output_width, output_height)?;
@@ -808,13 +1134,20 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
             request.output_width,
             request.output_height,
         )?;
-        let output_transform = IccOutputTransform::srgb();
+        let output_transform = request.color.transform.as_ref();
 
         let file = open_export_destination(request.path)
             .with_context(|| format!("create export {}", request.path.display()))?;
         let mut info = png::Info::with_size(request.output_width, request.output_height);
         info.color_type = png::ColorType::Rgba;
-        info.bit_depth = png::BitDepth::Eight;
+        info.bit_depth = match request.bit_depth {
+            ExportBitDepth::Eight => png::BitDepth::Eight,
+            ExportBitDepth::Sixteen => png::BitDepth::Sixteen,
+            ExportBitDepth::Float32Linear => unreachable!("float PNG rejected before geometry export"),
+        };
+        if let Some(profile) = request.color.embedded_icc.as_ref() {
+            info.icc_profile = Some(Cow::Owned(profile.clone()));
+        }
         if request.keep_metadata {
             info.exif_metadata = Some(Cow::Owned(build_exif_payload(
                 request.metadata,
@@ -824,7 +1157,9 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
         }
         let mut encoder = png::Encoder::with_info(BufWriter::new(file), info)
             .context("configure transformed PNG encoder")?;
-        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        if request.color.srgb {
+            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        }
         if request.keep_metadata {
             add_png_text_metadata(
                 &mut encoder,
@@ -845,18 +1180,23 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
             request.output_width,
             request.output_height,
         );
+        let row_format = match request.bit_depth {
+            ExportBitDepth::Eight => ExportRowFormat::Rgba8,
+            ExportBitDepth::Sixteen => ExportRowFormat::Rgba16Be,
+            ExportBitDepth::Float32Linear => unreachable!("float PNG rejected before geometry export"),
+        };
         for y in 0..request.output_height {
             let linear = resampler.output_row(y)?;
             output_sharpen.push_row(
                 linear,
-                &output_transform,
-                ExportRowFormat::Rgba8,
+                output_transform,
+                row_format,
                 &mut stream,
             )?;
         }
         output_sharpen.finish(
-            &output_transform,
-            ExportRowFormat::Rgba8,
+            output_transform,
+            row_format,
             &mut stream,
         )?;
         stream.finish().context("finish transformed PNG data")?;
@@ -914,7 +1254,7 @@ fn export_tiled_jpeg_geometry(
             request.output_width,
             request.output_height,
         )?;
-        let output_transform = IccOutputTransform::srgb();
+        let output_transform = request.color.transform.as_ref();
         {
             let file = OpenOptions::new()
                 .write(true)
@@ -934,13 +1274,13 @@ fn export_tiled_jpeg_geometry(
                 let linear = resampler.output_row(y)?;
                 output_sharpen.push_row(
                     linear,
-                    &output_transform,
+                    output_transform,
                     ExportRowFormat::Rgb8,
                     &mut writer,
                 )?;
             }
             output_sharpen.finish(
-                &output_transform,
+                output_transform,
                 ExportRowFormat::Rgb8,
                 &mut writer,
             )?;
@@ -984,6 +1324,7 @@ fn export_tiled_jpeg_geometry(
             request.metadata,
             request.output_width,
             request.output_height,
+            request.color.embedded_icc.as_deref(),
         )?;
         Ok(())
     })();
@@ -994,6 +1335,285 @@ fn export_tiled_jpeg_geometry(
         let _ = fs::remove_file(request.path);
     }
     result
+}
+
+fn export_tiled_tiff(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
+    validate_export_dimensions(request.output_width, request.output_height)?;
+    if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
+        return export_tiled_tiff_geometry(context, request);
+    }
+
+    let file = open_export_destination(request.path)
+        .with_context(|| format!("create TIFF {}", request.path.display()))?;
+    let mut writer = BufWriter::new(file);
+    let row_format = tiff_row_format(request.bit_depth);
+    let profile = tiff_embedded_profile(request.color);
+    write_tiff_header(&mut writer, request, row_format, &profile)?;
+    render_tiled_output(context, request, &mut writer, row_format)?;
+    writer.flush().context("flush TIFF export")?;
+    Ok(())
+}
+
+fn export_tiled_tiff_geometry(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+) -> Result<()> {
+    let staged_linear = temporary_export_path(request.path)?;
+    let result = (|| -> Result<()> {
+        {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged_linear)
+                .with_context(|| format!("create geometry linear raster {}", staged_linear.display()))?;
+            let mut writer = BufWriter::new(file);
+            stream_tiled_linear_rows(context, request, |_source_y, row| {
+                writer
+                    .write_all(bytemuck::cast_slice(row))
+                    .context("write TIFF geometry linear source row")
+            })?;
+            writer.flush().context("flush TIFF geometry source raster")?;
+        }
+
+        let source_file = fs::File::open(&staged_linear)
+            .with_context(|| format!("open geometry linear raster {}", staged_linear.display()))?;
+        // SAFETY: the staged source remains immutable while mapped.
+        let source_map = unsafe { memmap2::MmapOptions::new().map(&source_file) }
+            .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
+        let source = validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
+        let resampler = GeometryResampler::new_with_lens(
+            source,
+            request.raw.width,
+            request.raw.height,
+            request.geometry,
+            request.raw.lens_geometry.as_deref(),
+            request.output_width,
+            request.output_height,
+        )?;
+
+        let file = open_export_destination(request.path)
+            .with_context(|| format!("create TIFF {}", request.path.display()))?;
+        let mut writer = BufWriter::new(file);
+        let row_format = tiff_row_format(request.bit_depth);
+        let profile = tiff_embedded_profile(request.color);
+        write_tiff_header(&mut writer, request, row_format, &profile)?;
+
+        let mut output_sharpen = FinalSizeOutputSharpen::new(
+            request.raw.width,
+            request.raw.height,
+            request.output_width,
+            request.output_height,
+        )
+        .with_passthrough(request.bit_depth == ExportBitDepth::Float32Linear);
+        let output_transform = request.color.transform.as_ref();
+        for y in 0..request.output_height {
+            output_sharpen.push_row(
+                resampler.output_row(y)?,
+                output_transform,
+                row_format,
+                &mut writer,
+            )?;
+        }
+        output_sharpen.finish(output_transform, row_format, &mut writer)?;
+        writer.flush().context("flush transformed TIFF")?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&staged_linear);
+    if result.is_err() {
+        let _ = fs::remove_file(request.path);
+    }
+    result
+}
+
+fn tiff_row_format(bit_depth: ExportBitDepth) -> ExportRowFormat {
+    match bit_depth {
+        ExportBitDepth::Eight => ExportRowFormat::Rgb8,
+        ExportBitDepth::Sixteen => ExportRowFormat::Rgb16Le,
+        ExportBitDepth::Float32Linear => ExportRowFormat::RgbF32Le,
+    }
+}
+
+fn tiff_embedded_profile(color: &ResolvedExportColor) -> Vec<u8> {
+    color
+        .embedded_icc
+        .clone()
+        .unwrap_or_else(built_in_srgb_icc)
+}
+
+#[derive(Clone)]
+struct TiffEntry {
+    tag: u16,
+    field_type: u16,
+    count: u32,
+    data: Vec<u8>,
+}
+
+fn tiff_short(value: u16) -> Vec<u8> {
+    value.to_le_bytes().to_vec()
+}
+
+fn tiff_long(value: u32) -> Vec<u8> {
+    value.to_le_bytes().to_vec()
+}
+
+fn tiff_ascii(value: &str) -> Vec<u8> {
+    let mut bytes = value.as_bytes().to_vec();
+    if bytes.last().copied() != Some(0) {
+        bytes.push(0);
+    }
+    bytes
+}
+
+fn write_tiff_header<W: Write>(
+    output: &mut W,
+    request: ExportRequest<'_>,
+    row_format: ExportRowFormat,
+    profile: &[u8],
+) -> Result<()> {
+    let bits = match row_format {
+        ExportRowFormat::Rgb8 => 8u16,
+        ExportRowFormat::Rgb16Le => 16u16,
+        ExportRowFormat::RgbF32Le => 32u16,
+        _ => return Err(anyhow::anyhow!("unsupported TIFF row encoding")),
+    };
+    let sample_format = if row_format == ExportRowFormat::RgbF32Le {
+        3u16
+    } else {
+        1u16
+    };
+    let bytes_per_pixel = u64::from(bits / 8) * 3;
+    let pixel_bytes = u64::from(request.output_width)
+        .checked_mul(u64::from(request.output_height))
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+        .context("TIFF pixel byte count overflow")?;
+    let pixel_bytes_u32 = u32::try_from(pixel_bytes)
+        .context("TIFF pixel data exceeds classic TIFF's 4 GiB limit")?;
+
+    let mut entries = vec![
+        TiffEntry { tag: 256, field_type: 4, count: 1, data: tiff_long(request.output_width) },
+        TiffEntry { tag: 257, field_type: 4, count: 1, data: tiff_long(request.output_height) },
+        TiffEntry {
+            tag: 258,
+            field_type: 3,
+            count: 3,
+            data: [bits.to_le_bytes(), bits.to_le_bytes(), bits.to_le_bytes()].concat(),
+        },
+        TiffEntry { tag: 259, field_type: 3, count: 1, data: tiff_short(1) },
+        TiffEntry { tag: 262, field_type: 3, count: 1, data: tiff_short(2) },
+        TiffEntry { tag: 273, field_type: 4, count: 1, data: tiff_long(0) },
+        TiffEntry { tag: 274, field_type: 3, count: 1, data: tiff_short(1) },
+        TiffEntry { tag: 277, field_type: 3, count: 1, data: tiff_short(3) },
+        TiffEntry { tag: 278, field_type: 4, count: 1, data: tiff_long(request.output_height) },
+        TiffEntry { tag: 279, field_type: 4, count: 1, data: tiff_long(pixel_bytes_u32) },
+        TiffEntry { tag: 284, field_type: 3, count: 1, data: tiff_short(1) },
+        TiffEntry { tag: 305, field_type: 2, count: 10, data: tiff_ascii("AuRaw 2.0") },
+        TiffEntry {
+            tag: 339,
+            field_type: 3,
+            count: 3,
+            data: [
+                sample_format.to_le_bytes(),
+                sample_format.to_le_bytes(),
+                sample_format.to_le_bytes(),
+            ]
+            .concat(),
+        },
+        TiffEntry {
+            tag: 34675,
+            field_type: 7,
+            count: u32::try_from(profile.len()).context("ICC profile is too large for TIFF")?,
+            data: profile.to_vec(),
+        },
+    ];
+
+    if request.keep_metadata {
+        let description = combined_image_description(request.metadata);
+        if !description.is_empty() {
+            let data = tiff_ascii(&description);
+            entries.push(TiffEntry { tag: 270, field_type: 2, count: data.len() as u32, data });
+        }
+        if !request.metadata.camera_make.trim().is_empty() {
+            let data = tiff_ascii(request.metadata.camera_make.trim());
+            entries.push(TiffEntry { tag: 271, field_type: 2, count: data.len() as u32, data });
+        }
+        if !request.metadata.camera_model.trim().is_empty() {
+            let data = tiff_ascii(request.metadata.camera_model.trim());
+            entries.push(TiffEntry { tag: 272, field_type: 2, count: data.len() as u32, data });
+        }
+        if !request.metadata.artist.trim().is_empty() {
+            let data = tiff_ascii(request.metadata.artist.trim());
+            entries.push(TiffEntry { tag: 315, field_type: 2, count: data.len() as u32, data });
+        }
+    }
+
+    entries.sort_by_key(|entry| entry.tag);
+    let ifd_size = 2usize
+        .checked_add(entries.len().checked_mul(12).context("TIFF IFD size overflow")?)
+        .and_then(|value| value.checked_add(4))
+        .context("TIFF IFD size overflow")?;
+    let mut cursor = 8usize.checked_add(ifd_size).context("TIFF header size overflow")?;
+    let mut external_offsets = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if entry.data.len() > 4 {
+            cursor = (cursor + 1) & !1;
+            external_offsets.push(Some(cursor));
+            cursor = cursor.checked_add(entry.data.len()).context("TIFF metadata size overflow")?;
+        } else {
+            external_offsets.push(None);
+        }
+    }
+    cursor = (cursor + 3) & !3;
+    let pixel_offset = u32::try_from(cursor).context("TIFF header exceeds classic TIFF offset range")?;
+    let total_len = u64::from(pixel_offset)
+        .checked_add(pixel_bytes)
+        .context("TIFF file size overflow")?;
+    anyhow::ensure!(
+        total_len <= u64::from(u32::MAX),
+        "TIFF export exceeds classic TIFF's 4 GiB limit"
+    );
+    if let Some(strip) = entries.iter_mut().find(|entry| entry.tag == 273) {
+        strip.data = pixel_offset.to_le_bytes().to_vec();
+    }
+
+    output.write_all(b"II").context("write TIFF byte order")?;
+    output.write_all(&42u16.to_le_bytes()).context("write TIFF magic")?;
+    output.write_all(&8u32.to_le_bytes()).context("write TIFF IFD offset")?;
+    output
+        .write_all(&(entries.len() as u16).to_le_bytes())
+        .context("write TIFF entry count")?;
+
+    for (entry, external_offset) in entries.iter().zip(&external_offsets) {
+        output.write_all(&entry.tag.to_le_bytes()).context("write TIFF tag")?;
+        output.write_all(&entry.field_type.to_le_bytes()).context("write TIFF field type")?;
+        output.write_all(&entry.count.to_le_bytes()).context("write TIFF field count")?;
+        if let Some(offset) = external_offset {
+            output
+                .write_all(&u32::try_from(*offset).context("TIFF metadata offset overflow")?.to_le_bytes())
+                .context("write TIFF value offset")?;
+        } else {
+            let mut inline = [0u8; 4];
+            inline[..entry.data.len()].copy_from_slice(&entry.data);
+            output.write_all(&inline).context("write TIFF inline value")?;
+        }
+    }
+    output.write_all(&0u32.to_le_bytes()).context("write TIFF next IFD")?;
+
+    let mut written = 8 + ifd_size;
+    for (entry, external_offset) in entries.iter().zip(external_offsets) {
+        if let Some(offset) = external_offset {
+            while written < offset {
+                output.write_all(&[0]).context("pad TIFF metadata")?;
+                written += 1;
+            }
+            output.write_all(&entry.data).context("write TIFF metadata payload")?;
+            written += entry.data.len();
+        }
+    }
+    while written < pixel_offset as usize {
+        output.write_all(&[0]).context("pad TIFF pixel offset")?;
+        written += 1;
+    }
+    Ok(())
 }
 
 fn validate_linear_rgb_raster(bytes: &[u8], width: u32, height: u32) -> Result<&[f32]> {
@@ -1300,7 +1920,7 @@ fn export_tiled_jpeg(
                 .open(&staged_rgb)
                 .with_context(|| format!("create staged RGB raster {}", staged_rgb.display()))?;
             let mut rgb_writer = BufWriter::new(rgb_file);
-            render_tiled_srgb(context, request, &mut rgb_writer, ExportRowFormat::Rgb8)?;
+            render_tiled_output(context, request, &mut rgb_writer, ExportRowFormat::Rgb8)?;
             rgb_writer.flush().context("flush staged RGB raster")?;
         }
 
@@ -1350,6 +1970,7 @@ fn export_tiled_jpeg(
             request.metadata,
             request.output_width,
             request.output_height,
+            request.color.embedded_icc.as_deref(),
         )?;
         Ok(())
     })();
@@ -1368,8 +1989,9 @@ fn write_final_jpeg(
     metadata: &ExportMetadata,
     output_width: u32,
     output_height: u32,
+    icc_profile: Option<&[u8]>,
 ) -> Result<()> {
-    if !keep_metadata {
+    if !keep_metadata && icc_profile.is_none() {
         if is_direct_export_destination(output_path) {
             let mut input = BufReader::new(
                 fs::File::open(encoded_path)
@@ -1397,30 +2019,61 @@ fn write_final_jpeg(
     input.read_exact(&mut soi).context("read JPEG SOI marker")?;
     anyhow::ensure!(soi == [0xff, 0xd8], "staged JPEG is missing its SOI marker");
 
-    let tiff = build_exif_payload(metadata, output_width, output_height);
-    let payload_len = 6usize
-        .checked_add(tiff.len())
-        .context("JPEG EXIF payload length overflow")?;
-    let segment_len = payload_len
-        .checked_add(2)
-        .context("JPEG EXIF segment length overflow")?;
-    let segment_len = u16::try_from(segment_len)
-        .context("JPEG EXIF metadata exceeds the APP1 segment limit")?;
-
     let output = open_export_destination(output_path)
         .with_context(|| format!("create final JPEG {}", output_path.display()))?;
     let mut output = BufWriter::new(output);
     output.write_all(&soi).context("write JPEG SOI marker")?;
-    output.write_all(&[0xff, 0xe1]).context("write JPEG APP1 marker")?;
-    output
-        .write_all(&segment_len.to_be_bytes())
-        .context("write JPEG APP1 length")?;
-    output
-        .write_all(b"Exif\0\0")
-        .context("write JPEG EXIF signature")?;
-    output.write_all(&tiff).context("write JPEG EXIF payload")?;
+
+    if let Some(profile) = icc_profile {
+        write_jpeg_icc_segments(&mut output, profile)?;
+    }
+
+    if keep_metadata {
+        let tiff = build_exif_payload(metadata, output_width, output_height);
+        let payload_len = 6usize
+            .checked_add(tiff.len())
+            .context("JPEG EXIF payload length overflow")?;
+        let segment_len = payload_len
+            .checked_add(2)
+            .context("JPEG EXIF segment length overflow")?;
+        let segment_len = u16::try_from(segment_len)
+            .context("JPEG EXIF metadata exceeds the APP1 segment limit")?;
+        output.write_all(&[0xff, 0xe1]).context("write JPEG APP1 marker")?;
+        output
+            .write_all(&segment_len.to_be_bytes())
+            .context("write JPEG APP1 length")?;
+        output
+            .write_all(b"Exif\0\0")
+            .context("write JPEG EXIF signature")?;
+        output.write_all(&tiff).context("write JPEG EXIF payload")?;
+    }
+
     std::io::copy(&mut input, &mut output).context("copy JPEG image data")?;
     output.flush().context("flush final JPEG")?;
+    Ok(())
+}
+
+fn write_jpeg_icc_segments<W: Write>(output: &mut W, profile: &[u8]) -> Result<()> {
+    const ICC_HEADER: &[u8; 12] = b"ICC_PROFILE\0";
+    const MAX_CHUNK: usize = 65_519;
+    let total = profile.len().div_ceil(MAX_CHUNK);
+    anyhow::ensure!(
+        total <= u8::MAX as usize,
+        "ICC profile is too large for JPEG APP2 chunking"
+    );
+    for (index, chunk) in profile.chunks(MAX_CHUNK).enumerate() {
+        let payload_len = ICC_HEADER.len()
+            .checked_add(2)
+            .and_then(|value| value.checked_add(chunk.len()))
+            .context("JPEG ICC segment length overflow")?;
+        let segment_len = u16::try_from(payload_len + 2)
+            .context("JPEG ICC segment exceeds APP2 size limit")?;
+        output.write_all(&[0xff, 0xe2]).context("write JPEG APP2 marker")?;
+        output.write_all(&segment_len.to_be_bytes()).context("write JPEG ICC length")?;
+        output.write_all(ICC_HEADER).context("write JPEG ICC signature")?;
+        output.write_all(&[(index + 1) as u8, total as u8]).context("write JPEG ICC sequence")?;
+        output.write_all(chunk).context("write JPEG ICC payload")?;
+    }
     Ok(())
 }
 
@@ -1450,6 +2103,7 @@ struct FinalSizeOutputSharpen {
     previous: Option<Vec<f32>>,
     current: Option<Vec<f32>>,
     encoded_rows: u32,
+    passthrough: bool,
 }
 
 impl FinalSizeOutputSharpen {
@@ -1471,13 +2125,19 @@ impl FinalSizeOutputSharpen {
             previous: None,
             current: None,
             encoded_rows: 0,
+            passthrough: false,
         }
+    }
+
+    fn with_passthrough(mut self, passthrough: bool) -> Self {
+        self.passthrough = passthrough;
+        self
     }
 
     fn push_row<W: Write>(
         &mut self,
         row: Vec<f32>,
-        output_transform: &IccOutputTransform,
+        output_transform: Option<&IccOutputTransform>,
         row_format: ExportRowFormat,
         output: &mut W,
     ) -> Result<()> {
@@ -1485,6 +2145,9 @@ impl FinalSizeOutputSharpen {
             row.len() == checked_rgb_len(self.width, 1)?,
             "final-size sharpen row length does not match output width"
         );
+        if self.passthrough {
+            return self.write_encoded_row(&row, output_transform, row_format, output);
+        }
         let Some(current) = self.current.take() else {
             self.current = Some(row);
             return Ok(());
@@ -1499,10 +2162,13 @@ impl FinalSizeOutputSharpen {
 
     fn finish<W: Write>(
         &mut self,
-        output_transform: &IccOutputTransform,
+        output_transform: Option<&IccOutputTransform>,
         row_format: ExportRowFormat,
         output: &mut W,
     ) -> Result<()> {
+        if self.passthrough {
+            return Ok(());
+        }
         if let Some(current) = self.current.take() {
             let top = self.previous.as_deref().unwrap_or(&current);
             let sharpened = output_sharpen_linear_row(top, &current, &current, self.strength)?;
@@ -1515,11 +2181,11 @@ impl FinalSizeOutputSharpen {
     fn write_encoded_row<W: Write>(
         &mut self,
         row: &[f32],
-        output_transform: &IccOutputTransform,
+        output_transform: Option<&IccOutputTransform>,
         row_format: ExportRowFormat,
         output: &mut W,
     ) -> Result<()> {
-        let encoded = encode_srgb_row_with_format(row, output_transform, row_format)?;
+        let encoded = encode_output_row(row, output_transform, row_format)?;
         output
             .write_all(&encoded)
             .with_context(|| format!("write output row {}", self.encoded_rows))?;
@@ -1670,7 +2336,8 @@ impl LinearLightResizer {
                 source_height,
                 output_width,
                 output_height,
-            ),
+            )
+            .with_passthrough(row_format == ExportRowFormat::RgbF32Le),
         })
     }
 
@@ -1678,7 +2345,7 @@ impl LinearLightResizer {
         &mut self,
         source_y: u32,
         source: &[f32],
-        output_transform: &IccOutputTransform,
+        output_transform: Option<&IccOutputTransform>,
         output: &mut W,
     ) -> Result<()> {
         anyhow::ensure!(
@@ -1735,7 +2402,7 @@ impl LinearLightResizer {
 
     fn finish<W: Write>(
         &mut self,
-        output_transform: &IccOutputTransform,
+        output_transform: Option<&IccOutputTransform>,
         output: &mut W,
     ) -> Result<()> {
         anyhow::ensure!(
@@ -1775,7 +2442,7 @@ impl LinearLightResizer {
         &mut self,
         source_y: u32,
         completed_through_output: u32,
-        output_transform: &IccOutputTransform,
+        output_transform: Option<&IccOutputTransform>,
         output: &mut W,
     ) -> Result<()> {
         while self.next_output_row < self.output_height
@@ -1942,7 +2609,7 @@ fn resize_horizontal_row(source: &[f32], weights: &[Vec<SampleWeight>]) -> Resul
 }
 
 fn encode_srgb_row(row: &[f32], transform: &IccOutputTransform) -> Result<Vec<u8>> {
-    encode_srgb_row_with_format(row, transform, ExportRowFormat::Rgba8)
+    encode_output_row(row, Some(transform), ExportRowFormat::Rgba8)
 }
 
 fn encode_srgb_row_with_format(
@@ -1950,33 +2617,69 @@ fn encode_srgb_row_with_format(
     transform: &IccOutputTransform,
     row_format: ExportRowFormat,
 ) -> Result<Vec<u8>> {
+    encode_output_row(row, Some(transform), row_format)
+}
+
+fn encode_output_row(
+    row: &[f32],
+    transform: Option<&IccOutputTransform>,
+    row_format: ExportRowFormat,
+) -> Result<Vec<u8>> {
     anyhow::ensure!(
         row.len().is_multiple_of(3),
         "linear RGB row has an invalid length"
     );
     let pixels = row.len() / 3;
-    let channels = match row_format {
+    let bytes_per_pixel = match row_format {
         ExportRowFormat::Rgb8 => 3,
         ExportRowFormat::Rgba8 => 4,
+        ExportRowFormat::Rgb16Be | ExportRowFormat::Rgb16Le => 6,
+        ExportRowFormat::Rgba16Be => 8,
+        ExportRowFormat::RgbF32Le => 12,
     };
     let bytes = pixels
-        .checked_mul(channels)
+        .checked_mul(bytes_per_pixel)
         .context("encoded row overflow")?;
     let mut encoded = Vec::new();
-    encoded
-        .try_reserve_exact(bytes)
-        .context("reserve encoded export row")?;
+    encoded.try_reserve_exact(bytes).context("reserve encoded export row")?;
+
     for rgb in row.chunks_exact(3) {
         anyhow::ensure!(
             rgb.iter().all(|value| value.is_finite()),
             "export contains NaN or infinity"
         );
-        let device = transform.transform_rgb([rgb[0], rgb[1], rgb[2]]);
-        for value in device {
-            encoded.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
+        if row_format == ExportRowFormat::RgbF32Le {
+            for value in rgb {
+                encoded.extend_from_slice(&value.to_le_bytes());
+            }
+            continue;
         }
-        if row_format == ExportRowFormat::Rgba8 {
-            encoded.push(255);
+
+        let transform = transform.context("integer export requires an output color transform")?;
+        let device = transform.transform_rgb([rgb[0], rgb[1], rgb[2]]);
+        match row_format {
+            ExportRowFormat::Rgb8 | ExportRowFormat::Rgba8 => {
+                for value in device {
+                    encoded.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
+                }
+                if row_format == ExportRowFormat::Rgba8 {
+                    encoded.push(255);
+                }
+            }
+            ExportRowFormat::Rgb16Be | ExportRowFormat::Rgba16Be | ExportRowFormat::Rgb16Le => {
+                for value in device {
+                    let sample = (value.clamp(0.0, 1.0) * 65_535.0).round() as u16;
+                    if row_format == ExportRowFormat::Rgb16Le {
+                        encoded.extend_from_slice(&sample.to_le_bytes());
+                    } else {
+                        encoded.extend_from_slice(&sample.to_be_bytes());
+                    }
+                }
+                if row_format == ExportRowFormat::Rgba16Be {
+                    encoded.extend_from_slice(&u16::MAX.to_be_bytes());
+                }
+            }
+            ExportRowFormat::RgbF32Le => unreachable!(),
         }
     }
     Ok(encoded)
@@ -2610,7 +3313,7 @@ mod tests {
             let settings = ExportSettings {
                 resize_mode,
                 edge_or_dimension,
-                ..base
+                ..base.clone()
             };
             assert_eq!(settings.output_dimensions(6000, 4000), expected);
         }
@@ -2846,11 +3549,11 @@ mod tests {
         let mut output = Vec::new();
         let mut resizer = LinearLightResizer::new(1, 1, 1, 128).unwrap();
         resizer
-            .push_source_row(0, &[0.18, 0.18, 0.18], &transform, &mut output)
+            .push_source_row(0, &[0.18, 0.18, 0.18], Some(&transform), &mut output)
             .unwrap();
         assert_eq!(output.len(), 128 * 4);
         assert!(resizer.pending_rows.iter().all(Option::is_none));
-        resizer.finish(&transform, &mut output).unwrap();
+        resizer.finish(Some(&transform), &mut output).unwrap();
     }
 
     #[test]
@@ -2860,7 +3563,7 @@ mod tests {
         let mut resizer = LinearLightResizer::new(1, 128, 1, 1).unwrap();
         for source_y in 0..128 {
             resizer
-                .push_source_row(source_y, &[0.18, 0.18, 0.18], &transform, &mut output)
+                .push_source_row(source_y, &[0.18, 0.18, 0.18], Some(&transform), &mut output)
                 .unwrap();
             assert!(
                 resizer
@@ -2871,7 +3574,7 @@ mod tests {
                     <= 1
             );
         }
-        resizer.finish(&transform, &mut output).unwrap();
+        resizer.finish(Some(&transform), &mut output).unwrap();
         assert_eq!(output.len(), 4);
     }
 

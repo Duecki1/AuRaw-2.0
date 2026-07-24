@@ -24,7 +24,8 @@ pub use color_profile::{
 #[cfg(not(target_os = "android"))]
 pub use color_profile::{discover_display_icc_profile, read_display_icc_profile, DisplayIccProfile};
 pub use export::{
-    spawn_tiled_jpeg_export, spawn_tiled_png_export, ExportEvent, ExportFormat, ExportMetadata, ExportResizeMode, ExportSettings,
+    spawn_tiled_jpeg_export, spawn_tiled_png_export, spawn_tiled_tiff_export, ExportBitDepth,
+    ExportColorProfile, ExportEvent, ExportFormat, ExportMetadata, ExportResizeMode, ExportSettings,
     MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};

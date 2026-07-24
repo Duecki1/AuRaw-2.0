@@ -1830,6 +1830,7 @@ fn library_export_jobs(
         dialog = match format {
             ExportFormat::Png => dialog.add_filter("PNG image", &["png"]),
             ExportFormat::Jpeg => dialog.add_filter("JPEG image", &["jpg", "jpeg"]),
+            ExportFormat::Tiff => dialog.add_filter("TIFF image", &["tif", "tiff"]),
         };
         let mut destination = dialog.save_file()?;
         let valid_extension = destination
@@ -1840,6 +1841,10 @@ fn library_export_jobs(
                 ExportFormat::Jpeg => {
                     extension.eq_ignore_ascii_case("jpg")
                         || extension.eq_ignore_ascii_case("jpeg")
+                }
+                ExportFormat::Tiff => {
+                    extension.eq_ignore_ascii_case("tif")
+                        || extension.eq_ignore_ascii_case("tiff")
                 }
             });
         if !valid_extension {
@@ -2239,7 +2244,7 @@ impl Library {
                     if !paths.is_empty() {
                         app.library.export_dialog = Some(LibraryExportDialog {
                             paths,
-                            settings: app.export_settings,
+                            settings: app.export_settings.clone(),
                             format: ExportFormat::Jpeg,
                         });
                     }
@@ -2371,7 +2376,7 @@ impl Library {
                     if !targets.is_empty() {
                         app.library.export_dialog = Some(LibraryExportDialog {
                             targets,
-                            settings: app.export_settings,
+                            settings: app.export_settings.clone(),
                             format: ExportFormat::Jpeg,
                         });
                     }
@@ -2500,7 +2505,20 @@ impl Library {
                             ui.label("Format");
                             ui.selectable_value(&mut dialog.format, ExportFormat::Jpeg, "JPEG");
                             ui.selectable_value(&mut dialog.format, ExportFormat::Png, "PNG");
+                            ui.selectable_value(&mut dialog.format, ExportFormat::Tiff, "TIFF");
                         });
+                        match dialog.format {
+                            ExportFormat::Jpeg => {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                            }
+                            ExportFormat::Png
+                                if dialog.settings.bit_depth
+                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
+                            {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                            }
+                            _ => {}
+                        }
                         ui.add_space(6.0);
                         crate::ui::sidebar::export_settings_controls(
                             ui,
@@ -2508,6 +2526,18 @@ impl Library {
                             None,
                             false,
                         );
+                        match dialog.format {
+                            ExportFormat::Jpeg => {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                            }
+                            ExportFormat::Png
+                                if dialog.settings.bit_depth
+                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
+                            {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                            }
+                            _ => {}
+                        }
                         ui.add_space(10.0);
                         ui.label(
                             egui::RichText::new(if count > 1 {
@@ -2542,7 +2572,7 @@ impl Library {
                         app.library.export_dialog = None;
                         app.start_library_exports(
                             jobs,
-                            dialog.settings,
+                            dialog.settings.clone(),
                             dialog.format,
                             frame,
                         );
@@ -2659,7 +2689,20 @@ impl Library {
                             ui.label("Format");
                             ui.selectable_value(&mut dialog.format, ExportFormat::Jpeg, "JPEG");
                             ui.selectable_value(&mut dialog.format, ExportFormat::Png, "PNG");
+                            ui.selectable_value(&mut dialog.format, ExportFormat::Tiff, "TIFF");
                         });
+                        match dialog.format {
+                            ExportFormat::Jpeg => {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                            }
+                            ExportFormat::Png
+                                if dialog.settings.bit_depth
+                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
+                            {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                            }
+                            _ => {}
+                        }
                         ui.add_space(6.0);
                         crate::ui::sidebar::export_settings_controls(
                             ui,
@@ -2667,6 +2710,18 @@ impl Library {
                             None,
                             false,
                         );
+                        match dialog.format {
+                            ExportFormat::Jpeg => {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                            }
+                            ExportFormat::Png
+                                if dialog.settings.bit_depth
+                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
+                            {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                            }
+                            _ => {}
+                        }
                         ui.add_space(10.0);
                         ui.label(
                             egui::RichText::new(
@@ -2699,7 +2754,7 @@ impl Library {
                     app.library.export_dialog = None;
                     app.start_android_library_exports(
                         dialog.targets,
-                        dialog.settings,
+                        dialog.settings.clone(),
                         dialog.format,
                     );
                 }

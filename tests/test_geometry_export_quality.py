@@ -31,7 +31,7 @@ def test_geometry_resampling_happens_before_output_sharpen_and_encoding() -> Non
         assert "FinalSizeOutputSharpen::new" in body
         assert "output_sharpen.finish" in body
     sharpen = EXPORT[EXPORT.index("struct FinalSizeOutputSharpen") : EXPORT.index("struct LinearLightResizer")]
-    assert sharpen.index("output_sharpen_linear_row") < sharpen.index("encode_srgb_row_with_format")
+    assert sharpen.index("output_sharpen_linear_row") < sharpen.index("encode_output_row")
 
 
 def test_geometry_sampler_uses_combined_inverse_map_and_ewa_mitchell() -> None:
