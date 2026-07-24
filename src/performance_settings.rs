@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 4;
+const SETTINGS_VERSION: u32 = 5;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,6 +31,12 @@ pub(crate) struct PerformanceSettings {
     /// profile root. New RAWs without a sidecar may inherit this choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_camera_profile: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default = "default_display_color_management")]
+    pub(crate) display_color_management: bool,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) display_profile_override: Option<PathBuf>,
     #[serde(default)]
     pub(crate) adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings,
     #[cfg(not(target_os = "android"))]
@@ -54,6 +60,11 @@ const fn default_camera_profile_auto_detect() -> bool {
     !cfg!(target_os = "android")
 }
 
+#[cfg(not(target_os = "android"))]
+const fn default_display_color_management() -> bool {
+    true
+}
+
 impl Default for PerformanceSettings {
     fn default() -> Self {
         Self {
@@ -66,6 +77,10 @@ impl Default for PerformanceSettings {
             camera_profile_folder_label: None,
             camera_profile_auto_detect: default_camera_profile_auto_detect(),
             last_camera_profile: None,
+            #[cfg(not(target_os = "android"))]
+            display_color_management: default_display_color_management(),
+            #[cfg(not(target_os = "android"))]
+            display_profile_override: None,
             adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings::default(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
@@ -243,6 +258,10 @@ mod tests {
             camera_profile_folder_label: Some("CameraProfiles".to_owned()),
             camera_profile_auto_detect: false,
             last_camera_profile: Some(PathBuf::from("Sony/Camera ST.dcp")),
+            #[cfg(not(target_os = "android"))]
+            display_color_management: true,
+            #[cfg(not(target_os = "android"))]
+            display_profile_override: None,
             adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings {
                 adjustments: true,
                 masks: false,

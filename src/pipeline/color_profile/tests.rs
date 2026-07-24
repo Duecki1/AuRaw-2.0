@@ -1,4 +1,6 @@
 use super::{CameraProfile, HsvMap, IccOutputTransform, ProfileEncoding, ToneCurve};
+#[cfg(not(target_os = "android"))]
+use super::RenderingIntent;
 
 #[test]
 fn dual_illuminant_maps_interpolate_entrywise() {
@@ -84,4 +86,106 @@ fn gpu_layout_offsets_are_contiguous() {
         data.words.len(),
         data.layout.output[3] as usize + 33usize.pow(3)
     );
+}
+
+#[cfg(not(target_os = "android"))]
+#[test]
+fn lcms_display_lut_tracks_cpu_reference_with_low_delta_e() {
+    use lcms2::{
+        CIExyY, CIExyYTRIPLE, Flags, Intent, PixelFormat, Profile, ToneCurve as LcmsToneCurve,
+        Transform,
+    };
+
+    let output = Profile::new_srgb();
+    let bytes = output.icc().expect("serialize LCMS sRGB profile");
+    let lut = IccOutputTransform::from_icc(&bytes, RenderingIntent::RelativeColorimetric)
+        .expect("build sampled display LUT");
+
+    let white = CIExyY {
+        x: 0.3127,
+        y: 0.3290,
+        Y: 1.0,
+    };
+    let primaries = CIExyYTRIPLE {
+        Red: CIExyY {
+            x: 0.708,
+            y: 0.292,
+            Y: 1.0,
+        },
+        Green: CIExyY {
+            x: 0.170,
+            y: 0.797,
+            Y: 1.0,
+        },
+        Blue: CIExyY {
+            x: 0.131,
+            y: 0.046,
+            Y: 1.0,
+        },
+    };
+    let linear = LcmsToneCurve::new(1.0);
+    let input = Profile::new_rgb(&white, &primaries, &[&linear, &linear, &linear])
+        .expect("create linear Rec.2020 profile");
+    let reference: Transform<[f32; 3], [f32; 3]> = Transform::new_flags(
+        &input,
+        PixelFormat::RGB_FLT,
+        &output,
+        PixelFormat::RGB_FLT,
+        Intent::RelativeColorimetric,
+        Flags::HIGHRES_PRECALC | Flags::BLACKPOINT_COMPENSATION,
+    )
+    .expect("build LCMS CPU reference transform");
+
+    let samples = [
+        [0.01, 0.01, 0.01],
+        [0.18, 0.18, 0.18],
+        [0.5, 0.5, 0.5],
+        [0.22, 0.31, 0.12],
+        [0.42, 0.21, 0.09],
+        [0.08, 0.19, 0.35],
+    ];
+    let mut expected = [[0.0_f32; 3]; 6];
+    reference.transform_pixels(&samples, &mut expected);
+
+    for (input_rgb, expected_rgb) in samples.into_iter().zip(expected) {
+        let sampled_rgb = lut.transform_rgb(input_rgb);
+        let delta_e = delta_e76_srgb(sampled_rgb, expected_rgb);
+        assert!(
+            delta_e < 1.0,
+            "sample {input_rgb:?}: sampled={sampled_rgb:?} reference={expected_rgb:?} ΔE76={delta_e}"
+        );
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn delta_e76_srgb(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let lab = |rgb: [f32; 3]| {
+        let linear = rgb.map(|v| {
+            let v = v.clamp(0.0, 1.0);
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        let xyz = [
+            0.4124564 * linear[0] + 0.3575761 * linear[1] + 0.1804375 * linear[2],
+            0.2126729 * linear[0] + 0.7151522 * linear[1] + 0.0721750 * linear[2],
+            0.0193339 * linear[0] + 0.1191920 * linear[1] + 0.9503041 * linear[2],
+        ];
+        let f = |value: f32| {
+            if value > 216.0 / 24389.0 {
+                value.cbrt()
+            } else {
+                (24389.0 / 27.0 * value + 16.0) / 116.0
+            }
+        };
+        let fx = f(xyz[0] / 0.95047);
+        let fy = f(xyz[1]);
+        let fz = f(xyz[2] / 1.08883);
+        [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+    };
+    let a = lab(a);
+    let b = lab(b);
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }

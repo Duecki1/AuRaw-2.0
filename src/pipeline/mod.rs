@@ -20,6 +20,8 @@ pub use color_profile::{
     CameraProfile, DcpMatrixSet, DcpProfile, HsvMap, IccOutputTransform, ProfileEncoding,
     RenderingIntent, ToneCurve,
 };
+#[cfg(not(target_os = "android"))]
+pub use color_profile::{discover_display_icc_profile, read_display_icc_profile, DisplayIccProfile};
 pub use export::{
     spawn_tiled_jpeg_export, spawn_tiled_png_export, ExportEvent, ExportFormat, ExportMetadata, ExportResizeMode, ExportSettings,
     MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,

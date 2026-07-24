@@ -476,6 +476,22 @@ pub struct AurawApp {
     raw_cache: VecDeque<CachedRawDecode>,
     raw_cache_limit: usize,
     performance_settings_path: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_color_management: bool,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_override: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_label: String,
+    #[cfg(not(target_os = "android"))]
+    display_profile_source: Option<String>,
+    #[cfg(not(target_os = "android"))]
+    display_profile_fingerprint: Option<u64>,
+    #[cfg(not(target_os = "android"))]
+    display_profile_last_probe: Option<Instant>,
+    #[cfg(not(target_os = "android"))]
+    display_profile_last_screen_point: Option<[i32; 2]>,
+    #[cfg(not(target_os = "android"))]
+    display_output_transform: crate::pipeline::IccOutputTransform,
     pub(crate) camera_profile_mode: CameraProfileMode,
     pub(crate) camera_profile_folder: Option<PathBuf>,
     pub(crate) camera_profile_folder_label: Option<String>,
