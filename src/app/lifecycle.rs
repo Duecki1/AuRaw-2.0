@@ -310,6 +310,22 @@ impl AurawApp {
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
+            #[cfg(not(target_os = "android"))]
+            display_color_management: performance.display_color_management,
+            #[cfg(not(target_os = "android"))]
+            display_profile_override: performance.display_profile_override.clone(),
+            #[cfg(not(target_os = "android"))]
+            display_profile_label: "sRGB fallback".to_owned(),
+            #[cfg(not(target_os = "android"))]
+            display_profile_source: None,
+            #[cfg(not(target_os = "android"))]
+            display_profile_fingerprint: None,
+            #[cfg(not(target_os = "android"))]
+            display_profile_last_probe: None,
+            #[cfg(not(target_os = "android"))]
+            display_profile_last_screen_point: None,
+            #[cfg(not(target_os = "android"))]
+            display_output_transform: crate::pipeline::IccOutputTransform::srgb(),
             camera_profile_mode: performance.camera_profile_mode,
             camera_profile_folder,
             camera_profile_folder_label,
@@ -503,6 +519,22 @@ impl AurawApp {
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
+            #[cfg(not(target_os = "android"))]
+            display_color_management: performance.display_color_management,
+            #[cfg(not(target_os = "android"))]
+            display_profile_override: performance.display_profile_override.clone(),
+            #[cfg(not(target_os = "android"))]
+            display_profile_label: "sRGB fallback".to_owned(),
+            #[cfg(not(target_os = "android"))]
+            display_profile_source: None,
+            #[cfg(not(target_os = "android"))]
+            display_profile_fingerprint: None,
+            #[cfg(not(target_os = "android"))]
+            display_profile_last_probe: None,
+            #[cfg(not(target_os = "android"))]
+            display_profile_last_screen_point: None,
+            #[cfg(not(target_os = "android"))]
+            display_output_transform: crate::pipeline::IccOutputTransform::srgb(),
             camera_profile_mode: performance.camera_profile_mode,
             camera_profile_folder: performance.camera_profile_folder.clone(),
             camera_profile_folder_label: performance.camera_profile_folder_label.clone(),
@@ -937,6 +969,219 @@ impl AurawApp {
         self.persist_performance_settings();
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn set_display_color_management(&mut self, enabled: bool) {
+        if self.display_color_management == enabled {
+            return;
+        }
+        self.display_color_management = enabled;
+        self.display_profile_last_probe = None;
+        self.display_profile_fingerprint = None;
+        self.persist_performance_settings();
+        self.egui_ctx.request_repaint();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn choose_display_profile_override(&mut self) {
+        let mut dialog = rfd::FileDialog::new().add_filter("ICC profiles", &["icc", "icm"]);
+        if let Some(path) = self.display_profile_override.as_deref() {
+            if let Some(parent) = path.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        self.display_profile_override = Some(path);
+        self.display_profile_last_probe = None;
+        self.display_profile_fingerprint = None;
+        self.persist_performance_settings();
+        self.egui_ctx.request_repaint();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn clear_display_profile_override(&mut self) {
+        if self.display_profile_override.take().is_none() {
+            return;
+        }
+        self.display_profile_last_probe = None;
+        self.display_profile_fingerprint = None;
+        self.persist_performance_settings();
+        self.egui_ctx.request_repaint();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn display_profile_source(&self) -> Option<&str> {
+        self.display_profile_source.as_deref()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn sync_display_color_management(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        use std::hash::{Hash, Hasher};
+
+        let screen_point = ctx.input(|input| {
+            let viewport = input.viewport();
+            let native_pixels_per_point = viewport
+                .native_pixels_per_point
+                .unwrap_or_else(|| ctx.pixels_per_point());
+            let coordinate_scale = if cfg!(target_os = "macos") {
+                1.0
+            } else {
+                native_pixels_per_point
+            };
+            viewport.outer_rect.map(|rect| {
+                let center = rect.center();
+                [
+                    (center.x * coordinate_scale).round() as i32,
+                    (center.y * coordinate_scale).round() as i32,
+                ]
+            })
+        });
+        let screen_changed = match (screen_point, self.display_profile_last_screen_point) {
+            (Some(current), Some(previous)) => current != previous,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        };
+        let elapsed = self
+            .display_profile_last_probe
+            .map(|instant| instant.elapsed())
+            .unwrap_or(Duration::MAX);
+        if elapsed < Duration::from_secs(1)
+            || (!screen_changed && elapsed < Duration::from_secs(10))
+        {
+            return;
+        }
+        self.display_profile_last_probe = Some(Instant::now());
+        self.display_profile_last_screen_point = screen_point;
+
+        let resolved = if !self.display_color_management {
+            Ok(None)
+        } else if let Some(path) = self.display_profile_override.as_deref() {
+            crate::pipeline::read_display_icc_profile(path).map(Some)
+        } else {
+            crate::pipeline::discover_display_icc_profile(screen_point)
+        };
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let (transform, label, source, fingerprint) = match resolved {
+            Ok(Some(profile)) => {
+                profile.bytes.hash(&mut hasher);
+                let fingerprint = hasher.finish();
+                let source = Some(profile.source);
+                if self.display_profile_fingerprint == Some(fingerprint)
+                    && self.display_profile_label == profile.label
+                    && self.display_profile_source == source
+                {
+                    return;
+                }
+                match crate::pipeline::IccOutputTransform::from_icc(
+                    &profile.bytes,
+                    crate::pipeline::RenderingIntent::RelativeColorimetric,
+                ) {
+                    Ok(transform) => (transform, profile.label, source, fingerprint),
+                    Err(error) => {
+                        log::warn!("display ICC profile could not be built; using sRGB: {error:#}");
+                        (
+                            crate::pipeline::IccOutputTransform::srgb(),
+                            "sRGB fallback".to_owned(),
+                            Some(format!("ICC error: {error:#}")),
+                            0,
+                        )
+                    }
+                }
+            }
+            Ok(None) => {
+                let label = if self.display_color_management {
+                    "sRGB fallback".to_owned()
+                } else {
+                    "sRGB (color management disabled)".to_owned()
+                };
+                if self.display_profile_fingerprint == Some(0)
+                    && self.display_profile_label == label
+                    && self.display_profile_source.is_none()
+                {
+                    return;
+                }
+                (
+                    crate::pipeline::IccOutputTransform::srgb(),
+                    label,
+                    None,
+                    0,
+                )
+            }
+            Err(error) => {
+                let source = Some(format!("Profile discovery error: {error:#}"));
+                if self.display_profile_fingerprint == Some(0)
+                    && self.display_profile_label == "sRGB fallback"
+                    && self.display_profile_source == source
+                {
+                    return;
+                }
+                log::warn!("display ICC discovery failed; using sRGB: {error:#}");
+                (
+                    crate::pipeline::IccOutputTransform::srgb(),
+                    "sRGB fallback".to_owned(),
+                    source,
+                    0,
+                )
+            }
+        };
+
+        if self.display_profile_fingerprint == Some(fingerprint)
+            && self.display_profile_label == label
+            && self.display_profile_source == source
+        {
+            return;
+        }
+
+        self.display_output_transform = transform;
+        self.display_profile_label = label;
+        self.display_profile_source = source;
+        self.display_profile_fingerprint = Some(fingerprint);
+
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        if let Some(pipeline) = self.gpu_pipeline.as_ref() {
+            if let Err(error) = pipeline.write_output_transform(
+                &render_state.queue,
+                &self.display_output_transform,
+            ) {
+                log::warn!("could not update preview display ICC LUT: {error:#}");
+            }
+        }
+        if let Some(detail) = self.preview_detail.as_ref() {
+            let _ = detail.pipeline.write_output_transform(
+                &render_state.queue,
+                &self.display_output_transform,
+            );
+        }
+        if let Some(navigation) = self.preview_navigation.as_ref() {
+            let _ = navigation.pipeline.write_output_transform(
+                &render_state.queue,
+                &self.display_output_transform,
+            );
+        }
+        if self.gpu_pipeline.is_some() {
+            self.queue_preview_processing(ProcessingStage::Output);
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn apply_display_output_transform(
+        &self,
+        queue: &wgpu::Queue,
+        pipeline: &RawGpuPipeline,
+    ) {
+        if let Err(error) = pipeline.write_output_transform(queue, &self.display_output_transform) {
+            log::warn!("could not install display ICC LUT on preview pipeline: {error:#}");
+        }
+    }
+
     fn persist_performance_settings(&self) -> bool {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.raw_cache_limit,
@@ -947,6 +1192,10 @@ impl AurawApp {
             camera_profile_folder_label: self.camera_profile_folder_label.clone(),
             camera_profile_auto_detect: self.camera_profile_auto_detect,
             last_camera_profile: self.last_camera_profile.clone(),
+            #[cfg(not(target_os = "android"))]
+            display_color_management: self.display_color_management,
+            #[cfg(not(target_os = "android"))]
+            display_profile_override: self.display_profile_override.clone(),
             adjustment_copy_settings: self.adjustment_copy_settings,
             #[cfg(not(target_os = "android"))]
             last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
@@ -1194,6 +1443,8 @@ impl AurawApp {
             (delete_after_decode && !fd_backed_source).then(|| path.clone());
         #[cfg(target_os = "android")]
         let sidecar_android_app = self.android_app.clone();
+        #[cfg(not(target_os = "android"))]
+        let display_output_transform = self.display_output_transform.clone();
 
         self.load_receiver = Some(receiver);
         self.loading_label = Some(label.clone());
@@ -1532,6 +1783,10 @@ impl AurawApp {
                         "GPU preview pipeline created in {:.3}s",
                         pipeline_started.elapsed().as_secs_f64()
                     ));
+                    #[cfg(not(target_os = "android"))]
+                    pipeline
+                        .write_output_transform(&queue, &display_output_transform)
+                        .map_err(|error| format!("display ICC LUT upload failed: {error:#}"))?;
                     // Program handles have been cloned into `pipeline`; release
                     // the previous preview textures before any additional mask
                     // source pipeline is allocated.

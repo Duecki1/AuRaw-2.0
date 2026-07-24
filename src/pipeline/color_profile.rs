@@ -7,6 +7,7 @@ mod dcp;
 mod icc;
 
 use dcp::{profile_from_tags, profile_identity_from_tags, TiffReader};
+#[cfg(target_os = "android")]
 use icc::MatrixShaperProfile;
 
 #[cfg(test)]
@@ -18,6 +19,35 @@ const MAX_DCP_TAG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DCP_MAP_ENTRIES: usize = 1_000_000;
 const MAX_DCP_TONE_POINTS: usize = 65_536;
 const D50_XYZ: [f32; 3] = [0.964_22, 1.0, 0.825_21];
+
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Debug)]
+pub struct DisplayIccProfile {
+    pub bytes: Vec<u8>,
+    pub label: String,
+    pub source: String,
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn read_display_icc_profile(path: &Path) -> Result<DisplayIccProfile> {
+    let profile = icc::read_display_profile_file(path)?;
+    Ok(DisplayIccProfile {
+        bytes: profile.bytes,
+        label: profile.label,
+        source: profile.source,
+    })
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn discover_display_icc_profile(
+    screen_point: Option<[i32; 2]>,
+) -> Result<Option<DisplayIccProfile>> {
+    Ok(icc::discover_display_profile(screen_point)?.map(|profile| DisplayIccProfile {
+        bytes: profile.bytes,
+        label: profile.label,
+        source: profile.source,
+    }))
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProfileEncoding {
@@ -420,27 +450,36 @@ impl IccOutputTransform {
         Self { size, entries }
     }
 
-    /// Builds a GPU/CPU 3D transform for an RGB matrix-shaper ICC v2/v4
-    /// display or output profile. LUT-based ICC profiles are rejected with a
-    /// precise error instead of silently treating their device values as sRGB.
+    /// Builds a GPU/CPU 3D display transform from an RGB ICC v2/v4 profile.
+    /// Desktop builds use LCMS2 so both matrix-shaper and LUT/CLUT profiles are
+    /// sampled into the same compact GPU representation used by the hot path.
     pub fn from_icc(bytes: &[u8], intent: RenderingIntent) -> Result<Self> {
-        let profile = MatrixShaperProfile::parse(bytes)?;
         let size = OUTPUT_LUT_EDGE;
-        let mut entries = Vec::with_capacity((size * size * size) as usize);
-        for b in 0..size {
-            for g in 0..size {
-                for r in 0..size {
-                    let rgb = [
-                        output_lut_linear_node(r, size),
-                        output_lut_linear_node(g, size),
-                        output_lut_linear_node(b, size),
-                    ];
-                    let encoded = profile.transform(rgb, intent);
-                    entries.push([encoded[0], encoded[1], encoded[2], 0.0]);
+        #[cfg(not(target_os = "android"))]
+        {
+            let entries = icc::build_lcms_output_lut(bytes, intent, size)?;
+            return Ok(Self { size, entries });
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let profile = MatrixShaperProfile::parse(bytes)?;
+            let mut entries = Vec::with_capacity((size * size * size) as usize);
+            for b in 0..size {
+                for g in 0..size {
+                    for r in 0..size {
+                        let rgb = [
+                            output_lut_linear_node(r, size),
+                            output_lut_linear_node(g, size),
+                            output_lut_linear_node(b, size),
+                        ];
+                        let encoded = profile.transform(rgb, intent);
+                        entries.push([encoded[0], encoded[1], encoded[2], 0.0]);
+                    }
                 }
             }
+            Ok(Self { size, entries })
         }
-        Ok(Self { size, entries })
     }
 
     pub fn size(&self) -> u32 {

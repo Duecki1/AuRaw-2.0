@@ -174,6 +174,8 @@ impl AurawApp {
                 return;
             }
         };
+        #[cfg(not(target_os = "android"))]
+        self.apply_display_output_transform(&render_state.queue, &pipeline);
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,
@@ -459,6 +461,8 @@ impl AurawApp {
                 return;
             }
         };
+        #[cfg(not(target_os = "android"))]
+        self.apply_display_output_transform(&render_state.queue, &pipeline);
         if let Err(error) =
             Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &preview_raw)
         {
@@ -770,6 +774,8 @@ impl AurawApp {
                 return;
             }
         };
+        #[cfg(not(target_os = "android"))]
+        self.apply_display_output_transform(&render_state.queue, &pipeline);
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,
@@ -896,6 +902,8 @@ impl AurawApp {
                     return;
                 }
             };
+            #[cfg(not(target_os = "android"))]
+            self.apply_display_output_transform(&render_state.queue, &pipeline);
             if let Err(error) =
                 Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &raw)
             {

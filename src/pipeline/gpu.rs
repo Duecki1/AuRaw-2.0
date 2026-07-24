@@ -3501,8 +3501,9 @@ impl RawGpuPipeline {
         texture_id
     }
 
-    /// Updates the preview/display transform from an RGB ICC matrix-shaper
-    /// profile without rebuilding compute pipelines or bind groups.
+    /// Updates the preview/display transform from an RGB ICC profile. Desktop
+    /// builds accept matrix-shaper and LUT/CLUT profiles through LCMS2, then
+    /// upload the sampled 3D LUT without rebuilding pipelines or bind groups.
     pub fn set_display_icc_profile(
         &self,
         queue: &wgpu::Queue,

@@ -34,6 +34,7 @@ eframe = { version = "0.35", default-features = false, features = ["accesskit", 
 env_logger = "0.11"
 rfd = "0.15"
 pollster = "0.4"
+lcms2 = { version = "6.1.1", features = ["static"] }
 # Exact RC pin: see DEPENDENCIES.md. Replace with stable 2.x when the required APIs are released.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-18"] }
 
