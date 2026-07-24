@@ -1550,7 +1550,7 @@ fn upload_mask_atlas(
     image_height: u32,
 ) -> Result<()> {
     let edge = pipeline.mask_atlas_edge();
-    for layer in 0..MAX_LOCAL_MASKS {
+    for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {
         let bytes = masks.rasterize_layer_f16(layer, edge, edge, image_width, image_height);
         pipeline
             .update_mask_layer(queue, layer, &bytes)

@@ -53,8 +53,8 @@ def test_uniform_abi_carries_global_and_local_grading() -> None:
         "mask_grade_options",
     ):
         assert f"{field}: [[f32; 4]; MAX_LOCAL_MASKS]" in GPU
-        assert f"{field}: array<vec4<f32>, 8>" in COMMON
-    assert "size_of::<super::GpuParams>(), 7008" in GPU
+        assert f"{field}: array<vec4<f32>, 32>" in COMMON
+    assert "size_of::<super::GpuParams>(), 25056" in GPU
 
 
 def test_grading_is_scene_referred_perceptual_and_gamut_safe() -> None:

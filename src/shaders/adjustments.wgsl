@@ -37,11 +37,8 @@ fn local_adjustment_mix(pos: vec2<i32>) -> LocalAdjustmentMix {
     );
     let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
     let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
-    let count = min(params.mask_counts.x, 8u);
-    for (var index = 0u; index < 8u; index = index + 1u) {
-        if index >= count {
-            break;
-        }
+    let count = min(params.mask_counts.x, 32u);
+    for (var index = 0u; index < count; index = index + 1u) {
         let mask_state = params.mask_meta[index];
         if mask_state.x == 0u || mask_state.y == 0u {
             continue;
@@ -999,7 +996,7 @@ fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
     let full_size = vec2<f32>(f32(max(params.full_width, 1u)), f32(max(params.full_height, 1u)));
     let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
     let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
-    let count = min(params.mask_counts.x, 8u);
+    let count = min(params.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = params.mask_meta[index];
         if state.x == 0u || (state.z == 0u && state.w == 0u) { continue; }
@@ -1051,7 +1048,7 @@ fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
     let full_size = vec2<f32>(f32(max(params.full_width, 1u)), f32(max(params.full_height, 1u)));
     let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
     let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
-    let count = min(params.mask_counts.x, 8u);
+    let count = min(params.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = params.mask_meta[index];
         if state.x == 0u || (state.w & 2u) == 0u { continue; }
