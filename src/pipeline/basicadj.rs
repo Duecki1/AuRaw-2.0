@@ -9,8 +9,10 @@ pub enum DemosaicMode {
     Reference,
     /// Apply frequency-domain chroma suppression to the reference result.
     FrequencyDomainChroma,
-    /// Blend the high-detail result with a low-detail VNG-style result using
-    /// a Scharr/detail mask, following darktable's dual-demosaic behaviour.
+    /// Blend the high-detail result with a separate robust low-frequency
+    /// reconstruction using edge, sensor-noise, and reconstruction confidence.
+    /// The low branch is a clean-room gradient-guided alternative rather than
+    /// a direct VNG/LMMSE code port.
     Dual,
 }
 
@@ -27,7 +29,7 @@ impl DemosaicMode {
         match self {
             Self::Reference => "Reference (RCD / Markesteijn 3-pass)",
             Self::FrequencyDomainChroma => "Frequency-domain chroma",
-            Self::Dual => "Dual demosaic",
+            Self::Dual => "Dual demosaic (robust)",
         }
     }
 }

@@ -5,7 +5,8 @@ use super::{
     work_shader_source, HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS,
     RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY,
     SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
-    SHADER_BAYER_RCD_P4, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
+    SHADER_BAYER_RCD_P4, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE,
+    SHADER_TONE_ANALYSIS,
     SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5,
     SHADER_XTRANS_P6, SHADER_XTRANS_P7,
 };
@@ -52,6 +53,7 @@ fn compute_shaders_parse_and_validate() {
         ("Bayer RCD pass 2", SHADER_BAYER_RCD_P2),
         ("Bayer RCD pass 3", SHADER_BAYER_RCD_P3),
         ("Bayer RCD pass 4", SHADER_BAYER_RCD_P4),
+        ("robust dual demosaic", SHADER_DUAL_DEMOSAIC),
         ("X-Trans pass 1", SHADER_XTRANS_P1),
         ("X-Trans pass 2", SHADER_XTRANS_P2),
         ("X-Trans pass 3", SHADER_XTRANS_P3),
@@ -88,6 +90,13 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
             "32-bit Bayer pass 1",
             work_shader_source(
                 SHADER_BAYER_RCD_P1,
+                processing_work_format(ProcessingQuality::High),
+            ),
+        ),
+        (
+            "32-bit robust dual demosaic",
+            work_shader_source(
+                SHADER_DUAL_DEMOSAIC,
                 processing_work_format(ProcessingQuality::High),
             ),
         ),

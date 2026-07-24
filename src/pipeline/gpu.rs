@@ -152,8 +152,8 @@ fn highlight_final_read_slot(stage_count: usize) -> HighlightWorkSlot {
 
 fn expected_pass_count(cfa_kind: CfaKind) -> usize {
     let demosaic_passes = match cfa_kind {
-        CfaKind::Bayer => 4,
-        CfaKind::XTrans => 8,
+        CfaKind::Bayer => 6,
+        CfaKind::XTrans => 10,
     };
     // Highlight prepare + guided stages + two finalize variants, followed by
     // demosaic, four tone-analysis passes, and eleven adjustment/output passes
@@ -202,6 +202,14 @@ const SHADER_BAYER_RCD_P4: &str = concat!(
     include_str!("../shaders/noise.wgsl"),
     "\n",
     include_str!("../shaders/pass4.wgsl")
+);
+
+const SHADER_DUAL_DEMOSAIC: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/dual_demosaic.wgsl")
 );
 
 const SHADER_XTRANS_P1: &str = concat!(
@@ -1197,6 +1205,10 @@ impl GpuParams {
         self.highlight_options[0] >= 1.5 && self.highlight_reconstruction > 1e-6
     }
 
+    fn needs_dual_demosaic_passes(&self) -> bool {
+        self.demosaic_mode >= 1.5
+    }
+
     fn needs_intermediate_adjustment_passes(&self) -> bool {
         // Saturation and Vibrance live in apply_scene_effects_node alongside the
         // presence controls. They must therefore keep the intermediate passes
@@ -1237,7 +1249,6 @@ pub struct RawGpuPipeline {
     params_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
     tone_stats_buffer: wgpu::Buffer,
-    raw_stage_end: usize,
     tone_prepare_pass_index: usize,
     tone_reduce_pass_index: usize,
     tone_stage_end: usize,
@@ -1246,6 +1257,9 @@ pub struct RawGpuPipeline {
     highlight_finalize_guided_index: usize,
     highlight_finalize_direct_index: usize,
     demosaic_start_index: usize,
+    demosaic_dual_start_index: usize,
+    demosaic_dual_end_index: usize,
+    demosaic_finish_index: usize,
     adjustment_prepare_pass_index: usize,
     adjustment_tone_pass_index: usize,
     adjustment_effects_pass_index: usize,
@@ -1793,10 +1807,13 @@ impl RawGpuPipeline {
         ];
 
         let demosaic_start_for_programs = 1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2;
-        let demosaic_pass_count = match raw.cfa_kind {
-            CfaKind::Bayer => 4,
-            CfaKind::XTrans => 8,
+        let (demosaic_high_pass_count, demosaic_pass_count) = match raw.cfa_kind {
+            CfaKind::Bayer => (3, 6),
+            CfaKind::XTrans => (7, 10),
         };
+        let dual_green_for_programs = demosaic_start_for_programs + demosaic_high_pass_count;
+        let dual_rgb_for_programs = dual_green_for_programs + 1;
+        let demosaic_finish_for_programs = dual_rgb_for_programs + 1;
         let tone_prepare_for_programs = demosaic_start_for_programs + demosaic_pass_count;
         let adjustment_prepare_for_programs = tone_prepare_for_programs + 4;
         let reused_layout = |pass_index: usize| {
@@ -1886,8 +1903,45 @@ impl RawGpuPipeline {
             })
         });
 
+        let bgl_dual_green = reused_layout(dual_green_for_programs).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl dual demosaic green"),
+                entries: &[
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        20,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
+
+        let bgl_dual_rgb = reused_layout(dual_rgb_for_programs).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl dual demosaic rgb"),
+                entries: &[
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(21, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        22,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
+
         let bgl4 = (matches!(raw.cfa_kind, CfaKind::Bayer)
-            .then(|| reused_layout(demosaic_start_for_programs + 3))
+            .then(|| reused_layout(demosaic_finish_for_programs))
             .flatten())
         .unwrap_or_else(|| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1900,6 +1954,7 @@ impl RawGpuPipeline {
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(23, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
                         10,
                         demosaic_format,
@@ -1993,7 +2048,7 @@ impl RawGpuPipeline {
         });
 
         let bgl_xtrans_finish = (matches!(raw.cfa_kind, CfaKind::XTrans)
-            .then(|| reused_layout(demosaic_start_for_programs + 7))
+            .then(|| reused_layout(demosaic_finish_for_programs))
             .flatten())
         .unwrap_or_else(|| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2005,6 +2060,7 @@ impl RawGpuPipeline {
                     common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(23, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
                         10,
                         demosaic_format,
@@ -2338,6 +2394,77 @@ impl RawGpuPipeline {
             ],
         });
 
+        let (dual_green_view, dual_low_view) = match raw.cfa_kind {
+            CfaKind::Bayer => (&highlight_work_a_view, &highlight_work_b_view),
+            CfaKind::XTrans => (&tex1_view, &tex2_view),
+        };
+
+        let bg_dual_green = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg dual demosaic green"),
+            layout: &bgl_dual_green,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: wgpu::BindingResource::TextureView(dual_green_view),
+                },
+            ],
+        });
+
+        let bg_dual_rgb = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg dual demosaic rgb"),
+            layout: &bgl_dual_rgb,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: wgpu::BindingResource::TextureView(dual_green_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: wgpu::BindingResource::TextureView(dual_low_view),
+                },
+            ],
+        });
+
         let bg4 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg4"),
             layout: &bgl4,
@@ -2369,6 +2496,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 9,
                     resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: wgpu::BindingResource::TextureView(dual_low_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
@@ -2529,6 +2660,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 26,
                     resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: wgpu::BindingResource::TextureView(dual_low_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
@@ -2865,6 +3000,7 @@ impl RawGpuPipeline {
         let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format);
         let bayer_rcd_p3 = work_shader_source(SHADER_BAYER_RCD_P3, demosaic_format);
         let bayer_rcd_p4 = work_shader_source(SHADER_BAYER_RCD_P4, demosaic_format);
+        let dual_demosaic = work_shader_source(SHADER_DUAL_DEMOSAIC, demosaic_format);
         let xtrans_p1 = work_shader_source(SHADER_XTRANS_P1, demosaic_format);
         let xtrans_p2 = work_shader_source(SHADER_XTRANS_P2, demosaic_format);
         let xtrans_p3 = work_shader_source(SHADER_XTRANS_P3, demosaic_format);
@@ -2897,6 +3033,9 @@ impl RawGpuPipeline {
         let bayer_rcd_p4_module = program_template
             .is_none()
             .then(|| create_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref()));
+        let dual_demosaic_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw robust dual demosaic", dual_demosaic.as_ref()));
         let xtrans_p1_module = program_template
             .is_none()
             .then(|| create_shader("auraw X-Trans pass 1", xtrans_p1.as_ref()));
@@ -3041,10 +3180,9 @@ impl RawGpuPipeline {
         });
 
         let demosaic_start_index = passes.len();
-        // Select the demosaic family from LibRaw's CFA classification.
-        // Bayer uses the four-stage ratio-corrected reference path. Fuji
-        // X-Trans seeds an RGB image, performs three green/chroma refinement
-        // passes, then selects among eight homogeneity-guided candidates.
+        // Build the high-detail reference first. The robust low-frequency
+        // branch is represented by two real full-frame buffers, but its two
+        // dispatches are skipped at encode time unless Dual mode is selected.
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
                 Pass {
@@ -3068,15 +3206,6 @@ impl RawGpuPipeline {
                         &bgl3,
                     ),
                     bind_group: bg3,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        bayer_rcd_p4_module.as_ref(),
-                        "bayer_rcd_output",
-                        &bgl4,
-                    ),
-                    bind_group: bg4,
                     workgroups: image_workgroups,
                 },
             ]),
@@ -3140,19 +3269,53 @@ impl RawGpuPipeline {
                     bind_group: bg_xtrans_accumulate,
                     workgroups: image_workgroups,
                 },
-                Pass {
-                    pipeline: make_pipeline(
-                        xtrans_p7_module.as_ref(),
-                        "xtrans_demosaic_finish",
-                        &bgl_xtrans_finish,
-                    ),
-                    bind_group: bg_xtrans_finish,
-                    workgroups: image_workgroups,
-                },
             ]),
         }
 
-        let raw_stage_end = passes.len();
+        let demosaic_dual_start_index = passes.len();
+        passes.extend([
+            Pass {
+                pipeline: make_pipeline(
+                    dual_demosaic_module.as_ref(),
+                    "dual_green_reconstruct",
+                    &bgl_dual_green,
+                ),
+                bind_group: bg_dual_green,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    dual_demosaic_module.as_ref(),
+                    "dual_rgb_reconstruct",
+                    &bgl_dual_rgb,
+                ),
+                bind_group: bg_dual_rgb,
+                workgroups: image_workgroups,
+            },
+        ]);
+        let demosaic_dual_end_index = passes.len();
+
+        let demosaic_finish_index = passes.len();
+        match raw.cfa_kind {
+            CfaKind::Bayer => passes.push(Pass {
+                pipeline: make_pipeline(
+                    bayer_rcd_p4_module.as_ref(),
+                    "bayer_rcd_output",
+                    &bgl4,
+                ),
+                bind_group: bg4,
+                workgroups: image_workgroups,
+            }),
+            CfaKind::XTrans => passes.push(Pass {
+                pipeline: make_pipeline(
+                    xtrans_p7_module.as_ref(),
+                    "xtrans_demosaic_finish",
+                    &bgl_xtrans_finish,
+                ),
+                bind_group: bg_xtrans_finish,
+                workgroups: image_workgroups,
+            }),
+        }
 
         // Analyze the unexposed scene at reduced resolution. The guide is
         // bilateral and the histogram reduction emits robust tonal anchors.
@@ -3325,7 +3488,6 @@ impl RawGpuPipeline {
             params_buffer,
             tone_histogram_buffer,
             tone_stats_buffer,
-            raw_stage_end,
             tone_prepare_pass_index,
             tone_reduce_pass_index,
             tone_stage_end,
@@ -3334,6 +3496,9 @@ impl RawGpuPipeline {
             highlight_finalize_guided_index,
             highlight_finalize_direct_index,
             demosaic_start_index,
+            demosaic_dual_start_index,
+            demosaic_dual_end_index,
+            demosaic_finish_index,
             adjustment_prepare_pass_index,
             adjustment_tone_pass_index,
             adjustment_effects_pass_index,
@@ -4233,7 +4398,19 @@ impl RawGpuPipeline {
         } else {
             self.encode_pass(encoder, self.highlight_finalize_direct_index);
         }
-        self.encode_pass_range(encoder, self.demosaic_start_index, self.raw_stage_end);
+        self.encode_pass_range(
+            encoder,
+            self.demosaic_start_index,
+            self.demosaic_dual_start_index,
+        );
+        if params.needs_dual_demosaic_passes() {
+            self.encode_pass_range(
+                encoder,
+                self.demosaic_dual_start_index,
+                self.demosaic_dual_end_index,
+            );
+        }
+        self.encode_pass(encoder, self.demosaic_finish_index);
     }
 
     fn encode_output_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
