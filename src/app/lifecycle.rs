@@ -1102,31 +1102,10 @@ impl AurawApp {
             self.preview_quality.label()
         ));
         let sidecar_generation = self.begin_sidecar_open();
-        // Keep the previous full-frame preview pipeline alive just long enough
-        // for the decode worker to clone its already-compiled compute programs.
-        // On Android/Vulkan, recompiling these shaders for every RAW can take
-        // several seconds. The old textures are released immediately after the
-        // new pipeline has been allocated on the worker.
+        // Reuse compiled GPU programs across RAW opens; release only the old textures.
         let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
-            let old_pipeline = self.gpu_pipeline.take();
-            if let Some(texture_id) = old_pipeline
-                .as_ref()
-                .and_then(|pipeline| pipeline.egui_texture_id)
-            {
-                renderer.free_texture(&texture_id);
-            }
-            if let Some(old) = self.preview_detail.take() {
-                if let Some(texture_id) = old.pipeline.egui_texture_id {
-                    renderer.free_texture(&texture_id);
-                }
-            }
-            if let Some(old) = self.preview_navigation.take() {
-                if let Some(texture_id) = old.pipeline.egui_texture_id {
-                    renderer.free_texture(&texture_id);
-                }
-            }
-            old_pipeline
+            self.take_preview_pipeline_and_release_textures(&mut renderer)
         };
         #[cfg(target_os = "android")]
         let startup_gpu_prewarm_receiver = self.gpu_preview_prewarm_receiver.take();
@@ -1235,11 +1214,7 @@ impl AurawApp {
                     "RAW sidecar lookup finished in {:.3}s",
                     sidecar_started.elapsed().as_secs_f64()
                 ));
-                // Existing per-image edits always win. Only a truly new RAW
-                // (no sidecar at all) inherits the last DCP chosen in the
-                // Develop dropdown. A stale/mismatched sticky profile is safe:
-                // the loader validates it against this camera and falls back to
-                // its normal automatic selection when it does not match.
+                // Existing sidecar edits win; only new RAWs inherit the last valid DCP.
                 let (requested_camera_profile, requested_profile_from_sidecar) =
                     match profile_selection_override {
                         Some(selection) => (selection, false),
@@ -1902,21 +1877,7 @@ impl AurawApp {
                     return;
                 };
                 let mut renderer = render_state.renderer.write();
-                if let Some(old) = self.gpu_pipeline.take() {
-                    if let Some(texture_id) = old.egui_texture_id {
-                        renderer.free_texture(&texture_id);
-                    }
-                }
-                if let Some(old) = self.preview_detail.take() {
-                    if let Some(texture_id) = old.pipeline.egui_texture_id {
-                        renderer.free_texture(&texture_id);
-                    }
-                }
-                if let Some(old) = self.preview_navigation.take() {
-                    if let Some(texture_id) = old.pipeline.egui_texture_id {
-                        renderer.free_texture(&texture_id);
-                    }
-                }
+                self.take_preview_pipeline_and_release_textures(&mut renderer);
                 loaded
                     .pipeline
                     .register_egui_texture(&render_state.device, &mut renderer);

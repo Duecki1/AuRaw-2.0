@@ -21,7 +21,6 @@ def test_zoom_detail_is_viewport_sized_and_starts_immediately_above_fit() -> Non
     assert "requested_detail_edge" in PROCESSING_EXPORT
     assert "const DETAIL_ZOOM_START: f32 = 1.0005" in PROCESSING_EXPORT
     assert "requested_visible_width <= visible_proxy_width * 1.05" not in PROCESSING_EXPORT
-    assert "Always build the visible detail crop above fit view" in PROCESSING_EXPORT
     assert 'Duration::from_millis(if cfg!(target_os = "android") { 220 } else { 140 })' in PROCESSING_EXPORT
 
 
@@ -36,7 +35,8 @@ def test_zoom_detail_hides_processing_halo_and_aligns_cfa_phase() -> None:
     assert "aligned_detail_axis" in PROCESSING_EXPORT
     assert "texture_uv_rect" in APP
     assert "detail.texture_uv_rect" in PREVIEW
-    assert "Anchor the synthetic proxy mosaic to the source region's real CFA" in PROCESSING
+    assert "let phase_x = (x + output_phase_x).min(raw.width - 1);" in PROCESSING
+    assert "let phase_y = (y + output_phase_y).min(raw.height - 1);" in PROCESSING
 
 
 def test_zoomed_adjustments_dispatch_detail_and_tiny_adjusted_navigation_proxies() -> None:
@@ -57,7 +57,10 @@ def test_zoomed_adjustments_reuse_the_existing_crop_without_rebuilding_raw() -> 
     assert "raw: Arc<LoadedRaw>" in APP
     assert "source_origin: [u32; 2]" in APP
     assert "let detail_raw = Arc::clone(&detail.raw);" in PROCESSING_EXPORT
-    assert "Parameter edits are dispatched directly into this current crop" in PROCESSING_EXPORT
+    assert "if detail_is_current {" in PROCESSING_EXPORT
+    detail_guard_start = PROCESSING_EXPORT.index("if detail_is_current {")
+    detail_guard_end = PROCESSING_EXPORT.index("let urgent =", detail_guard_start)
+    assert "return;" in PROCESSING_EXPORT[detail_guard_start:detail_guard_end]
 
 
 def test_deferred_full_preview_does_not_force_continuous_zoomed_repaints() -> None:
@@ -78,8 +81,8 @@ def test_fit_view_never_flashes_the_tiny_navigation_proxy_during_edits() -> None
     assert "let detail_is_current = self" in PROCESSING_EXPORT
     assert "let use_navigation = self.preview_zoom > DETAIL_ZOOM_START" in PROCESSING_EXPORT
     assert "&& !detail_is_current" in PROCESSING_EXPORT
-    assert "Fit view now stays on the normal-resolution proxy throughout" in PROCESSING_EXPORT
-    assert "Drop the low-resolution navigation backing as soon as fit view is" in PROCESSING_EXPORT
+    assert "if !should_exist && !should_update {" in PROCESSING_EXPORT
+    assert "self.preview_navigation.take()" in PROCESSING_EXPORT
     assert "if self.preview_zoom > DETAIL_ZOOM_START {" in PROCESSING_EXPORT
     assert "self.preview_zoom > DETAIL_ZOOM_START || self.preview_navigation.is_some()" not in PROCESSING_EXPORT
 
@@ -88,7 +91,8 @@ def test_preview_geometry_does_not_change_when_backing_proxy_switches() -> None:
     assert "geometry_width" in PREVIEW
     assert "geometry_height" in PREVIEW
     assert ".loaded_raw" in PREVIEW
-    assert "Anchor all preview" in PREVIEW
+    assert "let source_dimensions = app" in PREVIEW
+    assert ".loaded_raw" in PREVIEW
     assert "geometry_width as f32 / geometry_height.max(1) as f32" in PREVIEW
 
 
@@ -99,8 +103,8 @@ def test_zoom_detail_masks_remain_in_full_image_coordinate_space() -> None:
     assert "let global_pos = vec2<f32>(pos + tile_origin())" in ADJUSTMENTS
     assert "let uv = clamp(global_pos / full_size" in ADJUSTMENTS
     assert "let detail_masks = self.masks.cropped_for_region(" not in PROCESSING_EXPORT
-    assert "Cropping/remapping the mask stack here double-transforms every mask" in PROCESSING_EXPORT
     assert "&self.masks,\n            &detail_raw," in PROCESSING_EXPORT
     assert "&self.masks,\n            &full_raw," in PROCESSING_EXPORT
     assert "full_raw.width,\n                    full_raw.height," in PROCESSING_EXPORT
-    assert "Panning only replaces the RAW crop" in PROCESSING_EXPORT
+    assert ".upload_raw_tile(&render_state.queue, &detail_raw)" in PROCESSING_EXPORT
+    assert "self.detail_dirty_mask_layers.iter().any" in PROCESSING_EXPORT

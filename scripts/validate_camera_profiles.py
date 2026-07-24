@@ -239,6 +239,7 @@ def main() -> int:
     rust_profile = read("src/pipeline/color_profile.rs")
     raw_loader = read("src/pipeline/raw_loader.rs")
     gpu = read("src/pipeline/gpu.rs")
+    gpu_tests = read("src/pipeline/gpu/tests.rs")
     build_rs = read("build.rs")
     common = read("src/shaders/common.wgsl")
     profile = read("src/shaders/profile.wgsl")
@@ -309,7 +310,7 @@ def main() -> int:
         [
             "cam_to_working(camera_rgb)",
             "apply_profile_hue_sat(scene_working_at(pos))",
-            "exp2(profile_exposure_ev)",
+            "exp2(profile_exposure_ev + local_exposure_ev)",
             "apply_exposure(rgb)",
             "apply_profile_look(rgb)",
             "apply_profile_tone_curve(rgb)",
@@ -338,9 +339,10 @@ def main() -> int:
         "darktable sigmoid defaults and generalized log-logistic coefficients are present",
     )
     c.check(
-        "(params.process_info.y & 1u) == 0u" in adjustments
-        and "display_linear = darktable_sigmoid(graded);" in adjustments,
-        "DCP base tone can bypass the default sigmoid while the sigmoid fallback remains available",
+        "var display_linear = darktable_sigmoid(graded);" in adjustments
+        and "(params.process_info.y & 1u) != 0u" in adjustments
+        and "display_linear = profile_tone_display_shoulder(graded);" in adjustments,
+        "DCP base tone can select the profile shoulder while the sigmoid fallback remains available",
     )
     c.require_in_order(
         adjustments,
@@ -397,19 +399,19 @@ def main() -> int:
         "baseline_exposure.is_finite() && baseline_exposure > -999.0" in raw_loader,
         "LibRaw's missing BaselineExposure sentinel cannot black out proprietary RAW previews",
     )
-    compact_gpu = " ".join(gpu.split())
+    compact_gpu_tests = " ".join(gpu_tests.split())
     c.check(
-        "size_of::<super::GpuParams>(), 6960" in compact_gpu
-        and "offset_of!(super::GpuParams, sigmoid_curve), 80" in compact_gpu
-        and "offset_of!(super::GpuParams, sigmoid_power), 96" in compact_gpu
-        and "offset_of!(super::GpuParams, tone_curve_0), 192" in compact_gpu
-        and "offset_of!(super::GpuParams, tone_curve_meta), 256" in compact_gpu
-        and "offset_of!(super::GpuParams, tone_curve_red_0), 272" in compact_gpu
-        and "offset_of!(super::GpuParams, tone_curve_green_0), 352" in compact_gpu
-        and "offset_of!(super::GpuParams, tone_curve_blue_0), 432" in compact_gpu
-        and "offset_of!(super::GpuParams, profile_hue_sat), 752" in compact_gpu
-        and "offset_of!(super::GpuParams, profile_flags), 816" in compact_gpu,
-        "camera-profile uniform ABI regression test covers the appended metadata block",
+        "size_of::<super::GpuParams>(), 25056" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, sigmoid_curve), 80" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, sigmoid_power), 96" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_0), 192" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_meta), 256" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_red_0), 272" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_green_0), 352" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_blue_0), 432" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, profile_hue_sat), 800" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, profile_flags), 864" in compact_gpu_tests,
+        "camera-profile uniform ABI regression test covers the current metadata block",
     )
 
     c.check("ProfileHueSatMapEncoding" not in profile, "shader receives normalized encoding flags rather than reparsing metadata")
@@ -427,8 +429,9 @@ def main() -> int:
         "profile tone curve uses a natural cubic spline",
     )
     c.check(
-        "SDR DCP tone curves must start at (0, 0) and end at (1, 1)" in rust_profile,
-        "SDR profile tone-curve endpoints are validated",
+        "DCP tone-curve coordinates must be in the 0..1 range" in rust_profile
+        and "DCP tone-curve x coordinates must be stored in strictly increasing order" in rust_profile,
+        "DCP profile tone-curve coordinates are bounded and ordered",
     )
 
     c.check("&bytes[36..40] != b\"acsp\"" in rust_profile, "ICC profile signature is validated")

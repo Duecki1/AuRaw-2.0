@@ -45,29 +45,13 @@ impl Preview {
         }
 
         let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
-        // While zoomed, the displayed backing texture may switch between the
-        // normal proxy and the tiny full-frame navigation proxy while an
-        // adjustment is being dragged. Fit view deliberately never makes that
-        // swap, avoiding a packaged-build pixelation flash. The independently
-        // downscaled proxies can differ by a pixel
-        // after integer rounding, which gives them a slightly different aspect
-        // ratio. Deriving zoom geometry from whichever texture happens to be
-        // active makes that texture swap look like camera motion: visible UVs
-        // change, `note_preview_motion` invalidates the detail crop, and the
-        // low-resolution backing briefly flashes through. Anchor all preview
-        // geometry to the full developed image instead; texture swaps then only
-        // change pixels, never the zoom/crop coordinate system.
+        // Anchor zoom geometry to the full developed image, independent of proxy size.
         let source_dimensions = app
             .loaded_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((pipeline_width, pipeline_height));
         let crop_preview = app.sidebar_tab == SidebarTab::Crop && !app.original_preview_visible();
-        // Legacy source-shape regression markers retained while the implementation
-        // now routes these operations through geometry-aware helpers:
-        // Self::paint_mask_overlay(ui, app, image_rect, visible_screen, outer_rect)
-        // painter_image_clipped
-        // inpaint_stroke_screen_bounds
         // *start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);
         // *end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);
         // Every non-Crop Develop surface uses the same final geometry frame that

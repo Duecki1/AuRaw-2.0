@@ -89,7 +89,8 @@ def test_android_import_picker_supports_single_and_batch_selection() -> None:
     single = ACTIVITY[ACTIVITY.index("private void importSingleDocument"):ACTIVITY.index("private StoredRaw importDocumentIntoLibrary")]
     assert "materializeLibraryRaw" not in batch
     assert "nativeOnImportBatchFinished" in batch
-    assert "materializeLibraryRaw" in single
+    assert "deliverLibraryRawFd" in single
+    assert "materializeLibraryRaw" not in ACTIVITY
 
 
 def test_android_previewless_raw_fallback_handles_modern_sensors_serially() -> None:
