@@ -197,7 +197,11 @@ pub const SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13;
 /// Process 14 adds sensor-profiled multiscale denoise while retaining the
 /// process-13 scene/display graph unchanged.
 pub const SENSOR_DENOISE_PROCESS_VERSION: u32 = 14;
-pub const CURRENT_PROCESS_VERSION: u32 = SENSOR_DENOISE_PROCESS_VERSION;
+/// Process 15 makes guided RAW highlight reconstruction boundary/consensus
+/// aware. Existing process-14 edits retain the previous guided solver so saved
+/// appearances do not change silently; new edits use the more robust solver.
+pub const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15;
+pub const CURRENT_PROCESS_VERSION: u32 = HIGHLIGHT_CONSENSUS_PROCESS_VERSION;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -329,8 +333,9 @@ impl ExposureParams {
         // Process 13 intentionally does *not* auto-upgrade process-12 edits:
         // reordering profile tone/look around scene controls is appearance
         // changing and cannot be represented by a scalar parameter migration.
-        // Process 14 retains the process-13 graph and changes only denoise. New
-        // edits start at CURRENT_PROCESS_VERSION; saved process-12/13 edits keep
+        // Process 14 retains the process-13 graph and changes only denoise.
+        // Process 15 changes guided highlight reconstruction only. New edits
+        // start at CURRENT_PROCESS_VERSION; saved process-12/13/14 edits keep
         // their renderer until the user explicitly opts into a compatible change.
         match self.process_version {
             0..=7 => {
@@ -345,6 +350,7 @@ impl ExposureParams {
             }
             LEGACY_SCENE_DISPLAY_PROCESS_VERSION
             | SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION
+            | SENSOR_DENOISE_PROCESS_VERSION
             | CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently

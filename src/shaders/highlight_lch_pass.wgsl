@@ -51,6 +51,64 @@ fn highlight_mask_channels(mask: u32) -> vec3<f32> {
     );
 }
 
+
+const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15u;
+
+// Equal-energy camera-RGB chroma signature. Subtracting the neutral [1,1,1]
+// axis makes distance compare colour ratios rather than exposure. This stage is
+// still in white-balanced camera RGB, so Rec.2020/display luminance must not be
+// used here.
+fn highlight_chroma_signature(rgb: vec3<f32>) -> vec3<f32> {
+    return highlight_chroma_ratio(rgb) - vec3<f32>(1.0);
+}
+
+fn highlight_chroma_distance_squared(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let delta = highlight_chroma_signature(a) - highlight_chroma_signature(b);
+    return min(dot(delta, delta) / 3.0, 16.0);
+}
+
+// A center with two surviving sensor channels contains a real colour-ratio
+// constraint. Reject propagated candidates whose surviving-channel ratios do
+// not agree with that measurement. With zero/one surviving channel there is no
+// independent ratio constraint, so this deliberately returns one.
+fn highlight_known_channel_compatibility(
+    center_rgb: vec3<f32>,
+    candidate_rgb: vec3<f32>,
+    known_channels: vec3<f32>,
+) -> f32 {
+    let known_count = known_channels.r + known_channels.g + known_channels.b;
+    if known_count < 1.5 {
+        return 1.0;
+    }
+
+    let center_mean = dot(center_rgb, known_channels) / max(known_count, 1.0);
+    let candidate_mean = dot(candidate_rgb, known_channels) / max(known_count, 1.0);
+    if center_mean <= 1e-8 || candidate_mean <= 1e-8 {
+        return 0.25;
+    }
+
+    let center_shape = center_rgb / center_mean;
+    let candidate_shape = candidate_rgb / candidate_mean;
+    let delta = (center_shape - candidate_shape) * known_channels;
+    let error2 = dot(delta, delta) / known_count;
+    return 1.0 / (1.0 + 10.0 * error2);
+}
+
+fn highlight_mask_mismatch_weight(center_mask: u32, neighbour_mask: u32) -> f32 {
+    // Unclipped neighbours are trustworthy Dirichlet boundary samples. Inside
+    // a clipped component, prefer propagation fronts with similar unknown-plane
+    // topology so a red-clipped region does not freely borrow a blue-clipped
+    // reconstruction merely because the pixels are spatially adjacent.
+    if neighbour_mask == 0u {
+        return 1.0;
+    }
+    let xor_mask = center_mask ^ neighbour_mask;
+    let mismatch = select(0.0, 1.0, (xor_mask & 1u) != 0u)
+        + select(0.0, 1.0, (xor_mask & 2u) != 0u)
+        + select(0.0, 1.0, (xor_mask & 4u) != 0u);
+    return mix(1.0, 0.58, mismatch / 3.0);
+}
+
 fn highlight_opposed_power_mean(a: f32, b: f32) -> f32 {
     let root = 0.5 * (
         pow(max(a, 0.0), 1.0 / 3.0)
@@ -133,6 +191,12 @@ fn reconstruct_highlight_at(
     var rgb_sum = vec3<f32>(0.0);
     var reliability_sum = 0.0;
     var weight_sum = 0.0;
+    // Chroma first/second moments let the solver distinguish a coherent coloured
+    // boundary from incompatible colours arriving from different components.
+    // Without this, averaging red and blue support can manufacture a magenta
+    // fully-clipped core even though no sensor sample ever supported that hue.
+    var chroma_signature_sum = vec3<f32>(0.0);
+    var chroma_signature_energy_sum = 0.0;
 
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
@@ -149,6 +213,7 @@ fn reconstruct_highlight_at(
 
             let neighbour_rgb = max(neighbour.rgb, vec3<f32>(0.0));
             let outward_rgb = max(outward.rgb, vec3<f32>(0.0));
+            let neighbour_mask = highlight_state_mask(neighbour.w);
             let neighbour_log_intensity = log(highlight_intensity(neighbour_rgb));
             let outward_reliability = highlight_state_confidence(outward.w);
             let measured_outward_log_intensity = log(highlight_intensity(outward_rgb));
@@ -192,10 +257,43 @@ fn reconstruct_highlight_at(
                 / (1.0 + 0.35 * abs(neighbour_log_intensity - center_log_intensity));
             let gradient_weight = 1.0 / (1.0 + 1.5 * abs(log_gradient));
             let reliability_weight = neighbour_reliability * neighbour_reliability;
-            let weight = spatial_weight * range_weight * gradient_weight * reliability_weight;
+            var boundary_weight = 1.0;
+            var anchor_weight = 1.0;
+            var topology_weight = 1.0;
+            if params.process_info.x >= HIGHLIGHT_CONSENSUS_PROCESS_VERSION {
+                // If neighbour and outward reliable samples disagree strongly in
+                // colour ratio, an object/illumination boundary likely lies on
+                // this propagation ray. Do not transport that chroma deep into
+                // the clipped component. Intensity gradients remain independent.
+                let chroma_disagreement = highlight_chroma_distance_squared(
+                    neighbour_rgb,
+                    outward_rgb,
+                );
+                let chroma_continuity = 1.0 / (1.0 + 7.0 * chroma_disagreement);
+                boundary_weight = mix(1.0, chroma_continuity, outward_reliability);
+                anchor_weight = highlight_known_channel_compatibility(
+                    center_rgb,
+                    candidate_rgb,
+                    vec3<f32>(1.0) - highlight_mask_channels(center_mask),
+                );
+                topology_weight = highlight_mask_mismatch_weight(center_mask, neighbour_mask);
+            }
+            let weight = spatial_weight
+                * range_weight
+                * gradient_weight
+                * reliability_weight
+                * boundary_weight
+                * anchor_weight
+                * topology_weight;
 
             rgb_sum = rgb_sum + candidate_rgb * weight;
             reliability_sum = reliability_sum + neighbour_reliability * weight;
+            if params.process_info.x >= HIGHLIGHT_CONSENSUS_PROCESS_VERSION {
+                let signature = highlight_chroma_signature(candidate_rgb);
+                chroma_signature_sum = chroma_signature_sum + signature * weight;
+                chroma_signature_energy_sum = chroma_signature_energy_sum
+                    + dot(signature, signature) * weight;
+            }
             weight_sum = weight_sum + weight;
         }
     }
@@ -205,13 +303,32 @@ fn reconstruct_highlight_at(
     }
 
     var candidate = rgb_sum / weight_sum;
+    let unknown_channels = highlight_mask_channels(center_mask);
+    let known_channels = vec3<f32>(1.0) - unknown_channels;
+    let unknown_fraction = (unknown_channels.r + unknown_channels.g + unknown_channels.b) / 3.0;
+    var consensus = 1.0;
+    if params.process_info.x >= HIGHLIGHT_CONSENSUS_PROCESS_VERSION {
+        let mean_signature = chroma_signature_sum / weight_sum;
+        let signature_variance = max(
+            chroma_signature_energy_sum / weight_sum - dot(mean_signature, mean_signature),
+            0.0,
+        );
+        // Coherent coloured boundaries retain their hue. When incompatible hue
+        // evidence meets inside a mostly/fully clipped component, progressively
+        // fall back toward a neutral intensity instead of inventing a mixed hue.
+        consensus = 1.0 / (1.0 + 5.0 * signature_variance);
+        let ambiguity = smoothstep(0.34, 1.0, unknown_fraction);
+        let colour_gate = mix(1.0, consensus, ambiguity);
+        let neutral_candidate = vec3<f32>(highlight_intensity(candidate));
+        candidate = mix(neutral_candidate, candidate, colour_gate);
+    }
     let propagated_reliability = clamp(
-        (reliability_sum / weight_sum) * 0.985,
+        (reliability_sum / weight_sum)
+            * 0.985
+            * mix(1.0, consensus, smoothstep(0.34, 1.0, unknown_fraction)),
         0.0,
         1.0,
     );
-    let unknown_channels = highlight_mask_channels(center_mask);
-    let known_channels = vec3<f32>(1.0) - unknown_channels;
     let known_energy = dot(center_rgb * candidate, known_channels);
     let candidate_known_energy = dot(candidate * candidate, known_channels);
     if candidate_known_energy > 1e-10 {

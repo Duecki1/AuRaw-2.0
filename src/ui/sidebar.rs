@@ -4,8 +4,8 @@ use crate::app::{
 use crate::pipeline::{
     BrushMode, DemosaicMode, DenoiseQuality, ExportBitDepth, ExportColorProfile, ExportResizeMode,
     ExposureParams, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry, MaskKind,
-    SigmoidColorProcessing, CURRENT_PROCESS_VERSION, HSL_HUE_LIMIT, MAX_EXPORT_EDGE,
-    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
+    SigmoidColorProcessing, HSL_HUE_LIMIT, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS,
+    MAX_MASK_COMPONENTS, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION, SENSOR_DENOISE_PROCESS_VERSION,
 };
 use crate::ui::components::adjustment_slider::{adjustment_slider, slider_scroll_locked};
 use crate::ui::components::color_grading::color_grading_editor;
