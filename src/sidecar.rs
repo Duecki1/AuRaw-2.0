@@ -1,7 +1,7 @@
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
-    ExposureParams, InpaintStroke, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION,
+    ExposureParams, GeometryTransform, InpaintStroke, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION,
     MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 3;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 4;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
@@ -92,6 +92,8 @@ impl Default for AdjustmentCopySettings {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct EditState {
     pub exposure: ExposureParams,
+    #[serde(default)]
+    pub geometry: GeometryTransform,
     /// Explicit per-image DCP selection relative to the configured camera-profile root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_profile: Option<PathBuf>,
@@ -108,6 +110,7 @@ pub struct EditState {
 pub fn default_edit_state() -> EditState {
     EditState {
         exposure: ExposureParams::scene_referred_default(),
+        geometry: GeometryTransform::default(),
         camera_profile: None,
         masks: Arc::new(MaskStack::default()),
         inpainting: Arc::new(Vec::new()),
@@ -143,6 +146,7 @@ pub fn apply_copied_adjustments(
 ) {
     if settings.adjustments {
         destination.exposure = source.exposure;
+        destination.geometry = source.geometry;
     }
     if settings.masks {
         destination.masks = Arc::clone(&source.masks);
@@ -1524,6 +1528,7 @@ mod tests {
         masks.add_mask(MaskKind::Radial);
         EditState {
             exposure,
+            geometry: GeometryTransform::default(),
             camera_profile: None,
             masks: Arc::new(masks),
             inpainting: Arc::new(Vec::new()),

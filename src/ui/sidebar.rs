@@ -74,3 +74,4 @@ include!("sidebar/masks.rs");
 include!("sidebar/inpainting.rs");
 include!("sidebar/export.rs");
 include!("sidebar/develop.rs");
+include!("sidebar/crop.rs");

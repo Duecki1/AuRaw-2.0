@@ -13,7 +13,7 @@ use crate::pipeline::{
     spawn_tiled_jpeg_export, spawn_tiled_png_export, BrushDab, BrushMode, CameraProfileMode, CfaKind,
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog,
     LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
-    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO,
+    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, GeometryTransform, EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{
@@ -96,6 +96,27 @@ impl PreviewQuality {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CropHandle {
+    Move,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CropDragState {
+    pub handle: CropHandle,
+    pub start: [f32; 2],
+    pub crop: [f32; 4],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PreviewUvRect {
     pub min: [f32; 2],
@@ -138,6 +159,7 @@ pub enum AppTab {
 pub enum SidebarTab {
     #[default]
     Adjustments,
+    Crop,
     Masks,
     Inpainting,
     Export,
@@ -267,6 +289,7 @@ struct LoadedPreview {
     sidecar_warning: Option<String>,
     sidecar_needs_rewrite: bool,
     selected_camera_profile: Option<PathBuf>,
+    geometry: GeometryTransform,
 }
 
 enum LoadEvent {
@@ -457,6 +480,9 @@ pub struct AurawApp {
     pub(crate) selected_camera_profile: Option<PathBuf>,
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
+    pub(crate) geometry: GeometryTransform,
+    pub(crate) crop_drag: Option<CropDragState>,
+    pub(crate) geometry_revision: u64,
     pub adjustment_section: AdjustmentSection,
     pub mask_section: MaskSection,
     pub tone_curve_tab: ToneCurveTab,

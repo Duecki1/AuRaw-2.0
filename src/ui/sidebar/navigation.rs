@@ -18,6 +18,7 @@ impl Sidebar {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (SidebarTab::Adjustments, "Adjustments"),
+                        (SidebarTab::Crop, "Crop"),
                         (SidebarTab::Masks, "Masks"),
                         (SidebarTab::Inpainting, "Inpainting"),
                         (SidebarTab::Export, "Export"),
@@ -44,6 +45,7 @@ impl Sidebar {
             .auto_shrink([false, false])
             .show(ui, |ui| match app.sidebar_tab {
                 SidebarTab::Adjustments => Self::show_adjustments(ui, app, layout, frame),
+                SidebarTab::Crop => Self::show_crop(ui, app),
                 SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
                 SidebarTab::Inpainting => Self::show_inpainting(ui, app, layout, frame),
                 SidebarTab::Export => Self::show_export(ui, app, frame),
@@ -244,7 +246,7 @@ impl Sidebar {
                 Self::show_adjustment_tabs(ui, app);
             }
             SidebarTab::Masks => Self::show_mask_tabs(ui, app),
-            SidebarTab::Inpainting | SidebarTab::Export => {}
+            SidebarTab::Crop | SidebarTab::Inpainting | SidebarTab::Export => {}
         }
     }
 
