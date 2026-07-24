@@ -105,6 +105,24 @@ def test_lens_correction_preserves_bayer_green_phase_without_nearest_neighbor_wa
     assert "nearest_matching_sample(raw, source_x, source_y, cfa_index)" not in correction_loop
 
 
+def test_lensfun_defers_common_distortion_until_float_geometry() -> None:
+    apply_body = LENSFUN[LENSFUN.index("pub(super) fn apply") : LENSFUN.index("fn initialize_modifier")]
+    assert "LF_MODIFY_TCA | LF_MODIFY_VIGNETTING" in apply_body
+    assert "LF_MODIFY_DISTORTION" in apply_body
+    assert "build_lens_geometry_map(raw, &geometry_modifier, geometry_flags)" in apply_body
+    assert "correct_mosaic(raw, &early_modifier, early_flags, lens_geometry)" in apply_body
+    assert "LF_MODIFY_TCA | LF_MODIFY_VIGNETTING | LF_MODIFY_DISTORTION" not in apply_body
+
+
+def test_xtrans_tca_interpolates_same_color_before_nearest_fallback() -> None:
+    sampler = LENSFUN[
+        LENSFUN.index("fn sample_corrected_cfa_subpixel") : LENSFUN.index("fn sample_bayer_phase_bilinear")
+    ]
+    assert "sample_xtrans_same_color_weighted(" in sampler
+    assert sampler.index("sample_xtrans_same_color_weighted(") < sampler.index("nearest_matching_sample(")
+    assert "raw.color_indices[index] != channel" in sampler
+
+
 def test_manual_profile_selection_remains_available_without_camera_match() -> None:
     assert ".unwrap_or_else(|| all_lenses(&database))" in LENSFUN
     assert "let camera = find_camera(&database" in LENSFUN

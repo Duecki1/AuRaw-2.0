@@ -1329,6 +1329,7 @@ unsafe fn loaded_raw_from_context(
         camera_profile_source: None,
         available_camera_profiles: Vec::new(),
         white_balance_model,
+        lens_geometry: None,
     })
 }
 

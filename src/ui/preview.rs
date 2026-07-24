@@ -3,8 +3,8 @@ use crate::app::{
     StraightenDragState,
 };
 use crate::pipeline::{
-    rasterize_inpaint_dabs_binary, BrushDab, BrushMode, GeometryTransform, MaskCombineMode,
-    MaskGeometry, MaskKind, ObjectStroke,
+    rasterize_inpaint_dabs_binary, BrushDab, BrushMode, GeometryTransform, LensGeometryMap,
+    MaskCombineMode, MaskGeometry, MaskKind, ObjectStroke,
 };
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui};
@@ -51,6 +51,10 @@ impl Preview {
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((pipeline_width, pipeline_height));
+        let lens_geometry = app
+            .loaded_raw
+            .as_ref()
+            .and_then(|raw| raw.lens_geometry.clone());
         let crop_preview = app.sidebar_tab == SidebarTab::Crop && !app.original_preview_visible();
         // *start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);
         // *end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);
@@ -58,7 +62,8 @@ impl Preview {
         // export writes. Mask and inpainting interactions are inverse-mapped back
         // into source coordinates below, so their tools remain accurate while the
         // pixels and overlays stay aligned with crop/rotation/flip/transform.
-        let final_geometry_preview = !crop_preview && !app.geometry.is_identity();
+        let final_geometry_preview =
+            !crop_preview && (!app.geometry.is_identity() || lens_geometry.is_some());
         let (geometry_width, geometry_height) = if final_geometry_preview {
             app.geometry
                 .crop_pixel_dimensions(source_dimensions.0, source_dimensions.1)
@@ -224,6 +229,7 @@ impl Preview {
                 image_rect,
                 visible_screen,
                 app.geometry,
+                lens_geometry.as_deref(),
                 source_dimensions.0,
                 source_dimensions.1,
             )
@@ -232,6 +238,7 @@ impl Preview {
                 image_rect,
                 visible_screen,
                 app.geometry,
+                lens_geometry.as_deref(),
                 source_dimensions.0,
                 source_dimensions.1,
             )
@@ -266,6 +273,7 @@ impl Preview {
                 texture_id,
                 image_rect,
                 app.geometry,
+                lens_geometry.as_deref(),
                 source_dimensions.0,
                 source_dimensions.1,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -277,6 +285,7 @@ impl Preview {
                 texture_id,
                 image_rect,
                 app.geometry,
+                lens_geometry.as_deref(),
                 source_dimensions.0,
                 source_dimensions.1,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -313,6 +322,7 @@ impl Preview {
                         detail_texture_id,
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_dimensions.0,
                         source_dimensions.1,
                         detail_texture_uv,
@@ -324,6 +334,7 @@ impl Preview {
                         detail_texture_id,
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_dimensions.0,
                         source_dimensions.1,
                         detail_texture_uv,
@@ -823,6 +834,10 @@ impl Preview {
         source_height: u32,
         response: &egui::Response,
     ) {
+        let lens_geometry = app
+            .loaded_raw
+            .as_ref()
+            .and_then(|raw| raw.lens_geometry.clone());
         let pointer = response
             .interact_pointer_pos()
             .filter(|position| preview_rect.contains(*position));
@@ -858,9 +873,10 @@ impl Preview {
         let Some(pointer) = pointer else {
             return;
         };
-        let source_uv = final_geometry_screen_to_source(
+        let source_uv = final_geometry_screen_to_native_source(
             image_rect,
             app.geometry,
+            lens_geometry.as_deref(),
             source_width,
             source_height,
             pointer,
@@ -878,9 +894,10 @@ impl Preview {
 
         let first_dab = app.last_inpaint_brush_point.is_none();
         let previous = app.last_inpaint_brush_point.unwrap_or(uv);
-        let previous_screen = final_geometry_source_to_screen(
+        let previous_screen = final_geometry_native_source_to_screen(
             image_rect,
             app.geometry,
+            lens_geometry.as_deref(),
             source_width,
             source_height,
             previous,
@@ -890,6 +907,7 @@ impl Preview {
         let radius_px = geometry_brush_radius_screen(
             image_rect,
             app.geometry,
+            lens_geometry.as_deref(),
             source_width,
             source_height,
             uv,
@@ -945,6 +963,10 @@ impl Preview {
         if app.sidebar_tab != SidebarTab::Inpainting {
             return;
         }
+        let lens_geometry = app
+            .loaded_raw
+            .as_ref()
+            .and_then(|raw| raw.lens_geometry.clone());
 
         let focused_stroke = app
             .inpaint_hovered_stroke
@@ -1003,6 +1025,9 @@ impl Preview {
                     texture.id(),
                     image_rect,
                     app.geometry,
+                    app.loaded_raw
+                        .as_ref()
+                        .and_then(|raw| raw.lens_geometry.as_deref()),
                     source_width,
                     source_height,
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -1014,6 +1039,7 @@ impl Preview {
                 &app.inpaint_strokes[index].dabs,
                 image_rect,
                 app.geometry,
+                lens_geometry.as_deref(),
                 source_width,
                 source_height,
             ) {
@@ -1082,6 +1108,9 @@ impl Preview {
                     texture.id(),
                     image_rect,
                     app.geometry,
+                    app.loaded_raw
+                        .as_ref()
+                        .and_then(|raw| raw.lens_geometry.as_deref()),
                     source_width,
                     source_height,
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -1095,9 +1124,10 @@ impl Preview {
             .pointer_hover_pos()
             .filter(|position| preview_rect.contains(*position))
         {
-            let source_uv = final_geometry_screen_to_source(
+            let source_uv = final_geometry_screen_to_native_source(
                 image_rect,
                 app.geometry,
+                lens_geometry.as_deref(),
                 source_width,
                 source_height,
                 pointer,
@@ -1106,6 +1136,7 @@ impl Preview {
                 let radius = geometry_brush_radius_screen(
                     image_rect,
                     app.geometry,
+                    lens_geometry.as_deref(),
                     source_width,
                     source_height,
                     uv,
@@ -1126,6 +1157,10 @@ impl Preview {
         source_height: u32,
         response: &egui::Response,
     ) {
+        let lens_geometry = app
+            .loaded_raw
+            .as_ref()
+            .and_then(|raw| raw.lens_geometry.clone());
         let Some(mask_index) = app.masks.selected_mask else {
             app.finish_mask_geometry_interaction();
             app.active_mask_tool = None;
@@ -1218,9 +1253,10 @@ impl Preview {
         if ui.input(|input| input.any_touches()) {
             app.begin_mask_touch_gesture(mask_index, component_index);
         }
-        let source_uv = final_geometry_screen_to_source(
+        let source_uv = final_geometry_screen_to_native_source(
             image_rect,
             app.geometry,
+            lens_geometry.as_deref(),
             source_width,
             source_height,
             pointer,
@@ -1258,6 +1294,7 @@ impl Preview {
                 pointer,
                 image_rect,
                 app.geometry,
+                lens_geometry.as_deref(),
                 source_width,
                 source_height,
             );
@@ -1294,9 +1331,10 @@ impl Preview {
                     let dy = uv[1] - previous[1];
                     // Measure spacing in the transformed preview so brush density
                     // remains stable after crop, rotate, flip, and perspective.
-                    let previous_screen = final_geometry_source_to_screen(
+                    let previous_screen = final_geometry_native_source_to_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         previous,
@@ -1306,6 +1344,7 @@ impl Preview {
                     let radius_px = geometry_brush_radius_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         uv,
@@ -1493,9 +1532,10 @@ impl Preview {
                     let previous = app.last_brush_point.unwrap_or(uv);
                     let dx = uv[0] - previous[0];
                     let dy = uv[1] - previous[1];
-                    let previous_screen = final_geometry_source_to_screen(
+                    let previous_screen = final_geometry_native_source_to_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         previous,
@@ -1505,6 +1545,7 @@ impl Preview {
                     let radius_px = geometry_brush_radius_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         uv,
@@ -1579,6 +1620,10 @@ impl Preview {
         source_width: u32,
         source_height: u32,
     ) {
+        let lens_geometry = app
+            .loaded_raw
+            .as_ref()
+            .and_then(|raw| raw.lens_geometry.clone());
         let Some(mask_index) = app.masks.selected_mask else {
             return;
         };
@@ -1686,6 +1731,7 @@ impl Preview {
                     let outer = radial_outline_geometry_screen_points(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         *center,
@@ -1698,6 +1744,7 @@ impl Preview {
                     let inner = radial_outline_geometry_screen_points(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         *center,
@@ -1709,9 +1756,10 @@ impl Preview {
                         inner,
                         Stroke::new(1.0, color.gamma_multiply(0.65)),
                     ));
-                    let center_screen = final_geometry_source_to_screen(
+                    let center_screen = final_geometry_native_source_to_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         *center,
@@ -1720,6 +1768,7 @@ impl Preview {
                     for handle in radial_handles_geometry_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         *center,
@@ -1731,6 +1780,7 @@ impl Preview {
                     let major_handle = radial_handles_geometry_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         *center,
@@ -1740,6 +1790,7 @@ impl Preview {
                     let rotation_handle = radial_rotation_handle_geometry(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         *center,
@@ -1758,16 +1809,18 @@ impl Preview {
                     feather,
                     initialized: true,
                 } => {
-                    let a = final_geometry_source_to_screen(
+                    let a = final_geometry_native_source_to_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         *start,
                     );
-                    let b = final_geometry_source_to_screen(
+                    let b = final_geometry_native_source_to_screen(
                         image_rect,
                         app.geometry,
+                        lens_geometry.as_deref(),
                         source_width,
                         source_height,
                         *end,
@@ -1813,9 +1866,10 @@ impl Preview {
                     };
                     match &component.geometry {
                         MaskGeometry::Brush { size, .. } => {
-                            let source_uv = final_geometry_screen_to_source(
+                            let source_uv = final_geometry_screen_to_native_source(
                                 image_rect,
                                 app.geometry,
+                                lens_geometry.as_deref(),
                                 source_width,
                                 source_height,
                                 pointer,
@@ -1824,6 +1878,7 @@ impl Preview {
                                 let radius = geometry_brush_radius_screen(
                                     image_rect,
                                     app.geometry,
+                                    lens_geometry.as_deref(),
                                     source_width,
                                     source_height,
                                     uv,
@@ -1837,9 +1892,10 @@ impl Preview {
                             }
                         }
                         MaskGeometry::Object { brush_size, .. } => {
-                            let source_uv = final_geometry_screen_to_source(
+                            let source_uv = final_geometry_screen_to_native_source(
                                 image_rect,
                                 app.geometry,
+                                lens_geometry.as_deref(),
                                 source_width,
                                 source_height,
                                 pointer,
@@ -1848,6 +1904,7 @@ impl Preview {
                                 let radius = geometry_brush_radius_screen(
                                     image_rect,
                                     app.geometry,
+                                    lens_geometry.as_deref(),
                                     source_width,
                                     source_height,
                                     uv,
@@ -1936,6 +1993,9 @@ impl Preview {
                 texture.id(),
                 image_rect,
                 app.geometry,
+                app.loaded_raw
+                    .as_ref()
+                    .and_then(|raw| raw.lens_geometry.as_deref()),
                 source_width,
                 source_height,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -2003,6 +2063,7 @@ fn begin_mask_drag(
     pointer: Pos2,
     image_rect: Rect,
     display_geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
 ) -> Option<MaskDragState> {
@@ -2020,6 +2081,7 @@ fn begin_mask_drag(
             let rotation_handle = radial_rotation_handle_geometry(
                 image_rect,
                 display_geometry,
+                lens_geometry,
                 source_width,
                 source_height,
                 *center,
@@ -2035,6 +2097,7 @@ fn begin_mask_drag(
             for (index, handle) in radial_handles_geometry_screen(
                 image_rect,
                 display_geometry,
+                lens_geometry,
                 source_width,
                 source_height,
                 *center,
@@ -2075,16 +2138,18 @@ fn begin_mask_drag(
             if !initialized {
                 return Some(MaskDragState::Create(uv));
             }
-            let a = final_geometry_source_to_screen(
+            let a = final_geometry_native_source_to_screen(
                 image_rect,
                 display_geometry,
+                lens_geometry,
                 source_width,
                 source_height,
                 *start,
             );
-            let b = final_geometry_source_to_screen(
+            let b = final_geometry_native_source_to_screen(
                 image_rect,
                 display_geometry,
+                lens_geometry,
                 source_width,
                 source_height,
                 *end,
@@ -2166,6 +2231,7 @@ fn radial_source_uv_at(
 fn radial_handles_geometry_screen(
     image_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
     center: [f32; 2],
@@ -2179,9 +2245,10 @@ fn radial_handles_geometry_screen(
         -std::f32::consts::FRAC_PI_2,
     ]
     .map(|angle| {
-        final_geometry_source_to_screen(
+        final_geometry_native_source_to_screen(
             image_rect,
             geometry,
+            lens_geometry,
             source_width,
             source_height,
             radial_source_uv_at(
@@ -2199,15 +2266,17 @@ fn radial_handles_geometry_screen(
 fn radial_rotation_handle_geometry(
     image_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
     center: [f32; 2],
     radius: [f32; 2],
     rotation: f32,
 ) -> Pos2 {
-    let center_screen = final_geometry_source_to_screen(
+    let center_screen = final_geometry_native_source_to_screen(
         image_rect,
         geometry,
+        lens_geometry,
         source_width,
         source_height,
         center,
@@ -2215,6 +2284,7 @@ fn radial_rotation_handle_geometry(
     let major_screen = radial_handles_geometry_screen(
         image_rect,
         geometry,
+        lens_geometry,
         source_width,
         source_height,
         center,
@@ -2228,6 +2298,7 @@ fn radial_rotation_handle_geometry(
 fn radial_outline_geometry_screen_points(
     image_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
     center: [f32; 2],
@@ -2239,9 +2310,10 @@ fn radial_outline_geometry_screen_points(
     (0..=segments)
         .map(|index| {
             let angle = std::f32::consts::TAU * index as f32 / segments as f32;
-            final_geometry_source_to_screen(
+            final_geometry_native_source_to_screen(
                 image_rect,
                 geometry,
+                lens_geometry,
                 source_width,
                 source_height,
                 radial_source_uv_at(
@@ -2410,6 +2482,31 @@ fn final_geometry_source_to_screen(
     normalized_to_screen(image_rect, output_uv)
 }
 
+fn final_geometry_native_source_to_screen(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    source_uv: [f32; 2],
+) -> Pos2 {
+    let corrected_uv = lens_geometry.map_or(source_uv, |lens_geometry| {
+        native_source_to_corrected_uv(
+            lens_geometry,
+            source_width,
+            source_height,
+            source_uv,
+        )
+    });
+    final_geometry_source_to_screen(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        corrected_uv,
+    )
+}
+
 fn final_geometry_screen_to_source(
     image_rect: Rect,
     geometry: GeometryTransform,
@@ -2458,6 +2555,7 @@ fn editable_source_uv(uv: [f32; 2]) -> Option<[f32; 2]> {
 fn geometry_brush_radius_screen(
     image_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
     center: [f32; 2],
@@ -2466,23 +2564,26 @@ fn geometry_brush_radius_screen(
     let source_width_f = source_width.max(1) as f32;
     let source_height_f = source_height.max(1) as f32;
     let radius_source_pixels = size.max(0.0) * source_width.min(source_height).max(1) as f32;
-    let center_screen = final_geometry_source_to_screen(
+    let center_screen = final_geometry_native_source_to_screen(
         image_rect,
         geometry,
+        lens_geometry,
         source_width,
         source_height,
         center,
     );
-    let x_screen = final_geometry_source_to_screen(
+    let x_screen = final_geometry_native_source_to_screen(
         image_rect,
         geometry,
+        lens_geometry,
         source_width,
         source_height,
         [center[0] + radius_source_pixels / source_width_f, center[1]],
     );
-    let y_screen = final_geometry_source_to_screen(
+    let y_screen = final_geometry_native_source_to_screen(
         image_rect,
         geometry,
+        lens_geometry,
         source_width,
         source_height,
         [center[0], center[1] + radius_source_pixels / source_height_f],
@@ -2600,50 +2701,68 @@ fn source_uv_bbox(points: impl IntoIterator<Item = [f32; 2]>) -> crate::app::Pre
     crate::app::PreviewUvRect { min, max }
 }
 
+fn visible_rect_sample_points(rect: Rect, nonlinear: bool) -> Vec<Pos2> {
+    let steps = if nonlinear { 4 } else { 1 };
+    let mut points = Vec::with_capacity((steps + 1) * (steps + 1));
+    for y in 0..=steps {
+        let ty = y as f32 / steps as f32;
+        for x in 0..=steps {
+            let tx = x as f32 / steps as f32;
+            points.push(Pos2::new(
+                rect.left() + rect.width() * tx,
+                rect.top() + rect.height() * ty,
+            ));
+        }
+    }
+    points
+}
+
 fn final_geometry_visible_source_uv(
     image_rect: Rect,
     visible_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
 ) -> crate::app::PreviewUvRect {
-    source_uv_bbox([
-        visible_rect.left_top(),
-        visible_rect.right_top(),
-        visible_rect.right_bottom(),
-        visible_rect.left_bottom(),
-    ].map(|point| {
-        final_geometry_screen_to_source(
-            image_rect,
-            geometry,
-            source_width,
-            source_height,
-            point,
-        )
-    }))
+    source_uv_bbox(
+        visible_rect_sample_points(visible_rect, lens_geometry.is_some())
+            .into_iter()
+            .map(|point| {
+                final_geometry_screen_to_native_source(
+                    image_rect,
+                    geometry,
+                    lens_geometry,
+                    source_width,
+                    source_height,
+                    point,
+                )
+            }),
+    )
 }
 
 fn crop_workspace_visible_source_uv(
     image_rect: Rect,
     visible_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
 ) -> crate::app::PreviewUvRect {
-    source_uv_bbox([
-        visible_rect.left_top(),
-        visible_rect.right_top(),
-        visible_rect.right_bottom(),
-        visible_rect.left_bottom(),
-    ].map(|point| {
-        crop_workspace_screen_to_source(
-            image_rect,
-            geometry,
-            source_width,
-            source_height,
-            point,
-        )
-    }))
+    source_uv_bbox(
+        visible_rect_sample_points(visible_rect, lens_geometry.is_some())
+            .into_iter()
+            .map(|point| {
+                crop_workspace_screen_to_native_source(
+                    image_rect,
+                    geometry,
+                    lens_geometry,
+                    source_width,
+                    source_height,
+                    point,
+                )
+            }),
+    )
 }
 
 fn paint_textured_geometry_quad(
@@ -2671,6 +2790,194 @@ fn paint_textured_geometry_quad(
     ui.painter_at(clip_rect).add(Shape::mesh(mesh));
 }
 
+fn paint_textured_combined_geometry_mesh(
+    ui: &Ui,
+    texture_id: egui::TextureId,
+    clip_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    texture_uv: Rect,
+    source_uv: [f32; 4],
+    crop_workspace: bool,
+) {
+    if lens_geometry.is_none() {
+        let positions = source_uv_corners(source_uv).map(|point| {
+            if crop_workspace {
+                crop_workspace_source_to_screen(
+                    clip_rect,
+                    geometry,
+                    source_width,
+                    source_height,
+                    point,
+                )
+            } else {
+                final_geometry_source_to_screen(
+                    clip_rect,
+                    geometry,
+                    source_width,
+                    source_height,
+                    point,
+                )
+            }
+        });
+        paint_textured_geometry_quad(ui, texture_id, clip_rect, positions, texture_uv);
+        return;
+    }
+
+    // Egui meshes linearly interpolate UVs inside each triangle. A modest grid
+    // therefore turns Lensfun's smooth nonlinear map into a GPU texture warp
+    // without first resampling the preview pixels on the CPU/CFA.
+    const GRID: usize = 32;
+    let lens_geometry = lens_geometry.expect("lens geometry checked above");
+    let mut mesh = Mesh::with_texture(texture_id);
+    mesh.vertices.reserve((GRID + 1) * (GRID + 1));
+    mesh.indices.reserve(GRID * GRID * 6);
+    for gy in 0..=GRID {
+        let ty = gy as f32 / GRID as f32;
+        let raw_v = source_uv[1] + (source_uv[3] - source_uv[1]) * ty;
+        let texture_v = texture_uv.top() + (texture_uv.bottom() - texture_uv.top()) * ty;
+        for gx in 0..=GRID {
+            let tx = gx as f32 / GRID as f32;
+            let raw_u = source_uv[0] + (source_uv[2] - source_uv[0]) * tx;
+            let texture_u = texture_uv.left() + (texture_uv.right() - texture_uv.left()) * tx;
+            let corrected_uv = native_source_to_corrected_uv(
+                lens_geometry,
+                source_width,
+                source_height,
+                [raw_u, raw_v],
+            );
+            let pos = if crop_workspace {
+                crop_workspace_source_to_screen(
+                    clip_rect,
+                    geometry,
+                    source_width,
+                    source_height,
+                    corrected_uv,
+                )
+            } else {
+                final_geometry_source_to_screen(
+                    clip_rect,
+                    geometry,
+                    source_width,
+                    source_height,
+                    corrected_uv,
+                )
+            };
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos,
+                uv: Pos2::new(texture_u, texture_v),
+                color: Color32::WHITE,
+            });
+        }
+    }
+    let stride = GRID + 1;
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            let a = (gy * stride + gx) as u32;
+            let b = a + 1;
+            let c = a + stride as u32;
+            let d = c + 1;
+            mesh.indices.extend_from_slice(&[a, b, d, a, d, c]);
+        }
+    }
+    ui.painter_at(clip_rect).add(Shape::mesh(mesh));
+}
+
+fn native_source_to_corrected_uv(
+    lens_geometry: &LensGeometryMap,
+    source_width: u32,
+    source_height: u32,
+    source_uv: [f32; 2],
+) -> [f32; 2] {
+    if source_uv[0] < 0.0 || source_uv[0] > 1.0 || source_uv[1] < 0.0 || source_uv[1] > 1.0 {
+        return source_uv;
+    }
+    let width = source_width.saturating_sub(1).max(1) as f32;
+    let height = source_height.saturating_sub(1).max(1) as f32;
+    let corrected = lens_geometry.corrected_position_for_raster(
+        source_uv[0] * width,
+        source_uv[1] * height,
+        source_width,
+        source_height,
+    );
+    [corrected[0] / width, corrected[1] / height]
+}
+
+fn final_geometry_screen_to_native_source(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    screen: Pos2,
+) -> [f32; 2] {
+    let corrected_uv = final_geometry_screen_to_source(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        screen,
+    );
+    corrected_uv_to_native_source(
+        corrected_uv,
+        lens_geometry,
+        source_width,
+        source_height,
+    )
+}
+
+fn crop_workspace_screen_to_native_source(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    screen: Pos2,
+) -> [f32; 2] {
+    let corrected_uv = crop_workspace_screen_to_source(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        screen,
+    );
+    corrected_uv_to_native_source(
+        corrected_uv,
+        lens_geometry,
+        source_width,
+        source_height,
+    )
+}
+
+fn corrected_uv_to_native_source(
+    corrected_uv: [f32; 2],
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+) -> [f32; 2] {
+    let Some(lens_geometry) = lens_geometry else {
+        return corrected_uv;
+    };
+    if corrected_uv[0] < 0.0
+        || corrected_uv[0] > 1.0
+        || corrected_uv[1] < 0.0
+        || corrected_uv[1] > 1.0
+    {
+        return corrected_uv;
+    }
+    let width = source_width.saturating_sub(1).max(1) as f32;
+    let height = source_height.saturating_sub(1).max(1) as f32;
+    let source = lens_geometry.source_position_for_raster(
+        corrected_uv[0] * width,
+        corrected_uv[1] * height,
+        source_width,
+        source_height,
+    );
+    [source[0] / width, source[1] / height]
+}
+
 fn source_uv_corners(source_uv: [f32; 4]) -> [[f32; 2]; 4] {
     [
         [source_uv[0], source_uv[1]],
@@ -2685,6 +2992,7 @@ fn paint_final_geometry_texture(
     texture_id: egui::TextureId,
     image_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
     texture_uv: Rect,
@@ -2694,16 +3002,18 @@ fn paint_final_geometry_texture(
         ui.painter_at(image_rect)
             .rect_filled(image_rect, 0.0, Color32::BLACK);
     }
-    let positions = source_uv_corners(source_uv).map(|point| {
-        final_geometry_source_to_screen(
-            image_rect,
-            geometry,
-            source_width,
-            source_height,
-            point,
-        )
-    });
-    paint_textured_geometry_quad(ui, texture_id, image_rect, positions, texture_uv);
+    paint_textured_combined_geometry_mesh(
+        ui,
+        texture_id,
+        image_rect,
+        geometry,
+        lens_geometry,
+        source_width,
+        source_height,
+        texture_uv,
+        source_uv,
+        false,
+    );
 }
 
 fn paint_final_geometry_overlay_texture(
@@ -2711,21 +3021,37 @@ fn paint_final_geometry_overlay_texture(
     texture_id: egui::TextureId,
     image_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
     texture_uv: Rect,
     source_uv: [f32; 4],
 ) {
-    let positions = source_uv_corners(source_uv).map(|point| {
-        final_geometry_source_to_screen(
-            image_rect,
-            geometry,
-            source_width,
-            source_height,
-            point,
-        )
-    });
-    paint_textured_geometry_quad(ui, texture_id, image_rect, positions, texture_uv);
+    if lens_geometry.is_none() {
+        let positions = source_uv_corners(source_uv).map(|point| {
+            final_geometry_source_to_screen(
+                image_rect,
+                geometry,
+                source_width,
+                source_height,
+                point,
+            )
+        });
+        paint_textured_geometry_quad(ui, texture_id, image_rect, positions, texture_uv);
+        return;
+    }
+    paint_textured_combined_geometry_mesh(
+        ui,
+        texture_id,
+        image_rect,
+        geometry,
+        lens_geometry,
+        source_width,
+        source_height,
+        texture_uv,
+        source_uv,
+        false,
+    );
 }
 
 fn paint_crop_workspace_texture(
@@ -2733,6 +3059,7 @@ fn paint_crop_workspace_texture(
     texture_id: egui::TextureId,
     image_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
     texture_uv: Rect,
@@ -2742,16 +3069,18 @@ fn paint_crop_workspace_texture(
         ui.painter_at(image_rect)
             .rect_filled(image_rect, 0.0, ui.visuals().panel_fill);
     }
-    let positions = source_uv_corners(source_uv).map(|point| {
-        crop_workspace_source_to_screen(
-            image_rect,
-            geometry,
-            source_width,
-            source_height,
-            point,
-        )
-    });
-    paint_textured_geometry_quad(ui, texture_id, image_rect, positions, texture_uv);
+    paint_textured_combined_geometry_mesh(
+        ui,
+        texture_id,
+        image_rect,
+        geometry,
+        lens_geometry,
+        source_width,
+        source_height,
+        texture_uv,
+        source_uv,
+        true,
+    );
 }
 
 fn crop_preview_screen_rect(
@@ -3438,6 +3767,7 @@ fn inpaint_stroke_geometry_screen_bounds(
     dabs: &[BrushDab],
     image_rect: Rect,
     geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
     source_width: u32,
     source_height: u32,
 ) -> Option<Rect> {
@@ -3457,9 +3787,10 @@ fn inpaint_stroke_geometry_screen_bounds(
         ];
         let mut dab_bounds: Option<Rect> = None;
         for point in points {
-            let screen = final_geometry_source_to_screen(
+            let screen = final_geometry_native_source_to_screen(
                 image_rect,
                 geometry,
+                lens_geometry,
                 source_width,
                 source_height,
                 point,

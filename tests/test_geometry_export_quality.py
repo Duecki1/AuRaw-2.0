@@ -42,6 +42,15 @@ def test_geometry_sampler_uses_combined_inverse_map_and_ewa_mitchell() -> None:
     assert "sample_rgb_bilinear" not in EXPORT
 
 
+def test_lens_distortion_is_composed_into_the_float_geometry_resample() -> None:
+    assert "pub struct LensGeometryMap" in GEOMETRY
+    assert "lens_geometry: Option<&'a LensGeometryMap>" in GEOMETRY
+    assert "GeometryInverseMap::new_with_lens" in EXPORT
+    assert "request.raw.lens_geometry.as_deref()" in EXPORT
+    assert "request.raw.lens_geometry.is_some()" in EXPORT
+    assert "pixel_jacobian_at(output_x as f32, output_y as f32)" in EXPORT
+
+
 def test_geometry_regressions_cover_identity_and_nonidentity() -> None:
     assert "fn geometry_resampler_identity_is_exact_in_linear_space" in EXPORT
     assert "fn geometry_resampler_quarter_turn_preserves_exact_pixels" in EXPORT

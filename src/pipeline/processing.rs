@@ -117,6 +117,12 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
+        // A lens map is normalized to the full sensor raster. A spatial crop
+        // needs an origin-aware view of that map, so do not attach the full-map
+        // normalization to cropped scratch RAWs where it would be misleading.
+        lens_geometry: (x == 0 && y == 0 && width == raw.width && height == raw.height)
+            .then(|| raw.lens_geometry.clone())
+            .flatten(),
     }
 }
 
@@ -251,6 +257,12 @@ pub fn build_region_proxy(
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
+        lens_geometry: (x == 0
+            && y == 0
+            && region_width == raw.width
+            && region_height == raw.height)
+            .then(|| raw.lens_geometry.clone())
+            .flatten(),
     }
 }
 
@@ -482,6 +494,9 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
+        // Export tiles use global coordinates for masks and are stitched back
+        // into one native raster before the deferred lens map is applied.
+        lens_geometry: None,
     };
     fill_padded_tile(raw, tile, &mut tile_raw);
     tile_raw
@@ -600,6 +615,7 @@ mod tests {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         }
     }
 
@@ -777,6 +793,7 @@ mod tests {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         };
 
         let cropped = crop_raw(&raw, 1, 1, 2, 2);
@@ -836,6 +853,7 @@ mod tests {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         };
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 4 });
