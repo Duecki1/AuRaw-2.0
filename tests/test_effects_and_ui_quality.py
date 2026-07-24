@@ -75,7 +75,9 @@ def test_dehaze_uses_airlight_and_transmission() -> None:
 
 def test_blacks_has_a_visible_lower_tonal_range() -> None:
     assert "black_fade_end" in TONEMAP
-    assert "signed_tone_range(blacks, 2.35, 1.90)" in TONEMAP
+    assert "apply_blacks_toe_v2" in TONEMAP
+    assert "gamma = exp2(-1.25 * blacks)" in TONEMAP
+    assert "gamma = exp2(1.25 * (-blacks))" in TONEMAP
 
     def smoothstep(edge0: float, edge1: float, value: float) -> float:
         x = max(0.0, min(1.0, (value - edge0) / max(edge1 - edge0, 1e-4)))
