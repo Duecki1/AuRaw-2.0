@@ -88,7 +88,7 @@ def test_raw_mosaic_has_no_final_output_resizer() -> None:
 
 def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
     assert APP.count("export_settings: ExportSettings::default()") == 2
-    assert "self.export_settings," in APP
+    assert "self.export_settings.clone()," in APP
     assert "ExportMetadata::from_raw" in APP
     assert "settings.keep_metadata" in EXPORT
     assert "settings.jpeg_quality" in EXPORT

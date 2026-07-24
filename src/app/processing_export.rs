@@ -1272,6 +1272,39 @@ impl AurawApp {
         self.start_export(path, frame, ExportFormat::Jpeg);
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn export_tiff(&mut self, frame: &eframe::Frame) {
+        if !self.can_export() {
+            return;
+        }
+
+        let default_name = self
+            .current_path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{name}-auraw.tif"))
+            .unwrap_or_else(|| "auraw-export.tif".to_owned());
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("TIFF image", &["tif", "tiff"])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let has_tiff_extension = matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some(extension)
+                if extension.eq_ignore_ascii_case("tif")
+                    || extension.eq_ignore_ascii_case("tiff")
+        );
+        if !has_tiff_extension {
+            path.set_extension("tif");
+        }
+
+        self.start_export(path, frame, ExportFormat::Tiff);
+    }
+
     #[cfg(target_os = "android")]
     pub(crate) fn export_png(&mut self, frame: &eframe::Frame) {
         self.export_android(frame, ExportFormat::Png);
@@ -1280,6 +1313,11 @@ impl AurawApp {
     #[cfg(target_os = "android")]
     pub(crate) fn export_jpeg(&mut self, frame: &eframe::Frame) {
         self.export_android(frame, ExportFormat::Jpeg);
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn export_tiff(&mut self, frame: &eframe::Frame) {
+        self.export_android(frame, ExportFormat::Tiff);
     }
 
     #[cfg(target_os = "android")]
@@ -1358,8 +1396,8 @@ impl AurawApp {
                 self.inpaint_layer.clone(),
                 path,
                 TileSpec::default(),
-                self.export_settings,
-                metadata,
+                self.export_settings.clone(),
+                metadata.clone(),
             ),
             ExportFormat::Jpeg => spawn_tiled_jpeg_export(
                 render_state.device.clone(),
@@ -1371,7 +1409,20 @@ impl AurawApp {
                 self.inpaint_layer.clone(),
                 path,
                 TileSpec::default(),
-                self.export_settings,
+                self.export_settings.clone(),
+                metadata.clone(),
+            ),
+            ExportFormat::Tiff => spawn_tiled_tiff_export(
+                render_state.device.clone(),
+                render_state.queue.clone(),
+                Arc::clone(raw),
+                self.geometry,
+                self.exposure,
+                self.masks.clone(),
+                self.inpaint_layer.clone(),
+                path,
+                TileSpec::default(),
+                self.export_settings.clone(),
                 metadata,
             ),
         };
@@ -1488,6 +1539,7 @@ impl AurawApp {
             .map(|(uri, display_name)| LibraryBatchExportJob { uri, display_name })
             .collect::<VecDeque<_>>();
         let total = pending.len();
+        self.export_settings = settings.clone();
         self.library_batch_export = Some(LibraryBatchExportState {
             pending,
             current: None,
@@ -1498,7 +1550,6 @@ impl AurawApp {
             format,
             settings,
         });
-        self.export_settings = settings;
         self.active_tab = AppTab::Library;
         self.notice = Some(format!(
             "Preparing to export {total} {}…",
@@ -1576,9 +1627,9 @@ impl AurawApp {
         }
 
         let format = batch.format;
-        let settings = batch.settings;
+        let settings = batch.settings.clone();
         let display_name = current.display_name.clone();
-        self.export_settings = settings;
+        self.export_settings = settings.clone();
         let Some(data_dir) = self.android_app.internal_data_path() else {
             self.complete_android_library_batch_export_item(Err(format!(
                 "{display_name}: Android did not provide an app data directory"
@@ -1701,6 +1752,7 @@ impl AurawApp {
             .map(|(source, destination)| LibraryBatchExportJob { source, destination })
             .collect::<VecDeque<_>>();
         let total = pending.len();
+        self.export_settings = settings.clone();
         self.library_batch_export = Some(LibraryBatchExportState {
             pending,
             current: None,
@@ -1711,7 +1763,6 @@ impl AurawApp {
             format,
             settings,
         });
-        self.export_settings = settings;
         self.active_tab = AppTab::Library;
         self.notice = Some(format!(
             "Preparing to export {total} {}…",
@@ -1734,7 +1785,7 @@ impl AurawApp {
             } else {
                 batch.pending.pop_front().map(|job| {
                     batch.current = Some(job.clone());
-                    (job, batch.settings)
+                    (job, batch.settings.clone())
                 })
             }
         };
@@ -1743,7 +1794,7 @@ impl AurawApp {
             self.finish_library_batch_export();
             return;
         };
-        self.export_settings = settings;
+        self.export_settings = settings.clone();
         self.open_path(job.source, frame);
         // Batch export is initiated from Library. Loading uses the normal RAW
         // pipeline so sidecars, masks, inpainting, camera profiles and lens
@@ -1773,8 +1824,8 @@ impl AurawApp {
 
         let destination = current.destination.clone();
         let format = batch.format;
-        let settings = batch.settings;
-        self.export_settings = settings;
+        let settings = batch.settings.clone();
+        self.export_settings = settings.clone();
         self.start_export(destination, frame, format);
         if self.export_receiver.is_none() {
             if let Some(batch) = self.library_batch_export.as_mut() {
@@ -1946,6 +1997,12 @@ impl AurawApp {
                                                 || extension.eq_ignore_ascii_case("jpeg") =>
                                         {
                                             ExportFormat::Jpeg
+                                        }
+                                        Some(extension)
+                                            if extension.eq_ignore_ascii_case("tif")
+                                                || extension.eq_ignore_ascii_case("tiff") =>
+                                        {
+                                            ExportFormat::Tiff
                                         }
                                         _ => ExportFormat::Png,
                                     };
