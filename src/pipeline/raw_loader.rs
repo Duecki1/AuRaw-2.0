@@ -330,6 +330,18 @@ impl<'a, T> IntoIterator for &'a CompactPixelMap<T> {
     fn into_iter(self) -> Self::IntoIter { self.iter() }
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CaptureMetadata {
+    /// ISO sensitivity. Zero means unavailable.
+    pub iso_speed: f32,
+    /// Exposure time in seconds. Zero means unavailable.
+    pub shutter_seconds: f32,
+    /// Original image description supplied by the camera or photographer.
+    pub description: String,
+    /// Original artist/creator string supplied by the camera or photographer.
+    pub artist: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct LoadedRaw {
     pub width: u32,
@@ -346,6 +358,8 @@ pub struct LoadedRaw {
     pub aperture: f32,
     /// Subject distance in metres. Zero means unavailable.
     pub focus_distance: f32,
+    /// Capture details retained from LibRaw for export metadata.
+    pub(crate) capture_metadata: CaptureMetadata,
     pub cfa_kind: CfaKind,
     pub raw_pixels: Vec<u16>,
     pub color_indices: CompactPixelMap<u8>,
@@ -527,6 +541,7 @@ mod tests {
             focal_length: 0.0,
             aperture: 0.0,
             focus_distance: 0.0,
+            capture_metadata: Default::default(),
             cfa_kind: CfaKind::Bayer,
             raw_pixels: vec![0],
             color_indices: CompactPixelMap::dense(1, 1, vec![0]),

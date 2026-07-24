@@ -165,6 +165,15 @@ pub struct ExportMetadata {
     pub source_file_name: Option<String>,
     pub camera_make: String,
     pub camera_model: String,
+    pub lens_make: String,
+    pub lens_model: String,
+    pub focal_length: f32,
+    pub aperture: f32,
+    pub focus_distance: f32,
+    pub iso_speed: f32,
+    pub shutter_seconds: f32,
+    pub description: String,
+    pub artist: String,
     pub source_width: u32,
     pub source_height: u32,
 }
@@ -175,6 +184,15 @@ impl ExportMetadata {
             source_file_name,
             camera_make: raw.camera_make.clone(),
             camera_model: raw.camera_model.clone(),
+            lens_make: raw.lens_make.clone(),
+            lens_model: raw.lens_model.clone(),
+            focal_length: raw.focal_length,
+            aperture: raw.aperture,
+            focus_distance: raw.focus_distance,
+            iso_speed: raw.capture_metadata.iso_speed,
+            shutter_seconds: raw.capture_metadata.shutter_seconds,
+            description: raw.capture_metadata.description.clone(),
+            artist: raw.capture_metadata.artist.clone(),
             source_width: raw.width,
             source_height: raw.height,
         }
@@ -1548,7 +1566,7 @@ fn add_png_text_metadata<W: Write>(
     output_height: u32,
 ) -> Result<()> {
     encoder
-        .add_itxt_chunk("Software".to_owned(), "AuRaw".to_owned())
+        .add_itxt_chunk("Software".to_owned(), "AuRaw 2.0".to_owned())
         .context("write PNG software metadata")?;
     if let Some(source) = metadata
         .source_file_name
@@ -1559,13 +1577,64 @@ fn add_png_text_metadata<W: Write>(
             .add_itxt_chunk("Source".to_owned(), source.to_owned())
             .context("write PNG source metadata")?;
     }
-    let camera = format!("{} {}", metadata.camera_make, metadata.camera_model)
-        .trim()
-        .to_owned();
+    let camera = joined_metadata_label(&metadata.camera_make, &metadata.camera_model);
     if !camera.is_empty() {
         encoder
             .add_itxt_chunk("Camera".to_owned(), camera)
             .context("write PNG camera metadata")?;
+    }
+    let lens = joined_metadata_label(&metadata.lens_make, &metadata.lens_model);
+    if !lens.is_empty() {
+        encoder
+            .add_itxt_chunk("Lens".to_owned(), lens)
+            .context("write PNG lens metadata")?;
+    }
+    if metadata.focal_length.is_finite() && metadata.focal_length > 0.0 {
+        encoder
+            .add_itxt_chunk(
+                "Focal length".to_owned(),
+                format!("{:.1} mm", metadata.focal_length),
+            )
+            .context("write PNG focal-length metadata")?;
+    }
+    if metadata.aperture.is_finite() && metadata.aperture > 0.0 {
+        encoder
+            .add_itxt_chunk("Aperture".to_owned(), format!("f/{:.1}", metadata.aperture))
+            .context("write PNG aperture metadata")?;
+    }
+    if metadata.focus_distance.is_finite() && metadata.focus_distance > 0.0 {
+        encoder
+            .add_itxt_chunk(
+                "Focus distance".to_owned(),
+                format!("{:.2} m", metadata.focus_distance),
+            )
+            .context("write PNG focus-distance metadata")?;
+    }
+    if metadata.iso_speed.is_finite() && metadata.iso_speed > 0.0 {
+        encoder
+            .add_itxt_chunk("ISO speed".to_owned(), format!("{:.0}", metadata.iso_speed))
+            .context("write PNG ISO metadata")?;
+    }
+    if metadata.shutter_seconds.is_finite() && metadata.shutter_seconds > 0.0 {
+        encoder
+            .add_itxt_chunk(
+                "Exposure time".to_owned(),
+                format_exposure_time(metadata.shutter_seconds),
+            )
+            .context("write PNG exposure-time metadata")?;
+    }
+    if !metadata.artist.trim().is_empty() {
+        encoder
+            .add_itxt_chunk("Artist".to_owned(), metadata.artist.trim().to_owned())
+            .context("write PNG artist metadata")?;
+    }
+    if !metadata.description.trim().is_empty() {
+        encoder
+            .add_itxt_chunk(
+                "Image description".to_owned(),
+                metadata.description.trim().to_owned(),
+            )
+            .context("write PNG image-description metadata")?;
     }
     encoder
         .add_itxt_chunk(
@@ -1579,99 +1648,316 @@ fn add_png_text_metadata<W: Write>(
             format!("{output_width}x{output_height}"),
         )
         .context("write export dimensions metadata")?;
+    encoder
+        .add_itxt_chunk("Orientation".to_owned(), "1 (normal)".to_owned())
+        .context("write PNG orientation metadata")?;
     Ok(())
 }
 
-/// Builds a compact TIFF/EXIF IFD for PNG's eXIf chunk. The output image has
-/// already been physically oriented, so Orientation is always written as 1.
-fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_height: u32) -> Vec<u8> {
-    #[derive(Clone)]
-    enum Value {
-        Short(u16),
-        Long(u32),
-        Ascii(Vec<u8>),
+fn format_exposure_time(seconds: f32) -> String {
+    if seconds > 0.0 && seconds < 1.0 {
+        let reciprocal = (1.0 / seconds).round().max(1.0);
+        if ((1.0 / reciprocal) - seconds).abs() <= seconds * 0.02 {
+            return format!("1/{reciprocal:.0} s");
+        }
     }
-    #[derive(Clone)]
-    struct Entry {
-        tag: u16,
-        value: Value,
-    }
+    format!("{seconds:.4} s")
+}
 
-    let mut entries = vec![
-        Entry {
-            tag: 0x0100,
-            value: Value::Long(output_width),
-        },
-        Entry {
-            tag: 0x0101,
-            value: Value::Long(output_height),
-        },
-        Entry {
-            tag: 0x0112,
-            value: Value::Short(1),
-        },
-        Entry {
-            tag: 0x0131,
-            value: Value::Ascii(b"AuRaw\0".to_vec()),
-        },
-    ];
-    if !metadata.camera_make.is_empty() {
-        let mut value = metadata.camera_make.as_bytes().to_vec();
-        value.push(0);
-        entries.push(Entry {
-            tag: 0x010f,
-            value: Value::Ascii(value),
-        });
+fn joined_metadata_label(make: &str, model: &str) -> String {
+    match (make.trim(), model.trim()) {
+        ("", "") => String::new(),
+        ("", model) => model.to_owned(),
+        (make, "") => make.to_owned(),
+        (make, model) if model.starts_with(make) => model.to_owned(),
+        (make, model) => format!("{make} {model}"),
     }
-    if !metadata.camera_model.is_empty() {
-        let mut value = metadata.camera_model.as_bytes().to_vec();
-        value.push(0);
-        entries.push(Entry {
-            tag: 0x0110,
-            value: Value::Ascii(value),
-        });
-    }
-    entries.sort_by_key(|entry| entry.tag);
+}
 
-    let ifd_offset = 8u32;
-    let data_offset = ifd_offset + 2 + entries.len() as u32 * 12 + 4;
-    let mut data = Vec::<u8>::new();
-    let mut output = Vec::with_capacity(data_offset as usize + 128);
-    output.extend_from_slice(b"II");
-    output.extend_from_slice(&42u16.to_le_bytes());
-    output.extend_from_slice(&ifd_offset.to_le_bytes());
-    output.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+fn export_metadata_description(metadata: &ExportMetadata) -> String {
+    let mut parts = Vec::with_capacity(3);
+    if let Some(source) = metadata
+        .source_file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("Processed from {source}"));
+    } else {
+        parts.push("Processed from a RAW image".to_owned());
+    }
+    if metadata.source_width > 0 && metadata.source_height > 0 {
+        parts.push(format!(
+            "original dimensions {}x{}",
+            metadata.source_width, metadata.source_height
+        ));
+    }
+    parts.push("exported by AuRaw 2.0".to_owned());
+    parts.join("; ")
+}
+
+fn combined_image_description(metadata: &ExportMetadata) -> String {
+    let export_description = export_metadata_description(metadata);
+    match metadata.description.trim() {
+        "" => export_description,
+        original => format!("{original}; {export_description}"),
+    }
+}
+
+#[derive(Clone)]
+enum ExifValue {
+    Short(u16),
+    Long(u32),
+    Ascii(Vec<u8>),
+    Rational(u32, u32),
+    Undefined(Vec<u8>),
+}
+
+#[derive(Clone)]
+struct ExifEntry {
+    tag: u16,
+    value: ExifValue,
+}
+
+fn nul_terminated_exif_ascii(value: &str) -> Vec<u8> {
+    let mut output = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii() && character != '\0' {
+                character as u8
+            } else {
+                b'?'
+            }
+        })
+        .collect::<Vec<_>>();
+    output.push(0);
+    output
+}
+
+fn exif_rational(value: f32) -> Option<(u32, u32)> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let denominator = 10_000u32;
+    let numerator = (f64::from(value) * f64::from(denominator))
+        .round()
+        .clamp(1.0, f64::from(u32::MAX)) as u32;
+    let divisor = greatest_common_divisor(numerator, denominator);
+    Some((numerator / divisor, denominator / divisor))
+}
+
+fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left.max(1)
+}
+
+fn exif_value_parts(value: &ExifValue) -> (u16, u32, Vec<u8>) {
+    match value {
+        ExifValue::Short(value) => (3, 1, value.to_le_bytes().to_vec()),
+        ExifValue::Long(value) => (4, 1, value.to_le_bytes().to_vec()),
+        ExifValue::Ascii(value) => (2, value.len() as u32, value.clone()),
+        ExifValue::Rational(numerator, denominator) => {
+            let mut bytes = Vec::with_capacity(8);
+            bytes.extend_from_slice(&numerator.to_le_bytes());
+            bytes.extend_from_slice(&(*denominator).max(1).to_le_bytes());
+            (5, 1, bytes)
+        }
+        ExifValue::Undefined(value) => (7, value.len() as u32, value.clone()),
+    }
+}
+
+fn encoded_ifd_block_len(entries: &[ExifEntry]) -> u32 {
+    let directory_len = 2usize
+        .saturating_add(entries.len().saturating_mul(12))
+        .saturating_add(4);
+    let data_len = entries
+        .iter()
+        .map(|entry| {
+            let (_, _, bytes) = exif_value_parts(&entry.value);
+            if bytes.len() <= 4 {
+                0
+            } else {
+                bytes.len() + (bytes.len() & 1)
+            }
+        })
+        .sum::<usize>();
+    u32::try_from(directory_len.saturating_add(data_len)).unwrap_or(u32::MAX)
+}
+
+fn encode_ifd_block(entries: &[ExifEntry], ifd_offset: u32) -> Vec<u8> {
+    let directory_len = 2usize + entries.len() * 12 + 4;
+    let data_offset = ifd_offset.saturating_add(directory_len as u32);
+    let mut directory = Vec::with_capacity(directory_len);
+    let mut data = Vec::new();
+    directory.extend_from_slice(&(entries.len() as u16).to_le_bytes());
 
     for entry in entries {
-        output.extend_from_slice(&entry.tag.to_le_bytes());
-        match entry.value {
-            Value::Short(value) => {
-                output.extend_from_slice(&3u16.to_le_bytes());
-                output.extend_from_slice(&1u32.to_le_bytes());
-                output.extend_from_slice(&value.to_le_bytes());
-                output.extend_from_slice(&0u16.to_le_bytes());
-            }
-            Value::Long(value) => {
-                output.extend_from_slice(&4u16.to_le_bytes());
-                output.extend_from_slice(&1u32.to_le_bytes());
-                output.extend_from_slice(&value.to_le_bytes());
-            }
-            Value::Ascii(value) => {
-                output.extend_from_slice(&2u16.to_le_bytes());
-                output.extend_from_slice(&(value.len() as u32).to_le_bytes());
-                if value.len() <= 4 {
-                    output.extend_from_slice(&value);
-                    output.resize(output.len() + 4 - value.len(), 0);
-                } else {
-                    let offset = data_offset + data.len() as u32;
-                    output.extend_from_slice(&offset.to_le_bytes());
-                    data.extend_from_slice(&value);
-                }
+        directory.extend_from_slice(&entry.tag.to_le_bytes());
+        let (field_type, count, bytes) = exif_value_parts(&entry.value);
+        directory.extend_from_slice(&field_type.to_le_bytes());
+        directory.extend_from_slice(&count.to_le_bytes());
+        if bytes.len() <= 4 {
+            directory.extend_from_slice(&bytes);
+            directory.resize(directory.len() + 4 - bytes.len(), 0);
+        } else {
+            let value_offset = data_offset.saturating_add(data.len() as u32);
+            directory.extend_from_slice(&value_offset.to_le_bytes());
+            data.extend_from_slice(&bytes);
+            if data.len() & 1 != 0 {
+                data.push(0);
             }
         }
     }
-    output.extend_from_slice(&0u32.to_le_bytes());
-    output.extend_from_slice(&data);
+    directory.extend_from_slice(&0u32.to_le_bytes());
+    directory.extend_from_slice(&data);
+    directory
+}
+
+/// Builds a compact, standards-shaped TIFF/EXIF payload used by both JPEG's
+/// APP1 segment and PNG's eXIf chunk. The output pixels have already been
+/// physically oriented, so Orientation is always normalized to 1.
+fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_height: u32) -> Vec<u8> {
+    let mut ifd0_entries = vec![
+        ExifEntry {
+            tag: 0x0100,
+            value: ExifValue::Long(output_width),
+        },
+        ExifEntry {
+            tag: 0x0101,
+            value: ExifValue::Long(output_height),
+        },
+        ExifEntry {
+            tag: 0x010e,
+            value: ExifValue::Ascii(nul_terminated_exif_ascii(&combined_image_description(
+                metadata,
+            ))),
+        },
+        ExifEntry {
+            tag: 0x0112,
+            value: ExifValue::Short(1),
+        },
+        ExifEntry {
+            tag: 0x0131,
+            value: ExifValue::Ascii(nul_terminated_exif_ascii("AuRaw 2.0")),
+        },
+    ];
+    if !metadata.camera_make.trim().is_empty() {
+        ifd0_entries.push(ExifEntry {
+            tag: 0x010f,
+            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.camera_make)),
+        });
+    }
+    if !metadata.camera_model.trim().is_empty() {
+        ifd0_entries.push(ExifEntry {
+            tag: 0x0110,
+            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.camera_model)),
+        });
+    }
+    if !metadata.artist.trim().is_empty() {
+        ifd0_entries.push(ExifEntry {
+            tag: 0x013b,
+            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.artist)),
+        });
+    }
+
+    let mut exif_entries = vec![
+        ExifEntry {
+            tag: 0x9000,
+            value: ExifValue::Undefined(b"0232".to_vec()),
+        },
+        ExifEntry {
+            tag: 0xa002,
+            value: ExifValue::Long(output_width),
+        },
+        ExifEntry {
+            tag: 0xa003,
+            value: ExifValue::Long(output_height),
+        },
+    ];
+    if let Some((numerator, denominator)) = exif_rational(metadata.shutter_seconds) {
+        exif_entries.push(ExifEntry {
+            tag: 0x829a,
+            value: ExifValue::Rational(numerator, denominator),
+        });
+    }
+    if metadata.iso_speed.is_finite() && metadata.iso_speed > 0.0 {
+        let iso = metadata.iso_speed.round().clamp(1.0, u32::MAX as f32) as u32;
+        exif_entries.push(ExifEntry {
+            tag: 0x8827,
+            value: if iso <= u32::from(u16::MAX) {
+                ExifValue::Short(iso as u16)
+            } else {
+                ExifValue::Long(iso)
+            },
+        });
+    }
+    if let Some((numerator, denominator)) = exif_rational(metadata.aperture) {
+        exif_entries.push(ExifEntry {
+            tag: 0x829d,
+            value: ExifValue::Rational(numerator, denominator),
+        });
+    }
+    if let Some((numerator, denominator)) = exif_rational(metadata.focal_length) {
+        exif_entries.push(ExifEntry {
+            tag: 0x920a,
+            value: ExifValue::Rational(numerator, denominator),
+        });
+    }
+    if let Some((numerator, denominator)) = exif_rational(metadata.focus_distance) {
+        exif_entries.push(ExifEntry {
+            tag: 0x9206,
+            value: ExifValue::Rational(numerator, denominator),
+        });
+    }
+    if !metadata.lens_make.trim().is_empty() {
+        exif_entries.push(ExifEntry {
+            tag: 0xa433,
+            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.lens_make)),
+        });
+    }
+    if !metadata.lens_model.trim().is_empty() {
+        exif_entries.push(ExifEntry {
+            tag: 0xa434,
+            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.lens_model)),
+        });
+    }
+    let mut user_comment = b"ASCII\0\0\0".to_vec();
+    user_comment.extend_from_slice(
+        &nul_terminated_exif_ascii(&combined_image_description(metadata))[..],
+    );
+    exif_entries.push(ExifEntry {
+        tag: 0x9286,
+        value: ExifValue::Undefined(user_comment),
+    });
+
+    ifd0_entries.sort_by_key(|entry| entry.tag);
+    exif_entries.sort_by_key(|entry| entry.tag);
+
+    // Adding the ExifIFD pointer changes IFD0's directory length, so include a
+    // placeholder before calculating the nested IFD's final TIFF-relative offset.
+    ifd0_entries.push(ExifEntry {
+        tag: 0x8769,
+        value: ExifValue::Long(0),
+    });
+    ifd0_entries.sort_by_key(|entry| entry.tag);
+    let ifd0_offset = 8u32;
+    let exif_ifd_offset = ifd0_offset.saturating_add(encoded_ifd_block_len(&ifd0_entries));
+    if let Some(pointer) = ifd0_entries.iter_mut().find(|entry| entry.tag == 0x8769) {
+        pointer.value = ExifValue::Long(exif_ifd_offset);
+    }
+
+    let ifd0 = encode_ifd_block(&ifd0_entries, ifd0_offset);
+    let exif_ifd = encode_ifd_block(&exif_entries, exif_ifd_offset);
+    let mut output = Vec::with_capacity(8 + ifd0.len() + exif_ifd.len());
+    output.extend_from_slice(b"II");
+    output.extend_from_slice(&42u16.to_le_bytes());
+    output.extend_from_slice(&ifd0_offset.to_le_bytes());
+    output.extend_from_slice(&ifd0);
+    output.extend_from_slice(&exif_ifd);
     output
 }
 
@@ -1716,18 +2002,73 @@ mod tests {
     }
 
     #[test]
-    fn exif_payload_is_a_little_endian_tiff() {
+    fn exif_payload_contains_source_camera_lens_and_exposure_metadata() {
         let metadata = ExportMetadata {
+            source_file_name: Some("IMG_0042.CR3".to_owned()),
             camera_make: "CameraCo".to_owned(),
             camera_model: "Model X".to_owned(),
+            lens_make: "LensCo".to_owned(),
+            lens_model: "Prime 50".to_owned(),
+            focal_length: 50.0,
+            aperture: 2.8,
+            iso_speed: 640.0,
+            shutter_seconds: 1.0 / 125.0,
+            description: "Studio portrait".to_owned(),
+            artist: "Photographer".to_owned(),
             source_width: 6000,
             source_height: 4000,
             ..ExportMetadata::default()
         };
         let exif = build_exif_payload(&metadata, 3000, 2000);
         assert_eq!(&exif[..4], &[b'I', b'I', 42, 0]);
-        assert!(exif.windows(9).any(|window| window == b"CameraCo\0"));
-        assert!(exif.windows(8).any(|window| window == b"Model X\0"));
+        for expected in [
+            b"CameraCo\0".as_slice(),
+            b"Model X\0".as_slice(),
+            b"LensCo\0".as_slice(),
+            b"Prime 50\0".as_slice(),
+            b"IMG_0042.CR3\0".as_slice(),
+            b"Studio portrait".as_slice(),
+            b"Photographer\0".as_slice(),
+        ] {
+            assert!(exif.windows(expected.len()).any(|window| window == expected));
+        }
+
+        let read_u16 = |offset: usize| u16::from_le_bytes([exif[offset], exif[offset + 1]]);
+        let read_u32 = |offset: usize| {
+            u32::from_le_bytes([
+                exif[offset],
+                exif[offset + 1],
+                exif[offset + 2],
+                exif[offset + 3],
+            ])
+        };
+        let ifd0_offset = read_u32(4) as usize;
+        let ifd0_count = read_u16(ifd0_offset) as usize;
+        let mut exif_ifd_offset = None;
+        let mut ifd0_tags = Vec::new();
+        for index in 0..ifd0_count {
+            let entry = ifd0_offset + 2 + index * 12;
+            let tag = read_u16(entry);
+            ifd0_tags.push(tag);
+            if tag == 0x8769 {
+                exif_ifd_offset = Some(read_u32(entry + 8) as usize);
+            }
+        }
+        assert!(ifd0_tags.contains(&0x010e));
+        assert!(ifd0_tags.contains(&0x010f));
+        assert!(ifd0_tags.contains(&0x0110));
+        assert!(ifd0_tags.contains(&0x013b));
+
+        let exif_ifd_offset = exif_ifd_offset.expect("ExifIFD pointer");
+        let exif_count = read_u16(exif_ifd_offset) as usize;
+        let exif_tags = (0..exif_count)
+            .map(|index| read_u16(exif_ifd_offset + 2 + index * 12))
+            .collect::<Vec<_>>();
+        for tag in [
+            0x829a, 0x829d, 0x8827, 0x920a, 0x9286, 0xa002, 0xa003, 0xa433, 0xa434,
+        ] {
+            assert!(exif_tags.contains(&tag), "missing EXIF tag {tag:#06x}");
+        }
     }
 
     #[test]
