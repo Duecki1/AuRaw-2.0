@@ -248,3 +248,41 @@ def test_local_mask_capacity_is_32_end_to_end() -> None:
         body = ADJUSTMENTS[start:] if end < 0 else ADJUSTMENTS[start:end]
         assert "for (var index = 0u; index < count; index = index + 1u)" in body
         assert "index < 8u" not in body
+
+
+def test_mask_geometry_overlays_follow_native_space_through_final_warp() -> None:
+    preview = (ROOT / "src/ui/preview.rs").read_text(encoding="utf-8")
+    assert "linear_axis_geometry_screen_points" in preview
+    assert "linear_isot_geometry_screen_points" in preview
+    assert "linear_rotation_handle_geometry" in preview
+    assert "distance_to_polyline" in preview
+    assert "brush_outline_geometry_screen_points" in preview
+    # Regression guard: transformed linear-mask feather boundaries must not be
+    # rebuilt from a screen-space perpendicular to the endpoint chord.
+    linear_block = preview[
+        preview.index("MaskGeometry::Linear {", preview.index("fn paint_mask_overlay")) :
+        preview.index("_ => {}", preview.index("MaskGeometry::Linear {", preview.index("fn paint_mask_overlay")))
+    ]
+    assert "linear_isot_geometry_screen_points" in linear_block
+    assert "center - normal * span" not in linear_block
+
+
+def test_lens_preview_mesh_adapts_to_source_resolution() -> None:
+    preview = (ROOT / "src/ui/preview.rs").read_text(encoding="utf-8")
+    mesh = preview[
+        preview.index("fn paint_textured_combined_geometry_mesh") :
+        preview.index("fn native_source_to_corrected_uv")
+    ]
+    assert "grid_x" in mesh and "grid_y" in mesh
+    assert "/ 96.0" in mesh
+    assert "const GRID: usize = 32" not in mesh
+
+
+
+def test_inpaint_focus_bounds_follow_warped_brush_footprint() -> None:
+    preview = (ROOT / "src/ui/preview.rs").read_text(encoding="utf-8")
+    fn = preview[preview.index("fn inpaint_stroke_geometry_screen_bounds(") :]
+    fn = fn[: fn.index("\nfn screen_to_normalized(")]
+    assert "brush_outline_geometry_screen_points(" in fn
+    assert "dab.center" in fn and "dab.size" in fn
+    assert "dab.center[0] - du" not in fn

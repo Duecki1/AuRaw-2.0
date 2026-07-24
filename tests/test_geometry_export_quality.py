@@ -59,3 +59,29 @@ def test_geometry_regressions_cover_identity_and_nonidentity() -> None:
     assert "fn geometry_resampler_identity_is_exact_in_linear_space" in EXPORT
     assert "fn geometry_resampler_quarter_turn_preserves_exact_pixels" in EXPORT
     assert "fn geometry_downsample_accumulates_linear_values_before_encoding" in EXPORT
+
+
+def test_transformed_output_sharpen_uses_post_crop_geometry_scale() -> None:
+    png = _body("export_tiled_png_geometry", "export_tiled_jpeg_geometry")
+    jpeg = _body("export_tiled_jpeg_geometry", "validate_linear_rgb_raster")
+    tiff = _body("export_tiled_tiff_geometry", "tiff_row_format")
+    for body in (png, jpeg, tiff):
+        assert ".crop_pixel_dimensions(request.raw.width, request.raw.height)" in body
+        sharpen_start = body.index("FinalSizeOutputSharpen::new")
+        sharpen_call = body[sharpen_start : sharpen_start + 240]
+        assert "geometry_width" in sharpen_call
+        assert "geometry_height" in sharpen_call
+        assert "request.raw.width" not in sharpen_call
+        assert "request.raw.height" not in sharpen_call
+
+
+def test_geometry_jacobian_uses_in_frame_one_sided_edges() -> None:
+    jacobian = GEOMETRY[
+        GEOMETRY.index("pub(crate) fn pixel_jacobian_at") :
+        GEOMETRY.index("fn corrected_position_normalized", GEOMETRY.index("pub(crate) fn pixel_jacobian_at"))
+    ]
+    assert "self.output_width == 1" in jacobian
+    assert "self.output_height == 1" in jacobian
+    assert "x - 1.0" in jacobian
+    assert "y - 1.0" in jacobian
+    assert "x + 1.0, output_y" not in jacobian

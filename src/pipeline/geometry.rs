@@ -86,38 +86,86 @@ impl LensGeometryMap {
         raster_width: u32,
         raster_height: u32,
     ) -> [f32; 2] {
-        let mut estimate = [source_x, source_y];
-        for _ in 0..6 {
+        if !source_x.is_finite() || !source_y.is_finite() {
+            return [source_x, source_y];
+        }
+        let max_x = raster_width.saturating_sub(1) as f32;
+        let max_y = raster_height.saturating_sub(1) as f32;
+        let target = [source_x.clamp(0.0, max_x), source_y.clamp(0.0, max_y)];
+        let mut estimate = target;
+        let mut best = estimate;
+        let mut best_error = f32::INFINITY;
+
+        // Invert corrected-destination -> native-source robustly. Preview
+        // overlays use this inverse every frame, so a divergent Newton step can
+        // otherwise turn into a handle teleport/NaN even though the image warp
+        // itself remains valid. Lens maps are smooth; ten guarded iterations
+        // converge well while staying negligible compared with painting.
+        for _ in 0..10 {
             let mapped = self.source_position_for_raster(
                 estimate[0],
                 estimate[1],
                 raster_width,
                 raster_height,
             );
-            let error = [mapped[0] - source_x, mapped[1] - source_y];
-            if error[0].abs().max(error[1].abs()) < 1e-3 {
+            if !mapped[0].is_finite() || !mapped[1].is_finite() {
                 break;
+            }
+            let error = [mapped[0] - target[0], mapped[1] - target[1]];
+            let residual = error[0].abs().max(error[1].abs());
+            if residual < best_error {
+                best_error = residual;
+                best = estimate;
+            }
+            if residual < 1e-3 {
+                return estimate;
             }
 
             let step = 0.5_f32;
+            // Use a one-sided finite difference that flips direction at the
+            // last pixel center. Clamping an always-positive probe to the same
+            // coordinate produced a zero Jacobian on the right/bottom edges and
+            // made handle inversion least reliable exactly where lens distortion
+            // is strongest.
+            let sample_x = if estimate[0] + step <= max_x {
+                estimate[0] + step
+            } else {
+                (estimate[0] - step).max(0.0)
+            };
+            let sample_y = if estimate[1] + step <= max_y {
+                estimate[1] + step
+            } else {
+                (estimate[1] - step).max(0.0)
+            };
+            let dx = sample_x - estimate[0];
+            let dy = sample_y - estimate[1];
+            if dx.abs() <= 1e-6 || dy.abs() <= 1e-6 {
+                break;
+            }
             let mapped_x = self.source_position_for_raster(
-                estimate[0] + step,
+                sample_x,
                 estimate[1],
                 raster_width,
                 raster_height,
             );
             let mapped_y = self.source_position_for_raster(
                 estimate[0],
-                estimate[1] + step,
+                sample_y,
                 raster_width,
                 raster_height,
             );
-            let j00 = (mapped_x[0] - mapped[0]) / step;
-            let j10 = (mapped_x[1] - mapped[1]) / step;
-            let j01 = (mapped_y[0] - mapped[0]) / step;
-            let j11 = (mapped_y[1] - mapped[1]) / step;
+            if [mapped_x[0], mapped_x[1], mapped_y[0], mapped_y[1]]
+                .iter()
+                .any(|value| !value.is_finite())
+            {
+                break;
+            }
+            let j00 = (mapped_x[0] - mapped[0]) / dx;
+            let j10 = (mapped_x[1] - mapped[1]) / dx;
+            let j01 = (mapped_y[0] - mapped[0]) / dy;
+            let j11 = (mapped_y[1] - mapped[1]) / dy;
             let determinant = j00 * j11 - j01 * j10;
-            let correction = if determinant.abs() > 1e-5 {
+            let correction = if determinant.is_finite() && determinant.abs() > 1e-5 {
                 [
                     (j11 * error[0] - j01 * error[1]) / determinant,
                     (-j10 * error[0] + j00 * error[1]) / determinant,
@@ -125,10 +173,19 @@ impl LensGeometryMap {
             } else {
                 error
             };
-            estimate[0] -= correction[0].clamp(-64.0, 64.0);
-            estimate[1] -= correction[1].clamp(-64.0, 64.0);
+            if !correction[0].is_finite() || !correction[1].is_finite() {
+                break;
+            }
+            let next = [
+                (estimate[0] - correction[0].clamp(-64.0, 64.0)).clamp(0.0, max_x),
+                (estimate[1] - correction[1].clamp(-64.0, 64.0)).clamp(0.0, max_y),
+            ];
+            if (next[0] - estimate[0]).abs().max((next[1] - estimate[1]).abs()) < 1e-4 {
+                break;
+            }
+            estimate = next;
         }
-        estimate
+        best
     }
 
     fn source_position(&self, x: f32, y: f32) -> [f32; 2] {
@@ -530,13 +587,44 @@ impl<'a> GeometryInverseMap<'a> {
     }
 
     pub(crate) fn pixel_jacobian_at(self, output_x: f32, output_y: f32) -> [[f32; 2]; 2] {
-        let origin = self.source_position(output_x, output_y);
-        let step_x = self.source_position(output_x + 1.0, output_y);
-        let step_y = self.source_position(output_x, output_y + 1.0);
-        [
-            [step_x[0] - origin[0], step_x[1] - origin[1]],
-            [step_y[0] - origin[0], step_y[1] - origin[1]],
-        ]
+        let x = output_x.clamp(0.0, self.output_width.saturating_sub(1) as f32);
+        let y = output_y.clamp(0.0, self.output_height.saturating_sub(1) as f32);
+        let origin = self.source_position(x, y);
+
+        // Keep derivative probes inside the destination raster. A forward
+        // difference at the final row/column used to step onto pasteboard; with
+        // nonlinear Lensfun mapping that probe bypasses the lens map and can
+        // create a bogus EWA footprint exactly along the exported image edge.
+        let jx = if self.output_width == 1 {
+            // A one-pixel output still represents the entire destination width.
+            // Sampling both pixel edges recovers that footprint for antialiasing
+            // instead of collapsing the X Jacobian to zero.
+            let left = self.source_position(-0.5, y);
+            let right = self.source_position(0.5, y);
+            [right[0] - left[0], right[1] - left[1]]
+        } else {
+            let (sample_x, sign) = if x + 1.0 < self.output_width as f32 {
+                (x + 1.0, 1.0)
+            } else {
+                (x - 1.0, -1.0)
+            };
+            let step = self.source_position(sample_x, y);
+            [(step[0] - origin[0]) * sign, (step[1] - origin[1]) * sign]
+        };
+        let jy = if self.output_height == 1 {
+            let top = self.source_position(x, -0.5);
+            let bottom = self.source_position(x, 0.5);
+            [bottom[0] - top[0], bottom[1] - top[1]]
+        } else {
+            let (sample_y, sign) = if y + 1.0 < self.output_height as f32 {
+                (y + 1.0, 1.0)
+            } else {
+                (y - 1.0, -1.0)
+            };
+            let step = self.source_position(x, sample_y);
+            [(step[0] - origin[0]) * sign, (step[1] - origin[1]) * sign]
+        };
+        [jx, jy]
     }
 
     fn corrected_position_normalized(self, output_u: f32, output_v: f32) -> [f32; 2] {
