@@ -271,6 +271,107 @@ impl GeometryTransform {
     }
 }
 
+/// Inverse mapping from destination pixel centers to native source pixel
+/// centers for the complete non-destructive crop/orientation transform.
+///
+/// Keeping this mapping in native source coordinates lets export combine
+/// crop, rotation, keystone, orientation, and resize into one linear-light
+/// resampling pass instead of first rasterizing an encoded intermediate.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GeometryInverseMap {
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+}
+
+impl GeometryInverseMap {
+    pub(crate) fn new(
+        geometry: GeometryTransform,
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+    ) -> Self {
+        Self {
+            geometry: geometry.sanitized(),
+            source_width: source_width.max(1),
+            source_height: source_height.max(1),
+            output_width: output_width.max(1),
+            output_height: output_height.max(1),
+        }
+    }
+
+    pub(crate) fn source_position(self, output_x: f32, output_y: f32) -> [f32; 2] {
+        let output_u = (output_x + 0.5) / self.output_width as f32;
+        let output_v = (output_y + 0.5) / self.output_height as f32;
+        self.source_position_normalized(output_u, output_v)
+    }
+
+    /// Source-space displacement caused by moving one destination pixel in X
+    /// and Y. The transform is affine, so this Jacobian is constant everywhere.
+    pub(crate) fn pixel_jacobian(self) -> [[f32; 2]; 2] {
+        let origin = self.source_position(0.0, 0.0);
+        let step_x = self.source_position(1.0, 0.0);
+        let step_y = self.source_position(0.0, 1.0);
+        [
+            [step_x[0] - origin[0], step_x[1] - origin[1]],
+            [step_y[0] - origin[0], step_y[1] - origin[1]],
+        ]
+    }
+
+    fn source_position_normalized(self, output_u: f32, output_v: f32) -> [f32; 2] {
+        let geometry = self.geometry;
+        let crop = geometry.crop;
+        let source_width = self.source_width as f32;
+        let source_height = self.source_height as f32;
+        let crop_width = (crop[2] - crop[0]) * source_width;
+        let crop_height = (crop[3] - crop[1]) * source_height;
+        let center_x = (crop[0] + crop[2]) * 0.5 * source_width;
+        let center_y = (crop[1] + crop[3]) * 0.5 * source_height;
+
+        // Undo discrete orientation first so the continuous transform stays in
+        // the crop's original coordinate system.
+        let (u, v) = match geometry.quarter_turns % 4 {
+            0 => (output_u, output_v),
+            1 => (output_v, 1.0 - output_u),
+            2 => (1.0 - output_u, 1.0 - output_v),
+            _ => (1.0 - output_v, output_u),
+        };
+        let dx = (u - 0.5) * crop_width;
+        let dy = (v - 0.5) * crop_height;
+
+        let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
+        let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
+        let shx = geometry.horizontal_transform.to_radians().tan();
+        let shy = geometry.vertical_transform.to_radians().tan();
+        let angle = geometry.rotation_degrees.to_radians();
+        let c = angle.cos();
+        let s = angle.sin();
+
+        // Forward transform is R * Shear * Flip. Invert its 2x2 matrix for
+        // destination-to-source sampling.
+        let a = c * fx - s * shy * fx;
+        let b = c * shx * fy - s * fy;
+        let c2 = s * fx + c * shy * fx;
+        let d = s * shx * fy + c * fy;
+        let determinant = a * d - b * c2;
+        if determinant.abs() < 1e-6 {
+            return [center_x - 0.5, center_y - 0.5];
+        }
+        let source_dx = (d * dx - b * dy) / determinant;
+        let source_dy = (-c2 * dx + a * dy) / determinant;
+
+        // Geometry is naturally expressed in pixel-edge coordinates, while
+        // the raster is indexed by pixel centers at integer coordinates.
+        [
+            center_x + source_dx - 0.5,
+            center_y + source_dy - 0.5,
+        ]
+    }
+}
+
 fn sanitized_crop(crop: [f32; 4]) -> [f32; 4] {
     let mut geometry = GeometryTransform::default();
     geometry.crop = crop;
@@ -388,18 +489,18 @@ pub fn transform_thumbnail_geometry(
     }
     let (output_width, output_height) =
         geometry.crop_pixel_dimensions(thumbnail.width, thumbnail.height);
+    let inverse_map = GeometryInverseMap::new(
+        geometry,
+        thumbnail.width,
+        thumbnail.height,
+        output_width,
+        output_height,
+    );
     let mut rgba = vec![0u8; output_width as usize * output_height as usize * 4];
     for output_y in 0..output_height {
         for output_x in 0..output_width {
-            let u = (output_x as f32 + 0.5) / output_width.max(1) as f32;
-            let v = (output_y as f32 + 0.5) / output_height.max(1) as f32;
-            let [source_x, source_y] = thumbnail_geometry_source_position(
-                geometry,
-                thumbnail.width,
-                thumbnail.height,
-                u,
-                v,
-            );
+            let [source_x, source_y] =
+                inverse_map.source_position(output_x as f32, output_y as f32);
             let pixel = sample_thumbnail_rgba_bilinear(
                 &thumbnail.rgba,
                 thumbnail.width,
@@ -416,48 +517,6 @@ pub fn transform_thumbnail_geometry(
         height: output_height,
         rgba,
     }
-}
-
-fn thumbnail_geometry_source_position(
-    geometry: GeometryTransform,
-    source_width: u32,
-    source_height: u32,
-    output_u: f32,
-    output_v: f32,
-) -> [f32; 2] {
-    let crop = geometry.crop;
-    let crop_width = (crop[2] - crop[0]) * source_width.max(1) as f32;
-    let crop_height = (crop[3] - crop[1]) * source_height.max(1) as f32;
-    let center_x = (crop[0] + crop[2]) * 0.5 * source_width.max(1) as f32;
-    let center_y = (crop[1] + crop[3]) * 0.5 * source_height.max(1) as f32;
-    let (u, v) = match geometry.quarter_turns % 4 {
-        0 => (output_u, output_v),
-        1 => (output_v, 1.0 - output_u),
-        2 => (1.0 - output_u, 1.0 - output_v),
-        _ => (1.0 - output_v, output_u),
-    };
-    let dx = (u - 0.5) * crop_width;
-    let dy = (v - 0.5) * crop_height;
-
-    let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
-    let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
-    let shx = geometry.horizontal_transform.to_radians().tan();
-    let shy = geometry.vertical_transform.to_radians().tan();
-    let angle = geometry.rotation_degrees.to_radians();
-    let c = angle.cos();
-    let s = angle.sin();
-    let a = c * fx - s * shy * fx;
-    let b = c * shx * fy - s * fy;
-    let c2 = s * fx + c * shy * fx;
-    let d = s * shx * fy + c * fy;
-    let determinant = a * d - b * c2;
-    if determinant.abs() < 1e-6 {
-        return [center_x, center_y];
-    }
-    [
-        center_x + (d * dx - b * dy) / determinant,
-        center_y + (-c2 * dx + a * dy) / determinant,
-    ]
 }
 
 fn sample_thumbnail_rgba_bilinear(
@@ -504,6 +563,36 @@ mod tests {
     #[test]
     fn geometry_defaults_to_identity() {
         assert!(GeometryTransform::default().is_identity());
+    }
+
+    #[test]
+    fn inverse_map_identity_targets_native_pixel_centers() {
+        let map = GeometryInverseMap::new(GeometryTransform::default(), 4, 3, 4, 3);
+        for (actual, expected) in map.source_position(0.0, 0.0).into_iter().zip([0.0, 0.0]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        for (actual, expected) in map.source_position(3.0, 2.0).into_iter().zip([3.0, 2.0]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        let jacobian = map.pixel_jacobian();
+        for (actual, expected) in jacobian.into_iter().flatten().zip([1.0, 0.0, 0.0, 1.0]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn inverse_map_combines_quarter_turn_with_output_geometry() {
+        let geometry = GeometryTransform {
+            quarter_turns: 1,
+            ..Default::default()
+        };
+        let map = GeometryInverseMap::new(geometry, 3, 2, 2, 3);
+        for (actual, expected) in map.source_position(0.0, 0.0).into_iter().zip([0.0, 1.0]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        for (actual, expected) in map.source_position(1.0, 2.0).into_iter().zip([2.0, 0.0]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -596,5 +685,30 @@ mod tests {
         let transformed = transform_thumbnail_geometry(&thumbnail, geometry);
         assert_eq!((transformed.width, transformed.height), (6, 4));
         assert_eq!(transformed.rgba.len(), 6 * 4 * 4);
+    }
+
+    #[test]
+    fn thumbnail_quarter_turn_uses_exact_pixel_centers() {
+        let thumbnail = crate::pipeline::RawThumbnail {
+            width: 3,
+            height: 2,
+            rgba: vec![
+                1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255,
+                4, 0, 0, 255, 5, 0, 0, 255, 6, 0, 0, 255,
+            ],
+        };
+        let transformed = transform_thumbnail_geometry(
+            &thumbnail,
+            GeometryTransform {
+                quarter_turns: 1,
+                ..Default::default()
+            },
+        );
+        let red = transformed
+            .rgba
+            .chunks_exact(4)
+            .map(|pixel| pixel[0])
+            .collect::<Vec<_>>();
+        assert_eq!(red, vec![4, 1, 5, 2, 6, 3]);
     }
 }
