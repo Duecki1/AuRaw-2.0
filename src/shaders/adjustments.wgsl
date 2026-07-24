@@ -1,9 +1,9 @@
-// Post-demosaic scene-linear controls. The first full-precision texture holds
-// the pre-tone/profile-rendering image. Capture sharpening samples that scene-
-// referred detail before ProfileToneCurve and Lightroom-style tone shaping, then
-// a second pass writes the post-tone base used by Texture, Clarity, and Dehaze.
-// Creative Effects remain later so sharpening never bites into tone-map, Glow,
-// or vignette artifacts.
+// Post-demosaic render graph with explicit domain boundaries. New-process
+// pixels flow through camera characterization -> scene edits -> optional look ->
+// exactly one view transform -> output encoding. The physical passes below may
+// fuse adjacent logical nodes, but they never move scene-style controls across
+// the scene/display boundary. Legacy process versions branch inside the same
+// entry points to preserve the historical DCP ordering.
 
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
@@ -1212,37 +1212,41 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
-    // Build the scene-referred capture base only. Exposure and the DCP colour
-    // characterisation stay before sharpening, but ProfileToneCurve and all
-    // Lightroom-style tonal shaping are intentionally deferred to the next
-    // pass. Capture sharpening therefore sees recoverable pre-tone detail
-    // instead of contrast/shoulder artifacts created by the rendition curve.
-    var rgb = apply_profile_hue_sat(scene_working_at(pos));
+    // Camera characterization is the only DCP color component allowed before
+    // scene edits in the new graph. Fixed profile exposure and editable global/
+    // local Exposure are also scene-linear. The LookTable is deferred until all
+    // scene controls have finished. Legacy edits retain the old pre-edit look.
+    var rgb = apply_camera_characterization(scene_working_at(pos));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     let local = local_adjustment_mix(pos);
     let local_exposure_ev = clamp(local.tone0.x, -10.0, 10.0);
     rgb = rgb * exp2(profile_exposure_ev + local_exposure_ev);
     rgb = apply_exposure(rgb);
-    rgb = apply_profile_look(rgb);
+    if !uses_explicit_scene_display_domains() {
+        rgb = apply_optional_profile_look(rgb);
+    }
     textureStore(adjustment_base_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn apply_capture_sharpen_and_tone(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
     let local = local_adjustment_mix(pos);
 
-    // Capture sharpening belongs to the scene-referred/detail-recovery stage:
-    // after camera/profile colour and Exposure, before any profile tone curve,
-    // adaptive Highlight/Shadow shaping, Contrast, local curves, or view tone.
+    // Capture sharpening and all H/S/W/B, Contrast, curve, and local tone
+    // controls operate in the scene domain. ProfileToneCurve is excluded from
+    // this node for process 13+, which makes slider semantics profile-independent.
+    // Process 12 and earlier preserve the historical curve-before-edits order.
     rgb = apply_capture_sharpening(pos, rgb);
-    rgb = apply_profile_tone_curve(rgb);
+    if !uses_explicit_scene_display_domains() {
+        rgb = apply_profile_view_tone(rgb);
+    }
     rgb = map_negative_gamut(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
     rgb = apply_lightroom_tone(rgb, pos);
@@ -1261,7 +1265,7 @@ fn apply_capture_sharpen_and_tone(@builtin(global_invocation_id) gid: vec3<u32>)
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn apply_lightroom_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
@@ -1349,10 +1353,11 @@ fn default_view_chroma_limit(mapped_luma: f32, candidate: vec3<f32>) -> f32 {
 }
 
 fn profile_tone_scene_shoulder_knee() -> f32 {
-    // Tone statistics are measured after the active DCP HueSat/Look/ToneCurve
-    // and default rendering exposure, but before the creative Exposure slider.
-    // Reapply only that live user exposure so the display shoulder follows the
-    // actual scene headroom without making Exposure trigger a new analysis pass.
+    // In the explicit-domain graph, tone statistics are measured after camera
+    // characterization plus fixed rendering exposure, before LookTable and the
+    // view transform. Legacy processes retain their historical profiled stats.
+    // Reapply only live user Exposure so the shoulder follows scene headroom
+    // without making Exposure trigger a new analysis pass.
     let user_exposure_ev = adaptive_tone_user_exposure_ev();
     let p95_over_white_ev = tone_stats.percentiles_0.w
         + user_exposure_ev
@@ -1428,8 +1433,42 @@ fn profile_tone_display_shoulder(rgb: vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn apply_dcp_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
+    // ProfileToneCurve is a component of this one selected view operator, not
+    // an upstream scene edit. The shoulder completes its HDR-to-display range
+    // mapping without stacking the configurable sigmoid on top.
+    let profile_view = apply_profile_view_tone(scene_rgb);
+    return profile_tone_display_shoulder(profile_view);
+}
+
+fn apply_explicit_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
+    // Optional creative profile look is the final scene-domain operation. It is
+    // deliberately downstream of H/S/W/B, Contrast, curves, presence, mixer,
+    // and grading so those controls mean the same thing across camera profiles.
+    let looked = apply_optional_profile_look(scene_rgb);
+    let view_input = max(map_negative_gamut(looked), vec3<f32>(0.0));
+
+    // Select exactly one view-transform path. A default DCP rendition uses its
+    // ProfileToneCurve inside the DCP-aware view node; a custom/user sigmoid is
+    // the complete view transform and therefore does not stack the profile tone
+    // curve ahead of it. This removes the previous double-tone behavior.
+    if (params.process_info.y & 1u) != 0u {
+        return apply_dcp_view_transform(view_input);
+    }
+    return apply_sigmoid_view_transform(view_input);
+}
+
+fn apply_legacy_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
+    // Process <=12 compatibility: LookTable/ProfileToneCurve have already run
+    // upstream. Preserve the historical final view selection byte-for-byte.
+    if (params.process_info.y & 1u) != 0u {
+        return profile_tone_display_shoulder(scene_rgb);
+    }
+    return darktable_sigmoid(scene_rgb);
+}
+
 @compute @workgroup_size(8, 8, 1)
-fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let rgb = textureLoad(final_adjustment_tex, pos, 0).xyz;
@@ -1443,14 +1482,14 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
         params.grade_options,
     );
     let graded = apply_local_color_grading(pos, globally_graded);
-    // With a DCP ProfileToneCurve, retain the profile's midtone rendition and
-    // add AuRaw's restrained toe/shoulder finish. Without one, use the full
-    // configurable sigmoid. Both paths avoid per-channel highlight clipping;
-    // the defaults prioritize smooth rolloff and bright-color saturation.
-    var display_linear = darktable_sigmoid(graded);
-    if (params.process_info.y & 1u) != 0u {
-        display_linear = profile_tone_display_shoulder(graded);
+    var display_linear = vec3<f32>(0.0);
+    if uses_explicit_scene_display_domains() {
+        display_linear = apply_explicit_view_node(graded);
+    } else {
+        display_linear = apply_legacy_view_node(graded);
     }
     textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
+    // Output ICC/device encoding is a separate display-domain operation, not a
+    // second view transform. It receives already display-referred linear RGB.
     textureStore(out_tex, pos, vec4<f32>(apply_output_lut(display_linear), 1.0));
 }

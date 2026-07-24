@@ -16,7 +16,7 @@ def test_global_exposure_has_no_unconditional_backend_lift() -> None:
     assert "exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" not in GPU
     assert "LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC
     assert "8 | 9 =>" in BASIC
-    assert "10 =>" in BASIC
+    assert "10 | 11 =>" in BASIC
     assert "self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC
 
 
@@ -73,12 +73,12 @@ def test_final_render_binds_tone_stats_for_scene_headroom_shoulder() -> None:
     # profile_tone_scene_shoulder_knee() is called by the final render entry
     # point and reads @binding(16) tone_stats from tonemap.wgsl. The final
     # pipeline layout and bind group must therefore both expose the buffer.
-    layout_start = GPU.index('label: Some("bgl perceptual color mixer and render")')
+    layout_start = GPU.index('label: Some("bgl scene look view and output")')
     layout_end = GPU.index('let bgl_adjust_render =\n            reused_layout', layout_start)
     render_layout = GPU[layout_start:layout_end]
     assert 'storage_buffer_entry(16, true)' in render_layout
 
-    group_start = GPU.index('label: Some("bg perceptual color mixer and render")')
+    group_start = GPU.index('label: Some("bg scene look view and output")')
     group_end = GPU.index('// Storage texture declarations are format-specific', group_start)
     render_group = GPU[group_start:group_end]
     assert 'binding: 16' in render_group

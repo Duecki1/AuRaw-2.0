@@ -11,6 +11,9 @@
 @group(0) @binding(16) var<storage, read> tone_stats: ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
 
+// This file implements a complete selectable scene-to-display view transform.
+// Process 13+ never stacks DCP ProfileToneCurve ahead of this sigmoid path.
+
 fn adaptive_tone_user_exposure_ev() -> f32 {
     // The histogram/guide remain cached in pre-user-exposure scene space so
     // moving Exposure stays cheap. Reintroduce the user-facing edit here. The
@@ -534,4 +537,8 @@ fn darktable_sigmoid(rgb: vec3<f32>) -> vec3<f32> {
         return sigmoid_per_channel(rgb);
     }
     return sigmoid_rgb_ratio(rgb);
+}
+
+fn apply_sigmoid_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
+    return darktable_sigmoid(scene_rgb);
 }

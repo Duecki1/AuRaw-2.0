@@ -181,8 +181,9 @@ struct SidecarDocument {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedSidecar {
     pub edits: EditState,
-    /// True when an older supported schema or processing version was upgraded
-    /// in memory. The next normal save rewrites it in the current format.
+    /// True when an older supported schema or processing version was changed
+    /// in memory. Compatibility process versions that intentionally remain on
+    /// their legacy render graph do not cause perpetual rewrite-on-load.
     pub migrated: bool,
 }
 
@@ -621,6 +622,7 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     let original_schema = document.schema_version;
     let original_process = document.process_version;
     document.edits.exposure.migrate_to_current_process();
+    let migrated_process = document.edits.exposure.process_version != original_process;
     document.edits.exposure.sanitize_tone_curves();
     for mask in &mut Arc::make_mut(&mut document.edits.masks).masks {
         mask.adjustments.sanitize_tone_curves();
@@ -629,8 +631,7 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
 
     Ok(LoadedSidecar {
         edits: document.edits,
-        migrated: original_schema != SIDECAR_SCHEMA_VERSION
-            || original_process != CURRENT_PROCESS_VERSION,
+        migrated: original_schema != SIDECAR_SCHEMA_VERSION || migrated_process,
     })
 }
 
@@ -1480,7 +1481,7 @@ fn invalid<T>(message: &str) -> Result<T, SidecarError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{MaskKind, CURRENT_PROCESS_VERSION};
+    use crate::pipeline::{MaskKind, CURRENT_PROCESS_VERSION, LEGACY_SCENE_DISPLAY_PROCESS_VERSION};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_edits() -> EditState {
@@ -1774,9 +1775,28 @@ mod tests {
         let loaded = decode(&value).unwrap();
         assert_eq!(
             loaded.edits.exposure.process_version,
-            CURRENT_PROCESS_VERSION
+            LEGACY_SCENE_DISPLAY_PROCESS_VERSION
         );
         assert!(loaded.migrated);
+    }
+
+    #[test]
+    fn process_twelve_sidecars_keep_the_legacy_render_graph() {
+        let mut edits = sample_edits();
+        edits.exposure.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
+        let value = serde_json::to_vec(&SidecarDocument {
+            format: SIDECAR_FORMAT.to_owned(),
+            schema_version: SIDECAR_SCHEMA_VERSION,
+            process_version: LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
+            edits,
+        })
+        .unwrap();
+        let loaded = decode(&value).unwrap();
+        assert_eq!(
+            loaded.edits.exposure.process_version,
+            LEGACY_SCENE_DISPLAY_PROCESS_VERSION
+        );
+        assert!(!loaded.migrated);
     }
 
     #[test]

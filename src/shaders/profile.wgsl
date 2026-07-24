@@ -192,7 +192,15 @@ fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
     return PROPHOTO_TO_REC2020 * profile_hsv_to_rgb(hsv) * profile_headroom;
 }
 
-fn apply_profile_look(rgb: vec3<f32>) -> vec3<f32> {
+// Render-graph domain wrappers. The low-level DCP helpers above retain their
+// file-format names, while these functions state the stage contract used by
+// the renderer: HueSatMap is camera characterization, LookTable is an optional
+// scene look, and ProfileToneCurve belongs to the view transform.
+fn apply_camera_characterization(rgb: vec3<f32>) -> vec3<f32> {
+    return apply_profile_hue_sat(rgb);
+}
+
+fn apply_optional_profile_look(rgb: vec3<f32>) -> vec3<f32> {
     return apply_profile_hsv_map(rgb, params.profile_look, params.profile_flags.y);
 }
 
@@ -252,6 +260,10 @@ fn apply_profile_tone_curve(rgb_rec2020: vec3<f32>) -> vec3<f32> {
     let curved = vec3<f32>(mapped_low)
         + (prophoto - vec3<f32>(low)) * scale;
     return PROPHOTO_TO_REC2020 * curved * profile_headroom;
+}
+
+fn apply_profile_view_tone(rgb: vec3<f32>) -> vec3<f32> {
+    return apply_profile_tone_curve(rgb);
 }
 
 fn output_lut_fetch(r: u32, g: u32, b: u32) -> vec3<f32> {

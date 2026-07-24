@@ -56,15 +56,30 @@ class DcpProfileSelectionTests(unittest.TestCase):
         self.assertIn('pub camera_model: Option<String>', profile)
 
 
-    def test_dcp_rendering_matches_adobe_stage_order_and_zero_centered_global_exposure(self) -> None:
+    def test_dcp_rendering_has_explicit_scene_look_and_view_boundaries(self) -> None:
         adjustments = read_source_tree(Path("src/shaders/adjustments.wgsl"))
         profile = read_source_tree(Path("src/shaders/profile.wgsl"))
         gpu = read_source_tree(Path("src/pipeline/gpu.rs"))
         lifecycle = read_source_tree(Path("src/app/lifecycle.rs"))
+
+        scene_start = adjustments.index("fn prepare_scene_node")
+        tone_start = adjustments.index("fn apply_scene_tone_node", scene_start)
+        view_start = adjustments.index("fn apply_explicit_view_node", tone_start)
+        scene = adjustments[scene_start:tone_start]
+        view = adjustments[view_start:]
+
         self.assertLess(
-            adjustments.index("apply_profile_hue_sat(scene_working_at(pos))"),
-            adjustments.index("rgb = apply_exposure(rgb)"),
+            scene.index("apply_camera_characterization(scene_working_at(pos))"),
+            scene.index("rgb = apply_exposure(rgb)"),
         )
+        self.assertIn("if !uses_explicit_scene_display_domains()", scene)
+        self.assertNotIn("apply_profile_view_tone", scene)
+        self.assertIn("apply_optional_profile_look(scene_rgb)", view)
+        self.assertIn("return apply_dcp_view_transform(view_input)", view)
+        self.assertIn("return apply_sigmoid_view_transform(view_input)", view)
+        self.assertIn("RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY", gpu)
+        self.assertIn("RenderStageContract", gpu)
+
         self.assertIn("mapped_low", profile)
         self.assertIn("mapped_high", profile)
         self.assertIn("(prophoto - vec3<f32>(low)) * scale", profile)
@@ -72,13 +87,7 @@ class DcpProfileSelectionTests(unittest.TestCase):
         self.assertIn("profile_headroom", profile)
         self.assertIn("profile_linear / profile_headroom", profile)
         self.assertIn("let local_exposure_ev", adjustments)
-        self.assertLess(
-            adjustments.index("let local_exposure_ev"),
-            adjustments.index("rgb = apply_profile_look(rgb)"),
-        )
         self.assertIn("profile_tone_display_shoulder", adjustments)
-        self.assertIn("var display_linear = darktable_sigmoid(graded)", adjustments)
-        self.assertNotIn("var display_linear = clamp(graded", adjustments)
         self.assertNotIn("exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV", gpu)
         self.assertIn("exposure: exposure.exposure", gpu)
         self.assertIn("profile.default_exposure_ev.to_bits()", read_source_tree(Path("src/pipeline/color_profile.rs")))

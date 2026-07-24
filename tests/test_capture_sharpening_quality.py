@@ -36,18 +36,18 @@ def test_capture_sharpening_is_edge_aware_luminance_preserving_and_scale_aware()
     assert "let range = exp(-2.4 * delta * delta)" in ADJUSTMENTS
     assert "edge_mask = smoothstep" in ADJUSTMENTS
     assert "return max(rgb * exp2(sharpen_ev)" in ADJUSTMENTS
-    assert "fn apply_capture_sharpen_and_tone" in ADJUSTMENTS
+    assert "fn apply_scene_tone_node" in ADJUSTMENTS
     sharpen_stage = ADJUSTMENTS[
-        ADJUSTMENTS.index("fn apply_capture_sharpen_and_tone") :
-        ADJUSTMENTS.index("fn apply_lightroom_effects")
+        ADJUSTMENTS.index("fn apply_scene_tone_node") :
+        ADJUSTMENTS.index("fn apply_scene_effects_node")
     ]
     sharpen = sharpen_stage.index("rgb = apply_capture_sharpening(pos, rgb);")
-    profile_tone = sharpen_stage.index("rgb = apply_profile_tone_curve(rgb);")
+    profile_tone = sharpen_stage.index("rgb = apply_profile_view_tone(rgb);")
     adaptive_tone = sharpen_stage.index("rgb = apply_lightroom_tone(rgb, pos);")
     contrast = sharpen_stage.index("rgb = apply_basic_contrast_value")
     assert sharpen < profile_tone < adaptive_tone < contrast
     assert "rgb = apply_capture_sharpening(pos, rgb);" not in ADJUSTMENTS[
-        ADJUSTMENTS.index("fn apply_lightroom_effects") :
+        ADJUSTMENTS.index("fn apply_scene_effects_node") :
         ADJUSTMENTS.index("fn prepare_glow_source")
     ]
     assert "exposure.sharpen_amount.abs() > 1e-6" in PROCESSING
@@ -63,4 +63,4 @@ def test_exposure_partially_retargets_adaptive_tone_without_reanalysis() -> None
     assert "params.process_info.z" in TONEMAP
     assert "+ adaptive_tone_user_exposure_ev()" in TONEMAP
     assert "adaptive_tone_user_exposure_ev() * 0.35" in TONEMAP
-    assert "CURRENT_PROCESS_VERSION: u32 = 12" in BASIC
+    assert "SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13" in BASIC

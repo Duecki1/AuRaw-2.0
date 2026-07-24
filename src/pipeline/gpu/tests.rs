@@ -1,7 +1,9 @@
 use super::{
-    color_grade_hue_turns, composite_inpaint_rgba16f, highlight_final_read_slot,
-    highlight_stage_slots, pack_local_point_curve, processing_work_format, shader_highlight_method,
+    color_grade_hue_turns, composite_inpaint_rgba16f,
+    explicit_render_graph_contracts_are_contiguous, highlight_final_read_slot, highlight_stage_slots,
+    pack_local_point_curve, processing_work_format, render_graph_flags, shader_highlight_method,
     work_shader_source, HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS,
+    RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY,
     SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
     SHADER_BAYER_RCD_P4, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
     SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5,
@@ -108,6 +110,16 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
         .validate(&module)
         .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
     }
+}
+
+#[test]
+fn process_version_selects_the_scene_display_contract_graph() {
+    assert_eq!(render_graph_flags(12), 0);
+    assert_eq!(
+        render_graph_flags(crate::pipeline::SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION),
+        RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY
+    );
+    assert!(explicit_render_graph_contracts_are_contiguous());
 }
 
 #[test]
@@ -456,9 +468,9 @@ fn adjustments_shader_contains_lightroom_style_controls() {
     assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
     assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
     assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
-    assert!(SHADER_ADJUSTMENTS.contains("prepare_adjustment_base"));
-    assert!(SHADER_ADJUSTMENTS.contains("apply_capture_sharpen_and_tone"));
-    assert!(SHADER_ADJUSTMENTS.contains("apply_lightroom_effects"));
+    assert!(SHADER_ADJUSTMENTS.contains("prepare_scene_node"));
+    assert!(SHADER_ADJUSTMENTS.contains("apply_scene_tone_node"));
+    assert!(SHADER_ADJUSTMENTS.contains("apply_scene_effects_node"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_creative_effects"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_glow"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_vignette"));
@@ -473,31 +485,33 @@ fn adjustments_shader_contains_lightroom_style_controls() {
 }
 
 #[test]
-fn dcp_characterization_and_exposure_precede_pre_tone_capture_sharpening() {
-    let prepare_start = SHADER_ADJUSTMENTS.find("fn prepare_adjustment_base").unwrap();
-    let sharpen_start = SHADER_ADJUSTMENTS
-        .find("fn apply_capture_sharpen_and_tone")
-        .unwrap();
-    let effects_start = SHADER_ADJUSTMENTS.find("fn apply_lightroom_effects").unwrap();
-    let prepare = &SHADER_ADJUSTMENTS[prepare_start..sharpen_start];
-    let sharpen_tone = &SHADER_ADJUSTMENTS[sharpen_start..effects_start];
+fn explicit_graph_keeps_profile_look_and_tone_after_scene_edits() {
+    let prepare_start = SHADER_ADJUSTMENTS.find("fn prepare_scene_node").unwrap();
+    let tone_start = SHADER_ADJUSTMENTS.find("fn apply_scene_tone_node").unwrap();
+    let effects_start = SHADER_ADJUSTMENTS.find("fn apply_scene_effects_node").unwrap();
+    let view_start = SHADER_ADJUSTMENTS.find("fn apply_explicit_view_node").unwrap();
+    let prepare = &SHADER_ADJUSTMENTS[prepare_start..tone_start];
+    let tone = &SHADER_ADJUSTMENTS[tone_start..effects_start];
+    let view = &SHADER_ADJUSTMENTS[view_start..];
 
-    let hue_sat = prepare
-        .find("var rgb = apply_profile_hue_sat(scene_working_at(pos))")
+    let characterization = prepare
+        .find("var rgb = apply_camera_characterization(scene_working_at(pos))")
         .unwrap();
     let profile_exposure = prepare.find("let profile_exposure_ev").unwrap();
     let exposure = prepare.find("rgb = apply_exposure(rgb)").unwrap();
-    let look = prepare.find("rgb = apply_profile_look(rgb)").unwrap();
-    assert!(
-        hue_sat < profile_exposure && profile_exposure < exposure && exposure < look
-    );
-    assert!(!prepare.contains("apply_profile_tone_curve(rgb)"));
+    assert!(characterization < profile_exposure && profile_exposure < exposure);
+    assert!(prepare.contains("if !uses_explicit_scene_display_domains()"));
 
-    let sharpen = sharpen_tone.find("rgb = apply_capture_sharpening(pos, rgb)").unwrap();
-    let curve = sharpen_tone.find("rgb = apply_profile_tone_curve(rgb)").unwrap();
-    let gamut = sharpen_tone.find("rgb = map_negative_gamut(rgb)").unwrap();
-    let adaptive_tone = sharpen_tone.find("rgb = apply_lightroom_tone(rgb, pos)").unwrap();
-    assert!(sharpen < curve && curve < gamut && gamut < adaptive_tone);
+    let sharpen = tone.find("rgb = apply_capture_sharpening(pos, rgb)").unwrap();
+    let adaptive_tone = tone.find("rgb = apply_lightroom_tone(rgb, pos)").unwrap();
+    let contrast = tone.find("rgb = apply_basic_contrast_value").unwrap();
+    assert!(sharpen < adaptive_tone && adaptive_tone < contrast);
+    assert!(tone.contains("if !uses_explicit_scene_display_domains()"));
+
+    let look = view.find("apply_optional_profile_look(scene_rgb)").unwrap();
+    let profile_tone = view.find("apply_dcp_view_transform(view_input)").unwrap();
+    let sigmoid = view.find("apply_sigmoid_view_transform(view_input)").unwrap();
+    assert!(look < profile_tone && look < sigmoid);
     assert!(SHADER_ADJUSTMENTS.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
     assert!(SHADER_ADJUSTMENTS.contains("return profile_data[offset + maximum].x"));
 }

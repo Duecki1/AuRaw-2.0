@@ -98,11 +98,11 @@ struct Params {
     // HueSat encoding, LookTable encoding, default exposure EV bits, and the
     // live DCP dual-illuminant interpolation weight as f32 bits.
     profile_flags: vec4<u32>,
-    // x = processing-formula version. y bit 0 = the active DCP provides the
-    // baseline ProfileToneCurve and AuRaw's default sigmoid should not be
-    // stacked on top of it. z stores the user-facing base Exposure as f32
-    // bits. Camera/DNG default rendering exposure lives independently in
-    // profile_flags.z, so adaptive tone reacts only to the explicit user edit.
+    // x = processing-formula version. y bit 0 selects the DCP-aware default
+    // view transform instead of the configurable sigmoid. z stores user-facing
+    // Exposure as f32 bits. w is the render-graph contract bitfield; bit 0
+    // enables explicit camera -> scene -> look -> view domain boundaries.
+    // Camera/DNG default rendering exposure lives independently in profile_flags.z.
     process_info: vec4<u32>,
     // Local adjustments. Each mask index maps directly to one layer in the
     // normalized R8 array texture sampled by adjustments.wgsl. mask_meta.w is
@@ -169,6 +169,14 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
+
+// Render-graph contract flags shared by tone analysis and output shaders.
+const RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY: u32 = 1u;
+
+fn uses_explicit_scene_display_domains() -> bool {
+    return (params.process_info.w & RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY) != 0u;
+}
+
 @group(0) @binding(1) var raw_tex: texture_2d<u32>;
 @group(0) @binding(2) var color_tex: texture_2d<u32>;
 // LibRaw can provide a repeating row/column black pattern in addition to the
