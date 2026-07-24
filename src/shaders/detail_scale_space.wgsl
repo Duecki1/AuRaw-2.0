@@ -1,0 +1,81 @@
+// Stage 2: creative detail scale-space.
+//
+// Texture and Clarity operate on adjacent, non-overlapping Laplacian bands:
+//   texture = center - fine base
+//   clarity = fine base - broad base
+// Capture sharpening is handled earlier in detail_capture.wgsl. Keeping the
+// bands disjoint prevents Amount/Texture/Clarity from reinforcing one residual.
+
+fn creative_fine_base_ev(pos: vec2<i32>) -> f32 {
+    // Start outside the capture-acutance footprint. The 5x5 bilateral base
+    // follows subject-space scaling and rejects hard-edge cross-talk.
+    let step = presence_step(1.65, 5);
+    return bilateral_log_luminance(pos, 2, step, 10.5);
+}
+
+fn creative_broad_base_ev(pos: vec2<i32>) -> f32 {
+    let clarity_reference = select(4.5, 5.5, params.tone_guide_radius > 3.5);
+    let step = presence_step(clarity_reference, 14);
+    return atrous_log_luminance(pos, step, 1.05);
+}
+
+fn creative_edge_guard(pos: vec2<i32>) -> f32 {
+    let step = presence_step(1.0, 3);
+    let left = log_luminance(adjustment_base_at(pos + vec2<i32>(-step, 0)));
+    let right = log_luminance(adjustment_base_at(pos + vec2<i32>(step, 0)));
+    let up = log_luminance(adjustment_base_at(pos + vec2<i32>(0, -step)));
+    let down = log_luminance(adjustment_base_at(pos + vec2<i32>(0, step)));
+    let gradient = length(vec2<f32>(right - left, down - up));
+    // Preserve local contrast near ordinary texture while backing away from
+    // high-contrast silhouettes where wide-band boosts would create halos.
+    return 1.0 - 0.78 * smoothstep(0.48, 1.25, gradient);
+}
+
+fn apply_texture_and_clarity_values(
+    pos: vec2<i32>,
+    rgb: vec3<f32>,
+    texture_value: f32,
+    clarity_value: f32,
+) -> vec3<f32> {
+    let texture = perceptual_control(texture_value);
+    let clarity = perceptual_control(clarity_value);
+    if abs(texture) < 1e-6 && abs(clarity) < 1e-6 {
+        return rgb;
+    }
+
+    let center_ev = log_luminance(rgb);
+    let fine_base_ev = creative_fine_base_ev(pos);
+    var broad_base_ev = fine_base_ev;
+    if abs(clarity) >= 1e-6 {
+        broad_base_ev = creative_broad_base_ev(pos);
+    }
+
+    // True adjacent Laplacian bands: no shared residual between Texture and
+    // Clarity, unlike center-broad formulations that double-count fine detail.
+    let texture_band_ev = center_ev - fine_base_ev;
+    let clarity_band_ev = fine_base_ev - broad_base_ev;
+
+    let signal_gate = smoothstep(-7.4, -2.35, center_ev);
+    let shadow_noise = 1.0 - signal_gate;
+    let texture_threshold = mix(0.028, 0.006, signal_gate) * mix(1.0, 1.65, shadow_noise);
+    let positive_texture = soft_detail_threshold(texture_band_ev, texture_threshold);
+    let negative_texture = clamp(texture_band_ev, -0.24, 0.24);
+    let selected_texture = select(negative_texture, positive_texture, texture >= 0.0);
+
+    let midtone_gate = smoothstep(-7.0, -2.25, center_ev)
+        * (1.0 - 0.74 * smoothstep(0.9, 3.6, center_ev));
+    let selected_clarity = soft_detail_threshold(clarity_band_ev, 0.0065);
+    let halo_guard = creative_edge_guard(pos);
+
+    // Positive texture is intentionally more conservative than the previous
+    // implementation because final-size output sharpening now owns delivery
+    // crispness. Creative controls should shape surfaces, not compensate export.
+    let texture_strength = select(1.55, 2.10, texture >= 0.0)
+        * mix(0.88, 1.12, abs(texture));
+    let clarity_strength = select(1.90, 2.62, clarity >= 0.0)
+        * mix(0.90, 1.10, abs(clarity));
+    let texture_ev = texture * selected_texture * texture_strength * mix(0.72, 1.0, signal_gate);
+    let clarity_ev = clarity * selected_clarity * clarity_strength * midtone_gate * halo_guard;
+    let delta_ev = clamp(texture_ev + clarity_ev, -0.95, 1.05);
+    return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
+}

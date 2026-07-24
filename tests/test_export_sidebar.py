@@ -112,7 +112,7 @@ def test_export_halo_covers_cumulative_spatial_support() -> None:
     assert "const EXPORT_CUMULATIVE_SUPPORT" in PROCESSING
     assert "EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8" in PROCESSING
     assert 'TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 }' in PROCESSING
-    assert "LOCAL_EFFECTS_SUPPORT: u32 = 24" in PROCESSING
+    assert "LOCAL_EFFECTS_SUPPORT: u32 = 28" in PROCESSING
     assert "GLOW_SUPPORT: u32 = 96" in PROCESSING
     assert "(MIN_EXPORT_TILE_HALO..=512).contains(&spec.halo)" in EXPORT
     assert "required_export_tile_halo(exposure, masks)" in EXPORT

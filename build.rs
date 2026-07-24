@@ -17,6 +17,8 @@ fn main() {
         "src/shaders/tone_analysis.wgsl",
         "src/shaders/tonemap.wgsl",
         "src/shaders/adjustments.wgsl",
+        "src/shaders/detail_capture.wgsl",
+        "src/shaders/detail_scale_space.wgsl",
         "src/shaders/regression_scene.wgsl",
         "src/shaders/pass1.wgsl",
         "src/shaders/pass2.wgsl",

@@ -311,8 +311,8 @@ const DEMOSAIC_CHAIN_SUPPORT: u32 = 32;
 // reach one additional guide cell, so its raw-pixel support is 24/32.
 const TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 };
 // Scale-aware Clarity has the widest presence footprint: the B3 kernel reaches
-// +/-2 times a step capped at 12 pixels. Texture and Dehaze remain inside it.
-const LOCAL_EFFECTS_SUPPORT: u32 = 24;
+// +/-2 times a step capped at 14 pixels. Texture and Dehaze remain inside it.
+const LOCAL_EFFECTS_SUPPORT: u32 = 28;
 // Glow cascades five B3 diffusion stages. At the capped 3x reference scale the
 // steps are 3+3+6+12+24, and each 5x5 stage reaches +/-2*step. Support therefore
 // accumulates to 96 pixels from the extracted highlight source.
