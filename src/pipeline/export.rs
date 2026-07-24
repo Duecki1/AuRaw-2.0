@@ -4,6 +4,7 @@ use super::{
     GeometryTransform, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan,
     TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
+use super::geometry::GeometryInverseMap;
 use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
 use eframe::wgpu;
@@ -508,6 +509,30 @@ fn render_tiled_srgb<W: Write>(
     output: &mut W,
     row_format: ExportRowFormat,
 ) -> Result<()> {
+    validate_export_dimensions(request.output_width, request.output_height)?;
+    let output_transform = IccOutputTransform::srgb();
+    let mut resizer = LinearLightResizer::new_with_format(
+        request.raw.width,
+        request.raw.height,
+        request.output_width,
+        request.output_height,
+        row_format,
+    )?;
+    stream_tiled_linear_rows(context, request, |source_y, source| {
+        resizer.push_source_row(source_y, source, &output_transform, output)
+    })?;
+    resizer.finish(&output_transform, output)?;
+    Ok(())
+}
+
+fn stream_tiled_linear_rows<F>(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    mut row_sink: F,
+) -> Result<()>
+where
+    F: FnMut(u32, &[f32]) -> Result<()>,
+{
     let ExportContext {
         device,
         queue,
@@ -530,7 +555,9 @@ fn render_tiled_srgb<W: Write>(
     validate_export_dimensions(output_width, output_height)?;
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
     crate::diagnostics::record(format!(
-        "Tiled export plan: output={}x{} tiles={} core={} halo={} row_format={row_format:?}",
+        "Tiled export plan: source={}x{} requested_output={}x{} tiles={} core={} halo={} linear_row_stream=f32",
+        raw.width,
+        raw.height,
         output_width,
         output_height,
         plan.tile_count(),
@@ -611,14 +638,6 @@ fn render_tiled_srgb<W: Write>(
         plan.tile_count()
     ));
 
-    let output_transform = IccOutputTransform::srgb();
-    let mut resizer = LinearLightResizer::new_with_format(
-        raw.width,
-        raw.height,
-        output_width,
-        output_height,
-        row_format,
-    )?;
     // Reuse one padded RAW allocation; queue uploads copy data before reuse.
     let mut tile_scratch = first_raw.clone();
 
@@ -743,43 +762,49 @@ fn render_tiled_srgb<W: Write>(
                 .checked_add(source_row_values)
                 .context("source export row end overflow")?;
             let source_y = band_y + local_y;
-            resizer.push_source_row(source_y, &band[start..end], &output_transform, output)?;
+            row_sink(source_y, &band[start..end])?;
         }
     }
-
-    resizer.finish(&output_transform, output)?;
     Ok(())
 }
 
-
-
 fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
-    let staged_rgb = temporary_export_path(request.path)?;
-    let (stage_width, stage_height) = geometry_stage_dimensions(request.raw.width, request.raw.height);
+    let staged_linear = temporary_export_path(request.path)?;
     let result = (|| -> Result<()> {
         {
-            let rgb_file = OpenOptions::new()
+            let linear_file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&staged_rgb)
-                .with_context(|| format!("create geometry source raster {}", staged_rgb.display()))?;
-            let mut rgb_writer = BufWriter::new(rgb_file);
-            let source_request = ExportRequest {
-                output_width: stage_width,
-                output_height: stage_height,
-                geometry: GeometryTransform::default(),
-                ..request
-            };
-            render_tiled_srgb(context, source_request, &mut rgb_writer, ExportRowFormat::Rgb8)?;
-            rgb_writer.flush().context("flush geometry source raster")?;
+                .open(&staged_linear)
+                .with_context(|| {
+                    format!("create geometry linear raster {}", staged_linear.display())
+                })?;
+            let mut linear_writer = BufWriter::new(linear_file);
+            stream_tiled_linear_rows(context, request, |_source_y, row| {
+                linear_writer
+                    .write_all(bytemuck::cast_slice(row))
+                    .context("write geometry linear source row")
+            })?;
+            linear_writer
+                .flush()
+                .context("flush geometry linear source raster")?;
         }
 
-        let rgb_file = fs::File::open(&staged_rgb)
-            .with_context(|| format!("open geometry source raster {}", staged_rgb.display()))?;
+        let linear_file = fs::File::open(&staged_linear)
+            .with_context(|| format!("open geometry linear raster {}", staged_linear.display()))?;
         // SAFETY: the staged raster remains open and immutable for the mapping lifetime.
-        let mapped = unsafe { memmap2::MmapOptions::new().map(&rgb_file) }
-            .with_context(|| format!("map geometry source raster {}", staged_rgb.display()))?;
-        validate_rgb_raster_len(&mapped, stage_width, stage_height)?;
+        let mapped = unsafe { memmap2::MmapOptions::new().map(&linear_file) }
+            .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
+        let source = validate_linear_rgb_raster(&mapped, request.raw.width, request.raw.height)?;
+        let resampler = GeometryResampler::new(
+            source,
+            request.raw.width,
+            request.raw.height,
+            request.geometry,
+            request.output_width,
+            request.output_height,
+        )?;
+        let output_transform = IccOutputTransform::srgb();
 
         let file = open_export_destination(request.path)
             .with_context(|| format!("create export {}", request.path.display()))?;
@@ -811,27 +836,21 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
             .stream_writer_with_size(64 * 1024)
             .context("create transformed streaming PNG writer")?;
         for y in 0..request.output_height {
-            let rgb = geometry_output_row(
-                &mapped,
-                stage_width,
-                stage_height,
-                request.geometry,
-                request.output_width,
-                request.output_height,
-                y,
+            let linear = resampler.output_row(y)?;
+            let rgba = encode_srgb_row_with_format(
+                &linear,
+                &output_transform,
+                ExportRowFormat::Rgba8,
             )?;
-            let mut rgba = Vec::with_capacity((request.output_width as usize) * 4);
-            for pixel in rgb.chunks_exact(3) {
-                rgba.extend_from_slice(pixel);
-                rgba.push(255);
-            }
-            stream.write_all(&rgba).context("write transformed PNG row")?;
+            stream
+                .write_all(&rgba)
+                .context("write transformed PNG row")?;
         }
         stream.finish().context("finish transformed PNG data")?;
         writer.finish().context("finish transformed PNG file")?;
         Ok(())
     })();
-    let _ = fs::remove_file(&staged_rgb);
+    let _ = fs::remove_file(&staged_linear);
     if result.is_err() {
         let _ = fs::remove_file(request.path);
     }
@@ -844,50 +863,59 @@ fn export_tiled_jpeg_geometry(
     quality: u8,
 ) -> Result<()> {
     let quality = quality.clamp(1, 100);
-    let source_rgb = temporary_export_path(request.path)?;
+    let source_linear = temporary_export_path(request.path)?;
     let transformed_rgb = temporary_export_path(request.path)?;
     let encoded_jpeg = temporary_export_path(request.path)?;
-    let (stage_width, stage_height) = geometry_stage_dimensions(request.raw.width, request.raw.height);
     let result = (|| -> Result<()> {
         {
             let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&source_rgb)
-                .with_context(|| format!("create geometry source raster {}", source_rgb.display()))?;
+                .open(&source_linear)
+                .with_context(|| {
+                    format!("create geometry linear raster {}", source_linear.display())
+                })?;
             let mut writer = BufWriter::new(file);
-            let source_request = ExportRequest {
-                output_width: stage_width,
-                output_height: stage_height,
-                geometry: GeometryTransform::default(),
-                ..request
-            };
-            render_tiled_srgb(context, source_request, &mut writer, ExportRowFormat::Rgb8)?;
-            writer.flush().context("flush geometry source raster")?;
+            stream_tiled_linear_rows(context, request, |_source_y, row| {
+                writer
+                    .write_all(bytemuck::cast_slice(row))
+                    .context("write geometry linear source row")
+            })?;
+            writer
+                .flush()
+                .context("flush geometry linear source raster")?;
         }
 
-        let source_file = fs::File::open(&source_rgb)
-            .with_context(|| format!("open geometry source raster {}", source_rgb.display()))?;
+        let source_file = fs::File::open(&source_linear)
+            .with_context(|| format!("open geometry linear raster {}", source_linear.display()))?;
         // SAFETY: the source raster remains open and immutable for the mapping lifetime.
         let source_map = unsafe { memmap2::MmapOptions::new().map(&source_file) }
-            .with_context(|| format!("map geometry source raster {}", source_rgb.display()))?;
-        validate_rgb_raster_len(&source_map, stage_width, stage_height)?;
+            .with_context(|| format!("map geometry linear raster {}", source_linear.display()))?;
+        let source = validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
+        let resampler = GeometryResampler::new(
+            source,
+            request.raw.width,
+            request.raw.height,
+            request.geometry,
+            request.output_width,
+            request.output_height,
+        )?;
+        let output_transform = IccOutputTransform::srgb();
         {
             let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&transformed_rgb)
-                .with_context(|| format!("create transformed RGB raster {}", transformed_rgb.display()))?;
+                .with_context(|| {
+                    format!("create transformed RGB raster {}", transformed_rgb.display())
+                })?;
             let mut writer = BufWriter::new(file);
             for y in 0..request.output_height {
-                let row = geometry_output_row(
-                    &source_map,
-                    stage_width,
-                    stage_height,
-                    request.geometry,
-                    request.output_width,
-                    request.output_height,
-                    y,
+                let linear = resampler.output_row(y)?;
+                let row = encode_srgb_row_with_format(
+                    &linear,
+                    &output_transform,
+                    ExportRowFormat::Rgb8,
                 )?;
                 writer.write_all(&row).context("write transformed RGB row")?;
             }
@@ -934,7 +962,7 @@ fn export_tiled_jpeg_geometry(
         )?;
         Ok(())
     })();
-    let _ = fs::remove_file(&source_rgb);
+    let _ = fs::remove_file(&source_linear);
     let _ = fs::remove_file(&transformed_rgb);
     let _ = fs::remove_file(&encoded_jpeg);
     if result.is_err() {
@@ -943,25 +971,19 @@ fn export_tiled_jpeg_geometry(
     result
 }
 
-fn geometry_stage_dimensions(width: u32, height: u32) -> (u32, u32) {
-    let width = width.max(1);
-    let height = height.max(1);
-    let pixels = f64::from(width) * f64::from(height);
-    let pixel_scale = if pixels > MAX_EXPORT_PIXELS as f64 {
-        (MAX_EXPORT_PIXELS as f64 / pixels).sqrt()
-    } else {
-        1.0
-    };
-    let edge_scale = if width.max(height) > MAX_EXPORT_EDGE {
-        f64::from(MAX_EXPORT_EDGE) / f64::from(width.max(height))
-    } else {
-        1.0
-    };
-    let scale = pixel_scale.min(edge_scale).min(1.0);
-    (
-        (f64::from(width) * scale).round().max(1.0) as u32,
-        (f64::from(height) * scale).round().max(1.0) as u32,
-    )
+fn validate_linear_rgb_raster(bytes: &[u8], width: u32, height: u32) -> Result<&[f32]> {
+    let expected_values = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .context("linear RGB raster size overflow")?;
+    let expected_bytes = expected_values
+        .checked_mul(std::mem::size_of::<f32>() as u64)
+        .context("linear RGB raster byte size overflow")?;
+    anyhow::ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) == expected_bytes,
+        "linear RGB raster length does not match its dimensions"
+    );
+    bytemuck::try_cast_slice(bytes).map_err(|error| anyhow::anyhow!("map linear RGB raster: {error}"))
 }
 
 fn validate_rgb_raster_len(bytes: &[u8], width: u32, height: u32) -> Result<()> {
@@ -976,118 +998,232 @@ fn validate_rgb_raster_len(bytes: &[u8], width: u32, height: u32) -> Result<()> 
     Ok(())
 }
 
-fn geometry_output_row(
-    source: &[u8],
+#[derive(Clone, Copy, Debug)]
+struct GeometryFilterAxes {
+    major: [f32; 2],
+    minor: [f32; 2],
+    major_scale: f32,
+    minor_scale: f32,
+    radius_x: f32,
+    radius_y: f32,
+}
+
+struct GeometryResampler<'a> {
+    source: &'a [f32],
     source_width: u32,
     source_height: u32,
-    geometry: GeometryTransform,
     output_width: u32,
     output_height: u32,
-    output_y: u32,
-) -> Result<Vec<u8>> {
-    anyhow::ensure!(output_y < output_height, "geometry row is outside the output image");
-    let geometry = geometry.sanitized();
-    let mut row = Vec::new();
-    row.try_reserve_exact((output_width as usize).saturating_mul(3))
-        .context("reserve transformed output row")?;
-    for output_x in 0..output_width {
-        let u = (output_x as f32 + 0.5) / output_width.max(1) as f32;
-        let v = (output_y as f32 + 0.5) / output_height.max(1) as f32;
-        let [source_x, source_y] = geometry_source_position(
+    inverse_map: GeometryInverseMap,
+    filter: GeometryFilterAxes,
+}
+
+impl<'a> GeometryResampler<'a> {
+    fn new(
+        source: &'a [f32],
+        source_width: u32,
+        source_height: u32,
+        geometry: GeometryTransform,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Self> {
+        validate_export_dimensions(output_width, output_height)?;
+        anyhow::ensure!(source_width > 0 && source_height > 0, "source image is empty");
+        anyhow::ensure!(
+            source.len() == checked_rgb_len(source_width, source_height)?,
+            "linear geometry raster length does not match its dimensions"
+        );
+        let inverse_map = GeometryInverseMap::new(
             geometry,
             source_width,
             source_height,
-            u,
-            v,
+            output_width,
+            output_height,
         );
-        let rgb = sample_rgb_bilinear(source, source_width, source_height, source_x, source_y);
-        row.extend_from_slice(&rgb);
+        let filter = geometry_filter_axes(inverse_map.pixel_jacobian());
+        Ok(Self {
+            source,
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            inverse_map,
+            filter,
+        })
     }
-    Ok(row)
+
+    fn output_row(&self, output_y: u32) -> Result<Vec<f32>> {
+        anyhow::ensure!(
+            output_y < self.output_height,
+            "geometry row is outside the output image"
+        );
+        let values = checked_rgb_len(self.output_width, 1)?;
+        let mut row = Vec::new();
+        row.try_reserve_exact(values)
+            .context("reserve transformed linear output row")?;
+        row.resize(values, 0.0);
+        for output_x in 0..self.output_width {
+            let [source_x, source_y] = self
+                .inverse_map
+                .source_position(output_x as f32, output_y as f32);
+            let rgb = self.sample(source_x, source_y);
+            let start = output_x as usize * 3;
+            row[start..start + 3].copy_from_slice(&rgb);
+        }
+        Ok(row)
+    }
+
+    fn sample(&self, x: f32, y: f32) -> [f32; 3] {
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < -0.5
+            || y < -0.5
+            || x > self.source_width as f32 - 0.5
+            || y > self.source_height as f32 - 0.5
+        {
+            return [0.0; 3];
+        }
+
+        let filter = self.filter;
+        if filter.major_scale <= 1.0 + 1e-6 && filter.minor_scale <= 1.0 + 1e-6 {
+            let nearest_x = x.round();
+            let nearest_y = y.round();
+            if (x - nearest_x).abs() <= 1e-6 && (y - nearest_y).abs() <= 1e-6 {
+                let source_x = nearest_x as u32;
+                let source_y = nearest_y as u32;
+                let index =
+                    (source_y as usize * self.source_width as usize + source_x as usize) * 3;
+                return [
+                    self.source[index],
+                    self.source[index + 1],
+                    self.source[index + 2],
+                ];
+            }
+        }
+        let min_x = (x - filter.radius_x).floor().max(0.0) as u32;
+        let max_x = (x + filter.radius_x)
+            .ceil()
+            .min(self.source_width.saturating_sub(1) as f32) as u32;
+        let min_y = (y - filter.radius_y).floor().max(0.0) as u32;
+        let max_y = (y + filter.radius_y)
+            .ceil()
+            .min(self.source_height.saturating_sub(1) as f32) as u32;
+
+        let mut sum = [0.0f32; 3];
+        let mut weight_sum = 0.0f32;
+        for source_y in min_y..=max_y {
+            for source_x in min_x..=max_x {
+                let dx = source_x as f32 - x;
+                let dy = source_y as f32 - y;
+                let major_distance =
+                    (dx * filter.major[0] + dy * filter.major[1]) / filter.major_scale;
+                let minor_distance =
+                    (dx * filter.minor[0] + dy * filter.minor[1]) / filter.minor_scale;
+                let radius_squared =
+                    major_distance * major_distance + minor_distance * minor_distance;
+                if radius_squared >= 4.0 {
+                    continue;
+                }
+                let weight = mitchell_netravali_f32(radius_squared.sqrt());
+                if weight == 0.0 {
+                    continue;
+                }
+                let index = (source_y as usize * self.source_width as usize
+                    + source_x as usize)
+                    * 3;
+                for channel in 0..3 {
+                    sum[channel] += self.source[index + channel] * weight;
+                }
+                weight_sum += weight;
+            }
+        }
+
+        if weight_sum.abs() > 1e-6 {
+            for value in &mut sum {
+                *value /= weight_sum;
+            }
+            return sum;
+        }
+
+        let nearest_x = x.round().clamp(0.0, self.source_width.saturating_sub(1) as f32) as u32;
+        let nearest_y = y.round().clamp(0.0, self.source_height.saturating_sub(1) as f32) as u32;
+        let index = (nearest_y as usize * self.source_width as usize + nearest_x as usize) * 3;
+        [self.source[index], self.source[index + 1], self.source[index + 2]]
+    }
 }
 
-fn geometry_source_position(
-    geometry: GeometryTransform,
-    source_width: u32,
-    source_height: u32,
-    output_u: f32,
-    output_v: f32,
-) -> [f32; 2] {
-    let crop = geometry.crop;
-    let crop_width = (crop[2] - crop[0]) * source_width.max(1) as f32;
-    let crop_height = (crop[3] - crop[1]) * source_height.max(1) as f32;
-    let center_x = (crop[0] + crop[2]) * 0.5 * source_width.max(1) as f32;
-    let center_y = (crop[1] + crop[3]) * 0.5 * source_height.max(1) as f32;
+fn geometry_filter_axes(jacobian: [[f32; 2]; 2]) -> GeometryFilterAxes {
+    // J columns are destination-pixel X/Y steps expressed in source space.
+    // C = J*J^T describes the source-space footprint. Clamp singular values
+    // below one source pixel so upscales reconstruct rather than sharpen into
+    // sub-pixel impulses; downscales widen the EWA footprint for anti-aliasing.
+    let jx = jacobian[0];
+    let jy = jacobian[1];
+    let c00 = jx[0] * jx[0] + jy[0] * jy[0];
+    let c01 = jx[0] * jx[1] + jy[0] * jy[1];
+    let c11 = jx[1] * jx[1] + jy[1] * jy[1];
+    let trace = c00 + c11;
+    let discriminant = ((c00 - c11) * (c00 - c11) + 4.0 * c01 * c01).sqrt();
+    let lambda_major = ((trace + discriminant) * 0.5).max(0.0);
+    let lambda_minor = ((trace - discriminant) * 0.5).max(0.0);
 
-    // Undo the discrete orientation first so fine straighten and keystone use
-    // the crop's original pixel coordinate system.
-    let (u, v) = match geometry.quarter_turns % 4 {
-        0 => (output_u, output_v),
-        1 => (output_v, 1.0 - output_u),
-        2 => (1.0 - output_u, 1.0 - output_v),
-        _ => (1.0 - output_v, output_u),
+    let major = if discriminant <= 1e-8 {
+        [1.0, 0.0]
+    } else {
+        let candidate_a = [c01, lambda_major - c00];
+        let candidate_b = [lambda_major - c11, c01];
+        let norm_a = candidate_a[0] * candidate_a[0] + candidate_a[1] * candidate_a[1];
+        let norm_b = candidate_b[0] * candidate_b[0] + candidate_b[1] * candidate_b[1];
+        let candidate = if norm_a >= norm_b {
+            candidate_a
+        } else {
+            candidate_b
+        };
+        let length = (candidate[0] * candidate[0] + candidate[1] * candidate[1]).sqrt();
+        if length > 1e-8 {
+            [candidate[0] / length, candidate[1] / length]
+        } else {
+            [1.0, 0.0]
+        }
     };
-    let dx = (u - 0.5) * crop_width;
-    let dy = (v - 0.5) * crop_height;
-
-    let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
-    let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
-    let shx = geometry.horizontal_transform.to_radians().tan();
-    let shy = geometry.vertical_transform.to_radians().tan();
-    let angle = geometry.rotation_degrees.to_radians();
-    let c = angle.cos();
-    let s = angle.sin();
-
-    // Forward transform is R * Shear * Flip. Invert the 2x2 matrix so each
-    // destination pixel samples the corresponding source position.
-    let a = c * fx - s * shy * fx;
-    let b = c * shx * fy - s * fy;
-    let c2 = s * fx + c * shy * fx;
-    let d = s * shx * fy + c * fy;
-    let determinant = a * d - b * c2;
-    if determinant.abs() < 1e-6 {
-        return [center_x, center_y];
+    let minor = [-major[1], major[0]];
+    let major_scale = lambda_major.sqrt().max(1.0);
+    let minor_scale = lambda_minor.sqrt().max(1.0);
+    let radius_x = 2.0
+        * (major[0].abs() * major_scale + minor[0].abs() * minor_scale);
+    let radius_y = 2.0
+        * (major[1].abs() * major_scale + minor[1].abs() * minor_scale);
+    GeometryFilterAxes {
+        major,
+        minor,
+        major_scale,
+        minor_scale,
+        radius_x,
+        radius_y,
     }
-    let source_dx = (d * dx - b * dy) / determinant;
-    let source_dy = (-c2 * dx + a * dy) / determinant;
-    [center_x + source_dx, center_y + source_dy]
 }
 
-fn sample_rgb_bilinear(
-    source: &[u8],
-    width: u32,
-    height: u32,
-    x: f32,
-    y: f32,
-) -> [u8; 3] {
-    if !x.is_finite()
-        || !y.is_finite()
-        || x < -0.5
-        || y < -0.5
-        || x > width as f32 - 0.5
-        || y > height as f32 - 0.5
-    {
-        return [0, 0, 0];
+fn mitchell_netravali_f32(value: f32) -> f32 {
+    let value = value.abs();
+    if value >= 2.0 {
+        return 0.0;
     }
-    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
-    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
-    let x0 = x.floor() as u32;
-    let y0 = y.floor() as u32;
-    let x1 = (x0 + 1).min(width.saturating_sub(1));
-    let y1 = (y0 + 1).min(height.saturating_sub(1));
-    let tx = x - x0 as f32;
-    let ty = y - y0 as f32;
-    let load = |px: u32, py: u32, channel: usize| -> f32 {
-        let index = ((py as usize * width as usize + px as usize) * 3) + channel;
-        source.get(index).copied().unwrap_or(0) as f32
-    };
-    let mut result = [0u8; 3];
-    for channel in 0..3 {
-        let top = load(x0, y0, channel) * (1.0 - tx) + load(x1, y0, channel) * tx;
-        let bottom = load(x0, y1, channel) * (1.0 - tx) + load(x1, y1, channel) * tx;
-        result[channel] = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;
+    const B: f32 = 1.0 / 3.0;
+    const C: f32 = 1.0 / 3.0;
+    let value2 = value * value;
+    let value3 = value2 * value;
+    if value < 1.0 {
+        ((12.0 - 9.0 * B - 6.0 * C) * value3
+            + (-18.0 + 12.0 * B + 6.0 * C) * value2
+            + (6.0 - 2.0 * B))
+            / 6.0
+    } else {
+        ((-B - 6.0 * C) * value3
+            + (6.0 * B + 30.0 * C) * value2
+            + (-12.0 * B - 48.0 * C) * value
+            + (8.0 * B + 24.0 * C))
+            / 6.0
     }
-    result
 }
 
 fn export_tiled_jpeg(
@@ -2381,6 +2517,75 @@ mod tests {
             assert_eq!(kernel[0].index, index as u32);
             assert_eq!(kernel[0].weight, 1.0);
         }
+    }
+
+    #[test]
+    fn geometry_resampler_identity_is_exact_in_linear_space() {
+        let source = (0..4 * 3 * 3)
+            .map(|index| index as f32 / 37.0)
+            .collect::<Vec<_>>();
+        let resampler = GeometryResampler::new(
+            &source,
+            4,
+            3,
+            GeometryTransform::default(),
+            4,
+            3,
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        for y in 0..3 {
+            output.extend_from_slice(&resampler.output_row(y).unwrap());
+        }
+        assert_eq!(output, source);
+    }
+
+    #[test]
+    fn geometry_resampler_quarter_turn_preserves_exact_pixels() {
+        let source = [
+            1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0,
+            4.0, 4.0, 4.0, 5.0, 5.0, 5.0, 6.0, 6.0, 6.0,
+        ];
+        let geometry = GeometryTransform {
+            quarter_turns: 1,
+            ..Default::default()
+        };
+        let resampler = GeometryResampler::new(&source, 3, 2, geometry, 2, 3).unwrap();
+        let expected = [
+            4.0, 4.0, 4.0, 1.0, 1.0, 1.0,
+            5.0, 5.0, 5.0, 2.0, 2.0, 2.0,
+            6.0, 6.0, 6.0, 3.0, 3.0, 3.0,
+        ];
+        let mut output = Vec::new();
+        for y in 0..3 {
+            output.extend_from_slice(&resampler.output_row(y).unwrap());
+        }
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn geometry_downsample_accumulates_linear_values_before_encoding() {
+        let source = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let resampler = GeometryResampler::new(
+            &source,
+            2,
+            1,
+            GeometryTransform::default(),
+            1,
+            1,
+        )
+        .unwrap();
+        let row = resampler.output_row(0).unwrap();
+        for value in &row {
+            assert!((*value - 0.5).abs() < 1e-5);
+        }
+        let encoded = encode_srgb_row_with_format(
+            &row,
+            &IccOutputTransform::srgb(),
+            ExportRowFormat::Rgb8,
+        )
+        .unwrap();
+        assert!(encoded.iter().all(|value| *value > 170));
     }
 
     #[test]
