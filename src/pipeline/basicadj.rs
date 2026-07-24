@@ -184,7 +184,14 @@ impl ColorGrading {
     }
 }
 
-pub const CURRENT_PROCESS_VERSION: u32 = 12;
+/// Process 12 is the last renderer where DCP LookTable/ProfileToneCurve were
+/// interleaved with scene-style edit controls. Keep it renderable so existing
+/// edits retain their saved appearance after the scene/display boundary split.
+pub const LEGACY_SCENE_DISPLAY_PROCESS_VERSION: u32 = 12;
+/// Process 13 establishes explicit camera-characterization -> scene-edit ->
+/// optional-look -> single-view-transform domain boundaries.
+pub const SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13;
+pub const CURRENT_PROCESS_VERSION: u32 = SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -299,28 +306,27 @@ impl ExposureParams {
         // Process versions 8 and 9 stored a zero-centered Exposure control
         // while the renderer secretly added +0.7 EV. Version 10 removed that
         // universal backend lift. Move it into the saved/user-visible Exposure
-        // value once so legacy edits keep their exact brightness without any
-        // continuing hidden offset. Version 11 introduced the scene-headroom
-        // DCP shoulder and protected Contrast S-curve. Version 12 moves capture
-        // sharpening into the pre-tone scene-referred stage. v10/v11 edits need
-        // no scalar parameter compensation, but migrate explicitly so each
-        // rendering-formula change is recorded rather than silently reinterpreted.
-        // Versions 0..=7 already stored the old rendition exposure explicitly.
+        // value once. Versions through 11 can safely migrate to process 12,
+        // which is the final legacy scene/display graph and preserves the
+        // historical DCP LookTable/ProfileToneCurve ordering.
+        //
+        // Process 13 intentionally does *not* auto-upgrade process-12 edits:
+        // reordering profile tone/look around scene controls is appearance
+        // changing and cannot be represented by a scalar parameter migration.
+        // New edits start at CURRENT_PROCESS_VERSION; old edits keep rendering
+        // with process 12 until an explicit user-facing conversion exists.
         match self.process_version {
             0..=7 => {
-                self.process_version = CURRENT_PROCESS_VERSION;
+                self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
             }
             8 | 9 => {
                 self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV;
-                self.process_version = CURRENT_PROCESS_VERSION;
+                self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
             }
-            10 => {
-                self.process_version = CURRENT_PROCESS_VERSION;
+            10 | 11 => {
+                self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
             }
-            11 => {
-                self.process_version = CURRENT_PROCESS_VERSION;
-            }
-            CURRENT_PROCESS_VERSION => {}
+            LEGACY_SCENE_DISPLAY_PROCESS_VERSION | CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently
             // reinterpret them with older formulas.
@@ -417,7 +423,7 @@ const fn default_sharpen_detail() -> f32 {
 mod tests {
     use super::{
         DemosaicMode, ExposureParams, PointCurve, CURRENT_PROCESS_VERSION,
-        LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
+        LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV, LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
     };
     use crate::pipeline::SigmoidParams;
 
@@ -432,6 +438,7 @@ mod tests {
     #[test]
     fn global_exposure_defaults_to_zero_in_the_edit_model() {
         let neutral = ExposureParams::default();
+        assert_eq!(neutral.process_version, CURRENT_PROCESS_VERSION);
         assert_eq!(neutral.exposure, 0.0);
         assert_eq!(neutral.black_point, 0.0);
 
@@ -473,7 +480,7 @@ mod tests {
             ..ExposureParams::default()
         };
         pre_backend.migrate_to_current_process();
-        assert_eq!(pre_backend.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(pre_backend.process_version, LEGACY_SCENE_DISPLAY_PROCESS_VERSION);
         assert_eq!(pre_backend.exposure, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV);
 
         let mut hidden_backend = ExposureParams {
@@ -482,7 +489,7 @@ mod tests {
             ..ExposureParams::default()
         };
         hidden_backend.migrate_to_current_process();
-        assert_eq!(hidden_backend.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(hidden_backend.process_version, LEGACY_SCENE_DISPLAY_PROCESS_VERSION);
         assert_eq!(hidden_backend.exposure, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV);
 
         let mut previous_tone_formula = ExposureParams {
@@ -492,7 +499,7 @@ mod tests {
             ..ExposureParams::default()
         };
         previous_tone_formula.migrate_to_current_process();
-        assert_eq!(previous_tone_formula.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(previous_tone_formula.process_version, LEGACY_SCENE_DISPLAY_PROCESS_VERSION);
         assert_eq!(previous_tone_formula.exposure, 0.35);
         assert_eq!(previous_tone_formula.contrast, 42.0);
     }

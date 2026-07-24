@@ -19,17 +19,17 @@ ALL_SHADERS = "\n".join(
 
 
 def test_effects_are_a_dedicated_same_stage_pass() -> None:
-    assert "fn prepare_adjustment_base" in ADJUSTMENTS
-    assert "fn apply_lightroom_effects" in ADJUSTMENTS
+    assert "fn prepare_scene_node" in ADJUSTMENTS
+    assert "fn apply_scene_effects_node" in ADJUSTMENTS
     assert "fn adjustment_base_at" in ADJUSTMENTS
     assert "textureLoad(adjustment_base_tex" in ADJUSTMENTS
     assert "scene_working_at(pos +" not in ADJUSTMENTS
 
-    prepare = GPU.index('"prepare_adjustment_base"')
-    sharpen_tone = GPU.index('"apply_capture_sharpen_and_tone"', prepare)
-    effects = GPU.index('"apply_lightroom_effects"', sharpen_tone)
+    prepare = GPU.index('"prepare_scene_node"')
+    sharpen_tone = GPU.index('"apply_scene_tone_node"', prepare)
+    effects = GPU.index('"apply_scene_effects_node"', sharpen_tone)
     creative = GPU.index('"apply_creative_effects"', effects)
-    render = GPU.index('"apply_lightroom_adjustments"', creative)
+    render = GPU.index('"apply_view_node"', creative)
     assert prepare < sharpen_tone < effects < creative < render
 
 
@@ -169,7 +169,7 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
 
 
 def test_revised_adjustment_formulas_increment_the_process_version() -> None:
-    assert "CURRENT_PROCESS_VERSION: u32 = 12" in BASIC
+    assert "SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13" in BASIC
     assert "0..=7 =>" in BASIC
     assert "8 | 9 =>" in BASIC
     assert "self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC

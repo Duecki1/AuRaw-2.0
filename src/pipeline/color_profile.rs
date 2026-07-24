@@ -469,7 +469,57 @@ pub(crate) struct ProfileGpuLayout {
     pub flags: [u32; 4],
 }
 
+/// Domain-specific slices of a DCP/ICC payload. Keeping these contracts
+/// explicit prevents characterization, creative look, and view/output data
+/// from being treated as one monolithic "profile stage" by the render graph.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CameraCharacterizationGpuStage {
+    pub hue_sat: [u32; 4],
+    pub hue_sat_2: [u32; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OptionalLookGpuStage {
+    pub look_table: [u32; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ViewTransformGpuStage {
+    pub profile_tone: [u32; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutputEncodingGpuStage {
+    pub output_lut: [u32; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProfileGpuStages {
+    pub characterization: CameraCharacterizationGpuStage,
+    pub optional_look: OptionalLookGpuStage,
+    pub view: ViewTransformGpuStage,
+    pub output: OutputEncodingGpuStage,
+}
+
 impl ProfileGpuLayout {
+    pub(crate) fn stages(self) -> ProfileGpuStages {
+        ProfileGpuStages {
+            characterization: CameraCharacterizationGpuStage {
+                hue_sat: self.hue_sat,
+                hue_sat_2: self.hue_sat_2,
+            },
+            optional_look: OptionalLookGpuStage {
+                look_table: self.look,
+            },
+            view: ViewTransformGpuStage {
+                profile_tone: self.tone,
+            },
+            output: OutputEncodingGpuStage {
+                output_lut: self.output,
+            },
+        }
+    }
+
     fn new(profile: &CameraProfile) -> Self {
         let mut offset = 1u32; // A non-empty storage buffer is required by wgpu.
         let hue_sat = if let Some(map) = &profile.hue_sat_maps[0] {

@@ -147,12 +147,12 @@ def test_global_white_balance_rebuilds_camera_and_dcp_transforms() -> None:
     assert "profile_layout.flags[3] = profile_weight" in gpu
     assert "bitcast<f32>(params.profile_flags.w)" in profile
     matrix = adjustments.index("cam_to_working(camera_rgb)")
-    hue_sat = adjustments.index("var rgb = apply_profile_hue_sat(scene_working_at(pos))")
+    hue_sat = adjustments.index("var rgb = apply_camera_characterization(scene_working_at(pos))")
     exposure = adjustments.index("rgb = apply_exposure(rgb)")
     assert matrix < hue_sat < exposure
 
     matrix = tone.index("cam_to_working(camera_rgb)")
-    hue_sat = tone.index("apply_profile_hue_sat(working)")
+    hue_sat = tone.index("apply_camera_characterization(working)")
     assert matrix < hue_sat
 
 

@@ -4,7 +4,7 @@ use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams,
     HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
     ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams, GLOBAL_TEMPERATURE_LIMIT,
-    MAX_LOCAL_MASKS,
+    MAX_LOCAL_MASKS, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -28,6 +28,71 @@ const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
+
+const RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY: u32 = 1 << 0;
+
+/// Logical domains carried by the post-demosaic graph. These contracts are
+/// independent of pass fusion: multiple adjacent nodes may execute in one GPU
+/// pass, but a scene-domain edit may never consume display-referred pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderDomain {
+    CameraLinear,
+    SceneLinear,
+    LookAdjustedScene,
+    DisplayLinear,
+    OutputEncoded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderStageContract {
+    name: &'static str,
+    input: RenderDomain,
+    output: RenderDomain,
+}
+
+const EXPLICIT_RENDER_GRAPH: [RenderStageContract; 5] = [
+    RenderStageContract {
+        name: "camera_characterization",
+        input: RenderDomain::CameraLinear,
+        output: RenderDomain::SceneLinear,
+    },
+    RenderStageContract {
+        name: "scene_edits",
+        input: RenderDomain::SceneLinear,
+        output: RenderDomain::SceneLinear,
+    },
+    RenderStageContract {
+        name: "optional_look",
+        input: RenderDomain::SceneLinear,
+        output: RenderDomain::LookAdjustedScene,
+    },
+    RenderStageContract {
+        name: "view_transform",
+        input: RenderDomain::LookAdjustedScene,
+        output: RenderDomain::DisplayLinear,
+    },
+    RenderStageContract {
+        name: "output_encoding",
+        input: RenderDomain::DisplayLinear,
+        output: RenderDomain::OutputEncoded,
+    },
+];
+
+fn render_graph_flags(process_version: u32) -> u32 {
+    if process_version >= SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION {
+        RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY
+    } else {
+        0
+    }
+}
+
+fn explicit_render_graph_contracts_are_contiguous() -> bool {
+    EXPLICIT_RENDER_GRAPH
+        .windows(2)
+        .all(|pair| pair[0].output == pair[1].input)
+        && EXPLICIT_RENDER_GRAPH[0].name == "camera_characterization"
+        && EXPLICIT_RENDER_GRAPH[3].name == "view_transform"
+}
 
 const SHADER_HIGHLIGHTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
@@ -431,8 +496,9 @@ pub struct GpuParams {
     profile_tone: [u32; 4],
     output_lut: [u32; 4],
     profile_flags: [u32; 4],
-    // Explicit processing-formula version. Future formula changes migrate this
-    // value deliberately rather than silently changing existing edits.
+    // Processing version, view-selection flags, user Exposure f32 bits, and
+    // render-graph contract flags. Formula changes are process-versioned so
+    // existing edits can stay on their historical stage ordering.
     process_info: [u32; 4],
     // Local mask count followed by reserved values. Each fixed mask index maps
     // directly to one layer in the normalized R16F mask atlas.
@@ -689,11 +755,17 @@ impl GpuParams {
             inpaint_neutral_to_current_transform(raw.cam_to_srgb, camera_transform);
         let mut profile_layout = raw.camera_profile.gpu_layout();
         profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
+        let profile_stages = profile_layout.stages();
+        debug_assert_eq!(
+            profile_stages.characterization.hue_sat_2,
+            profile_layout.hue_sat_2
+        );
         let sigmoid = sigmoid_coefficients(exposure.sigmoid);
-        // Keep the DCP profile tone as the baseline rendition at untouched
-        // Rendering defaults, but use a highlight-only display shoulder rather
-        // than the previous hard [0, 1] clamp. Custom Sigmoid settings still
-        // opt into the full AuRaw scene-to-display transform.
+        // Select the view transform, not an upstream tone stage. At default
+        // rendering settings a DCP ProfileToneCurve participates in the single
+        // DCP-aware view node. A customized Sigmoid replaces that view path
+        // entirely, avoiding ProfileToneCurve -> Sigmoid double tone in process
+        // 13+. Legacy process versions interpret the same flag as before.
         let use_profile_base_tone =
             raw.camera_profile.tone_curve.is_some() && exposure.sigmoid == SigmoidParams::default();
         let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
@@ -1010,16 +1082,16 @@ impl GpuParams {
             abi_version: GPU_PARAMS_ABI_VERSION,
             abi_size_bytes: GPU_PARAMS_ABI_SIZE_BYTES,
             tone_histogram_bounds: [0, 0, raw.width, raw.height],
-            profile_hue_sat: profile_layout.hue_sat,
-            profile_look: profile_layout.look,
-            profile_tone: profile_layout.tone,
-            output_lut: profile_layout.output,
+            profile_hue_sat: profile_stages.characterization.hue_sat,
+            profile_look: profile_stages.optional_look.look_table,
+            profile_tone: profile_stages.view.profile_tone,
+            output_lut: profile_stages.output.output_lut,
             profile_flags: profile_layout.flags,
             process_info: [
                 exposure.process_version,
                 u32::from(use_profile_base_tone),
                 exposure.exposure.to_bits(),
-                0,
+                render_graph_flags(exposure.process_version),
             ],
             mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
             mask_meta,
@@ -1092,7 +1164,7 @@ impl GpuParams {
     }
 
     fn needs_intermediate_adjustment_passes(&self) -> bool {
-        // Saturation and Vibrance live in apply_lightroom_effects alongside the
+        // Saturation and Vibrance live in apply_scene_effects_node alongside the
         // presence controls. They must therefore keep the intermediate passes
         // enabled even when Texture, Clarity, Dehaze, Glow, and Vignette are
         // all neutral. Capture sharpening now lives in the always-run pre-tone
@@ -1944,7 +2016,7 @@ impl RawGpuPipeline {
         let bgl_adjust_prepare =
             reused_layout(adjustment_prepare_for_programs).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl adjustment preparation"),
+                    label: Some("bgl scene preparation"),
                     entries: &[
                         common_entries[0],
                         common_entries[1],
@@ -1972,7 +2044,7 @@ impl RawGpuPipeline {
         let bgl_adjust_tone =
             reused_layout(adjustment_prepare_for_programs + 1).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl capture sharpening and tone"),
+                    label: Some("bgl scene tone edits"),
                     entries: &[
                         buffer_entry(0),
                         texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
@@ -1996,7 +2068,7 @@ impl RawGpuPipeline {
         let bgl_adjust_effects =
             reused_layout(adjustment_prepare_for_programs + 2).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl Lightroom local effects"),
+                    label: Some("bgl scene presence and color"),
                     entries: &[
                         buffer_entry(0),
                         texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
@@ -2065,7 +2137,7 @@ impl RawGpuPipeline {
             });
 
         let bgl_adjust_render = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl perceptual color mixer and render"),
+            label: Some("bgl scene look view and output"),
             entries: &[
                 buffer_entry(0),
                 storage_texture_entry(
@@ -2560,7 +2632,7 @@ impl RawGpuPipeline {
         });
 
         let bg_adjust_tone = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg capture sharpening and tone"),
+            label: Some("bg scene tone edits"),
             layout: &bgl_adjust_tone,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2599,7 +2671,7 @@ impl RawGpuPipeline {
         });
 
         let bg_adjust_effects = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg Lightroom local effects"),
+            label: Some("bg scene presence and color"),
             layout: &bgl_adjust_effects,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2712,7 +2784,7 @@ impl RawGpuPipeline {
         });
 
         let bg_adjust_render = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg perceptual color mixer and render"),
+            label: Some("bg scene look view and output"),
             layout: &bgl_adjust_render,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2817,6 +2889,7 @@ impl RawGpuPipeline {
         let adjustments_module = program_template
             .is_none()
             .then(|| create_shader("auraw adjustments", adjustments_shader.as_ref()));
+        debug_assert!(explicit_render_graph_contracts_are_contiguous());
 
         let mut next_program_index = 0usize;
         let mut make_pipeline = |shader: Option<&wgpu::ShaderModule>,
@@ -3104,7 +3177,7 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
-                    "prepare_adjustment_base",
+                    "prepare_scene_node",
                     &bgl_adjust_prepare,
                 ),
                 bind_group: bg_adjust_prepare,
@@ -3113,7 +3186,7 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
-                    "apply_capture_sharpen_and_tone",
+                    "apply_scene_tone_node",
                     &bgl_adjust_tone,
                 ),
                 bind_group: bg_adjust_tone,
@@ -3122,7 +3195,7 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
-                    "apply_lightroom_effects",
+                    "apply_scene_effects_node",
                     &bgl_adjust_effects,
                 ),
                 bind_group: bg_adjust_effects,
@@ -3194,7 +3267,7 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
-                    "apply_lightroom_adjustments",
+                    "apply_view_node",
                     &bgl_adjust_render,
                 ),
                 bind_group: bg_adjust_render,

@@ -43,11 +43,11 @@ def test_luminance_is_ratio_preserving_and_gamut_mapping_is_constant_hue() -> No
 
 
 def test_gpu_schedules_full_precision_base_effects_then_mixer_render() -> None:
-    prepare = GPU.index('"prepare_adjustment_base"')
-    sharpen_tone = GPU.index('"apply_capture_sharpen_and_tone"', prepare)
-    effects = GPU.index('"apply_lightroom_effects"', sharpen_tone)
+    prepare = GPU.index('"prepare_scene_node"')
+    sharpen_tone = GPU.index('"apply_scene_tone_node"', prepare)
+    effects = GPU.index('"apply_scene_effects_node"', sharpen_tone)
     creative = GPU.index('"apply_creative_effects"', effects)
-    render = GPU.index('"apply_lightroom_adjustments"', creative)
+    render = GPU.index('"apply_view_node"', creative)
     assert prepare < sharpen_tone < effects < creative < render
     assert "work_shader_source(SHADER_ADJUSTMENTS, work_format)" in GPU
     # Two existing demosaic scratch textures are reused after the RAW stage:

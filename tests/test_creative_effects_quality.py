@@ -37,12 +37,12 @@ def test_glow_is_highlight_aware_cascaded_and_same_stage() -> None:
 
 
 def test_creative_pass_ping_pongs_before_color_mixer() -> None:
-    local_pass = GPU.index('"apply_lightroom_effects"')
+    local_pass = GPU.index('"apply_scene_effects_node"')
     glow_source = GPU.index('"prepare_glow_source"', local_pass)
     glow_start = GPU.index('"diffuse_glow_0"', glow_source)
     glow_end = GPU.index('"diffuse_glow_4"', glow_start)
     creative_pass = GPU.index('"apply_creative_effects"', glow_end)
-    render_pass = GPU.index('"apply_lightroom_adjustments"', creative_pass)
+    render_pass = GPU.index('"apply_view_node"', creative_pass)
     assert local_pass < glow_source < glow_start < glow_end < creative_pass < render_pass
     assert "binding: 24" in GPU and "TextureView(&tex1_view)" in GPU
     assert "binding: 25" in GPU and "TextureView(&tex2_view)" in GPU
