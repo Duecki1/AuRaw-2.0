@@ -72,9 +72,9 @@ def test_mask_atlas_is_shared_by_preview_and_export() -> None:
 
 
 def test_local_adjustments_are_scene_linear_and_mask_weighted() -> None:
-    assert "mask_adjust_0: array<vec4<f32>, 8>" in COMMON
-    assert "mask_adjust_1: array<vec4<f32>, 8>" in COMMON
-    assert "mask_adjust_2: array<vec4<f32>, 8>" in COMMON
+    assert "mask_adjust_0: array<vec4<f32>, 32>" in COMMON
+    assert "mask_adjust_1: array<vec4<f32>, 32>" in COMMON
+    assert "mask_adjust_2: array<vec4<f32>, 32>" in COMMON
     assert "local_adjustment_mix" in ADJUSTMENTS
     assert "apply_local_basic_tone_values" in ADJUSTMENTS
     assert "apply_temperature_tint_values" in ADJUSTMENTS
@@ -219,3 +219,20 @@ def test_object_mask_postprocessing_prevents_speckled_interior_holes() -> None:
     trimap = ai[ai.index("fn build_vitmatte_trimap"):ai.index("fn padded_to_divisor")]
     assert "(96..=160).contains(&value)" in trimap
     assert "(8..=247).contains(&value)" not in trimap
+
+
+def test_local_mask_capacity_is_32_end_to_end() -> None:
+    assert "pub const MAX_LOCAL_MASKS: usize = 32;" in MASKS
+    assert "min(params.mask_counts.x, 32u)" in ADJUSTMENTS
+    assert "mask_meta: array<vec4<u32>, 32>" in COMMON
+    assert "mask_adjust_0: array<vec4<f32>, 32>" in COMMON
+    assert "masks.masks.len().min(MAX_LOCAL_MASKS)" in EXPORT
+
+    # Basic tone/effects must iterate the actual mask count too. A leftover
+    # eight-mask loop here makes mask geometry visible for masks 9+ while
+    # silently dropping exposure/contrast/WB/presence adjustments.
+    mix_start = ADJUSTMENTS.index("fn local_adjustment_mix")
+    mix_end = ADJUSTMENTS.index("fn scene_working_at", mix_start)
+    local_mix = ADJUSTMENTS[mix_start:mix_end]
+    assert "for (var index = 0u; index < count; index = index + 1u)" in local_mix
+    assert "index < 8u" not in local_mix

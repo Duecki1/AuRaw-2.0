@@ -23,7 +23,7 @@ use resources::*;
 mod tests;
 
 const GPU_PARAMS_ABI_VERSION: u32 = 2;
-const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 7_008;
+const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 25_056;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
@@ -1159,6 +1159,7 @@ pub struct RawGpuPipeline {
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
     mask_texture: wgpu::Texture,
+    mask_layer_capacity: usize,
     inpaint_texture: wgpu::Texture,
     legacy_inpaint_camera_to_working: [[f32; 4]; 3],
     mask_atlas_edge: u32,
@@ -1548,12 +1549,23 @@ impl RawGpuPipeline {
         let mask_atlas_edge = mask_atlas_edge_override
             .unwrap_or(default_mask_atlas_edge)
             .clamp(64, export_mask_atlas_edge_limit());
+        // Interactive pipelines reserve all 32 layers so masks can be added without
+        // rebuilding the RAW pipeline. Full-quality export uses an explicit mask edge
+        // and can allocate only the layers it will actually sample, avoiding a huge
+        // 4K x 4K x 32 R16F texture for ordinary edits with just a few masks.
+        let mask_layer_capacity = if mask_atlas_edge_override.is_some()
+            && quality == ProcessingQuality::High
+        {
+            (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
+        } else {
+            MAX_LOCAL_MASKS
+        };
         let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw normalized local-mask atlas"),
             size: wgpu::Extent3d {
                 width: mask_atlas_edge,
                 height: mask_atlas_edge,
-                depth_or_array_layers: MAX_LOCAL_MASKS as u32,
+                depth_or_array_layers: mask_layer_capacity as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -1562,27 +1574,9 @@ impl RawGpuPipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[wgpu::TextureFormat::R16Float],
         });
-        let empty_masks =
-            vec![0u16; mask_atlas_edge as usize * mask_atlas_edge as usize * MAX_LOCAL_MASKS];
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &mask_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&empty_masks),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(mask_atlas_edge * 2),
-                rows_per_image: Some(mask_atlas_edge),
-            },
-            wgpu::Extent3d {
-                width: mask_atlas_edge,
-                height: mask_atlas_edge,
-                depth_or_array_layers: MAX_LOCAL_MASKS as u32,
-            },
-        );
+        // Do not upload an all-zero atlas here. With 32 supported layers that would
+        // create a very large temporary CPU allocation. Every active layer is uploaded
+        // before the first recompute, and shaders never sample layers beyond mask_counts.x.
 
         let inpaint_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw pre-adjustment inpaint layer"),
@@ -3167,6 +3161,7 @@ impl RawGpuPipeline {
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
             mask_texture,
+            mask_layer_capacity,
             inpaint_texture,
             legacy_inpaint_camera_to_working: raw.cam_to_srgb,
             mask_atlas_edge,
@@ -3189,8 +3184,11 @@ impl RawGpuPipeline {
         layer: usize,
         values: &[u16],
     ) -> Result<()> {
-        if layer >= MAX_LOCAL_MASKS {
-            return Err(anyhow!("local-mask layer {layer} is out of range"));
+        if layer >= self.mask_layer_capacity {
+            return Err(anyhow!(
+                "local-mask layer {layer} exceeds atlas capacity {}",
+                self.mask_layer_capacity
+            ));
         }
         let expected = self.mask_atlas_edge as usize * self.mask_atlas_edge as usize;
         if values.len() != expected {

@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
-pub const MAX_LOCAL_MASKS: usize = 8;
+pub const MAX_LOCAL_MASKS: usize = 32;
 pub const MAX_MASK_COMPONENTS: usize = 64;
 pub const MASK_ATLAS_EDGE_DESKTOP: u32 = 2048;
 pub const MASK_ATLAS_EDGE_ANDROID: u32 = 1024;

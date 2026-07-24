@@ -298,7 +298,7 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
     // Sixteen scalar values keep the stable 64-byte prefix. The two
     // darktable sigmoid vec4s follow the local-tone controls, then the
     // remaining adjustment, camera/raw, dimension and profile blocks.
-    assert_eq!(std::mem::size_of::<super::GpuParams>(), 7008);
+    assert_eq!(std::mem::size_of::<super::GpuParams>(), 25056);
     assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
     assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
     assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
@@ -343,37 +343,37 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
     assert_eq!(std::mem::offset_of!(super::GpuParams, process_info), 880);
     assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 896);
     assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 912);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 1040);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1168);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 1296);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 1424);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 2320);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 1424);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1936);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 2448);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 2960);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 6544);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_red_0),
-        2448
+        7056
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_green_0),
-        3472
+        11152
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
-        4496
+        15248
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 5520);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 19344);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
-        6160
+        21904
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 6288);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 6352);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 22416);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 22480);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_grade_shadows),
-        6368
+        22496
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_grade_options),
-        6880
+        24544
     );
 }
 
