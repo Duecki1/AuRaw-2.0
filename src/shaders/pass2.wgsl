@@ -84,5 +84,5 @@ fn bayer_rcd_green(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pq_dir = p_stat / (p_stat + q_stat);
     let vh_dir = textureLoad(tex1_read, pos, 0).x;
     let clip = select(0.0, 1.0, is_raw_clipped(pos));
-    textureStore(tex2_write, pos, vec4<f32>(max(green, 0.0), vh_dir, pq_dir, clip));
+    textureStore(tex2_write, pos, vec4<f32>(green, vh_dir, pq_dir, clip));
 }

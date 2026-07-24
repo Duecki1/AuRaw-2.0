@@ -103,7 +103,7 @@ fn ppg_rgb_at(pos: vec2<i32>) -> vec3<f32> {
             b = g + ppg_difference_pair(p, 2u, horizontal);
         }
     }
-    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+    return vec3<f32>(r, g, b);
 }
 
 fn rcd_green_channel(pos: vec2<i32>, channel: u32) -> f32 {
@@ -171,7 +171,7 @@ fn rcd_reference_at(pos: vec2<i32>) -> vec3<f32> {
     let g = green_plane_at(pos);
     let r = rcd_green_channel(pos, 0u);
     let b = rcd_green_channel(pos, 2u);
-    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+    return vec3<f32>(r, g, b);
 }
 
 fn bayer_uv(rgb: vec3<f32>) -> vec2<f32> {
@@ -183,7 +183,7 @@ fn bayer_from_yuv(y: f32, uv: vec2<f32>) -> vec3<f32> {
     let b = y + uv.x / 0.56433;
     let r = y + uv.y / 0.67815;
     let g = (y - 0.2627 * r - 0.0593 * b) / 0.6780;
-    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+    return vec3<f32>(r, g, b);
 }
 
 fn bayer_median5(a: f32, b: f32, c: f32, d: f32, e: f32) -> f32 {
@@ -292,7 +292,7 @@ fn low_detail_rgb_at(pos: vec2<i32>) -> vec3<f32> {
             if channel == 2u { sum.b += raw_cfa_at(q) * weight; weights.b += weight; }
         }
     }
-    return max(sum / max(weights, vec3<f32>(1e-6)), vec3<f32>(0.0));
+    return sum / max(weights, vec3<f32>(1e-6));
 }
 
 fn reference_luma_at(pos: vec2<i32>) -> f32 {
@@ -384,7 +384,7 @@ fn apply_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     }
     let center = vec2<f32>(rgb.r - rgb.g, rgb.b - rgb.g);
     let chroma = mix(center, sum / max(weight_sum, 1e-6), strength);
-    return max(vec3<f32>(rgb.g + chroma.x, rgb.g, rgb.g + chroma.y), vec3<f32>(0.0));
+    return vec3<f32>(rgb.g + chroma.x, rgb.g, rgb.g + chroma.y);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -402,5 +402,5 @@ fn bayer_rcd_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     camera_rgb = apply_ca(pos, camera_rgb);
     camera_rgb = apply_chroma_denoise(pos, camera_rgb);
-    textureStore(scene_write, pos, vec4<f32>(max(camera_rgb, vec3<f32>(0.0)), 1.0));
+    textureStore(scene_write, pos, vec4<f32>(camera_rgb, 1.0));
 }

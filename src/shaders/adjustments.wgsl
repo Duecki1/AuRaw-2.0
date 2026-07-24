@@ -95,15 +95,15 @@ fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
     // binds the pre-tone base here; the later presence pass binds its post-tone
     // output here. This keeps both spatial operators sampling the correct domain
     // without allocating another full-frame working texture.
-    return max(textureLoad(adjustment_base_tex, clamp_pos(pos), 0).xyz, vec3<f32>(0.0));
+    return textureLoad(adjustment_base_tex, clamp_pos(pos), 0).xyz;
 }
 
 fn local_effects_at(pos: vec2<i32>) -> vec3<f32> {
-    return max(textureLoad(local_effects_tex, clamp_pos(pos), 0).xyz, vec3<f32>(0.0));
+    return textureLoad(local_effects_tex, clamp_pos(pos), 0).xyz;
 }
 
 fn log_luminance(rgb: vec3<f32>) -> f32 {
-    return log2(safe_luma(max(rgb, vec3<f32>(0.0))));
+    return log2(safe_luma(rgb));
 }
 
 fn presence_reference_scale() -> f32 {
@@ -276,7 +276,7 @@ fn apply_capture_sharpening(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         -0.42,
         0.48,
     );
-    return max(rgb * exp2(sharpen_ev), vec3<f32>(0.0));
+    return rgb * exp2(sharpen_ev);
 }
 
 fn apply_texture_and_clarity_values(
@@ -328,7 +328,7 @@ fn apply_texture_and_clarity_values(
     let texture_ev = texture * selected_fine * texture_strength;
     let clarity_ev = clarity * clarity_band * clarity_strength * midtone_gate;
     let delta_ev = clamp(texture_ev + clarity_ev, -1.35, 1.50);
-    return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
+    return rgb * exp2(delta_ev);
 }
 
 struct HazeNeighborhood {
@@ -338,7 +338,8 @@ struct HazeNeighborhood {
 }
 
 fn normalized_dark_ratio(rgb: vec3<f32>, airlight_luma: f32) -> f32 {
-    let normalized = max(rgb, vec3<f32>(0.0)) / max(airlight_luma, 1e-6);
+    let positive = gamut_project_nonnegative_rec2020(rgb);
+    let normalized = positive / max(airlight_luma, 1e-6);
     return clamp(min(normalized.r, min(normalized.g, normalized.b)), 0.0, 1.0);
 }
 
@@ -422,10 +423,7 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
             0.22,
             1.0,
         );
-        let physical = max(
-            (rgb - airlight * (1.0 - transmission)) / transmission,
-            vec3<f32>(0.0),
-        );
+        let physical = (rgb - airlight * (1.0 - transmission)) / transmission;
         let restored_lum = safe_luma(physical);
         let luminance_gain = clamp(restored_lum / max(center_lum, 1e-6), 0.28, 4.5);
         let hue_safe = rgb * luminance_gain;
@@ -442,7 +440,7 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
         restored = SRGB_TO_REC2020 * oklab_to_linear_srgb(
             vec3<f32>(lab.x, lab.yz * chroma_boost),
         );
-        return repair_negative_rec2020(restored);
+        return restored;
     }
 
     let haze = -amount;
@@ -450,8 +448,8 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let hazed = mix(rgb, airlight, haze_mix);
     let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * hazed);
     let desaturation = 1.0 - haze * (0.12 + 0.20 * (1.0 - haze_likelihood));
-    return repair_negative_rec2020(
-        SRGB_TO_REC2020 * oklab_to_linear_srgb(vec3<f32>(lab.x, lab.yz * desaturation)),
+    return SRGB_TO_REC2020 * oklab_to_linear_srgb(
+        vec3<f32>(lab.x, lab.yz * desaturation),
     );
 }
 
@@ -465,7 +463,11 @@ fn extended_perceptual_luminance(linear_luma: f32) -> f32 {
 }
 
 fn glow_emission(rgb: vec3<f32>, cutoff: f32) -> vec3<f32> {
-    let linear_luma = safe_luma(rgb);
+    // Glow is an emissive positive-domain effect. Project a local proxy for the
+    // extraction math without overwriting the signed scene RGB carried by the
+    // main pipeline.
+    let glow_rgb = gamut_project_nonnegative_rec2020(rgb);
+    let linear_luma = safe_luma(glow_rgb);
     let perceptual_luma = extended_perceptual_luminance(linear_luma);
     let cutoff_fade = smoothstep(cutoff, cutoff + 0.16, perceptual_luma);
     let excess = max(perceptual_luma - cutoff, 0.0);
@@ -478,7 +480,7 @@ fn glow_emission(rgb: vec3<f32>, cutoff: f32) -> vec3<f32> {
     // light blooms in its own colour instead of becoming neutral grey. The
     // ratio is softly clamped so very narrow-band highlights cannot explode
     // into dotted colour speckles when the blur radius becomes large.
-    let colour_ratio = clamp(rgb / max(linear_luma, 1e-6), vec3<f32>(0.0), vec3<f32>(3.5));
+    let colour_ratio = clamp(glow_rgb / max(linear_luma, 1e-6), vec3<f32>(0.0), vec3<f32>(3.5));
     let warm_tint = vec3<f32>(1.025, 1.0, 0.975);
     return colour_ratio * warm_tint
         * intensity * pow(linear_luma, 0.62) * cutoff_fade * black_gate;
@@ -490,7 +492,7 @@ fn glow_cutoff() -> f32 {
 }
 
 fn glow_work_at(pos: vec2<i32>) -> vec3<f32> {
-    return max(textureLoad(glow_work_tex, clamp_pos(pos), 0).xyz, vec3<f32>(0.0));
+    return textureLoad(glow_work_tex, clamp_pos(pos), 0).xyz;
 }
 
 fn glow_stage_step(stage: u32) -> i32 {
@@ -561,7 +563,7 @@ fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     // the surrounding darker pixels.
     let current_luma = safe_luma(rgb);
     let core_protection = 1.0 - 0.72 * smoothstep(1.0, 3.2, current_luma);
-    return max(rgb + bloom * amount * 2.8 * core_protection, vec3<f32>(0.0));
+    return rgb + bloom * amount * 2.8 * core_protection;
 }
 
 fn full_image_uv(pos: vec2<i32>) -> vec2<f32> {
@@ -643,7 +645,7 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         -2.7,
         1.35,
     );
-    return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
+    return rgb * exp2(delta_ev);
 }
 
 // Lightroom's named HSL channels are a UI model, not a reason to process in
@@ -745,7 +747,7 @@ fn mixer_hue_shift(weights: MixerBandWeights) -> f32 {
 }
 
 fn mixer_sample_from_rgb(rgb: vec3<f32>) -> MixerSample {
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * max(rgb, vec3<f32>(0.0)));
+    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
     let chroma = length(lab.yz);
     var hue_vector = vec2<f32>(1.0, 0.0);
     if chroma > 1e-9 {
@@ -842,7 +844,7 @@ fn nonnegative_rec2020_from_oklab(lightness: f32, hue_vector: vec2<f32>, request
             high = middle;
         }
     }
-    return max(candidate, vec3<f32>(0.0));
+    return candidate;
 }
 
 fn mixer_saturation_factor(amount: f32) -> f32 {
@@ -916,7 +918,7 @@ fn apply_color_grading_wheels(
         return input_rgb;
     }
 
-    let rgb = max(input_rgb, vec3<f32>(0.0));
+    let rgb = input_rgb;
     let luminance = max(dot(rgb, LUMA), 0.0);
     let weights = color_grade_tonal_weights(luminance, options);
     let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
@@ -955,7 +957,7 @@ fn apply_color_grading_wheels(
         // Scene-linear scalar gain preserves the graded hue and RGB ratios.
         adjusted = adjusted * exp2(mixer_luminance_ev(luminance_grade, lab.x));
     }
-    return max(adjusted, vec3<f32>(0.0));
+    return adjusted;
 }
 
 fn local_curve_block(mask_index: u32, curve: u32, block: u32) -> vec4<f32> {
@@ -1134,7 +1136,7 @@ fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
         }
         rgb = mix(rgb, adjusted, weight);
     }
-    return max(rgb, vec3<f32>(0.0));
+    return rgb;
 }
 
 fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
@@ -1158,7 +1160,7 @@ fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
         );
         rgb = mix(rgb, adjusted, weight);
     }
-    return max(rgb, vec3<f32>(0.0));
+    return rgb;
 }
 
 fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
@@ -1208,7 +1210,7 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         // as a checkerboard of different brightness values.
         adjusted = adjusted * exp2(mixer_luminance_ev(luminance_amount, sample.lab.x));
     }
-    return max(adjusted, vec3<f32>(0.0));
+    return adjusted;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1229,7 +1231,7 @@ fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if !uses_explicit_scene_display_domains() {
         rgb = apply_optional_profile_look(rgb);
     }
-    textureStore(adjustment_base_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+    textureStore(adjustment_base_out, pos, vec4<f32>(rgb, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1247,8 +1249,6 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if !uses_explicit_scene_display_domains() {
         rgb = apply_profile_view_tone(rgb);
     }
-    rgb = map_negative_gamut(rgb);
-    rgb = max(rgb, vec3<f32>(0.0));
     rgb = apply_lightroom_tone(rgb, pos);
     rgb = apply_local_basic_tone_values(
         rgb,
@@ -1261,7 +1261,7 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_basic_contrast_value(rgb, local.tone0.y);
     rgb = apply_temperature_tint_values(rgb, local.tone1.z, local.tone1.w);
     rgb = apply_local_curve_and_hsl(pos, rgb);
-    textureStore(local_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+    textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1279,7 +1279,7 @@ fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_dehaze_value(pos, rgb, params.presence.z + local.effects.w);
     rgb = apply_saturation_vibrance(rgb);
     rgb = apply_saturation_value(rgb, local.effects.x);
-    textureStore(local_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+    textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1328,7 +1328,7 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rgb = local_effects_at(pos);
     rgb = apply_glow(pos, rgb);
     rgb = apply_vignette(pos, rgb);
-    textureStore(creative_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+    textureStore(creative_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
 fn default_view_chroma_limit(mapped_luma: f32, candidate: vec3<f32>) -> f32 {
@@ -1393,7 +1393,7 @@ fn profile_tone_scene_shoulder_knee() -> f32 {
 }
 
 fn profile_tone_display_shoulder(rgb: vec3<f32>) -> vec3<f32> {
-    let positive = desaturate_negative_values(rgb);
+    let positive = gamut_project_nonnegative_rec2020(rgb);
     let luma = safe_luma(positive);
     if luma <= 1e-8 {
         return vec3<f32>(0.0);
@@ -1446,7 +1446,7 @@ fn apply_explicit_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
     // deliberately downstream of H/S/W/B, Contrast, curves, presence, mixer,
     // and grading so those controls mean the same thing across camera profiles.
     let looked = apply_optional_profile_look(scene_rgb);
-    let view_input = max(map_negative_gamut(looked), vec3<f32>(0.0));
+    let view_input = gamut_project_nonnegative_rec2020(looked);
 
     // Select exactly one view-transform path. A default DCP rendition uses its
     // ProfileToneCurve inside the DCP-aware view node; a custom/user sigmoid is

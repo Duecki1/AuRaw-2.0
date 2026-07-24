@@ -28,11 +28,11 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     let exposed = characterized * exp2(profile_exposure_ev);
     if uses_explicit_scene_display_domains() {
-        return max(map_negative_gamut(exposed), vec3<f32>(0.0));
+        return map_negative_gamut(exposed);
     }
     let looked = apply_optional_profile_look(exposed);
     let curved = apply_profile_view_tone(looked);
-    return max(map_negative_gamut(curved), vec3<f32>(0.0));
+    return map_negative_gamut(curved);
 }
 
 @compute @workgroup_size(8, 8, 1)
