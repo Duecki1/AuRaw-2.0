@@ -86,7 +86,7 @@ class DcpProfileSelectionTests(unittest.TestCase):
         self.assertIn("use_profile_base_tone", gpu)
         self.assertIn("profile_headroom", profile)
         self.assertIn("profile_linear / profile_headroom", profile)
-        self.assertIn("let local_exposure_ev", adjustments)
+        self.assertIn("apply_local_exposure_nodes(pos, rgb)", adjustments)
         self.assertIn("profile_tone_display_shoulder", adjustments)
         self.assertNotIn("exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV", gpu)
         self.assertIn("exposure: exposure.exposure", gpu)

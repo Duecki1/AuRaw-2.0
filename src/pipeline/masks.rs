@@ -782,6 +782,25 @@ impl Default for LocalAdjustments {
 }
 
 impl LocalAdjustments {
+    pub fn curve_feature_flags(self) -> u32 {
+        u32::from(!self.tone_curve.is_identity())
+            | (u32::from(!self.tone_curve_red.is_identity()) << 1)
+            | (u32::from(!self.tone_curve_green.is_identity()) << 2)
+            | (u32::from(!self.tone_curve_blue.is_identity()) << 3)
+    }
+
+    pub fn has_color_mixer(self) -> bool {
+        self.hsl_hue
+            .iter()
+            .chain(&self.hsl_saturation)
+            .chain(&self.hsl_luminance)
+            .any(|value| value.abs() > 1e-6)
+    }
+
+    pub fn has_color_grading(self) -> bool {
+        !self.color_grading.is_neutral()
+    }
+
     pub fn is_neutral(self) -> bool {
         let mut normalized = self;
         // Hue is intentionally remembered when a wheel is pulled back to the

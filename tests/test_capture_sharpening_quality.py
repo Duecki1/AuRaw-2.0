@@ -48,8 +48,8 @@ def test_capture_sharpening_is_edge_aware_luminance_preserving_and_scale_aware()
     sharpen = sharpen_stage.index("rgb = apply_capture_sharpening(pos, rgb);")
     profile_tone = sharpen_stage.index("rgb = apply_profile_view_tone(rgb);")
     adaptive_tone = sharpen_stage.index("rgb = apply_lightroom_tone(rgb, pos);")
-    contrast = sharpen_stage.index("rgb = apply_basic_contrast_value")
-    assert sharpen < profile_tone < adaptive_tone < contrast
+    local_tone = sharpen_stage.index("rgb = apply_local_scene_tone_nodes(pos, rgb);")
+    assert sharpen < profile_tone < adaptive_tone < local_tone
     assert "rgb = apply_capture_sharpening(pos, rgb);" not in ADJUSTMENTS[
         ADJUSTMENTS.index("fn apply_scene_effects_node") :
         ADJUSTMENTS.index("fn prepare_glow_source")

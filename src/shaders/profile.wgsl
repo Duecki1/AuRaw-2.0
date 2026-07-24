@@ -274,12 +274,12 @@ fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
     let lut_info = params.output_lut;
     if lut_info.x < 2u || lut_info.y < 2u || lut_info.z < 2u {
         let output_linear = REC2020_TO_SRGB * rgb;
-        let mapped = gamut_project_unit(output_linear, dot(output_linear, SRGB_LUMA));
+        let mapped = perceptual_gamut_compress_unit_srgb(output_linear);
         return srgb_oetf(mapped);
     }
     // ICC/device LUT coordinates require the unit cube. Project once at this
     // explicit output boundary, preserving lightness and hue direction.
-    let mapped = gamut_project_unit_rec2020(rgb);
+    let mapped = perceptual_gamut_compress_unit_rec2020(rgb);
     let shaped = vec3<f32>(
         profile_srgb_encode_value(mapped.r),
         profile_srgb_encode_value(mapped.g),
@@ -306,5 +306,5 @@ fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
     let low_z = mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y);
     let high_z = mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y);
     let output_rgb = mix(low_z, high_z, f.z);
-    return gamut_project_unit(output_rgb, dot(output_rgb, SRGB_LUMA));
+    return perceptual_gamut_compress_unit_srgb(output_rgb);
 }

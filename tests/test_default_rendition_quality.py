@@ -35,7 +35,7 @@ def test_metadata_default_exposure_is_resolved_once_with_conservative_fallback()
 
 
 def test_default_view_transform_uses_scene_headroom_shoulder_and_gamut_aware_chroma() -> None:
-    assert "fn default_view_chroma_limit" in ADJUSTMENTS
+    assert "fn default_view_chroma_limit" not in ADJUSTMENTS
     assert "let toe_weight = 1.0 - smoothstep(0.018, 0.22, luma)" in ADJUSTMENTS
     assert "fn profile_tone_scene_shoulder_knee" in ADJUSTMENTS
     assert "tone_stats.percentiles_0.w" in ADJUSTMENTS
@@ -47,7 +47,7 @@ def test_default_view_transform_uses_scene_headroom_shoulder_and_gamut_aware_chr
     assert "let shoulder_knee = 0.70" not in ADJUSTMENTS
     assert "let shoulder_knee = 0.82" not in ADJUSTMENTS
     assert "let ratio_preserved = positive * (mapped_luma / luma)" in ADJUSTMENTS
-    assert "let chroma_limit = default_view_chroma_limit" in ADJUSTMENTS
+    assert "perceptual_gamut_compress_unit_rec2020(ratio_preserved)" in ADJUSTMENTS
     assert "safe_luma(positive)" in ADJUSTMENTS
     assert "peak <= knee" not in ADJUSTMENTS
 

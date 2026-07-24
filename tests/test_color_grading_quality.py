@@ -54,13 +54,13 @@ def test_uniform_abi_carries_global_and_local_grading() -> None:
     ):
         assert f"{field}: [[f32; 4]; MAX_LOCAL_MASKS]" in GPU
         assert f"{field}: array<vec4<f32>, 32>" in COMMON
-    assert "size_of::<super::GpuParams>(), 25056" in GPU
+    assert "size_of::<super::GpuParams>(), 25136" in GPU
 
 
 def test_grading_is_scene_referred_perceptual_and_gamut_safe() -> None:
     assert "fn apply_color_grading_wheels" in ADJUSTMENTS
     assert "linear_srgb_to_oklab(REC2020_TO_SRGB * rgb)" in ADJUSTMENTS
-    assert "nonnegative_rec2020_from_oklab" in ADJUSTMENTS
+    assert "perceptual_rec2020_from_oklab_nonnegative" in ADJUSTMENTS
     assert "target_ab / target_chroma" in ADJUSTMENTS
     assert "adjusted = adjusted * exp2(mixer_luminance_ev" in ADJUSTMENTS
     assert "fn apply_explicit_view_node" in ADJUSTMENTS

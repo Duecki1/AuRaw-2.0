@@ -64,42 +64,6 @@ fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
     return rgb * exp2(params.exposure);
 }
 
-fn signed_cuberoot(value: f32) -> f32 {
-    return sign(value) * pow(abs(value), 1.0 / 3.0);
-}
-
-fn linear_srgb_to_oklab(rgb: vec3<f32>) -> vec3<f32> {
-    let lms = mat3x3<f32>(
-        vec3<f32>(0.41222147, 0.21190350, 0.08830246),
-        vec3<f32>(0.53633254, 0.68069955, 0.28171884),
-        vec3<f32>(0.05144599, 0.10739696, 0.62997870),
-    ) * rgb;
-    let root = vec3<f32>(
-        signed_cuberoot(lms.x),
-        signed_cuberoot(lms.y),
-        signed_cuberoot(lms.z),
-    );
-    return mat3x3<f32>(
-        vec3<f32>( 0.21045426,  1.97799850,  0.02590404),
-        vec3<f32>( 0.79361779, -2.42859221,  0.78277177),
-        vec3<f32>(-0.00407205,  0.45059371, -0.80867577),
-    ) * root;
-}
-
-fn oklab_to_linear_srgb(lab: vec3<f32>) -> vec3<f32> {
-    let root = mat3x3<f32>(
-        vec3<f32>(1.0, 1.0, 1.0),
-        vec3<f32>(0.39633778, -0.10556135, -0.08948418),
-        vec3<f32>(0.21580376, -0.06385417, -1.29148555),
-    ) * lab;
-    let lms = root * root * root;
-    return mat3x3<f32>(
-        vec3<f32>( 4.07674166, -1.26843800, -0.00419609),
-        vec3<f32>(-3.30771159,  2.60975740, -0.70341861),
-        vec3<f32>( 0.23096993, -0.34131940,  1.70761470),
-    ) * lms;
-}
-
 fn circular_hue_distance(a: f32, b: f32) -> f32 {
     let d = abs(a - b);
     return min(d, 1.0 - d);
@@ -162,7 +126,9 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
 
     let chroma_factor = clamp(saturation_factor * vibrance_factor, 0.0, 4.0);
     let adjusted = vec3<f32>(lab.x, lab.yz * chroma_factor);
-    return SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted);
+    return perceptual_gamut_compress_nonnegative_rec2020(
+        SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted),
+    );
 }
 
 fn apply_saturation_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
@@ -176,5 +142,7 @@ fn apply_saturation_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
         factor = exp2(saturation * 1.24);
     }
     let adjusted = vec3<f32>(lab.x, lab.yz * factor);
-    return SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted);
+    return perceptual_gamut_compress_nonnegative_rec2020(
+        SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted),
+    );
 }
