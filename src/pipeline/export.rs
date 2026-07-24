@@ -4,6 +4,7 @@ use super::{
     GeometryTransform, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan,
     TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
+use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
 use eframe::wgpu;
 use std::borrow::Cow;
@@ -254,25 +255,9 @@ pub fn spawn_tiled_png_export(
                     geometry.crop_pixel_dimensions(raw.width, raw.height);
                 let (output_width, output_height) =
                     settings.checked_output_dimensions(geometry_width, geometry_height)?;
-                let mut tile_spec = tile_spec;
-                let required_halo = required_export_tile_halo(&exposure, &masks);
-                tile_spec.halo = if tile_spec.halo == EXPORT_TILE_HALO {
-                    required_halo
-                } else {
-                    tile_spec.halo.max(required_halo)
-                };
-                if cfg!(target_os = "android")
-                    && tile_spec.core_edge == 768
-                    && tile_spec.halo <= 192
-                {
-                    // Neutral/low-radius edits can amortize the halo with a
-                    // larger core while keeping the padded allocation close to
-                    // the old worst-case footprint; wide-radius edits stay at 768 px.
-                    tile_spec.core_edge = 1024;
-                }
-                let tile_spec = bounded_tile_spec(tile_spec, raw.width)?;
-                if is_direct_export_destination(&worker_path) {
-                    return export_tiled_png(
+                let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
+                export_to_destination(&worker_path, |path| {
+                    export_tiled_png(
                         ExportContext {
                             device: &device,
                             queue: &queue,
@@ -283,7 +268,7 @@ pub fn spawn_tiled_png_export(
                             exposure: &exposure,
                             masks: &masks,
                             inpaint: inpaint.as_ref(),
-                            path: &worker_path,
+                            path,
                             tile_spec,
                             output_width,
                             output_height,
@@ -291,38 +276,8 @@ pub fn spawn_tiled_png_export(
                             metadata: &metadata,
                             geometry,
                         },
-                    );
-                }
-                let temporary = temporary_export_path(&worker_path)?;
-                let export_result = export_tiled_png(
-                    ExportContext {
-                        device: &device,
-                        queue: &queue,
-                        events: &worker_sender,
-                    },
-                    ExportRequest {
-                        raw: &raw,
-                        exposure: &exposure,
-                        masks: &masks,
-                        inpaint: inpaint.as_ref(),
-                        path: &temporary,
-                        tile_spec,
-                        output_width,
-                        output_height,
-                        keep_metadata: settings.keep_metadata,
-                        metadata: &metadata,
-                        geometry,
-                    },
-                );
-                if let Err(error) = export_result {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(error);
-                }
-                if let Err(error) = publish_completed_export(&temporary, &worker_path) {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(error);
-                }
-                Ok(())
+                    )
+                })
             })();
             match &result {
                 Ok(()) => crate::diagnostics::record(format!(
@@ -390,25 +345,9 @@ pub fn spawn_tiled_jpeg_export(
                     geometry.crop_pixel_dimensions(raw.width, raw.height);
                 let (output_width, output_height) =
                     settings.checked_output_dimensions(geometry_width, geometry_height)?;
-                let mut tile_spec = tile_spec;
-                let required_halo = required_export_tile_halo(&exposure, &masks);
-                tile_spec.halo = if tile_spec.halo == EXPORT_TILE_HALO {
-                    required_halo
-                } else {
-                    tile_spec.halo.max(required_halo)
-                };
-                if cfg!(target_os = "android")
-                    && tile_spec.core_edge == 768
-                    && tile_spec.halo <= 192
-                {
-                    // Neutral/low-radius edits can amortize the halo with a
-                    // larger core while keeping the padded allocation close to
-                    // the old worst-case footprint; wide-radius edits stay at 768 px.
-                    tile_spec.core_edge = 1024;
-                }
-                let tile_spec = bounded_tile_spec(tile_spec, raw.width)?;
-                if is_direct_export_destination(&worker_path) {
-                    return export_tiled_jpeg(
+                let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
+                export_to_destination(&worker_path, |path| {
+                    export_tiled_jpeg(
                         ExportContext {
                             device: &device,
                             queue: &queue,
@@ -419,7 +358,7 @@ pub fn spawn_tiled_jpeg_export(
                             exposure: &exposure,
                             masks: &masks,
                             inpaint: inpaint.as_ref(),
-                            path: &worker_path,
+                            path,
                             tile_spec,
                             output_width,
                             output_height,
@@ -428,39 +367,8 @@ pub fn spawn_tiled_jpeg_export(
                             geometry,
                         },
                         settings.jpeg_quality,
-                    );
-                }
-                let temporary = temporary_export_path(&worker_path)?;
-                let export_result = export_tiled_jpeg(
-                    ExportContext {
-                        device: &device,
-                        queue: &queue,
-                        events: &worker_sender,
-                    },
-                    ExportRequest {
-                        raw: &raw,
-                        exposure: &exposure,
-                        masks: &masks,
-                        inpaint: inpaint.as_ref(),
-                        path: &temporary,
-                        tile_spec,
-                        output_width,
-                        output_height,
-                        keep_metadata: settings.keep_metadata,
-                        metadata: &metadata,
-                        geometry,
-                    },
-                    settings.jpeg_quality,
-                );
-                if let Err(error) = export_result {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(error);
-                }
-                if let Err(error) = publish_completed_export(&temporary, &worker_path) {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(error);
-                }
-                Ok(())
+                    )
+                })
             })();
             match &result {
                 Ok(()) => crate::diagnostics::record(format!(
@@ -486,6 +394,44 @@ pub fn spawn_tiled_jpeg_export(
     }
 
     receiver
+}
+
+fn resolved_export_tile_spec(
+    mut tile_spec: TileSpec,
+    exposure: &ExposureParams,
+    masks: &MaskStack,
+    source_width: u32,
+) -> Result<TileSpec> {
+    let required_halo = required_export_tile_halo(exposure, masks);
+    tile_spec.halo = if tile_spec.halo == EXPORT_TILE_HALO {
+        required_halo
+    } else {
+        tile_spec.halo.max(required_halo)
+    };
+    if cfg!(target_os = "android") && tile_spec.core_edge == 768 && tile_spec.halo <= 192 {
+        tile_spec.core_edge = 1024;
+    }
+    bounded_tile_spec(tile_spec, source_width)
+}
+
+fn export_to_destination<F>(destination: &Path, export: F) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    if is_direct_export_destination(destination) {
+        return export(destination);
+    }
+
+    let temporary = temporary_export_path(destination)?;
+    if let Err(error) = export(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = publish_completed_export(&temporary, destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -630,10 +576,7 @@ fn render_tiled_srgb<W: Write>(
         export_mask_edge
     ));
 
-    // Preserve the original full-resolution tone statistics exactly. Every
-    // native source pixel contributes once, while halo pixels are excluded via
-    // the per-tile histogram bounds. Reuse one padded RAW allocation so this
-    // exact prepass still benefits from the allocation/copy optimizations.
+    // Count each native source pixel once; exclude halo pixels from tone statistics.
     let tone_analysis_started = Instant::now();
     let mut tone_scratch = first_raw.clone();
     tile_pipeline.begin_export_tone_analysis(queue, device);
@@ -676,9 +619,7 @@ fn render_tiled_srgb<W: Write>(
         output_height,
         row_format,
     )?;
-    // Reuse one padded RAW allocation for the entire export. Queue::write_texture
-    // copies each tile before this buffer is rewritten, so reuse is safe and
-    // avoids allocator churn proportional to tile count.
+    // Reuse one padded RAW allocation; queue uploads copy data before reuse.
     let mut tile_scratch = first_raw.clone();
 
     let total_tiles = plan.tile_count();
@@ -744,11 +685,8 @@ fn render_tiled_srgb<W: Write>(
                 )
                 .with_context(|| format!("queue export tile readback {}", global_index + 1))?;
 
-            // Queue this tile before consuming the previous tile. Using
-            // `replace` here also lets Rust infer the concrete pending-readback
-            // handle type from `readback` before we call methods on the older
-            // handle. GPU rendering/copy can therefore overlap CPU stitching,
-            // resizing, and encoding without requiring a public type annotation.
+            // Queue the next readback before consuming the previous one so GPU work
+            // overlaps CPU stitching, resizing, and encoding.
             let previous = pending_readback.replace((tile, global_index, readback));
             if let Some((previous_tile, previous_index, previous_readback)) = previous {
                 let rgb = previous_readback
@@ -1853,50 +1791,13 @@ fn cleanup_stale_export_parts(parent: &Path, destination_name: &str) {
 }
 
 fn publish_completed_export(temporary: &Path, destination: &Path) -> Result<()> {
-    replace_export_file(temporary, destination).with_context(|| {
+    replace_file(temporary, destination).with_context(|| {
         format!(
             "publish completed export {} to {}",
             temporary.display(),
             destination.display()
         )
     })
-}
-
-#[cfg(not(windows))]
-fn replace_export_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::rename(source, destination)
-}
-
-#[cfg(windows)]
-fn replace_export_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both buffers are NUL-terminated and remain alive for the call.
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 fn upload_mask_atlas(

@@ -633,6 +633,30 @@ impl AurawApp {
         crate::android::set_back_navigation_active(tab != AppTab::Library);
     }
 
+    fn take_preview_pipeline_and_release_textures(
+        &mut self,
+        renderer: &mut eframe::egui_wgpu::Renderer,
+    ) -> Option<RawGpuPipeline> {
+        let pipeline = self.gpu_pipeline.take();
+        if let Some(texture_id) = pipeline.as_ref().and_then(|pipeline| pipeline.egui_texture_id) {
+            renderer.free_texture(&texture_id);
+        }
+        for texture_id in [
+            self.preview_detail
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+            self.preview_navigation
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            renderer.free_texture(&texture_id);
+        }
+        pipeline
+    }
+
     #[cfg(target_os = "android")]
     pub(crate) fn copy_text_to_clipboard(&self, label: &str, text: &str) -> Result<(), String> {
         crate::android::copy_text_to_clipboard(&self.android_app, label, text)

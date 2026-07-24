@@ -6,11 +6,12 @@ LENSFUN = (ROOT / "src/pipeline/lensfun.rs").read_text(encoding="utf-8")
 
 
 def test_preview_proxy_co_sites_every_cfa_phase_in_one_source_macrocell() -> None:
-    assert "one complete output CFA cell summarizes one shared source macrocell" in PROCESSING
     assert "let macro_y0 = y + (py / cfa_period) * scale * cfa_period;" in PROCESSING
     assert "let macro_x0 = x + (px / cfa_period) * scale * cfa_period;" in PROCESSING
-    assert "(sy - y) % cfa_period != output_phase_y" in PROCESSING
-    assert "(sx - x) % cfa_period != output_phase_x" in PROCESSING
+    assert "let first_sy = macro_y0 + output_phase_y;" in PROCESSING
+    assert "let first_sx = macro_x0 + output_phase_x;" in PROCESSING
+    assert "step_by(cfa_period as usize)" in PROCESSING
+    assert "raw.color_indices[index] == cfa" in PROCESSING
     proxy_body = PROCESSING[PROCESSING.index("pub fn build_region_proxy") : PROCESSING.index("fn nearest_cfa_sample")]
     assert "let source_x0 = x + px * scale;" not in proxy_body
     assert "let source_y0 = y + py * scale;" not in proxy_body

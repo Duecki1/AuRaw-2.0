@@ -58,7 +58,8 @@ def test_export_resize_modes_and_metadata_controls_are_wired() -> None:
         assert f"ExportResizeMode::{mode}" in SIDEBAR
     assert "checked_output_dimensions" in EXPORT
     assert "resample_raw" not in EXPORT
-    assert "read_display_linear_region_blocking" in EXPORT
+    assert "begin_display_linear_region_readback" in EXPORT
+    assert ".finish(device)" in EXPORT
     assert "LinearLightResizer" in EXPORT
     assert "vertical_by_source" in EXPORT
     assert "pending_rows" in EXPORT
@@ -81,7 +82,8 @@ def test_raw_mosaic_has_no_final_output_resizer() -> None:
     assert "pub fn resample_raw" not in PROCESSING
     assert "build_proxy" in PROCESSING
     assert "nearest_cfa_sample" in PROCESSING
-    assert "read_display_linear_region_blocking" in EXPORT
+    assert "begin_display_linear_region_readback" in EXPORT
+    assert ".finish(device)" in EXPORT
 
 
 def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
@@ -112,7 +114,9 @@ def test_export_halo_covers_cumulative_spatial_support() -> None:
     assert 'TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 }' in PROCESSING
     assert "LOCAL_EFFECTS_SUPPORT: u32 = 24" in PROCESSING
     assert "GLOW_SUPPORT: u32 = 96" in PROCESSING
-    assert "(EXPORT_TILE_HALO..=512).contains(&spec.halo)" in EXPORT
+    assert "(MIN_EXPORT_TILE_HALO..=512).contains(&spec.halo)" in EXPORT
+    assert "required_export_tile_halo(exposure, masks)" in EXPORT
+    assert "tile_spec.halo.max(required_halo)" in EXPORT
 
 
 def test_export_tone_statistics_cover_native_resolution_tile_cores() -> None:

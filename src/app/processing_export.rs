@@ -14,10 +14,7 @@ fn aligned_detail_axis(
         ((max_uv.clamp(0.0, 1.0) * extent as f32).ceil() as u32).clamp(visible_start + 1, extent);
     let visible_len = visible_end - visible_start;
 
-    // Demosaic, chroma cleanup, clarity, and glow all sample neighbouring
-    // pixels. Keep a generous source-space halo, then never display that halo.
-    // This prevents the straight crop-edge and coloured zipper artifacts that
-    // otherwise become obvious at high zoom.
+    // Preserve spatial context around detail crops to prevent visible edge seams.
     let visible_detail_pixels =
         (viewport_pixels.max(1) as f32 * detail_pixel_scale.max(0.1)).max(1.0);
     let support_padding =
@@ -205,21 +202,7 @@ impl AurawApp {
         let inpaint_source = None;
 
         let mut renderer = render_state.renderer.write();
-        if let Some(old) = self.gpu_pipeline.take() {
-            if let Some(texture_id) = old.egui_texture_id {
-                renderer.free_texture(&texture_id);
-            }
-        }
-        if let Some(old) = self.preview_detail.take() {
-            if let Some(texture_id) = old.pipeline.egui_texture_id {
-                renderer.free_texture(&texture_id);
-            }
-        }
-        if let Some(old) = self.preview_navigation.take() {
-            if let Some(texture_id) = old.pipeline.egui_texture_id {
-                renderer.free_texture(&texture_id);
-            }
-        }
+        self.take_preview_pipeline_and_release_textures(&mut renderer);
         pipeline.register_egui_texture(&render_state.device, &mut renderer);
         drop(renderer);
 
@@ -285,12 +268,7 @@ impl AurawApp {
             self.preview_detail_urgent = true;
         }
 
-        // Only maintain the tiny navigation proxy while actually zoomed. Keeping
-        // it alive after returning to fit view made later slider edits briefly
-        // swap the entire preview to a 512 px backing texture on slower packaged
-        // builds (AppImage/Windows), which looked like a one-frame pixelation
-        // flash. Fit view now stays on the normal-resolution proxy throughout
-        // interactive edits.
+        // The low-resolution navigation proxy is useful only while zoomed.
         if self.preview_zoom > DETAIL_ZOOM_START {
             self.navigation_pending_stage = Some(match self.navigation_pending_stage {
                 Some(existing) => existing.min(stage),
@@ -395,11 +373,7 @@ impl AurawApp {
     }
 
     pub(crate) fn preview_base_pipeline(&self) -> Option<&RawGpuPipeline> {
-        // Never replace fit view with the tiny navigation proxy. On slower
-        // packaged builds the 512 px proxy could remain visible for a frame or
-        // two after every slider movement, making the whole preview visibly
-        // pixelate. The navigation proxy is only a zoom/pan fallback while a
-        // high-resolution detail crop is catching up.
+        // Keep fit view on the normal-resolution proxy.
         let detail_is_current = self
             .preview_detail
             .as_ref()
@@ -506,21 +480,7 @@ impl AurawApp {
         let inpaint_source = None;
 
         let mut renderer = render_state.renderer.write();
-        if let Some(old) = self.gpu_pipeline.take() {
-            if let Some(texture_id) = old.egui_texture_id {
-                renderer.free_texture(&texture_id);
-            }
-        }
-        if let Some(old) = self.preview_detail.take() {
-            if let Some(texture_id) = old.pipeline.egui_texture_id {
-                renderer.free_texture(&texture_id);
-            }
-        }
-        if let Some(old) = self.preview_navigation.take() {
-            if let Some(texture_id) = old.pipeline.egui_texture_id {
-                renderer.free_texture(&texture_id);
-            }
-        }
+        self.take_preview_pipeline_and_release_textures(&mut renderer);
         pipeline.register_egui_texture(&render_state.device, &mut renderer);
         drop(renderer);
 
@@ -585,8 +545,7 @@ impl AurawApp {
             .as_ref()
             .is_some_and(|detail| detail.revision == self.preview_revision);
         if detail_is_current {
-            // Parameter edits are dispatched directly into this current crop by
-            // advance_zoomed_processing; rebuilding the RAW crop would waste CPU.
+            // Reuse the current detail crop for parameter-only updates.
             return;
         }
 
@@ -615,11 +574,7 @@ impl AurawApp {
             return;
         };
         let visible = self.preview_visible_uv;
-        // Always build the visible detail crop above fit view. The old
-        // "full proxy has enough texels" shortcut compared against preview_raw,
-        // but the UI may actually be displaying the 384/512-pixel adjusted
-        // navigation proxy. That mismatch is what delayed high-quality output
-        // until roughly 140-160% zoom.
+        // Above fit view, always build the visible high-resolution detail crop.
 
         let cfa_period = match full_raw.cfa_kind {
             crate::pipeline::CfaKind::Bayer => 2,
@@ -673,11 +628,7 @@ impl AurawApp {
             crop_height,
             detail_spec,
         ));
-        // The adjustment shader samples the mask atlas with normalized
-        // full-image coordinates (tile origin + local pixel divided by the
-        // virtual full size). Keep the atlas in that same coordinate space.
-        // Cropping/remapping the mask stack here double-transforms every mask
-        // once the crop moves away from the image origin.
+        // Keep mask atlases in full-image coordinates to avoid double-applying crop offsets.
         let virtual_full_width =
             ((detail_raw.width as f64 * full_raw.width as f64 / crop_width as f64).round() as u32)
                 .max(detail_raw.width);
@@ -698,10 +649,7 @@ impl AurawApp {
             virtual_full_width,
             virtual_full_height,
         );
-        // Prefer the higher-resolution normal proxy whenever its histogram is
-        // still valid. Output-only edits do not invalidate ToneStats; RAW/WB
-        // edits do, so their freshly updated navigation proxy is the anchor
-        // until the deferred normal proxy reaches its Tone stage again.
+        // Prefer the normal proxy whenever its tone statistics are still current.
         let normal_tone_is_current = !matches!(
             self.pending_stage,
             Some(ProcessingStage::Raw | ProcessingStage::Tone)
@@ -730,9 +678,7 @@ impl AurawApp {
                 ));
                 return;
             }
-            // A reused detail pipeline already owns the invariant full-frame
-            // mask atlas. Panning only replaces the RAW crop, so do not
-            // rerasterize every AI/brush mask unless its geometry changed.
+            // Re-rasterize masks only when their geometry changed.
             if self.detail_dirty_mask_layers.iter().any(|dirty| *dirty) {
                 let edge = detail.pipeline.mask_atlas_edge();
                 for layer in 0..MAX_LOCAL_MASKS {
@@ -894,9 +840,7 @@ impl AurawApp {
         let should_exist = self.preview_zoom > DETAIL_ZOOM_START;
         let should_update = self.navigation_pending_stage.is_some();
         if !should_exist && !should_update {
-            // Drop the low-resolution navigation backing as soon as fit view is
-            // stable again. This also prevents a stale zoom proxy from being
-            // considered during a later fit-view slider edit.
+            // Release the navigation proxy when fit view is stable.
             if let Some(render_state) = frame.wgpu_render_state() {
                 if let Some(old) = self.preview_navigation.take() {
                     if let Some(texture_id) = old.pipeline.egui_texture_id {
@@ -1120,10 +1064,7 @@ impl AurawApp {
                 if !self.detail_dirty_mask_layers[layer] {
                     continue;
                 }
-                // The detail shader addresses this atlas in full-image UVs,
-                // so dirty layers must stay full-frame as well. Rasterizing a
-                // crop-local atlas makes masks slide, repeat, or disappear
-                // while panning.
+                // Detail masks remain full-frame because the shader addresses full-image UVs.
                 let bytes = self.masks.rasterize_layer_f16(
                     layer,
                     edge,

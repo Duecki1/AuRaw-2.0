@@ -210,6 +210,7 @@ binary_suffixes = {
     ".a", ".aar", ".apk", ".class", ".dll", ".dylib", ".exe", ".jar",
     ".o", ".obj", ".rlib", ".rmeta", ".so",
 }
+allowed_binary_paths = {"gradle/wrapper/gradle-wrapper.jar"}
 ignored_roots = {
     ".git",
     ".gradle",
@@ -224,7 +225,7 @@ for path in sorted(item for item in ROOT.rglob("*") if item.is_file()):
     relative = path.relative_to(ROOT).as_posix()
     if any(relative == root or relative.startswith(f"{root}/") for root in ignored_roots):
         continue
-    if path.suffix.lower() in binary_suffixes:
+    if path.suffix.lower() in binary_suffixes and relative not in allowed_binary_paths:
         errors.append(f"generated binary is present in the source tree: {relative}")
 
 if errors:

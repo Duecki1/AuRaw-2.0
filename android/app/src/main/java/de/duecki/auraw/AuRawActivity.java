@@ -1353,28 +1353,6 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    private void materializeLibraryRaw(Uri source, String displayName) throws Exception {
-        verifyRawLibraryIdentity(source, displayName);
-        File cached = File.createTempFile("auraw-library-", suffixFor(displayName), getCacheDir());
-        boolean completed = false;
-        try {
-            try (InputStream input = openLibraryInput(source);
-                 OutputStream output = new FileOutputStream(cached)) {
-                if (input == null) {
-                    throw new IllegalStateException("Android storage returned no RAW stream");
-                }
-                copy(input, output, MAX_RAW_IMPORT_BYTES);
-            }
-            completed = true;
-            nativeOnFilePicked(
-                    cached.getAbsolutePath(), displayName, source.toString(), "", true);
-        } finally {
-            if (!completed && !cached.delete() && cached.exists()) {
-                cached.deleteOnExit();
-            }
-        }
-    }
-
     private InputStream openLibraryInput(Uri uri) throws Exception {
         if (ContentResolver.SCHEME_FILE.equals(uri.getScheme())) {
             return new FileInputStream(new File(uri.getPath()));

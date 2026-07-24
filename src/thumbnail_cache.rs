@@ -1,7 +1,8 @@
+use crate::file_ops::{replace_file, sync_parent_directory};
 use crate::pipeline::RawThumbnail;
 use image::ImageFormat;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Write};
 use std::path::Path;
 #[cfg(not(target_os = "android"))]
@@ -413,53 +414,6 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<(
         let _ = fs::remove_file(&temporary);
     }
     result
-}
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::rename(source, destination)
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both buffers are NUL-terminated and remain alive for the call.
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
-    File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

@@ -136,10 +136,11 @@ def test_mask_brushes_stay_on_image_but_geometry_handles_can_leave_preview() -> 
     assert "let geometry_can_leave_image = matches!(kind, MaskKind::Radial | MaskKind::Linear)" in PREVIEW
     assert "let pointer_bounds = if geometry_can_leave_image" in PREVIEW
     assert "screen_to_normalized_unclamped(image_rect, pointer)" in PREVIEW
-    assert "Self::paint_mask_overlay(ui, app, image_rect, visible_screen, outer_rect)" in PREVIEW
+    assert "Self::paint_mask_overlay(" in PREVIEW
     assert "let painter = ui.painter_at(overlay_rect);" in PREVIEW
-    # Raster coverage and brush cursors still use the visible image clip.
-    assert "painter_image_clipped" in PREVIEW
+    # Raster coverage stays clipped to the image while brush cursors stay inside the preview.
+    assert "paint_textured_geometry_quad(ui, texture_id, image_rect" in PREVIEW
+    assert "ui.painter_at(clip_rect).add(Shape::mesh(mesh));" in PREVIEW
     assert ".filter(|position| preview_rect.contains(*position))" in PREVIEW
 
 

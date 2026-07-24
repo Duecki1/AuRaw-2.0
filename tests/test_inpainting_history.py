@@ -37,5 +37,5 @@ def test_inpainting_stroke_rows_highlight_location_on_hover_and_click() -> None:
     assert "stroke_response.hovered()" in sidebar
     assert "stroke_response.clicked()" in sidebar
     assert "rasterize_inpaint_dabs_binary" in preview
-    assert "inpaint_stroke_screen_bounds" in preview
+    assert "inpaint_stroke_geometry_screen_bounds" in preview
     assert 'format!("Stroke {}", index + 1)' in preview

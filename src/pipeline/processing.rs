@@ -162,18 +162,9 @@ pub fn build_region_proxy(
         super::CfaKind::XTrans => 6,
     };
 
-    // A reduced RAW proxy must keep every CFA phase in one synthetic Bayer/X-Trans
-    // cell spatially co-sited. The old implementation gave each output photosite
-    // its own non-overlapping `scale x scale` source block. At a 4x reduction,
-    // for example, the R and G samples beside each other in the proxy represented
-    // source regions four pixels apart. Demosaicing that synthetic mosaic turns
-    // ordinary high-contrast edges into strong green/magenta fringes.
-    //
-    // Instead, one complete output CFA cell summarizes one shared source macrocell
-    // of `scale * cfa_period` pixels. Each output phase averages only source
-    // photosites with that exact phase inside the shared macrocell. This preserves
-    // the sensor pattern while keeping R/G/B measurements registered to the same
-    // image area.
+    // One complete output CFA cell summarizes one shared source macrocell.
+    // Each output phase averages only matching source photosites in that macrocell,
+    // keeping R/G/B measurements co-sited before demosaic.
     raw_pixels
         .par_chunks_mut(row_stride)
         .zip(color_indices.par_chunks_mut(row_stride))
@@ -194,9 +185,7 @@ pub fn build_region_proxy(
                 let center_y = (macro_y0 + (macro_y1.saturating_sub(macro_y0)) / 2)
                     .min(raw.height - 1);
 
-                // Anchor the synthetic proxy mosaic to the source region's real CFA
-                // phase. Detail crops are aligned to the sensor period, preventing
-                // a phase jump from appearing as coloured horizontal/vertical lines.
+                // Preserve the source region's CFA phase for detail crops.
                 let phase_x = (x + output_phase_x).min(raw.width - 1);
                 let phase_y = (y + output_phase_y).min(raw.height - 1);
                 let phase_index = (phase_y * raw.width + phase_x) as usize;
@@ -206,9 +195,7 @@ pub fn build_region_proxy(
                 let mut black_sum = 0.0f64;
                 let mut count = 0u32;
 
-                // Visit the exact same phase-matched samples as the serial path.
-                // Only independent output rows are distributed across Rayon workers;
-                // accumulation order inside every proxy photosite remains unchanged.
+                // Parallelize rows without changing per-photosite accumulation order.
                 let first_sy = macro_y0 + output_phase_y;
                 let first_sx = macro_x0 + output_phase_x;
                 for sy in (first_sy..macro_y1).step_by(cfa_period as usize) {
@@ -517,11 +504,7 @@ pub fn extract_padded_tile_into(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mu
 fn fill_padded_tile(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw) {
     let width = tile.padded_width as usize;
     let height = tile.padded_height as usize;
-    // `extract_padded_tile` creates the first reusable export tile with an empty
-    // pixel buffer. Allocate the backing storage here so every caller of this
-    // helper gets the same invariant before row slices are taken. The reuse path
-    // may already have the right capacity, in which case `resize` is effectively
-    // free.
+    // Keep the reusable tile buffer fully allocated before row slices are taken.
     tile_raw
         .raw_pixels
         .resize(width.saturating_mul(height), 0);
