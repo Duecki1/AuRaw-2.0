@@ -1,3 +1,4 @@
+use super::raw_loader::RawThumbnail;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -145,6 +146,225 @@ impl GeometryTransform {
             (self.quarter_turns + 3) % 4
         };
     }
+
+    /// Shrink and, when possible, minimally reposition the crop so every pixel
+    /// in the destination frame samples the real source image after fine
+    /// rotation / keystone transforms. This is the crop-tool equivalent of
+    /// "constrain crop": the white crop rectangle never includes pasteboard.
+    ///
+    /// The crop aspect ratio is preserved because both dimensions are scaled
+    /// by the same factor. Quarter turns and flips do not create empty corners,
+    /// so they naturally leave an already-valid crop unchanged.
+    pub fn fit_crop_inside_transformed_source(
+        &mut self,
+        source_width: u32,
+        source_height: u32,
+    ) -> bool {
+        let mut geometry = self.sanitized();
+        let original_crop = geometry.crop;
+        if crop_fits_transformed_source(geometry, original_crop, source_width, source_height) {
+            *self = geometry;
+            return false;
+        }
+
+        let source_width_f = source_width.max(1) as f32;
+        let source_height_f = source_height.max(1) as f32;
+        let width = (original_crop[2] - original_crop[0]) * source_width_f;
+        let height = (original_crop[3] - original_crop[1]) * source_height_f;
+        let original_center = [
+            (original_crop[0] + original_crop[2]) * 0.5 * source_width_f,
+            (original_crop[1] + original_crop[3]) * 0.5 * source_height_f,
+        ];
+
+        // Feasibility is monotonic in a uniform scale: once a crop of a given
+        // aspect fits inside the transformed source, every smaller crop fits as
+        // well. Binary search therefore gives the largest no-pasteboard crop.
+        let mut low = 0.0_f32;
+        let mut high = 1.0_f32;
+        for _ in 0..32 {
+            let mid = (low + high) * 0.5;
+            if feasible_crop_center_bounds(geometry, width * mid, height * mid, source_width_f, source_height_f)
+                .is_some()
+            {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+
+        // Stay a hair inside the mathematical boundary. Preview/export sampling
+        // uses floating point and bilinear filtering, so this avoids a one-pixel
+        // black seam on GPUs that round the edge in the opposite direction.
+        let scale = (low * 0.999_999).clamp(0.0, 1.0);
+        let fitted_width = (width * scale)
+            .max(Self::MIN_CROP_EXTENT * source_width_f)
+            .min(source_width_f);
+        let fitted_height = (height * scale)
+            .max(Self::MIN_CROP_EXTENT * source_height_f)
+            .min(source_height_f);
+
+        let Some(([min_cx, max_cx], [min_cy, max_cy])) = feasible_crop_center_bounds(
+            geometry,
+            fitted_width,
+            fitted_height,
+            source_width_f,
+            source_height_f,
+        ) else {
+            // With the currently allowed transform ranges this should never be
+            // reached, but keep a deterministic fallback rather than producing
+            // an invalid crop if future transform limits become more extreme.
+            return false;
+        };
+        let center_x = original_center[0].clamp(min_cx, max_cx);
+        let center_y = original_center[1].clamp(min_cy, max_cy);
+        geometry.crop = [
+            (center_x - fitted_width * 0.5) / source_width_f,
+            (center_y - fitted_height * 0.5) / source_height_f,
+            (center_x + fitted_width * 0.5) / source_width_f,
+            (center_y + fitted_height * 0.5) / source_height_f,
+        ];
+        geometry = geometry.sanitized();
+        let changed = geometry.crop != original_crop;
+        *self = geometry;
+        changed
+    }
+
+    /// Clamp a crop drag to the largest point between the drag start and the
+    /// proposed crop that still contains no transformed pasteboard. Interpolating
+    /// the rectangle preserves the user's active anchor/opposite corner behavior,
+    /// including fixed-aspect corner drags.
+    pub fn constrain_crop_drag_to_transformed_source(
+        self,
+        start_crop: [f32; 4],
+        proposed_crop: [f32; 4],
+        source_width: u32,
+        source_height: u32,
+    ) -> [f32; 4] {
+        let geometry = self.sanitized();
+        let proposed = sanitized_crop(proposed_crop);
+        if crop_fits_transformed_source(geometry, proposed, source_width, source_height) {
+            return proposed;
+        }
+        let start = sanitized_crop(start_crop);
+        if !crop_fits_transformed_source(geometry, start, source_width, source_height) {
+            // Legacy sidecars can contain a crop that predates constrained
+            // rotation. Fit that state first so the drag always starts from a
+            // valid rectangle.
+            let mut fitted = geometry;
+            fitted.crop = start;
+            fitted.fit_crop_inside_transformed_source(source_width, source_height);
+            return fitted.crop;
+        }
+
+        let mut low = 0.0_f32;
+        let mut high = 1.0_f32;
+        for _ in 0..28 {
+            let mid = (low + high) * 0.5;
+            let candidate = lerp_crop(start, proposed, mid);
+            if crop_fits_transformed_source(geometry, candidate, source_width, source_height) {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        sanitized_crop(lerp_crop(start, proposed, low * 0.999_999))
+    }
+}
+
+fn sanitized_crop(crop: [f32; 4]) -> [f32; 4] {
+    let mut geometry = GeometryTransform::default();
+    geometry.crop = crop;
+    geometry.sanitized().crop
+}
+
+fn lerp_crop(start: [f32; 4], end: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        start[0] + (end[0] - start[0]) * t,
+        start[1] + (end[1] - start[1]) * t,
+        start[2] + (end[2] - start[2]) * t,
+        start[3] + (end[3] - start[3]) * t,
+    ]
+}
+
+fn inverse_affine_corner_delta(geometry: GeometryTransform, dx: f32, dy: f32) -> [f32; 2] {
+    let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
+    let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
+    let shx = geometry.horizontal_transform.to_radians().tan();
+    let shy = geometry.vertical_transform.to_radians().tan();
+    let angle = geometry.rotation_degrees.to_radians();
+    let c = angle.cos();
+    let s = angle.sin();
+    let a = c * fx - s * shy * fx;
+    let b = c * shx * fy - s * fy;
+    let c2 = s * fx + c * shy * fx;
+    let d = s * shx * fy + c * fy;
+    let determinant = a * d - b * c2;
+    if determinant.abs() < 1e-6 {
+        return [0.0, 0.0];
+    }
+    [(d * dx - b * dy) / determinant, (-c2 * dx + a * dy) / determinant]
+}
+
+fn transformed_crop_corner_deltas(
+    geometry: GeometryTransform,
+    crop_width: f32,
+    crop_height: f32,
+) -> [[f32; 2]; 4] {
+    let half_width = crop_width * 0.5;
+    let half_height = crop_height * 0.5;
+    [
+        inverse_affine_corner_delta(geometry, -half_width, -half_height),
+        inverse_affine_corner_delta(geometry, half_width, -half_height),
+        inverse_affine_corner_delta(geometry, half_width, half_height),
+        inverse_affine_corner_delta(geometry, -half_width, half_height),
+    ]
+}
+
+fn feasible_crop_center_bounds(
+    geometry: GeometryTransform,
+    crop_width: f32,
+    crop_height: f32,
+    source_width: f32,
+    source_height: f32,
+) -> Option<([f32; 2], [f32; 2])> {
+    let corners = transformed_crop_corner_deltas(geometry, crop_width, crop_height);
+    let min_dx = corners.iter().map(|point| point[0]).fold(f32::INFINITY, f32::min);
+    let max_dx = corners.iter().map(|point| point[0]).fold(f32::NEG_INFINITY, f32::max);
+    let min_dy = corners.iter().map(|point| point[1]).fold(f32::INFINITY, f32::min);
+    let max_dy = corners.iter().map(|point| point[1]).fold(f32::NEG_INFINITY, f32::max);
+    let x_bounds = [-min_dx, source_width - max_dx];
+    let y_bounds = [-min_dy, source_height - max_dy];
+    if x_bounds[0] <= x_bounds[1] + 1e-4 && y_bounds[0] <= y_bounds[1] + 1e-4 {
+        Some((x_bounds, y_bounds))
+    } else {
+        None
+    }
+}
+
+fn crop_fits_transformed_source(
+    geometry: GeometryTransform,
+    crop: [f32; 4],
+    source_width: u32,
+    source_height: u32,
+) -> bool {
+    let crop = sanitized_crop(crop);
+    let source_width_f = source_width.max(1) as f32;
+    let source_height_f = source_height.max(1) as f32;
+    let crop_width = (crop[2] - crop[0]) * source_width_f;
+    let crop_height = (crop[3] - crop[1]) * source_height_f;
+    let center_x = (crop[0] + crop[2]) * 0.5 * source_width_f;
+    let center_y = (crop[1] + crop[3]) * 0.5 * source_height_f;
+    const EPSILON: f32 = 1e-3;
+    transformed_crop_corner_deltas(geometry, crop_width, crop_height)
+        .into_iter()
+        .all(|delta| {
+            let x = center_x + delta[0];
+            let y = center_y + delta[1];
+            x >= -EPSILON
+                && x <= source_width_f + EPSILON
+                && y >= -EPSILON
+                && y <= source_height_f + EPSILON
+        })
 }
 
 fn finite_clamp(value: f32, min: f32, max: f32) -> f32 {
@@ -153,6 +373,128 @@ fn finite_clamp(value: f32, min: f32, max: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Applies the saved non-destructive crop/orientation transform to a small RGBA
+/// thumbnail. This intentionally mirrors export sampling so Library cards show
+/// the same framing/orientation as Develop and the final file.
+pub fn transform_thumbnail_geometry(
+    thumbnail: &RawThumbnail,
+    geometry: GeometryTransform,
+) -> RawThumbnail {
+    let geometry = geometry.sanitized();
+    if geometry.is_identity() || thumbnail.width == 0 || thumbnail.height == 0 {
+        return thumbnail.clone();
+    }
+    let (output_width, output_height) =
+        geometry.crop_pixel_dimensions(thumbnail.width, thumbnail.height);
+    let mut rgba = vec![0u8; output_width as usize * output_height as usize * 4];
+    for output_y in 0..output_height {
+        for output_x in 0..output_width {
+            let u = (output_x as f32 + 0.5) / output_width.max(1) as f32;
+            let v = (output_y as f32 + 0.5) / output_height.max(1) as f32;
+            let [source_x, source_y] = thumbnail_geometry_source_position(
+                geometry,
+                thumbnail.width,
+                thumbnail.height,
+                u,
+                v,
+            );
+            let pixel = sample_thumbnail_rgba_bilinear(
+                &thumbnail.rgba,
+                thumbnail.width,
+                thumbnail.height,
+                source_x,
+                source_y,
+            );
+            let index = ((output_y as usize * output_width as usize + output_x as usize) * 4) as usize;
+            rgba[index..index + 4].copy_from_slice(&pixel);
+        }
+    }
+    RawThumbnail {
+        width: output_width,
+        height: output_height,
+        rgba,
+    }
+}
+
+fn thumbnail_geometry_source_position(
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    output_u: f32,
+    output_v: f32,
+) -> [f32; 2] {
+    let crop = geometry.crop;
+    let crop_width = (crop[2] - crop[0]) * source_width.max(1) as f32;
+    let crop_height = (crop[3] - crop[1]) * source_height.max(1) as f32;
+    let center_x = (crop[0] + crop[2]) * 0.5 * source_width.max(1) as f32;
+    let center_y = (crop[1] + crop[3]) * 0.5 * source_height.max(1) as f32;
+    let (u, v) = match geometry.quarter_turns % 4 {
+        0 => (output_u, output_v),
+        1 => (output_v, 1.0 - output_u),
+        2 => (1.0 - output_u, 1.0 - output_v),
+        _ => (1.0 - output_v, output_u),
+    };
+    let dx = (u - 0.5) * crop_width;
+    let dy = (v - 0.5) * crop_height;
+
+    let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
+    let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
+    let shx = geometry.horizontal_transform.to_radians().tan();
+    let shy = geometry.vertical_transform.to_radians().tan();
+    let angle = geometry.rotation_degrees.to_radians();
+    let c = angle.cos();
+    let s = angle.sin();
+    let a = c * fx - s * shy * fx;
+    let b = c * shx * fy - s * fy;
+    let c2 = s * fx + c * shy * fx;
+    let d = s * shx * fy + c * fy;
+    let determinant = a * d - b * c2;
+    if determinant.abs() < 1e-6 {
+        return [center_x, center_y];
+    }
+    [
+        center_x + (d * dx - b * dy) / determinant,
+        center_y + (-c2 * dx + a * dy) / determinant,
+    ]
+}
+
+fn sample_thumbnail_rgba_bilinear(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+) -> [u8; 4] {
+    if !x.is_finite()
+        || !y.is_finite()
+        || x < -0.5
+        || y < -0.5
+        || x > width as f32 - 0.5
+        || y > height as f32 - 0.5
+    {
+        return [0, 0, 0, 255];
+    }
+    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(width.saturating_sub(1));
+    let y1 = (y0 + 1).min(height.saturating_sub(1));
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let load = |px: u32, py: u32, channel: usize| -> f32 {
+        let index = ((py as usize * width as usize + px as usize) * 4) + channel;
+        source.get(index).copied().unwrap_or(if channel == 3 { 255 } else { 0 }) as f32
+    };
+    let mut result = [0u8; 4];
+    for channel in 0..4 {
+        let top = load(x0, y0, channel) * (1.0 - tx) + load(x1, y0, channel) * tx;
+        let bottom = load(x0, y1, channel) * (1.0 - tx) + load(x1, y1, channel) * tx;
+        result[channel] = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -171,5 +513,88 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(geometry.crop_pixel_dimensions(4000, 3000), (2000, 1500));
+    }
+
+
+    #[test]
+    fn constrained_rotation_shrinks_full_crop_inside_source() {
+        let mut geometry = GeometryTransform {
+            rotation_degrees: 20.0,
+            ..Default::default()
+        };
+        assert!(!crop_fits_transformed_source(geometry, geometry.crop, 4000, 3000));
+        assert!(geometry.fit_crop_inside_transformed_source(4000, 3000));
+        assert!(crop_fits_transformed_source(geometry, geometry.crop, 4000, 3000));
+        assert!(geometry.crop[0] > 0.0);
+        assert!(geometry.crop[1] > 0.0);
+        assert!(geometry.crop[2] < 1.0);
+        assert!(geometry.crop[3] < 1.0);
+    }
+
+    #[test]
+    fn quarter_turn_does_not_shrink_valid_crop() {
+        let original = [0.1, 0.2, 0.9, 0.8];
+        let mut geometry = GeometryTransform {
+            crop: original,
+            quarter_turns: 1,
+            ..Default::default()
+        };
+        assert!(!geometry.fit_crop_inside_transformed_source(4000, 3000));
+        assert_eq!(geometry.crop, original);
+    }
+
+    #[test]
+    fn constrained_corner_drag_keeps_opposite_corner_fixed() {
+        let geometry = GeometryTransform {
+            crop: [0.2, 0.2, 0.8, 0.8],
+            rotation_degrees: 25.0,
+            ..Default::default()
+        };
+        let mut fitted = geometry;
+        fitted.fit_crop_inside_transformed_source(4000, 3000);
+        let start = fitted.crop;
+        let proposed = [0.0, 0.0, start[2], start[3]];
+        let constrained = fitted.constrain_crop_drag_to_transformed_source(
+            start,
+            proposed,
+            4000,
+            3000,
+        );
+        assert!((constrained[2] - start[2]).abs() < 1e-6);
+        assert!((constrained[3] - start[3]).abs() < 1e-6);
+        assert!(crop_fits_transformed_source(fitted, constrained, 4000, 3000));
+    }
+
+    #[test]
+    fn thumbnail_geometry_identity_is_lossless() {
+        let thumbnail = crate::pipeline::RawThumbnail {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                255, 0, 0, 255, 0, 255, 0, 255,
+                0, 0, 255, 255, 255, 255, 255, 255,
+            ],
+        };
+        assert_eq!(
+            transform_thumbnail_geometry(&thumbnail, GeometryTransform::default()).rgba,
+            thumbnail.rgba
+        );
+    }
+
+    #[test]
+    fn thumbnail_geometry_applies_crop_and_quarter_turn_dimensions() {
+        let thumbnail = crate::pipeline::RawThumbnail {
+            width: 8,
+            height: 6,
+            rgba: vec![128; 8 * 6 * 4],
+        };
+        let geometry = GeometryTransform {
+            crop: [0.25, 0.0, 0.75, 1.0],
+            quarter_turns: 1,
+            ..Default::default()
+        };
+        let transformed = transform_thumbnail_geometry(&thumbnail, geometry);
+        assert_eq!((transformed.width, transformed.height), (6, 4));
+        assert_eq!(transformed.rgba.len(), 6 * 4 * 4);
     }
 }

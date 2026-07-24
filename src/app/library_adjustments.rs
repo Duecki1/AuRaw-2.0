@@ -45,6 +45,7 @@ impl AurawApp {
         if adjustments_changed {
             self.exposure = merged.exposure;
             self.geometry = merged.geometry.sanitized();
+            self.crop_constraint_reference = None;
             self.note_geometry_changed();
             self.exposure.sanitize_tone_curves();
             self.note_edit_changed();

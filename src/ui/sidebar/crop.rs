@@ -15,7 +15,10 @@ impl Sidebar {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Reset").clicked() {
                     app.geometry = GeometryTransform::default();
+                    app.crop_constraint_reference = Some(app.geometry.crop);
                     app.crop_drag = None;
+                    app.straighten_tool_active = false;
+                    app.straighten_drag = None;
                     app.note_geometry_changed();
                 }
             });
@@ -23,6 +26,9 @@ impl Sidebar {
         ui.separator();
 
         let before = app.geometry;
+        if app.crop_constraint_reference.is_none() {
+            app.crop_constraint_reference = Some(app.geometry.crop);
+        }
         let previous_aspect = app.geometry.aspect_ratio;
         egui::ComboBox::from_label("Aspect ratio")
             .selected_text(app.geometry.aspect_ratio.label())
@@ -43,6 +49,7 @@ impl Sidebar {
             });
         if app.geometry.aspect_ratio != previous_aspect {
             Self::apply_crop_aspect(app, source_dimensions.0, source_dimensions.1);
+            app.crop_constraint_reference = Some(app.geometry.crop);
         }
 
         ui.add_space(4.0);
@@ -64,6 +71,20 @@ impl Sidebar {
             0.1,
             Some("Fine rotation for leveling the image."),
         );
+        let straighten_label = if app.straighten_tool_active {
+            "Drawing straighten line…"
+        } else {
+            "Draw straighten line"
+        };
+        if ui
+            .selectable_label(app.straighten_tool_active, straighten_label)
+            .on_hover_text("Drag along a horizon or vertical edge in the Crop preview. AuRaw rotates the image so that line becomes level.")
+            .clicked()
+        {
+            app.straighten_tool_active = !app.straighten_tool_active;
+            app.straighten_drag = None;
+            app.crop_drag = None;
+        }
 
         ui.separator();
         ui.strong("Transform");
@@ -103,6 +124,25 @@ impl Sidebar {
         );
 
         app.geometry = app.geometry.sanitized();
+        let containment_transform_changed =
+            (app.geometry.rotation_degrees - before.rotation_degrees).abs() > 1e-6
+                || (app.geometry.horizontal_transform - before.horizontal_transform).abs() > 1e-6
+                || (app.geometry.vertical_transform - before.vertical_transform).abs() > 1e-6;
+        if containment_transform_changed {
+            // Re-fit from the user's unconstrained crop rather than repeatedly
+            // shrinking the already-fitted result. This makes the white crop
+            // rectangle expand again when straighten/keystone is reduced.
+            if let Some(reference) = app.crop_constraint_reference {
+                app.geometry.crop = reference;
+            }
+        }
+        // Keep the crop rectangle itself inside the usable transformed image.
+        // Fine rotation and keystone otherwise expose pasteboard at the crop
+        // corners even though the overlay can be visually clipped there.
+        app.geometry.fit_crop_inside_transformed_source(
+            source_dimensions.0,
+            source_dimensions.1,
+        );
         if app.geometry != before {
             app.note_geometry_changed();
         }

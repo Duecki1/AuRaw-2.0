@@ -319,7 +319,10 @@ impl AurawApp {
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
             geometry: GeometryTransform::default(),
+            crop_constraint_reference: None,
             crop_drag: None,
+            straighten_tool_active: false,
+            straighten_drag: None,
             geometry_revision: 0,
             adjustment_section: AdjustmentSection::default(),
             mask_section: MaskSection::default(),
@@ -509,7 +512,10 @@ impl AurawApp {
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
             geometry: GeometryTransform::default(),
+            crop_constraint_reference: None,
             crop_drag: None,
+            straighten_tool_active: false,
+            straighten_drag: None,
             geometry_revision: 0,
             adjustment_section: AdjustmentSection::default(),
             mask_section: MaskSection::default(),
@@ -1950,7 +1956,10 @@ impl AurawApp {
                 self.gpu_pipeline = Some(loaded.pipeline);
                 self.exposure = loaded.rendered_exposure;
                 self.geometry = loaded.geometry.sanitized();
+                self.crop_constraint_reference = None;
                 self.crop_drag = None;
+                self.straighten_tool_active = false;
+                self.straighten_drag = None;
                 self.geometry_revision = 0;
                 self.masks = loaded.rendered_masks;
                 self.inpaint_strokes = loaded.inpaint_strokes;

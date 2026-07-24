@@ -117,6 +117,12 @@ pub(crate) struct CropDragState {
     pub crop: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StraightenDragState {
+    pub start: egui::Pos2,
+    pub current: egui::Pos2,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PreviewUvRect {
     pub min: [f32; 2],
@@ -481,7 +487,12 @@ pub struct AurawApp {
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
     pub(crate) geometry: GeometryTransform,
+    /// Runtime-only crop before automatic rotation/keystone containment. This
+    /// lets the crop expand again when the user reduces the straighten angle.
+    pub(crate) crop_constraint_reference: Option<[f32; 4]>,
     pub(crate) crop_drag: Option<CropDragState>,
+    pub(crate) straighten_tool_active: bool,
+    pub(crate) straighten_drag: Option<StraightenDragState>,
     pub(crate) geometry_revision: u64,
     pub adjustment_section: AdjustmentSection,
     pub mask_section: MaskSection,

@@ -525,7 +525,12 @@ pub fn load_developed_thumbnail_cache(
             fingerprint_path.display()
         )
     })?;
-    if cached.trim() != format!("{fingerprint:016x}") {
+    if cached.trim()
+        != format!(
+            "{:016x}",
+            fingerprint ^ crate::sidecar::DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT
+        )
+    {
         let _ = fs::remove_file(&cache_path);
         let _ = fs::remove_file(&fingerprint_path);
         return Ok(None);
@@ -551,7 +556,11 @@ pub fn save_developed_thumbnail_cache(
     crate::thumbnail_cache::save_png(&cache_path, thumbnail)?;
     crate::thumbnail_cache::write_bytes_atomic(
         &fingerprint_path,
-        format!("{fingerprint:016x}\n").as_bytes(),
+        format!(
+            "{:016x}\n",
+            fingerprint ^ crate::sidecar::DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT
+        )
+        .as_bytes(),
     )
     .map_err(|error| {
         format!(
