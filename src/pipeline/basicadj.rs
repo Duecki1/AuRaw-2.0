@@ -184,7 +184,7 @@ impl ColorGrading {
     }
 }
 
-pub const CURRENT_PROCESS_VERSION: u32 = 8;
+pub const CURRENT_PROCESS_VERSION: u32 = 12;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -256,6 +256,19 @@ pub struct ExposureParams {
     pub clarity: f32,
     pub dehaze: f32,
 
+    // Capture sharpening. The defaults mirror the familiar Lightroom-style
+    // starting point while remaining entirely non-destructive and editable.
+    // Amount is 0..150, Radius is 0.5..3.0 px at a 1080 px reference short
+    // edge, and Detail/Masking use 0..100 perceptual domains.
+    #[serde(default = "default_sharpen_amount")]
+    pub sharpen_amount: f32,
+    #[serde(default = "default_sharpen_radius")]
+    pub sharpen_radius: f32,
+    #[serde(default = "default_sharpen_detail")]
+    pub sharpen_detail: f32,
+    #[serde(default)]
+    pub sharpen_masking: f32,
+
     // Creative effects. Glow follows a highlight-aware, multi-scale bloom
     // model; vignette is a post-crop, exposure-domain edge treatment.
     pub glow_amount: f32,
@@ -276,20 +289,35 @@ pub struct ExposureParams {
     pub color_grading: ColorGrading,
 }
 
-/// Fixed backend exposure lift applied only to the global Exposure control.
-/// The user-facing/global edit value is centered at 0 EV; local-mask Exposure
-/// remains an unbiased relative adjustment.
-pub const GLOBAL_EXPOSURE_BACKEND_OFFSET_EV: f32 = 0.7;
+/// Historical renderer-only exposure lift used by process versions 8 and 9.
+/// New edits never receive this implicitly; it exists only so older sidecars
+/// can migrate their rendered brightness into the explicit Exposure value.
+pub const LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV: f32 = 0.7;
 
 impl ExposureParams {
     pub fn migrate_to_current_process(&mut self) {
-        // Version 8 rebases the persisted global Exposure control so 0 is the
-        // neutral UI value while the historical +0.7 EV rendition lift moves
-        // to the backend. Subtracting the lift here preserves the exact render
-        // of older sidecars after the backend starts adding it automatically.
+        // Process versions 8 and 9 stored a zero-centered Exposure control
+        // while the renderer secretly added +0.7 EV. Version 10 removed that
+        // universal backend lift. Move it into the saved/user-visible Exposure
+        // value once so legacy edits keep their exact brightness without any
+        // continuing hidden offset. Version 11 introduced the scene-headroom
+        // DCP shoulder and protected Contrast S-curve. Version 12 moves capture
+        // sharpening into the pre-tone scene-referred stage. v10/v11 edits need
+        // no scalar parameter compensation, but migrate explicitly so each
+        // rendering-formula change is recorded rather than silently reinterpreted.
+        // Versions 0..=7 already stored the old rendition exposure explicitly.
         match self.process_version {
             0..=7 => {
-                self.exposure -= GLOBAL_EXPOSURE_BACKEND_OFFSET_EV;
+                self.process_version = CURRENT_PROCESS_VERSION;
+            }
+            8 | 9 => {
+                self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV;
+                self.process_version = CURRENT_PROCESS_VERSION;
+            }
+            10 => {
+                self.process_version = CURRENT_PROCESS_VERSION;
+            }
+            11 => {
                 self.process_version = CURRENT_PROCESS_VERSION;
             }
             CURRENT_PROCESS_VERSION => {}
@@ -353,6 +381,10 @@ impl Default for ExposureParams {
             texture: 0.0,
             clarity: 0.0,
             dehaze: 0.0,
+            sharpen_amount: default_sharpen_amount(),
+            sharpen_radius: default_sharpen_radius(),
+            sharpen_detail: default_sharpen_detail(),
+            sharpen_masking: 0.0,
             glow_amount: 0.0,
             glow_radius: 50.0,
             glow_threshold: 60.0,
@@ -369,11 +401,23 @@ impl Default for ExposureParams {
     }
 }
 
+const fn default_sharpen_amount() -> f32 {
+    40.0
+}
+
+const fn default_sharpen_radius() -> f32 {
+    1.0
+}
+
+const fn default_sharpen_detail() -> f32 {
+    25.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         DemosaicMode, ExposureParams, PointCurve, CURRENT_PROCESS_VERSION,
-        GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
+        LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
     };
     use crate::pipeline::SigmoidParams;
 
@@ -422,14 +466,34 @@ mod tests {
     }
 
     #[test]
-    fn older_presence_formulas_migrate_to_the_current_version() {
-        let mut params = ExposureParams {
-            process_version: CURRENT_PROCESS_VERSION - 1,
-            exposure: GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
+    fn legacy_backend_exposure_is_migrated_into_the_visible_control() {
+        let mut pre_backend = ExposureParams {
+            process_version: 7,
+            exposure: LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
             ..ExposureParams::default()
         };
-        params.migrate_to_current_process();
-        assert_eq!(params.process_version, CURRENT_PROCESS_VERSION);
-        assert_eq!(params.exposure, 0.0);
+        pre_backend.migrate_to_current_process();
+        assert_eq!(pre_backend.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(pre_backend.exposure, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV);
+
+        let mut hidden_backend = ExposureParams {
+            process_version: 9,
+            exposure: 0.0,
+            ..ExposureParams::default()
+        };
+        hidden_backend.migrate_to_current_process();
+        assert_eq!(hidden_backend.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(hidden_backend.exposure, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV);
+
+        let mut previous_tone_formula = ExposureParams {
+            process_version: 10,
+            exposure: 0.35,
+            contrast: 42.0,
+            ..ExposureParams::default()
+        };
+        previous_tone_formula.migrate_to_current_process();
+        assert_eq!(previous_tone_formula.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(previous_tone_formula.exposure, 0.35);
+        assert_eq!(previous_tone_formula.contrast, 42.0);
     }
 }

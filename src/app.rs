@@ -178,6 +178,7 @@ pub enum AdjustmentSection {
     ToneCurve,
     Color,
     ColorGrading,
+    Detail,
     Effects,
     ColorMixer,
     Optics,

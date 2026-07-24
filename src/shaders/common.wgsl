@@ -31,11 +31,11 @@ struct Params {
     sigmoid_power: vec4<f32>,
     // Texture, clarity, dehaze, Lightroom-style contrast.
     presence: vec4<f32>,
-    // Glow amount, radius, highlight threshold, reserved.
+    // Glow amount, radius, highlight threshold, capture-sharpen amount.
     creative_effects: vec4<f32>,
     // Vignette amount, midpoint, roundness, feather.
     vignette: vec4<f32>,
-    // Vignette highlight protection, followed by reserved values.
+    // Vignette highlight protection, sharpen radius, detail, masking.
     vignette_options: vec4<f32>,
     // Reconstruction method, guided passes, colour adaptation, reserved.
     highlight_options: vec4<f32>,
@@ -100,7 +100,9 @@ struct Params {
     profile_flags: vec4<u32>,
     // x = processing-formula version. y bit 0 = the active DCP provides the
     // baseline ProfileToneCurve and AuRaw's default sigmoid should not be
-    // stacked on top of it. Remaining lanes are reserved.
+    // stacked on top of it. z stores the user-facing base Exposure as f32
+    // bits. Camera/DNG default rendering exposure lives independently in
+    // profile_flags.z, so adaptive tone reacts only to the explicit user edit.
     process_info: vec4<u32>,
     // Local adjustments. Each mask index maps directly to one layer in the
     // normalized R8 array texture sampled by adjustments.wgsl. mask_meta.w is

@@ -79,11 +79,9 @@ class DcpProfileSelectionTests(unittest.TestCase):
         self.assertIn("profile_tone_display_shoulder", adjustments)
         self.assertIn("var display_linear = darktable_sigmoid(graded)", adjustments)
         self.assertNotIn("var display_linear = clamp(graded", adjustments)
-        self.assertIn("GLOBAL_EXPOSURE_BACKEND_OFFSET_EV", gpu)
-        self.assertIn(
-            "exposure: exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV",
-            gpu,
-        )
+        self.assertNotIn("exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV", gpu)
+        self.assertIn("exposure: exposure.exposure", gpu)
+        self.assertIn("profile.default_exposure_ev.to_bits()", read_source_tree(Path("src/pipeline/color_profile.rs")))
         self.assertNotIn("rendered_exposure.exposure = 0.0", lifecycle)
 
     def test_profile_preferences_are_persisted_and_cache_aware(self) -> None:

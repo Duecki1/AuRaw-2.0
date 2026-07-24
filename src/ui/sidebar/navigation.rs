@@ -105,6 +105,9 @@ impl Sidebar {
                         false,
                     );
                 }
+                AdjustmentSection::Detail => {
+                    changed |= Self::show_detail(ui, &mut app.exposure, false);
+                }
                 AdjustmentSection::Effects => {
                     changed |= Self::show_presence(
                         ui,
@@ -142,6 +145,7 @@ impl Sidebar {
                 &mut app.color_grade_tab,
                 true,
             );
+            changed |= Self::show_detail(ui, &mut app.exposure, true);
             changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, true);
             changed |= Self::show_hsl(ui, &mut app.exposure, true);
             lens_changed |= Self::show_optics(ui, app, true);
@@ -267,6 +271,7 @@ impl Sidebar {
                         (AdjustmentSection::ToneCurve, "Tone Curve"),
                         (AdjustmentSection::Color, "Color"),
                         (AdjustmentSection::ColorGrading, "Color Grading"),
+                        (AdjustmentSection::Detail, "Detail"),
                         (AdjustmentSection::Effects, "Effects"),
                         (AdjustmentSection::ColorMixer, "Color Mixer"),
                         (AdjustmentSection::Optics, "Optics"),

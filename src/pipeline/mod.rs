@@ -12,7 +12,7 @@ mod sigmoid;
 
 pub use basicadj::{
     ColorGradeWheel, ColorGrading, DemosaicMode, ExposureParams, HighlightReconstructionMethod,
-    PointCurve, CURRENT_PROCESS_VERSION, GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
+    PointCurve, CURRENT_PROCESS_VERSION, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
     GLOBAL_TEMPERATURE_LIMIT, HSL_HUE_LIMIT, MAX_POINT_CURVE_POINTS,
 };
 pub use color_profile::{

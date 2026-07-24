@@ -394,10 +394,15 @@ def main() -> int:
     c.check("multiply_4x4_4x3(abcc, profile.color_matrix)" in raw_loader, "AB * CC * CM ordering is explicit")
     c.check("multiply_3x4_4x4(balanced_reference_to_xyz, inverse_abcc)" in raw_loader, "ForwardMatrix path applies FM * D * inverse(AB * CC)")
     c.check("mired_interpolation_weight" in raw_loader and "1_000_000.0 /" in raw_loader, "dual-illuminant interpolation is reciprocal-CCT based")
-    c.check("baseline_exposure_offset += baseline_exposure" in raw_loader, "BaselineExposure and profile offset are combined")
     c.check(
-        "baseline_exposure.is_finite() && baseline_exposure > -999.0" in raw_loader,
-        "LibRaw's missing BaselineExposure sentinel cannot black out proprietary RAW previews",
+        "resolve_default_exposure_ev" in raw_loader
+        and "camera_profile.profile_exposure_offset_ev" in raw_loader,
+        "BaselineExposure and profile BaselineExposureOffset are resolved exactly once",
+    )
+    c.check(
+        "value.is_finite() && value > -999.0" in raw_loader
+        and "MISSING_BASELINE_EXPOSURE_FALLBACK_EV" in raw_loader,
+        "missing/corrupt BaselineExposure uses the documented conservative fallback",
     )
     compact_gpu_tests = " ".join(gpu_tests.split())
     c.check(

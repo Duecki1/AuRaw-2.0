@@ -21,6 +21,25 @@ use std::os::unix::ffi::OsStrExt;
 const MAX_DCP_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DCP_SCAN_FILES: usize = 10_000;
 const MAX_DCP_SCAN_DEPTH: usize = 16;
+/// Conservative default only for RAWs that provide no usable DNG
+/// BaselineExposure. This is deliberately much smaller than the historical
+/// universal +0.7 EV renderer lift and is applied exactly once, before any
+/// user Exposure edit.
+const MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 0.25;
+
+fn valid_baseline_exposure(value: f32) -> Option<f32> {
+    // LibRaw initializes a missing BaselineExposure to a finite sentinel below
+    // -999 EV. Reject that sentinel and corrupt/non-finite values.
+    (value.is_finite() && value > -999.0).then_some(value)
+}
+
+fn resolve_default_exposure_ev(baseline_exposure: Option<f32>, profile_offset_ev: f32) -> f32 {
+    let baseline = baseline_exposure.unwrap_or(MISSING_BASELINE_EXPOSURE_FALLBACK_EV);
+    // DNG BaselineExposureOffset is a profile-specific delta to the image
+    // baseline. Combine the two named metadata terms once; never add a second
+    // renderer-only exposure constant. Keep pathological metadata bounded.
+    (baseline + profile_offset_ev).clamp(-5.0, 5.0)
+}
 #[cfg(target_os = "android")]
 const MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
@@ -1247,13 +1266,11 @@ unsafe fn loaded_raw_from_context(
     let mut camera_profile = dcp_profile
         .map(|profile| CameraProfile::from_dcp(profile, profile_weight))
         .unwrap_or_default();
-    let baseline_exposure = color.dng_levels.baseline_exposure;
-    // LibRaw initializes a missing BaselineExposure to a sentinel below
-    // -999 EV. It is finite, but applying it makes exp2(EV) underflow to
-    // zero and turns every non-DNG/proprietary RAW preview black.
-    if baseline_exposure.is_finite() && baseline_exposure > -999.0 {
-        camera_profile.baseline_exposure_offset += baseline_exposure;
-    }
+    let baseline_exposure = valid_baseline_exposure(color.dng_levels.baseline_exposure);
+    camera_profile.default_exposure_ev = resolve_default_exposure_ev(
+        baseline_exposure,
+        camera_profile.profile_exposure_offset_ev,
+    );
     if !color.profile.is_null() && color.profile_length > 0 {
         let length = usize::try_from(color.profile_length).unwrap_or(0);
         if length <= 16 * 1024 * 1024 {
@@ -2866,11 +2883,32 @@ mod tests {
         adjusted_camera_transform, black_levels, cam_to_working, canonical_cfa_map,
         canonicalize_f32x4, cfa_kind_from_filters, effective_black_level, identity_4x4,
         load_raw_thumbnail, matching_thumbnail_orientation, oriented_source_pos,
+        resolve_default_exposure_ev, valid_baseline_exposure,
         validate_embedded_thumbnail_metadata, white_balance, white_levels, CameraColorModel,
         CameraWhiteBalanceModel, CfaKind, DngColorEndpoint, MAX_EMBEDDED_THUMBNAIL_BYTES,
+        MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
     };
 
     const RGBG: [u8; 4] = *b"RGBG";
+
+    #[test]
+    fn default_render_exposure_prefers_dng_baseline_and_combines_profile_offset_once() {
+        assert_eq!(valid_baseline_exposure(-1000.0), None);
+        assert_eq!(valid_baseline_exposure(f32::NAN), None);
+        assert_eq!(valid_baseline_exposure(-0.35), Some(-0.35));
+        assert!((resolve_default_exposure_ev(Some(-0.35), 0.20) + 0.15).abs() < 1e-6);
+        assert!(
+            (resolve_default_exposure_ev(None, 0.0) - MISSING_BASELINE_EXPOSURE_FALLBACK_EV)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (resolve_default_exposure_ev(None, 0.10)
+                - (MISSING_BASELINE_EXPOSURE_FALLBACK_EV + 0.10))
+                .abs()
+                < 1e-6
+        );
+    }
 
     #[test]
     fn synthetic_dng_produces_a_bounded_rgba_thumbnail() {
