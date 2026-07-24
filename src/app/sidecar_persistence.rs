@@ -636,6 +636,7 @@ impl AurawApp {
         let device = render_state.device.clone();
         let queue = render_state.queue.clone();
         let repaint = self.egui_ctx.clone();
+        let geometry = self.geometry;
         let worker_job = job.clone();
         let worker_target = job.target.clone();
         #[cfg(target_os = "android")]
@@ -648,6 +649,7 @@ impl AurawApp {
                     let thumbnail = snapshot
                         .read_thumbnail_blocking(&device, &queue, 512)
                         .map_err(|error| format!("GPU thumbnail readback failed: {error:#}"))?;
+                    let thumbnail = crate::pipeline::transform_thumbnail_geometry(&thumbnail, geometry);
                     match &worker_target {
                         #[cfg(not(target_os = "android"))]
                         crate::sidecar::SidecarTarget::Desktop { raw_path } => {

@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub const SIDECAR_SCHEMA_VERSION: u32 = 4;
+/// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
+pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0002;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
@@ -392,7 +394,9 @@ pub fn developed_thumbnail_cache_is_fresh(raw_path: &Path) -> Result<bool, Strin
             ))
         }
     };
-    let fresh = desktop_sidecar_fingerprint(raw_path)? == Some(cached_fingerprint);
+    let fresh = desktop_sidecar_fingerprint(raw_path)?
+        .map(|fingerprint| fingerprint ^ DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT)
+        == Some(cached_fingerprint);
     remove_legacy_developed_thumbnail_cache(raw_path);
     Ok(fresh)
 }
@@ -433,7 +437,7 @@ pub fn save_developed_thumbnail_cache(
     })?;
     atomic_write(
         &fingerprint_path,
-        format!("{expected_sidecar_fingerprint:016x}\n").as_bytes(),
+        format!("{:016x}\n", expected_sidecar_fingerprint ^ DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT).as_bytes(),
     )
     .map_err(|error| {
         format!(

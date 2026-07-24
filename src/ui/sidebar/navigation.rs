@@ -11,6 +11,7 @@ impl Sidebar {
         ui.set_max_width(content_width);
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
 
+        let previous_sidebar_tab = app.sidebar_tab;
         egui::ScrollArea::horizontal()
             .id_salt("develop-sidebar-tabs")
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -27,6 +28,11 @@ impl Sidebar {
                     }
                 });
             });
+        if previous_sidebar_tab == SidebarTab::Crop && app.sidebar_tab != SidebarTab::Crop {
+            app.crop_drag = None;
+            app.straighten_tool_active = false;
+            app.straighten_drag = None;
+        }
         ui.add_space(2.0);
         ui.separator();
 

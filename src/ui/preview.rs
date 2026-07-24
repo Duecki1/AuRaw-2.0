@@ -1,4 +1,7 @@
-use crate::app::{AurawApp, CropDragState, CropHandle, MaskDragState, MaskOverlayBlink, SidebarTab};
+use crate::app::{
+    AurawApp, CropDragState, CropHandle, MaskDragState, MaskOverlayBlink, SidebarTab,
+    StraightenDragState,
+};
 use crate::pipeline::{
     rasterize_inpaint_dabs_binary, BrushDab, BrushMode, GeometryTransform, MaskCombineMode,
     MaskGeometry, MaskKind, ObjectStroke,
@@ -163,6 +166,7 @@ impl Preview {
                 app.cancel_mask_touch_gesture();
             } else if app.sidebar_tab == SidebarTab::Crop {
                 app.crop_drag = None;
+                app.straighten_drag = None;
             } else if app.sidebar_tab == SidebarTab::Inpainting {
                 app.inpaint_stroke.clear();
                 app.last_inpaint_brush_point = None;
@@ -467,6 +471,73 @@ impl Preview {
         let primary_released = ui.input(|input| input.pointer.primary_released());
         let quarter_turns = app.geometry.quarter_turns % 4;
 
+        if app.straighten_tool_active {
+            if primary_pressed {
+                if let Some(pointer) = pointer.filter(|point| image_rect.contains(*point)) {
+                    let uv = crop_workspace_screen_to_source(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        pointer,
+                    );
+                    if source_uv_inside_image(uv) {
+                        app.straighten_drag = Some(StraightenDragState {
+                            start: pointer,
+                            current: pointer,
+                        });
+                        app.crop_drag = None;
+                    }
+                }
+            }
+            if primary_down {
+                if let (Some(pointer), Some(mut drag)) = (pointer, app.straighten_drag) {
+                    let uv = crop_workspace_screen_to_source(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        pointer,
+                    );
+                    if source_uv_inside_image(uv) {
+                        drag.current = pointer;
+                        app.straighten_drag = Some(drag);
+                    }
+                }
+            }
+            if primary_released {
+                if let Some(drag) = app.straighten_drag.take() {
+                    let delta = drag.current - drag.start;
+                    if delta.length() >= 12.0 {
+                        let angle = delta.y.atan2(delta.x).to_degrees();
+                        let target = nearest_straight_axis_degrees(angle);
+                        let correction = normalize_degrees(target - angle);
+                        let previous = app.geometry.rotation_degrees;
+                        app.geometry.rotation_degrees =
+                            (previous + correction).clamp(-45.0, 45.0);
+                        if (app.geometry.rotation_degrees - previous).abs() > 1e-4 {
+                            let reference = if let Some(reference) = app.crop_constraint_reference {
+                                reference
+                            } else {
+                                let reference = app.geometry.crop;
+                                app.crop_constraint_reference = Some(reference);
+                                reference
+                            };
+                            app.geometry.crop = reference;
+                            app.geometry.fit_crop_inside_transformed_source(
+                                source_width,
+                                source_height,
+                            );
+                            app.note_geometry_changed();
+                        }
+                    }
+                }
+            } else if !primary_down {
+                app.straighten_drag = None;
+            }
+            return;
+        }
+
         if primary_pressed {
             if let Some(pointer) = pointer.filter(|point| image_rect.expand(28.0).contains(*point)) {
                 let display_crop_rect = crop_preview_screen_rect(
@@ -542,8 +613,22 @@ impl Preview {
                         constrain_crop_aspect(app, crop, drag.handle)
                     };
                 }
+                // Do not merely clip the crop overlay against the rotated
+                // image. Clamp the actual crop rectangle to the last valid drag
+                // position so all four white crop corners remain over source
+                // pixels and the exported frame contains no pasteboard.
+                crop = app.geometry.constrain_crop_drag_to_transformed_source(
+                    drag.crop,
+                    crop,
+                    source_width,
+                    source_height,
+                );
                 if crop != app.geometry.crop {
                     app.geometry.crop = crop;
+                    // A manual crop becomes the new user intent. Future
+                    // straighten changes may auto-fit from this rectangle, but
+                    // must never expand beyond it.
+                    app.crop_constraint_reference = Some(crop);
                     app.note_geometry_changed();
                 }
             }
@@ -573,6 +658,17 @@ impl Preview {
         if visible_crop.width() <= 0.0 || visible_crop.height() <= 0.0 {
             return;
         }
+        // Keep the crop mask on top of real image pixels only. Fine rotation
+        // and keystone can expose pasteboard inside the Crop workspace; shading
+        // that pasteboard makes the overlay look as if it extends beyond the
+        // photograph. Clip each outside-crop band against the transformed full-
+        // image quadrilateral instead.
+        let image_polygon = crop_workspace_image_polygon(
+            image_rect,
+            app.geometry,
+            source_width,
+            source_height,
+        );
         let shade = Color32::from_black_alpha(150);
         for rect in [
             Rect::from_min_max(
@@ -592,28 +688,75 @@ impl Preview {
                 Pos2::new(visible_rect.right(), visible_crop.bottom()),
             ),
         ] {
-            if rect.width() > 0.0 && rect.height() > 0.0 {
-                painter.rect_filled(rect, 0.0, shade);
+            let rect = rect.intersect(visible_rect);
+            if rect.width() <= 0.0 || rect.height() <= 0.0 {
+                continue;
+            }
+            let clipped = clip_polygon_to_rect(&image_polygon, rect);
+            if clipped.len() >= 3 {
+                painter.add(Shape::convex_polygon(
+                    clipped,
+                    shade,
+                    Stroke::new(0.0, Color32::TRANSPARENT),
+                ));
             }
         }
 
-        painter.rect_stroke(crop_rect, 0.0, Stroke::new(2.0, Color32::WHITE), egui::StrokeKind::Inside);
+        let border_stroke = Stroke::new(2.0, Color32::WHITE);
+        for (a, b) in crop_rect_segments(crop_rect) {
+            if let Some([a, b]) = clip_crop_workspace_segment_to_source_image(
+                image_rect,
+                app.geometry,
+                source_width,
+                source_height,
+                a,
+                b,
+            ) {
+                painter.line_segment([a, b], border_stroke);
+            }
+        }
         for fraction in [1.0 / 3.0, 2.0 / 3.0] {
             let x = egui::lerp(crop_rect.left()..=crop_rect.right(), fraction);
             let y = egui::lerp(crop_rect.top()..=crop_rect.bottom(), fraction);
-            painter.line_segment(
-                [Pos2::new(x, crop_rect.top()), Pos2::new(x, crop_rect.bottom())],
-                Stroke::new(1.0, Color32::from_white_alpha(115)),
-            );
-            painter.line_segment(
-                [Pos2::new(crop_rect.left(), y), Pos2::new(crop_rect.right(), y)],
-                Stroke::new(1.0, Color32::from_white_alpha(115)),
-            );
+            for (a, b) in [
+                (Pos2::new(x, crop_rect.top()), Pos2::new(x, crop_rect.bottom())),
+                (Pos2::new(crop_rect.left(), y), Pos2::new(crop_rect.right(), y)),
+            ] {
+                if let Some([a, b]) = clip_crop_workspace_segment_to_source_image(
+                    image_rect,
+                    app.geometry,
+                    source_width,
+                    source_height,
+                    a,
+                    b,
+                ) {
+                    painter.line_segment(
+                        [a, b],
+                        Stroke::new(1.0, Color32::from_white_alpha(115)),
+                    );
+                }
+            }
         }
 
         for point in crop_handle_points(crop_rect) {
-            painter.circle_filled(point, 5.5, Color32::WHITE);
-            painter.circle_stroke(point, 7.5, Stroke::new(1.5, Color32::BLACK));
+            let uv = crop_workspace_screen_to_source(
+                image_rect,
+                app.geometry,
+                source_width,
+                source_height,
+                point,
+            );
+            if source_uv_inside_image(uv) {
+                painter.circle_filled(point, 5.5, Color32::WHITE);
+                painter.circle_stroke(point, 7.5, Stroke::new(1.5, Color32::BLACK));
+            }
+        }
+
+        if let Some(line) = app.straighten_drag {
+            let stroke = Stroke::new(2.0, Color32::WHITE);
+            painter.line_segment([line.start, line.current], stroke);
+            painter.circle_filled(line.start, 4.0, Color32::WHITE);
+            painter.circle_filled(line.current, 4.0, Color32::WHITE);
         }
     }
 
@@ -2730,6 +2873,212 @@ fn crop_preview_pointer_to_source_normalized(
         [canvas_uv[0] * canvas_width, canvas_uv[1] * canvas_height],
     );
     [source_point[0] / source_width_f, source_point[1] / source_height_f]
+}
+
+
+fn source_uv_inside_image(uv: [f32; 2]) -> bool {
+    const EPSILON: f32 = 1e-4;
+    uv[0].is_finite()
+        && uv[1].is_finite()
+        && uv[0] >= -EPSILON
+        && uv[0] <= 1.0 + EPSILON
+        && uv[1] >= -EPSILON
+        && uv[1] <= 1.0 + EPSILON
+}
+
+fn normalize_degrees(mut degrees: f32) -> f32 {
+    while degrees > 180.0 {
+        degrees -= 360.0;
+    }
+    while degrees <= -180.0 {
+        degrees += 360.0;
+    }
+    degrees
+}
+
+fn nearest_straight_axis_degrees(angle: f32) -> f32 {
+    // Pick the nearest horizontal or vertical axis. Drawing left-to-right or
+    // right-to-left therefore produces the same correction, as does either
+    // direction along a vertical edge.
+    (angle / 90.0).round() * 90.0
+}
+
+fn crop_workspace_image_polygon(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+) -> Vec<Pos2> {
+    [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+        .into_iter()
+        .map(|uv| {
+            crop_workspace_source_to_screen(
+                image_rect,
+                geometry,
+                source_width,
+                source_height,
+                uv,
+            )
+        })
+        .collect()
+}
+
+fn clip_polygon_to_rect(polygon: &[Pos2], rect: Rect) -> Vec<Pos2> {
+    fn clip_axis(
+        input: &[Pos2],
+        inside: impl Fn(Pos2) -> bool,
+        intersect: impl Fn(Pos2, Pos2) -> Pos2,
+    ) -> Vec<Pos2> {
+        if input.is_empty() {
+            return Vec::new();
+        }
+        let mut output = Vec::with_capacity(input.len() + 4);
+        let mut previous = *input.last().unwrap();
+        let mut previous_inside = inside(previous);
+        for &current in input {
+            let current_inside = inside(current);
+            if current_inside != previous_inside {
+                output.push(intersect(previous, current));
+            }
+            if current_inside {
+                output.push(current);
+            }
+            previous = current;
+            previous_inside = current_inside;
+        }
+        output
+    }
+
+    let mut output = polygon.to_vec();
+    let left = rect.left();
+    output = clip_axis(
+        &output,
+        |p| p.x >= left,
+        |a, b| {
+            let denom = b.x - a.x;
+            let t = if denom.abs() <= f32::EPSILON {
+                0.0
+            } else {
+                (left - a.x) / denom
+            };
+            Pos2::new(left, a.y + (b.y - a.y) * t)
+        },
+    );
+    let right = rect.right();
+    output = clip_axis(
+        &output,
+        |p| p.x <= right,
+        |a, b| {
+            let denom = b.x - a.x;
+            let t = if denom.abs() <= f32::EPSILON { 0.0 } else { (right - a.x) / denom };
+            Pos2::new(right, a.y + (b.y - a.y) * t)
+        },
+    );
+    let top = rect.top();
+    output = clip_axis(
+        &output,
+        |p| p.y >= top,
+        |a, b| {
+            let denom = b.y - a.y;
+            let t = if denom.abs() <= f32::EPSILON { 0.0 } else { (top - a.y) / denom };
+            Pos2::new(a.x + (b.x - a.x) * t, top)
+        },
+    );
+    let bottom = rect.bottom();
+    clip_axis(
+        &output,
+        |p| p.y <= bottom,
+        |a, b| {
+            let denom = b.y - a.y;
+            let t = if denom.abs() <= f32::EPSILON { 0.0 } else { (bottom - a.y) / denom };
+            Pos2::new(a.x + (b.x - a.x) * t, bottom)
+        },
+    )
+}
+
+fn crop_rect_segments(rect: Rect) -> [(Pos2, Pos2); 4] {
+    [
+        (rect.left_top(), rect.right_top()),
+        (rect.right_top(), rect.right_bottom()),
+        (rect.right_bottom(), rect.left_bottom()),
+        (rect.left_bottom(), rect.left_top()),
+    ]
+}
+
+fn liang_barsky_clip_test(p: f32, q: f32, t0: &mut f32, t1: &mut f32) -> bool {
+    if p.abs() <= f32::EPSILON {
+        return q >= 0.0;
+    }
+    let r = q / p;
+    if p < 0.0 {
+        if r > *t1 {
+            return false;
+        }
+        if r > *t0 {
+            *t0 = r;
+        }
+    } else {
+        if r < *t0 {
+            return false;
+        }
+        if r < *t1 {
+            *t1 = r;
+        }
+    }
+    true
+}
+
+fn clip_crop_workspace_segment_to_source_image(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    a: Pos2,
+    b: Pos2,
+) -> Option<[Pos2; 2]> {
+    let start = crop_workspace_screen_to_source(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        a,
+    );
+    let end = crop_workspace_screen_to_source(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        b,
+    );
+    let delta = [end[0] - start[0], end[1] - start[1]];
+    let mut t0 = 0.0_f32;
+    let mut t1 = 1.0_f32;
+    if !liang_barsky_clip_test(-delta[0], start[0], &mut t0, &mut t1)
+        || !liang_barsky_clip_test(delta[0], 1.0 - start[0], &mut t0, &mut t1)
+        || !liang_barsky_clip_test(-delta[1], start[1], &mut t0, &mut t1)
+        || !liang_barsky_clip_test(delta[1], 1.0 - start[1], &mut t0, &mut t1)
+        || t1 < t0
+    {
+        return None;
+    }
+    let source_a = [start[0] + delta[0] * t0, start[1] + delta[1] * t0];
+    let source_b = [start[0] + delta[0] * t1, start[1] + delta[1] * t1];
+    Some([
+        crop_workspace_source_to_screen(
+            image_rect,
+            geometry,
+            source_width,
+            source_height,
+            source_a,
+        ),
+        crop_workspace_source_to_screen(
+            image_rect,
+            geometry,
+            source_width,
+            source_height,
+            source_b,
+        ),
+    ])
 }
 
 fn crop_handle_points(rect: Rect) -> [Pos2; 8] {

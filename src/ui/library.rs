@@ -1246,6 +1246,7 @@ fn render_uncached_developed_thumbnail(
     };
 
     let edits = loaded_sidecar.edits;
+    let geometry = edits.geometry;
     if edits.lens.enabled {
         let catalog = lensfun_catalog(&preview_raw);
         let selected = catalog
@@ -1334,6 +1335,7 @@ fn render_uncached_developed_thumbnail(
         .output_snapshot()
         .read_thumbnail_blocking(&gpu.device, &gpu.queue, maximum_edge)
         .map_err(|error| format!("could not read edited thumbnail pixels: {error:#}"))?;
+    let thumbnail = crate::pipeline::transform_thumbnail_geometry(&thumbnail, geometry);
     crate::sidecar::save_developed_thumbnail_cache(path, &thumbnail, sidecar_fingerprint)?;
     Ok(Some(thumbnail))
 }
@@ -1405,15 +1407,26 @@ fn load_android_library_thumbnail(
             "could not use Android developed-thumbnail cache for {display_name}: {error}"
         ),
     }
-    crate::android::load_library_thumbnail(
+    let mut thumbnail = crate::android::load_library_thumbnail(
         app,
         uri,
         display_name,
         *bytes,
         *modified_seconds,
         THUMBNAIL_EDGE,
-    )
-    .map(|thumbnail| loaded_library_thumbnail(thumbnail, false))
+    )?;
+    // Android cannot headlessly rebuild all adjustments while browsing the
+    // library, but geometry is cheap and important for composition. Apply the
+    // saved crop/orientation even when a developed cache has not been captured
+    // yet; opening/saving the image later replaces this with the fully developed
+    // geometry-aware thumbnail.
+    if let Ok(Some(sidecar)) = crate::sidecar::load_android(app, uri, display_name) {
+        thumbnail = crate::pipeline::transform_thumbnail_geometry(
+            &thumbnail,
+            sidecar.edits.geometry,
+        );
+    }
+    Ok(loaded_library_thumbnail(thumbnail, false))
 }
 
 fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize, load: ThumbnailLoader) {
