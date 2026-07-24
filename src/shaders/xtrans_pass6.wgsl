@@ -65,5 +65,5 @@ fn xtrans_markesteijn_accumulate(@builtin(global_invocation_id) gid: vec3<u32>) 
         measured_channel,
         mark_component(mark_load(pos), measured_channel),
     );
-    textureStore(mark_high_write, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+    textureStore(mark_high_write, pos, vec4<f32>(rgb, 1.0));
 }

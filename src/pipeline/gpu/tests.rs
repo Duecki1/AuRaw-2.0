@@ -461,6 +461,53 @@ fn adjustments_shader_contains_darktable_sigmoid_paths() {
 }
 
 #[test]
+fn signed_scene_rgb_is_preserved_until_explicit_positive_domain_boundaries() {
+    // Shared projection is used only where a positive/unit RGB domain is part
+    // of the algorithm contract; scene intermediates must not floor channels.
+    assert!(SHADER_ADJUSTMENTS.contains("fn gamut_project_nonnegative("));
+    assert!(SHADER_ADJUSTMENTS.contains("fn gamut_project_unit("));
+    assert!(SHADER_ADJUSTMENTS.contains(
+        "let view_input = gamut_project_nonnegative_rec2020(looked)"
+    ));
+    assert!(SHADER_ADJUSTMENTS.contains("let mapped = gamut_project_unit_rec2020(rgb)"));
+
+    for forbidden in [
+        "max(REC2020_TO_PROPHOTO *",
+        "linear_srgb_to_oklab(REC2020_TO_SRGB * max(rgb",
+        "return max(adjusted, vec3<f32>(0.0))",
+        "vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0)",
+        "let view_input = max(map_negative_gamut",
+    ] {
+        assert!(
+            !SHADER_ADJUSTMENTS.contains(forbidden),
+            "premature RGB floor reintroduced: {forbidden}"
+        );
+    }
+
+    for (name, source) in [
+        ("Bayer pass 2", SHADER_BAYER_RCD_P2),
+        ("Bayer pass 3", SHADER_BAYER_RCD_P3),
+        ("Bayer finish", SHADER_BAYER_RCD_P4),
+        ("X-Trans pass 2", SHADER_XTRANS_P2),
+        ("X-Trans pass 3", SHADER_XTRANS_P3),
+        ("X-Trans accumulation", SHADER_XTRANS_P6),
+        ("X-Trans finish", SHADER_XTRANS_P7),
+    ] {
+        for forbidden in [
+            "max(camera_rgb, vec3<f32>(0.0))",
+            "max(rgb, vec3<f32>(0.0))",
+            "max(out, vec3<f32>(0.0))",
+            "max(green, 0.0)",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{name} reintroduced destructive demosaic flooring: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
 fn adjustments_shader_contains_lightroom_style_controls() {
     assert!(!SHADER_ADJUSTMENTS.contains("apply_camera_temperature_tint"));
     assert!(SHADER_ADJUSTMENTS.contains("bitcast<f32>(params.profile_flags.w)"));

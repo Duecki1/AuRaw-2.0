@@ -141,7 +141,7 @@ fn apply_basic_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
         return rgb;
     }
 
-    let luminance = safe_luma(max(rgb, vec3<f32>(0.0)));
+    let luminance = safe_luma(rgb);
     let scene_ev = log2(luminance / SCENE_MIDDLE_GREY);
 
     // Contrast is a protected S-curve in scene EV rather than a global EV
@@ -305,12 +305,14 @@ fn scene_curve_decode(value: f32) -> f32 {
 }
 
 fn remap_scene_luminance(rgb: vec3<f32>, adjusted_luminance: f32) -> vec3<f32> {
-    let positive = max(rgb, vec3<f32>(0.0));
-    let luminance = max(dot(positive, LUMA), 0.0);
-    let chromaticity = positive / max(luminance, 1e-20);
-    let chroma_weight = smoothstep(1e-7, 1e-5, luminance);
-    let direction = mix(vec3<f32>(1.0), chromaticity, chroma_weight);
-    return direction * max(adjusted_luminance, 0.0);
+    let luminance = dot(rgb, LUMA);
+    let mapped_luminance = max(adjusted_luminance, 0.0);
+    if luminance <= 1e-7 {
+        return vec3<f32>(mapped_luminance);
+    }
+    // One scalar gain keeps signed RGB ratios intact. Near zero luminance the
+    // neutral fallback avoids unstable ratios without flooring channels.
+    return rgb * (mapped_luminance / luminance);
 }
 
 fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
@@ -392,15 +394,10 @@ fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
 }
 
 fn desaturate_negative_values(rgb: vec3<f32>) -> vec3<f32> {
-    let pixel_average = max((rgb.r + rgb.g + rgb.b) / 3.0, 0.0);
-    let min_value = min(rgb.r, min(rgb.g, rgb.b));
-    let saturation_factor = select(
-        1.0,
-        -pixel_average / (min_value - pixel_average),
-        min_value < 0.0,
-    );
-    return vec3<f32>(pixel_average)
-        + saturation_factor * (rgb - vec3<f32>(pixel_average));
+    // Sigmoid variants require a positive domain. Use the same lightness- and
+    // hue-direction-preserving projection as the rest of the render graph so
+    // this safety boundary is explicit and consistent.
+    return gamut_project_nonnegative_rec2020(rgb);
 }
 
 // Returns min, mid, max channel indices, matching darktable's seven cases.

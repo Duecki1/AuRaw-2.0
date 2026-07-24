@@ -105,16 +105,6 @@ fn circular_hue_distance(a: f32, b: f32) -> f32 {
     return min(d, 1.0 - d);
 }
 
-fn repair_negative_rec2020(rgb: vec3<f32>) -> vec3<f32> {
-    let neutral = vec3<f32>(max(dot(rgb, LUMA), 0.0));
-    let chroma = rgb - neutral;
-    var scale = 1.0;
-    if chroma.r < 0.0 { scale = min(scale, neutral.r / max(-chroma.r, 1e-9)); }
-    if chroma.g < 0.0 { scale = min(scale, neutral.g / max(-chroma.g, 1e-9)); }
-    if chroma.b < 0.0 { scale = min(scale, neutral.b / max(-chroma.b, 1e-9)); }
-    return neutral + chroma * clamp(scale, 0.0, 1.0);
-}
-
 fn perceptual_control(value: f32) -> f32 {
     let normalized = clamp(value / 100.0, -1.0, 1.0);
     let magnitude = abs(normalized);
@@ -129,7 +119,7 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
         return rgb;
     }
 
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * max(rgb, vec3<f32>(0.0)));
+    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
     let chroma = length(lab.yz);
     if chroma < 1e-9 {
         return rgb;
@@ -172,7 +162,7 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
 
     let chroma_factor = clamp(saturation_factor * vibrance_factor, 0.0, 4.0);
     let adjusted = vec3<f32>(lab.x, lab.yz * chroma_factor);
-    return repair_negative_rec2020(SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted));
+    return SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted);
 }
 
 fn apply_saturation_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
@@ -180,11 +170,11 @@ fn apply_saturation_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     if abs(saturation) < 1e-6 {
         return rgb;
     }
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * max(rgb, vec3<f32>(0.0)));
+    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
     var factor = max(1.0 + saturation, 0.0);
     if saturation > 0.0 {
         factor = exp2(saturation * 1.24);
     }
     let adjusted = vec3<f32>(lab.x, lab.yz * factor);
-    return repair_negative_rec2020(SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted));
+    return SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted);
 }
