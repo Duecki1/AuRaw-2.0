@@ -647,6 +647,7 @@ mod imp {
             focal_length: raw.focal_length,
             aperture: raw.aperture,
             focus_distance: raw.focus_distance,
+            capture_metadata: raw.capture_metadata.clone(),
             cfa_kind: raw.cfa_kind,
             raw_pixels,
             color_indices: raw.color_indices.clone(),

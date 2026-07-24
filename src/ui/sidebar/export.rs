@@ -87,7 +87,7 @@ pub(crate) fn export_settings_controls(
         ui.strong("Metadata");
         ui.checkbox(&mut settings.keep_metadata, "Keep metadata")
             .on_hover_text(
-                "Embeds available camera, source-file, original-size, software, and orientation metadata in the exported image.",
+                "Embeds available source, camera, lens, exposure, creator, original-size, software, and normalized-orientation metadata in the exported image.",
             );
     });
 

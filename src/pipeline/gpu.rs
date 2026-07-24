@@ -1257,6 +1257,7 @@ impl RawGpuPipeline {
             focal_length: 0.0,
             aperture: 0.0,
             focus_distance: 0.0,
+            capture_metadata: Default::default(),
             cfa_kind,
             raw_pixels: vec![0u16; pixels],
             color_indices: crate::pipeline::CompactPixelMap::repeating(

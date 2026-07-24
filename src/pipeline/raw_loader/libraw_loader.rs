@@ -1279,6 +1279,12 @@ unsafe fn loaded_raw_from_context(
         focal_length: finite_positive_or_zero(other.focal_len),
         aperture: finite_positive_or_zero(other.aperture),
         focus_distance: 0.0,
+        capture_metadata: super::CaptureMetadata {
+            iso_speed: finite_positive_or_zero(other.iso_speed),
+            shutter_seconds: finite_positive_or_zero(other.shutter),
+            description: c_array_to_string(&other.desc),
+            artist: c_array_to_string(&other.artist),
+        },
         cfa_kind,
         raw_pixels,
         color_indices,
