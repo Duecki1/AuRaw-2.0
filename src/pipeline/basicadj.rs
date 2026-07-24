@@ -1,3 +1,4 @@
+use super::noise::DenoiseQuality;
 use super::sigmoid::SigmoidParams;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -191,7 +192,10 @@ pub const LEGACY_SCENE_DISPLAY_PROCESS_VERSION: u32 = 12;
 /// Process 13 establishes explicit camera-characterization -> scene-edit ->
 /// optional-look -> single-view-transform domain boundaries.
 pub const SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13;
-pub const CURRENT_PROCESS_VERSION: u32 = SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION;
+/// Process 14 adds sensor-profiled multiscale denoise while retaining the
+/// process-13 scene/display graph unchanged.
+pub const SENSOR_DENOISE_PROCESS_VERSION: u32 = 14;
+pub const CURRENT_PROCESS_VERSION: u32 = SENSOR_DENOISE_PROCESS_VERSION;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -231,6 +235,16 @@ pub struct ExposureParams {
     pub tone_curve_green: PointCurve,
     pub tone_curve_blue: PointCurve,
     pub chroma_denoise: f32,
+    /// Sensor-profiled camera-linear luminance noise reduction, 0..100.
+    #[serde(default)]
+    pub luminance_denoise: f32,
+    /// Detail protection for sensor-profiled denoise, 0..100. Higher values
+    /// reject cross-edge samples more aggressively.
+    #[serde(default = "default_denoise_detail")]
+    pub denoise_detail: f32,
+    /// Tap budget / scale count for the multiscale denoise stage.
+    #[serde(default)]
+    pub denoise_quality: DenoiseQuality,
     /// Demosaic finishing mode. The reference algorithm is always run first.
     pub demosaic_mode: DemosaicMode,
     /// Detail threshold in darktable-compatible 0..100 units for dual mode.
@@ -313,8 +327,9 @@ impl ExposureParams {
         // Process 13 intentionally does *not* auto-upgrade process-12 edits:
         // reordering profile tone/look around scene controls is appearance
         // changing and cannot be represented by a scalar parameter migration.
-        // New edits start at CURRENT_PROCESS_VERSION; old edits keep rendering
-        // with process 12 until an explicit user-facing conversion exists.
+        // Process 14 retains the process-13 graph and changes only denoise. New
+        // edits start at CURRENT_PROCESS_VERSION; saved process-12/13 edits keep
+        // their renderer until the user explicitly opts into a compatible change.
         match self.process_version {
             0..=7 => {
                 self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
@@ -326,7 +341,9 @@ impl ExposureParams {
             10 | 11 => {
                 self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
             }
-            LEGACY_SCENE_DISPLAY_PROCESS_VERSION | CURRENT_PROCESS_VERSION => {}
+            LEGACY_SCENE_DISPLAY_PROCESS_VERSION
+            | SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION
+            | CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently
             // reinterpret them with older formulas.
@@ -370,6 +387,9 @@ impl Default for ExposureParams {
             tone_curve_green: PointCurve::linear(),
             tone_curve_blue: PointCurve::linear(),
             chroma_denoise: 0.0,
+            luminance_denoise: 0.0,
+            denoise_detail: default_denoise_detail(),
+            denoise_quality: DenoiseQuality::default(),
             demosaic_mode: DemosaicMode::Reference,
             dual_threshold: 20.0,
             frequency_chroma: 1.0,
@@ -405,6 +425,10 @@ impl Default for ExposureParams {
             color_grading: ColorGrading::default(),
         }
     }
+}
+
+const fn default_denoise_detail() -> f32 {
+    50.0
 }
 
 const fn default_sharpen_amount() -> f32 {

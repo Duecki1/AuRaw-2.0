@@ -3,6 +3,7 @@ use super::{
     CameraProfileMode, CameraWhiteBalanceModel, CfaKind, CompactPixelMap, DngColorEndpoint, LoadedRaw, RawThumbnail,
     MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
 };
+use super::super::noise::NoiseProfile;
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
 use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
@@ -1262,6 +1263,19 @@ unsafe fn loaded_raw_from_context(
         white_levels(color.maximum, linear_max, physical_black_levels),
         cfa_map,
     );
+    let noise_profile = NoiseProfile::estimate(
+        width,
+        height,
+        &raw_pixels,
+        &color_indices,
+        &black_levels_per_pixel,
+        white_levels,
+        finite_positive_or_zero(other.iso_speed),
+        match cfa_kind {
+            CfaKind::Bayer => 2,
+            CfaKind::XTrans => 6,
+        },
+    );
 
     let mut camera_profile = dcp_profile
         .map(|profile| CameraProfile::from_dcp(profile, profile_weight))
@@ -1310,6 +1324,7 @@ unsafe fn loaded_raw_from_context(
         black_levels,
         black_levels_per_pixel,
         white_levels,
+        noise_profile,
         camera_profile,
         camera_profile_source: None,
         available_camera_profiles: Vec::new(),

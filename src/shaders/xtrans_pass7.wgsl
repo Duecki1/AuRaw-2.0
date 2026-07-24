@@ -254,7 +254,7 @@ fn xt_apply_ca(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return out;
 }
 
-fn xt_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+fn xt_legacy_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let strength = clamp(params.chroma_denoise, 0.0, 1.0);
     if strength <= 1e-6 { return rgb; }
     var sum = vec2<f32>(0.0);
@@ -274,6 +274,48 @@ fn xt_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(rgb.g + chroma.x, rgb.g, rgb.g + chroma.y);
 }
 
+fn xt_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    let luma_strength = clamp(params.noise_options.x, 0.0, 1.0);
+    let chroma_strength = clamp(params.chroma_denoise, 0.0, 1.0);
+    if luma_strength <= 1e-6 && chroma_strength <= 1e-6 { return rgb; }
+
+    let center_y = nr_luma(rgb);
+    let center_uv = nr_chroma(rgb);
+    let center_variance = nr_component_variance(rgb);
+    var luma_sum = center_y;
+    var luma_weights = 1.0;
+    var chroma_sum = center_uv;
+    var chroma_weights = 1.0;
+
+    let scale_count = nr_scale_count();
+    for (var scale = 0; scale < 3; scale = scale + 1) {
+        if scale >= scale_count { break; }
+        let radius = nr_scale_radius(scale);
+        for (var direction_index = 0; direction_index < 8; direction_index = direction_index + 1) {
+            let direction = NR_DIRECTIONS[direction_index];
+            let sample = xt_high(pos + direction * radius);
+            let spatial = nr_scale_spatial_weight(radius, direction);
+            let sample_y = nr_luma(sample);
+            let sample_uv = nr_chroma(sample);
+            let sample_variance = nr_component_variance(sample);
+            let range_weights = nr_range_weights(
+                center_y,
+                center_uv,
+                center_variance,
+                sample_y,
+                sample_uv,
+                sample_variance,
+                spatial,
+            );
+            luma_sum += sample_y * range_weights.x;
+            luma_weights += range_weights.x;
+            chroma_sum += sample_uv * range_weights.y;
+            chroma_weights += range_weights.y;
+        }
+    }
+    return nr_finish(rgb, luma_sum, luma_weights, chroma_sum, chroma_weights);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_demosaic_finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
@@ -287,7 +329,13 @@ fn xtrans_demosaic_finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         camera_rgb = xt_reference_false_color_guard(pos, reference);
     }
-    camera_rgb = xt_apply_ca(pos, camera_rgb);
-    camera_rgb = xt_chroma_denoise(pos, camera_rgb);
+    if params.process_info.x >= SENSOR_DENOISE_PROCESS_VERSION || params.noise_options.x > 1e-6 {
+        camera_rgb = xt_sensor_denoise(pos, camera_rgb);
+        camera_rgb = xt_apply_ca(pos, camera_rgb);
+    } else {
+        // Preserve process-13-and-earlier chroma-NR rendering for existing edits.
+        camera_rgb = xt_apply_ca(pos, camera_rgb);
+        camera_rgb = xt_legacy_chroma_denoise(pos, camera_rgb);
+    }
     textureStore(xtrans_scene_write, pos, vec4<f32>(camera_rgb, 1.0));
 }

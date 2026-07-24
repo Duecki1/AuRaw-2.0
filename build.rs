@@ -8,6 +8,7 @@ fn main() {
         "src/shaders/common.wgsl",
         "src/shaders/profile.wgsl",
         "src/shaders/raw_sampling.wgsl",
+        "src/shaders/noise.wgsl",
         "src/shaders/color.wgsl",
         "src/shaders/highlights.wgsl",
         "src/shaders/highlight_lch_pass.wgsl",

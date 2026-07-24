@@ -1316,6 +1316,8 @@ fn validate_exposure(exposure: &ExposureParams) -> Result<(), SidecarError> {
             exposure.saturation,
             exposure.vibrance,
             exposure.chroma_denoise,
+            exposure.luminance_denoise,
+            exposure.denoise_detail,
             exposure.dual_threshold,
             exposure.frequency_chroma,
             exposure.ca_red,
@@ -1481,7 +1483,10 @@ fn invalid<T>(message: &str) -> Result<T, SidecarError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{MaskKind, CURRENT_PROCESS_VERSION, LEGACY_SCENE_DISPLAY_PROCESS_VERSION};
+    use crate::pipeline::{
+        MaskKind, CURRENT_PROCESS_VERSION, LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
+        SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_edits() -> EditState {
@@ -1764,11 +1769,11 @@ mod tests {
     #[test]
     fn old_processing_state_is_migrated_deliberately() {
         let mut edits = sample_edits();
-        edits.exposure.process_version = CURRENT_PROCESS_VERSION - 1;
+        edits.exposure.process_version = 11;
         let value = serde_json::to_vec(&SidecarDocument {
             format: SIDECAR_FORMAT.to_owned(),
             schema_version: 0,
-            process_version: CURRENT_PROCESS_VERSION - 1,
+            process_version: 11,
             edits,
         })
         .unwrap();
@@ -1778,6 +1783,26 @@ mod tests {
             LEGACY_SCENE_DISPLAY_PROCESS_VERSION
         );
         assert!(loaded.migrated);
+    }
+
+    #[test]
+    fn process_thirteen_sidecars_keep_their_saved_denoise_rendering() {
+        let mut edits = sample_edits();
+        edits.exposure.process_version = SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION;
+        edits.exposure.chroma_denoise = 0.6;
+        let value = serde_json::to_vec(&SidecarDocument {
+            format: SIDECAR_FORMAT.to_owned(),
+            schema_version: SIDECAR_SCHEMA_VERSION,
+            process_version: SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
+            edits,
+        })
+        .unwrap();
+        let loaded = decode(&value).unwrap();
+        assert_eq!(
+            loaded.edits.exposure.process_version,
+            SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION
+        );
+        assert!(!loaded.migrated);
     }
 
     #[test]

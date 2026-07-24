@@ -665,6 +665,7 @@ mod imp {
                 )
             },
             white_levels: raw.white_levels,
+            noise_profile: raw.noise_profile,
             camera_profile: raw.camera_profile.clone(),
             camera_profile_source: raw.camera_profile_source.clone(),
             available_camera_profiles: raw.available_camera_profiles.clone(),

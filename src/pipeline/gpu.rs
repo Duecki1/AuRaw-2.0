@@ -22,8 +22,8 @@ use resources::*;
 #[cfg(test)]
 mod tests;
 
-const GPU_PARAMS_ABI_VERSION: u32 = 2;
-const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 25_056;
+const GPU_PARAMS_ABI_VERSION: u32 = 3;
+const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 25_104;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
@@ -199,6 +199,8 @@ const SHADER_BAYER_RCD_P4: &str = concat!(
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
+    include_str!("../shaders/noise.wgsl"),
+    "\n",
     include_str!("../shaders/pass4.wgsl")
 );
 
@@ -268,6 +270,8 @@ const SHADER_XTRANS_P7: &str = concat!(
     include_str!("../shaders/raw_sampling.wgsl"),
     "\n",
     include_str!("../shaders/color.wgsl"),
+    "\n",
+    include_str!("../shaders/noise.wgsl"),
     "\n",
     include_str!("../shaders/xtrans_pass7.wgsl")
 );
@@ -442,6 +446,11 @@ pub struct GpuParams {
     vignette: [f32; 4],
     vignette_options: [f32; 4],
     highlight_options: [f32; 4],
+    // Per-CFA-plane sensor noise model: variance = shot * signal + read.
+    noise_shot: [f32; 4],
+    noise_read: [f32; 4],
+    // Luma strength, detail protection, quality tier, profile confidence.
+    noise_options: [f32; 4],
     tone_curve_0: [f32; 4],
     tone_curve_1: [f32; 4],
     tone_curve_2: [f32; 4],
@@ -922,6 +931,31 @@ impl GpuParams {
                 exposure.highlight_color_adaptation.clamp(0.0, 1.0),
                 0.0,
             ],
+            noise_shot: {
+                let mut coefficients = std::array::from_fn(|channel| {
+                    raw.noise_profile.shot[channel] * raw.wb_coeffs[channel].max(0.0)
+                });
+                if raw.noise_profile.green2_present {
+                    coefficients[1] = 0.5 * (coefficients[1] + coefficients[3]);
+                }
+                coefficients
+            },
+            noise_read: {
+                let mut coefficients = std::array::from_fn(|channel| {
+                    let wb = raw.wb_coeffs[channel].max(0.0);
+                    raw.noise_profile.read[channel] * wb * wb
+                });
+                if raw.noise_profile.green2_present {
+                    coefficients[1] = 0.5 * (coefficients[1] + coefficients[3]);
+                }
+                coefficients
+            },
+            noise_options: [
+                (exposure.luminance_denoise / 100.0).clamp(0.0, 1.0),
+                (exposure.denoise_detail / 100.0).clamp(0.0, 1.0),
+                exposure.denoise_quality.shader_value(),
+                raw.noise_profile.confidence.clamp(0.0, 1.0),
+            ],
             tone_curve_0: [
                 exposure.tone_curve.points[0][0],
                 exposure.tone_curve.points[0][1],
@@ -1355,6 +1389,7 @@ impl RawGpuPipeline {
                 EDGE, EDGE, 1, 1, vec![0.0f32],
             ),
             white_levels: [65535.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: crate::pipeline::CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),

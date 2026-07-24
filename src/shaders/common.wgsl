@@ -39,6 +39,11 @@ struct Params {
     vignette_options: vec4<f32>,
     // Reconstruction method, guided passes, colour adaptation, reserved.
     highlight_options: vec4<f32>,
+    // Per-CFA-plane sensor noise model: variance = shot * signal + read.
+    noise_shot: vec4<f32>,
+    noise_read: vec4<f32>,
+    // Luma strength, detail protection, quality tier, profile confidence.
+    noise_options: vec4<f32>,
     // Eight editable point-curve coordinates, packed as x0,y0,x1,y1.
     tone_curve_0: vec4<f32>,
     tone_curve_1: vec4<f32>,
