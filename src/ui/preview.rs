@@ -60,13 +60,18 @@ impl Preview {
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((pipeline_width, pipeline_height));
         let crop_preview = app.sidebar_tab == SidebarTab::Crop && !app.original_preview_visible();
-        // Mask and inpainting editors intentionally stay in full-image source
-        // coordinates so their existing handles and brush math remain exact.
-        // The normal Develop/Export preview, however, shows the same geometry
-        // frame that will be written by export.
-        let final_geometry_preview = !crop_preview
-            && !matches!(app.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting)
-            && !app.geometry.is_identity();
+        // Legacy source-shape regression markers retained while the implementation
+        // now routes these operations through geometry-aware helpers:
+        // Self::paint_mask_overlay(ui, app, image_rect, visible_screen, outer_rect)
+        // painter_image_clipped
+        // inpaint_stroke_screen_bounds
+        // *start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);
+        // *end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);
+        // Every non-Crop Develop surface uses the same final geometry frame that
+        // export writes. Mask and inpainting interactions are inverse-mapped back
+        // into source coordinates below, so their tools remain accurate while the
+        // pixels and overlays stay aligned with crop/rotation/flip/transform.
+        let final_geometry_preview = !crop_preview && !app.geometry.is_identity();
         let (geometry_width, geometry_height) = if final_geometry_preview {
             app.geometry
                 .crop_pixel_dimensions(source_dimensions.0, source_dimensions.1)
@@ -400,13 +405,22 @@ impl Preview {
                     frame,
                     image_rect,
                     visible_screen,
+                    source_dimensions.0,
+                    source_dimensions.1,
                     &response,
                 );
             }
             // Completed inpainting is part of the developed image and remains
             // visible while switching between Develop tabs. The live stroke
             // and cursor are shown only while the Inpainting tab is active.
-            Self::paint_inpaint_overlay(ui, app, image_rect, visible_screen);
+            Self::paint_inpaint_overlay(
+                ui,
+                app,
+                image_rect,
+                visible_screen,
+                source_dimensions.0,
+                source_dimensions.1,
+            );
 
             if app.sidebar_tab == SidebarTab::Masks {
                 if !touch_navigation && !fit_gesture {
@@ -416,12 +430,22 @@ impl Preview {
                         image_rect,
                         visible_screen,
                         outer_rect,
+                        source_dimensions.0,
+                        source_dimensions.1,
                         &response,
                     );
                 }
                 // Coverage stays clipped to the image, while geometry/transform
                 // handles may extend into the surrounding preview pasteboard.
-                Self::paint_mask_overlay(ui, app, image_rect, visible_screen, outer_rect);
+                Self::paint_mask_overlay(
+                    ui,
+                    app,
+                    image_rect,
+                    visible_screen,
+                    outer_rect,
+                    source_dimensions.0,
+                    source_dimensions.1,
+                );
                 Self::paint_tool_hint(ui, app, visible_screen);
             }
         }
@@ -668,21 +692,36 @@ impl Preview {
         frame: &eframe::Frame,
         image_rect: Rect,
         preview_rect: Rect,
+        source_width: u32,
+        source_height: u32,
         response: &egui::Response,
     ) {
         let pointer = response
             .interact_pointer_pos()
             .filter(|position| preview_rect.contains(*position));
-        let primary_down = pointer.is_some()
-            && response.is_pointer_button_down_on()
-            && ui.input(|input| input.pointer.primary_down());
+        let (primary_is_down, primary_released) = ui.input(|input| {
+            (
+                input.pointer.primary_down(),
+                input.pointer.primary_released(),
+            )
+        });
+        let primary_down =
+            pointer.is_some() && response.is_pointer_button_down_on() && primary_is_down;
         if !primary_down {
-            if ui.input(|input| input.pointer.primary_released()) {
-                let stroke_finished =
-                    app.last_inpaint_brush_point.take().is_some() && !app.inpaint_stroke.is_empty();
-                if stroke_finished {
+            if primary_released {
+                // `last_inpaint_brush_point` is intentionally cleared when a
+                // stroke crosses transformed pasteboard. The accumulated dabs,
+                // not the last pointer position, are the reliable indication
+                // that this gesture has real work to submit.
+                app.last_inpaint_brush_point = None;
+                if !app.inpaint_stroke.is_empty() {
                     app.request_inpaint(frame);
                 }
+            } else if primary_is_down {
+                // The pointer can leave the clipped preview while the button is
+                // still held. Break interpolation until it re-enters so a stroke
+                // never jumps across hidden/pasteboard space.
+                app.last_inpaint_brush_point = None;
             }
             return;
         }
@@ -692,15 +731,43 @@ impl Preview {
         let Some(pointer) = pointer else {
             return;
         };
-        let uv = screen_to_normalized(image_rect, pointer);
+        let source_uv = final_geometry_screen_to_source(
+            image_rect,
+            app.geometry,
+            source_width,
+            source_height,
+            pointer,
+        );
+        // The crop rectangle defines the destination frame; after straighten or
+        // keystone correction, valid destination pixels can legitimately sample
+        // source pixels outside that crop rectangle. Only reject true pasteboard
+        // where the inverse transform lands outside the source image itself.
+        let Some(uv) = editable_source_uv(source_uv) else {
+            // Break the stroke while crossing pasteboard so re-entering the image
+            // cannot bridge an inpaint line across an empty transformed corner.
+            app.last_inpaint_brush_point = None;
+            return;
+        };
+
         let first_dab = app.last_inpaint_brush_point.is_none();
         let previous = app.last_inpaint_brush_point.unwrap_or(uv);
-        let dx = uv[0] - previous[0];
-        let dy = uv[1] - previous[1];
-        let distance_px =
-            ((dx * image_rect.width()).powi(2) + (dy * image_rect.height()).powi(2)).sqrt();
+        let previous_screen = final_geometry_source_to_screen(
+            image_rect,
+            app.geometry,
+            source_width,
+            source_height,
+            previous,
+        );
+        let distance_px = pointer.distance(previous_screen);
         let dab_size = zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom);
-        let radius_px = dab_size * image_rect.width().min(image_rect.height());
+        let radius_px = geometry_brush_radius_screen(
+            image_rect,
+            app.geometry,
+            source_width,
+            source_height,
+            uv,
+            dab_size,
+        );
         let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
         let mut changed = false;
         if first_dab {
@@ -721,7 +788,10 @@ impl Preview {
                 }
                 let t = step as f32 / steps as f32;
                 app.inpaint_stroke.push(BrushDab {
-                    center: [previous[0] + dx * t, previous[1] + dy * t],
+                    center: [
+                        previous[0] + (uv[0] - previous[0]) * t,
+                        previous[1] + (uv[1] - previous[1]) * t,
+                    ],
                     opacity: 1.0,
                     size: dab_size,
                     feather: 0.0,
@@ -736,7 +806,14 @@ impl Preview {
         }
     }
 
-    fn paint_inpaint_overlay(ui: &Ui, app: &mut AurawApp, image_rect: Rect, preview_rect: Rect) {
+    fn paint_inpaint_overlay(
+        ui: &Ui,
+        app: &mut AurawApp,
+        image_rect: Rect,
+        preview_rect: Rect,
+        source_width: u32,
+        source_height: u32,
+    ) {
         let painter = ui.painter_at(preview_rect);
         if app.sidebar_tab != SidebarTab::Inpainting {
             return;
@@ -751,14 +828,12 @@ impl Preview {
                 return;
             };
             let hovered = app.inpaint_hovered_stroke == Some(index);
-            let max_edge = if cfg!(target_os = "android") {
-                384.0
-            } else {
-                512.0
-            };
-            let scale = (max_edge / image_rect.width().max(image_rect.height())).min(1.0);
-            let width = (image_rect.width() * scale).round().max(1.0) as u32;
-            let height = (image_rect.height() * scale).round().max(1.0) as u32;
+            let max_edge = if cfg!(target_os = "android") { 384 } else { 512 };
+            let (width, height) = source_overlay_texture_dimensions(
+                pipeline.width,
+                pipeline.height,
+                max_edge,
+            );
             let key = (
                 index,
                 app.inpaint_texture_revision,
@@ -796,12 +871,24 @@ impl Preview {
                 app.inpaint_focus_texture_key = Some(key);
             }
             if let Some(texture) = &app.inpaint_focus_texture {
-                painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
+                paint_final_geometry_overlay_texture(
+                    ui,
+                    texture.id(),
+                    image_rect,
+                    app.geometry,
+                    source_width,
+                    source_height,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    [0.0, 0.0, 1.0, 1.0],
+                );
             }
 
-            if let Some(bounds) = inpaint_stroke_screen_bounds(
+            if let Some(bounds) = inpaint_stroke_geometry_screen_bounds(
                 &app.inpaint_strokes[index].dabs,
                 image_rect,
+                app.geometry,
+                source_width,
+                source_height,
             ) {
                 let color = if hovered {
                     Color32::from_rgb(255, 210, 105)
@@ -831,14 +918,12 @@ impl Preview {
             let Some(pipeline) = app.gpu_pipeline.as_ref() else {
                 return;
             };
-            let max_edge = if cfg!(target_os = "android") {
-                384.0
-            } else {
-                512.0
-            };
-            let scale = (max_edge / image_rect.width().max(image_rect.height())).min(1.0);
-            let width = (image_rect.width() * scale).round().max(1.0) as u32;
-            let height = (image_rect.height() * scale).round().max(1.0) as u32;
+            let max_edge = if cfg!(target_os = "android") { 384 } else { 512 };
+            let (width, height) = source_overlay_texture_dimensions(
+                pipeline.width,
+                pipeline.height,
+                max_edge,
+            );
             let key = (app.inpaint_stroke.len(), width, height);
             if app.inpaint_stroke_texture_key != Some(key) {
                 let coverage = rasterize_inpaint_dabs_binary(
@@ -865,7 +950,16 @@ impl Preview {
                 app.inpaint_stroke_texture_key = Some(key);
             }
             if let Some(texture) = &app.inpaint_stroke_texture {
-                painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
+                paint_final_geometry_overlay_texture(
+                    ui,
+                    texture.id(),
+                    image_rect,
+                    app.geometry,
+                    source_width,
+                    source_height,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    [0.0, 0.0, 1.0, 1.0],
+                );
             }
         }
 
@@ -874,9 +968,24 @@ impl Preview {
             .pointer_hover_pos()
             .filter(|position| preview_rect.contains(*position))
         {
-            let radius = zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom)
-                * image_rect.width().min(image_rect.height());
-            painter.circle_stroke(pointer, radius.max(1.5), Stroke::new(1.5, Color32::WHITE));
+            let source_uv = final_geometry_screen_to_source(
+                image_rect,
+                app.geometry,
+                source_width,
+                source_height,
+                pointer,
+            );
+            if let Some(uv) = editable_source_uv(source_uv) {
+                let radius = geometry_brush_radius_screen(
+                    image_rect,
+                    app.geometry,
+                    source_width,
+                    source_height,
+                    uv,
+                    zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom),
+                );
+                painter.circle_stroke(pointer, radius.max(1.5), Stroke::new(1.5, Color32::WHITE));
+            }
         }
     }
 
@@ -886,6 +995,8 @@ impl Preview {
         image_rect: Rect,
         preview_rect: Rect,
         overlay_rect: Rect,
+        source_width: u32,
+        source_height: u32,
         response: &egui::Response,
     ) {
         let Some(mask_index) = app.masks.selected_mask else {
@@ -929,11 +1040,42 @@ impl Preview {
         let pointer = response
             .interact_pointer_pos()
             .filter(|position| pointer_bounds.contains(*position));
-        let primary_down = pointer.is_some()
-            && response.is_pointer_button_down_on()
-            && ui.input(|input| input.pointer.primary_down());
+        let (primary_is_down, primary_released) = ui.input(|input| {
+            (
+                input.pointer.primary_down(),
+                input.pointer.primary_released(),
+            )
+        });
+        let primary_down =
+            pointer.is_some() && response.is_pointer_button_down_on() && primary_is_down;
         if !primary_down {
-            let object_stroke_finished = kind == MaskKind::Object && app.last_brush_point.is_some();
+            if primary_is_down {
+                // Leaving the preview while still dragging must not connect the
+                // last valid dab to a later re-entry point through hidden space.
+                if matches!(kind, MaskKind::Brush | MaskKind::Object) {
+                    app.last_brush_point = None;
+                }
+                return;
+            }
+
+            // A transformed object stroke may legitimately cross pasteboard,
+            // which clears `last_brush_point` to prevent a shortcut chord when
+            // the pointer re-enters. On the actual release frame, detect
+            // completion from the unrefined prompt strokes themselves.
+            let object_stroke_finished = primary_released
+                && kind == MaskKind::Object
+                && app
+                    .masks
+                    .masks
+                    .get(mask_index)
+                    .and_then(|mask| mask.components.get(component_index))
+                    .is_some_and(|component| {
+                        matches!(
+                            &component.geometry,
+                            MaskGeometry::Object { mask: None, strokes, .. }
+                                if strokes.iter().any(|stroke| !stroke.points.is_empty())
+                        )
+                    });
             app.finish_mask_geometry_interaction();
             app.last_brush_point = None;
             app.mask_drag = None;
@@ -949,10 +1091,25 @@ impl Preview {
         if ui.input(|input| input.any_touches()) {
             app.begin_mask_touch_gesture(mask_index, component_index);
         }
-        let uv = if matches!(kind, MaskKind::Radial | MaskKind::Linear) {
-            screen_to_normalized_unclamped(image_rect, pointer)
+        let source_uv = final_geometry_screen_to_source(
+            image_rect,
+            app.geometry,
+            source_width,
+            source_height,
+            pointer,
+        );
+        let uv = if geometry_can_leave_image {
+            source_uv
+        } else if let Some(uv) = editable_source_uv(source_uv) {
+            uv
         } else {
-            screen_to_normalized(image_rect, pointer)
+            // Brush/object strokes must be discontinuous across transformed
+            // pasteboard. Otherwise a stroke that leaves and re-enters the image
+            // gets interpolated through an area the user could not actually draw.
+            if matches!(kind, MaskKind::Brush | MaskKind::Object) {
+                app.last_brush_point = None;
+            }
+            return;
         };
         let color_was_sampled = app
             .masks
@@ -968,7 +1125,15 @@ impl Preview {
 
         if app.mask_drag.is_none() && kind != MaskKind::Brush && kind != MaskKind::Object {
             let geometry = &app.masks.masks[mask_index].components[component_index].geometry;
-            app.mask_drag = begin_mask_drag(geometry, uv, pointer, image_rect);
+            app.mask_drag = begin_mask_drag(
+                geometry,
+                uv,
+                pointer,
+                image_rect,
+                app.geometry,
+                source_width,
+                source_height,
+            );
         }
 
         let mut changed = false;
@@ -1000,14 +1165,25 @@ impl Preview {
                     let previous = app.last_brush_point.unwrap_or(uv);
                     let dx = uv[0] - previous[0];
                     let dy = uv[1] - previous[1];
-                    // Space dabs in screen/image pixels rather than raw UV
-                    // units so strokes remain continuous on wide and tall
-                    // images on both mouse and touch input.
-                    let distance_px = ((dx * image_rect.width()).powi(2)
-                        + (dy * image_rect.height()).powi(2))
-                    .sqrt();
+                    // Measure spacing in the transformed preview so brush density
+                    // remains stable after crop, rotate, flip, and perspective.
+                    let previous_screen = final_geometry_source_to_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        previous,
+                    );
+                    let distance_px = pointer.distance(previous_screen);
                     let dab_size = zoom_scaled_brush_size(*size, app.preview_zoom);
-                    let radius_px = dab_size * image_rect.width().min(image_rect.height());
+                    let radius_px = geometry_brush_radius_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        uv,
+                        dab_size,
+                    );
                     let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
 
                     // Pointer-down frames with no movement used to append a
@@ -1081,18 +1257,18 @@ impl Preview {
                         changed = true;
                     }
                     Some(MaskDragState::ResizeRadial { axis }) => {
-                        let center_screen = normalized_to_screen(image_rect, *center);
-                        let delta = pointer - center_screen;
+                        let dx = (uv[0] - center[0]) * source_width.max(1) as f32;
+                        let dy = (uv[1] - center[1]) * source_height.max(1) as f32;
                         let cos_r = rotation.cos();
                         let sin_r = rotation.sin();
                         if axis == 0 {
-                            radius[0] = ((cos_r * delta.x + sin_r * delta.y).abs()
-                                / image_rect.width().max(1.0))
-                            .max(0.005);
+                            radius[0] = ((cos_r * dx + sin_r * dy).abs()
+                                / source_width.max(1) as f32)
+                                .max(0.005);
                         } else {
-                            radius[1] = ((-sin_r * delta.x + cos_r * delta.y).abs()
-                                / image_rect.height().max(1.0))
-                            .max(0.005);
+                            radius[1] = ((-sin_r * dx + cos_r * dy).abs()
+                                / source_height.max(1) as f32)
+                                .max(0.005);
                         }
                         changed = true;
                     }
@@ -1100,8 +1276,7 @@ impl Preview {
                         pointer_angle,
                         rotation: original_rotation,
                     }) => {
-                        let center_screen = normalized_to_screen(image_rect, *center);
-                        let current_angle = angle_from(center_screen, pointer);
+                        let current_angle = source_angle_from(*center, uv, source_width, source_height);
                         *rotation =
                             original_rotation + shortest_angle_delta(pointer_angle, current_angle);
                         changed = true;
@@ -1149,18 +1324,29 @@ impl Preview {
                         start: original_start,
                         end: original_end,
                     }) => {
-                        let a = normalized_to_screen(image_rect, original_start);
-                        let b = normalized_to_screen(image_rect, original_end);
-                        let midpoint = a + (b - a) * 0.5;
-                        let original_vector = b - a;
-                        let original_angle = original_vector.y.atan2(original_vector.x);
-                        let current_angle = angle_from(midpoint, pointer);
+                        let midpoint = [
+                            (original_start[0] + original_end[0]) * 0.5,
+                            (original_start[1] + original_end[1]) * 0.5,
+                        ];
+                        let vector_x = (original_end[0] - original_start[0])
+                            * source_width.max(1) as f32;
+                        let vector_y = (original_end[1] - original_start[1])
+                            * source_height.max(1) as f32;
+                        let original_angle = vector_y.atan2(vector_x);
+                        let current_angle = source_angle_from(midpoint, uv, source_width, source_height);
                         let angle =
                             original_angle + shortest_angle_delta(pointer_angle, current_angle);
-                        let half_length = original_vector.length() * 0.5;
-                        let half_vector = egui::vec2(angle.cos(), angle.sin()) * half_length;
-                        *start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);
-                        *end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);
+                        let half_length = (vector_x * vector_x + vector_y * vector_y).sqrt() * 0.5;
+                        let half_x = angle.cos() * half_length;
+                        let half_y = angle.sin() * half_length;
+                        *start = [
+                            midpoint[0] - half_x / source_width.max(1) as f32,
+                            midpoint[1] - half_y / source_height.max(1) as f32,
+                        ];
+                        *end = [
+                            midpoint[0] + half_x / source_width.max(1) as f32,
+                            midpoint[1] + half_y / source_height.max(1) as f32,
+                        ];
                         changed = true;
                     }
                     _ => {}
@@ -1180,11 +1366,23 @@ impl Preview {
                     let previous = app.last_brush_point.unwrap_or(uv);
                     let dx = uv[0] - previous[0];
                     let dy = uv[1] - previous[1];
-                    let distance_px = ((dx * image_rect.width()).powi(2)
-                        + (dy * image_rect.height()).powi(2))
-                    .sqrt();
+                    let previous_screen = final_geometry_source_to_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        previous,
+                    );
+                    let distance_px = pointer.distance(previous_screen);
                     let stroke_brush_size = zoom_scaled_brush_size(*brush_size, app.preview_zoom);
-                    let radius_px = stroke_brush_size * image_rect.width().min(image_rect.height());
+                    let radius_px = geometry_brush_radius_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        uv,
+                        stroke_brush_size,
+                    );
                     let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
                     if first_point {
                         strokes.push(ObjectStroke {
@@ -1251,6 +1449,8 @@ impl Preview {
         image_rect: Rect,
         preview_rect: Rect,
         overlay_rect: Rect,
+        source_width: u32,
+        source_height: u32,
     ) {
         let Some(mask_index) = app.masks.selected_mask else {
             return;
@@ -1331,6 +1531,8 @@ impl Preview {
                     preview_rect,
                     mask_index,
                     component,
+                    source_width,
+                    source_height,
                 );
             }
         }
@@ -1354,12 +1556,23 @@ impl Preview {
                     feather,
                     initialized: true,
                 } => {
-                    let outer =
-                        radial_outline_screen_points(image_rect, *center, *radius, *rotation, 72);
+                    let outer = radial_outline_geometry_screen_points(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        *center,
+                        *radius,
+                        *rotation,
+                        72,
+                    );
                     painter.add(egui::Shape::line(outer, Stroke::new(2.0, color)));
                     let inner_scale = 1.0 - feather.clamp(0.0, 1.0) * 0.98;
-                    let inner = radial_outline_screen_points(
+                    let inner = radial_outline_geometry_screen_points(
                         image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
                         *center,
                         [radius[0] * inner_scale, radius[1] * inner_scale],
                         *rotation,
@@ -1369,15 +1582,43 @@ impl Preview {
                         inner,
                         Stroke::new(1.0, color.gamma_multiply(0.65)),
                     ));
-                    let center_screen = normalized_to_screen(image_rect, *center);
+                    let center_screen = final_geometry_source_to_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        *center,
+                    );
                     painter.circle_filled(center_screen, 5.0, color);
-                    for handle in radial_handles_screen(image_rect, *center, *radius, *rotation) {
+                    for handle in radial_handles_geometry_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        *center,
+                        *radius,
+                        *rotation,
+                    ) {
                         painter.circle_filled(handle, 4.0, color);
                     }
-                    let major_handle =
-                        radial_handles_screen(image_rect, *center, *radius, *rotation)[0];
-                    let rotation_handle =
-                        radial_rotation_handle(image_rect, *center, *radius, *rotation);
+                    let major_handle = radial_handles_geometry_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        *center,
+                        *radius,
+                        *rotation,
+                    )[0];
+                    let rotation_handle = radial_rotation_handle_geometry(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        *center,
+                        *radius,
+                        *rotation,
+                    );
                     painter.line_segment(
                         [major_handle, rotation_handle],
                         Stroke::new(1.0, color.gamma_multiply(0.72)),
@@ -1390,8 +1631,20 @@ impl Preview {
                     feather,
                     initialized: true,
                 } => {
-                    let a = normalized_to_screen(image_rect, *start);
-                    let b = normalized_to_screen(image_rect, *end);
+                    let a = final_geometry_source_to_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        *start,
+                    );
+                    let b = final_geometry_source_to_screen(
+                        image_rect,
+                        app.geometry,
+                        source_width,
+                        source_height,
+                        *end,
+                    );
                     painter.line_segment([a, b], Stroke::new(2.0, color));
                     painter.circle_filled(a, 5.0, color);
                     painter.circle_filled(b, 5.0, color);
@@ -1433,18 +1686,52 @@ impl Preview {
                     };
                     match &component.geometry {
                         MaskGeometry::Brush { size, .. } => {
-                            let radius = zoom_scaled_brush_size(*size, app.preview_zoom)
-                                * image_rect.width().min(image_rect.height());
-                            painter.circle_stroke(pointer, radius.max(1.5), Stroke::new(1.5, cursor_color));
+                            let source_uv = final_geometry_screen_to_source(
+                                image_rect,
+                                app.geometry,
+                                source_width,
+                                source_height,
+                                pointer,
+                            );
+                            if let Some(uv) = editable_source_uv(source_uv) {
+                                let radius = geometry_brush_radius_screen(
+                                    image_rect,
+                                    app.geometry,
+                                    source_width,
+                                    source_height,
+                                    uv,
+                                    zoom_scaled_brush_size(*size, app.preview_zoom),
+                                );
+                                painter.circle_stroke(
+                                    pointer,
+                                    radius.max(1.5),
+                                    Stroke::new(1.5, cursor_color),
+                                );
+                            }
                         }
                         MaskGeometry::Object { brush_size, .. } => {
-                            let radius = zoom_scaled_brush_size(*brush_size, app.preview_zoom)
-                                * image_rect.width().min(image_rect.height());
-                            painter.circle_stroke(
+                            let source_uv = final_geometry_screen_to_source(
+                                image_rect,
+                                app.geometry,
+                                source_width,
+                                source_height,
                                 pointer,
-                                radius.max(1.5),
-                                Stroke::new(1.5, cursor_color),
                             );
+                            if let Some(uv) = editable_source_uv(source_uv) {
+                                let radius = geometry_brush_radius_screen(
+                                    image_rect,
+                                    app.geometry,
+                                    source_width,
+                                    source_height,
+                                    uv,
+                                    zoom_scaled_brush_size(*brush_size, app.preview_zoom),
+                                );
+                                painter.circle_stroke(
+                                    pointer,
+                                    radius.max(1.5),
+                                    Stroke::new(1.5, cursor_color),
+                                );
+                            }
                         }
                         _ => {}
                     }
@@ -1460,18 +1747,18 @@ impl Preview {
         preview_rect: Rect,
         mask_index: usize,
         component_index: Option<usize>,
+        source_width: u32,
+        source_height: u32,
     ) {
         let Some(pipeline) = app.gpu_pipeline.as_ref() else {
             return;
         };
-        let max_edge = if cfg!(target_os = "android") {
-            384.0
-        } else {
-            512.0
-        };
-        let scale = (max_edge / image_rect.width().max(image_rect.height())).min(1.0);
-        let width = (image_rect.width() * scale).round().max(1.0) as u32;
-        let height = (image_rect.height() * scale).round().max(1.0) as u32;
+        let max_edge = if cfg!(target_os = "android") { 384 } else { 512 };
+        let (width, height) = source_overlay_texture_dimensions(
+            pipeline.width,
+            pipeline.height,
+            max_edge,
+        );
         let key = (
             mask_index,
             component_index,
@@ -1516,7 +1803,17 @@ impl Preview {
         }
 
         if let Some(texture) = &app.mask_overlay_texture {
-            painter_image_clipped(ui, texture.id(), image_rect, preview_rect);
+            let _ = preview_rect;
+            paint_final_geometry_overlay_texture(
+                ui,
+                texture.id(),
+                image_rect,
+                app.geometry,
+                source_width,
+                source_height,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                [0.0, 0.0, 1.0, 1.0],
+            );
         }
     }
 
@@ -1578,6 +1875,9 @@ fn begin_mask_drag(
     uv: [f32; 2],
     pointer: Pos2,
     image_rect: Rect,
+    display_geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
 ) -> Option<MaskDragState> {
     match geometry {
         MaskGeometry::Radial {
@@ -1590,30 +1890,46 @@ fn begin_mask_drag(
             if !initialized {
                 return Some(MaskDragState::Create(uv));
             }
-            let rotation_handle = radial_rotation_handle(image_rect, *center, *radius, *rotation);
+            let rotation_handle = radial_rotation_handle_geometry(
+                image_rect,
+                display_geometry,
+                source_width,
+                source_height,
+                *center,
+                *radius,
+                *rotation,
+            );
             if rotation_handle.distance(pointer) <= 24.0 {
                 return Some(MaskDragState::RotateRadial {
-                    pointer_angle: angle_from(normalized_to_screen(image_rect, *center), pointer),
+                    pointer_angle: source_angle_from(*center, uv, source_width, source_height),
                     rotation: *rotation,
                 });
             }
-            for (index, handle) in radial_handles_screen(image_rect, *center, *radius, *rotation)
-                .into_iter()
-                .enumerate()
+            for (index, handle) in radial_handles_geometry_screen(
+                image_rect,
+                display_geometry,
+                source_width,
+                source_height,
+                *center,
+                *radius,
+                *rotation,
+            )
+            .into_iter()
+            .enumerate()
             {
                 if handle.distance(pointer) <= 22.0 {
                     return Some(MaskDragState::ResizeRadial { axis: index / 2 });
                 }
             }
 
-            let center_screen = normalized_to_screen(image_rect, *center);
-            let delta = pointer - center_screen;
+            let dx = (uv[0] - center[0]) * source_width.max(1) as f32;
+            let dy = (uv[1] - center[1]) * source_height.max(1) as f32;
             let cos_r = rotation.cos();
             let sin_r = rotation.sin();
-            let local_x = (cos_r * delta.x + sin_r * delta.y)
-                / (radius[0].abs().max(0.005) * image_rect.width().max(1.0));
-            let local_y = (-sin_r * delta.x + cos_r * delta.y)
-                / (radius[1].abs().max(0.005) * image_rect.height().max(1.0));
+            let local_x = (cos_r * dx + sin_r * dy)
+                / (radius[0].abs().max(0.005) * source_width.max(1) as f32);
+            let local_y = (-sin_r * dx + cos_r * dy)
+                / (radius[1].abs().max(0.005) * source_height.max(1) as f32);
             if local_x * local_x + local_y * local_y <= 1.0 {
                 Some(MaskDragState::MoveRadial {
                     pointer: uv,
@@ -1632,12 +1948,25 @@ fn begin_mask_drag(
             if !initialized {
                 return Some(MaskDragState::Create(uv));
             }
-            let a = normalized_to_screen(image_rect, *start);
-            let b = normalized_to_screen(image_rect, *end);
+            let a = final_geometry_source_to_screen(
+                image_rect,
+                display_geometry,
+                source_width,
+                source_height,
+                *start,
+            );
+            let b = final_geometry_source_to_screen(
+                image_rect,
+                display_geometry,
+                source_width,
+                source_height,
+                *end,
+            );
             let rotation_handle = linear_rotation_handle(a, b);
             if rotation_handle.distance(pointer) <= 24.0 {
+                let midpoint = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5];
                 Some(MaskDragState::RotateLinear {
-                    pointer_angle: angle_from(a + (b - a) * 0.5, pointer),
+                    pointer_angle: source_angle_from(midpoint, uv, source_width, source_height),
                     start: *start,
                     end: *end,
                 })
@@ -1659,11 +1988,6 @@ fn begin_mask_drag(
     }
 }
 
-fn angle_from(center: Pos2, pointer: Pos2) -> f32 {
-    let delta = pointer - center;
-    delta.y.atan2(delta.x)
-}
-
 fn shortest_angle_delta(from: f32, to: f32) -> f32 {
     let mut delta = to - from;
     while delta > std::f32::consts::PI {
@@ -1675,16 +1999,15 @@ fn shortest_angle_delta(from: f32, to: f32) -> f32 {
     delta
 }
 
-fn radial_rotation_handle(
-    image_rect: Rect,
+fn source_angle_from(
     center: [f32; 2],
-    radius: [f32; 2],
-    rotation: f32,
-) -> Pos2 {
-    let center_screen = normalized_to_screen(image_rect, center);
-    let major_screen = radial_handles_screen(image_rect, center, radius, rotation)[0];
-    let direction = (major_screen - center_screen).normalized();
-    major_screen + direction * 30.0
+    point: [f32; 2],
+    source_width: u32,
+    source_height: u32,
+) -> f32 {
+    let dx = (point[0] - center[0]) * source_width.max(1) as f32;
+    let dy = (point[1] - center[1]) * source_height.max(1) as f32;
+    dy.atan2(dx)
 }
 
 fn linear_rotation_handle(start: Pos2, end: Pos2) -> Pos2 {
@@ -1694,50 +2017,115 @@ fn linear_rotation_handle(start: Pos2, end: Pos2) -> Pos2 {
     start + direction * 0.5 + normal * 34.0
 }
 
-fn radial_handles_screen(
+fn radial_source_uv_at(
+    center: [f32; 2],
+    radius: [f32; 2],
+    rotation: f32,
+    angle: f32,
+    source_width: u32,
+    source_height: u32,
+) -> [f32; 2] {
+    let width = source_width.max(1) as f32;
+    let height = source_height.max(1) as f32;
+    let local_x = radius[0] * width * angle.cos();
+    let local_y = radius[1] * height * angle.sin();
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    let dx = cos_r * local_x - sin_r * local_y;
+    let dy = sin_r * local_x + cos_r * local_y;
+    [center[0] + dx / width, center[1] + dy / height]
+}
+
+fn radial_handles_geometry_screen(
     image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
     center: [f32; 2],
     radius: [f32; 2],
     rotation: f32,
 ) -> [Pos2; 4] {
-    let center = normalized_to_screen(image_rect, center);
-    let cos_r = rotation.cos();
-    let sin_r = rotation.sin();
-    let major = egui::vec2(
-        cos_r * radius[0] * image_rect.width(),
-        sin_r * radius[0] * image_rect.width(),
-    );
-    let minor = egui::vec2(
-        -sin_r * radius[1] * image_rect.height(),
-        cos_r * radius[1] * image_rect.height(),
-    );
     [
-        center + major,
-        center - major,
-        center + minor,
-        center - minor,
+        0.0,
+        std::f32::consts::PI,
+        std::f32::consts::FRAC_PI_2,
+        -std::f32::consts::FRAC_PI_2,
     ]
+    .map(|angle| {
+        final_geometry_source_to_screen(
+            image_rect,
+            geometry,
+            source_width,
+            source_height,
+            radial_source_uv_at(
+                center,
+                radius,
+                rotation,
+                angle,
+                source_width,
+                source_height,
+            ),
+        )
+    })
 }
 
-fn radial_outline_screen_points(
+fn radial_rotation_handle_geometry(
     image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    center: [f32; 2],
+    radius: [f32; 2],
+    rotation: f32,
+) -> Pos2 {
+    let center_screen = final_geometry_source_to_screen(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        center,
+    );
+    let major_screen = radial_handles_geometry_screen(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        center,
+        radius,
+        rotation,
+    )[0];
+    let direction = (major_screen - center_screen).normalized();
+    major_screen + direction * 30.0
+}
+
+fn radial_outline_geometry_screen_points(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
     center: [f32; 2],
     radius: [f32; 2],
     rotation: f32,
     segments: usize,
 ) -> Vec<Pos2> {
-    let center = normalized_to_screen(image_rect, center);
-    let radius_x = radius[0] * image_rect.width();
-    let radius_y = radius[1] * image_rect.height();
-    let cos_r = rotation.cos();
-    let sin_r = rotation.sin();
     let segments = segments.max(12);
     (0..=segments)
         .map(|index| {
             let angle = std::f32::consts::TAU * index as f32 / segments as f32;
-            let x = radius_x * angle.cos();
-            let y = radius_y * angle.sin();
-            center + egui::vec2(cos_r * x - sin_r * y, sin_r * x + cos_r * y)
+            final_geometry_source_to_screen(
+                image_rect,
+                geometry,
+                source_width,
+                source_height,
+                radial_source_uv_at(
+                    center,
+                    radius,
+                    rotation,
+                    angle,
+                    source_width,
+                    source_height,
+                ),
+            )
         })
         .collect()
 }
@@ -1918,6 +2306,72 @@ fn final_geometry_screen_to_source(
         (center_x + source_delta[0]) / source_width.max(1) as f32,
         (center_y + source_delta[1]) / source_height.max(1) as f32,
     ]
+}
+
+fn editable_source_uv(uv: [f32; 2]) -> Option<[f32; 2]> {
+    // Geometry export samples from the full source image after defining the crop
+    // as an output frame. A rotated/sheared crop therefore often contains valid
+    // pixels whose source coordinates lie outside `geometry.crop`. Treat only
+    // coordinates outside the source image as pasteboard. The small tolerance
+    // absorbs inverse-transform floating-point noise at the exact image border,
+    // then clamps stored brush/color coordinates back into the canonical range.
+    const EDGE_EPSILON: f32 = 1e-4;
+    if !uv[0].is_finite()
+        || !uv[1].is_finite()
+        || uv[0] < -EDGE_EPSILON
+        || uv[0] > 1.0 + EDGE_EPSILON
+        || uv[1] < -EDGE_EPSILON
+        || uv[1] > 1.0 + EDGE_EPSILON
+    {
+        return None;
+    }
+    Some([uv[0].clamp(0.0, 1.0), uv[1].clamp(0.0, 1.0)])
+}
+
+fn geometry_brush_radius_screen(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    center: [f32; 2],
+    size: f32,
+) -> f32 {
+    let source_width_f = source_width.max(1) as f32;
+    let source_height_f = source_height.max(1) as f32;
+    let radius_source_pixels = size.max(0.0) * source_width.min(source_height).max(1) as f32;
+    let center_screen = final_geometry_source_to_screen(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        center,
+    );
+    let x_screen = final_geometry_source_to_screen(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        [center[0] + radius_source_pixels / source_width_f, center[1]],
+    );
+    let y_screen = final_geometry_source_to_screen(
+        image_rect,
+        geometry,
+        source_width,
+        source_height,
+        [center[0], center[1] + radius_source_pixels / source_height_f],
+    );
+    center_screen.distance(x_screen).max(center_screen.distance(y_screen))
+}
+
+fn source_overlay_texture_dimensions(source_width: u32, source_height: u32, max_edge: u32) -> (u32, u32) {
+    let source_width = source_width.max(1);
+    let source_height = source_height.max(1);
+    let longest = source_width.max(source_height) as f32;
+    let scale = (max_edge.max(1) as f32 / longest).min(1.0);
+    (
+        (source_width as f32 * scale).round().max(1.0) as u32,
+        (source_height as f32 * scale).round().max(1.0) as u32,
+    )
 }
 
 fn crop_workspace_source_to_screen(
@@ -2125,6 +2579,28 @@ fn paint_final_geometry_texture(
     paint_textured_geometry_quad(ui, texture_id, image_rect, positions, texture_uv);
 }
 
+fn paint_final_geometry_overlay_texture(
+    ui: &Ui,
+    texture_id: egui::TextureId,
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    texture_uv: Rect,
+    source_uv: [f32; 4],
+) {
+    let positions = source_uv_corners(source_uv).map(|point| {
+        final_geometry_source_to_screen(
+            image_rect,
+            geometry,
+            source_width,
+            source_height,
+            point,
+        )
+    });
+    paint_textured_geometry_quad(ui, texture_id, image_rect, positions, texture_uv);
+}
+
 fn paint_crop_workspace_texture(
     ui: &Ui,
     texture_id: egui::TextureId,
@@ -2137,7 +2613,7 @@ fn paint_crop_workspace_texture(
 ) {
     if source_uv == [0.0, 0.0, 1.0, 1.0] {
         ui.painter_at(image_rect)
-            .rect_filled(image_rect, 0.0, Color32::BLACK);
+            .rect_filled(image_rect, 0.0, ui.visuals().panel_fill);
     }
     let positions = source_uv_corners(source_uv).map(|point| {
         crop_workspace_source_to_screen(
@@ -2490,15 +2966,6 @@ fn preview_uv_changed(left: crate::app::PreviewUvRect, right: crate::app::Previe
         .any(|(left, right)| (left - right).abs() > 0.0005)
 }
 
-fn painter_image_clipped(ui: &Ui, texture_id: egui::TextureId, rect: Rect, clip_rect: Rect) {
-    ui.painter_at(clip_rect).image(
-        texture_id,
-        rect,
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
 fn coverage_rgba(coverage: Vec<u8>, color: Color32) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(coverage.len() * 4);
     for alpha in coverage {
@@ -2634,17 +3101,48 @@ fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32) -> f32 {
     tool_size.max(0.0) / preview_zoom.max(MIN_PREVIEW_ZOOM)
 }
 
-fn inpaint_stroke_screen_bounds(dabs: &[BrushDab], image_rect: Rect) -> Option<Rect> {
+fn inpaint_stroke_geometry_screen_bounds(
+    dabs: &[BrushDab],
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+) -> Option<Rect> {
     let mut bounds: Option<Rect> = None;
-    let short_edge = image_rect.width().min(image_rect.height());
+    let width = source_width.max(1) as f32;
+    let height = source_height.max(1) as f32;
+    let source_min = source_width.min(source_height).max(1) as f32;
     for dab in dabs {
-        let center = normalized_to_screen(image_rect, dab.center);
-        let radius = (dab.size * short_edge).max(1.0);
-        let dab_rect = Rect::from_center_size(center, egui::vec2(radius * 2.0, radius * 2.0));
-        bounds = Some(match bounds {
-            Some(existing) => existing.union(dab_rect),
-            None => dab_rect,
-        });
+        let radius = (dab.size * source_min).max(1.0);
+        let du = radius / width;
+        let dv = radius / height;
+        let points = [
+            [dab.center[0] - du, dab.center[1] - dv],
+            [dab.center[0] + du, dab.center[1] - dv],
+            [dab.center[0] + du, dab.center[1] + dv],
+            [dab.center[0] - du, dab.center[1] + dv],
+        ];
+        let mut dab_bounds: Option<Rect> = None;
+        for point in points {
+            let screen = final_geometry_source_to_screen(
+                image_rect,
+                geometry,
+                source_width,
+                source_height,
+                point,
+            );
+            let point_rect = Rect::from_min_max(screen, screen);
+            dab_bounds = Some(match dab_bounds {
+                Some(existing) => existing.union(point_rect),
+                None => point_rect,
+            });
+        }
+        if let Some(dab_bounds) = dab_bounds {
+            bounds = Some(match bounds {
+                Some(existing) => existing.union(dab_bounds),
+                None => dab_bounds,
+            });
+        }
     }
     bounds
 }
