@@ -6,6 +6,7 @@ mod gpu_cache;
 mod geometry;
 mod lensfun;
 mod masks;
+mod noise;
 mod processing;
 mod raw_loader;
 mod sigmoid;
@@ -13,8 +14,8 @@ mod sigmoid;
 pub use basicadj::{
     ColorGradeWheel, ColorGrading, DemosaicMode, ExposureParams, HighlightReconstructionMethod,
     PointCurve, CURRENT_PROCESS_VERSION, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
-    LEGACY_SCENE_DISPLAY_PROCESS_VERSION, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
-    GLOBAL_TEMPERATURE_LIMIT, HSL_HUE_LIMIT, MAX_POINT_CURVE_POINTS,
+    GLOBAL_TEMPERATURE_LIMIT, HSL_HUE_LIMIT, LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
+    MAX_POINT_CURVE_POINTS, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION, SENSOR_DENOISE_PROCESS_VERSION,
 };
 pub use color_profile::{
     CameraProfile, DcpMatrixSet, DcpProfile, HsvMap, IccOutputTransform, ProfileEncoding,
@@ -30,6 +31,7 @@ pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};
 pub use geometry::{transform_thumbnail_geometry, CropAspectRatio, GeometryTransform};
 pub(crate) use gpu_cache::PersistentGpuPipelineCache;
 pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
+pub use noise::{DenoiseQuality, NoiseProfile};
 pub use masks::{
     compose_inpaint_strokes, ellipse_outline_points, export_mask_atlas_edge,
     export_mask_atlas_edge_limit, mask_atlas_edge, rasterize_brush_dabs,

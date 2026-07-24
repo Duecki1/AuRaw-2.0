@@ -41,6 +41,9 @@ pub fn affected_stage(before: &ExposureParams, after: &ExposureParams) -> Option
 fn raw_controls_changed(before: &ExposureParams, after: &ExposureParams) -> bool {
     before.black_point != after.black_point
         || before.chroma_denoise != after.chroma_denoise
+        || before.luminance_denoise != after.luminance_denoise
+        || before.denoise_detail != after.denoise_detail
+        || before.denoise_quality != after.denoise_quality
         || before.demosaic_mode != after.demosaic_mode
         || before.dual_threshold != after.dual_threshold
         || before.frequency_chroma != after.frequency_chroma
@@ -109,6 +112,7 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         black_levels: raw.black_levels,
         black_levels_per_pixel,
         white_levels: raw.white_levels,
+        noise_profile: raw.noise_profile,
         camera_profile: raw.camera_profile.clone(),
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
@@ -242,6 +246,7 @@ pub fn build_region_proxy(
         black_levels: raw.black_levels,
         black_levels_per_pixel: CompactPixelMap::compact_from_dense(width, height, black_levels_per_pixel, 64),
         white_levels: raw.white_levels,
+        noise_profile: raw.noise_profile.scaled_variance(1.0 / (scale * scale) as f32),
         camera_profile: raw.camera_profile.clone(),
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
@@ -472,6 +477,7 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
             tile.padded_height,
         ),
         white_levels: raw.white_levels,
+        noise_profile: raw.noise_profile,
         camera_profile: raw.camera_profile.clone(),
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
@@ -589,6 +595,7 @@ mod tests {
                 vec![0.0; (width * height) as usize],
             ),
             white_levels: [1023.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
@@ -671,9 +678,27 @@ mod tests {
     #[test]
     fn raw_controls_invalidate_every_downstream_stage() {
         let before = ExposureParams::default();
-        let mut after = before;
-        after.black_point = 0.01;
-        assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Raw));
+
+        let mut black_point = before;
+        black_point.black_point = 0.01;
+        assert_eq!(
+            affected_stage(&before, &black_point),
+            Some(ProcessingStage::Raw)
+        );
+
+        let mut luminance_denoise = before;
+        luminance_denoise.luminance_denoise = 25.0;
+        assert_eq!(
+            affected_stage(&before, &luminance_denoise),
+            Some(ProcessingStage::Raw)
+        );
+
+        let mut denoise_quality = before;
+        denoise_quality.denoise_quality = crate::pipeline::DenoiseQuality::High;
+        assert_eq!(
+            affected_stage(&before, &denoise_quality),
+            Some(ProcessingStage::Raw)
+        );
     }
 
     #[test]
@@ -747,6 +772,7 @@ mod tests {
             black_levels: [0.0; 4],
             black_levels_per_pixel: CompactPixelMap::dense(width, height, (0..width * height).map(|value| value as f32).collect()),
             white_levels: [1023.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
@@ -805,6 +831,7 @@ mod tests {
             black_levels: [0.0; 4],
             black_levels_per_pixel: CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
             white_levels: [1023.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),

@@ -1,5 +1,6 @@
 use super::basicadj::GLOBAL_TEMPERATURE_LIMIT;
 use super::color_profile::CameraProfile;
+use super::noise::NoiseProfile;
 #[cfg(not(libraw_available))]
 use anyhow::anyhow;
 use anyhow::{Context, Result};
@@ -371,6 +372,8 @@ pub struct LoadedRaw {
     /// repeating row/column pattern from `cblack[4..]`.
     pub black_levels_per_pixel: CompactPixelMap<f32>,
     pub white_levels: [f32; 4],
+    /// Per-capture signal-dependent sensor noise estimate in normalized RAW units.
+    pub noise_profile: NoiseProfile,
     /// DCP creative profile stages and retained embedded camera ICC data.
     pub camera_profile: CameraProfile,
     /// External DCP actually applied to this RAW, when one was selected.
@@ -554,6 +557,7 @@ mod tests {
             black_levels: [0.0; 4],
             black_levels_per_pixel: CompactPixelMap::dense(1, 1, vec![0.0]),
             white_levels: [1.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),

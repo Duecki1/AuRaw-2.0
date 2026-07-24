@@ -361,10 +361,100 @@ impl Sidebar {
     fn show_detail(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Detail", false, foldable, |ui| {
+            let denoise_before = (
+                exposure.luminance_denoise,
+                exposure.chroma_denoise,
+                exposure.denoise_detail,
+                exposure.denoise_quality,
+            );
+            ui.label(egui::RichText::new("Sensor-profiled noise reduction")
+                .strong()
+                .size(11.5));
+            ui.label(
+                egui::RichText::new("Signal-dependent multiscale filtering before tone, texture, and sharpening")
+                    .size(10.5)
+                    .color(ui.visuals().weak_text_color()),
+            );
+            changed |= adjustment_slider(
+                ui,
+                "Luminance",
+                &mut exposure.luminance_denoise,
+                0.0..=100.0,
+                0,
+                1.0,
+                Some("Reduces shot/read noise using the RAW's estimated a·signal+b sensor model. Higher values can smooth fine texture."),
+            );
+            let mut color_percent = exposure.chroma_denoise.clamp(0.0, 1.0) * 100.0;
+            if adjustment_slider(
+                ui,
+                "Color",
+                &mut color_percent,
+                0.0..=100.0,
+                0,
+                1.0,
+                Some("Reduces color speckling while keeping luminance structure comparatively intact."),
+            ) {
+                exposure.chroma_denoise = color_percent / 100.0;
+                changed = true;
+            }
+            changed |= adjustment_slider(
+                ui,
+                "Denoise Detail",
+                &mut exposure.denoise_detail,
+                0.0..=100.0,
+                0,
+                1.0,
+                Some("Higher values protect edges and microtexture more strongly; lower values permit smoother denoising."),
+            );
+            let previous_quality = exposure.denoise_quality;
+            egui::ComboBox::from_label("Denoise Quality")
+                .selected_text(exposure.denoise_quality.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut exposure.denoise_quality,
+                        DenoiseQuality::Fast,
+                        DenoiseQuality::Fast.label(),
+                    );
+                    ui.selectable_value(
+                        &mut exposure.denoise_quality,
+                        DenoiseQuality::Balanced,
+                        DenoiseQuality::Balanced.label(),
+                    );
+                    ui.selectable_value(
+                        &mut exposure.denoise_quality,
+                        DenoiseQuality::High,
+                        DenoiseQuality::High.label(),
+                    );
+                });
+            ui.label(
+                egui::RichText::new("Fast: 8 taps · Balanced: 16 taps · High: 24 taps")
+                    .size(10.0)
+                    .color(ui.visuals().weak_text_color()),
+            );
+            changed |= previous_quality != exposure.denoise_quality;
+            let denoise_after = (
+                exposure.luminance_denoise,
+                exposure.chroma_denoise,
+                exposure.denoise_detail,
+                exposure.denoise_quality,
+            );
+            if denoise_before != denoise_after
+                && exposure.process_version == SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION
+            {
+                // Process 14 keeps the process-13 graph but opts edited NR into
+                // the new sensor-profiled algorithm. Older process-12 edits
+                // keep their legacy scene/display graph unless explicitly converted.
+                exposure.process_version = CURRENT_PROCESS_VERSION;
+                changed = true;
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
             ui.label(
                 egui::RichText::new("Edge-aware capture sharpening for fine RAW detail")
-                    .size(11.5)
-                    .color(ui.visuals().weak_text_color()),
+                    .strong()
+                    .size(11.5),
             );
             changed |= adjustment_slider(
                 ui,
@@ -689,15 +779,6 @@ impl Sidebar {
                 });
             changed |= previous_mode != exposure.demosaic_mode;
 
-            changed |= adjustment_slider(
-                ui,
-                "Chroma Denoise",
-                &mut exposure.chroma_denoise,
-                0.0..=1.0,
-                2,
-                0.01,
-                None,
-            );
             if exposure.demosaic_mode == DemosaicMode::FrequencyDomainChroma {
                 changed |= adjustment_slider(
                     ui,
