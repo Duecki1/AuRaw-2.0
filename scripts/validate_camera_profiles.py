@@ -308,28 +308,41 @@ def main() -> int:
     c.require_in_order(
         adjustments,
         [
-            "cam_to_working(camera_rgb)",
-            "apply_profile_hue_sat(scene_working_at(pos))",
-            "exp2(profile_exposure_ev + local_exposure_ev)",
+            "fn prepare_scene_node",
+            "apply_camera_characterization(scene_working_at(pos))",
+            "exp2(profile_exposure_ev)",
             "apply_exposure(rgb)",
-            "apply_profile_look(rgb)",
-            "apply_profile_tone_curve(rgb)",
-            "map_negative_gamut(rgb)",
+            "apply_local_exposure_nodes(pos, rgb)",
+            "apply_optional_profile_look(rgb)",
+            "fn apply_scene_tone_node",
+            "apply_capture_sharpening(pos, rgb)",
+            "apply_profile_view_tone(rgb)",
             "apply_lightroom_tone(rgb, pos)",
+            "apply_local_scene_tone_nodes(pos, rgb)",
+            "fn apply_scene_effects_node",
+            "apply_texture_and_clarity_values",
+            "apply_dehaze_value",
             "apply_saturation_vibrance(rgb)",
+            "fn apply_view_node",
+            "apply_color_mixer(pos, rgb)",
+            "apply_color_grading_wheels",
+            "apply_explicit_view_node(graded)",
+            "apply_output_lut(display_linear)",
         ],
-        "render order is camera/WB -> HueSat -> exposure -> Look -> profile tone -> adjustments",
+        "explicit render graph preserves characterization -> scene edits -> look/view -> output order",
     )
     c.require_in_order(
         tone_analysis,
         [
             "cam_to_working(camera_rgb)",
-            "apply_profile_hue_sat(working)",
+            "apply_camera_characterization(working)",
             "exp2(profile_exposure_ev)",
-            "apply_profile_look(exposed)",
-            "apply_profile_tone_curve(looked)",
+            "if uses_explicit_scene_display_domains()",
+            "return map_negative_gamut(exposed)",
+            "apply_optional_profile_look(exposed)",
+            "apply_profile_view_tone(looked)",
         ],
-        "adaptive histogram includes all fixed DCP rendering stages",
+        "adaptive histogram uses characterization-only stats for explicit domains and preserves legacy profiled stats",
     )
     sigmoid_rust = read("src/pipeline/sigmoid.rs")
     c.check(
@@ -339,18 +352,25 @@ def main() -> int:
         "darktable sigmoid defaults and generalized log-logistic coefficients are present",
     )
     c.check(
-        "var display_linear = darktable_sigmoid(graded);" in adjustments
-        and "(params.process_info.y & 1u) != 0u" in adjustments
-        and "display_linear = profile_tone_display_shoulder(graded);" in adjustments,
-        "DCP base tone can select the profile shoulder while the sigmoid fallback remains available",
+        "fn apply_dcp_view_transform" in adjustments
+        and "apply_profile_view_tone(scene_rgb)" in adjustments
+        and "profile_tone_display_shoulder(profile_view)" in adjustments
+        and "fn apply_explicit_view_node" in adjustments
+        and "return apply_dcp_view_transform(view_input);" in adjustments
+        and "return apply_sigmoid_view_transform(view_input);" in adjustments,
+        "explicit graph selects exactly one DCP-profile or sigmoid view transform",
     )
     c.require_in_order(
         adjustments,
         [
-            "display_linear = darktable_sigmoid(graded);",
+            "fn apply_explicit_view_node",
+            "return apply_dcp_view_transform(view_input);",
+            "return apply_sigmoid_view_transform(view_input);",
+            "fn apply_view_node",
+            "display_linear = apply_explicit_view_node(graded);",
             "apply_output_lut(display_linear)",
         ],
-        "the optional darktable sigmoid path still precedes the bounded ICC LUT",
+        "selected view transform precedes the separate bounded ICC output LUT",
     )
     c.check(
         "preserve_hue_and_energy" in tonemap
@@ -406,16 +426,17 @@ def main() -> int:
     )
     compact_gpu_tests = " ".join(gpu_tests.split())
     c.check(
-        "size_of::<super::GpuParams>(), 25056" in compact_gpu_tests
+        "size_of::<super::GpuParams>(), 25136" in compact_gpu_tests
         and "offset_of!(super::GpuParams, sigmoid_curve), 80" in compact_gpu_tests
         and "offset_of!(super::GpuParams, sigmoid_power), 96" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_0), 192" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_meta), 256" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_red_0), 272" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_green_0), 352" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_blue_0), 432" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, profile_hue_sat), 800" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, profile_flags), 864" in compact_gpu_tests,
+        and "offset_of!(super::GpuParams, tone_curve_0), 240" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_meta), 304" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_red_0), 320" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_green_0), 400" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, tone_curve_blue_0), 480" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, profile_hue_sat), 848" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, profile_flags), 912" in compact_gpu_tests
+        and "offset_of!(super::GpuParams, process_info), 928" in compact_gpu_tests,
         "camera-profile uniform ABI regression test covers the current metadata block",
     )
 

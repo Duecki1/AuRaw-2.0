@@ -195,7 +195,14 @@ impl Sidebar {
         ui.set_width(content_width);
         ui.set_max_width(content_width);
 
-        let source_dimensions = app.loaded_raw.as_ref().map(|raw| (raw.width, raw.height));
+        // Export sizing is defined after non-destructive crop/orientation.
+        // Using the full RAW dimensions here made the sidebar disagree with the
+        // exporter (and could label a crop as a resize). Keep UI validation and
+        // displayed dimensions on the same geometry contract as export.rs.
+        let source_dimensions = app
+            .loaded_raw
+            .as_ref()
+            .map(|raw| app.geometry.crop_pixel_dimensions(raw.width, raw.height));
         export_settings_controls(ui, &mut app.export_settings, source_dimensions, true);
 
         if let Some((completed, total)) = app.export_progress_state() {

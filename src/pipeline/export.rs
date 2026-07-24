@@ -1174,9 +1174,12 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
         let mut stream = writer
             .stream_writer_with_size(64 * 1024)
             .context("create transformed streaming PNG writer")?;
+        let (geometry_width, geometry_height) = request
+            .geometry
+            .crop_pixel_dimensions(request.raw.width, request.raw.height);
         let mut output_sharpen = FinalSizeOutputSharpen::new(
-            request.raw.width,
-            request.raw.height,
+            geometry_width,
+            geometry_height,
             request.output_width,
             request.output_height,
         );
@@ -1264,9 +1267,12 @@ fn export_tiled_jpeg_geometry(
                     format!("create transformed RGB raster {}", transformed_rgb.display())
                 })?;
             let mut writer = BufWriter::new(file);
+            let (geometry_width, geometry_height) = request
+                .geometry
+                .crop_pixel_dimensions(request.raw.width, request.raw.height);
             let mut output_sharpen = FinalSizeOutputSharpen::new(
-                request.raw.width,
-                request.raw.height,
+                geometry_width,
+                geometry_height,
                 request.output_width,
                 request.output_height,
             );
@@ -1398,9 +1404,12 @@ fn export_tiled_tiff_geometry(
         let profile = tiff_embedded_profile(request.color);
         write_tiff_header(&mut writer, request, row_format, &profile)?;
 
+        let (geometry_width, geometry_height) = request
+            .geometry
+            .crop_pixel_dimensions(request.raw.width, request.raw.height);
         let mut output_sharpen = FinalSizeOutputSharpen::new(
-            request.raw.width,
-            request.raw.height,
+            geometry_width,
+            geometry_height,
             request.output_width,
             request.output_height,
         )

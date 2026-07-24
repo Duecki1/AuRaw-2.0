@@ -1133,7 +1133,7 @@ impl Preview {
                 pointer,
             );
             if let Some(uv) = editable_source_uv(source_uv) {
-                let radius = geometry_brush_radius_screen(
+                let outline = brush_outline_geometry_screen_points(
                     image_rect,
                     app.geometry,
                     lens_geometry.as_deref(),
@@ -1141,8 +1141,9 @@ impl Preview {
                     source_height,
                     uv,
                     zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom),
+                    64,
                 );
-                painter.circle_stroke(pointer, radius.max(1.5), Stroke::new(1.5, Color32::WHITE));
+                painter.add(Shape::line(outline, Stroke::new(1.5, Color32::WHITE)));
             }
         }
     }
@@ -1809,6 +1810,23 @@ impl Preview {
                     feather,
                     initialized: true,
                 } => {
+                    // Linear masks are defined in native source-pixel space.
+                    // Drawing their guides as straight *screen-space* lines is
+                    // only valid for a similarity transform. Perspective shear
+                    // and especially nonlinear Lensfun distortion turn both the
+                    // axis and equal-t transition lines into warped curves. Keep
+                    // the overlay derived from the exact rasterizer geometry.
+                    let axis = linear_axis_geometry_screen_points(
+                        image_rect,
+                        app.geometry,
+                        lens_geometry.as_deref(),
+                        source_width,
+                        source_height,
+                        *start,
+                        *end,
+                        48,
+                    );
+                    painter.add(Shape::line(axis, Stroke::new(2.0, color)));
                     let a = final_geometry_native_source_to_screen(
                         image_rect,
                         app.geometry,
@@ -1825,26 +1843,40 @@ impl Preview {
                         source_height,
                         *end,
                     );
-                    painter.line_segment([a, b], Stroke::new(2.0, color));
                     painter.circle_filled(a, 5.0, color);
                     painter.circle_filled(b, 5.0, color);
-                    let direction = b - a;
-                    let length = direction.length().max(1.0);
-                    let normal = egui::vec2(-direction.y, direction.x) / length;
-                    let rotation_handle = linear_rotation_handle(a, b);
-                    let middle = a + direction * 0.5;
+                    let (middle, rotation_handle) = linear_rotation_handle_geometry(
+                        image_rect,
+                        app.geometry,
+                        lens_geometry.as_deref(),
+                        source_width,
+                        source_height,
+                        *start,
+                        *end,
+                    );
                     painter.line_segment(
                         [middle, rotation_handle],
                         Stroke::new(1.0, color.gamma_multiply(0.72)),
                     );
                     painter.circle_stroke(rotation_handle, 6.0, Stroke::new(2.0, color));
-                    let span = image_rect.width().max(image_rect.height());
-                    let half_transition = direction * (0.5 * feather.clamp(0.02, 1.0));
-                    for center in [middle - half_transition, middle + half_transition] {
-                        painter.line_segment(
-                            [center - normal * span, center + normal * span],
-                            Stroke::new(1.0, color.gamma_multiply(0.65)),
+
+                    let width_factor = feather.clamp(0.02, 1.0);
+                    for t in [0.5 - 0.5 * width_factor, 0.5 + 0.5 * width_factor] {
+                        let boundary = linear_isot_geometry_screen_points(
+                            image_rect,
+                            app.geometry,
+                            lens_geometry.as_deref(),
+                            source_width,
+                            source_height,
+                            *start,
+                            *end,
+                            t,
+                            64,
                         );
+                        painter.add(Shape::line(
+                            boundary,
+                            Stroke::new(1.0, color.gamma_multiply(0.65)),
+                        ));
                     }
                 }
                 _ => {}
@@ -1875,7 +1907,7 @@ impl Preview {
                                 pointer,
                             );
                             if let Some(uv) = editable_source_uv(source_uv) {
-                                let radius = geometry_brush_radius_screen(
+                                let outline = brush_outline_geometry_screen_points(
                                     image_rect,
                                     app.geometry,
                                     lens_geometry.as_deref(),
@@ -1883,12 +1915,9 @@ impl Preview {
                                     source_height,
                                     uv,
                                     zoom_scaled_brush_size(*size, app.preview_zoom),
+                                    64,
                                 );
-                                painter.circle_stroke(
-                                    pointer,
-                                    radius.max(1.5),
-                                    Stroke::new(1.5, cursor_color),
-                                );
+                                painter.add(Shape::line(outline, Stroke::new(1.5, cursor_color)));
                             }
                         }
                         MaskGeometry::Object { brush_size, .. } => {
@@ -1901,7 +1930,7 @@ impl Preview {
                                 pointer,
                             );
                             if let Some(uv) = editable_source_uv(source_uv) {
-                                let radius = geometry_brush_radius_screen(
+                                let outline = brush_outline_geometry_screen_points(
                                     image_rect,
                                     app.geometry,
                                     lens_geometry.as_deref(),
@@ -1909,12 +1938,9 @@ impl Preview {
                                     source_height,
                                     uv,
                                     zoom_scaled_brush_size(*brush_size, app.preview_zoom),
+                                    64,
                                 );
-                                painter.circle_stroke(
-                                    pointer,
-                                    radius.max(1.5),
-                                    Stroke::new(1.5, cursor_color),
-                                );
+                                painter.add(Shape::line(outline, Stroke::new(1.5, cursor_color)));
                             }
                         }
                         _ => {}
@@ -2154,7 +2180,15 @@ fn begin_mask_drag(
                 source_height,
                 *end,
             );
-            let rotation_handle = linear_rotation_handle(a, b);
+            let (_, rotation_handle) = linear_rotation_handle_geometry(
+                image_rect,
+                display_geometry,
+                lens_geometry,
+                source_width,
+                source_height,
+                *start,
+                *end,
+            );
             if rotation_handle.distance(pointer) <= 24.0 {
                 let midpoint = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5];
                 Some(MaskDragState::RotateLinear {
@@ -2166,7 +2200,20 @@ fn begin_mask_drag(
                 Some(MaskDragState::LinearStart)
             } else if b.distance(pointer) <= 22.0 {
                 Some(MaskDragState::LinearEnd)
-            } else if distance_to_segment(pointer, a, b) <= 18.0 {
+            } else if distance_to_polyline(
+                pointer,
+                &linear_axis_geometry_screen_points(
+                    image_rect,
+                    display_geometry,
+                    lens_geometry,
+                    source_width,
+                    source_height,
+                    *start,
+                    *end,
+                    32,
+                ),
+            ) <= 18.0
+            {
                 Some(MaskDragState::MoveLinear {
                     pointer: uv,
                     start: *start,
@@ -2202,11 +2249,209 @@ fn source_angle_from(
     dy.atan2(dx)
 }
 
-fn linear_rotation_handle(start: Pos2, end: Pos2) -> Pos2 {
-    let direction = end - start;
-    let length = direction.length().max(1.0);
-    let normal = egui::vec2(-direction.y, direction.x) / length;
-    start + direction * 0.5 + normal * 34.0
+fn linear_rotation_handle_geometry(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    start: [f32; 2],
+    end: [f32; 2],
+) -> (Pos2, Pos2) {
+    let midpoint_uv = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5];
+    let midpoint = final_geometry_native_source_to_screen(
+        image_rect,
+        geometry,
+        lens_geometry,
+        source_width,
+        source_height,
+        midpoint_uv,
+    );
+
+    // Use the local tangent of the *warped* gradient axis. The old code used
+    // the straight chord between transformed endpoints, which points in the
+    // wrong direction under nonlinear lens correction.
+    let tangent_a_uv = [
+        start[0] + (end[0] - start[0]) * 0.48,
+        start[1] + (end[1] - start[1]) * 0.48,
+    ];
+    let tangent_b_uv = [
+        start[0] + (end[0] - start[0]) * 0.52,
+        start[1] + (end[1] - start[1]) * 0.52,
+    ];
+    let tangent_a = final_geometry_native_source_to_screen(
+        image_rect,
+        geometry,
+        lens_geometry,
+        source_width,
+        source_height,
+        tangent_a_uv,
+    );
+    let tangent_b = final_geometry_native_source_to_screen(
+        image_rect,
+        geometry,
+        lens_geometry,
+        source_width,
+        source_height,
+        tangent_b_uv,
+    );
+    let tangent = tangent_b - tangent_a;
+    let normal = if tangent.length_sq() > 1e-6 {
+        egui::vec2(-tangent.y, tangent.x) / tangent.length()
+    } else {
+        egui::vec2(0.0, -1.0)
+    };
+    (midpoint, midpoint + normal * 34.0)
+}
+
+fn linear_axis_geometry_screen_points(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    start: [f32; 2],
+    end: [f32; 2],
+    segments: usize,
+) -> Vec<Pos2> {
+    let segments = segments.max(2);
+    (0..=segments)
+        .map(|index| {
+            let t = index as f32 / segments as f32;
+            let uv = [
+                start[0] + (end[0] - start[0]) * t,
+                start[1] + (end[1] - start[1]) * t,
+            ];
+            final_geometry_native_source_to_screen(
+                image_rect,
+                geometry,
+                lens_geometry,
+                source_width,
+                source_height,
+                uv,
+            )
+        })
+        .collect()
+}
+
+fn clip_infinite_source_line(
+    point: [f32; 2],
+    direction: [f32; 2],
+    source_width: u32,
+    source_height: u32,
+) -> Option<(f32, f32)> {
+    let bounds = [source_width.max(1) as f32, source_height.max(1) as f32];
+    let mut lo = f32::NEG_INFINITY;
+    let mut hi = f32::INFINITY;
+    for axis in 0..2 {
+        let p = point[axis];
+        let d = direction[axis];
+        if d.abs() <= 1e-8 {
+            if p < 0.0 || p > bounds[axis] {
+                return None;
+            }
+            continue;
+        }
+        let a = (0.0 - p) / d;
+        let b = (bounds[axis] - p) / d;
+        lo = lo.max(a.min(b));
+        hi = hi.min(a.max(b));
+        if lo > hi {
+            return None;
+        }
+    }
+    (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
+fn linear_isot_geometry_screen_points(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    start: [f32; 2],
+    end: [f32; 2],
+    t: f32,
+    segments: usize,
+) -> Vec<Pos2> {
+    let width = source_width.max(1) as f32;
+    let height = source_height.max(1) as f32;
+    let start_px = [start[0] * width, start[1] * height];
+    let delta = [(end[0] - start[0]) * width, (end[1] - start[1]) * height];
+    let center = [start_px[0] + delta[0] * t, start_px[1] + delta[1] * t];
+    let perpendicular = [-delta[1], delta[0]];
+    if perpendicular[0].abs().max(perpendicular[1].abs()) <= 1e-6 {
+        return vec![final_geometry_native_source_to_screen(
+            image_rect,
+            geometry,
+            lens_geometry,
+            source_width,
+            source_height,
+            start,
+        )];
+    }
+    let Some((q0, q1)) = clip_infinite_source_line(
+        center,
+        perpendicular,
+        source_width,
+        source_height,
+    ) else {
+        return Vec::new();
+    };
+    let segments = segments.max(2);
+    (0..=segments)
+        .map(|index| {
+            let fraction = index as f32 / segments as f32;
+            let q = q0 + (q1 - q0) * fraction;
+            let source_px = [
+                center[0] + perpendicular[0] * q,
+                center[1] + perpendicular[1] * q,
+            ];
+            let uv = [source_px[0] / width, source_px[1] / height];
+            final_geometry_native_source_to_screen(
+                image_rect,
+                geometry,
+                lens_geometry,
+                source_width,
+                source_height,
+                uv,
+            )
+        })
+        .collect()
+}
+
+fn brush_outline_geometry_screen_points(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    center: [f32; 2],
+    size: f32,
+    segments: usize,
+) -> Vec<Pos2> {
+    let width = source_width.max(1) as f32;
+    let height = source_height.max(1) as f32;
+    let radius = size.max(0.0) * source_width.min(source_height).max(1) as f32;
+    let center_px = [center[0] * width, center[1] * height];
+    let segments = segments.max(16);
+    (0..=segments)
+        .map(|index| {
+            let angle = std::f32::consts::TAU * index as f32 / segments as f32;
+            let uv = [
+                (center_px[0] + radius * angle.cos()) / width,
+                (center_px[1] + radius * angle.sin()) / height,
+            ];
+            final_geometry_native_source_to_screen(
+                image_rect,
+                geometry,
+                lens_geometry,
+                source_width,
+                source_height,
+                uv,
+            )
+        })
+        .collect()
 }
 
 fn radial_source_uv_at(
@@ -2337,6 +2582,17 @@ fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
     }
     let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
     point.distance(start + segment * t)
+}
+
+fn distance_to_polyline(point: Pos2, points: &[Pos2]) -> f32 {
+    match points {
+        [] => f32::INFINITY,
+        [only] => point.distance(*only),
+        _ => points
+            .windows(2)
+            .map(|pair| distance_to_segment(point, pair[0], pair[1]))
+            .fold(f32::INFINITY, f32::min),
+    }
 }
 
 
@@ -2702,7 +2958,7 @@ fn source_uv_bbox(points: impl IntoIterator<Item = [f32; 2]>) -> crate::app::Pre
 }
 
 fn visible_rect_sample_points(rect: Rect, nonlinear: bool) -> Vec<Pos2> {
-    let steps = if nonlinear { 4 } else { 1 };
+    let steps = if nonlinear { 10 } else { 1 };
     let mut points = Vec::with_capacity((steps + 1) * (steps + 1));
     for y in 0..=steps {
         let ty = y as f32 / steps as f32;
@@ -2829,17 +3085,25 @@ fn paint_textured_combined_geometry_mesh(
     // Egui meshes linearly interpolate UVs inside each triangle. A modest grid
     // therefore turns Lensfun's smooth nonlinear map into a GPU texture warp
     // without first resampling the preview pixels on the CPU/CFA.
-    const GRID: usize = 32;
+    // Keep the display warp close to the exact map used by vector overlays and
+    // inverse pointer mapping. A fixed 32x32 mesh can span ~200 source pixels
+    // per cell on high-resolution RAWs, visibly separating mask handles from
+    // their coverage near strongly distorted edges. Bound each cell to roughly
+    // 96 source pixels while keeping vertex count predictable.
+    let span_u = (source_uv[2] - source_uv[0]).abs().max(1e-6);
+    let span_v = (source_uv[3] - source_uv[1]).abs().max(1e-6);
+    let grid_x = ((source_width.max(1) as f32 * span_u / 96.0).ceil() as usize).clamp(16, 96);
+    let grid_y = ((source_height.max(1) as f32 * span_v / 96.0).ceil() as usize).clamp(16, 96);
     let lens_geometry = lens_geometry.expect("lens geometry checked above");
     let mut mesh = Mesh::with_texture(texture_id);
-    mesh.vertices.reserve((GRID + 1) * (GRID + 1));
-    mesh.indices.reserve(GRID * GRID * 6);
-    for gy in 0..=GRID {
-        let ty = gy as f32 / GRID as f32;
+    mesh.vertices.reserve((grid_x + 1) * (grid_y + 1));
+    mesh.indices.reserve(grid_x * grid_y * 6);
+    for gy in 0..=grid_y {
+        let ty = gy as f32 / grid_y as f32;
         let raw_v = source_uv[1] + (source_uv[3] - source_uv[1]) * ty;
         let texture_v = texture_uv.top() + (texture_uv.bottom() - texture_uv.top()) * ty;
-        for gx in 0..=GRID {
-            let tx = gx as f32 / GRID as f32;
+        for gx in 0..=grid_x {
+            let tx = gx as f32 / grid_x as f32;
             let raw_u = source_uv[0] + (source_uv[2] - source_uv[0]) * tx;
             let texture_u = texture_uv.left() + (texture_uv.right() - texture_uv.left()) * tx;
             let corrected_uv = native_source_to_corrected_uv(
@@ -2872,9 +3136,9 @@ fn paint_textured_combined_geometry_mesh(
             });
         }
     }
-    let stride = GRID + 1;
-    for gy in 0..GRID {
-        for gx in 0..GRID {
+    let stride = grid_x + 1;
+    for gy in 0..grid_y {
+        for gx in 0..grid_x {
             let a = (gy * stride + gx) as u32;
             let b = a + 1;
             let c = a + stride as u32;
@@ -3772,39 +4036,30 @@ fn inpaint_stroke_geometry_screen_bounds(
     source_height: u32,
 ) -> Option<Rect> {
     let mut bounds: Option<Rect> = None;
-    let width = source_width.max(1) as f32;
-    let height = source_height.max(1) as f32;
-    let source_min = source_width.min(source_height).max(1) as f32;
     for dab in dabs {
-        let radius = (dab.size * source_min).max(1.0);
-        let du = radius / width;
-        let dv = radius / height;
-        let points = [
-            [dab.center[0] - du, dab.center[1] - dv],
-            [dab.center[0] + du, dab.center[1] - dv],
-            [dab.center[0] + du, dab.center[1] + dv],
-            [dab.center[0] - du, dab.center[1] + dv],
-        ];
-        let mut dab_bounds: Option<Rect> = None;
-        for point in points {
-            let screen = final_geometry_native_source_to_screen(
-                image_rect,
-                geometry,
-                lens_geometry,
-                source_width,
-                source_height,
-                point,
-            );
+        // A source-space circular dab is generally not bounded by the four
+        // transformed corners of its source-space square after perspective or
+        // nonlinear lens distortion: an arc can bulge beyond every transformed
+        // corner. Sample the actual dab circumference through the same final
+        // mapping used by the mask texture/cursor so the focused-stroke box
+        // cannot visibly cut through a warped mask footprint.
+        for screen in brush_outline_geometry_screen_points(
+            image_rect,
+            geometry,
+            lens_geometry,
+            source_width,
+            source_height,
+            dab.center,
+            dab.size,
+            48,
+        ) {
+            if !screen.x.is_finite() || !screen.y.is_finite() {
+                continue;
+            }
             let point_rect = Rect::from_min_max(screen, screen);
-            dab_bounds = Some(match dab_bounds {
+            bounds = Some(match bounds {
                 Some(existing) => existing.union(point_rect),
                 None => point_rect,
-            });
-        }
-        if let Some(dab_bounds) = dab_bounds {
-            bounds = Some(match bounds {
-                Some(existing) => existing.union(dab_bounds),
-                None => dab_bounds,
             });
         }
     }

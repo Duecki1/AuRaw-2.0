@@ -137,3 +137,9 @@ def test_export_sidebar_shows_live_progress_bar() -> None:
     assert "Preparing export…" in SIDEBAR
     assert "tiles" in SIDEBAR
 
+
+
+def test_export_sidebar_uses_post_crop_geometry_dimensions() -> None:
+    sidebar = (ROOT / "src/ui/sidebar/export.rs").read_text(encoding="utf-8")
+    assert "app.geometry.crop_pixel_dimensions(raw.width, raw.height)" in sidebar
+    assert ".map(|raw| (raw.width, raw.height))" not in sidebar
