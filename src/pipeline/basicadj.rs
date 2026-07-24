@@ -198,10 +198,13 @@ pub const SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13;
 /// process-13 scene/display graph unchanged.
 pub const SENSOR_DENOISE_PROCESS_VERSION: u32 = 14;
 /// Process 15 makes guided RAW highlight reconstruction boundary/consensus
-/// aware. Existing process-14 edits retain the previous guided solver so saved
-/// appearances do not change silently; new edits use the more robust solver.
+/// aware.
 pub const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15;
-pub const CURRENT_PROCESS_VERSION: u32 = HIGHLIGHT_CONSENSUS_PROCESS_VERSION;
+/// Process 16 repairs the Basic-panel low-tone response. Shadows now use a
+/// broader pixel-aware scene-EV selector and Blacks uses a monotone toe/pivot
+/// remap instead of a weak masked exposure multiplier.
+pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;
+pub const CURRENT_PROCESS_VERSION: u32 = BASIC_TONE_RESPONSE_PROCESS_VERSION;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -334,9 +337,10 @@ impl ExposureParams {
         // reordering profile tone/look around scene controls is appearance
         // changing and cannot be represented by a scalar parameter migration.
         // Process 14 retains the process-13 graph and changes only denoise.
-        // Process 15 changes guided highlight reconstruction only. New edits
-        // start at CURRENT_PROCESS_VERSION; saved process-12/13/14 edits keep
-        // their renderer until the user explicitly opts into a compatible change.
+        // Process 15 changes guided highlight reconstruction only. Process 16
+        // fixes a development-era Basic tone response bug. Process-15 builds
+        // were never a stable compatibility target, so they migrate to 16;
+        // released process-12/13/14 appearances remain pinned deliberately.
         match self.process_version {
             0..=7 => {
                 self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
@@ -350,8 +354,11 @@ impl ExposureParams {
             }
             LEGACY_SCENE_DISPLAY_PROCESS_VERSION
             | SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION
-            | SENSOR_DENOISE_PROCESS_VERSION
-            | CURRENT_PROCESS_VERSION => {}
+            | SENSOR_DENOISE_PROCESS_VERSION => {}
+            HIGHLIGHT_CONSENSUS_PROCESS_VERSION => {
+                self.process_version = BASIC_TONE_RESPONSE_PROCESS_VERSION;
+            }
+            CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently
             // reinterpret them with older formulas.
