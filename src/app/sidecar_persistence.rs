@@ -37,6 +37,7 @@ impl AurawApp {
                 maker: self.lens_correction.selected_maker.clone(),
                 model: self.lens_correction.selected_model.clone(),
             },
+            ai_masks_need_update: self.ai_masks_need_update,
         }
     }
 

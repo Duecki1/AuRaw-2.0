@@ -1587,6 +1587,8 @@ fn catalog_status(count: usize, warning_count: usize, truncated: bool) -> String
 #[cfg(not(target_os = "android"))]
 enum LibraryCardAction {
     Export(Vec<PathBuf>),
+    CopyAdjustments(PathBuf),
+    PasteAdjustments(Vec<PathBuf>),
     Duplicate(Vec<PathBuf>),
     ResetAdjustments(Vec<PathBuf>),
     Delete(Vec<PathBuf>),
@@ -1595,6 +1597,8 @@ enum LibraryCardAction {
 #[cfg(target_os = "android")]
 enum LibraryCardAction {
     Export(Vec<(String, String)>),
+    CopyAdjustments((String, String)),
+    PasteAdjustments(Vec<(String, String)>),
     Duplicate(Vec<(String, String)>),
     ResetAdjustments(Vec<(String, String)>),
     Delete(Vec<(String, String)>),
@@ -1604,6 +1608,7 @@ enum LibraryCardAction {
 fn android_selection_menu(
     ui: &mut Ui,
     selected: &[(LibrarySource, String)],
+    can_paste_adjustments: bool,
     library_action: &mut Option<LibraryCardAction>,
 ) {
     let targets = || {
@@ -1626,6 +1631,32 @@ fn android_selection_menu(
     };
     if ui.button(export_label).clicked() {
         *library_action = Some(LibraryCardAction::Export(targets()));
+        ui.close();
+    }
+    ui.separator();
+    if selected_count == 1 && ui.button("Copy adjustments").clicked() {
+        if let Some((source, _)) = selected.first() {
+            let LibrarySource::Android {
+                uri, display_name, ..
+            } = source;
+            *library_action = Some(LibraryCardAction::CopyAdjustments((
+                uri.clone(),
+                display_name.clone(),
+            )));
+        }
+        ui.close();
+    }
+    let paste_label = if selected_count > 1 {
+        "Paste adjustments to selected"
+    } else {
+        "Paste adjustments"
+    };
+    if ui
+        .add_enabled(can_paste_adjustments, egui::Button::new(paste_label))
+        .on_disabled_hover_text("Copy adjustments from an image first")
+        .clicked()
+    {
+        *library_action = Some(LibraryCardAction::PasteAdjustments(targets()));
         ui.close();
     }
     ui.separator();
@@ -1849,6 +1880,7 @@ impl Library {
                         android_selection_menu(
                             ui,
                             &selected_android_items,
+                            app.has_copied_adjustments(),
                             &mut library_action,
                         );
                     });
@@ -2042,6 +2074,7 @@ impl Library {
                         {
                             let LibrarySource::File(path) = &source;
                             let path = path.clone();
+                            let context_source_path = path.clone();
 
                             if response.clicked() && !response.secondary_clicked() {
                                 if app.library.selection_mode() {
@@ -2075,12 +2108,14 @@ impl Library {
                                     })
                                     .collect::<Vec<_>>()
                             } else {
-                                vec![path]
+                                vec![path.clone()]
                             };
                             let selected_count = context_paths.len();
                             let action_enabled = !app.library.file_action_in_progress()
                                 && app.library_batch_export_progress().is_none()
                                 && !context_paths.is_empty();
+                            let can_paste_adjustments =
+                                action_enabled && app.has_copied_adjustments();
                             response.context_menu(|ui| {
                                 let export_label = if selected_count > 1 {
                                     "Export selected…"
@@ -2093,6 +2128,39 @@ impl Library {
                                 {
                                     library_action =
                                         Some(LibraryCardAction::Export(context_paths.clone()));
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui
+                                    .add_enabled(
+                                        action_enabled,
+                                        egui::Button::new("Copy adjustments"),
+                                    )
+                                    .clicked()
+                                {
+                                    library_action = Some(LibraryCardAction::CopyAdjustments(
+                                        context_source_path.clone(),
+                                    ));
+                                    ui.close();
+                                }
+                                let paste_label = if selected_count > 1 {
+                                    "Paste adjustments to selected"
+                                } else {
+                                    "Paste adjustments"
+                                };
+                                if ui
+                                    .add_enabled(
+                                        can_paste_adjustments,
+                                        egui::Button::new(paste_label),
+                                    )
+                                    .on_disabled_hover_text(
+                                        "Copy adjustments from an image first",
+                                    )
+                                    .clicked()
+                                {
+                                    library_action = Some(LibraryCardAction::PasteAdjustments(
+                                        context_paths.clone(),
+                                    ));
                                     ui.close();
                                 }
                                 ui.separator();
@@ -2156,6 +2224,33 @@ impl Library {
                             format: ExportFormat::Jpeg,
                         });
                     }
+                }
+                LibraryCardAction::CopyAdjustments(path) => {
+                    let status = match app.copy_library_adjustments_from_path(&path) {
+                        Ok(()) => format!(
+                            "Copied adjustments from {}",
+                            app.copied_adjustments_source_label().unwrap_or("image")
+                        ),
+                        Err(error) => format!("Could not copy adjustments: {error}"),
+                    };
+                    app.library.status = status;
+                }
+                LibraryCardAction::PasteAdjustments(paths) => {
+                    let total = paths.len();
+                    let (completed, failures) = app.paste_library_adjustments_to_paths(&paths);
+                    app.library.clear_selection();
+                    app.library.refresh(ui.ctx());
+                    app.library.status = if failures.is_empty() {
+                        format!(
+                            "Pasted adjustments to {completed} selected {}",
+                            if completed == 1 { "image" } else { "images" }
+                        )
+                    } else {
+                        format!(
+                            "Pasted adjustments to {completed} of {total} selected images. {}",
+                            failures.join(" · ")
+                        )
+                    };
                 }
                 LibraryCardAction::Duplicate(paths) => {
                     app.library.clear_selection();
@@ -2261,6 +2356,32 @@ impl Library {
                             format: ExportFormat::Jpeg,
                         });
                     }
+                }
+                LibraryCardAction::CopyAdjustments((uri, display_name)) => {
+                    let status = match app.copy_library_adjustments_from_android(&uri, &display_name) {
+                        Ok(()) => format!("Copied adjustments from {display_name}"),
+                        Err(error) => format!("Could not copy adjustments: {error}"),
+                    };
+                    app.library.status = status;
+                }
+                LibraryCardAction::PasteAdjustments(targets) => {
+                    let total = targets.len();
+                    let (completed, failures) =
+                        app.paste_library_adjustments_to_android(&targets);
+                    app.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
+                    app.library.refresh(ui.ctx());
+                    app.library.status = if failures.is_empty() {
+                        format!(
+                            "Pasted adjustments to {completed} selected {}",
+                            if completed == 1 { "image" } else { "images" }
+                        )
+                    } else {
+                        format!(
+                            "Pasted adjustments to {completed} of {total} selected images. {}",
+                            failures.join(" · ")
+                        )
+                    };
                 }
                 LibraryCardAction::Duplicate(targets) => {
                     let total = targets.len();

@@ -126,6 +126,40 @@ impl Settings {
 
         ui.add_space(8.0);
         Self::group(ui, content_width, |ui| {
+            ui.heading("Copy & paste adjustments");
+            ui.add(
+                egui::Label::new(
+                    "Choose which edit categories Library > Copy Adjustments stores for later pasting. The selection is remembered across restarts.",
+                )
+                .wrap(),
+            );
+            ui.add_space(4.0);
+
+            let mut settings = app.adjustment_copy_settings;
+            let mut changed = false;
+            changed |= ui
+                .checkbox(&mut settings.adjustments, "Adjustments")
+                .on_hover_text("Global light, color, tone curve, effects, color mixer, and RAW adjustment values.")
+                .changed();
+            changed |= ui
+                .checkbox(&mut settings.masks, "Masks")
+                .on_hover_text("Mask groups, geometry, components, and their local adjustments. Pasted AI/content-aware masks are marked for refresh on the destination image.")
+                .changed();
+            changed |= ui
+                .checkbox(&mut settings.inpainting, "Inpainting")
+                .on_hover_text("Inpainting strokes and generated patch data.")
+                .changed();
+            changed |= ui
+                .checkbox(&mut settings.lens_correction, "Lens correction")
+                .on_hover_text("Lens correction enabled state and selected lens profile.")
+                .changed();
+            if changed {
+                app.set_adjustment_copy_settings(settings);
+            }
+        });
+
+        ui.add_space(8.0);
+        Self::group(ui, content_width, |ui| {
             ui.heading("RAW color profiles");
             ui.add(
                     egui::Label::new(

@@ -16,7 +16,9 @@ use crate::pipeline::{
     ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS,
 };
-use crate::sidecar::{EditState as SidecarEditState, LensEditState as SidecarLensEditState};
+use crate::sidecar::{
+    AdjustmentCopySettings, EditState as SidecarEditState, LensEditState as SidecarLensEditState,
+};
 use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::{Library, LibraryState};
@@ -256,6 +258,7 @@ struct LoadedPreview {
     rendered_exposure: ExposureParams,
     rendered_masks: MaskStack,
     inpaint_strokes: Vec<InpaintStroke>,
+    ai_masks_need_update: bool,
     mask_source: Option<MaskRgbImage>,
     inpaint_source: Option<MaskRgbImage>,
     lens_correction: LensCorrectionState,
@@ -391,6 +394,13 @@ struct LibraryBatchExportJob {
     display_name: String,
 }
 
+#[derive(Clone, Debug)]
+struct LibraryAdjustmentClipboard {
+    edits: SidecarEditState,
+    settings: AdjustmentCopySettings,
+    source_label: String,
+}
+
 #[derive(Debug)]
 struct LibraryBatchExportState {
     pending: VecDeque<LibraryBatchExportJob>,
@@ -431,6 +441,8 @@ pub struct AurawApp {
     pub(crate) android_original_hold: Option<AndroidOriginalHold>,
     pub exposure: ExposureParams,
     pub(crate) library: LibraryState,
+    pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
+    adjustment_clipboard: Option<LibraryAdjustmentClipboard>,
     raw_cache: VecDeque<CachedRawDecode>,
     raw_cache_limit: usize,
     performance_settings_path: Option<PathBuf>,
@@ -594,5 +606,6 @@ include!("app/lifecycle.rs");
 include!("app/masks_ai.rs");
 include!("app/inpainting.rs");
 include!("app/processing_export.rs");
+include!("app/library_adjustments.rs");
 include!("app/sidecar_persistence.rs");
 include!("app/eframe_impl.rs");

@@ -305,6 +305,8 @@ impl AurawApp {
             android_original_hold: None,
             exposure,
             library: LibraryState::new_with_workers(ctx, performance.thumbnail_workers),
+            adjustment_copy_settings: performance.adjustment_copy_settings,
+            adjustment_clipboard: None,
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
@@ -490,6 +492,8 @@ impl AurawApp {
                 &cc.egui_ctx,
                 performance.thumbnail_workers,
             ),
+            adjustment_copy_settings: performance.adjustment_copy_settings,
+            adjustment_clipboard: None,
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
@@ -913,6 +917,14 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn set_adjustment_copy_settings(&mut self, settings: AdjustmentCopySettings) {
+        if self.adjustment_copy_settings == settings {
+            return;
+        }
+        self.adjustment_copy_settings = settings;
+        self.persist_performance_settings();
+    }
+
     fn persist_performance_settings(&self) -> bool {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.raw_cache_limit,
@@ -923,6 +935,7 @@ impl AurawApp {
             camera_profile_folder_label: self.camera_profile_folder_label.clone(),
             camera_profile_auto_detect: self.camera_profile_auto_detect,
             last_camera_profile: self.last_camera_profile.clone(),
+            adjustment_copy_settings: self.adjustment_copy_settings,
             #[cfg(not(target_os = "android"))]
             last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
             ..Default::default()
@@ -1282,6 +1295,7 @@ impl AurawApp {
                         mut rendered_masks,
                         inpaint_strokes,
                         saved_lens,
+                        pasted_ai_masks_need_update,
                         mut sidecar_warning,
                         mut sidecar_needs_rewrite,
                     ) = if let Some(edits) = edit_override {
@@ -1290,6 +1304,7 @@ impl AurawApp {
                             Arc::unwrap_or_clone(edits.masks),
                             Arc::unwrap_or_clone(edits.inpainting),
                             Some(edits.lens),
+                            edits.ai_masks_need_update,
                             None,
                             true,
                         )
@@ -1305,6 +1320,7 @@ impl AurawApp {
                                     Arc::unwrap_or_clone(loaded.edits.masks),
                                     Arc::unwrap_or_clone(loaded.edits.inpainting),
                                     Some(loaded.edits.lens),
+                                    loaded.edits.ai_masks_need_update,
                                     warning,
                                     loaded.migrated,
                                 )
@@ -1314,6 +1330,7 @@ impl AurawApp {
                                 MaskStack::default(),
                                 Vec::new(),
                                 None,
+                                false,
                                 None,
                                 false,
                             ),
@@ -1322,6 +1339,7 @@ impl AurawApp {
                                 MaskStack::default(),
                                 Vec::new(),
                                 None,
+                                false,
                                 Some(format!(
                                     "Could not load this RAW's sidecar; using default edits: {error}"
                                 )),
@@ -1661,6 +1679,7 @@ impl AurawApp {
                         rendered_exposure,
                         rendered_masks,
                         inpaint_strokes,
+                        ai_masks_need_update: pasted_ai_masks_need_update,
                         mask_source,
                         inpaint_source,
                         lens_correction,
@@ -1926,7 +1945,9 @@ impl AurawApp {
                 self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
                 self.inpaint_revision = 0;
                 self.inpaint_source_cache = loaded.inpaint_source;
+                self.ai_masks_need_update = loaded.ai_masks_need_update;
                 self.rehydrate_restored_mask_state();
+                self.ai_masks_need_update |= loaded.ai_masks_need_update;
                 if loaded.mask_source.is_some() {
                     self.mask_source_cache = loaded.mask_source;
                 }

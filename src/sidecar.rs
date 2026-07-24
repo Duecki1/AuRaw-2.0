@@ -62,6 +62,33 @@ pub struct LensEditState {
     pub model: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AdjustmentCopySettings {
+    #[serde(default = "default_true")]
+    pub adjustments: bool,
+    #[serde(default = "default_true")]
+    pub masks: bool,
+    #[serde(default)]
+    pub inpainting: bool,
+    #[serde(default)]
+    pub lens_correction: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for AdjustmentCopySettings {
+    fn default() -> Self {
+        Self {
+            adjustments: true,
+            masks: true,
+            inpainting: false,
+            lens_correction: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct EditState {
     pub exposure: ExposureParams,
@@ -72,6 +99,68 @@ pub struct EditState {
     #[serde(default)]
     pub inpainting: Arc<Vec<InpaintStroke>>,
     pub lens: LensEditState,
+    /// Persisted because copied content-aware masks belong to the source image
+    /// until they are explicitly regenerated on the destination image.
+    #[serde(default)]
+    pub ai_masks_need_update: bool,
+}
+
+pub fn default_edit_state() -> EditState {
+    EditState {
+        exposure: ExposureParams::scene_referred_default(),
+        camera_profile: None,
+        masks: Arc::new(MaskStack::default()),
+        inpainting: Arc::new(Vec::new()),
+        lens: LensEditState::default(),
+        ai_masks_need_update: false,
+    }
+}
+
+fn masks_contain_content_aware_components(masks: &MaskStack) -> bool {
+    masks.masks.iter().any(|mask| {
+        mask.components.iter().any(|component| {
+            matches!(
+                component.kind,
+                MaskKind::Subject
+                    | MaskKind::Background
+                    | MaskKind::Object
+                    | MaskKind::Landscape
+                    | MaskKind::LuminanceRange
+                    | MaskKind::ColorRange
+                    | MaskKind::DepthRange
+            )
+        })
+    })
+}
+
+/// Merge a copied edit snapshot into an existing destination according to the
+/// user's library copy settings. Content-aware masks are deliberately marked
+/// stale after crossing image boundaries so Develop exposes the refresh action.
+pub fn apply_copied_adjustments(
+    destination: &mut EditState,
+    source: &EditState,
+    settings: AdjustmentCopySettings,
+) {
+    if settings.adjustments {
+        destination.exposure = source.exposure;
+    }
+    if settings.masks {
+        destination.masks = Arc::clone(&source.masks);
+        destination.ai_masks_need_update =
+            masks_contain_content_aware_components(&destination.masks);
+    }
+    if settings.inpainting {
+        destination.inpainting = Arc::clone(&source.inpainting);
+        if masks_contain_content_aware_components(&destination.masks) {
+            destination.ai_masks_need_update = true;
+        }
+    }
+    if settings.lens_correction {
+        destination.lens = source.lens.clone();
+        if masks_contain_content_aware_components(&destination.masks) {
+            destination.ai_masks_need_update = true;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -410,6 +499,24 @@ fn migrate_legacy_developed_thumbnail_cache(raw_path: &Path) -> Result<(), Strin
     if save_developed_thumbnail_cache(raw_path, &thumbnail, current_fingerprint).is_err() {
         return Ok(());
     }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn invalidate_developed_thumbnail_cache(raw_path: &Path) -> Result<(), String> {
+    for path in [
+        developed_thumbnail_path_for_raw(raw_path),
+        developed_thumbnail_fingerprint_path_for_raw(raw_path),
+        legacy_developed_thumbnail_path_for_raw(raw_path),
+        legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("could not remove {}: {error}", path.display())),
+        }
+    }
+    remove_legacy_developed_thumbnail_cache(raw_path);
     Ok(())
 }
 
@@ -1425,7 +1532,46 @@ mod tests {
                 maker: "Test Optics".to_owned(),
                 model: "35 mm f/2".to_owned(),
             },
+            ai_masks_need_update: false,
         }
+    }
+
+    #[test]
+    fn copied_adjustments_respect_category_settings_and_mark_ai_masks_stale() {
+        let mut source = sample_edits();
+        source.exposure.dehaze = 61.0;
+        source.lens.enabled = false;
+        let mut source_masks = MaskStack::default();
+        source_masks.add_mask(MaskKind::Subject);
+        source.masks = Arc::new(source_masks);
+
+        let mut destination = sample_edits();
+        destination.exposure.dehaze = 7.0;
+        let original_exposure = destination.exposure;
+        let original_lens = destination.lens.clone();
+
+        apply_copied_adjustments(
+            &mut destination,
+            &source,
+            AdjustmentCopySettings {
+                adjustments: false,
+                masks: true,
+                inpainting: false,
+                lens_correction: false,
+            },
+        );
+
+        assert_eq!(destination.exposure, original_exposure);
+        assert_eq!(destination.lens, original_lens);
+        assert_eq!(destination.masks.masks.len(), 1);
+        assert_eq!(destination.masks.masks[0].components[0].kind, MaskKind::Subject);
+        assert!(destination.ai_masks_need_update);
+    }
+
+    #[test]
+    fn legacy_copy_settings_use_safe_category_defaults() {
+        let settings: AdjustmentCopySettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings, AdjustmentCopySettings::default());
     }
 
     fn temporary_directory(label: &str) -> PathBuf {

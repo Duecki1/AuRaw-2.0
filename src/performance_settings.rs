@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 3;
+const SETTINGS_VERSION: u32 = 4;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,6 +31,8 @@ pub(crate) struct PerformanceSettings {
     /// profile root. New RAWs without a sidecar may inherit this choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_camera_profile: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings,
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_library_folder: Option<PathBuf>,
@@ -64,6 +66,7 @@ impl Default for PerformanceSettings {
             camera_profile_folder_label: None,
             camera_profile_auto_detect: default_camera_profile_auto_detect(),
             last_camera_profile: None,
+            adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings::default(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
         }
@@ -72,7 +75,16 @@ impl Default for PerformanceSettings {
 
 impl PerformanceSettings {
     pub(crate) fn sanitized(mut self) -> Self {
+        let loaded_version = self.version;
         self.version = SETTINGS_VERSION;
+        // Copy/paste categories were introduced with version 3. Their original
+        // defaults enabled every category, including geometry-dependent edits.
+        // Version 4 makes inpainting and lens correction opt-in so upgrading
+        // from that first release also receives the safer defaults.
+        if loaded_version < 4 {
+            self.adjustment_copy_settings.inpainting = false;
+            self.adjustment_copy_settings.lens_correction = false;
+        }
         self.raw_cache_files = self
             .raw_cache_files
             .min(crate::app::maximum_raw_cache_limit());
@@ -231,6 +243,12 @@ mod tests {
             camera_profile_folder_label: Some("CameraProfiles".to_owned()),
             camera_profile_auto_detect: false,
             last_camera_profile: Some(PathBuf::from("Sony/Camera ST.dcp")),
+            adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings {
+                adjustments: true,
+                masks: false,
+                inpainting: true,
+                lens_correction: false,
+            },
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
         }
@@ -256,6 +274,22 @@ mod tests {
             settings.last_camera_profile,
             Some(PathBuf::from("Sony/Camera ST.dcp"))
         );
+        assert!(!settings.adjustment_copy_settings.masks);
+        assert!(!settings.adjustment_copy_settings.lens_correction);
+    }
+
+    #[test]
+    fn version_three_copy_settings_migrate_geometry_dependent_categories_to_opt_in() {
+        let settings: PerformanceSettings = serde_json::from_str(
+            r#"{"version":3,"raw_cache_files":1,"thumbnail_workers":1,"adjustment_copy_settings":{"adjustments":true,"masks":true,"inpainting":true,"lens_correction":true}}"#,
+        )
+        .expect("version 3 settings should remain readable")
+        .sanitized();
+
+        assert!(settings.adjustment_copy_settings.adjustments);
+        assert!(settings.adjustment_copy_settings.masks);
+        assert!(!settings.adjustment_copy_settings.inpainting);
+        assert!(!settings.adjustment_copy_settings.lens_correction);
     }
 
     #[test]
@@ -267,6 +301,10 @@ mod tests {
         assert_eq!(
             settings.preview_quality,
             crate::app::PreviewQuality::Balanced
+        );
+        assert_eq!(
+            settings.adjustment_copy_settings,
+            crate::sidecar::AdjustmentCopySettings::default()
         );
     }
 }
