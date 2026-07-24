@@ -473,6 +473,11 @@ impl AurawApp {
         self.edit_history.note_change();
     }
 
+    pub(crate) fn note_geometry_changed(&mut self) {
+        self.geometry = self.geometry.sanitized();
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+    }
+
     /// Signal an edit that changed semantic mask contents. This separate domain
     /// lets global and lens-only transactions share the existing mask snapshot
     /// without scanning large brush/range-mask data.
@@ -489,6 +494,7 @@ impl AurawApp {
             .committed_revision()
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             ^ self.inpaint_revision
+            ^ self.geometry_revision.rotate_left(17)
     }
 
     /// O(1) snapshot for persistence. Call `commit_edit_history_now` first so

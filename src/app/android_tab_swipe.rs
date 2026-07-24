@@ -99,6 +99,7 @@ impl AurawApp {
 
         let editing_mask = self.active_tab == AppTab::Develop
             && (self.mask_drag.is_some()
+                || self.crop_drag.is_some()
                 || self.preview_touch_navigation_active
                 || self
                     .android_original_hold

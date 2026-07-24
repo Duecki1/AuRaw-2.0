@@ -1,4 +1,4 @@
-use crate::app::{AurawApp, MaskDragState, MaskOverlayBlink, SidebarTab};
+use crate::app::{AurawApp, CropDragState, CropHandle, MaskDragState, MaskOverlayBlink, SidebarTab};
 use crate::pipeline::{
     rasterize_inpaint_dabs_binary, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
     ObjectStroke,
@@ -78,6 +78,10 @@ impl Preview {
             // pointer input across the whole preview panel. Brush-like tools
             // still filter their pointer to the visible image below.
             outer_rect
+        } else if app.sidebar_tab == SidebarTab::Crop {
+            // Crop edge/corner hit targets deliberately extend into the pasteboard,
+            // which is especially important for finger input near image boundaries.
+            outer_rect
         } else {
             visible_image_rect
         };
@@ -136,6 +140,8 @@ impl Preview {
             // Roll back any pending mask stroke and prevent this frame from painting.
             if app.sidebar_tab == SidebarTab::Masks {
                 app.cancel_mask_touch_gesture();
+            } else if app.sidebar_tab == SidebarTab::Crop {
+                app.crop_drag = None;
             } else if app.sidebar_tab == SidebarTab::Inpainting {
                 app.inpaint_stroke.clear();
                 app.last_inpaint_brush_point = None;
@@ -172,6 +178,7 @@ impl Preview {
         let pan_with_primary = !touch_navigation
             && !original_hold_tracking
             && !brush_canvas
+            && app.sidebar_tab != SidebarTab::Crop
             && response.dragged_by(egui::PointerButton::Primary);
         let pan_with_middle = !touch_navigation && response.dragged_by(egui::PointerButton::Middle);
         if pan_with_primary || pan_with_middle {
@@ -255,6 +262,13 @@ impl Preview {
             }
         }
 
+        if app.sidebar_tab == SidebarTab::Crop && !app.original_preview_visible() {
+            if !touch_navigation && !fit_gesture {
+                Self::handle_crop_interaction(ui, app, image_rect);
+            }
+            Self::paint_crop_overlay(ui, app, image_rect, visible_screen);
+        }
+
         painter.text(
             outer_rect.left_top() + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
@@ -311,6 +325,139 @@ impl Preview {
         }
     }
 
+    fn handle_crop_interaction(ui: &mut Ui, app: &mut AurawApp, image_rect: Rect) {
+        if image_rect.width() <= 1.0 || image_rect.height() <= 1.0 {
+            return;
+        }
+        let pointer = ui.input(|input| input.pointer.interact_pos());
+        let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
+        let primary_down = ui.input(|input| input.pointer.primary_down());
+        let primary_released = ui.input(|input| input.pointer.primary_released());
+
+        let to_normalized = |position: Pos2| -> [f32; 2] {
+            [
+                ((position.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0),
+                ((position.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0),
+            ]
+        };
+
+        if primary_pressed {
+            if let Some(pointer) = pointer.filter(|point| image_rect.expand(28.0).contains(*point)) {
+                let crop_rect = crop_screen_rect(image_rect, app.geometry.crop);
+                if let Some(handle) = crop_handle_at(crop_rect, pointer, 28.0) {
+                    app.crop_drag = Some(CropDragState {
+                        handle,
+                        start: to_normalized(pointer),
+                        crop: app.geometry.crop,
+                    });
+                }
+            }
+        }
+
+        if primary_down {
+            if let (Some(pointer), Some(drag)) = (pointer, app.crop_drag) {
+                let current = to_normalized(pointer);
+                let delta = [current[0] - drag.start[0], current[1] - drag.start[1]];
+                let mut crop = drag.crop;
+                match drag.handle {
+                    CropHandle::Move => {
+                        let width = crop[2] - crop[0];
+                        let height = crop[3] - crop[1];
+                        let left = (crop[0] + delta[0]).clamp(0.0, 1.0 - width);
+                        let top = (crop[1] + delta[1]).clamp(0.0, 1.0 - height);
+                        crop = [left, top, left + width, top + height];
+                    }
+                    CropHandle::Left => crop[0] += delta[0],
+                    CropHandle::Right => crop[2] += delta[0],
+                    CropHandle::Top => crop[1] += delta[1],
+                    CropHandle::Bottom => crop[3] += delta[1],
+                    CropHandle::TopLeft => {
+                        crop[0] += delta[0];
+                        crop[1] += delta[1];
+                    }
+                    CropHandle::TopRight => {
+                        crop[2] += delta[0];
+                        crop[1] += delta[1];
+                    }
+                    CropHandle::BottomLeft => {
+                        crop[0] += delta[0];
+                        crop[3] += delta[1];
+                    }
+                    CropHandle::BottomRight => {
+                        crop[2] += delta[0];
+                        crop[3] += delta[1];
+                    }
+                }
+                crop = sanitize_dragged_crop(crop, drag.handle);
+                if drag.handle != CropHandle::Move {
+                    crop = if is_crop_corner(drag.handle) {
+                        constrain_crop_corner_aspect(app, drag.crop, current, drag.handle)
+                            .unwrap_or(crop)
+                    } else {
+                        constrain_crop_aspect(app, crop, drag.handle)
+                    };
+                }
+                if crop != app.geometry.crop {
+                    app.geometry.crop = crop;
+                    app.note_geometry_changed();
+                }
+            }
+        }
+
+        if primary_released || !primary_down {
+            app.crop_drag = None;
+        }
+    }
+
+    fn paint_crop_overlay(ui: &mut Ui, app: &AurawApp, image_rect: Rect, visible_rect: Rect) {
+        let painter = ui.painter_at(visible_rect);
+        let crop_rect = crop_screen_rect(image_rect, app.geometry.crop).intersect(visible_rect);
+        if crop_rect.width() <= 0.0 || crop_rect.height() <= 0.0 {
+            return;
+        }
+        let shade = Color32::from_black_alpha(150);
+        for rect in [
+            Rect::from_min_max(visible_rect.min, Pos2::new(visible_rect.right(), crop_rect.top())),
+            Rect::from_min_max(Pos2::new(visible_rect.left(), crop_rect.bottom()), visible_rect.max),
+            Rect::from_min_max(Pos2::new(visible_rect.left(), crop_rect.top()), Pos2::new(crop_rect.left(), crop_rect.bottom())),
+            Rect::from_min_max(Pos2::new(crop_rect.right(), crop_rect.top()), Pos2::new(visible_rect.right(), crop_rect.bottom())),
+        ] {
+            if rect.width() > 0.0 && rect.height() > 0.0 {
+                painter.rect_filled(rect, 0.0, shade);
+            }
+        }
+
+        painter.rect_stroke(crop_rect, 0.0, Stroke::new(2.0, Color32::WHITE), egui::StrokeKind::Inside);
+        for fraction in [1.0 / 3.0, 2.0 / 3.0] {
+            let x = egui::lerp(crop_rect.left()..=crop_rect.right(), fraction);
+            let y = egui::lerp(crop_rect.top()..=crop_rect.bottom(), fraction);
+            painter.line_segment(
+                [Pos2::new(x, crop_rect.top()), Pos2::new(x, crop_rect.bottom())],
+                Stroke::new(1.0, Color32::from_white_alpha(115)),
+            );
+            painter.line_segment(
+                [Pos2::new(crop_rect.left(), y), Pos2::new(crop_rect.right(), y)],
+                Stroke::new(1.0, Color32::from_white_alpha(115)),
+            );
+        }
+
+        for point in crop_handle_points(crop_rect) {
+            painter.circle_filled(point, 5.5, Color32::WHITE);
+            painter.circle_stroke(point, 7.5, Stroke::new(1.5, Color32::BLACK));
+        }
+
+        let angle = (app.geometry.rotation_degrees + f32::from(app.geometry.quarter_turns) * 90.0).to_radians();
+        if angle.abs() > 0.001 {
+            let center = crop_rect.center();
+            let direction = egui::vec2(angle.cos(), angle.sin());
+            let half = crop_rect.width().min(crop_rect.height()) * 0.36;
+            painter.line_segment(
+                [center - direction * half, center + direction * half],
+                Stroke::new(1.5, Color32::from_rgb(255, 196, 64)),
+            );
+        }
+    }
+
     #[cfg(target_os = "android")]
     fn handle_android_original_hold(
         ui: &Ui,
@@ -332,7 +479,7 @@ impl Preview {
             )
         });
 
-        let allowed = !matches!(app.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting)
+        let allowed = !matches!(app.sidebar_tab, SidebarTab::Crop | SidebarTab::Masks | SidebarTab::Inpainting)
             && !touch_navigation
             && !multi_touch
             && any_touches;
@@ -1468,6 +1615,180 @@ fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
     }
     let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
     point.distance(start + segment * t)
+}
+
+fn crop_screen_rect(image_rect: Rect, crop: [f32; 4]) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(
+            egui::lerp(image_rect.left()..=image_rect.right(), crop[0]),
+            egui::lerp(image_rect.top()..=image_rect.bottom(), crop[1]),
+        ),
+        Pos2::new(
+            egui::lerp(image_rect.left()..=image_rect.right(), crop[2]),
+            egui::lerp(image_rect.top()..=image_rect.bottom(), crop[3]),
+        ),
+    )
+}
+
+fn crop_handle_points(rect: Rect) -> [Pos2; 8] {
+    [
+        rect.left_top(),
+        rect.right_top(),
+        rect.left_bottom(),
+        rect.right_bottom(),
+        Pos2::new(rect.center().x, rect.top()),
+        Pos2::new(rect.center().x, rect.bottom()),
+        Pos2::new(rect.left(), rect.center().y),
+        Pos2::new(rect.right(), rect.center().y),
+    ]
+}
+
+fn crop_handle_at(rect: Rect, pointer: Pos2, radius: f32) -> Option<CropHandle> {
+    let candidates = [
+        (CropHandle::TopLeft, rect.left_top()),
+        (CropHandle::TopRight, rect.right_top()),
+        (CropHandle::BottomLeft, rect.left_bottom()),
+        (CropHandle::BottomRight, rect.right_bottom()),
+        (CropHandle::Top, Pos2::new(rect.center().x, rect.top())),
+        (CropHandle::Bottom, Pos2::new(rect.center().x, rect.bottom())),
+        (CropHandle::Left, Pos2::new(rect.left(), rect.center().y)),
+        (CropHandle::Right, Pos2::new(rect.right(), rect.center().y)),
+    ];
+    for (handle, point) in candidates {
+        if point.distance(pointer) <= radius {
+            return Some(handle);
+        }
+    }
+    rect.contains(pointer).then_some(CropHandle::Move)
+}
+
+fn sanitize_dragged_crop(mut crop: [f32; 4], handle: CropHandle) -> [f32; 4] {
+    use crate::pipeline::GeometryTransform;
+    let min = GeometryTransform::MIN_CROP_EXTENT;
+    match handle {
+        CropHandle::Left | CropHandle::TopLeft | CropHandle::BottomLeft => {
+            crop[0] = crop[0].clamp(0.0, crop[2] - min);
+        }
+        CropHandle::Right | CropHandle::TopRight | CropHandle::BottomRight => {
+            crop[2] = crop[2].clamp(crop[0] + min, 1.0);
+        }
+        _ => {}
+    }
+    match handle {
+        CropHandle::Top | CropHandle::TopLeft | CropHandle::TopRight => {
+            crop[1] = crop[1].clamp(0.0, crop[3] - min);
+        }
+        CropHandle::Bottom | CropHandle::BottomLeft | CropHandle::BottomRight => {
+            crop[3] = crop[3].clamp(crop[1] + min, 1.0);
+        }
+        _ => {}
+    }
+    crop
+}
+
+fn is_crop_corner(handle: CropHandle) -> bool {
+    matches!(
+        handle,
+        CropHandle::TopLeft
+            | CropHandle::TopRight
+            | CropHandle::BottomLeft
+            | CropHandle::BottomRight
+    )
+}
+
+/// Constrains a corner drag to the selected aspect ratio while keeping the
+/// diagonally opposite corner fixed. The anchor comes from the crop at drag
+/// start, so clamping at an image boundary can never make the opposite corner
+/// wander under the pointer.
+fn constrain_crop_corner_aspect(
+    app: &AurawApp,
+    original_crop: [f32; 4],
+    pointer: [f32; 2],
+    handle: CropHandle,
+) -> Option<[f32; 4]> {
+    let raw = app.loaded_raw.as_ref()?;
+    let ratio = app
+        .geometry
+        .aspect_ratio
+        .value(raw.width, raw.height)?;
+    let normalized_ratio =
+        ratio / (raw.width.max(1) as f32 / raw.height.max(1) as f32);
+    if !normalized_ratio.is_finite() || normalized_ratio <= f32::EPSILON {
+        return None;
+    }
+
+    let (anchor_x, anchor_y, x_sign, y_sign) = match handle {
+        CropHandle::TopLeft => (original_crop[2], original_crop[3], -1.0, -1.0),
+        CropHandle::TopRight => (original_crop[0], original_crop[3], 1.0, -1.0),
+        CropHandle::BottomLeft => (original_crop[2], original_crop[1], -1.0, 1.0),
+        CropHandle::BottomRight => (original_crop[0], original_crop[1], 1.0, 1.0),
+        _ => return None,
+    };
+
+    let desired_width = (pointer[0] - anchor_x).abs();
+    let desired_height = (pointer[1] - anchor_y).abs();
+
+    // Orthogonally project the pointer distance onto width/height pairs that
+    // satisfy width / height == normalized_ratio. This makes diagonal, mostly
+    // horizontal, and mostly vertical drags all feel continuous.
+    let inv_ratio = 1.0 / normalized_ratio;
+    let projected_width = (desired_width + desired_height * inv_ratio)
+        / (1.0 + inv_ratio * inv_ratio);
+
+    let max_width_from_x = if x_sign < 0.0 {
+        anchor_x
+    } else {
+        1.0 - anchor_x
+    };
+    let max_height_from_y = if y_sign < 0.0 {
+        anchor_y
+    } else {
+        1.0 - anchor_y
+    };
+    let max_width = max_width_from_x.min(max_height_from_y * normalized_ratio);
+
+    let min_extent = crate::pipeline::GeometryTransform::MIN_CROP_EXTENT;
+    let min_width = min_extent.max(min_extent * normalized_ratio);
+    let width = projected_width.clamp(min_width.min(max_width), max_width);
+    let height = width / normalized_ratio;
+
+    let dragged_x = anchor_x + x_sign * width;
+    let dragged_y = anchor_y + y_sign * height;
+    Some(match handle {
+        CropHandle::TopLeft => [dragged_x, dragged_y, anchor_x, anchor_y],
+        CropHandle::TopRight => [anchor_x, dragged_y, dragged_x, anchor_y],
+        CropHandle::BottomLeft => [dragged_x, anchor_y, anchor_x, dragged_y],
+        CropHandle::BottomRight => [anchor_x, anchor_y, dragged_x, dragged_y],
+        _ => return None,
+    })
+}
+
+fn constrain_crop_aspect(app: &AurawApp, mut crop: [f32; 4], handle: CropHandle) -> [f32; 4] {
+    let Some(raw) = app.loaded_raw.as_ref() else {
+        return crop;
+    };
+    let Some(ratio) = app.geometry.aspect_ratio.value(raw.width, raw.height) else {
+        return crop;
+    };
+    let normalized_ratio = ratio / (raw.width.max(1) as f32 / raw.height.max(1) as f32);
+    let width = crop[2] - crop[0];
+    let height = crop[3] - crop[1];
+    let target_height = width / normalized_ratio.max(f32::EPSILON);
+    let target_width = height * normalized_ratio;
+
+    let horizontal_edge = matches!(handle, CropHandle::Left | CropHandle::Right);
+    if horizontal_edge || (target_height <= 1.0 && (target_height - height).abs() <= (target_width - width).abs()) {
+        let new_height = target_height.clamp(crate::pipeline::GeometryTransform::MIN_CROP_EXTENT, 1.0);
+        let center = (crop[1] + crop[3]) * 0.5;
+        crop[1] = (center - new_height * 0.5).clamp(0.0, 1.0 - new_height);
+        crop[3] = crop[1] + new_height;
+    } else {
+        let new_width = target_width.clamp(crate::pipeline::GeometryTransform::MIN_CROP_EXTENT, 1.0);
+        let center = (crop[0] + crop[2]) * 0.5;
+        crop[0] = (center - new_width * 0.5).clamp(0.0, 1.0 - new_width);
+        crop[2] = crop[0] + new_width;
+    }
+    crop
 }
 
 fn fitted_image_size(available: egui::Vec2, image_aspect: f32) -> egui::Vec2 {

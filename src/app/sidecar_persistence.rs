@@ -29,6 +29,7 @@ impl AurawApp {
             .map(std::path::Path::to_path_buf);
         SidecarEditState {
             exposure: self.exposure,
+            geometry: self.geometry.sanitized(),
             camera_profile,
             masks: self.committed_mask_state_for_persistence(),
             inpainting: Arc::new(self.inpaint_strokes.clone()),

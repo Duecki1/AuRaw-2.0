@@ -318,6 +318,9 @@ impl AurawApp {
             selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
+            geometry: GeometryTransform::default(),
+            crop_drag: None,
+            geometry_revision: 0,
             adjustment_section: AdjustmentSection::default(),
             mask_section: MaskSection::default(),
             tone_curve_tab: ToneCurveTab::default(),
@@ -505,6 +508,9 @@ impl AurawApp {
             selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
+            geometry: GeometryTransform::default(),
+            crop_drag: None,
+            geometry_revision: 0,
             adjustment_section: AdjustmentSection::default(),
             mask_section: MaskSection::default(),
             tone_curve_tab: ToneCurveTab::default(),
@@ -1298,6 +1304,7 @@ impl AurawApp {
                         pasted_ai_masks_need_update,
                         mut sidecar_warning,
                         mut sidecar_needs_rewrite,
+                        geometry,
                     ) = if let Some(edits) = edit_override {
                         (
                             edits.exposure,
@@ -1307,6 +1314,7 @@ impl AurawApp {
                             edits.ai_masks_need_update,
                             None,
                             true,
+                            edits.geometry.sanitized(),
                         )
                     } else {
                         match loaded_sidecar {
@@ -1323,6 +1331,7 @@ impl AurawApp {
                                     loaded.edits.ai_masks_need_update,
                                     warning,
                                     loaded.migrated,
+                                    loaded.edits.geometry.sanitized(),
                                 )
                             }
                             Ok(None) => (
@@ -1333,6 +1342,7 @@ impl AurawApp {
                                 false,
                                 None,
                                 false,
+                                GeometryTransform::default(),
                             ),
                             Err(error) => (
                                 initial_exposure,
@@ -1344,6 +1354,7 @@ impl AurawApp {
                                     "Could not load this RAW's sidecar; using default edits: {error}"
                                 )),
                                 false,
+                                GeometryTransform::default(),
                             ),
                         }
                     };
@@ -1688,6 +1699,7 @@ impl AurawApp {
                         sidecar_warning,
                         sidecar_needs_rewrite,
                         selected_camera_profile,
+                        geometry,
                     })
                 })();
 
@@ -1937,6 +1949,9 @@ impl AurawApp {
                 self.preview_raw = Some(loaded.preview_raw);
                 self.gpu_pipeline = Some(loaded.pipeline);
                 self.exposure = loaded.rendered_exposure;
+                self.geometry = loaded.geometry.sanitized();
+                self.crop_drag = None;
+                self.geometry_revision = 0;
                 self.masks = loaded.rendered_masks;
                 self.inpaint_strokes = loaded.inpaint_strokes;
                 self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);

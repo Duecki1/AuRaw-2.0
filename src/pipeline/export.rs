@@ -1,7 +1,7 @@
 use super::{
     export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
     required_export_tile_halo, ExposureParams, GpuParams, IccOutputTransform, InpaintLayer,
-    LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan,
+    GeometryTransform, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan,
     TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use anyhow::{Context, Result};
@@ -218,6 +218,7 @@ pub fn spawn_tiled_png_export(
     device: wgpu::Device,
     queue: wgpu::Queue,
     raw: Arc<LoadedRaw>,
+    geometry: GeometryTransform,
     exposure: ExposureParams,
     masks: MaskStack,
     inpaint: Option<InpaintLayer>,
@@ -248,8 +249,11 @@ pub fn spawn_tiled_png_export(
                 exposure.highlight_method,
             ));
             let result = (|| -> Result<()> {
+                let geometry = geometry.sanitized();
+                let (geometry_width, geometry_height) =
+                    geometry.crop_pixel_dimensions(raw.width, raw.height);
                 let (output_width, output_height) =
-                    settings.checked_output_dimensions(raw.width, raw.height)?;
+                    settings.checked_output_dimensions(geometry_width, geometry_height)?;
                 let mut tile_spec = tile_spec;
                 let required_halo = required_export_tile_halo(&exposure, &masks);
                 tile_spec.halo = if tile_spec.halo == EXPORT_TILE_HALO {
@@ -285,6 +289,7 @@ pub fn spawn_tiled_png_export(
                             output_height,
                             keep_metadata: settings.keep_metadata,
                             metadata: &metadata,
+                            geometry,
                         },
                     );
                 }
@@ -306,6 +311,7 @@ pub fn spawn_tiled_png_export(
                         output_height,
                         keep_metadata: settings.keep_metadata,
                         metadata: &metadata,
+                        geometry,
                     },
                 );
                 if let Err(error) = export_result {
@@ -352,6 +358,7 @@ pub fn spawn_tiled_jpeg_export(
     device: wgpu::Device,
     queue: wgpu::Queue,
     raw: Arc<LoadedRaw>,
+    geometry: GeometryTransform,
     exposure: ExposureParams,
     masks: MaskStack,
     inpaint: Option<InpaintLayer>,
@@ -378,8 +385,11 @@ pub fn spawn_tiled_jpeg_export(
                 tile_spec.halo,
             ));
             let result = (|| -> Result<()> {
+                let geometry = geometry.sanitized();
+                let (geometry_width, geometry_height) =
+                    geometry.crop_pixel_dimensions(raw.width, raw.height);
                 let (output_width, output_height) =
-                    settings.checked_output_dimensions(raw.width, raw.height)?;
+                    settings.checked_output_dimensions(geometry_width, geometry_height)?;
                 let mut tile_spec = tile_spec;
                 let required_halo = required_export_tile_halo(&exposure, &masks);
                 tile_spec.halo = if tile_spec.halo == EXPORT_TILE_HALO {
@@ -415,6 +425,7 @@ pub fn spawn_tiled_jpeg_export(
                             output_height,
                             keep_metadata: settings.keep_metadata,
                             metadata: &metadata,
+                            geometry,
                         },
                         settings.jpeg_quality,
                     );
@@ -437,6 +448,7 @@ pub fn spawn_tiled_jpeg_export(
                         output_height,
                         keep_metadata: settings.keep_metadata,
                         metadata: &metadata,
+                        geometry,
                     },
                     settings.jpeg_quality,
                 );
@@ -495,6 +507,7 @@ struct ExportRequest<'a> {
     output_height: u32,
     keep_metadata: bool,
     metadata: &'a ExportMetadata,
+    geometry: GeometryTransform,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -505,6 +518,9 @@ enum ExportRowFormat {
 
 fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
     validate_export_dimensions(request.output_width, request.output_height)?;
+    if !request.geometry.is_identity() {
+        return export_tiled_png_geometry(context, request);
+    }
     let file = open_export_destination(request.path)
         .with_context(|| format!("create export {}", request.path.display()))?;
     let mut info = png::Info::with_size(request.output_width, request.output_height);
@@ -562,6 +578,7 @@ fn render_tiled_srgb<W: Write>(
         output_height,
         keep_metadata: _,
         metadata: _,
+        geometry: _,
     } = request;
     let export_started = Instant::now();
     validate_export_dimensions(output_width, output_height)?;
@@ -798,11 +815,351 @@ fn render_tiled_srgb<W: Write>(
 
 
 
+fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
+    let staged_rgb = temporary_export_path(request.path)?;
+    let (stage_width, stage_height) = geometry_stage_dimensions(request.raw.width, request.raw.height);
+    let result = (|| -> Result<()> {
+        {
+            let rgb_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged_rgb)
+                .with_context(|| format!("create geometry source raster {}", staged_rgb.display()))?;
+            let mut rgb_writer = BufWriter::new(rgb_file);
+            let source_request = ExportRequest {
+                output_width: stage_width,
+                output_height: stage_height,
+                geometry: GeometryTransform::default(),
+                ..request
+            };
+            render_tiled_srgb(context, source_request, &mut rgb_writer, ExportRowFormat::Rgb8)?;
+            rgb_writer.flush().context("flush geometry source raster")?;
+        }
+
+        let rgb_file = fs::File::open(&staged_rgb)
+            .with_context(|| format!("open geometry source raster {}", staged_rgb.display()))?;
+        // SAFETY: the staged raster remains open and immutable for the mapping lifetime.
+        let mapped = unsafe { memmap2::MmapOptions::new().map(&rgb_file) }
+            .with_context(|| format!("map geometry source raster {}", staged_rgb.display()))?;
+        validate_rgb_raster_len(&mapped, stage_width, stage_height)?;
+
+        let file = open_export_destination(request.path)
+            .with_context(|| format!("create export {}", request.path.display()))?;
+        let mut info = png::Info::with_size(request.output_width, request.output_height);
+        info.color_type = png::ColorType::Rgba;
+        info.bit_depth = png::BitDepth::Eight;
+        if request.keep_metadata {
+            info.exif_metadata = Some(Cow::Owned(build_exif_payload(
+                request.metadata,
+                request.output_width,
+                request.output_height,
+            )));
+        }
+        let mut encoder = png::Encoder::with_info(BufWriter::new(file), info)
+            .context("configure transformed PNG encoder")?;
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        if request.keep_metadata {
+            add_png_text_metadata(
+                &mut encoder,
+                request.metadata,
+                request.output_width,
+                request.output_height,
+            )?;
+        }
+        let mut writer = encoder
+            .write_header()
+            .with_context(|| format!("write PNG header for {}", request.path.display()))?;
+        let mut stream = writer
+            .stream_writer_with_size(64 * 1024)
+            .context("create transformed streaming PNG writer")?;
+        for y in 0..request.output_height {
+            let rgb = geometry_output_row(
+                &mapped,
+                stage_width,
+                stage_height,
+                request.geometry,
+                request.output_width,
+                request.output_height,
+                y,
+            )?;
+            let mut rgba = Vec::with_capacity((request.output_width as usize) * 4);
+            for pixel in rgb.chunks_exact(3) {
+                rgba.extend_from_slice(pixel);
+                rgba.push(255);
+            }
+            stream.write_all(&rgba).context("write transformed PNG row")?;
+        }
+        stream.finish().context("finish transformed PNG data")?;
+        writer.finish().context("finish transformed PNG file")?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&staged_rgb);
+    if result.is_err() {
+        let _ = fs::remove_file(request.path);
+    }
+    result
+}
+
+fn export_tiled_jpeg_geometry(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    quality: u8,
+) -> Result<()> {
+    let quality = quality.clamp(1, 100);
+    let source_rgb = temporary_export_path(request.path)?;
+    let transformed_rgb = temporary_export_path(request.path)?;
+    let encoded_jpeg = temporary_export_path(request.path)?;
+    let (stage_width, stage_height) = geometry_stage_dimensions(request.raw.width, request.raw.height);
+    let result = (|| -> Result<()> {
+        {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&source_rgb)
+                .with_context(|| format!("create geometry source raster {}", source_rgb.display()))?;
+            let mut writer = BufWriter::new(file);
+            let source_request = ExportRequest {
+                output_width: stage_width,
+                output_height: stage_height,
+                geometry: GeometryTransform::default(),
+                ..request
+            };
+            render_tiled_srgb(context, source_request, &mut writer, ExportRowFormat::Rgb8)?;
+            writer.flush().context("flush geometry source raster")?;
+        }
+
+        let source_file = fs::File::open(&source_rgb)
+            .with_context(|| format!("open geometry source raster {}", source_rgb.display()))?;
+        // SAFETY: the source raster remains open and immutable for the mapping lifetime.
+        let source_map = unsafe { memmap2::MmapOptions::new().map(&source_file) }
+            .with_context(|| format!("map geometry source raster {}", source_rgb.display()))?;
+        validate_rgb_raster_len(&source_map, stage_width, stage_height)?;
+        {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&transformed_rgb)
+                .with_context(|| format!("create transformed RGB raster {}", transformed_rgb.display()))?;
+            let mut writer = BufWriter::new(file);
+            for y in 0..request.output_height {
+                let row = geometry_output_row(
+                    &source_map,
+                    stage_width,
+                    stage_height,
+                    request.geometry,
+                    request.output_width,
+                    request.output_height,
+                    y,
+                )?;
+                writer.write_all(&row).context("write transformed RGB row")?;
+            }
+            writer.flush().context("flush transformed RGB raster")?;
+        }
+        drop(source_map);
+        drop(source_file);
+
+        let transformed_file = fs::File::open(&transformed_rgb)
+            .with_context(|| format!("open transformed RGB raster {}", transformed_rgb.display()))?;
+        // SAFETY: the transformed raster remains open and immutable for the mapping lifetime.
+        let transformed_map = unsafe { memmap2::MmapOptions::new().map(&transformed_file) }
+            .with_context(|| format!("map transformed RGB raster {}", transformed_rgb.display()))?;
+        validate_rgb_raster_len(&transformed_map, request.output_width, request.output_height)?;
+
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&encoded_jpeg)
+            .with_context(|| format!("create staged JPEG {}", encoded_jpeg.display()))?;
+        let mut writer = BufWriter::new(file);
+        {
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality);
+            encoder
+                .encode(
+                    &transformed_map[..],
+                    request.output_width,
+                    request.output_height,
+                    image::ExtendedColorType::Rgb8,
+                )
+                .with_context(|| format!("encode JPEG {}", request.path.display()))?;
+        }
+        writer.flush().context("flush transformed JPEG")?;
+        drop(transformed_map);
+        drop(transformed_file);
+
+        write_final_jpeg(
+            &encoded_jpeg,
+            request.path,
+            request.keep_metadata,
+            request.metadata,
+            request.output_width,
+            request.output_height,
+        )?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&source_rgb);
+    let _ = fs::remove_file(&transformed_rgb);
+    let _ = fs::remove_file(&encoded_jpeg);
+    if result.is_err() {
+        let _ = fs::remove_file(request.path);
+    }
+    result
+}
+
+fn geometry_stage_dimensions(width: u32, height: u32) -> (u32, u32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let pixels = f64::from(width) * f64::from(height);
+    let pixel_scale = if pixels > MAX_EXPORT_PIXELS as f64 {
+        (MAX_EXPORT_PIXELS as f64 / pixels).sqrt()
+    } else {
+        1.0
+    };
+    let edge_scale = if width.max(height) > MAX_EXPORT_EDGE {
+        f64::from(MAX_EXPORT_EDGE) / f64::from(width.max(height))
+    } else {
+        1.0
+    };
+    let scale = pixel_scale.min(edge_scale).min(1.0);
+    (
+        (f64::from(width) * scale).round().max(1.0) as u32,
+        (f64::from(height) * scale).round().max(1.0) as u32,
+    )
+}
+
+fn validate_rgb_raster_len(bytes: &[u8], width: u32, height: u32) -> Result<()> {
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .context("RGB raster size overflow")?;
+    anyhow::ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) == expected,
+        "RGB raster length does not match its dimensions"
+    );
+    Ok(())
+}
+
+fn geometry_output_row(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    geometry: GeometryTransform,
+    output_width: u32,
+    output_height: u32,
+    output_y: u32,
+) -> Result<Vec<u8>> {
+    anyhow::ensure!(output_y < output_height, "geometry row is outside the output image");
+    let geometry = geometry.sanitized();
+    let mut row = Vec::new();
+    row.try_reserve_exact((output_width as usize).saturating_mul(3))
+        .context("reserve transformed output row")?;
+    for output_x in 0..output_width {
+        let u = (output_x as f32 + 0.5) / output_width.max(1) as f32;
+        let v = (output_y as f32 + 0.5) / output_height.max(1) as f32;
+        let [source_x, source_y] = geometry_source_position(
+            geometry,
+            source_width,
+            source_height,
+            u,
+            v,
+        );
+        let rgb = sample_rgb_bilinear(source, source_width, source_height, source_x, source_y);
+        row.extend_from_slice(&rgb);
+    }
+    Ok(row)
+}
+
+fn geometry_source_position(
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    output_u: f32,
+    output_v: f32,
+) -> [f32; 2] {
+    let crop = geometry.crop;
+    let crop_width = (crop[2] - crop[0]) * source_width.max(1) as f32;
+    let crop_height = (crop[3] - crop[1]) * source_height.max(1) as f32;
+    let center_x = (crop[0] + crop[2]) * 0.5 * source_width.max(1) as f32;
+    let center_y = (crop[1] + crop[3]) * 0.5 * source_height.max(1) as f32;
+
+    // Undo the discrete orientation first so fine straighten and keystone use
+    // the crop's original pixel coordinate system.
+    let (u, v) = match geometry.quarter_turns % 4 {
+        0 => (output_u, output_v),
+        1 => (output_v, 1.0 - output_u),
+        2 => (1.0 - output_u, 1.0 - output_v),
+        _ => (1.0 - output_v, output_u),
+    };
+    let dx = (u - 0.5) * crop_width;
+    let dy = (v - 0.5) * crop_height;
+
+    let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
+    let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
+    let shx = geometry.horizontal_transform.to_radians().tan();
+    let shy = geometry.vertical_transform.to_radians().tan();
+    let angle = geometry.rotation_degrees.to_radians();
+    let c = angle.cos();
+    let s = angle.sin();
+
+    // Forward transform is R * Shear * Flip. Invert the 2x2 matrix so each
+    // destination pixel samples the corresponding source position.
+    let a = c * fx - s * shy * fx;
+    let b = c * shx * fy - s * fy;
+    let c2 = s * fx + c * shy * fx;
+    let d = s * shx * fy + c * fy;
+    let determinant = a * d - b * c2;
+    if determinant.abs() < 1e-6 {
+        return [center_x, center_y];
+    }
+    let source_dx = (d * dx - b * dy) / determinant;
+    let source_dy = (-c2 * dx + a * dy) / determinant;
+    [center_x + source_dx, center_y + source_dy]
+}
+
+fn sample_rgb_bilinear(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+) -> [u8; 3] {
+    if !x.is_finite()
+        || !y.is_finite()
+        || x < -0.5
+        || y < -0.5
+        || x > width as f32 - 0.5
+        || y > height as f32 - 0.5
+    {
+        return [0, 0, 0];
+    }
+    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(width.saturating_sub(1));
+    let y1 = (y0 + 1).min(height.saturating_sub(1));
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let load = |px: u32, py: u32, channel: usize| -> f32 {
+        let index = ((py as usize * width as usize + px as usize) * 3) + channel;
+        source.get(index).copied().unwrap_or(0) as f32
+    };
+    let mut result = [0u8; 3];
+    for channel in 0..3 {
+        let top = load(x0, y0, channel) * (1.0 - tx) + load(x1, y0, channel) * tx;
+        let bottom = load(x0, y1, channel) * (1.0 - tx) + load(x1, y1, channel) * tx;
+        result[channel] = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;
+    }
+    result
+}
+
 fn export_tiled_jpeg(
     context: ExportContext<'_>,
     request: ExportRequest<'_>,
     quality: u8,
 ) -> Result<()> {
+    if !request.geometry.is_identity() {
+        return export_tiled_jpeg_geometry(context, request, quality);
+    }
     let quality = quality.clamp(1, 100);
     let staged_rgb = temporary_export_path(request.path)?;
     let encoded_jpeg = temporary_export_path(request.path)?;
