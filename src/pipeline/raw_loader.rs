@@ -1,5 +1,6 @@
 use super::basicadj::GLOBAL_TEMPERATURE_LIMIT;
 use super::color_profile::CameraProfile;
+use super::geometry::LensGeometryMap;
 use super::noise::NoiseProfile;
 #[cfg(not(libraw_available))]
 use anyhow::anyhow;
@@ -7,6 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::ops::Index;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -383,6 +385,10 @@ pub struct LoadedRaw {
     /// Camera/DCP calibration data retained so global white-balance edits can
     /// rebuild the camera transform instead of applying generic RGB gains.
     pub(crate) white_balance_model: Option<CameraWhiteBalanceModel>,
+    /// Smooth corrected-image -> native-source distortion map. Lens shading
+    /// and TCA are already applied to the CFA, while this common geometric
+    /// component is deferred until the float RGB geometry pass.
+    pub lens_geometry: Option<Arc<LensGeometryMap>>,
 }
 
 impl LoadedRaw {
@@ -574,6 +580,7 @@ mod tests {
                     ],
                 },
             }),
+            lens_geometry: None,
         }
     }
 

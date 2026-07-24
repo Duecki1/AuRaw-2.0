@@ -686,6 +686,7 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         };
         let params = super::GpuParams::new(
             &ExposureParams::default(),
@@ -963,6 +964,7 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         }
     }
 
@@ -1256,6 +1258,7 @@ fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
         camera_profile_source: None,
         available_camera_profiles: Vec::new(),
         white_balance_model: None,
+        lens_geometry: None,
     };
     let exposure = ExposureParams::default();
     let params = super::GpuParams::new(&exposure, &crate::pipeline::MaskStack::default(), &raw);
@@ -1375,6 +1378,7 @@ fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         }
     }
 

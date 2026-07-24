@@ -1335,7 +1335,11 @@ fn render_uncached_developed_thumbnail(
         .output_snapshot()
         .read_thumbnail_blocking(&gpu.device, &gpu.queue, maximum_edge)
         .map_err(|error| format!("could not read edited thumbnail pixels: {error:#}"))?;
-    let thumbnail = crate::pipeline::transform_thumbnail_geometry(&thumbnail, geometry);
+    let thumbnail = crate::pipeline::transform_thumbnail_geometry_with_lens(
+        &thumbnail,
+        geometry,
+        preview_raw.lens_geometry.as_deref(),
+    );
     crate::sidecar::save_developed_thumbnail_cache(path, &thumbnail, sidecar_fingerprint)?;
     Ok(Some(thumbnail))
 }

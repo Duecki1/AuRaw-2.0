@@ -1,4 +1,4 @@
-use super::{CompactPixelMap, LoadedRaw};
+use super::{CompactPixelMap, LensGeometryMap, LoadedRaw};
 use anyhow::{anyhow, Result};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -61,6 +61,7 @@ mod imp {
     use std::ffi::{c_char, c_int, c_void, CStr, CString};
     use std::path::{Path, PathBuf};
     use std::ptr;
+    use std::sync::Arc;
 
     const LF_NO_ERROR: c_int = 0;
     const LF_SEARCH_LOOSE: c_int = 1;
@@ -432,6 +433,93 @@ mod imp {
         });
         let width = c_int::try_from(raw.width).context("RAW width does not fit Lensfun")?;
         let height = c_int::try_from(raw.height).context("RAW height does not fit Lensfun")?;
+        let aperture = positive(raw.aperture).unwrap_or(8.0);
+        let distance = positive(raw.focus_distance).unwrap_or(1000.0);
+
+        // Keep only channel-relative TCA and multiplicative lens shading in CFA
+        // space. Common distortion is deliberately excluded here: warping the
+        // mosaic destroys X-Trans locality and forces an early u16 requantization.
+        let (early_modifier, early_flags) = initialize_modifier(
+            lens,
+            crop,
+            width,
+            height,
+            focal,
+            aperture,
+            distance,
+            LF_MODIFY_TCA | LF_MODIFY_VIGNETTING,
+        )?;
+
+        // Build a second modifier for the common geometric component. Its
+        // inverse map is retained and later composed with crop/rotate/keystone
+        // in the float RGB geometry pass, so the image is geometrically sampled
+        // only once.
+        let (geometry_modifier, mut geometry_flags) = initialize_modifier(
+            lens,
+            crop,
+            width,
+            height,
+            focal,
+            aperture,
+            distance,
+            LF_MODIFY_DISTORTION,
+        )?;
+
+        // Auto-scale must still account for the complete coordinate correction,
+        // including TCA. Probe the same TCA+distortion combination used by the
+        // former one-pass path, then attach only its common scale to the deferred
+        // geometry modifier so channel-relative TCA is not applied twice.
+        let (scale_probe_modifier, scale_probe_flags) = initialize_modifier(
+            lens,
+            crop,
+            width,
+            height,
+            focal,
+            aperture,
+            distance,
+            LF_MODIFY_TCA | LF_MODIFY_DISTORTION,
+        )?;
+        if scale_probe_flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_TCA) != 0 {
+            // SAFETY: Lensfun computes a scale for the configured live modifier.
+            let scale = unsafe { lf_modifier_get_auto_scale(scale_probe_modifier.0, 0) };
+            if scale.is_finite() && scale > 0.0 {
+                // SAFETY: the callback is added to the live deferred geometry modifier.
+                let scaling_added =
+                    unsafe { lf_modifier_add_coord_callback_scale(geometry_modifier.0, scale, 0) };
+                if scaling_added != 0 {
+                    geometry_flags |= LF_MODIFY_SCALE;
+                }
+            }
+        }
+
+        if early_flags & (LF_MODIFY_TCA | LF_MODIFY_VIGNETTING) == 0
+            && geometry_flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_SCALE) == 0
+        {
+            return Err(anyhow!(
+                "the selected Lensfun profile contains no applicable correction data"
+            ));
+        }
+
+        let lens_geometry = build_lens_geometry_map(raw, &geometry_modifier, geometry_flags)?;
+        if early_flags & (LF_MODIFY_TCA | LF_MODIFY_VIGNETTING) == 0 {
+            let mut corrected = raw.clone();
+            corrected.lens_geometry = lens_geometry;
+            return Ok(corrected);
+        }
+        correct_mosaic(raw, &early_modifier, early_flags, lens_geometry)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn initialize_modifier(
+        lens: *const lfLens,
+        crop: f32,
+        width: c_int,
+        height: c_int,
+        focal: f32,
+        aperture: f32,
+        distance: f32,
+        requested_flags: c_int,
+    ) -> Result<(Modifier, c_int)> {
         // SAFETY: all pointers and scalar parameters are valid. Lensfun 0.3.x
         // configures focal/aperture/distance through `lf_modifier_initialize`.
         let pointer = unsafe { lf_modifier_new(lens, crop.max(0.1), width, height) };
@@ -439,11 +527,9 @@ mod imp {
             return Err(anyhow!("Lensfun could not create a modifier"));
         }
         let modifier = Modifier(pointer);
-        let aperture = positive(raw.aperture).unwrap_or(8.0);
-        let distance = positive(raw.focus_distance).unwrap_or(1000.0);
         // SAFETY: modifier and lens are live. reverse=0 applies correction rather
         // than simulating defects, and the selected lens geometry is a valid enum.
-        let mut flags = unsafe {
+        let flags = unsafe {
             lf_modifier_initialize(
                 modifier.0,
                 lens,
@@ -453,41 +539,86 @@ mod imp {
                 distance,
                 1.0,
                 (*lens).lens_type,
-                LF_MODIFY_TCA | LF_MODIFY_VIGNETTING | LF_MODIFY_DISTORTION,
+                requested_flags,
                 0,
             )
         };
+        Ok((modifier, flags))
+    }
 
-        if flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_TCA) != 0 {
-            // SAFETY: Lensfun computes a scale for the configured live modifier.
-            let scale = unsafe { lf_modifier_get_auto_scale(modifier.0, 0) };
-            if scale.is_finite() && scale > 0.0 {
-                // SAFETY: the callback is added to the same initialized modifier.
-                let scaling_added =
-                    unsafe { lf_modifier_add_coord_callback_scale(modifier.0, scale, 0) };
-                if scaling_added != 0 {
-                    flags |= LF_MODIFY_SCALE;
-                }
+    fn build_lens_geometry_map(
+        raw: &LoadedRaw,
+        modifier: &Modifier,
+        flags: c_int,
+    ) -> Result<Option<Arc<LensGeometryMap>>> {
+        if flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_SCALE) == 0 {
+            return Ok(None);
+        }
+
+        // Lens distortion is smooth. Sampling it at <=32-pixel spacing keeps
+        // the retained map compact while accurately following strong corner
+        // curvature when the later float resampler interpolates this grid.
+        const MAX_GRID_STEP: u32 = 32;
+        let grid_width = raw.width.saturating_sub(1).div_ceil(MAX_GRID_STEP) + 1;
+        let grid_height = raw.height.saturating_sub(1).div_ceil(MAX_GRID_STEP) + 1;
+        let grid_width = grid_width.max(2);
+        let grid_height = grid_height.max(2);
+        let mut coordinates = Vec::with_capacity(grid_width as usize * grid_height as usize);
+        let mut mapped = [0.0f32; 6];
+
+        for grid_y in 0..grid_height {
+            let y = if grid_height <= 1 {
+                0.0
+            } else {
+                grid_y as f32 * raw.height.saturating_sub(1) as f32
+                    / (grid_height - 1) as f32
+            };
+            for grid_x in 0..grid_width {
+                let x = if grid_width <= 1 {
+                    0.0
+                } else {
+                    grid_x as f32 * raw.width.saturating_sub(1) as f32
+                        / (grid_width - 1) as f32
+                };
+                mapped.fill(0.0);
+                // SAFETY: the output contains six floats for one RGB subpixel
+                // coordinate. Distortion-only maps have identical RGB geometry;
+                // green is used as the common coordinate by convention.
+                let filled = unsafe {
+                    lf_modifier_apply_subpixel_geometry_distortion(
+                        modifier.0,
+                        x,
+                        y,
+                        1,
+                        1,
+                        mapped.as_mut_ptr(),
+                    )
+                };
+                coordinates.push(if filled == 0 {
+                    [x, y]
+                } else {
+                    [mapped[2], mapped[3]]
+                });
             }
         }
 
-        if flags
-            & (LF_MODIFY_DISTORTION
-                | LF_MODIFY_GEOMETRY
-                | LF_MODIFY_TCA
-                | LF_MODIFY_SCALE
-                | LF_MODIFY_VIGNETTING)
-            == 0
-        {
-            return Err(anyhow!(
-                "the selected Lensfun profile contains no applicable correction data"
-            ));
-        }
-
-        correct_mosaic(raw, &modifier, flags)
+        let map = LensGeometryMap::new(
+            raw.width,
+            raw.height,
+            grid_width,
+            grid_height,
+            coordinates,
+        )
+        .ok_or_else(|| anyhow!("Lensfun produced an invalid distortion map"))?;
+        Ok(Some(Arc::new(map)))
     }
 
-    fn correct_mosaic(raw: &LoadedRaw, modifier: &Modifier, flags: c_int) -> Result<LoadedRaw> {
+    fn correct_mosaic(
+        raw: &LoadedRaw,
+        modifier: &Modifier,
+        flags: c_int,
+        lens_geometry: Option<Arc<LensGeometryMap>>,
+    ) -> Result<LoadedRaw> {
         let width = raw.width as usize;
         let height = raw.height as usize;
         let mut raw_pixels = vec![0u16; raw.raw_pixels.len()];
@@ -633,7 +764,7 @@ mod imp {
             }
         }
         crate::diagnostics::record(format!(
-            "Lensfun coordinate warp/CFA resample finished in {:.3}s",
+            "Lensfun CFA TCA/shading correction finished in {:.3}s",
             warp_started.elapsed().as_secs_f64()
         ));
 
@@ -670,6 +801,7 @@ mod imp {
             camera_profile_source: raw.camera_profile_source.clone(),
             available_camera_profiles: raw.available_camera_profiles.clone(),
             white_balance_model: raw.white_balance_model.clone(),
+            lens_geometry,
         })
     }
 
@@ -768,12 +900,100 @@ mod imp {
             }
         }
 
-        // X-Trans has an irregular 6x6 color layout, so keep the conservative
-        // same-color fallback there. Bayer is the common path and receives true
-        // subpixel interpolation below, which removes the nearest-neighbor
-        // stair-steps and color breaks that were visible after Lensfun warping.
+        if raw.cfa_kind == crate::pipeline::CfaKind::XTrans && x.is_finite() && y.is_finite() {
+            if let Some(sample) = sample_xtrans_same_color_weighted(
+                raw,
+                x,
+                y,
+                channel,
+                vignette_enabled,
+                vignette_gains,
+            ) {
+                return sample;
+            }
+        }
+
+        // Degenerate edge/corrupt-coordinate fallback only. Normal Bayer and
+        // X-Trans TCA paths interpolate strictly within the requested CFA color.
         let source_index = nearest_matching_sample(raw, x, y, channel);
         corrected_sample_at(raw, source_index, vignette_enabled, vignette_gains)
+    }
+
+    fn sample_xtrans_same_color_weighted(
+        raw: &LoadedRaw,
+        x: f32,
+        y: f32,
+        channel: u8,
+        vignette_enabled: bool,
+        vignette_gains: &[f32],
+    ) -> Option<(f32, f32)> {
+        let max_x = raw.width.saturating_sub(1) as i32;
+        let max_y = raw.height.saturating_sub(1) as i32;
+        let center_x = x.floor() as i32;
+        let center_y = y.floor() as i32;
+        const NEIGHBORS: usize = 4;
+        let mut nearest = [(f32::INFINITY, 0usize); NEIGHBORS];
+
+        // A 3-pixel search radius reaches several samples of every X-Trans
+        // color. Keep only the four closest same-color sites so TCA correction
+        // remains sharply local instead of averaging a broad irregular CFA
+        // neighborhood. Inverse-distance weighting then gives a continuous
+        // subpixel estimate without ever mixing colors.
+        for sample_y in (center_y - 3)..=(center_y + 3) {
+            if sample_y < 0 || sample_y > max_y {
+                continue;
+            }
+            for sample_x in (center_x - 3)..=(center_x + 3) {
+                if sample_x < 0 || sample_x > max_x {
+                    continue;
+                }
+                let index = sample_y as usize * raw.width as usize + sample_x as usize;
+                if raw.color_indices[index] != channel {
+                    continue;
+                }
+                let dx = sample_x as f32 - x;
+                let dy = sample_y as f32 - y;
+                let distance_squared = dx * dx + dy * dy;
+                if distance_squared > 12.25 {
+                    continue;
+                }
+                if distance_squared < 1e-8 {
+                    return Some(corrected_sample_at(
+                        raw,
+                        index,
+                        vignette_enabled,
+                        vignette_gains,
+                    ));
+                }
+
+                if distance_squared < nearest[NEIGHBORS - 1].0 {
+                    let mut slot = NEIGHBORS - 1;
+                    while slot > 0 && distance_squared < nearest[slot - 1].0 {
+                        nearest[slot] = nearest[slot - 1];
+                        slot -= 1;
+                    }
+                    nearest[slot] = (distance_squared, index);
+                }
+            }
+        }
+
+        let mut value_sum = 0.0f32;
+        let mut black_sum = 0.0f32;
+        let mut weight_sum = 0.0f32;
+        for (distance_squared, index) in nearest {
+            if !distance_squared.is_finite() {
+                continue;
+            }
+            // Squared inverse distance strongly favors the local sample nearest
+            // the requested TCA coordinate, retaining microdetail while the
+            // remaining neighbors stabilize interpolation between X-Trans sites.
+            let weight = 1.0 / distance_squared.max(1e-4).powi(2);
+            let sample = corrected_sample_at(raw, index, vignette_enabled, vignette_gains);
+            value_sum += sample.0 * weight;
+            black_sum += sample.1 * weight;
+            weight_sum += weight;
+        }
+        (weight_sum > 1e-6).then(|| (value_sum / weight_sum, black_sum / weight_sum))
     }
 
     fn sample_bayer_phase_bilinear(

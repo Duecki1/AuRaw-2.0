@@ -1,7 +1,7 @@
 use super::{
     export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
     required_export_tile_halo, ExposureParams, GpuParams, IccOutputTransform, InpaintLayer,
-    GeometryTransform, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan,
+    GeometryTransform, LensGeometryMap, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan,
     TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use super::geometry::GeometryInverseMap;
@@ -465,7 +465,7 @@ enum ExportRowFormat {
 
 fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
     validate_export_dimensions(request.output_width, request.output_height)?;
-    if !request.geometry.is_identity() {
+    if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
         return export_tiled_png_geometry(context, request);
     }
     let file = open_export_destination(request.path)
@@ -796,11 +796,12 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
         let mapped = unsafe { memmap2::MmapOptions::new().map(&linear_file) }
             .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
         let source = validate_linear_rgb_raster(&mapped, request.raw.width, request.raw.height)?;
-        let resampler = GeometryResampler::new(
+        let resampler = GeometryResampler::new_with_lens(
             source,
             request.raw.width,
             request.raw.height,
             request.geometry,
+            request.raw.lens_geometry.as_deref(),
             request.output_width,
             request.output_height,
         )?;
@@ -892,11 +893,12 @@ fn export_tiled_jpeg_geometry(
         let source_map = unsafe { memmap2::MmapOptions::new().map(&source_file) }
             .with_context(|| format!("map geometry linear raster {}", source_linear.display()))?;
         let source = validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
-        let resampler = GeometryResampler::new(
+        let resampler = GeometryResampler::new_with_lens(
             source,
             request.raw.width,
             request.raw.height,
             request.geometry,
+            request.raw.lens_geometry.as_deref(),
             request.output_width,
             request.output_height,
         )?;
@@ -1014,8 +1016,8 @@ struct GeometryResampler<'a> {
     source_height: u32,
     output_width: u32,
     output_height: u32,
-    inverse_map: GeometryInverseMap,
-    filter: GeometryFilterAxes,
+    inverse_map: GeometryInverseMap<'a>,
+    affine_filter: Option<GeometryFilterAxes>,
 }
 
 impl<'a> GeometryResampler<'a> {
@@ -1027,20 +1029,42 @@ impl<'a> GeometryResampler<'a> {
         output_width: u32,
         output_height: u32,
     ) -> Result<Self> {
+        Self::new_with_lens(
+            source,
+            source_width,
+            source_height,
+            geometry,
+            None,
+            output_width,
+            output_height,
+        )
+    }
+
+    fn new_with_lens(
+        source: &'a [f32],
+        source_width: u32,
+        source_height: u32,
+        geometry: GeometryTransform,
+        lens_geometry: Option<&'a LensGeometryMap>,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Self> {
         validate_export_dimensions(output_width, output_height)?;
         anyhow::ensure!(source_width > 0 && source_height > 0, "source image is empty");
         anyhow::ensure!(
             source.len() == checked_rgb_len(source_width, source_height)?,
             "linear geometry raster length does not match its dimensions"
         );
-        let inverse_map = GeometryInverseMap::new(
+        let inverse_map = GeometryInverseMap::new_with_lens(
             geometry,
+            lens_geometry,
             source_width,
             source_height,
             output_width,
             output_height,
         );
-        let filter = geometry_filter_axes(inverse_map.pixel_jacobian());
+        let affine_filter =
+            lens_geometry.is_none().then(|| geometry_filter_axes(inverse_map.pixel_jacobian()));
         Ok(Self {
             source,
             source_width,
@@ -1048,7 +1072,7 @@ impl<'a> GeometryResampler<'a> {
             output_width,
             output_height,
             inverse_map,
-            filter,
+            affine_filter,
         })
     }
 
@@ -1066,14 +1090,20 @@ impl<'a> GeometryResampler<'a> {
             let [source_x, source_y] = self
                 .inverse_map
                 .source_position(output_x as f32, output_y as f32);
-            let rgb = self.sample(source_x, source_y);
+            let filter = self.affine_filter.unwrap_or_else(|| {
+                geometry_filter_axes(
+                    self.inverse_map
+                        .pixel_jacobian_at(output_x as f32, output_y as f32),
+                )
+            });
+            let rgb = self.sample(source_x, source_y, filter);
             let start = output_x as usize * 3;
             row[start..start + 3].copy_from_slice(&rgb);
         }
         Ok(row)
     }
 
-    fn sample(&self, x: f32, y: f32) -> [f32; 3] {
+    fn sample(&self, x: f32, y: f32, filter: GeometryFilterAxes) -> [f32; 3] {
         if !x.is_finite()
             || !y.is_finite()
             || x < -0.5
@@ -1084,7 +1114,6 @@ impl<'a> GeometryResampler<'a> {
             return [0.0; 3];
         }
 
-        let filter = self.filter;
         if filter.major_scale <= 1.0 + 1e-6 && filter.minor_scale <= 1.0 + 1e-6 {
             let nearest_x = x.round();
             let nearest_y = y.round();
@@ -1231,7 +1260,7 @@ fn export_tiled_jpeg(
     request: ExportRequest<'_>,
     quality: u8,
 ) -> Result<()> {
-    if !request.geometry.is_identity() {
+    if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
         return export_tiled_jpeg_geometry(context, request, quality);
     }
     let quality = quality.clamp(1, 100);

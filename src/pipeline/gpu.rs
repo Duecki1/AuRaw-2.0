@@ -1408,6 +1408,7 @@ impl RawGpuPipeline {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         };
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();

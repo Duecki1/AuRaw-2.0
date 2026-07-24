@@ -28,7 +28,10 @@ pub use export::{
     MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};
-pub use geometry::{transform_thumbnail_geometry, CropAspectRatio, GeometryTransform};
+pub use geometry::{
+    transform_thumbnail_geometry, transform_thumbnail_geometry_with_lens, CropAspectRatio,
+    GeometryTransform, LensGeometryMap,
+};
 pub(crate) use gpu_cache::PersistentGpuPipelineCache;
 pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
 pub use noise::{DenoiseQuality, NoiseProfile};
