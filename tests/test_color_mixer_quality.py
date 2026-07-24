@@ -16,13 +16,14 @@ def test_color_mixer_does_not_process_in_mathematical_hsl() -> None:
 
 
 def test_neutral_mixer_is_an_exact_no_op() -> None:
-    neutral_branch = re.search(
-        r"fn apply_color_mixer\([^}]+color_mixer_strength\(\);(.+?)let sample",
+    node = re.search(
+        r"fn apply_color_mixer_values\((.+?)\n}\n\nfn apply_color_mixer",
         ADJUSTMENTS,
         flags=re.DOTALL,
     )
-    assert neutral_branch is not None
-    assert "return rgb;" in neutral_branch.group(1)
+    assert node is not None
+    assert "let strengths = vec3<f32>" in node.group(1)
+    assert "return rgb;" in node.group(1)
     assert "max_abs_vec4" in ADJUSTMENTS
 
 
@@ -37,8 +38,8 @@ def test_selector_is_spatially_stable_but_center_detail_is_not_blurred() -> None
 
 def test_luminance_is_ratio_preserving_and_gamut_mapping_is_constant_hue() -> None:
     assert "adjusted = adjusted * exp2(mixer_luminance_ev" in ADJUSTMENTS
-    assert "fn nonnegative_rec2020_from_oklab" in ADJUSTMENTS
-    assert "binary search" in ADJUSTMENTS
+    assert "perceptual_rec2020_from_oklab_nonnegative" in ADJUSTMENTS
+    assert "perceptual_gamut_compress_nonnegative_rec2020" in ADJUSTMENTS
     assert "clamp(hsl.z" not in ADJUSTMENTS
 
 

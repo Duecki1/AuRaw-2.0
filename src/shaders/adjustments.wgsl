@@ -22,43 +22,40 @@
 // inserted before all Develop adjustments, so both global and masked adjustments affect it.
 @group(0) @binding(32) var inpaint_tex: texture_2d<f32>;
 
-struct LocalAdjustmentMix {
-    tone0: vec4<f32>,
-    tone1: vec4<f32>,
-    effects: vec4<f32>,
-}
-
-fn local_adjustment_mix(pos: vec2<i32>) -> LocalAdjustmentMix {
-    var tone0 = vec4<f32>(0.0);
-    var tone1 = vec4<f32>(0.0);
-    var effects = vec4<f32>(0.0);
+fn local_mask_uv(pos: vec2<i32>) -> vec2<f32> {
     let full_size = vec2<f32>(
         f32(max(params.full_width, 1u)),
         f32(max(params.full_height, 1u)),
     );
     let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
     let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
+    return uv;
+}
+
+fn local_mask_weight(pos: vec2<i32>, index: u32) -> f32 {
+    return textureSampleLevel(
+        local_mask_tex,
+        local_mask_sampler,
+        local_mask_uv(pos),
+        i32(index),
+        0.0,
+    ).x;
+}
+
+fn apply_local_exposure_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
     let count = min(params.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
-        let mask_state = params.mask_meta[index];
-        if mask_state.x == 0u || mask_state.y == 0u {
-            continue;
-        }
-        let weight = textureSampleLevel(
-            local_mask_tex,
-            local_mask_sampler,
-            uv,
-            i32(index),
-            0.0,
-        ).x;
-        if weight <= 1e-5 {
-            continue;
-        }
-        tone0 = tone0 + params.mask_adjust_0[index] * weight;
-        tone1 = tone1 + params.mask_adjust_1[index] * weight;
-        effects = effects + params.mask_adjust_2[index] * weight;
+        let state = params.mask_meta[index];
+        if state.x == 0u || state.y == 0u { continue; }
+        let value = clamp(params.mask_adjust_0[index].x, -5.0, 5.0);
+        if abs(value) <= 1e-7 { continue; }
+        let weight = local_mask_weight(pos, index);
+        if weight <= 1e-5 { continue; }
+        let adjusted = rgb * exp2(value);
+        rgb = mix(rgb, adjusted, weight);
     }
-    return LocalAdjustmentMix(tone0, tone1, effects);
+    return rgb;
 }
 
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
@@ -296,8 +293,10 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
         let chroma_boost = 1.0
             + amount * (0.10 + 0.30 * haze_likelihood)
                 * (1.0 - 0.38 * content_saturation);
-        restored = SRGB_TO_REC2020 * oklab_to_linear_srgb(
-            vec3<f32>(lab.x, lab.yz * chroma_boost),
+        restored = perceptual_gamut_compress_nonnegative_rec2020(
+            SRGB_TO_REC2020 * oklab_to_linear_srgb(
+                vec3<f32>(lab.x, lab.yz * chroma_boost),
+            ),
         );
         return restored;
     }
@@ -307,8 +306,10 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let hazed = mix(rgb, airlight, haze_mix);
     let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * hazed);
     let desaturation = 1.0 - haze * (0.12 + 0.20 * (1.0 - haze_likelihood));
-    return SRGB_TO_REC2020 * oklab_to_linear_srgb(
-        vec3<f32>(lab.x, lab.yz * desaturation),
+    return perceptual_gamut_compress_nonnegative_rec2020(
+        SRGB_TO_REC2020 * oklab_to_linear_srgb(
+            vec3<f32>(lab.x, lab.yz * desaturation),
+        ),
     );
 }
 
@@ -435,11 +436,17 @@ fn full_image_uv(pos: vec2<i32>) -> vec2<f32> {
 }
 
 fn vignette_distance(pos: vec2<i32>, roundness: f32) -> f32 {
-    let dimensions = max(
-        vec2<f32>(f32(params.full_width), f32(params.full_height)),
-        vec2<f32>(1.0),
+    let dimensions = max(params.vignette_frame.zw, vec2<f32>(1.0));
+    let source_delta = full_image_uv(pos) - params.vignette_frame.xy;
+    let transform = params.vignette_transform;
+    // Evaluate directly in final-frame coordinates even though the creative
+    // pass runs before geometry resampling. This keeps the vignette centered
+    // on the cropped composition through rotation, flips and keystone.
+    let frame_uv = vec2<f32>(
+        0.5 + transform.x * source_delta.x + transform.y * source_delta.y,
+        0.5 + transform.z * source_delta.x + transform.w * source_delta.y,
     );
-    let p = abs(full_image_uv(pos) * 2.0 - vec2<f32>(1.0));
+    let p = abs(frame_uv * 2.0 - vec2<f32>(1.0));
     let frame_ellipse = length(p);
     let frame_rectangle = pow(pow(p.x, 8.0) + pow(p.y, 8.0), 1.0 / 8.0);
     let short_dimension = max(min(dimensions.x, dimensions.y), 1.0);
@@ -530,14 +537,6 @@ fn max_abs_vec4(value: vec4<f32>) -> f32 {
     return max(max(abs(value.x), abs(value.y)), max(abs(value.z), abs(value.w)));
 }
 
-fn color_mixer_strength() -> vec3<f32> {
-    return vec3<f32>(
-        max(max_abs_vec4(params.hsl_hue_0), max_abs_vec4(params.hsl_hue_1)),
-        max(max_abs_vec4(params.hsl_saturation_0), max_abs_vec4(params.hsl_saturation_1)),
-        max(max_abs_vec4(params.hsl_luminance_0), max_abs_vec4(params.hsl_luminance_1)),
-    );
-}
-
 fn circular_distance(a: f32, b: f32) -> f32 {
     let d = abs(a - b);
     return min(d, 1.0 - d);
@@ -584,25 +583,6 @@ fn directed_hue_shift(value: f32, backward_span: f32, forward_span: f32) -> f32 
     let amount = clamp(value / 100.0, -2.0, 2.0);
     let span = select(backward_span, forward_span, amount >= 0.0);
     return amount * span * 0.90;
-}
-
-fn mixer_hue_shift(weights: MixerBandWeights) -> f32 {
-    // Backward/forward spans are distances to the adjacent calibrated
-    // OKLab anchors. This makes each slider endpoint move toward the color
-    // shown next to it in the Lightroom-style channel order.
-    let first = vec4<f32>(
-        directed_hue_shift(params.hsl_hue_0.x, 0.1690846, 0.0653940),
-        directed_hue_shift(params.hsl_hue_0.y, 0.0653940, 0.1583152),
-        directed_hue_shift(params.hsl_hue_0.z, 0.1583152, 0.0909059),
-        directed_hue_shift(params.hsl_hue_0.w, 0.0909059, 0.1452044),
-    );
-    let second = vec4<f32>(
-        directed_hue_shift(params.hsl_hue_1.x, 0.1452044, 0.1924530),
-        directed_hue_shift(params.hsl_hue_1.y, 0.1924530, 0.0825612),
-        directed_hue_shift(params.hsl_hue_1.z, 0.0825612, 0.0960816),
-        directed_hue_shift(params.hsl_hue_1.w, 0.0960816, 0.1690846),
-    );
-    return (dot(weights.first, first) + dot(weights.second, second)) / max(weights.total, 1e-6);
 }
 
 fn mixer_sample_from_rgb(rgb: vec3<f32>) -> MixerSample {
@@ -671,39 +651,6 @@ fn stabilized_mixer_sample(pos: vec2<i32>, center_rgb: vec3<f32>) -> MixerSample
         stable_hue = vector_sum / vector_length;
     }
     return MixerSample(center.lab, center.chroma, stable_hue, center.confidence);
-}
-
-fn nonnegative_rec2020_from_oklab(lightness: f32, hue_vector: vec2<f32>, requested_chroma: f32) -> vec3<f32> {
-    // Hue/saturation moves can leave the positive Rec.2020 working gamut.
-    // Compress chroma at constant OKLab lightness and hue instead of clipping
-    // RGB channels, which would visibly change hue and create hard boundaries.
-    var low = 0.0;
-    var high = max(requested_chroma, 0.0);
-    let requested = SRGB_TO_REC2020 * oklab_to_linear_srgb(
-        vec3<f32>(lightness, hue_vector * high),
-    );
-    if min(requested.r, min(requested.g, requested.b)) >= 0.0 {
-        return requested;
-    }
-
-    // Chroma zero is a valid neutral fallback for every non-negative
-    // lightness, so the binary search always starts from a valid candidate.
-    var candidate = SRGB_TO_REC2020 * oklab_to_linear_srgb(
-        vec3<f32>(lightness, vec2<f32>(0.0)),
-    );
-    for (var iteration = 0; iteration < 10; iteration = iteration + 1) {
-        let middle = 0.5 * (low + high);
-        let probe = SRGB_TO_REC2020 * oklab_to_linear_srgb(
-            vec3<f32>(lightness, hue_vector * middle),
-        );
-        if min(probe.r, min(probe.g, probe.b)) >= 0.0 {
-            low = middle;
-            candidate = probe;
-        } else {
-            high = middle;
-        }
-    }
-    return candidate;
 }
 
 fn mixer_saturation_factor(amount: f32) -> f32 {
@@ -800,7 +747,7 @@ fn apply_color_grading_wheels(
         let target_ab = lab.yz + grade_vector * (0.135 * signal * hdr_guard * saturation_guard);
         let target_chroma = length(target_ab);
         if target_chroma > 1e-8 {
-            adjusted = nonnegative_rec2020_from_oklab(
+            adjusted = perceptual_rec2020_from_oklab_nonnegative(
                 lab.x,
                 target_ab / target_chroma,
                 target_chroma,
@@ -930,7 +877,7 @@ fn local_curve_value(mask_index: u32, curve: u32, input: f32) -> f32 {
     return clamp(hermite, min(p0.y, p1.y), max(p0.y, p1.y));
 }
 
-fn local_hue_shift(weights: MixerBandWeights, first_values: vec4<f32>, second_values: vec4<f32>) -> f32 {
+fn mixer_hue_shift_values(weights: MixerBandWeights, first_values: vec4<f32>, second_values: vec4<f32>) -> f32 {
     let first = vec4<f32>(
         directed_hue_shift(first_values.x, 0.1690846, 0.0653940),
         directed_hue_shift(first_values.y, 0.0653940, 0.1583152),
@@ -946,53 +893,55 @@ fn local_hue_shift(weights: MixerBandWeights, first_values: vec4<f32>, second_va
     return (dot(weights.first, first) + dot(weights.second, second)) / max(weights.total, 1e-6);
 }
 
-fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+fn apply_local_curves_for_mask(mask_index: u32, input_rgb: vec3<f32>) -> vec3<f32> {
+    var adjusted = input_rgb;
+    let state = params.mask_meta[mask_index];
+    if (state.z & 1u) != 0u {
+        let luminance = max(dot(adjusted, LUMA), 0.0);
+        let curved = scene_curve_decode(local_curve_value(mask_index, 0u, scene_curve_encode(luminance)));
+        adjusted = remap_scene_luminance(adjusted, curved);
+    }
+    if (state.z & 2u) != 0u && adjusted.r >= 0.0 {
+        adjusted.r = scene_curve_decode(local_curve_value(mask_index, 1u, scene_curve_encode(adjusted.r)));
+    }
+    if (state.z & 4u) != 0u && adjusted.g >= 0.0 {
+        adjusted.g = scene_curve_decode(local_curve_value(mask_index, 2u, scene_curve_encode(adjusted.g)));
+    }
+    if (state.z & 8u) != 0u && adjusted.b >= 0.0 {
+        adjusted.b = scene_curve_decode(local_curve_value(mask_index, 3u, scene_curve_encode(adjusted.b)));
+    }
+    return adjusted;
+}
+
+fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let full_size = vec2<f32>(f32(max(params.full_width, 1u)), f32(max(params.full_height, 1u)));
-    let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
-    let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
     let count = min(params.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = params.mask_meta[index];
-        if state.x == 0u || (state.z == 0u && state.w == 0u) { continue; }
-        let weight = textureSampleLevel(local_mask_tex, local_mask_sampler, uv, i32(index), 0.0).x;
+        if state.x == 0u || state.y == 0u { continue; }
+        let weight = local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
+
+        // A local adjustment is one masked invocation of the same logical
+        // scene-tone node, not a weighted parameter contribution to a shared
+        // aggregate. This keeps overlap behavior deterministic for nonlinear
+        // tone, contrast, WB, and curve operations.
         var adjusted = rgb;
-        if (state.z & 1u) != 0u {
-            let luminance = max(dot(adjusted, LUMA), 0.0);
-            let curved = scene_curve_decode(local_curve_value(index, 0u, scene_curve_encode(luminance)));
-            adjusted = remap_scene_luminance(adjusted, curved);
-        }
-        if (state.z & 2u) != 0u && adjusted.r >= 0.0 {
-            adjusted.r = scene_curve_decode(local_curve_value(index, 1u, scene_curve_encode(adjusted.r)));
-        }
-        if (state.z & 4u) != 0u && adjusted.g >= 0.0 {
-            adjusted.g = scene_curve_decode(local_curve_value(index, 2u, scene_curve_encode(adjusted.g)));
-        }
-        if (state.z & 8u) != 0u && adjusted.b >= 0.0 {
-            adjusted.b = scene_curve_decode(local_curve_value(index, 3u, scene_curve_encode(adjusted.b)));
-        }
-        if (state.w & 1u) != 0u {
-            let sample = mixer_sample_from_rgb(adjusted);
-            if sample.confidence > 1e-5 {
-                let hue = fract(atan2(sample.hue_vector.y, sample.hue_vector.x) / (2.0 * 3.14159265359) + 1.0);
-                let bands = mixer_band_weights(hue);
-                let hue_shift = local_hue_shift(bands, params.mask_hsl_hue_0[index], params.mask_hsl_hue_1[index]) * sample.confidence;
-                let saturation = mixer_band_value(bands, params.mask_hsl_saturation_0[index], params.mask_hsl_saturation_1[index]) / 100.0 * sample.confidence;
-                let luminance = mixer_band_value(bands, params.mask_hsl_luminance_0[index], params.mask_hsl_luminance_1[index]) / 100.0 * sample.confidence;
-                if abs(hue_shift) > 1e-7 || abs(saturation) > 1e-7 {
-                    let angle = atan2(sample.lab.z, sample.lab.y) + hue_shift * 2.0 * 3.14159265359;
-                    adjusted = nonnegative_rec2020_from_oklab(
-                        sample.lab.x,
-                        vec2<f32>(cos(angle), sin(angle)),
-                        sample.chroma * mixer_saturation_factor(saturation),
-                    );
-                }
-                if abs(luminance) > 1e-7 {
-                    adjusted = adjusted * exp2(mixer_luminance_ev(luminance, sample.lab.x));
-                }
-            }
-        }
+        adjusted = apply_local_basic_tone_values(
+            adjusted,
+            pos,
+            params.mask_adjust_0[index].z,
+            params.mask_adjust_0[index].w,
+            params.mask_adjust_1[index].x,
+            params.mask_adjust_1[index].y,
+        );
+        adjusted = apply_basic_contrast_value(adjusted, params.mask_adjust_0[index].y);
+        adjusted = apply_temperature_tint_values(
+            adjusted,
+            params.mask_adjust_1[index].z,
+            params.mask_adjust_1[index].w,
+        );
+        adjusted = apply_local_curves_for_mask(index, adjusted);
         rgb = mix(rgb, adjusted, weight);
     }
     return rgb;
@@ -1000,14 +949,11 @@ fn apply_local_curve_and_hsl(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
 
 fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let full_size = vec2<f32>(f32(max(params.full_width, 1u)), f32(max(params.full_height, 1u)));
-    let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
-    let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
     let count = min(params.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = params.mask_meta[index];
         if state.x == 0u || (state.w & 2u) == 0u { continue; }
-        let weight = textureSampleLevel(local_mask_tex, local_mask_sampler, uv, i32(index), 0.0).x;
+        let weight = local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
         let adjusted = apply_color_grading_wheels(
             rgb,
@@ -1022,11 +968,22 @@ fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
     return rgb;
 }
 
-fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let strengths = color_mixer_strength();
+fn apply_color_mixer_values(
+    pos: vec2<i32>,
+    rgb: vec3<f32>,
+    hue_0: vec4<f32>,
+    hue_1: vec4<f32>,
+    saturation_0: vec4<f32>,
+    saturation_1: vec4<f32>,
+    luminance_0: vec4<f32>,
+    luminance_1: vec4<f32>,
+) -> vec3<f32> {
+    let strengths = vec3<f32>(
+        max(max_abs_vec4(hue_0), max_abs_vec4(hue_1)),
+        max(max_abs_vec4(saturation_0), max_abs_vec4(saturation_1)),
+        max(max_abs_vec4(luminance_0), max_abs_vec4(luminance_1)),
+    );
     if max(strengths.x, max(strengths.y, strengths.z)) < 1e-6 {
-        // Exact no-op: enabling the mixer with neutral sliders must not change
-        // pixels or run the selector filter.
         return rgb;
     }
 
@@ -1037,17 +994,11 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
 
     let selector_hue = fract(atan2(sample.hue_vector.y, sample.hue_vector.x) / (2.0 * 3.14159265359) + 1.0);
     let weights = mixer_band_weights(selector_hue);
-    let hue_shift = mixer_hue_shift(weights) * sample.confidence;
-    let saturation_amount = mixer_band_value(
-        weights,
-        params.hsl_saturation_0,
-        params.hsl_saturation_1,
-    ) / 100.0 * sample.confidence;
-    let luminance_amount = mixer_band_value(
-        weights,
-        params.hsl_luminance_0,
-        params.hsl_luminance_1,
-    ) / 100.0 * sample.confidence;
+    let hue_shift = mixer_hue_shift_values(weights, hue_0, hue_1) * sample.confidence;
+    let saturation_amount = mixer_band_value(weights, saturation_0, saturation_1)
+        / 100.0 * sample.confidence;
+    let luminance_amount = mixer_band_value(weights, luminance_0, luminance_1)
+        / 100.0 * sample.confidence;
 
     if max(abs(hue_shift), max(abs(saturation_amount), abs(luminance_amount))) < 1e-7 {
         return rgb;
@@ -1060,16 +1011,81 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         let target_angle = center_angle + hue_shift * 2.0 * 3.14159265359;
         let target_hue = vec2<f32>(cos(target_angle), sin(target_angle));
         let target_chroma = sample.chroma * mixer_saturation_factor(saturation_amount);
-        adjusted = nonnegative_rec2020_from_oklab(sample.lab.x, target_hue, target_chroma);
+        adjusted = perceptual_rec2020_from_oklab_nonnegative(
+            sample.lab.x,
+            target_hue,
+            target_chroma,
+        );
     }
 
     if abs(luminance_amount) > 1e-7 {
         // A scalar scene-linear gain preserves RGB ratios, hue and saturation.
-        // Unlike changing HSL lightness, it cannot expose per-channel extrema
-        // as a checkerboard of different brightness values.
         adjusted = adjusted * exp2(mixer_luminance_ev(luminance_amount, sample.lab.x));
+        adjusted = perceptual_gamut_compress_nonnegative_rec2020(adjusted);
     }
     return adjusted;
+}
+
+fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    return apply_color_mixer_values(
+        pos,
+        rgb,
+        params.hsl_hue_0,
+        params.hsl_hue_1,
+        params.hsl_saturation_0,
+        params.hsl_saturation_1,
+        params.hsl_luminance_0,
+        params.hsl_luminance_1,
+    );
+}
+
+fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    let count = min(params.mask_counts.x, 32u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = params.mask_meta[index];
+        if state.x == 0u || (state.w & 1u) == 0u { continue; }
+        let weight = local_mask_weight(pos, index);
+        if weight <= 1e-5 { continue; }
+
+        // A local HSL/mixer edit is exactly the global mixer node with mask-
+        // supplied parameters, followed by one masked blend. Keeping one node
+        // implementation prevents local/global selector or gamut drift.
+        let adjusted = apply_color_mixer_values(
+            pos,
+            rgb,
+            params.mask_hsl_hue_0[index],
+            params.mask_hsl_hue_1[index],
+            params.mask_hsl_saturation_0[index],
+            params.mask_hsl_saturation_1[index],
+            params.mask_hsl_luminance_0[index],
+            params.mask_hsl_luminance_1[index],
+        );
+        rgb = mix(rgb, adjusted, weight);
+    }
+    return rgb;
+}
+
+
+fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    let count = min(params.mask_counts.x, 32u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = params.mask_meta[index];
+        if state.x == 0u || state.y == 0u { continue; }
+        let local = params.mask_adjust_2[index];
+        if max(max(abs(local.x), abs(local.y)), max(abs(local.z), abs(local.w))) <= 1e-7 {
+            continue;
+        }
+        let weight = local_mask_weight(pos, index);
+        if weight <= 1e-5 { continue; }
+        var adjusted = rgb;
+        adjusted = apply_texture_and_clarity_values(pos, adjusted, local.y, local.z);
+        adjusted = apply_dehaze_value(pos, adjusted, local.w);
+        adjusted = apply_saturation_value(adjusted, local.x);
+        rgb = mix(rgb, adjusted, weight);
+    }
+    return rgb;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1083,10 +1099,9 @@ fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     // scene controls have finished. Legacy edits retain the old pre-edit look.
     var rgb = apply_camera_characterization(scene_working_at(pos));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
-    let local = local_adjustment_mix(pos);
-    let local_exposure_ev = clamp(local.tone0.x, -10.0, 10.0);
-    rgb = rgb * exp2(profile_exposure_ev + local_exposure_ev);
+    rgb = rgb * exp2(profile_exposure_ev);
     rgb = apply_exposure(rgb);
+    rgb = apply_local_exposure_nodes(pos, rgb);
     if !uses_explicit_scene_display_domains() {
         rgb = apply_optional_profile_look(rgb);
     }
@@ -1098,7 +1113,6 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
-    let local = local_adjustment_mix(pos);
 
     // Capture sharpening and all H/S/W/B, Contrast, curve, and local tone
     // controls operate in the scene domain. ProfileToneCurve is excluded from
@@ -1109,17 +1123,7 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
         rgb = apply_profile_view_tone(rgb);
     }
     rgb = apply_lightroom_tone(rgb, pos);
-    rgb = apply_local_basic_tone_values(
-        rgb,
-        pos,
-        local.tone0.z,
-        local.tone0.w,
-        local.tone1.x,
-        local.tone1.y,
-    );
-    rgb = apply_basic_contrast_value(rgb, local.tone0.y);
-    rgb = apply_temperature_tint_values(rgb, local.tone1.z, local.tone1.w);
-    rgb = apply_local_curve_and_hsl(pos, rgb);
+    rgb = apply_local_scene_tone_nodes(pos, rgb);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
@@ -1128,16 +1132,10 @@ fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
-    let local = local_adjustment_mix(pos);
-    rgb = apply_texture_and_clarity_values(
-        pos,
-        rgb,
-        params.presence.x + local.effects.y,
-        params.presence.y + local.effects.z,
-    );
-    rgb = apply_dehaze_value(pos, rgb, params.presence.z + local.effects.w);
+    rgb = apply_texture_and_clarity_values(pos, rgb, params.presence.x, params.presence.y);
+    rgb = apply_dehaze_value(pos, rgb, params.presence.z);
     rgb = apply_saturation_vibrance(rgb);
-    rgb = apply_saturation_value(rgb, local.effects.x);
+    rgb = apply_local_scene_effect_nodes(pos, rgb);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
@@ -1188,27 +1186,6 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_glow(pos, rgb);
     rgb = apply_vignette(pos, rgb);
     textureStore(creative_effects_out, pos, vec4<f32>(rgb, 1.0));
-}
-
-fn default_view_chroma_limit(mapped_luma: f32, candidate: vec3<f32>) -> f32 {
-    let delta = candidate - vec3<f32>(mapped_luma);
-    var limit = 1.0;
-    if delta.r > 1e-7 {
-        limit = min(limit, (1.0 - mapped_luma) / delta.r);
-    } else if delta.r < -1e-7 {
-        limit = min(limit, mapped_luma / -delta.r);
-    }
-    if delta.g > 1e-7 {
-        limit = min(limit, (1.0 - mapped_luma) / delta.g);
-    } else if delta.g < -1e-7 {
-        limit = min(limit, mapped_luma / -delta.g);
-    }
-    if delta.b > 1e-7 {
-        limit = min(limit, (1.0 - mapped_luma) / delta.b);
-    } else if delta.b < -1e-7 {
-        limit = min(limit, mapped_luma / -delta.b);
-    }
-    return clamp(limit, 0.0, 1.0);
 }
 
 fn profile_tone_scene_shoulder_knee() -> f32 {
@@ -1273,23 +1250,11 @@ fn profile_tone_display_shoulder(rgb: vec3<f32>) -> vec3<f32> {
             + distance / (1.0 + distance / (1.0 - shoulder_knee));
     }
 
-    // Preserve the scene/profile hue and saturation by mapping luminance with
-    // one scalar gain. Only compress chroma when a channel would leave display
-    // gamut; this keeps bright flowers, signs, fabrics, and sunsets colorful
-    // instead of washing them out through independent channel clipping.
+    // Preserve the scene/profile hue with one scalar luminance gain, then let
+    // the same perceptual boundary service used by the editing nodes approach
+    // the display gamut with a soft chroma knee. No per-channel view clamp.
     let ratio_preserved = positive * (mapped_luma / luma);
-    let chroma_limit = default_view_chroma_limit(mapped_luma, ratio_preserved);
-    let chroma_scale = select(
-        chroma_limit,
-        1.0,
-        chroma_limit >= 0.9999,
-    );
-    return clamp(
-        vec3<f32>(mapped_luma)
-            + (ratio_preserved - vec3<f32>(mapped_luma)) * chroma_scale,
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
+    return perceptual_gamut_compress_unit_rec2020(ratio_preserved);
 }
 
 fn apply_dcp_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
@@ -1331,7 +1296,8 @@ fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let rgb = textureLoad(final_adjustment_tex, pos, 0).xyz;
-    let mixed = apply_color_mixer(pos, rgb);
+    let globally_mixed = apply_color_mixer(pos, rgb);
+    let mixed = apply_local_color_mixer(pos, globally_mixed);
     let globally_graded = apply_color_grading_wheels(
         mixed,
         params.grade_shadows,

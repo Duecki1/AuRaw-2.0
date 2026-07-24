@@ -170,8 +170,8 @@ def test_rust_compile_surface_regressions_are_absent() -> None:
     assert "#[derive(Clone, Debug)]\nenum TransferCurve" in icc
     assert '#[cfg(not(libraw_available))]\nuse anyhow::anyhow;' in raw_loader
     assert "use crate::ui::mask_component_color;" not in sidebar
-    assert "offset_of!(super::GpuParams, process_info), 880" in gpu_tests
-    assert "offset_of!(super::GpuParams, mask_counts), 896" in gpu_tests
+    assert "offset_of!(super::GpuParams, process_info), 928" in gpu_tests
+    assert "offset_of!(super::GpuParams, mask_counts), 944" in gpu_tests
 
 
 def test_large_object_mask_models_resume_after_transient_download_failures() -> None:

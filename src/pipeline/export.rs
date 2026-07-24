@@ -549,7 +549,7 @@ where
         output_height,
         keep_metadata: _,
         metadata: _,
-        geometry: _,
+        geometry,
     } = request;
     let export_started = Instant::now();
     validate_export_dimensions(output_width, output_height)?;
@@ -577,7 +577,8 @@ where
         first.global_origin_y,
         raw.width,
         raw.height,
-    );
+    )
+    .with_vignette_geometry(geometry);
     let pipeline_started = Instant::now();
     let export_mask_edge = if masks.masks.is_empty() {
         mask_atlas_edge()
@@ -623,6 +624,7 @@ where
             raw.width,
             raw.height,
         )
+        .with_vignette_geometry(geometry)
         .with_tone_histogram_bounds(
             tile.local_core_x,
             tile.local_core_y,
@@ -691,7 +693,8 @@ where
                 tile.global_origin_y,
                 raw.width,
                 raw.height,
-            );
+            )
+            .with_vignette_geometry(geometry);
             tile_pipeline.dispatch_export_tile(queue, device, &params);
             let readback = tile_pipeline
                 .begin_display_linear_region_readback(

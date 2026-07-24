@@ -61,8 +61,8 @@ def test_scene_controls_precede_optional_look_and_view_transform() -> None:
     legacy_gate = tone.index("if !uses_explicit_scene_display_domains()")
     profile_tone = tone.index("rgb = apply_profile_view_tone(rgb)", legacy_gate)
     adaptive_tone = tone.index("rgb = apply_lightroom_tone(rgb, pos)", profile_tone)
-    contrast = tone.index("rgb = apply_basic_contrast_value", adaptive_tone)
-    assert legacy_gate < profile_tone < adaptive_tone < contrast
+    local_tone = tone.index("rgb = apply_local_scene_tone_nodes(pos, rgb)", adaptive_tone)
+    assert legacy_gate < profile_tone < adaptive_tone < local_tone
 
     look = view.index("apply_optional_profile_look(scene_rgb)")
     profile_view = view.index("apply_dcp_view_transform(view_input)", look)
@@ -77,7 +77,7 @@ def test_tone_analysis_is_profile_independent_on_new_process_path() -> None:
     legacy_look = TONE.index("apply_optional_profile_look(exposed)", explicit_branch)
     legacy_tone = TONE.index("apply_profile_view_tone(looked)", legacy_look)
     assert explicit_branch < legacy_look < legacy_tone
-    assert "return max(map_negative_gamut(exposed)" in TONE[explicit_branch:legacy_look]
+    assert "return map_negative_gamut(exposed);" in TONE[explicit_branch:legacy_look]
 
 
 def test_process_version_preserves_legacy_appearance() -> None:

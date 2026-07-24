@@ -75,7 +75,11 @@ def test_local_adjustments_are_scene_linear_and_mask_weighted() -> None:
     assert "mask_adjust_0: array<vec4<f32>, 32>" in COMMON
     assert "mask_adjust_1: array<vec4<f32>, 32>" in COMMON
     assert "mask_adjust_2: array<vec4<f32>, 32>" in COMMON
-    assert "local_adjustment_mix" in ADJUSTMENTS
+    assert "fn local_adjustment_mix" not in ADJUSTMENTS
+    assert "fn apply_local_exposure_nodes" in ADJUSTMENTS
+    assert "fn apply_local_scene_tone_nodes" in ADJUSTMENTS
+    assert "fn apply_local_scene_effect_nodes" in ADJUSTMENTS
+    assert "fn apply_local_color_mixer" in ADJUSTMENTS
     assert "apply_local_basic_tone_values" in ADJUSTMENTS
     assert "apply_temperature_tint_values" in ADJUSTMENTS
     assert "apply_texture_and_clarity_values" in ADJUSTMENTS
@@ -232,8 +236,15 @@ def test_local_mask_capacity_is_32_end_to_end() -> None:
     # Basic tone/effects must iterate the actual mask count too. A leftover
     # eight-mask loop here makes mask geometry visible for masks 9+ while
     # silently dropping exposure/contrast/WB/presence adjustments.
-    mix_start = ADJUSTMENTS.index("fn local_adjustment_mix")
-    mix_end = ADJUSTMENTS.index("fn scene_working_at", mix_start)
-    local_mix = ADJUSTMENTS[mix_start:mix_end]
-    assert "for (var index = 0u; index < count; index = index + 1u)" in local_mix
-    assert "index < 8u" not in local_mix
+    for function_name in (
+        "apply_local_exposure_nodes",
+        "apply_local_scene_tone_nodes",
+        "apply_local_scene_effect_nodes",
+        "apply_local_color_mixer",
+        "apply_local_color_grading",
+    ):
+        start = ADJUSTMENTS.index(f"fn {function_name}")
+        end = ADJUSTMENTS.find("\nfn ", start + 4)
+        body = ADJUSTMENTS[start:] if end < 0 else ADJUSTMENTS[start:end]
+        assert "for (var index = 0u; index < count; index = index + 1u)" in body
+        assert "index < 8u" not in body

@@ -1277,7 +1277,8 @@ fn render_uncached_developed_thumbnail(
     let mut masks = Arc::unwrap_or_clone(edits.masks);
     let inpaint_strokes = Arc::unwrap_or_clone(edits.inpainting);
     let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
-    let initial_params = GpuParams::new(&edits.exposure, &masks, &preview_raw);
+    let initial_params = GpuParams::new(&edits.exposure, &masks, &preview_raw)
+        .with_vignette_geometry(geometry);
     let gpu = developed_thumbnail_gpu()?;
     let gpu = gpu
         .lock()
@@ -1329,7 +1330,8 @@ fn render_uncached_developed_thumbnail(
             .update_mask_layer(&gpu.queue, layer, &values)
             .map_err(|error| format!("could not apply thumbnail local mask: {error:#}"))?;
     }
-    let params = GpuParams::new(&edits.exposure, &masks, &preview_raw);
+    let params = GpuParams::new(&edits.exposure, &masks, &preview_raw)
+        .with_vignette_geometry(geometry);
     pipeline.recompute(&gpu.queue, &gpu.device, &params);
     let thumbnail = pipeline
         .output_snapshot()

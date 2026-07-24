@@ -382,7 +382,7 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
     // Sixteen scalar values keep the stable 64-byte prefix. The two
     // darktable sigmoid vec4s follow the local-tone controls, then the
     // remaining adjustment, camera/raw, dimension and profile blocks.
-    assert_eq!(std::mem::size_of::<super::GpuParams>(), 25056);
+    assert_eq!(std::mem::size_of::<super::GpuParams>(), 25136);
     assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
     assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
     assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
@@ -399,65 +399,70 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
         std::mem::offset_of!(super::GpuParams, highlight_options),
         176
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 192);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 256);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 240);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 304);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_curve_red_0),
-        272
+        320
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_curve_green_0),
-        352
+        400
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_curve_blue_0),
-        432
+        480
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 608);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, inpaint_wb_0), 672);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, width), 752);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 760);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 768);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 656);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, inpaint_wb_0), 720);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, width), 800);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 808);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 816);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_histogram_bounds),
-        784
+        832
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 800);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 864);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, process_info), 880);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 896);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 912);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 1424);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1936);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 2448);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 2960);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 6544);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 848);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 912);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, process_info), 928);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 944);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 960);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 1472);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1984);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 2496);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 3008);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 6592);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_red_0),
-        7056
+        7104
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_green_0),
-        11152
+        11200
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
-        15248
+        15296
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 19344);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 19392);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
-        21904
+        21952
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 22416);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 22480);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 22464);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 22528);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_grade_shadows),
-        22496
+        22544
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_grade_options),
-        24544
+        24592
+    );
+    assert_eq!(std::mem::offset_of!(super::GpuParams, vignette_frame), 25104);
+    assert_eq!(
+        std::mem::offset_of!(super::GpuParams, vignette_transform),
+        25120
     );
 }
 
@@ -478,7 +483,7 @@ fn signed_scene_rgb_is_preserved_until_explicit_positive_domain_boundaries() {
     assert!(SHADER_ADJUSTMENTS.contains(
         "let view_input = gamut_project_nonnegative_rec2020(looked)"
     ));
-    assert!(SHADER_ADJUSTMENTS.contains("let mapped = gamut_project_unit_rec2020(rgb)"));
+    assert!(SHADER_ADJUSTMENTS.contains("perceptual_gamut_compress_unit_rec2020"));
 
     for forbidden in [
         "max(REC2020_TO_PROPHOTO *",
@@ -531,7 +536,7 @@ fn adjustments_shader_contains_lightroom_style_controls() {
     assert!(SHADER_ADJUSTMENTS.contains("apply_glow"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_vignette"));
     assert!(SHADER_ADJUSTMENTS.contains("stabilized_mixer_sample"));
-    assert!(SHADER_ADJUSTMENTS.contains("nonnegative_rec2020_from_oklab"));
+    assert!(SHADER_ADJUSTMENTS.contains("perceptual_rec2020_from_oklab_nonnegative"));
     assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_color_grading_wheels"));
     assert!(SHADER_ADJUSTMENTS.contains("color_grade_tonal_weights"));

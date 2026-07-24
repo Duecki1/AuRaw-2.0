@@ -158,7 +158,8 @@ impl AurawApp {
         // preview with the existing mask stack, then mark source-dependent
         // masks as stale so the user can explicitly refresh them.
         let preview_masks = self.masks.clone();
-        let params = GpuParams::new(&self.exposure, &preview_masks, &preview_raw);
+        let params = GpuParams::new(&self.exposure, &preview_masks, &preview_raw)
+            .with_vignette_geometry(self.geometry);
         let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
             &render_state.device,
             &render_state.queue,
@@ -329,7 +330,8 @@ impl AurawApp {
             let _ = pipeline.update_inpaint_layer(
                 &render_state.queue, inpaint, 0, 0, raw.width, raw.height
             );
-            let params = GpuParams::new(exposure, masks, raw);
+            let params =
+                GpuParams::new(exposure, masks, raw).with_vignette_geometry(self.geometry);
             pipeline.recompute(&render_state.queue, &render_state.device, &params);
         }
 
@@ -337,7 +339,8 @@ impl AurawApp {
             let _ = navigation.pipeline.update_inpaint_layer(
                 &render_state.queue, inpaint, 0, 0, navigation.raw.width, navigation.raw.height
             );
-            let params = GpuParams::new(exposure, masks, &navigation.raw);
+            let params = GpuParams::new(exposure, masks, &navigation.raw)
+                .with_vignette_geometry(self.geometry);
             navigation
                 .pipeline
                 .recompute(&render_state.queue, &render_state.device, &params);
@@ -364,7 +367,8 @@ impl AurawApp {
                 detail.virtual_origin[1],
                 detail.virtual_full_size[0],
                 detail.virtual_full_size[1],
-            );
+            )
+            .with_vignette_geometry(self.geometry);
             detail
                 .pipeline
                 .recompute(&render_state.queue, &render_state.device, &params);
@@ -447,7 +451,8 @@ impl AurawApp {
         } else {
             Arc::new(build_proxy(&full_raw, spec))
         };
-        let params = GpuParams::new(&self.exposure, &self.masks, &preview_raw);
+        let params = GpuParams::new(&self.exposure, &self.masks, &preview_raw)
+            .with_vignette_geometry(self.geometry);
         let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
             &render_state.device,
             &render_state.queue,
@@ -652,7 +657,8 @@ impl AurawApp {
             virtual_origin_y,
             virtual_full_width,
             virtual_full_height,
-        );
+        )
+        .with_vignette_geometry(self.geometry);
         // Prefer the normal proxy whenever its tone statistics are still current.
         let normal_tone_is_current = !matches!(
             self.pending_stage,
@@ -881,7 +887,8 @@ impl AurawApp {
                     },
                 ))
             };
-            let params = GpuParams::new(&self.target_exposure, &self.masks, &raw);
+            let params = GpuParams::new(&self.target_exposure, &self.masks, &raw)
+                .with_vignette_geometry(self.geometry);
             let Some(template) = self.gpu_pipeline.as_ref() else {
                 return;
             };
@@ -976,7 +983,8 @@ impl AurawApp {
             self.notice = Some(format!("Could not update navigation inpainting: {error:#}"));
             return;
         }
-        let params = GpuParams::new(&self.target_exposure, &self.masks, &preview.raw);
+        let params = GpuParams::new(&self.target_exposure, &self.masks, &preview.raw)
+            .with_vignette_geometry(self.geometry);
         let stages = match stage {
             ProcessingStage::Raw => &[
                 ProcessingStage::Raw,
@@ -1043,7 +1051,8 @@ impl AurawApp {
             virtual_origin[1],
             virtual_full_size[0],
             virtual_full_size[1],
-        );
+        )
+        .with_vignette_geometry(self.geometry);
 
         let normal_tone_is_current = !matches!(
             self.pending_stage,
@@ -1181,7 +1190,8 @@ impl AurawApp {
                 return;
             }
         }
-        let params = GpuParams::new(&self.target_exposure, &self.masks, raw);
+        let params = GpuParams::new(&self.target_exposure, &self.masks, raw)
+            .with_vignette_geometry(self.geometry);
         pipeline.dispatch_stage(&render_state.queue, &render_state.device, &params, stage);
         self.pending_stage = match stage {
             ProcessingStage::Raw => Some(ProcessingStage::Tone),

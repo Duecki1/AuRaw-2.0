@@ -171,6 +171,12 @@ struct Params {
     mask_grade_highlights: array<vec4<f32>, 32>,
     mask_grade_global: array<vec4<f32>, 32>,
     mask_grade_options: array<vec4<f32>, 32>,
+    // Post-crop vignette mapping. Frame = source-space crop center (xy) plus
+    // final-frame pixel dimensions (zw). Transform maps normalized source
+    // deltas to normalized final-frame deltas and includes orientation, fine
+    // rotation, flips and keystone/shear.
+    vignette_frame: vec4<f32>,
+    vignette_transform: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;

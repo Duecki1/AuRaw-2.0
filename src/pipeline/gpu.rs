@@ -2,8 +2,9 @@ use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams,
-    HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
-    ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams, GLOBAL_TEMPERATURE_LIMIT,
+    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
+    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
+    GLOBAL_TEMPERATURE_LIMIT,
     MAX_LOCAL_MASKS, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
 };
 use anyhow::{anyhow, Result};
@@ -22,8 +23,8 @@ use resources::*;
 #[cfg(test)]
 mod tests;
 
-const GPU_PARAMS_ABI_VERSION: u32 = 3;
-const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 25_104;
+const GPU_PARAMS_ABI_VERSION: u32 = 4;
+const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 25_136;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
@@ -582,6 +583,11 @@ pub struct GpuParams {
     mask_grade_highlights: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_grade_global: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_grade_options: [[f32; 4]; MAX_LOCAL_MASKS],
+    // Final-frame vignette mapping. `vignette_frame` stores source-space crop
+    // center followed by final-frame pixel dimensions. `vignette_transform` is
+    // the normalized source-to-final 2x2 affine matrix.
+    vignette_frame: [f32; 4],
+    vignette_transform: [f32; 4],
 }
 
 const _: () = assert!(std::mem::size_of::<GpuParams>() == GPU_PARAMS_ABI_SIZE_BYTES as usize);
@@ -810,17 +816,9 @@ impl GpuParams {
         let mut mask_grade_options = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
             let adjustment = mask.adjustments;
-            let has_hsl = adjustment
-                .hsl_hue
-                .iter()
-                .chain(&adjustment.hsl_saturation)
-                .chain(&adjustment.hsl_luminance)
-                .any(|value| value.abs() > 1e-6);
-            let curve_flags = u32::from(!adjustment.tone_curve.is_identity())
-                | (u32::from(!adjustment.tone_curve_red.is_identity()) << 1)
-                | (u32::from(!adjustment.tone_curve_green.is_identity()) << 2)
-                | (u32::from(!adjustment.tone_curve_blue.is_identity()) << 3);
-            let has_grading = !adjustment.color_grading.is_neutral();
+            let has_hsl = adjustment.has_color_mixer();
+            let curve_flags = adjustment.curve_feature_flags();
+            let has_grading = adjustment.has_color_grading();
             mask_meta[index] = [
                 u32::from(mask.enabled),
                 u32::from(!adjustment.is_neutral()),
@@ -1192,7 +1190,70 @@ impl GpuParams {
             mask_grade_highlights,
             mask_grade_global,
             mask_grade_options,
+            vignette_frame: [
+                0.5,
+                0.5,
+                full_width.max(1) as f32,
+                full_height.max(1) as f32,
+            ],
+            vignette_transform: [1.0, 0.0, 0.0, 1.0],
         }
+    }
+
+    pub fn with_vignette_geometry(mut self, geometry: GeometryTransform) -> Self {
+        let geometry = geometry.sanitized();
+        let crop = geometry.crop;
+        let source_width = self.full_width.max(1) as f32;
+        let source_height = self.full_height.max(1) as f32;
+        let crop_width = ((crop[2] - crop[0]) * source_width).max(1e-6);
+        let crop_height = ((crop[3] - crop[1]) * source_height).max(1e-6);
+        let center_u = (crop[0] + crop[2]) * 0.5;
+        let center_v = (crop[1] + crop[3]) * 0.5;
+
+        // Match GeometryInverseMap / preview geometry exactly: forward mapping
+        // is quarter-turn * rotation * shear * flip. Convert source-normalized
+        // deltas directly into final-frame normalized deltas so the shader can
+        // evaluate the vignette before geometry resampling without baking it
+        // into the source image's orientation.
+        let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
+        let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
+        let shx = geometry.horizontal_transform.to_radians().tan();
+        let shy = geometry.vertical_transform.to_radians().tan();
+        let angle = geometry.rotation_degrees.to_radians();
+        let cos = angle.cos();
+        let sin = angle.sin();
+        let affine = [
+            cos * fx - sin * shy * fx,
+            cos * shx * fy - sin * fy,
+            sin * fx + cos * shy * fx,
+            sin * shx * fy + cos * fy,
+        ];
+        let quarter = match geometry.quarter_turns % 4 {
+            0 => [1.0, 0.0, 0.0, 1.0],
+            1 => [0.0, -1.0, 1.0, 0.0],
+            2 => [-1.0, 0.0, 0.0, -1.0],
+            _ => [0.0, 1.0, -1.0, 0.0],
+        };
+        let forward = [
+            quarter[0] * affine[0] + quarter[1] * affine[2],
+            quarter[0] * affine[1] + quarter[1] * affine[3],
+            quarter[2] * affine[0] + quarter[3] * affine[2],
+            quarter[2] * affine[1] + quarter[3] * affine[3],
+        ];
+        let (output_width, output_height) = if geometry.quarter_turns % 2 == 0 {
+            (crop_width, crop_height)
+        } else {
+            (crop_height, crop_width)
+        };
+
+        self.vignette_frame = [center_u, center_v, output_width, output_height];
+        self.vignette_transform = [
+            forward[0] * source_width / output_width,
+            forward[1] * source_height / output_width,
+            forward[2] * source_width / output_height,
+            forward[3] * source_height / output_height,
+        ];
+        self
     }
 
     pub fn with_tone_histogram_bounds(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {

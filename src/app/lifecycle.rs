@@ -1705,7 +1705,8 @@ impl AurawApp {
                     ));
                     crate::diagnostics::record_raw("Preview proxy", &preview_raw);
                     let initial_params =
-                        GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw);
+                        GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw)
+                            .with_vignette_geometry(geometry);
                     // Interactive previews use bounded half-float working
                     // surfaces on every platform. Full-float remains mandatory
                     // for regression rendering and tiled export readback.
@@ -1871,7 +1872,8 @@ impl AurawApp {
                     }
 
                     let params =
-                        GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw);
+                        GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw)
+                            .with_vignette_geometry(geometry);
                     let mask_upload_started = Instant::now();
                     Self::upload_preview_masks(
                         &pipeline,
