@@ -836,17 +836,26 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
         let mut stream = writer
             .stream_writer_with_size(64 * 1024)
             .context("create transformed streaming PNG writer")?;
+        let mut output_sharpen = FinalSizeOutputSharpen::new(
+            request.raw.width,
+            request.raw.height,
+            request.output_width,
+            request.output_height,
+        );
         for y in 0..request.output_height {
             let linear = resampler.output_row(y)?;
-            let rgba = encode_srgb_row_with_format(
-                &linear,
+            output_sharpen.push_row(
+                linear,
                 &output_transform,
                 ExportRowFormat::Rgba8,
+                &mut stream,
             )?;
-            stream
-                .write_all(&rgba)
-                .context("write transformed PNG row")?;
         }
+        output_sharpen.finish(
+            &output_transform,
+            ExportRowFormat::Rgba8,
+            &mut stream,
+        )?;
         stream.finish().context("finish transformed PNG data")?;
         writer.finish().context("finish transformed PNG file")?;
         Ok(())
@@ -912,15 +921,26 @@ fn export_tiled_jpeg_geometry(
                     format!("create transformed RGB raster {}", transformed_rgb.display())
                 })?;
             let mut writer = BufWriter::new(file);
+            let mut output_sharpen = FinalSizeOutputSharpen::new(
+                request.raw.width,
+                request.raw.height,
+                request.output_width,
+                request.output_height,
+            );
             for y in 0..request.output_height {
                 let linear = resampler.output_row(y)?;
-                let row = encode_srgb_row_with_format(
-                    &linear,
+                output_sharpen.push_row(
+                    linear,
                     &output_transform,
                     ExportRowFormat::Rgb8,
+                    &mut writer,
                 )?;
-                writer.write_all(&row).context("write transformed RGB row")?;
             }
+            output_sharpen.finish(
+                &output_transform,
+                ExportRowFormat::Rgb8,
+                &mut writer,
+            )?;
             writer.flush().context("flush transformed RGB raster")?;
         }
         drop(source_map);
@@ -1413,6 +1433,172 @@ struct OutputSampleWeight {
     weight: f32,
 }
 
+
+// Stage 3: output detail.
+//
+// Capture sharpening restores sensor/acutance detail and creative scale-space
+// shapes Texture/Clarity before the view transform. Delivery sharpening belongs
+// here, after resize/geometry, so its radius is exactly one final-output pixel.
+// Keeping it out of adjustments.wgsl prevents previews and pre-resize exports
+// from using creative presence as a substitute for final-size crispness.
+struct FinalSizeOutputSharpen {
+    width: u32,
+    strength: f32,
+    previous: Option<Vec<f32>>,
+    current: Option<Vec<f32>>,
+    encoded_rows: u32,
+}
+
+impl FinalSizeOutputSharpen {
+    fn new(source_width: u32, source_height: u32, output_width: u32, output_height: u32) -> Self {
+        let scale_x = source_width as f32 / output_width.max(1) as f32;
+        let scale_y = source_height as f32 / output_height.max(1) as f32;
+        let downsample = scale_x.max(scale_y).max(1.0);
+        let upscale = (output_width as f32 / source_width.max(1) as f32)
+            .max(output_height as f32 / source_height.max(1) as f32)
+            .max(1.0);
+        // Lanczos/EWA downsampling benefits from a little more final acutance;
+        // upscales get less to avoid emphasizing interpolation texture.
+        let downsample_boost = (downsample.log2() / 3.0).clamp(0.0, 1.0);
+        let upscale_reduction = ((upscale - 1.0) / 2.0).clamp(0.0, 1.0);
+        let strength = (0.44 + 0.22 * downsample_boost) * (1.0 - 0.28 * upscale_reduction);
+        Self {
+            width: output_width,
+            strength,
+            previous: None,
+            current: None,
+            encoded_rows: 0,
+        }
+    }
+
+    fn push_row<W: Write>(
+        &mut self,
+        row: Vec<f32>,
+        output_transform: &IccOutputTransform,
+        row_format: ExportRowFormat,
+        output: &mut W,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            row.len() == checked_rgb_len(self.width, 1)?,
+            "final-size sharpen row length does not match output width"
+        );
+        let Some(current) = self.current.take() else {
+            self.current = Some(row);
+            return Ok(());
+        };
+        let top = self.previous.as_deref().unwrap_or(&current);
+        let sharpened = output_sharpen_linear_row(top, &current, &row, self.strength)?;
+        self.write_encoded_row(&sharpened, output_transform, row_format, output)?;
+        self.previous = Some(current);
+        self.current = Some(row);
+        Ok(())
+    }
+
+    fn finish<W: Write>(
+        &mut self,
+        output_transform: &IccOutputTransform,
+        row_format: ExportRowFormat,
+        output: &mut W,
+    ) -> Result<()> {
+        if let Some(current) = self.current.take() {
+            let top = self.previous.as_deref().unwrap_or(&current);
+            let sharpened = output_sharpen_linear_row(top, &current, &current, self.strength)?;
+            self.write_encoded_row(&sharpened, output_transform, row_format, output)?;
+        }
+        self.previous = None;
+        Ok(())
+    }
+
+    fn write_encoded_row<W: Write>(
+        &mut self,
+        row: &[f32],
+        output_transform: &IccOutputTransform,
+        row_format: ExportRowFormat,
+        output: &mut W,
+    ) -> Result<()> {
+        let encoded = encode_srgb_row_with_format(row, output_transform, row_format)?;
+        output
+            .write_all(&encoded)
+            .with_context(|| format!("write output row {}", self.encoded_rows))?;
+        self.encoded_rows += 1;
+        Ok(())
+    }
+}
+
+fn rec2020_luminance(pixel: &[f32]) -> f32 {
+    (pixel[0] * 0.2627 + pixel[1] * 0.6780 + pixel[2] * 0.0593).max(1e-8)
+}
+
+fn output_sharpen_linear_row(
+    top: &[f32],
+    center: &[f32],
+    bottom: &[f32],
+    strength: f32,
+) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        top.len() == center.len() && center.len() == bottom.len() && center.len().is_multiple_of(3),
+        "output sharpen rows have incompatible lengths"
+    );
+    let pixels = center.len() / 3;
+    let mut sharpened = Vec::new();
+    sharpened
+        .try_reserve_exact(center.len())
+        .context("reserve final-size sharpen row")?;
+    sharpened.resize(center.len(), 0.0);
+
+    for x in 0..pixels {
+        let x_left = x.saturating_sub(1);
+        let x_right = (x + 1).min(pixels.saturating_sub(1));
+        let center_start = x * 3;
+        let left_start = x_left * 3;
+        let right_start = x_right * 3;
+        let c = rec2020_luminance(&center[center_start..center_start + 3]);
+        let l = rec2020_luminance(&center[left_start..left_start + 3]);
+        let r = rec2020_luminance(&center[right_start..right_start + 3]);
+        let u = rec2020_luminance(&top[center_start..center_start + 3]);
+        let d = rec2020_luminance(&bottom[center_start..center_start + 3]);
+        let center_ev = c.log2();
+
+        // Edge-aware cross blur. Large luminance jumps contribute less, which
+        // keeps output sharpening from building bright/dark rims across edges.
+        let mut weighted = c * 4.0;
+        let mut weight_sum = 4.0;
+        for neighbour in [l, r, u, d] {
+            let delta = neighbour.log2() - center_ev;
+            let weight = (-4.2 * delta * delta).exp();
+            weighted += neighbour * weight;
+            weight_sum += weight;
+        }
+        let base = (weighted / weight_sum.max(1e-6)).max(1e-8);
+        let detail_ev = center_ev - base.log2();
+
+        // Flat-field/shadow thresholding suppresses noise; real edges get a
+        // smooth selection boost. This stage is deliberately modest because it
+        // follows capture and creative detail rather than replacing them.
+        let shadow = (1.0 - ((center_ev + 7.5) / 4.5).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let threshold = 0.0065 + 0.012 * shadow;
+        let thresholded = detail_ev.signum() * (detail_ev.abs() - threshold).max(0.0);
+        let edge = [l, r, u, d]
+            .into_iter()
+            .map(|value| (value.log2() - center_ev).abs())
+            .fold(0.0f32, f32::max);
+        let edge_select = (0.30 + 0.70 * ((edge - 0.008) / 0.16).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let delta_ev = (thresholded * strength * edge_select).clamp(-0.16, 0.18);
+        let proposed = c * 2.0f32.powf(delta_ev);
+
+        // Constrain overshoot to the local final-size neighbourhood. A 1.5%
+        // allowance retains crispness without visible light/dark halos.
+        let local_min = c.min(l).min(r).min(u).min(d);
+        let local_max = c.max(l).max(r).max(u).max(d);
+        let target_luma = proposed.clamp(local_min * 0.985, local_max * 1.015);
+        let gain = (target_luma / c).clamp(0.78, 1.28);
+        for channel in 0..3 {
+            sharpened[center_start + channel] = (center[center_start + channel] * gain).max(0.0);
+        }
+    }
+    Ok(sharpened)
+}
+
 struct LinearLightResizer {
     source_width: u32,
     source_height: u32,
@@ -1425,6 +1611,7 @@ struct LinearLightResizer {
     next_source_row: u32,
     next_output_row: u32,
     row_format: ExportRowFormat,
+    output_sharpen: FinalSizeOutputSharpen,
 }
 
 impl LinearLightResizer {
@@ -1475,6 +1662,12 @@ impl LinearLightResizer {
             next_source_row: 0,
             next_output_row: 0,
             row_format,
+            output_sharpen: FinalSizeOutputSharpen::new(
+                source_width,
+                source_height,
+                output_width,
+                output_height,
+            ),
         })
     }
 
@@ -1554,10 +1747,18 @@ impl LinearLightResizer {
             output_transform,
             output,
         )?;
+        self.output_sharpen
+            .finish(output_transform, self.row_format, output)?;
         anyhow::ensure!(
             self.next_output_row == self.output_height,
             "linear resizer produced {} of {} output rows",
             self.next_output_row,
+            self.output_height
+        );
+        anyhow::ensure!(
+            self.output_sharpen.encoded_rows == self.output_height,
+            "output sharpen produced {} of {} rows",
+            self.output_sharpen.encoded_rows,
             self.output_height
         );
         anyhow::ensure!(
@@ -1581,10 +1782,8 @@ impl LinearLightResizer {
             let row = self.pending_rows[self.next_output_row as usize]
                 .take()
                 .context("completed resize row has no accumulated pixels")?;
-            let encoded = encode_srgb_row_with_format(&row, output_transform, self.row_format)?;
-            output
-                .write_all(&encoded)
-                .with_context(|| format!("write output row {}", self.next_output_row))?;
+            self.output_sharpen
+                .push_row(row, output_transform, self.row_format, output)?;
             self.next_output_row += 1;
         }
         Ok(())

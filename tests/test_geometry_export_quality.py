@@ -23,11 +23,15 @@ def test_geometry_export_stages_native_float_linear_rows() -> None:
         assert "geometry_output_row" not in body
 
 
-def test_geometry_resampling_happens_before_srgb_encoding() -> None:
+def test_geometry_resampling_happens_before_output_sharpen_and_encoding() -> None:
     png = _body("export_tiled_png_geometry", "export_tiled_jpeg_geometry")
     jpeg = _body("export_tiled_jpeg_geometry", "validate_linear_rgb_raster")
-    assert png.index("resampler.output_row(y)") < png.index("encode_srgb_row_with_format")
-    assert jpeg.index("resampler.output_row(y)") < jpeg.index("encode_srgb_row_with_format")
+    for body in (png, jpeg):
+        assert body.index("resampler.output_row(y)") < body.index("output_sharpen.push_row")
+        assert "FinalSizeOutputSharpen::new" in body
+        assert "output_sharpen.finish" in body
+    sharpen = EXPORT[EXPORT.index("struct FinalSizeOutputSharpen") : EXPORT.index("struct LinearLightResizer")]
+    assert sharpen.index("output_sharpen_linear_row") < sharpen.index("encode_srgb_row_with_format")
 
 
 def test_geometry_sampler_uses_combined_inverse_map_and_ewa_mitchell() -> None:

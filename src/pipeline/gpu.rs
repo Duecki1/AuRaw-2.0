@@ -321,7 +321,11 @@ const SHADER_ADJUSTMENTS: &str = concat!(
     "\n",
     include_str!("../shaders/tonemap.wgsl"),
     "\n",
-    include_str!("../shaders/adjustments.wgsl")
+    include_str!("../shaders/adjustments.wgsl"),
+    "\n",
+    include_str!("../shaders/detail_capture.wgsl"),
+    "\n",
+    include_str!("../shaders/detail_scale_space.wgsl")
 );
 
 const SHADER_INPAINT_DOWNSAMPLE: &str = r#"
