@@ -11,6 +11,13 @@
 @group(0) @binding(16) var<storage, read> tone_stats: ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
 
+fn adaptive_tone_user_exposure_ev() -> f32 {
+    // The histogram/guide remain cached in pre-user-exposure scene space so
+    // moving Exposure stays cheap. Reintroduce the user-facing edit here. The
+    // camera/DNG default rendering exposure is deliberately excluded here.
+    return clamp(bitcast<f32>(params.process_info.z), -5.0, 5.0);
+}
+
 fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
     let guide_size_i = vec2<i32>(textureDimensions(tone_guide_tex));
     let guide_max = guide_size_i - vec2<i32>(1);
@@ -30,13 +37,28 @@ fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
                 textureLoad(tone_guide_tex, p10, 0).x, fraction.x);
     let b = mix(textureLoad(tone_guide_tex, p01, 0).x,
                 textureLoad(tone_guide_tex, p11, 0).x, fraction.x);
-    return mix(a, b, fraction.y);
+    // Evaluate the local guide at the post-Exposure brightness. This makes a
+    // large positive Exposure naturally move more pixels into Highlights and
+    // Whites, while a negative Exposure moves them toward Shadows/Blacks.
+    return mix(a, b, fraction.y) + adaptive_tone_user_exposure_ev();
 }
 
 fn tone_percentiles() -> TonePercentiles {
     let p0 = tone_stats.percentiles_0;
     let p1 = tone_stats.percentiles_1;
-    return TonePercentiles(p0.x, p0.y, p0.z, p0.w, p1.x);
+    // Partially follow base Exposure instead of shifting the entire analysis
+    // by the same amount. A full equal shift would cancel out and reproduce
+    // the old pre-exposure masks; keeping 65% of the relative movement gives
+    // recovery controls a more photographic, exposure-aware response without
+    // making their target ranges jump abruptly after large edits.
+    let guide_follow = adaptive_tone_user_exposure_ev() * 0.35;
+    return TonePercentiles(
+        p0.x + guide_follow,
+        p0.y + guide_follow,
+        p0.z + guide_follow,
+        p0.w + guide_follow,
+        p1.x + guide_follow,
+    );
 }
 
 fn adaptive_tone_masks(local_ev: f32, percentiles: TonePercentiles) -> vec4<f32> {
@@ -117,9 +139,30 @@ fn apply_basic_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     }
 
     let luminance = safe_luma(max(rgb, vec3<f32>(0.0)));
-    let contrast_power = exp2(amount);
     let scene_ev = log2(luminance / SCENE_MIDDLE_GREY);
-    let adjusted_luminance = SCENE_MIDDLE_GREY * exp2(scene_ev * contrast_power);
+
+    // Contrast is a protected S-curve in scene EV rather than a global EV
+    // multiplier. Near middle grey the exponential responses are steep, so
+    // the slider changes midtone slope decisively. Toward the ends they
+    // asymptotically cap the displacement: the toe cannot be driven down by
+    // more than ~0.85 EV and the shoulder cannot be driven up by more than
+    // ~1.0 EV at +100. This keeps deep texture and highlight separation alive
+    // while still making the centre of the histogram visibly punchier.
+    let toe_distance_ev = max(-scene_ev, 0.0);
+    let shoulder_distance_ev = max(scene_ev, 0.0);
+    let toe_midtone_width_ev = 1.65;
+    let shoulder_midtone_width_ev = 1.85;
+    let toe_response = 1.0 - exp2(-toe_distance_ev / toe_midtone_width_ev);
+    let shoulder_response = 1.0 - exp2(-shoulder_distance_ev / shoulder_midtone_width_ev);
+    let signed_protected_shape = shoulder_response * 1.00 - toe_response * 0.85;
+
+    // Negative contrast is deliberately gentler. Keeping its maximum response
+    // below the response widths preserves monotonicity through middle grey and
+    // avoids the flat/reversed tonal patches that an over-strong inverse S can
+    // create. Positive +100 remains the more assertive photographic endpoint.
+    let contrast_strength = select(0.72, 1.0, amount >= 0.0);
+    let adjusted_ev = scene_ev + amount * contrast_strength * signed_protected_shape;
+    let adjusted_luminance = SCENE_MIDDLE_GREY * exp2(adjusted_ev);
     return rgb * clamp(adjusted_luminance / luminance, 0.0, 64.0);
 }
 

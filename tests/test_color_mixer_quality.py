@@ -44,17 +44,19 @@ def test_luminance_is_ratio_preserving_and_gamut_mapping_is_constant_hue() -> No
 
 def test_gpu_schedules_full_precision_base_effects_then_mixer_render() -> None:
     prepare = GPU.index('"prepare_adjustment_base"')
-    effects = GPU.index('"apply_lightroom_effects"', prepare)
+    sharpen_tone = GPU.index('"apply_capture_sharpen_and_tone"', prepare)
+    effects = GPU.index('"apply_lightroom_effects"', sharpen_tone)
     creative = GPU.index('"apply_creative_effects"', effects)
     render = GPU.index('"apply_lightroom_adjustments"', creative)
-    assert prepare < effects < creative < render
+    assert prepare < sharpen_tone < effects < creative < render
     assert "work_shader_source(SHADER_ADJUSTMENTS, work_format)" in GPU
     # Two existing demosaic scratch textures are reused after the RAW stage:
-    # tex1 stores the base/final creative output and tex2 stores local Effects.
+    # tex1 holds the pre-tone base, then local Effects; tex2 holds the sharpened
+    # post-tone base, then the final creative composite consumed by the mixer.
     assert "binding: 22" in GPU and "TextureView(&tex1_view)" in GPU
     assert "binding: 23" in GPU and "TextureView(&tex2_view)" in GPU
-    assert "binding: 24" in GPU and "TextureView(&tex2_view)" in GPU
-    assert "binding: 25" in GPU and "TextureView(&tex1_view)" in GPU
+    assert "binding: 24" in GPU and "TextureView(&tex1_view)" in GPU
+    assert "binding: 25" in GPU and "TextureView(&tex2_view)" in GPU
 
 
 def test_named_channels_are_calibrated_in_oklab_not_hsl_angles() -> None:

@@ -91,10 +91,10 @@ fn expected_pass_count(cfa_kind: CfaKind) -> usize {
         CfaKind::XTrans => 8,
     };
     // Highlight prepare + guided stages + two finalize variants, followed by
-    // demosaic, four tone-analysis passes, and ten adjustment/output passes
-    // (base, local effects, Glow extraction + five diffusion stages, creative
-    // composite, and final render).
-    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + demosaic_passes + 4 + 10
+    // demosaic, four tone-analysis passes, and eleven adjustment/output passes
+    // (pre-tone base, capture-sharpen/tone, local effects, Glow extraction +
+    // five diffusion stages, creative composite, and final render).
+    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + demosaic_passes + 4 + 11
 }
 
 const SHADER_BAYER_RCD_P1: &str = concat!(
@@ -778,11 +778,10 @@ impl GpuParams {
 
         Self {
             black_point: exposure.black_point,
-            // Keep the global Exposure slider centered at 0 in the edit/UI
-            // model while retaining the historical scene-referred +0.7 EV
-            // baseline in the renderer. Local mask exposure is packed above
-            // without this offset, so it remains a purely relative control.
-            exposure: exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
+            // Exposure is now exactly the user-visible edit value. Camera/DNG
+            // default rendering exposure is carried separately in profile_flags.z,
+            // so no renderer-only lift can silently stack with metadata.
+            exposure: exposure.exposure,
             temperature: exposure
                 .temperature
                 .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
@@ -831,7 +830,7 @@ impl GpuParams {
                 exposure.glow_amount.clamp(0.0, 100.0),
                 exposure.glow_radius.clamp(0.0, 100.0),
                 exposure.glow_threshold.clamp(0.0, 100.0),
-                0.0,
+                exposure.sharpen_amount.clamp(0.0, 150.0),
             ],
             vignette: [
                 exposure.vignette_amount.clamp(-100.0, 100.0),
@@ -841,9 +840,9 @@ impl GpuParams {
             ],
             vignette_options: [
                 exposure.vignette_highlights.clamp(0.0, 100.0),
-                0.0,
-                0.0,
-                0.0,
+                exposure.sharpen_radius.clamp(0.5, 3.0),
+                exposure.sharpen_detail.clamp(0.0, 100.0),
+                exposure.sharpen_masking.clamp(0.0, 100.0),
             ],
             highlight_options: [
                 shader_highlight_method(raw.cfa_kind, exposure.highlight_method),
@@ -1019,7 +1018,7 @@ impl GpuParams {
             process_info: [
                 exposure.process_version,
                 u32::from(use_profile_base_tone),
-                0,
+                exposure.exposure.to_bits(),
                 0,
             ],
             mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
@@ -1095,12 +1094,16 @@ impl GpuParams {
     fn needs_intermediate_adjustment_passes(&self) -> bool {
         // Saturation and Vibrance live in apply_lightroom_effects alongside the
         // presence controls. They must therefore keep the intermediate passes
-        // enabled even when Texture, Clarity, Dehaze, Glow, and Vignette are all
-        // neutral. Omitting them made both global color sliders a no-op.
+        // enabled even when Texture, Clarity, Dehaze, Glow, and Vignette are
+        // all neutral. Capture sharpening now lives in the always-run pre-tone
+        // sharpen/tone pass and must not force these later optional passes.
+        // Omitting Saturation/Vibrance here made both global color
+        // sliders a no-op.
         let global_effects = self.saturation.abs() > 1e-6
             || self.vibrance.abs() > 1e-6
             || self.presence[..3].iter().any(|value| value.abs() > 1e-6);
-        let creative = self.creative_effects[0].abs() > 1e-6 || self.vignette[0].abs() > 1e-6;
+        let creative = self.creative_effects[0].abs() > 1e-6
+            || self.vignette[0].abs() > 1e-6;
         let local_count = (self.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
         let local_effects = self.mask_adjust_2[..local_count]
             .iter()
@@ -1138,6 +1141,7 @@ pub struct RawGpuPipeline {
     highlight_finalize_direct_index: usize,
     demosaic_start_index: usize,
     adjustment_prepare_pass_index: usize,
+    adjustment_tone_pass_index: usize,
     adjustment_effects_pass_index: usize,
     glow_prepare_pass_index: usize,
     glow_blur_start_index: usize,
@@ -1965,8 +1969,32 @@ impl RawGpuPipeline {
                 })
             });
 
-        let bgl_adjust_effects =
+        let bgl_adjust_tone =
             reused_layout(adjustment_prepare_for_programs + 1).unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl capture sharpening and tone"),
+                    entries: &[
+                        buffer_entry(0),
+                        texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_texture_entry(
+                            23,
+                            work_format,
+                            wgpu::StorageTextureAccess::WriteOnly,
+                        ),
+                        storage_buffer_entry(16, true),
+                        texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_buffer_entry(20, true),
+                        texture_array_entry(
+                            27,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
+                        sampler_entry(28),
+                    ],
+                })
+            });
+
+        let bgl_adjust_effects =
+            reused_layout(adjustment_prepare_for_programs + 2).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl Lightroom local effects"),
                     entries: &[
@@ -1988,7 +2016,7 @@ impl RawGpuPipeline {
             });
 
         let bgl_glow_prepare =
-            reused_layout(adjustment_prepare_for_programs + 2).unwrap_or_else(|| {
+            reused_layout(adjustment_prepare_for_programs + 3).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl Glow source extraction"),
                     entries: &[
@@ -2004,7 +2032,7 @@ impl RawGpuPipeline {
             });
 
         let bgl_glow_blur =
-            reused_layout(adjustment_prepare_for_programs + 3).unwrap_or_else(|| {
+            reused_layout(adjustment_prepare_for_programs + 4).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl Glow diffusion"),
                     entries: &[
@@ -2019,7 +2047,7 @@ impl RawGpuPipeline {
                 })
             });
 
-        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 8)
+        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 9)
             .unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl creative glow and vignette"),
@@ -2046,6 +2074,11 @@ impl RawGpuPipeline {
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
                 texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
+                // The final DCP/view shoulder reads the cached scene percentiles
+                // to choose a headroom-aware highlight knee. Keep binding 16 in
+                // this entry point's layout even though earlier adjustment passes
+                // already bind the same tone-statistics buffer independently.
+                storage_buffer_entry(16, true),
                 storage_buffer_entry(20, true),
                 texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
                 sampler_entry(28),
@@ -2053,7 +2086,7 @@ impl RawGpuPipeline {
             ],
         });
         let bgl_adjust_render =
-            reused_layout(adjustment_prepare_for_programs + 9).unwrap_or(bgl_adjust_render);
+            reused_layout(adjustment_prepare_for_programs + 10).unwrap_or(bgl_adjust_render);
 
         let make_highlight_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
@@ -2526,9 +2559,9 @@ impl RawGpuPipeline {
             ],
         });
 
-        let bg_adjust_effects = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg Lightroom local effects"),
-            layout: &bgl_adjust_effects,
+        let bg_adjust_tone = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg capture sharpening and tone"),
+            layout: &bgl_adjust_tone,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -2547,6 +2580,14 @@ impl RawGpuPipeline {
                     resource: tone_stats_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: profile_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
                     binding: 27,
                     resource: wgpu::BindingResource::TextureView(&mask_view),
                 },
@@ -2557,8 +2598,39 @@ impl RawGpuPipeline {
             ],
         });
 
-        // Glow is extracted from the completed local-effects image in tex2.
-        // Five adjacent B3-spline diffusion stages then ping-pong through tex1
+        let bg_adjust_effects = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg Lightroom local effects"),
+            layout: &bgl_adjust_effects,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: tone_stats_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+            ],
+        });
+
+        // Glow is extracted from the completed local-effects image in tex1.
+        // Five adjacent B3-spline diffusion stages then ping-pong through tex2
         // and the display-linear surface. The latter is safe scratch here: the
         // final render overwrites it only after the creative composite.
         let bg_glow_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2571,11 +2643,11 @@ impl RawGpuPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 24,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 31,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
                 },
             ],
         });
@@ -2602,19 +2674,20 @@ impl RawGpuPipeline {
                 })
             };
         let bg_glow_blur_0 =
-            make_glow_blur_bind_group("bg Glow diffusion 0", &tex1_view, &display_linear_view);
+            make_glow_blur_bind_group("bg Glow diffusion 0", &tex2_view, &display_linear_view);
         let bg_glow_blur_1 =
-            make_glow_blur_bind_group("bg Glow diffusion 1", &display_linear_view, &tex1_view);
+            make_glow_blur_bind_group("bg Glow diffusion 1", &display_linear_view, &tex2_view);
         let bg_glow_blur_2 =
-            make_glow_blur_bind_group("bg Glow diffusion 2", &tex1_view, &display_linear_view);
+            make_glow_blur_bind_group("bg Glow diffusion 2", &tex2_view, &display_linear_view);
         let bg_glow_blur_3 =
-            make_glow_blur_bind_group("bg Glow diffusion 3", &display_linear_view, &tex1_view);
+            make_glow_blur_bind_group("bg Glow diffusion 3", &display_linear_view, &tex2_view);
         let bg_glow_blur_4 =
-            make_glow_blur_bind_group("bg Glow diffusion 4", &tex1_view, &display_linear_view);
+            make_glow_blur_bind_group("bg Glow diffusion 4", &tex2_view, &display_linear_view);
 
-        // The creative pass keeps the untouched local-effects result in tex2,
+        // The creative pass keeps the untouched local-effects result in tex1,
         // composites the final Glow diffusion from display_linear, applies the
-        // post-crop vignette, and writes the complete result back into tex1.
+        // post-crop vignette, and writes the complete result into tex2. tex2 is
+        // therefore the final adjustment source whether optional effects run or not.
         let bg_adjust_creative = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg creative glow and vignette"),
             layout: &bgl_adjust_creative,
@@ -2625,11 +2698,11 @@ impl RawGpuPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 24,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 25,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 30,
@@ -2652,7 +2725,11 @@ impl RawGpuPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 26,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: tone_stats_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 20,
@@ -3015,9 +3092,10 @@ impl RawGpuPipeline {
         let tone_reduce_pass_index = tone_prepare_pass_index + 3;
         let tone_stage_end = passes.len();
         let adjustment_prepare_pass_index = passes.len();
-        let adjustment_effects_pass_index = adjustment_prepare_pass_index + 1;
-        let glow_prepare_pass_index = adjustment_prepare_pass_index + 2;
-        let glow_blur_start_index = adjustment_prepare_pass_index + 3;
+        let adjustment_tone_pass_index = adjustment_prepare_pass_index + 1;
+        let adjustment_effects_pass_index = adjustment_prepare_pass_index + 2;
+        let glow_prepare_pass_index = adjustment_prepare_pass_index + 3;
+        let glow_blur_start_index = adjustment_prepare_pass_index + 4;
         let glow_blur_end_index = glow_blur_start_index + 5;
         let adjustment_creative_pass_index = glow_blur_end_index;
         let adjustment_render_pass_index = adjustment_creative_pass_index + 1;
@@ -3030,6 +3108,15 @@ impl RawGpuPipeline {
                     &bgl_adjust_prepare,
                 ),
                 bind_group: bg_adjust_prepare,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
+                    "apply_capture_sharpen_and_tone",
+                    &bgl_adjust_tone,
+                ),
+                bind_group: bg_adjust_tone,
                 workgroups: image_workgroups,
             },
             Pass {
@@ -3140,6 +3227,7 @@ impl RawGpuPipeline {
             highlight_finalize_direct_index,
             demosaic_start_index,
             adjustment_prepare_pass_index,
+            adjustment_tone_pass_index,
             adjustment_effects_pass_index,
             glow_prepare_pass_index,
             glow_blur_start_index,
@@ -4041,6 +4129,10 @@ impl RawGpuPipeline {
 
     fn encode_output_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
         self.encode_pass(encoder, self.adjustment_prepare_pass_index);
+        // Capture sharpening and tone finalization are always required: when
+        // optional presence/creative effects are neutral this pass already
+        // writes the final adjustment image into tex2 for the render pass.
+        self.encode_pass(encoder, self.adjustment_tone_pass_index);
         if params.needs_intermediate_adjustment_passes() {
             self.encode_pass(encoder, self.adjustment_effects_pass_index);
             if params.needs_glow_passes() {

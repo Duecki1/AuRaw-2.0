@@ -26,10 +26,11 @@ def test_effects_are_a_dedicated_same_stage_pass() -> None:
     assert "scene_working_at(pos +" not in ADJUSTMENTS
 
     prepare = GPU.index('"prepare_adjustment_base"')
-    effects = GPU.index('"apply_lightroom_effects"', prepare)
+    sharpen_tone = GPU.index('"apply_capture_sharpen_and_tone"', prepare)
+    effects = GPU.index('"apply_lightroom_effects"', sharpen_tone)
     creative = GPU.index('"apply_creative_effects"', effects)
     render = GPU.index('"apply_lightroom_adjustments"', creative)
-    assert prepare < effects < creative < render
+    assert prepare < sharpen_tone < effects < creative < render
 
 
 
@@ -168,9 +169,10 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
 
 
 def test_revised_adjustment_formulas_increment_the_process_version() -> None:
-    assert "CURRENT_PROCESS_VERSION: u32 = 8" in BASIC
+    assert "CURRENT_PROCESS_VERSION: u32 = 12" in BASIC
     assert "0..=7 =>" in BASIC
-    assert "self.exposure -= GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC
+    assert "8 | 9 =>" in BASIC
+    assert "self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC
 
 
 def test_presence_and_color_controls_use_perceptual_bounded_mappings() -> None:

@@ -315,9 +315,14 @@ impl DcpProfile {
 #[derive(Clone, Debug, Default)]
 pub struct CameraProfile {
     pub name: Option<String>,
-    /// Default exposure contribution in EV. `from_dcp` initializes this
-    /// from BaselineExposureOffset; the RAW loader adds DNG BaselineExposure.
-    pub baseline_exposure_offset: f32,
+    /// Profile-specific DNG BaselineExposureOffset contribution in EV. This is
+    /// kept separate from the resolved image baseline so metadata and profile
+    /// exposure terms cannot accidentally accumulate through repeated loading.
+    pub profile_exposure_offset_ev: f32,
+    /// Final fixed rendering exposure for this RAW: BaselineExposure when
+    /// present (or the documented fallback) plus the profile offset above.
+    /// The user Exposure slider is never included here.
+    pub default_exposure_ev: f32,
     /// Retain both calibration-illuminant maps. Their DNG mired-space blend is
     /// selected at render time from the adjusted camera white balance.
     pub hue_sat_maps: [Option<HsvMap>; 2],
@@ -349,7 +354,8 @@ impl CameraProfile {
         };
         Self {
             name: dcp.name,
-            baseline_exposure_offset: dcp.baseline_exposure_offset,
+            profile_exposure_offset_ev: dcp.baseline_exposure_offset,
+            default_exposure_ev: dcp.baseline_exposure_offset,
             hue_sat_maps,
             look_table: dcp.look_table,
             tone_curve: dcp.tone_curve,
@@ -514,7 +520,7 @@ impl ProfileGpuLayout {
                 .look_table
                 .as_ref()
                 .map_or(0, |map| map.encoding.shader_value()),
-            profile.baseline_exposure_offset.to_bits(),
+            profile.default_exposure_ev.to_bits(),
             0,
         ];
         Self {

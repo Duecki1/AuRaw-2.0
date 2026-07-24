@@ -44,9 +44,9 @@ def test_creative_pass_ping_pongs_before_color_mixer() -> None:
     creative_pass = GPU.index('"apply_creative_effects"', glow_end)
     render_pass = GPU.index('"apply_lightroom_adjustments"', creative_pass)
     assert local_pass < glow_source < glow_start < glow_end < creative_pass < render_pass
-    assert "binding: 24" in GPU and "TextureView(&tex2_view)" in GPU
-    assert "binding: 25" in GPU and "TextureView(&tex1_view)" in GPU
-    assert "binding: 26" in GPU and "TextureView(&tex1_view)" in GPU
+    assert "binding: 24" in GPU and "TextureView(&tex1_view)" in GPU
+    assert "binding: 25" in GPU and "TextureView(&tex2_view)" in GPU
+    assert "binding: 26" in GPU and "TextureView(&tex2_view)" in GPU
     assert "binding: 30" in GPU and "TextureView(&display_linear_view)" in GPU
     assert "binding: 31" in GPU
     assert "textureLoad(final_adjustment_tex" in ADJUSTMENTS

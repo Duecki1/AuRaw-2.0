@@ -21,8 +21,10 @@ const CONTRAST_SLOPE_CALIBRATION: f32 = 0.9939394;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum SigmoidColorProcessing {
-    #[default]
     PerChannel,
+    /// Default: map luminance while preserving RGB ratios until the output
+    /// gamut boundary, which keeps bright saturated colors more photographic.
+    #[default]
     RgbRatio,
 }
 
@@ -62,7 +64,7 @@ impl Default for SigmoidParams {
             skew: 0.0,
             display_white_target: 100.0,
             display_black_target: 0.0152,
-            color_processing: SigmoidColorProcessing::PerChannel,
+            color_processing: SigmoidColorProcessing::RgbRatio,
             hue_preservation: 100.0,
         }
     }

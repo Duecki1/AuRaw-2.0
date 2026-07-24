@@ -333,7 +333,8 @@ pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -
         + TONE_GUIDE_SUPPORT
         + COLOR_MIXER_SUPPORT;
 
-    let local_spatial_active = exposure.texture.abs() > 1e-6
+    let local_spatial_active = exposure.sharpen_amount.abs() > 1e-6
+        || exposure.texture.abs() > 1e-6
         || exposure.clarity.abs() > 1e-6
         || exposure.dehaze.abs() > 1e-6
         || masks.masks.iter().any(|mask| {
@@ -696,6 +697,7 @@ mod tests {
     fn export_halo_shrinks_when_wide_radius_effects_are_neutral() {
         let masks = MaskStack::default();
         let mut exposure = ExposureParams::default();
+        exposure.sharpen_amount = 0.0;
         assert_eq!(
             required_export_tile_halo(&exposure, &masks),
             MIN_EXPORT_TILE_HALO

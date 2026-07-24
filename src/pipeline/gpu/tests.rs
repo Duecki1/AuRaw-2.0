@@ -181,25 +181,88 @@ fn grading_hues_match_the_visible_srgb_wheel_in_oklab() {
 }
 
 #[test]
-fn profile_highlight_shoulder_is_monotonic() {
-    let map_peak = |peak: f32| {
-        let knee = 0.82;
-        if peak <= knee {
-            peak
-        } else {
-            let distance = peak - knee;
-            knee + distance / (1.0 + distance / (1.0 - knee))
-        }
-    };
-    let mut previous = map_peak(0.0);
-    for step in 1..=10_000 {
-        let current = map_peak(step as f32 / 1_000.0);
-        assert!(current >= previous, "shoulder reversed at step {step}");
-        assert!(current <= 1.0);
-        previous = current;
+fn profile_highlight_shoulder_is_scene_adaptive_and_monotonic() {
+    fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+        let x = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
     }
-    assert!(SHADER_ADJUSTMENTS.contains("mapped_peak = knee + distance /"));
+
+    fn knee_for_scene(p95_over_white_ev: f32, p995_over_white_ev: f32) -> f32 {
+        let broad = smoothstep(-0.55, 1.25, p95_over_white_ev);
+        let peak = smoothstep(0.0, 3.5, p995_over_white_ev);
+        let gap = (p995_over_white_ev - p95_over_white_ev).max(0.0);
+        let isolated = smoothstep(0.65, 3.0, gap);
+        let peak_weight = peak * (1.0 + (0.38 - 1.0) * isolated);
+        let pressure = (broad * 0.74 + peak_weight * 0.26).clamp(0.0, 1.0);
+        0.91 + (0.62 - 0.91) * pressure
+    }
+
+    let low_headroom = knee_for_scene(-1.0, -0.2);
+    let broad_highlights = knee_for_scene(0.8, 1.6);
+    let isolated_specular = knee_for_scene(-0.2, 2.5);
+    assert!(broad_highlights < low_headroom);
+    assert!(isolated_specular > broad_highlights);
+    assert!((0.62..=0.91).contains(&low_headroom));
+    assert!((0.62..=0.91).contains(&broad_highlights));
+    assert!((0.62..=0.91).contains(&isolated_specular));
+
+    for knee in [low_headroom, broad_highlights, isolated_specular] {
+        let map_luma = |luma: f32| {
+            if luma <= knee {
+                luma
+            } else {
+                let distance = luma - knee;
+                knee + distance / (1.0 + distance / (1.0 - knee))
+            }
+        };
+        let mut previous = map_luma(0.0);
+        for step in 1..=10_000 {
+            let current = map_luma(step as f32 / 1_000.0);
+            assert!(current >= previous, "shoulder reversed at step {step}");
+            assert!(current <= 1.0);
+            previous = current;
+        }
+    }
+
+    assert!(SHADER_ADJUSTMENTS.contains("fn profile_tone_scene_shoulder_knee"));
+    assert!(SHADER_ADJUSTMENTS.contains("let broad_highlight_pressure"));
+    assert!(SHADER_ADJUSTMENTS.contains("let isolated_specular"));
+    assert!(SHADER_ADJUSTMENTS.contains("let shoulder_knee = profile_tone_scene_shoulder_knee()"));
+    assert!(!SHADER_ADJUSTMENTS.contains("let shoulder_knee = 0.70"));
     assert!(!SHADER_ADJUSTMENTS.contains("mix(positive, darktable_sigmoid"));
+}
+
+#[test]
+fn basic_contrast_has_protected_toe_midtones_and_shoulder() {
+    fn contrast_ev(scene_ev: f32, amount: f32) -> f32 {
+        let toe_distance = (-scene_ev).max(0.0);
+        let shoulder_distance = scene_ev.max(0.0);
+        let toe_response = 1.0 - 2.0f32.powf(-toe_distance / 1.65);
+        let shoulder_response = 1.0 - 2.0f32.powf(-shoulder_distance / 1.85);
+        let shape = shoulder_response - toe_response * 0.85;
+        let strength = if amount >= 0.0 { 1.0 } else { 0.72 };
+        scene_ev + amount.clamp(-1.0, 1.0) * strength * shape
+    }
+
+    for amount in [-1.0, 1.0] {
+        let mut previous = contrast_ev(-16.0, amount);
+        for step in 1..=28_000 {
+            let scene_ev = -16.0 + step as f32 / 1_000.0;
+            let current = contrast_ev(scene_ev, amount);
+            assert!(current > previous, "contrast reversed at {scene_ev} EV");
+            previous = current;
+        }
+    }
+
+    // +100 is assertive around the midtones, but the finite tail displacement
+    // protects deep shadows and highlights from runaway EV multiplication.
+    assert!(contrast_ev(-1.0, 1.0) < -1.25);
+    assert!(contrast_ev(1.0, 1.0) > 1.25);
+    assert!(contrast_ev(-8.0, 1.0) > -9.0);
+    assert!(contrast_ev(8.0, 1.0) < 9.1);
+    assert_eq!(contrast_ev(0.0, 1.0), 0.0);
+
+    assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast_value"));
 }
 
 #[test]
@@ -394,6 +457,7 @@ fn adjustments_shader_contains_lightroom_style_controls() {
     assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
     assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
     assert!(SHADER_ADJUSTMENTS.contains("prepare_adjustment_base"));
+    assert!(SHADER_ADJUSTMENTS.contains("apply_capture_sharpen_and_tone"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_lightroom_effects"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_creative_effects"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_glow"));
@@ -409,25 +473,31 @@ fn adjustments_shader_contains_lightroom_style_controls() {
 }
 
 #[test]
-fn dcp_characterization_precedes_exposure_and_profile_rendering() {
-    let prepare = &SHADER_ADJUSTMENTS[SHADER_ADJUSTMENTS
-        .find("fn prepare_adjustment_base")
-        .unwrap()..];
+fn dcp_characterization_and_exposure_precede_pre_tone_capture_sharpening() {
+    let prepare_start = SHADER_ADJUSTMENTS.find("fn prepare_adjustment_base").unwrap();
+    let sharpen_start = SHADER_ADJUSTMENTS
+        .find("fn apply_capture_sharpen_and_tone")
+        .unwrap();
+    let effects_start = SHADER_ADJUSTMENTS.find("fn apply_lightroom_effects").unwrap();
+    let prepare = &SHADER_ADJUSTMENTS[prepare_start..sharpen_start];
+    let sharpen_tone = &SHADER_ADJUSTMENTS[sharpen_start..effects_start];
+
     let hue_sat = prepare
         .find("var rgb = apply_profile_hue_sat(scene_working_at(pos))")
         .unwrap();
     let profile_exposure = prepare.find("let profile_exposure_ev").unwrap();
     let exposure = prepare.find("rgb = apply_exposure(rgb)").unwrap();
     let look = prepare.find("rgb = apply_profile_look(rgb)").unwrap();
-    let curve = prepare.find("rgb = apply_profile_tone_curve(rgb)").unwrap();
-    let gamut = prepare.find("rgb = map_negative_gamut(rgb)").unwrap();
     assert!(
-        hue_sat < profile_exposure
-            && profile_exposure < exposure
-            && exposure < look
-            && look < curve
-            && curve < gamut
+        hue_sat < profile_exposure && profile_exposure < exposure && exposure < look
     );
+    assert!(!prepare.contains("apply_profile_tone_curve(rgb)"));
+
+    let sharpen = sharpen_tone.find("rgb = apply_capture_sharpening(pos, rgb)").unwrap();
+    let curve = sharpen_tone.find("rgb = apply_profile_tone_curve(rgb)").unwrap();
+    let gamut = sharpen_tone.find("rgb = map_negative_gamut(rgb)").unwrap();
+    let adaptive_tone = sharpen_tone.find("rgb = apply_lightroom_tone(rgb, pos)").unwrap();
+    assert!(sharpen < curve && curve < gamut && gamut < adaptive_tone);
     assert!(SHADER_ADJUSTMENTS.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
     assert!(SHADER_ADJUSTMENTS.contains("return profile_data[offset + maximum].x"));
 }

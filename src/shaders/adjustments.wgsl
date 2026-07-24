@@ -1,8 +1,9 @@
-// Post-demosaic scene-linear controls. Global controls are prepared into a
-// full-precision texture first. Local detail Effects sample that exact image,
-// then creative Effects sample the completed local-effects result. Keeping the
-// stages separate prevents blur/detail residuals from becoming global exposure
-// changes and gives Glow a same-stage highlight source.
+// Post-demosaic scene-linear controls. The first full-precision texture holds
+// the pre-tone/profile-rendering image. Capture sharpening samples that scene-
+// referred detail before ProfileToneCurve and Lightroom-style tone shaping, then
+// a second pass writes the post-tone base used by Texture, Clarity, and Dehaze.
+// Creative Effects remain later so sharpening never bites into tone-map, Glow,
+// or vignette artifacts.
 
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
@@ -90,6 +91,10 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
 }
 
 fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
+    // Binding 22 is deliberately stage-relative. The capture-sharpen/tone pass
+    // binds the pre-tone base here; the later presence pass binds its post-tone
+    // output here. This keeps both spatial operators sampling the correct domain
+    // without allocating another full-frame working texture.
     return max(textureLoad(adjustment_base_tex, clamp_pos(pos), 0).xyz, vec3<f32>(0.0));
 }
 
@@ -183,6 +188,95 @@ fn atrous_log_luminance(pos: vec2<i32>, step: i32, range_strength: f32) -> f32 {
 
 fn soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
     return sign(detail) * max(abs(detail) - threshold, 0.0);
+}
+
+fn capture_sharpen_blur_ev(pos: vec2<i32>, radius_pixels: f32, step: i32) -> f32 {
+    let center_ev = log_luminance(adjustment_base_at(pos));
+    let sigma_samples = clamp(radius_pixels / max(f32(step), 1.0), 0.65, 2.25);
+    var weighted_sum = 0.0;
+    var weight_sum = 0.0;
+
+    // A compact bilateral Gaussian gives Radius a genuine spatial footprint
+    // while suppressing cross-edge halos. The fixed 5x5 support keeps capture
+    // sharpening practical on preview proxies and full-resolution exports.
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            let sample_ev = log_luminance(
+                adjustment_base_at(pos + vec2<i32>(dx * step, dy * step)),
+            );
+            let distance_squared = f32(dx * dx + dy * dy);
+            let spatial = exp(-0.5 * distance_squared / (sigma_samples * sigma_samples));
+            let delta = sample_ev - center_ev;
+            let range = exp(-2.4 * delta * delta);
+            let weight = spatial * range;
+            weighted_sum = weighted_sum + sample_ev * weight;
+            weight_sum = weight_sum + weight;
+        }
+    }
+    return weighted_sum / max(weight_sum, 1e-6);
+}
+
+fn capture_sharpen_edge_strength(pos: vec2<i32>, step: i32) -> f32 {
+    let left = log_luminance(adjustment_base_at(pos + vec2<i32>(-step, 0)));
+    let right = log_luminance(adjustment_base_at(pos + vec2<i32>(step, 0)));
+    let up = log_luminance(adjustment_base_at(pos + vec2<i32>(0, -step)));
+    let down = log_luminance(adjustment_base_at(pos + vec2<i32>(0, step)));
+    return length(vec2<f32>(right - left, down - up));
+}
+
+fn apply_capture_sharpening(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    let amount = clamp(params.creative_effects.w / 150.0, 0.0, 1.0);
+    if amount < 1e-6 {
+        return rgb;
+    }
+
+    let radius = clamp(params.vignette_options.y, 0.5, 3.0);
+    let detail = clamp(params.vignette_options.z / 100.0, 0.0, 1.0);
+    let masking = clamp(params.vignette_options.w / 100.0, 0.0, 1.0);
+    let radius_pixels = radius * presence_reference_scale();
+    let step = clamp(i32(round(max(radius_pixels * 0.55, 1.0))), 1, 5);
+
+    let center_ev = log_luminance(rgb);
+    let base_ev = capture_sharpen_blur_ev(pos, radius_pixels, step);
+    let broad_detail_ev = center_ev - base_ev;
+
+    // Detail progressively restores the highest spatial frequencies rather
+    // than simply multiplying Amount. This gives hair, foliage, masonry and
+    // fine texture a Lightroom-like crispness without forcing broad halos.
+    let micro_left = log_luminance(adjustment_base_at(pos + vec2<i32>(-1, 0)));
+    let micro_right = log_luminance(adjustment_base_at(pos + vec2<i32>(1, 0)));
+    let micro_up = log_luminance(adjustment_base_at(pos + vec2<i32>(0, -1)));
+    let micro_down = log_luminance(adjustment_base_at(pos + vec2<i32>(0, 1)));
+    let micro_base_ev = 0.25 * (micro_left + micro_right + micro_up + micro_down);
+    let micro_detail_ev = center_ev - micro_base_ev;
+    let detail_ev = mix(broad_detail_ev, mix(broad_detail_ev, micro_detail_ev, 0.72), detail);
+
+    // Low Detail suppresses tiny noise-like residuals. Higher Detail lowers
+    // the threshold deliberately, matching the expectation that the slider
+    // reveals progressively finer real structure as well as more grain.
+    let detail_threshold = mix(0.018, 0.0035, detail);
+    let selected_detail = soft_detail_threshold(detail_ev, detail_threshold);
+
+    // Masking 0 sharpens the full image. Increasing it smoothly restricts the
+    // effect to stronger luminance edges, protecting skies, skin and flat noise.
+    var edge_mask = 1.0;
+    if masking > 1e-6 {
+        let edge_strength = capture_sharpen_edge_strength(pos, 1);
+        let edge_threshold = mix(0.035, 0.62, pow(masking, 1.35));
+        edge_mask = smoothstep(edge_threshold * 0.72, edge_threshold + 0.16, edge_strength);
+    }
+
+    // Protect very deep noise and extreme specular values from ringing. Apply
+    // only a luminance gain so RGB ratios and therefore hue remain stable.
+    let shadow_gate = smoothstep(-9.0, -4.8, center_ev);
+    let highlight_gate = 1.0 - 0.55 * smoothstep(3.0, 6.5, center_ev);
+    let strength = amount * mix(1.45, 2.20, detail);
+    let sharpen_ev = clamp(
+        selected_detail * strength * edge_mask * shadow_gate * highlight_gate,
+        -0.42,
+        0.48,
+    );
+    return max(rgb * exp2(sharpen_ev), vec3<f32>(0.0));
 }
 
 fn apply_texture_and_clarity_values(
@@ -1122,12 +1216,11 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
-    // Keep the newer DNG camera-characterisation order, but apply global and
-    // masked Exposure together in the same scene-linear stage. Exposure after
-    // LookTable/ProfileToneCurve behaves like a baked display edit and can no
-    // longer recover highlight separation. Local masks use normalized full-
-    // image coordinates, so the same exposure field is used for preview and
-    // every export tile.
+    // Build the scene-referred capture base only. Exposure and the DCP colour
+    // characterisation stay before sharpening, but ProfileToneCurve and all
+    // Lightroom-style tonal shaping are intentionally deferred to the next
+    // pass. Capture sharpening therefore sees recoverable pre-tone detail
+    // instead of contrast/shoulder artifacts created by the rendition curve.
     var rgb = apply_profile_hue_sat(scene_working_at(pos));
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     let local = local_adjustment_mix(pos);
@@ -1135,11 +1228,24 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = rgb * exp2(profile_exposure_ev + local_exposure_ev);
     rgb = apply_exposure(rgb);
     rgb = apply_profile_look(rgb);
+    textureStore(adjustment_base_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn apply_capture_sharpen_and_tone(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    var rgb = adjustment_base_at(pos);
+    let local = local_adjustment_mix(pos);
+
+    // Capture sharpening belongs to the scene-referred/detail-recovery stage:
+    // after camera/profile colour and Exposure, before any profile tone curve,
+    // adaptive Highlight/Shadow shaping, Contrast, local curves, or view tone.
+    rgb = apply_capture_sharpening(pos, rgb);
     rgb = apply_profile_tone_curve(rgb);
     rgb = map_negative_gamut(rgb);
     rgb = max(rgb, vec3<f32>(0.0));
     rgb = apply_lightroom_tone(rgb, pos);
-
     rgb = apply_local_basic_tone_values(
         rgb,
         pos,
@@ -1151,7 +1257,7 @@ fn prepare_adjustment_base(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_basic_contrast_value(rgb, local.tone0.y);
     rgb = apply_temperature_tint_values(rgb, local.tone1.z, local.tone1.w);
     rgb = apply_local_curve_and_hsl(pos, rgb);
-    textureStore(adjustment_base_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
+    textureStore(local_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1221,18 +1327,105 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(creative_effects_out, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0));
 }
 
+fn default_view_chroma_limit(mapped_luma: f32, candidate: vec3<f32>) -> f32 {
+    let delta = candidate - vec3<f32>(mapped_luma);
+    var limit = 1.0;
+    if delta.r > 1e-7 {
+        limit = min(limit, (1.0 - mapped_luma) / delta.r);
+    } else if delta.r < -1e-7 {
+        limit = min(limit, mapped_luma / -delta.r);
+    }
+    if delta.g > 1e-7 {
+        limit = min(limit, (1.0 - mapped_luma) / delta.g);
+    } else if delta.g < -1e-7 {
+        limit = min(limit, mapped_luma / -delta.g);
+    }
+    if delta.b > 1e-7 {
+        limit = min(limit, (1.0 - mapped_luma) / delta.b);
+    } else if delta.b < -1e-7 {
+        limit = min(limit, mapped_luma / -delta.b);
+    }
+    return clamp(limit, 0.0, 1.0);
+}
+
+fn profile_tone_scene_shoulder_knee() -> f32 {
+    // Tone statistics are measured after the active DCP HueSat/Look/ToneCurve
+    // and default rendering exposure, but before the creative Exposure slider.
+    // Reapply only that live user exposure so the display shoulder follows the
+    // actual scene headroom without making Exposure trigger a new analysis pass.
+    let user_exposure_ev = adaptive_tone_user_exposure_ev();
+    let p95_over_white_ev = tone_stats.percentiles_0.w
+        + user_exposure_ev
+        + log2(SCENE_MIDDLE_GREY);
+    let p995_over_white_ev = tone_stats.percentiles_1.x
+        + user_exposure_ev
+        + log2(SCENE_MIDDLE_GREY);
+
+    // Broad bright content (p95) should pull the knee down sooner than a tiny
+    // isolated specular (p99.5). The percentile gap is therefore treated as a
+    // specular-isolation signal: a large gap delays the knee, protecting bright
+    // skin, flowers and sunsets from being flattened just because a few pixels
+    // sit far above display white.
+    let broad_highlight_pressure = smoothstep(-0.55, 1.25, p95_over_white_ev);
+    let peak_headroom_pressure = smoothstep(0.0, 3.5, p995_over_white_ev);
+    let specular_gap_ev = max(
+        tone_stats.percentiles_1.x - tone_stats.percentiles_0.w,
+        0.0,
+    );
+    let isolated_specular = smoothstep(0.65, 3.0, specular_gap_ev);
+    let peak_weight = peak_headroom_pressure * mix(1.0, 0.38, isolated_specular);
+    let scene_pressure = clamp(
+        broad_highlight_pressure * 0.74 + peak_weight * 0.26,
+        0.0,
+        1.0,
+    );
+
+    // Low-headroom scenes keep a late, nearly invisible shoulder. Scenes with
+    // genuinely broad highlight headroom progressively move the knee earlier,
+    // reserving enough display range for clouds and high-key texture. This is
+    // scene-adaptive rather than a universal fixed knee.
+    return mix(0.91, 0.62, scene_pressure);
+}
+
 fn profile_tone_display_shoulder(rgb: vec3<f32>) -> vec3<f32> {
     let positive = desaturate_negative_values(rgb);
-    let peak = max(positive.r, max(positive.g, positive.b));
-    let knee = 0.82;
-    if peak <= knee {
-        return positive;
+    let luma = safe_luma(positive);
+    if luma <= 1e-8 {
+        return vec3<f32>(0.0);
     }
-    // This rational shoulder meets the identity with unit slope at the knee,
-    // stays monotone, and approaches display white without clipping HDR detail.
-    let distance = peak - knee;
-    let mapped_peak = knee + distance / (1.0 + distance / (1.0 - knee));
-    return positive * (mapped_peak / peak);
+
+    // The DCP ProfileToneCurve already supplies the camera/profile's intended
+    // midtone character. Add only a restrained display finish: a gentle toe
+    // deepens blacks without pinning shadow detail to zero, while a luminance-
+    // driven, scene-adaptive shoulder reserves display headroom according to
+    // the actual bright-end distribution. Using luminance instead of the
+    // brightest RGB channel avoids darkening saturated colors unnecessarily.
+    let toe_weight = 1.0 - smoothstep(0.018, 0.22, luma);
+    var mapped_luma = luma * mix(1.0, 0.91, toe_weight);
+    let shoulder_knee = profile_tone_scene_shoulder_knee();
+    if mapped_luma > shoulder_knee {
+        let distance = mapped_luma - shoulder_knee;
+        mapped_luma = shoulder_knee
+            + distance / (1.0 + distance / (1.0 - shoulder_knee));
+    }
+
+    // Preserve the scene/profile hue and saturation by mapping luminance with
+    // one scalar gain. Only compress chroma when a channel would leave display
+    // gamut; this keeps bright flowers, signs, fabrics, and sunsets colorful
+    // instead of washing them out through independent channel clipping.
+    let ratio_preserved = positive * (mapped_luma / luma);
+    let chroma_limit = default_view_chroma_limit(mapped_luma, ratio_preserved);
+    let chroma_scale = select(
+        chroma_limit,
+        1.0,
+        chroma_limit >= 0.9999,
+    );
+    return clamp(
+        vec3<f32>(mapped_luma)
+            + (ratio_preserved - vec3<f32>(mapped_luma)) * chroma_scale,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1250,10 +1443,10 @@ fn apply_lightroom_adjustments(@builtin(global_invocation_id) gid: vec3<u32>) {
         params.grade_options,
     );
     let graded = apply_local_color_grading(pos, globally_graded);
-    // Never hard-clamp the creative result. With a default DCP ProfileToneCurve
-    // retain its baseline rendition and add only a highlight shoulder; otherwise
-    // use the full configurable sigmoid. Both paths preserve separation between
-    // over-range values instead of flattening them to 1.0.
+    // With a DCP ProfileToneCurve, retain the profile's midtone rendition and
+    // add AuRaw's restrained toe/shoulder finish. Without one, use the full
+    // configurable sigmoid. Both paths avoid per-channel highlight clipping;
+    // the defaults prioritize smooth rolloff and bright-color saturation.
     var display_linear = darktable_sigmoid(graded);
     if (params.process_info.y & 1u) != 0u {
         display_linear = profile_tone_display_shoulder(graded);

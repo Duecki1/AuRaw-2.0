@@ -358,6 +358,54 @@ impl Sidebar {
         changed
     }
 
+    fn show_detail(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
+        let mut changed = false;
+        Self::adjustment_section(ui, "Detail", false, foldable, |ui| {
+            ui.label(
+                egui::RichText::new("Edge-aware capture sharpening for fine RAW detail")
+                    .size(11.5)
+                    .color(ui.visuals().weak_text_color()),
+            );
+            changed |= adjustment_slider(
+                ui,
+                "Amount",
+                &mut exposure.sharpen_amount,
+                0.0..=150.0,
+                0,
+                1.0,
+                Some("Controls overall capture sharpening strength. Zero is an exact no-op."),
+            );
+            changed |= adjustment_slider(
+                ui,
+                "Radius",
+                &mut exposure.sharpen_radius,
+                0.5..=3.0,
+                2,
+                0.05,
+                Some("Controls the edge width being sharpened. Smaller values favor fine detail; larger values strengthen broader edges."),
+            );
+            changed |= adjustment_slider(
+                ui,
+                "Detail",
+                &mut exposure.sharpen_detail,
+                0.0..=100.0,
+                0,
+                1.0,
+                Some("Raises the contribution of the finest texture and lowers fine-detail suppression."),
+            );
+            changed |= adjustment_slider(
+                ui,
+                "Masking",
+                &mut exposure.sharpen_masking,
+                0.0..=100.0,
+                0,
+                1.0,
+                Some("Restricts sharpening to stronger luminance edges as the value increases, protecting flat areas and noise."),
+            );
+        });
+        changed
+    }
+
     fn show_presence(
         ui: &mut Ui,
         exposure: &mut ExposureParams,
