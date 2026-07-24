@@ -444,7 +444,7 @@ impl Sidebar {
                 // Process 14 keeps the process-13 graph but opts edited NR into
                 // the new sensor-profiled algorithm. Older process-12 edits
                 // keep their legacy scene/display graph unless explicitly converted.
-                exposure.process_version = CURRENT_PROCESS_VERSION;
+                exposure.process_version = SENSOR_DENOISE_PROCESS_VERSION;
                 changed = true;
             }
 
