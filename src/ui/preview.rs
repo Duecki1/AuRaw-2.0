@@ -1,10 +1,10 @@
 use crate::app::{AurawApp, CropDragState, CropHandle, MaskDragState, MaskOverlayBlink, SidebarTab};
 use crate::pipeline::{
-    rasterize_inpaint_dabs_binary, BrushDab, BrushMode, MaskCombineMode, MaskGeometry, MaskKind,
-    ObjectStroke,
+    rasterize_inpaint_dabs_binary, BrushDab, BrushMode, GeometryTransform, MaskCombineMode,
+    MaskGeometry, MaskKind, ObjectStroke,
 };
 use crate::ui::mask_component_color;
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui};
+use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui};
 
 const MIN_PREVIEW_ZOOM: f32 = 0.70;
 const MAX_PREVIEW_ZOOM: f32 = 32.0;
@@ -54,11 +54,27 @@ impl Preview {
         // low-resolution backing briefly flashes through. Anchor all preview
         // geometry to the full developed image instead; texture swaps then only
         // change pixels, never the zoom/crop coordinate system.
-        let (geometry_width, geometry_height) = app
+        let source_dimensions = app
             .loaded_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((pipeline_width, pipeline_height));
+        let crop_preview = app.sidebar_tab == SidebarTab::Crop && !app.original_preview_visible();
+        // Mask and inpainting editors intentionally stay in full-image source
+        // coordinates so their existing handles and brush math remain exact.
+        // The normal Develop/Export preview, however, shows the same geometry
+        // frame that will be written by export.
+        let final_geometry_preview = !crop_preview
+            && !matches!(app.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting)
+            && !app.geometry.is_identity();
+        let (geometry_width, geometry_height) = if final_geometry_preview {
+            app.geometry
+                .crop_pixel_dimensions(source_dimensions.0, source_dimensions.1)
+        } else if crop_preview && app.geometry.quarter_turns % 2 == 1 {
+            (source_dimensions.1, source_dimensions.0)
+        } else {
+            source_dimensions
+        };
         let base_size = fitted_image_size(
             outer_rect.size(),
             geometry_width as f32 / geometry_height.max(1) as f32,
@@ -210,19 +226,37 @@ impl Preview {
             app.preview_viewport_pixels = viewport_pixels;
             moved = true;
         }
-        let visible_uv = crate::app::PreviewUvRect {
-            min: [
-                ((visible_screen.left() - image_rect.left()) / image_rect.width().max(1.0))
-                    .clamp(0.0, 1.0),
-                ((visible_screen.top() - image_rect.top()) / image_rect.height().max(1.0))
-                    .clamp(0.0, 1.0),
-            ],
-            max: [
-                ((visible_screen.right() - image_rect.left()) / image_rect.width().max(1.0))
-                    .clamp(0.0, 1.0),
-                ((visible_screen.bottom() - image_rect.top()) / image_rect.height().max(1.0))
-                    .clamp(0.0, 1.0),
-            ],
+        let visible_uv = if crop_preview {
+            crop_workspace_visible_source_uv(
+                image_rect,
+                visible_screen,
+                app.geometry,
+                source_dimensions.0,
+                source_dimensions.1,
+            )
+        } else if final_geometry_preview {
+            final_geometry_visible_source_uv(
+                image_rect,
+                visible_screen,
+                app.geometry,
+                source_dimensions.0,
+                source_dimensions.1,
+            )
+        } else {
+            crate::app::PreviewUvRect {
+                min: [
+                    ((visible_screen.left() - image_rect.left()) / image_rect.width().max(1.0))
+                        .clamp(0.0, 1.0),
+                    ((visible_screen.top() - image_rect.top()) / image_rect.height().max(1.0))
+                        .clamp(0.0, 1.0),
+                ],
+                max: [
+                    ((visible_screen.right() - image_rect.left()) / image_rect.width().max(1.0))
+                        .clamp(0.0, 1.0),
+                    ((visible_screen.bottom() - image_rect.top()) / image_rect.height().max(1.0))
+                        .clamp(0.0, 1.0),
+                ],
+            }
         };
         if preview_uv_changed(app.preview_visible_uv, visible_uv) {
             app.preview_visible_uv = visible_uv;
@@ -233,12 +267,36 @@ impl Preview {
         }
 
         let painter = ui.painter_at(outer_rect);
-        painter.image(
-            texture_id,
-            image_rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        if crop_preview {
+            paint_crop_workspace_texture(
+                ui,
+                texture_id,
+                image_rect,
+                app.geometry,
+                source_dimensions.0,
+                source_dimensions.1,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                [0.0, 0.0, 1.0, 1.0],
+            );
+        } else if final_geometry_preview {
+            paint_final_geometry_texture(
+                ui,
+                texture_id,
+                image_rect,
+                app.geometry,
+                source_dimensions.0,
+                source_dimensions.1,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                [0.0, 0.0, 1.0, 1.0],
+            );
+        } else {
+            painter.image(
+                texture_id,
+                image_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
 
         if let Some(detail) = app
             .preview_detail
@@ -246,27 +304,71 @@ impl Preview {
             .filter(|detail| detail.revision == app.preview_revision)
         {
             if let Some(detail_texture_id) = detail.pipeline.egui_texture_id {
-                let detail_rect = Rect::from_min_max(
-                    normalized_to_screen(image_rect, detail.uv_rect.min),
-                    normalized_to_screen(image_rect, detail.uv_rect.max),
+                let detail_texture_uv = Rect::from_min_max(
+                    Pos2::new(detail.texture_uv_rect.min[0], detail.texture_uv_rect.min[1]),
+                    Pos2::new(detail.texture_uv_rect.max[0], detail.texture_uv_rect.max[1]),
                 );
-                painter.image(
-                    detail_texture_id,
-                    detail_rect,
-                    Rect::from_min_max(
-                        Pos2::new(detail.texture_uv_rect.min[0], detail.texture_uv_rect.min[1]),
-                        Pos2::new(detail.texture_uv_rect.max[0], detail.texture_uv_rect.max[1]),
-                    ),
-                    Color32::WHITE,
-                );
+                let detail_source_uv = [
+                    detail.uv_rect.min[0],
+                    detail.uv_rect.min[1],
+                    detail.uv_rect.max[0],
+                    detail.uv_rect.max[1],
+                ];
+                if crop_preview {
+                    paint_crop_workspace_texture(
+                        ui,
+                        detail_texture_id,
+                        image_rect,
+                        app.geometry,
+                        source_dimensions.0,
+                        source_dimensions.1,
+                        detail_texture_uv,
+                        detail_source_uv,
+                    );
+                } else if final_geometry_preview {
+                    paint_final_geometry_texture(
+                        ui,
+                        detail_texture_id,
+                        image_rect,
+                        app.geometry,
+                        source_dimensions.0,
+                        source_dimensions.1,
+                        detail_texture_uv,
+                        detail_source_uv,
+                    );
+                } else {
+                    let detail_rect = Rect::from_min_max(
+                        normalized_to_screen(image_rect, detail.uv_rect.min),
+                        normalized_to_screen(image_rect, detail.uv_rect.max),
+                    );
+                    painter.image(
+                        detail_texture_id,
+                        detail_rect,
+                        detail_texture_uv,
+                        Color32::WHITE,
+                    );
+                }
             }
         }
 
-        if app.sidebar_tab == SidebarTab::Crop && !app.original_preview_visible() {
+        if crop_preview {
             if !touch_navigation && !fit_gesture {
-                Self::handle_crop_interaction(ui, app, image_rect);
+                Self::handle_crop_interaction(
+                    ui,
+                    app,
+                    image_rect,
+                    source_dimensions.0,
+                    source_dimensions.1,
+                );
             }
-            Self::paint_crop_overlay(ui, app, image_rect, visible_screen);
+            Self::paint_crop_overlay(
+                ui,
+                app,
+                image_rect,
+                visible_screen,
+                source_dimensions.0,
+                source_dimensions.1,
+            );
         }
 
         painter.text(
@@ -325,7 +427,13 @@ impl Preview {
         }
     }
 
-    fn handle_crop_interaction(ui: &mut Ui, app: &mut AurawApp, image_rect: Rect) {
+    fn handle_crop_interaction(
+        ui: &mut Ui,
+        app: &mut AurawApp,
+        image_rect: Rect,
+        source_width: u32,
+        source_height: u32,
+    ) {
         if image_rect.width() <= 1.0 || image_rect.height() <= 1.0 {
             return;
         }
@@ -333,21 +441,28 @@ impl Preview {
         let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
         let primary_down = ui.input(|input| input.pointer.primary_down());
         let primary_released = ui.input(|input| input.pointer.primary_released());
-
-        let to_normalized = |position: Pos2| -> [f32; 2] {
-            [
-                ((position.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0),
-                ((position.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0),
-            ]
-        };
+        let quarter_turns = app.geometry.quarter_turns % 4;
 
         if primary_pressed {
             if let Some(pointer) = pointer.filter(|point| image_rect.expand(28.0).contains(*point)) {
-                let crop_rect = crop_screen_rect(image_rect, app.geometry.crop);
-                if let Some(handle) = crop_handle_at(crop_rect, pointer, 28.0) {
+                let display_crop_rect = crop_preview_screen_rect(
+                    image_rect,
+                    app.geometry,
+                    source_width,
+                    source_height,
+                );
+                if let Some(display_handle) = crop_handle_at(display_crop_rect, pointer, 28.0) {
+                    let handle = crop_source_handle_for_display(display_handle, quarter_turns);
+                    let start = crop_preview_pointer_to_source_normalized(
+                        image_rect,
+                        quarter_turns,
+                        source_width,
+                        source_height,
+                        pointer,
+                    );
                     app.crop_drag = Some(CropDragState {
                         handle,
-                        start: to_normalized(pointer),
+                        start,
                         crop: app.geometry.crop,
                     });
                 }
@@ -356,7 +471,13 @@ impl Preview {
 
         if primary_down {
             if let (Some(pointer), Some(drag)) = (pointer, app.crop_drag) {
-                let current = to_normalized(pointer);
+                let current = crop_preview_pointer_to_source_normalized(
+                    image_rect,
+                    quarter_turns,
+                    source_width,
+                    source_height,
+                    pointer,
+                );
                 let delta = [current[0] - drag.start[0], current[1] - drag.start[1]];
                 let mut crop = drag.crop;
                 match drag.handle {
@@ -409,18 +530,43 @@ impl Preview {
         }
     }
 
-    fn paint_crop_overlay(ui: &mut Ui, app: &AurawApp, image_rect: Rect, visible_rect: Rect) {
+    fn paint_crop_overlay(
+        ui: &mut Ui,
+        app: &AurawApp,
+        image_rect: Rect,
+        visible_rect: Rect,
+        source_width: u32,
+        source_height: u32,
+    ) {
         let painter = ui.painter_at(visible_rect);
-        let crop_rect = crop_screen_rect(image_rect, app.geometry.crop).intersect(visible_rect);
-        if crop_rect.width() <= 0.0 || crop_rect.height() <= 0.0 {
+        let crop_rect = crop_preview_screen_rect(
+            image_rect,
+            app.geometry,
+            source_width,
+            source_height,
+        );
+        let visible_crop = crop_rect.intersect(visible_rect);
+        if visible_crop.width() <= 0.0 || visible_crop.height() <= 0.0 {
             return;
         }
         let shade = Color32::from_black_alpha(150);
         for rect in [
-            Rect::from_min_max(visible_rect.min, Pos2::new(visible_rect.right(), crop_rect.top())),
-            Rect::from_min_max(Pos2::new(visible_rect.left(), crop_rect.bottom()), visible_rect.max),
-            Rect::from_min_max(Pos2::new(visible_rect.left(), crop_rect.top()), Pos2::new(crop_rect.left(), crop_rect.bottom())),
-            Rect::from_min_max(Pos2::new(crop_rect.right(), crop_rect.top()), Pos2::new(visible_rect.right(), crop_rect.bottom())),
+            Rect::from_min_max(
+                visible_rect.min,
+                Pos2::new(visible_rect.right(), visible_crop.top()),
+            ),
+            Rect::from_min_max(
+                Pos2::new(visible_rect.left(), visible_crop.bottom()),
+                visible_rect.max,
+            ),
+            Rect::from_min_max(
+                Pos2::new(visible_rect.left(), visible_crop.top()),
+                Pos2::new(visible_crop.left(), visible_crop.bottom()),
+            ),
+            Rect::from_min_max(
+                Pos2::new(visible_crop.right(), visible_crop.top()),
+                Pos2::new(visible_rect.right(), visible_crop.bottom()),
+            ),
         ] {
             if rect.width() > 0.0 && rect.height() > 0.0 {
                 painter.rect_filled(rect, 0.0, shade);
@@ -444,17 +590,6 @@ impl Preview {
         for point in crop_handle_points(crop_rect) {
             painter.circle_filled(point, 5.5, Color32::WHITE);
             painter.circle_stroke(point, 7.5, Stroke::new(1.5, Color32::BLACK));
-        }
-
-        let angle = (app.geometry.rotation_degrees + f32::from(app.geometry.quarter_turns) * 90.0).to_radians();
-        if angle.abs() > 0.001 {
-            let center = crop_rect.center();
-            let direction = egui::vec2(angle.cos(), angle.sin());
-            let half = crop_rect.width().min(crop_rect.height()) * 0.36;
-            painter.line_segment(
-                [center - direction * half, center + direction * half],
-                Stroke::new(1.5, Color32::from_rgb(255, 196, 64)),
-            );
         }
     }
 
@@ -1617,17 +1752,508 @@ fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
     point.distance(start + segment * t)
 }
 
-fn crop_screen_rect(image_rect: Rect, crop: [f32; 4]) -> Rect {
-    Rect::from_min_max(
-        Pos2::new(
-            egui::lerp(image_rect.left()..=image_rect.right(), crop[0]),
-            egui::lerp(image_rect.top()..=image_rect.bottom(), crop[1]),
-        ),
-        Pos2::new(
-            egui::lerp(image_rect.left()..=image_rect.right(), crop[2]),
-            egui::lerp(image_rect.top()..=image_rect.bottom(), crop[3]),
+
+fn geometry_forward_affine(geometry: GeometryTransform, dx: f32, dy: f32) -> [f32; 2] {
+    let geometry = geometry.sanitized();
+    let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
+    let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
+    let shx = geometry.horizontal_transform.to_radians().tan();
+    let shy = geometry.vertical_transform.to_radians().tan();
+    let angle = geometry.rotation_degrees.to_radians();
+    let c = angle.cos();
+    let s = angle.sin();
+
+    let flipped_x = dx * fx;
+    let flipped_y = dy * fy;
+    let sheared_x = flipped_x + shx * flipped_y;
+    let sheared_y = shy * flipped_x + flipped_y;
+    [
+        c * sheared_x - s * sheared_y,
+        s * sheared_x + c * sheared_y,
+    ]
+}
+
+fn geometry_inverse_affine(geometry: GeometryTransform, dx: f32, dy: f32) -> [f32; 2] {
+    let geometry = geometry.sanitized();
+    let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
+    let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
+    let shx = geometry.horizontal_transform.to_radians().tan();
+    let shy = geometry.vertical_transform.to_radians().tan();
+    let angle = geometry.rotation_degrees.to_radians();
+    let c = angle.cos();
+    let s = angle.sin();
+    let a = c * fx - s * shy * fx;
+    let b = c * shx * fy - s * fy;
+    let c2 = s * fx + c * shy * fx;
+    let d = s * shx * fy + c * fy;
+    let determinant = a * d - b * c2;
+    if determinant.abs() < 1e-6 {
+        return [0.0, 0.0];
+    }
+    [(d * dx - b * dy) / determinant, (-c2 * dx + a * dy) / determinant]
+}
+
+fn quarter_rotate_delta(quarter_turns: u8, dx: f32, dy: f32) -> [f32; 2] {
+    match quarter_turns % 4 {
+        0 => [dx, dy],
+        1 => [-dy, dx],
+        2 => [-dx, -dy],
+        _ => [dy, -dx],
+    }
+}
+
+fn quarter_unrotate_delta(quarter_turns: u8, dx: f32, dy: f32) -> [f32; 2] {
+    match quarter_turns % 4 {
+        0 => [dx, dy],
+        1 => [dy, -dx],
+        2 => [-dx, -dy],
+        _ => [-dy, dx],
+    }
+}
+
+fn geometry_forward_linear(geometry: GeometryTransform, dx: f32, dy: f32) -> [f32; 2] {
+    let affine = geometry_forward_affine(geometry, dx, dy);
+    quarter_rotate_delta(geometry.quarter_turns, affine[0], affine[1])
+}
+
+fn geometry_inverse_linear(geometry: GeometryTransform, dx: f32, dy: f32) -> [f32; 2] {
+    let affine = quarter_unrotate_delta(geometry.quarter_turns, dx, dy);
+    geometry_inverse_affine(geometry, affine[0], affine[1])
+}
+
+fn quarter_rotate_image_point(
+    quarter_turns: u8,
+    source_width: f32,
+    source_height: f32,
+    point: [f32; 2],
+) -> [f32; 2] {
+    match quarter_turns % 4 {
+        0 => point,
+        1 => [source_height - point[1], point[0]],
+        2 => [source_width - point[0], source_height - point[1]],
+        _ => [point[1], source_width - point[0]],
+    }
+}
+
+fn quarter_unrotate_image_point(
+    quarter_turns: u8,
+    source_width: f32,
+    source_height: f32,
+    point: [f32; 2],
+) -> [f32; 2] {
+    match quarter_turns % 4 {
+        0 => point,
+        1 => [point[1], source_height - point[0]],
+        2 => [source_width - point[0], source_height - point[1]],
+        _ => [source_width - point[1], point[0]],
+    }
+}
+
+fn geometry_crop_metrics(
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+) -> ([f32; 2], [f32; 2]) {
+    let geometry = geometry.sanitized();
+    let source_width = source_width.max(1) as f32;
+    let source_height = source_height.max(1) as f32;
+    let crop = geometry.crop;
+    (
+        [
+            (crop[0] + crop[2]) * 0.5 * source_width,
+            (crop[1] + crop[3]) * 0.5 * source_height,
+        ],
+        [
+            (crop[2] - crop[0]) * source_width,
+            (crop[3] - crop[1]) * source_height,
+        ],
+    )
+}
+
+fn final_geometry_source_to_screen(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    source_uv: [f32; 2],
+) -> Pos2 {
+    let geometry = geometry.sanitized();
+    let ([center_x, center_y], [crop_width, crop_height]) =
+        geometry_crop_metrics(geometry, source_width, source_height);
+    let source_x = source_uv[0] * source_width.max(1) as f32;
+    let source_y = source_uv[1] * source_height.max(1) as f32;
+    let transformed = geometry_forward_linear(geometry, source_x - center_x, source_y - center_y);
+    let (output_width, output_height) = if geometry.quarter_turns % 2 == 0 {
+        (crop_width, crop_height)
+    } else {
+        (crop_height, crop_width)
+    };
+    let output_uv = [
+        0.5 + transformed[0] / output_width.max(f32::EPSILON),
+        0.5 + transformed[1] / output_height.max(f32::EPSILON),
+    ];
+    normalized_to_screen(image_rect, output_uv)
+}
+
+fn final_geometry_screen_to_source(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    screen: Pos2,
+) -> [f32; 2] {
+    let geometry = geometry.sanitized();
+    let ([center_x, center_y], [crop_width, crop_height]) =
+        geometry_crop_metrics(geometry, source_width, source_height);
+    let output_uv = screen_to_normalized_unclamped(image_rect, screen);
+    let (output_width, output_height) = if geometry.quarter_turns % 2 == 0 {
+        (crop_width, crop_height)
+    } else {
+        (crop_height, crop_width)
+    };
+    let output_dx = (output_uv[0] - 0.5) * output_width;
+    let output_dy = (output_uv[1] - 0.5) * output_height;
+    let source_delta = geometry_inverse_linear(geometry, output_dx, output_dy);
+    [
+        (center_x + source_delta[0]) / source_width.max(1) as f32,
+        (center_y + source_delta[1]) / source_height.max(1) as f32,
+    ]
+}
+
+fn crop_workspace_source_to_screen(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    source_uv: [f32; 2],
+) -> Pos2 {
+    let geometry = geometry.sanitized();
+    let ([center_x, center_y], _) = geometry_crop_metrics(geometry, source_width, source_height);
+    let source_width_f = source_width.max(1) as f32;
+    let source_height_f = source_height.max(1) as f32;
+    let source_x = source_uv[0] * source_width_f;
+    let source_y = source_uv[1] * source_height_f;
+    let transformed = geometry_forward_affine(geometry, source_x - center_x, source_y - center_y);
+    let pre_quarter = [center_x + transformed[0], center_y + transformed[1]];
+    let canvas_point = quarter_rotate_image_point(
+        geometry.quarter_turns,
+        source_width_f,
+        source_height_f,
+        pre_quarter,
+    );
+    let (canvas_width, canvas_height) = if geometry.quarter_turns % 2 == 0 {
+        (source_width_f, source_height_f)
+    } else {
+        (source_height_f, source_width_f)
+    };
+    normalized_to_screen(
+        image_rect,
+        [canvas_point[0] / canvas_width, canvas_point[1] / canvas_height],
+    )
+}
+
+fn crop_workspace_screen_to_source(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    screen: Pos2,
+) -> [f32; 2] {
+    let geometry = geometry.sanitized();
+    let ([center_x, center_y], _) = geometry_crop_metrics(geometry, source_width, source_height);
+    let source_width_f = source_width.max(1) as f32;
+    let source_height_f = source_height.max(1) as f32;
+    let (canvas_width, canvas_height) = if geometry.quarter_turns % 2 == 0 {
+        (source_width_f, source_height_f)
+    } else {
+        (source_height_f, source_width_f)
+    };
+    let canvas_uv = screen_to_normalized_unclamped(image_rect, screen);
+    let canvas_point = [canvas_uv[0] * canvas_width, canvas_uv[1] * canvas_height];
+    let pre_quarter = quarter_unrotate_image_point(
+        geometry.quarter_turns,
+        source_width_f,
+        source_height_f,
+        canvas_point,
+    );
+    let source_delta = geometry_inverse_affine(
+        geometry,
+        pre_quarter[0] - center_x,
+        pre_quarter[1] - center_y,
+    );
+    [
+        (center_x + source_delta[0]) / source_width_f,
+        (center_y + source_delta[1]) / source_height_f,
+    ]
+}
+
+fn source_uv_bbox(points: impl IntoIterator<Item = [f32; 2]>) -> crate::app::PreviewUvRect {
+    let mut min = [1.0_f32, 1.0_f32];
+    let mut max = [0.0_f32, 0.0_f32];
+    for point in points {
+        min[0] = min[0].min(point[0]);
+        min[1] = min[1].min(point[1]);
+        max[0] = max[0].max(point[0]);
+        max[1] = max[1].max(point[1]);
+    }
+    min[0] = min[0].clamp(0.0, 1.0);
+    min[1] = min[1].clamp(0.0, 1.0);
+    max[0] = max[0].clamp(0.0, 1.0);
+    max[1] = max[1].clamp(0.0, 1.0);
+    if max[0] <= min[0] {
+        if min[0] >= 1.0 {
+            min[0] = 1.0 - 1e-6;
+            max[0] = 1.0;
+        } else {
+            max[0] = (min[0] + 1e-6).min(1.0);
+        }
+    }
+    if max[1] <= min[1] {
+        if min[1] >= 1.0 {
+            min[1] = 1.0 - 1e-6;
+            max[1] = 1.0;
+        } else {
+            max[1] = (min[1] + 1e-6).min(1.0);
+        }
+    }
+    crate::app::PreviewUvRect { min, max }
+}
+
+fn final_geometry_visible_source_uv(
+    image_rect: Rect,
+    visible_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+) -> crate::app::PreviewUvRect {
+    source_uv_bbox([
+        visible_rect.left_top(),
+        visible_rect.right_top(),
+        visible_rect.right_bottom(),
+        visible_rect.left_bottom(),
+    ].map(|point| {
+        final_geometry_screen_to_source(
+            image_rect,
+            geometry,
+            source_width,
+            source_height,
+            point,
+        )
+    }))
+}
+
+fn crop_workspace_visible_source_uv(
+    image_rect: Rect,
+    visible_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+) -> crate::app::PreviewUvRect {
+    source_uv_bbox([
+        visible_rect.left_top(),
+        visible_rect.right_top(),
+        visible_rect.right_bottom(),
+        visible_rect.left_bottom(),
+    ].map(|point| {
+        crop_workspace_screen_to_source(
+            image_rect,
+            geometry,
+            source_width,
+            source_height,
+            point,
+        )
+    }))
+}
+
+fn paint_textured_geometry_quad(
+    ui: &Ui,
+    texture_id: egui::TextureId,
+    clip_rect: Rect,
+    positions: [Pos2; 4],
+    texture_uv: Rect,
+) {
+    let mut mesh = Mesh::with_texture(texture_id);
+    let uvs = [
+        texture_uv.left_top(),
+        texture_uv.right_top(),
+        texture_uv.right_bottom(),
+        texture_uv.left_bottom(),
+    ];
+    for (pos, uv) in positions.into_iter().zip(uvs) {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv,
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    ui.painter_at(clip_rect).add(Shape::mesh(mesh));
+}
+
+fn source_uv_corners(source_uv: [f32; 4]) -> [[f32; 2]; 4] {
+    [
+        [source_uv[0], source_uv[1]],
+        [source_uv[2], source_uv[1]],
+        [source_uv[2], source_uv[3]],
+        [source_uv[0], source_uv[3]],
+    ]
+}
+
+fn paint_final_geometry_texture(
+    ui: &Ui,
+    texture_id: egui::TextureId,
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    texture_uv: Rect,
+    source_uv: [f32; 4],
+) {
+    if source_uv == [0.0, 0.0, 1.0, 1.0] {
+        ui.painter_at(image_rect)
+            .rect_filled(image_rect, 0.0, Color32::BLACK);
+    }
+    let positions = source_uv_corners(source_uv).map(|point| {
+        final_geometry_source_to_screen(
+            image_rect,
+            geometry,
+            source_width,
+            source_height,
+            point,
+        )
+    });
+    paint_textured_geometry_quad(ui, texture_id, image_rect, positions, texture_uv);
+}
+
+fn paint_crop_workspace_texture(
+    ui: &Ui,
+    texture_id: egui::TextureId,
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+    texture_uv: Rect,
+    source_uv: [f32; 4],
+) {
+    if source_uv == [0.0, 0.0, 1.0, 1.0] {
+        ui.painter_at(image_rect)
+            .rect_filled(image_rect, 0.0, Color32::BLACK);
+    }
+    let positions = source_uv_corners(source_uv).map(|point| {
+        crop_workspace_source_to_screen(
+            image_rect,
+            geometry,
+            source_width,
+            source_height,
+            point,
+        )
+    });
+    paint_textured_geometry_quad(ui, texture_id, image_rect, positions, texture_uv);
+}
+
+fn crop_preview_screen_rect(
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    source_width: u32,
+    source_height: u32,
+) -> Rect {
+    let geometry = geometry.sanitized();
+    let source_width_f = source_width.max(1) as f32;
+    let source_height_f = source_height.max(1) as f32;
+    let crop = geometry.crop;
+    let crop_center = [
+        (crop[0] + crop[2]) * 0.5 * source_width_f,
+        (crop[1] + crop[3]) * 0.5 * source_height_f,
+    ];
+    let display_center = quarter_rotate_image_point(
+        geometry.quarter_turns,
+        source_width_f,
+        source_height_f,
+        crop_center,
+    );
+    let crop_width = (crop[2] - crop[0]) * source_width_f;
+    let crop_height = (crop[3] - crop[1]) * source_height_f;
+    let (canvas_width, canvas_height, display_width, display_height) =
+        if geometry.quarter_turns % 2 == 0 {
+            (source_width_f, source_height_f, crop_width, crop_height)
+        } else {
+            (source_height_f, source_width_f, crop_height, crop_width)
+        };
+    let center = normalized_to_screen(
+        image_rect,
+        [display_center[0] / canvas_width, display_center[1] / canvas_height],
+    );
+    Rect::from_center_size(
+        center,
+        egui::vec2(
+            display_width / canvas_width * image_rect.width(),
+            display_height / canvas_height * image_rect.height(),
         ),
     )
+}
+
+fn crop_source_handle_for_display(handle: CropHandle, quarter_turns: u8) -> CropHandle {
+    use CropHandle::*;
+    match quarter_turns % 4 {
+        0 => handle,
+        1 => match handle {
+            TopLeft => BottomLeft,
+            TopRight => TopLeft,
+            BottomRight => TopRight,
+            BottomLeft => BottomRight,
+            Top => Left,
+            Right => Top,
+            Bottom => Right,
+            Left => Bottom,
+            Move => Move,
+        },
+        2 => match handle {
+            TopLeft => BottomRight,
+            TopRight => BottomLeft,
+            BottomRight => TopLeft,
+            BottomLeft => TopRight,
+            Top => Bottom,
+            Right => Left,
+            Bottom => Top,
+            Left => Right,
+            Move => Move,
+        },
+        _ => match handle {
+            TopLeft => TopRight,
+            TopRight => BottomRight,
+            BottomRight => BottomLeft,
+            BottomLeft => TopLeft,
+            Top => Right,
+            Right => Bottom,
+            Bottom => Left,
+            Left => Top,
+            Move => Move,
+        },
+    }
+}
+
+fn crop_preview_pointer_to_source_normalized(
+    image_rect: Rect,
+    quarter_turns: u8,
+    source_width: u32,
+    source_height: u32,
+    pointer: Pos2,
+) -> [f32; 2] {
+    let source_width_f = source_width.max(1) as f32;
+    let source_height_f = source_height.max(1) as f32;
+    let (canvas_width, canvas_height) = if quarter_turns % 2 == 0 {
+        (source_width_f, source_height_f)
+    } else {
+        (source_height_f, source_width_f)
+    };
+    let canvas_uv = screen_to_normalized_unclamped(image_rect, pointer);
+    let source_point = quarter_unrotate_image_point(
+        quarter_turns,
+        source_width_f,
+        source_height_f,
+        [canvas_uv[0] * canvas_width, canvas_uv[1] * canvas_height],
+    );
+    [source_point[0] / source_width_f, source_point[1] / source_height_f]
 }
 
 fn crop_handle_points(rect: Rect) -> [Pos2; 8] {
@@ -1663,7 +2289,6 @@ fn crop_handle_at(rect: Rect, pointer: Pos2, radius: f32) -> Option<CropHandle> 
 }
 
 fn sanitize_dragged_crop(mut crop: [f32; 4], handle: CropHandle) -> [f32; 4] {
-    use crate::pipeline::GeometryTransform;
     let min = GeometryTransform::MIN_CROP_EXTENT;
     match handle {
         CropHandle::Left | CropHandle::TopLeft | CropHandle::BottomLeft => {
