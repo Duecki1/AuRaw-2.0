@@ -270,16 +270,36 @@ fn output_lut_fetch(r: u32, g: u32, b: u32) -> vec3<f32> {
     return profile_data[index].xyz;
 }
 
+fn map_output_lut_input_rec2020(rgb: vec3<f32>) -> vec3<f32> {
+    // The LUT already covers every in-cube Rec.2020 value, including exact
+    // primaries and cube edges. Gamut-map only values that cannot be indexed
+    // directly; otherwise an identity-like LUT would not be an identity at
+    // its corners.
+    if rgb_is_unit(rgb) {
+        return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return perceptual_gamut_compress_unit_rec2020(rgb);
+}
+
+// ICC output contract shared with `IccOutputTransform::transform_rgb`:
+//   input: display-linear D65 Rec.2020, potentially outside the unit cube;
+//   pre-LUT policy: one perceptual projection into unit Rec.2020;
+//   coordinates: sign-preserving sRGB shaper followed by unit clamping;
+//   interpolation: trilinear with R-fastest storage and clamped cube edges;
+//   output: encoded destination-device RGB supplied by the LUT.
+// The sampled output is not linear sRGB and must not be passed through a
+// linear-light gamut operation after lookup.
 fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
     let lut_info = params.output_lut;
     if lut_info.x < 2u || lut_info.y < 2u || lut_info.z < 2u {
+        // The no-LUT fallback is explicitly linear Rec.2020 -> linear sRGB,
+        // followed by sRGB-domain gamut mapping and encoding. Unlike the ICC
+        // LUT path below, this branch really does operate in linear sRGB.
         let output_linear = REC2020_TO_SRGB * rgb;
         let mapped = perceptual_gamut_compress_unit_srgb(output_linear);
         return srgb_oetf(mapped);
     }
-    // ICC/device LUT coordinates require the unit cube. Project once at this
-    // explicit output boundary, preserving lightness and hue direction.
-    let mapped = perceptual_gamut_compress_unit_rec2020(rgb);
+    let mapped = map_output_lut_input_rec2020(rgb);
     let shaped = vec3<f32>(
         profile_srgb_encode_value(mapped.r),
         profile_srgb_encode_value(mapped.g),
@@ -305,6 +325,8 @@ fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
 
     let low_z = mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y);
     let high_z = mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y);
-    let output_rgb = mix(low_z, high_z, f.z);
-    return perceptual_gamut_compress_unit_srgb(output_rgb);
+    // LUT entries are already encoded destination-device RGB. Return the
+    // trilinear result verbatim; interpreting it as linear sRGB corrupts valid
+    // destination primaries and makes preview disagree with CPU export.
+    return mix(low_z, high_z, f.z);
 }

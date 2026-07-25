@@ -46,14 +46,19 @@ fn native_options() -> eframe::NativeOptions {
                 eframe::wgpu::Limits::default()
             };
             required_limits.max_texture_dimension_2d = adapter_limits.max_texture_dimension_2d;
-            let mut required_features = eframe::wgpu::Features::empty();
             #[cfg(target_os = "android")]
-            if adapter
-                .features()
-                .contains(eframe::wgpu::Features::PIPELINE_CACHE)
-            {
-                required_features |= eframe::wgpu::Features::PIPELINE_CACHE;
-            }
+            let required_features = {
+                let mut features = eframe::wgpu::Features::empty();
+                if adapter
+                    .features()
+                    .contains(eframe::wgpu::Features::PIPELINE_CACHE)
+                {
+                    features |= eframe::wgpu::Features::PIPELINE_CACHE;
+                }
+                features
+            };
+            #[cfg(not(target_os = "android"))]
+            let required_features = eframe::wgpu::Features::empty();
             eframe::wgpu::DeviceDescriptor {
                 label: Some("AuRaw wgpu device"),
                 required_features,

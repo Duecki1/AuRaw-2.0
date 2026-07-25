@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "build_support/lensfun_version.rs"]
+mod lensfun_version;
+
 fn main() {
     configure_source_revision();
 
@@ -180,13 +183,79 @@ fn configure_desktop_lensfun() {
     for variable in ["LENSFUN_NO_PKG_CONFIG", "PKG_CONFIG_PATH"] {
         println!("cargo:rerun-if-env-changed={variable}");
     }
+    println!("cargo:rerun-if-changed=build_support/lensfun_version.rs");
 
-    match pkg_config::Config::new().probe("lensfun") {
-        Ok(_) => println!("cargo:rustc-cfg=lensfun_available"),
-        Err(_) => println!(
-            "cargo:warning=Lensfun was not found through pkg-config; lens correction will be disabled. Install lensfun/lensfun.pc on the target machine to enable it."
-        ),
+    let lensfun = match pkg_config::Config::new().probe("lensfun") {
+        Ok(lensfun) => lensfun,
+        Err(_) => {
+            println!(
+                "cargo:warning=Lensfun was not found through pkg-config; lens correction will be disabled. Install a supported Lensfun 0.3.2 through 0.3.4 development package to enable it."
+            );
+            return;
+        }
+    };
+
+    let version = lensfun_version::validate_supported_lensfun_version(&lensfun.version)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let header = find_lensfun_header(&lensfun.include_paths).unwrap_or_else(|| {
+        panic!(
+            "Lensfun {} was found, but lensfun.h was not present in the pkg-config include paths: {:?}",
+            lensfun.version, lensfun.include_paths
+        )
+    });
+    let header_source = std::fs::read_to_string(&header)
+        .unwrap_or_else(|error| panic!("could not read {}: {error}", header.display()));
+    let header_version = lensfun_version::parse_lensfun_header_version(&header_source)
+        .and_then(|header_version| {
+            lensfun_version::validate_supported_lensfun_version(&header_version.to_string())?;
+            Ok(header_version)
+        })
+        .unwrap_or_else(|error| panic!("{}: {error}", header.display()));
+    if header_version != version {
+        panic!(
+            "Lensfun pkg-config reports {version}, but {} declares {header_version}; refusing to generate bindings from a mismatched ABI",
+            header.display()
+        );
     }
+    generate_lensfun_bindings(&header, &lensfun.include_paths);
+    println!("cargo:rustc-env=AURAW_LENSFUN_BUILD_VERSION={version}");
+    println!("cargo:rustc-cfg=lensfun_available");
+}
+
+fn find_lensfun_header(include_paths: &[PathBuf]) -> Option<PathBuf> {
+    include_paths
+        .iter()
+        .flat_map(|path| [path.join("lensfun.h"), path.join("lensfun/lensfun.h")])
+        .find(|path| path.is_file())
+}
+
+fn generate_lensfun_bindings(header: &Path, include_paths: &[PathBuf]) {
+    let bindings = bindgen::Builder::default()
+        .header(header.to_string_lossy())
+        .clang_args(
+            include_paths
+                .iter()
+                .map(|path| format!("-I{}", path.to_string_lossy())),
+        )
+        .allowlist_function(
+            "lf_(free|mlstr_get|db_new|db_destroy|db_load|db_load_file|db_find_cameras|db_find_cameras_ext|db_find_lenses_hd|db_get_lenses|modifier_new|modifier_destroy|modifier_initialize|modifier_get_auto_scale|modifier_add_coord_callback_scale|modifier_apply_subpixel_geometry_distortion|modifier_apply_color_modification)",
+        )
+        .allowlist_type(
+            "lf(Camera|Lens|Database|Modifier|LensType|PixelFormat|ComponentRole|Error)",
+        )
+        .allowlist_var("LF_(NO_ERROR|SEARCH_.*|PF_F32|MODIFY_.*|CR_.*|VERSION.*)")
+        .prepend_enum_name(false)
+        .layout_tests(true)
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .generate()
+        .unwrap_or_else(|error| panic!("could not generate Lensfun bindings from {}: {error}", header.display()));
+
+    let output_dir = std::env::var("OUT_DIR")
+        .unwrap_or_else(|error| panic!("Cargo did not set OUT_DIR: {error}"));
+    let output = PathBuf::from(output_dir).join("lensfun_bindings.rs");
+    bindings
+        .write_to_file(&output)
+        .unwrap_or_else(|error| panic!("could not write {}: {error}", output.display()));
 }
 
 fn configure_desktop_libraw() {

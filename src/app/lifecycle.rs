@@ -1138,34 +1138,86 @@ impl AurawApp {
             return;
         }
 
+        let Some(render_state) = frame.wgpu_render_state() else {
+            // No GPU state exists to update yet; committing the logical profile is
+            // safe because each later pipeline install applies it before visibility.
+            self.display_output_transform = transform;
+            self.display_profile_label = label;
+            self.display_profile_source = source;
+            self.display_profile_fingerprint = Some(fingerprint);
+            return;
+        };
+
+        let previous_transform = self.display_output_transform.clone();
+        let mut updates = Vec::new();
+        if let Some(pipeline) = self.gpu_pipeline.as_ref() {
+            updates.push((
+                "main preview",
+                pipeline.write_output_transform(&render_state.queue, &transform),
+            ));
+        }
+        if let Some(detail) = self.preview_detail.as_ref() {
+            updates.push((
+                "detail preview",
+                detail
+                    .pipeline
+                    .write_output_transform(&render_state.queue, &transform),
+            ));
+        }
+        if let Some(navigation) = self.preview_navigation.as_ref() {
+            updates.push((
+                "navigation preview",
+                navigation
+                    .pipeline
+                    .write_output_transform(&render_state.queue, &transform),
+            ));
+        }
+        if let Err(error) = collect_pipeline_update_results("install display ICC LUT", updates) {
+            // Some buffers may already have received the new LUT, but no output
+            // dispatch occurs before this point. Restore the previous transform on
+            // every present pipeline and leave the logical profile/revision dirty.
+            let mut rollbacks = Vec::new();
+            if let Some(pipeline) = self.gpu_pipeline.as_ref() {
+                rollbacks.push((
+                    "main preview",
+                    pipeline.write_output_transform(&render_state.queue, &previous_transform),
+                ));
+            }
+            if let Some(detail) = self.preview_detail.as_ref() {
+                rollbacks.push((
+                    "detail preview",
+                    detail.pipeline.write_output_transform(
+                        &render_state.queue,
+                        &previous_transform,
+                    ),
+                ));
+            }
+            if let Some(navigation) = self.preview_navigation.as_ref() {
+                rollbacks.push((
+                    "navigation preview",
+                    navigation.pipeline.write_output_transform(
+                        &render_state.queue,
+                        &previous_transform,
+                    ),
+                ));
+            }
+            let rollback = collect_pipeline_update_results("restore display ICC LUT", rollbacks);
+            self.pending_stage = Some(ProcessingStage::Output);
+            self.notice = Some(
+                "Could not update every preview color profile. The previous display transform remains active."
+                    .to_owned(),
+            );
+            crate::diagnostics::record(format!(
+                "transactional display-profile update failed: {error:#}; rollback={rollback:#?}"
+            ));
+            return;
+        }
+
+        // Commit logical metadata only after every present pipeline accepted the LUT.
         self.display_output_transform = transform;
         self.display_profile_label = label;
         self.display_profile_source = source;
         self.display_profile_fingerprint = Some(fingerprint);
-
-        let Some(render_state) = frame.wgpu_render_state() else {
-            return;
-        };
-        if let Some(pipeline) = self.gpu_pipeline.as_ref() {
-            if let Err(error) = pipeline.write_output_transform(
-                &render_state.queue,
-                &self.display_output_transform,
-            ) {
-                log::warn!("could not update preview display ICC LUT: {error:#}");
-            }
-        }
-        if let Some(detail) = self.preview_detail.as_ref() {
-            let _ = detail.pipeline.write_output_transform(
-                &render_state.queue,
-                &self.display_output_transform,
-            );
-        }
-        if let Some(navigation) = self.preview_navigation.as_ref() {
-            let _ = navigation.pipeline.write_output_transform(
-                &render_state.queue,
-                &self.display_output_transform,
-            );
-        }
         if self.gpu_pipeline.is_some() {
             self.queue_preview_processing(ProcessingStage::Output);
         }
@@ -1176,10 +1228,10 @@ impl AurawApp {
         &self,
         queue: &wgpu::Queue,
         pipeline: &RawGpuPipeline,
-    ) {
-        if let Err(error) = pipeline.write_output_transform(queue, &self.display_output_transform) {
-            log::warn!("could not install display ICC LUT on preview pipeline: {error:#}");
-        }
+    ) -> anyhow::Result<()> {
+        pipeline
+            .write_output_transform(queue, &self.display_output_transform)
+            .map_err(|error| anyhow::anyhow!("preview pipeline: install display ICC LUT: {error:#}"))
     }
 
     fn persist_performance_settings(&self) -> bool {

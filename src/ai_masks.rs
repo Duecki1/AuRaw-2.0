@@ -2976,7 +2976,7 @@ fn fill_enclosed_component_holes(selected: &mut [bool], width: usize, height: us
     }
     let mut exterior = vec![false; selected.len()];
     let mut queue = VecDeque::new();
-    let mut seed = |x: usize, y: usize, exterior: &mut [bool], queue: &mut VecDeque<usize>| {
+    let seed = |x: usize, y: usize, exterior: &mut [bool], queue: &mut VecDeque<usize>| {
         let index = y * width + x;
         if !selected[index] && !exterior[index] {
             exterior[index] = true;

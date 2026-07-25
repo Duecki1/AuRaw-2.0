@@ -58,136 +58,66 @@ mod imp {
     use super::*;
     use anyhow::Context;
     use rayon::prelude::*;
-    use std::ffi::{c_char, c_int, c_void, CStr, CString};
+    use std::ffi::{c_char, c_int, CStr, CString};
     use std::path::{Path, PathBuf};
     use std::ptr;
     use std::sync::Arc;
 
-    const LF_NO_ERROR: c_int = 0;
-    const LF_SEARCH_LOOSE: c_int = 1;
-    const LF_SEARCH_SORT_AND_UNIQUIFY: c_int = 2;
-    const LF_PF_F32: c_int = 3;
-    const LF_MODIFY_TCA: c_int = 0x0000_0001;
-    const LF_MODIFY_VIGNETTING: c_int = 0x0000_0002;
-    const LF_MODIFY_DISTORTION: c_int = 0x0000_0008;
-    const LF_MODIFY_GEOMETRY: c_int = 0x0000_0010;
-    const LF_MODIFY_SCALE: c_int = 0x0000_0020;
-    const LF_CR_UNKNOWN: c_int = 2;
-    const LF_CR_RED: c_int = 4;
-    const LF_CR_GREEN: c_int = 5;
-    const LF_CR_BLUE: c_int = 6;
+    const LENSFUN_BUILD_VERSION: &str = env!("AURAW_LENSFUN_BUILD_VERSION");
+
+    // # Native safety contract
+    //
+    // * ABI: build.rs accepts Lensfun 0.3.2 through 0.3.4, verifies that the
+    //   pkg-config and selected header versions agree, and bindgen emits the
+    //   declarations plus compile-time layout tests from that exact header.
+    // * Ownership: Database and Modifier uniquely own pointers returned by
+    //   their constructors; OwnedPointerList owns only search-result arrays.
+    //   Camera/lens records and multilingual strings remain Lensfun-owned.
+    // * Lifetimes: record pointers are used only while their Database guard is
+    //   live, localized strings are copied immediately, and search arrays are
+    //   freed exactly once through lf_free.
+    // * Nullability: every constructor/list/record/string result is checked by
+    //   the safe wrapper before dereference or conversion.
+    // * Thread safety: database and modifier handles are never shared across
+    //   threads. Rayon work starts only after Lensfun has filled Rust-owned
+    //   coordinate/gain buffers and operates exclusively on those copies.
+    // * Buffer validity: each native call's SAFETY comment states the exact
+    //   element count, row stride, and live pointer requirements.
+    mod ffi {
+        #![allow(
+            dead_code,
+            non_camel_case_types,
+            non_snake_case,
+            non_upper_case_globals
+        )]
+        include!(concat!(env!("OUT_DIR"), "/lensfun_bindings.rs"));
+    }
+
+    use ffi::{
+        lf_db_destroy, lf_db_find_cameras, lf_db_find_cameras_ext, lf_db_find_lenses_hd,
+        lf_db_get_lenses, lf_db_load, lf_db_load_file, lf_db_new, lf_free, lf_mlstr_get,
+        lf_modifier_add_coord_callback_scale, lf_modifier_apply_color_modification,
+        lf_modifier_apply_subpixel_geometry_distortion, lf_modifier_destroy,
+        lf_modifier_get_auto_scale, lf_modifier_initialize, lf_modifier_new, lfCamera,
+        lfDatabase, lfLens, lfModifier,
+    };
+
+    // Bindgen reads these values and all accessed structure layouts from the
+    // exact Lensfun 0.3.2-0.3.4 header selected by pkg-config in build.rs.
+    const LF_NO_ERROR: ffi::lfError = ffi::LF_NO_ERROR;
+    const LF_SEARCH_LOOSE: c_int = ffi::LF_SEARCH_LOOSE as c_int;
+    const LF_SEARCH_SORT_AND_UNIQUIFY: c_int = ffi::LF_SEARCH_SORT_AND_UNIQUIFY as c_int;
+    const LF_MODIFY_TCA: c_int = ffi::LF_MODIFY_TCA as c_int;
+    const LF_MODIFY_VIGNETTING: c_int = ffi::LF_MODIFY_VIGNETTING as c_int;
+    const LF_MODIFY_DISTORTION: c_int = ffi::LF_MODIFY_DISTORTION as c_int;
+    const LF_MODIFY_GEOMETRY: c_int = ffi::LF_MODIFY_GEOMETRY as c_int;
+    const LF_MODIFY_SCALE: c_int = ffi::LF_MODIFY_SCALE as c_int;
+    const LF_CR_UNKNOWN: c_int = ffi::LF_CR_UNKNOWN as c_int;
+    const LF_CR_RED: c_int = ffi::LF_CR_RED as c_int;
+    const LF_CR_GREEN: c_int = ffi::LF_CR_GREEN as c_int;
+    const LF_CR_BLUE: c_int = ffi::LF_CR_BLUE as c_int;
     const LF_CR_RGBA: c_int =
         LF_CR_RED | (LF_CR_GREEN << 4) | (LF_CR_BLUE << 8) | (LF_CR_UNKNOWN << 12);
-
-    #[repr(C)]
-    struct lfDatabase {
-        _private: [u8; 0],
-    }
-
-    #[repr(C)]
-    struct lfModifier {
-        _private: [u8; 0],
-    }
-
-    // Lensfun 0.3.2–0.3.4 expose these fields at the beginning of the
-    // public C structs. AuRaw only reads this stable prefix; the database owns
-    // each object and keeps it alive for the lifetime of `Database`.
-    #[repr(C)]
-    struct lfCamera {
-        maker: *mut c_char,
-        model: *mut c_char,
-        variant: *mut c_char,
-        mount: *mut c_char,
-        crop_factor: f32,
-        score: c_int,
-    }
-
-    #[repr(C)]
-    struct lfLens {
-        maker: *mut c_char,
-        model: *mut c_char,
-        min_focal: f32,
-        max_focal: f32,
-        min_aperture: f32,
-        max_aperture: f32,
-        mounts: *mut *mut c_char,
-        center_x: f32,
-        center_y: f32,
-        crop_factor: f32,
-        aspect_ratio: f32,
-        lens_type: c_int,
-    }
-
-    unsafe extern "C" {
-        fn lf_free(data: *mut c_void);
-        fn lf_mlstr_get(value: *const c_char) -> *const c_char;
-        fn lf_db_new() -> *mut lfDatabase;
-        fn lf_db_destroy(db: *mut lfDatabase);
-        fn lf_db_load(db: *mut lfDatabase) -> c_int;
-        fn lf_db_load_file(db: *mut lfDatabase, filename: *const c_char) -> c_int;
-        fn lf_db_find_cameras(
-            db: *const lfDatabase,
-            maker: *const c_char,
-            model: *const c_char,
-        ) -> *mut *const lfCamera;
-        fn lf_db_find_cameras_ext(
-            db: *const lfDatabase,
-            maker: *const c_char,
-            model: *const c_char,
-            flags: c_int,
-        ) -> *mut *const lfCamera;
-        fn lf_db_find_lenses_hd(
-            db: *const lfDatabase,
-            camera: *const lfCamera,
-            maker: *const c_char,
-            lens: *const c_char,
-            flags: c_int,
-        ) -> *mut *const lfLens;
-        fn lf_db_get_lenses(db: *const lfDatabase) -> *const *const lfLens;
-        fn lf_modifier_new(
-            lens: *const lfLens,
-            crop: f32,
-            width: c_int,
-            height: c_int,
-        ) -> *mut lfModifier;
-        fn lf_modifier_destroy(modifier: *mut lfModifier);
-        fn lf_modifier_initialize(
-            modifier: *mut lfModifier,
-            lens: *const lfLens,
-            pixel_format: c_int,
-            focal: f32,
-            aperture: f32,
-            distance: f32,
-            scale: f32,
-            target_geometry: c_int,
-            flags: c_int,
-            reverse: c_int,
-        ) -> c_int;
-        fn lf_modifier_get_auto_scale(modifier: *mut lfModifier, reverse: c_int) -> f32;
-        fn lf_modifier_add_coord_callback_scale(
-            modifier: *mut lfModifier,
-            scale: f32,
-            reverse: c_int,
-        ) -> c_int;
-        fn lf_modifier_apply_subpixel_geometry_distortion(
-            modifier: *mut lfModifier,
-            x: f32,
-            y: f32,
-            width: c_int,
-            height: c_int,
-            result: *mut f32,
-        ) -> c_int;
-        fn lf_modifier_apply_color_modification(
-            modifier: *mut lfModifier,
-            pixels: *mut c_void,
-            x: f32,
-            y: f32,
-            width: c_int,
-            height: c_int,
-            component_role: c_int,
-            row_stride: c_int,
-        ) -> c_int;
-    }
 
     struct Database(*mut lfDatabase);
 
@@ -357,15 +287,8 @@ mod imp {
         let database = Database::load()?;
         let camera = find_camera(&database, &raw.camera_make, &raw.camera_model);
         let camera_label = camera
-            .map(|camera| unsafe {
-                format!(
-                    "{} {}",
-                    multilingual_string((*camera).maker),
-                    multilingual_string((*camera).model)
-                )
-                .trim()
-                .to_owned()
-            })
+            .and_then(camera_name)
+            .map(|(maker, model)| format!("{maker} {model}").trim().to_owned())
             .unwrap_or_else(|| {
                 let reported = format!("{} {}", raw.camera_make, raw.camera_model)
                     .trim()
@@ -383,7 +306,7 @@ mod imp {
         sort_and_deduplicate_lenses(&mut lenses);
 
         let auto_match = find_auto_lens(&database, camera, raw);
-        let status = if let Some(found) = &auto_match {
+        let message = if let Some(found) = &auto_match {
             format!("Auto-detected {} from RAW metadata", found.label())
         } else if raw.lens_model.trim().is_empty() {
             "The RAW file does not identify a lens. Select one manually.".to_owned()
@@ -398,6 +321,7 @@ mod imp {
                 raw.lens_model
             )
         };
+        let status = format!("Lensfun {LENSFUN_BUILD_VERSION}: {message}");
 
         Ok(LensfunCatalog {
             available: true,
@@ -414,17 +338,18 @@ mod imp {
         let lens = find_lens(&database, camera, selection)
             .ok_or_else(|| anyhow!("Lensfun has no profile for {}", selection.label()))?;
 
-        // SAFETY: camera/lens pointers are database-owned and valid for this scope.
-        // If the camera is absent from the database, Lensfun's calibration crop
-        // factor is the safest available fallback for manual correction.
+        // If the camera is absent from the database, Lensfun's calibration
+        // crop factor is the safest available fallback for manual correction.
+        let lens_fields = lens_fields(lens)
+            .ok_or_else(|| anyhow!("Lensfun returned a null lens profile"))?;
         let crop = camera
-            .map(|camera| unsafe { (*camera).crop_factor })
+            .and_then(camera_crop_factor)
             .and_then(positive)
-            .or_else(|| positive(unsafe { (*lens).crop_factor }))
+            .or_else(|| positive(lens_fields.crop_factor))
             .unwrap_or(1.0);
-        let focal = positive(raw.focal_length).unwrap_or_else(|| unsafe {
-            let min = (*lens).min_focal;
-            let max = (*lens).max_focal;
+        let focal = positive(raw.focal_length).unwrap_or_else(|| {
+            let min = lens_fields.min_focal;
+            let max = lens_fields.max_focal;
             if min.is_finite() && max.is_finite() && min > 0.0 && max >= min {
                 0.5 * (min + max)
             } else {
@@ -527,18 +452,21 @@ mod imp {
             return Err(anyhow!("Lensfun could not create a modifier"));
         }
         let modifier = Modifier(pointer);
-        // SAFETY: modifier and lens are live. reverse=0 applies correction rather
-        // than simulating defects, and the selected lens geometry is a valid enum.
+        let lens_type = lens_fields(lens)
+            .ok_or_else(|| anyhow!("Lensfun returned a null lens profile"))?
+            .lens_type;
+        // SAFETY: modifier and lens are live database-owned objects generated
+        // against the verified Lensfun headers. reverse=0 applies correction.
         let flags = unsafe {
             lf_modifier_initialize(
                 modifier.0,
                 lens,
-                LF_PF_F32,
+                ffi::LF_PF_F32,
                 focal,
                 aperture,
                 distance,
                 1.0,
-                (*lens).lens_type,
+                lens_type,
                 requested_flags,
                 0,
             )
@@ -1402,8 +1330,10 @@ mod imp {
         let Some(lens) = find_lens(database, camera, candidate) else {
             return true;
         };
-        // SAFETY: `lens` is database-owned and remains valid for this scope.
-        let (min_focal, max_focal) = unsafe { ((*lens).min_focal, (*lens).max_focal) };
+        let Some(fields) = lens_fields(lens) else {
+            return true;
+        };
+        let (min_focal, max_focal) = (fields.min_focal, fields.max_focal);
         if !min_focal.is_finite()
             || !max_focal.is_finite()
             || min_focal <= 0.0
@@ -1547,17 +1477,62 @@ mod imp {
             })
     }
 
+    #[derive(Clone, Copy)]
+    struct LensFields {
+        crop_factor: f32,
+        min_focal: f32,
+        max_focal: f32,
+        lens_type: ffi::lfLensType,
+    }
+
+    fn camera_name(pointer: *const lfCamera) -> Option<(String, String)> {
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: every camera pointer passed here comes from a live Lensfun
+        // database. Bindgen generated the field offsets from the exact verified
+        // 0.3.2-0.3.4 header selected during this build.
+        let camera = unsafe { &*pointer };
+        Some((
+            multilingual_string(camera.Maker),
+            multilingual_string(camera.Model),
+        ))
+    }
+
+    fn camera_crop_factor(pointer: *const lfCamera) -> Option<f32> {
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: same database ownership and generated-layout contract as
+        // `camera_name`.
+        Some(unsafe { (*pointer).CropFactor })
+    }
+
+    fn lens_fields(pointer: *const lfLens) -> Option<LensFields> {
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: every lens pointer passed here is database-owned and remains
+        // valid until the surrounding `Database` guard drops. All field offsets
+        // come from generated bindings for the accepted Lensfun ABI.
+        let lens = unsafe { &*pointer };
+        Some(LensFields {
+            crop_factor: lens.CropFactor,
+            min_focal: lens.MinFocal,
+            max_focal: lens.MaxFocal,
+            lens_type: lens.Type,
+        })
+    }
+
     fn lens_name(pointer: *const lfLens) -> Option<LensfunLens> {
         if pointer.is_null() {
             return None;
         }
-        // SAFETY: pointer is database-owned and valid for this read.
-        let (maker, model) = unsafe {
-            (
-                multilingual_string((*pointer).maker),
-                multilingual_string((*pointer).model),
-            )
-        };
+        // SAFETY: same database ownership and generated-layout contract as
+        // `lens_fields`.
+        let lens = unsafe { &*pointer };
+        let maker = multilingual_string(lens.Maker);
+        let model = multilingual_string(lens.Model);
         if maker.is_empty() && model.is_empty() {
             None
         } else {
@@ -1583,15 +1558,20 @@ mod imp {
         result
     }
 
-    unsafe fn multilingual_string(pointer: *const c_char) -> String {
+    fn multilingual_string(pointer: *mut c_char) -> String {
         if pointer.is_null() {
             return String::new();
         }
-        let localized = lf_mlstr_get(pointer);
+        // SAFETY: Lensfun owns both the multilingual string and the localized
+        // NUL-terminated result. The result is borrowed only for this copy and
+        // is never freed by Rust.
+        let localized = unsafe { lf_mlstr_get(pointer) };
         if localized.is_null() {
             String::new()
         } else {
-            CStr::from_ptr(localized)
+            // SAFETY: `lf_mlstr_get` returns a valid NUL-terminated string or
+            // null for the lifetime of its database-owned input.
+            unsafe { CStr::from_ptr(localized) }
                 .to_string_lossy()
                 .trim()
                 .to_owned()
@@ -1600,5 +1580,32 @@ mod imp {
 
     fn positive(value: f32) -> Option<f32> {
         (value.is_finite() && value > 0.0).then_some(value)
+    }
+
+    #[cfg(test)]
+    mod ffi_boundary_tests {
+        use super::*;
+
+        #[test]
+        fn null_native_results_are_normal_wrapper_misses() {
+            assert!(camera_name(ptr::null()).is_none());
+            assert!(camera_crop_factor(ptr::null()).is_none());
+            assert!(lens_fields(ptr::null()).is_none());
+            assert!(lens_name(ptr::null()).is_none());
+            assert!(pointer_list::<lfLens>(ptr::null()).is_empty());
+
+            let list = OwnedPointerList::<lfLens> {
+                pointer: ptr::null_mut(),
+            };
+            assert!(list.first().is_none());
+            assert!(list.values().is_empty());
+        }
+
+        #[test]
+        fn native_owners_remain_raii_guards() {
+            assert!(std::mem::needs_drop::<Database>());
+            assert!(std::mem::needs_drop::<Modifier>());
+            assert!(std::mem::needs_drop::<OwnedPointerList<lfLens>>());
+        }
     }
 }

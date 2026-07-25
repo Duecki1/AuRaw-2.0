@@ -632,6 +632,25 @@ pub struct AurawApp {
     pending_android_profile_reload: Option<(Option<PathBuf>, SidecarEditState)>,
 }
 
+fn collect_pipeline_update_results(
+    operation: &'static str,
+    updates: Vec<(&'static str, anyhow::Result<()>)>,
+) -> anyhow::Result<()> {
+    let failures = updates
+        .into_iter()
+        .filter_map(|(pipeline, result)| {
+            result
+                .err()
+                .map(|error| format!("{pipeline}: {operation}: {error:#}"))
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(failures.join("; ")))
+    }
+}
+
 impl AurawApp {
     pub(crate) fn activate_tab(&mut self, tab: AppTab) {
         if self.active_tab == tab {
@@ -687,3 +706,68 @@ include!("app/processing_export.rs");
 include!("app/library_adjustments.rs");
 include!("app/sidecar_persistence.rs");
 include!("app/eframe_impl.rs");
+
+#[cfg(test)]
+mod transactional_pipeline_tests {
+    use super::collect_pipeline_update_results;
+
+    #[test]
+    fn each_present_pipeline_failure_has_operation_context() {
+        for failed in ["main", "detail", "navigation"] {
+            let result = collect_pipeline_update_results(
+                "install inpaint layer",
+                ["main", "detail", "navigation"]
+                    .into_iter()
+                    .map(|name| {
+                        let result = if name == failed {
+                            Err(anyhow::anyhow!("injected failure"))
+                        } else {
+                            Ok(())
+                        };
+                        (name, result)
+                    })
+                    .collect(),
+            );
+            let message = format!("{:#}", result.unwrap_err());
+            assert!(message.contains(failed));
+            assert!(message.contains("install inpaint layer"));
+        }
+    }
+
+    #[test]
+    fn absent_optional_pipelines_need_no_placeholder_update() {
+        assert!(collect_pipeline_update_results(
+            "install output transform",
+            vec![("main", Ok(()))],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_later_retry_can_succeed_after_partial_failure_without_advancing_revision() {
+        let mut rendered_revision = Some(41_u64);
+        let requested_revision = 42_u64;
+        let first = collect_pipeline_update_results(
+            "install output transform",
+            vec![
+                ("main", Ok(())),
+                ("detail", Err(anyhow::anyhow!("injected failure"))),
+            ],
+        );
+        if first.is_ok() {
+            rendered_revision = Some(requested_revision);
+        }
+        assert!(first.is_err());
+        assert_eq!(rendered_revision, Some(41));
+
+        let retry = collect_pipeline_update_results(
+            "install output transform",
+            vec![("main", Ok(())), ("detail", Ok(()))],
+        );
+        if retry.is_ok() {
+            rendered_revision = Some(requested_revision);
+        }
+        assert!(retry.is_ok());
+        assert_eq!(rendered_revision, Some(requested_revision));
+    }
+}
