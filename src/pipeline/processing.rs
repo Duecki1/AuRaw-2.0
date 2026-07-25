@@ -41,6 +41,9 @@ pub fn affected_stage(before: &ExposureParams, after: &ExposureParams) -> Option
 fn raw_controls_changed(before: &ExposureParams, after: &ExposureParams) -> bool {
     before.black_point != after.black_point
         || before.chroma_denoise != after.chroma_denoise
+        || before.luminance_denoise != after.luminance_denoise
+        || before.denoise_detail != after.denoise_detail
+        || before.denoise_quality != after.denoise_quality
         || before.demosaic_mode != after.demosaic_mode
         || before.dual_threshold != after.dual_threshold
         || before.frequency_chroma != after.frequency_chroma
@@ -109,10 +112,17 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         black_levels: raw.black_levels,
         black_levels_per_pixel,
         white_levels: raw.white_levels,
+        noise_profile: raw.noise_profile,
         camera_profile: raw.camera_profile.clone(),
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
+        // A lens map is normalized to the full sensor raster. A spatial crop
+        // needs an origin-aware view of that map, so do not attach the full-map
+        // normalization to cropped scratch RAWs where it would be misleading.
+        lens_geometry: (x == 0 && y == 0 && width == raw.width && height == raw.height)
+            .then(|| raw.lens_geometry.clone())
+            .flatten(),
     }
 }
 
@@ -242,10 +252,17 @@ pub fn build_region_proxy(
         black_levels: raw.black_levels,
         black_levels_per_pixel: CompactPixelMap::compact_from_dense(width, height, black_levels_per_pixel, 64),
         white_levels: raw.white_levels,
+        noise_profile: raw.noise_profile.scaled_variance(1.0 / (scale * scale) as f32),
         camera_profile: raw.camera_profile.clone(),
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
+        lens_geometry: (x == 0
+            && y == 0
+            && region_width == raw.width
+            && region_height == raw.height)
+            .then(|| raw.lens_geometry.clone())
+            .flatten(),
     }
 }
 
@@ -294,8 +311,8 @@ const DEMOSAIC_CHAIN_SUPPORT: u32 = 32;
 // reach one additional guide cell, so its raw-pixel support is 24/32.
 const TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 };
 // Scale-aware Clarity has the widest presence footprint: the B3 kernel reaches
-// +/-2 times a step capped at 12 pixels. Texture and Dehaze remain inside it.
-const LOCAL_EFFECTS_SUPPORT: u32 = 24;
+// +/-2 times a step capped at 14 pixels. Texture and Dehaze remain inside it.
+const LOCAL_EFFECTS_SUPPORT: u32 = 28;
 // Glow cascades five B3 diffusion stages. At the capped 3x reference scale the
 // steps are 3+3+6+12+24, and each 5x5 stage reaches +/-2*step. Support therefore
 // accumulates to 96 pixels from the extracted highlight source.
@@ -472,10 +489,14 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
             tile.padded_height,
         ),
         white_levels: raw.white_levels,
+        noise_profile: raw.noise_profile,
         camera_profile: raw.camera_profile.clone(),
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
+        // Export tiles use global coordinates for masks and are stitched back
+        // into one native raster before the deferred lens map is applied.
+        lens_geometry: None,
     };
     fill_padded_tile(raw, tile, &mut tile_raw);
     tile_raw
@@ -589,10 +610,12 @@ mod tests {
                 vec![0.0; (width * height) as usize],
             ),
             white_levels: [1023.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         }
     }
 
@@ -671,9 +694,27 @@ mod tests {
     #[test]
     fn raw_controls_invalidate_every_downstream_stage() {
         let before = ExposureParams::default();
-        let mut after = before;
-        after.black_point = 0.01;
-        assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Raw));
+
+        let mut black_point = before;
+        black_point.black_point = 0.01;
+        assert_eq!(
+            affected_stage(&before, &black_point),
+            Some(ProcessingStage::Raw)
+        );
+
+        let mut luminance_denoise = before;
+        luminance_denoise.luminance_denoise = 25.0;
+        assert_eq!(
+            affected_stage(&before, &luminance_denoise),
+            Some(ProcessingStage::Raw)
+        );
+
+        let mut denoise_quality = before;
+        denoise_quality.denoise_quality = crate::pipeline::DenoiseQuality::High;
+        assert_eq!(
+            affected_stage(&before, &denoise_quality),
+            Some(ProcessingStage::Raw)
+        );
     }
 
     #[test]
@@ -747,10 +788,12 @@ mod tests {
             black_levels: [0.0; 4],
             black_levels_per_pixel: CompactPixelMap::dense(width, height, (0..width * height).map(|value| value as f32).collect()),
             white_levels: [1023.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         };
 
         let cropped = crop_raw(&raw, 1, 1, 2, 2);
@@ -805,10 +848,12 @@ mod tests {
             black_levels: [0.0; 4],
             black_levels_per_pixel: CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
             white_levels: [1023.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         };
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 4 });

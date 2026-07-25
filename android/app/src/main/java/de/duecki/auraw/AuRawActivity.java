@@ -56,7 +56,8 @@ public final class AuRawActivity extends NativeActivity {
     private static final int MAX_DCP_TREE_DEPTH = 16;
     private static final String CAMERA_PROFILE_MIRROR_PREFIX = "camera-profiles-";
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
-    private static final int MAX_THUMBNAIL_CACHE_FILES = 512;
+    private static final int MAX_THUMBNAIL_CACHE_ENTRIES = 512;
+    private static final long MAX_THUMBNAIL_CACHE_BYTES = 128L * 1024L * 1024L;
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
     private static final String LEGACY_MEDIASTORE_RAW_RELATIVE_PATH =
             Environment.DIRECTORY_DOWNLOADS + "/AuRaw/";
@@ -1248,10 +1249,7 @@ public final class AuRawActivity extends NativeActivity {
     }
 
     private File thumbnailCachePath(String identity, String suffix) throws Exception {
-        File directory = new File(getCacheDir(), "library-thumbnails");
-        if (!directory.isDirectory() && !directory.mkdirs()) {
-            throw new IllegalStateException("Could not create the thumbnail cache");
-        }
+        File directory = persistentThumbnailCacheDirectory();
         byte[] digest = MessageDigest.getInstance("SHA-256").digest(
                 identity.getBytes(StandardCharsets.UTF_8));
         StringBuilder name = new StringBuilder();
@@ -1259,24 +1257,98 @@ public final class AuRawActivity extends NativeActivity {
             name.append(String.format(Locale.ROOT, "%02x", value & 0xff));
         }
         File cached = new File(directory, name.append(suffix).toString());
-        if (cached.isFile()) {
-            cached.setLastModified(System.currentTimeMillis());
-        }
+        migrateLegacyThumbnailCacheEntry(cached);
+        touchThumbnailCacheEntry(cached);
         trimThumbnailCache(directory);
         return cached;
     }
 
-    private static void trimThumbnailCache(File directory) {
-        File[] files = directory.listFiles(File::isFile);
-        if (files == null || files.length <= MAX_THUMBNAIL_CACHE_FILES) {
+    /**
+     * Thumbnail PNGs are regenerable, but keeping them in no-backup app storage
+     * prevents Android's cache scavenger from discarding the whole library
+     * between launches. They still disappear when app data is cleared or the
+     * app is uninstalled, and the bounded LRU below prevents unbounded growth.
+     */
+    private File persistentThumbnailCacheDirectory() {
+        File directory = new File(getNoBackupFilesDir(), "library-thumbnails");
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IllegalStateException("Could not create the persistent thumbnail cache");
+        }
+        return directory;
+    }
+
+    /** Lazily preserves cache entries written by releases that used getCacheDir(). */
+    private void migrateLegacyThumbnailCacheEntry(File destination) {
+        File legacyDirectory = new File(getCacheDir(), "library-thumbnails");
+        if (!legacyDirectory.isDirectory()) {
             return;
         }
-        Arrays.sort(files, (left, right) -> Long.compare(left.lastModified(), right.lastModified()));
-        int remove = files.length - MAX_THUMBNAIL_CACHE_FILES;
-        for (int index = 0; index < remove; index++) {
-            if (!files[index].delete() && files[index].exists()) {
-                files[index].deleteOnExit();
+        migrateLegacyThumbnailCacheFile(
+                new File(legacyDirectory, destination.getName()), destination);
+        File destinationFingerprint = new File(destination.getPath() + ".fingerprint");
+        migrateLegacyThumbnailCacheFile(
+                new File(legacyDirectory, destination.getName() + ".fingerprint"),
+                destinationFingerprint);
+    }
+
+    private static void migrateLegacyThumbnailCacheFile(File source, File destination) {
+        if (destination.isFile() || !source.isFile()) {
+            return;
+        }
+        try {
+            moveOrCopyLegacyFile(source, destination, MAX_THUMBNAIL_CACHE_BYTES);
+        } catch (Exception error) {
+            Log.w(LOG_TAG, "Could not migrate legacy thumbnail cache entry", error);
+        }
+    }
+
+    private static void touchThumbnailCacheEntry(File cached) {
+        if (!cached.isFile()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        cached.setLastModified(now);
+        File fingerprint = new File(cached.getPath() + ".fingerprint");
+        if (fingerprint.isFile()) {
+            fingerprint.setLastModified(now);
+        }
+    }
+
+    private static void trimThumbnailCache(File directory) {
+        File[] thumbnails = directory.listFiles((parent, name) -> name.endsWith(".png"));
+        if (thumbnails != null && thumbnails.length > MAX_THUMBNAIL_CACHE_ENTRIES) {
+            Arrays.sort(
+                    thumbnails,
+                    (left, right) -> Long.compare(left.lastModified(), right.lastModified()));
+            int remove = thumbnails.length - MAX_THUMBNAIL_CACHE_ENTRIES;
+            for (int index = 0; index < remove; index++) {
+                deleteThumbnailCacheEntry(thumbnails[index]);
             }
+        }
+
+        // A crash between the PNG and fingerprint writes may leave an orphan.
+        File[] fingerprints = directory.listFiles(
+                (parent, name) -> name.endsWith(".developed.png.fingerprint"));
+        if (fingerprints == null) {
+            return;
+        }
+        for (File fingerprint : fingerprints) {
+            String name = fingerprint.getName();
+            String thumbnailName = name.substring(0, name.length() - ".fingerprint".length());
+            if (!new File(directory, thumbnailName).isFile()) {
+                deleteCacheFile(fingerprint);
+            }
+        }
+    }
+
+    private static void deleteThumbnailCacheEntry(File thumbnail) {
+        deleteCacheFile(thumbnail);
+        deleteCacheFile(new File(thumbnail.getPath() + ".fingerprint"));
+    }
+
+    private static void deleteCacheFile(File file) {
+        if (!file.delete() && file.exists()) {
+            file.deleteOnExit();
         }
     }
 

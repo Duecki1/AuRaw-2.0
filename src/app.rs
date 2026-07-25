@@ -10,11 +10,11 @@ use crate::inpainting::{
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_jpeg_export, spawn_tiled_png_export, BrushDab, BrushMode, CameraProfileMode, CfaKind,
-    ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog,
-    LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
-    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, GeometryTransform, EXPORT_TILE_HALO,
-    MAX_LOCAL_MASKS,
+    spawn_tiled_jpeg_export, spawn_tiled_png_export, spawn_tiled_tiff_export, BrushDab, BrushMode,
+    CameraProfileMode, ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams,
+    GeometryTransform, GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog, LensfunLens,
+    LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality,
+    ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{
     AdjustmentCopySettings, EditState as SidecarEditState, LensEditState as SidecarLensEditState,
@@ -75,9 +75,14 @@ impl PreviewQuality {
 
     pub const fn detail_edge(self) -> u32 {
         match (self, cfg!(target_os = "android")) {
-            (Self::Fast, true) => 1080,
-            (Self::Balanced, true) => 1600,
-            (Self::High, true) => 2048,
+            // Zoom detail coexists with the full preview and navigation proxy.
+            // The hybrid branch's additional scene/display working textures make
+            // the former 1600/2048 limits exceed the Android GPU budget before a
+            // crop can be shown. These still meet or exceed common phone viewport
+            // resolution while leaving room for inpainting's 512px work surface.
+            (Self::Fast, true) => 960,
+            (Self::Balanced, true) => 1152,
+            (Self::High, true) => 1280,
             (Self::Fast, false) => 1920,
             (Self::Balanced, false) => 2560,
             (Self::High, false) => 3072,
@@ -476,6 +481,22 @@ pub struct AurawApp {
     raw_cache: VecDeque<CachedRawDecode>,
     raw_cache_limit: usize,
     performance_settings_path: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_color_management: bool,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_override: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_label: String,
+    #[cfg(not(target_os = "android"))]
+    display_profile_source: Option<String>,
+    #[cfg(not(target_os = "android"))]
+    display_profile_fingerprint: Option<u64>,
+    #[cfg(not(target_os = "android"))]
+    display_profile_last_probe: Option<Instant>,
+    #[cfg(not(target_os = "android"))]
+    display_profile_last_screen_point: Option<[i32; 2]>,
+    #[cfg(not(target_os = "android"))]
+    display_output_transform: crate::pipeline::IccOutputTransform,
     pub(crate) camera_profile_mode: CameraProfileMode,
     pub(crate) camera_profile_folder: Option<PathBuf>,
     pub(crate) camera_profile_folder_label: Option<String>,
@@ -616,6 +637,25 @@ pub struct AurawApp {
     pending_android_profile_reload: Option<(Option<PathBuf>, SidecarEditState)>,
 }
 
+fn collect_pipeline_update_results(
+    operation: &'static str,
+    updates: Vec<(&'static str, anyhow::Result<()>)>,
+) -> anyhow::Result<()> {
+    let failures = updates
+        .into_iter()
+        .filter_map(|(pipeline, result)| {
+            result
+                .err()
+                .map(|error| format!("{pipeline}: {operation}: {error:#}"))
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(failures.join("; ")))
+    }
+}
+
 impl AurawApp {
     pub(crate) fn activate_tab(&mut self, tab: AppTab) {
         if self.active_tab == tab {
@@ -671,3 +711,68 @@ include!("app/processing_export.rs");
 include!("app/library_adjustments.rs");
 include!("app/sidecar_persistence.rs");
 include!("app/eframe_impl.rs");
+
+#[cfg(test)]
+mod transactional_pipeline_tests {
+    use super::collect_pipeline_update_results;
+
+    #[test]
+    fn each_present_pipeline_failure_has_operation_context() {
+        for failed in ["main", "detail", "navigation"] {
+            let result = collect_pipeline_update_results(
+                "install inpaint layer",
+                ["main", "detail", "navigation"]
+                    .into_iter()
+                    .map(|name| {
+                        let result = if name == failed {
+                            Err(anyhow::anyhow!("injected failure"))
+                        } else {
+                            Ok(())
+                        };
+                        (name, result)
+                    })
+                    .collect(),
+            );
+            let message = format!("{:#}", result.unwrap_err());
+            assert!(message.contains(failed));
+            assert!(message.contains("install inpaint layer"));
+        }
+    }
+
+    #[test]
+    fn absent_optional_pipelines_need_no_placeholder_update() {
+        assert!(collect_pipeline_update_results(
+            "install output transform",
+            vec![("main", Ok(()))],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_later_retry_can_succeed_after_partial_failure_without_advancing_revision() {
+        let mut rendered_revision = Some(41_u64);
+        let requested_revision = 42_u64;
+        let first = collect_pipeline_update_results(
+            "install output transform",
+            vec![
+                ("main", Ok(())),
+                ("detail", Err(anyhow::anyhow!("injected failure"))),
+            ],
+        );
+        if first.is_ok() {
+            rendered_revision = Some(requested_revision);
+        }
+        assert!(first.is_err());
+        assert_eq!(rendered_revision, Some(41));
+
+        let retry = collect_pipeline_update_results(
+            "install output transform",
+            vec![("main", Ok(())), ("detail", Ok(()))],
+        );
+        if retry.is_ok() {
+            rendered_revision = Some(requested_revision);
+        }
+        assert!(retry.is_ok());
+        assert_eq!(rendered_revision, Some(requested_revision));
+    }
+}

@@ -16,13 +16,14 @@ def test_color_mixer_does_not_process_in_mathematical_hsl() -> None:
 
 
 def test_neutral_mixer_is_an_exact_no_op() -> None:
-    neutral_branch = re.search(
-        r"fn apply_color_mixer\([^}]+color_mixer_strength\(\);(.+?)let sample",
+    node = re.search(
+        r"fn apply_color_mixer_values\((.+?)\n}\n\nfn apply_color_mixer",
         ADJUSTMENTS,
         flags=re.DOTALL,
     )
-    assert neutral_branch is not None
-    assert "return rgb;" in neutral_branch.group(1)
+    assert node is not None
+    assert "let strengths = vec3<f32>" in node.group(1)
+    assert "return rgb;" in node.group(1)
     assert "max_abs_vec4" in ADJUSTMENTS
 
 
@@ -37,17 +38,17 @@ def test_selector_is_spatially_stable_but_center_detail_is_not_blurred() -> None
 
 def test_luminance_is_ratio_preserving_and_gamut_mapping_is_constant_hue() -> None:
     assert "adjusted = adjusted * exp2(mixer_luminance_ev" in ADJUSTMENTS
-    assert "fn nonnegative_rec2020_from_oklab" in ADJUSTMENTS
-    assert "binary search" in ADJUSTMENTS
+    assert "perceptual_rec2020_from_oklab_nonnegative" in ADJUSTMENTS
+    assert "perceptual_gamut_compress_nonnegative_rec2020" in ADJUSTMENTS
     assert "clamp(hsl.z" not in ADJUSTMENTS
 
 
 def test_gpu_schedules_full_precision_base_effects_then_mixer_render() -> None:
-    prepare = GPU.index('"prepare_adjustment_base"')
-    sharpen_tone = GPU.index('"apply_capture_sharpen_and_tone"', prepare)
-    effects = GPU.index('"apply_lightroom_effects"', sharpen_tone)
+    prepare = GPU.index('"prepare_scene_node"')
+    sharpen_tone = GPU.index('"apply_scene_tone_node"', prepare)
+    effects = GPU.index('"apply_scene_effects_node"', sharpen_tone)
     creative = GPU.index('"apply_creative_effects"', effects)
-    render = GPU.index('"apply_lightroom_adjustments"', creative)
+    render = GPU.index('"apply_view_node"', creative)
     assert prepare < sharpen_tone < effects < creative < render
     assert "work_shader_source(SHADER_ADJUSTMENTS, work_format)" in GPU
     # Two existing demosaic scratch textures are reused after the RAW stage:

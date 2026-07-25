@@ -15,20 +15,24 @@ struct ToneHistogram {
 fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(tone_scene_tex, clamp_pos(pos), 0).xyz;
 
-    // Sensor black calibration has already happened per CFA plane. Include
-    // every fixed camera-profile rendering stage and DNG default exposure so
-    // the adaptive bounds describe the same signal that reaches the display
-    // transform. Deliberately omit only the user's creative Exposure control,
-    // keeping the histogram stable while that slider moves.
-    // Match the rendered DCP order and colour domain. Global white balance is
-    // already represented by the camera-specific transform in GpuParams.
+    // Sensor black calibration has already happened per CFA plane. In the
+    // explicit-domain graph, tone statistics are measured after camera
+    // characterization and fixed DNG rendering exposure only. Profile LookTable
+    // and ProfileToneCurve are intentionally excluded so H/S/W/B, Contrast,
+    // curves, and presence controls keep stable scene semantics across profiles.
+    // Legacy process versions retain their historical fully-profiled analysis
+    // path so existing edits do not change appearance. User Exposure remains
+    // omitted in both paths and is reintroduced analytically by tonemap.wgsl.
     let working = cam_to_working(camera_rgb);
-    let hue_sat = apply_profile_hue_sat(working);
+    let characterized = apply_camera_characterization(working);
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
-    let exposed = hue_sat * exp2(profile_exposure_ev);
-    let looked = apply_profile_look(exposed);
-    let curved = apply_profile_tone_curve(looked);
-    return max(map_negative_gamut(curved), vec3<f32>(0.0));
+    let exposed = characterized * exp2(profile_exposure_ev);
+    if uses_explicit_scene_display_domains() {
+        return map_negative_gamut(exposed);
+    }
+    let looked = apply_optional_profile_look(exposed);
+    let curved = apply_profile_view_tone(looked);
+    return map_negative_gamut(curved);
 }
 
 @compute @workgroup_size(8, 8, 1)

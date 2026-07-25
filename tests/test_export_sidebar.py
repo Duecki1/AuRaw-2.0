@@ -88,7 +88,7 @@ def test_raw_mosaic_has_no_final_output_resizer() -> None:
 
 def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
     assert APP.count("export_settings: ExportSettings::default()") == 2
-    assert "self.export_settings," in APP
+    assert "self.export_settings.clone()," in APP
     assert "ExportMetadata::from_raw" in APP
     assert "settings.keep_metadata" in EXPORT
     assert "settings.jpeg_quality" in EXPORT
@@ -112,7 +112,7 @@ def test_export_halo_covers_cumulative_spatial_support() -> None:
     assert "const EXPORT_CUMULATIVE_SUPPORT" in PROCESSING
     assert "EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8" in PROCESSING
     assert 'TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 }' in PROCESSING
-    assert "LOCAL_EFFECTS_SUPPORT: u32 = 24" in PROCESSING
+    assert "LOCAL_EFFECTS_SUPPORT: u32 = 28" in PROCESSING
     assert "GLOW_SUPPORT: u32 = 96" in PROCESSING
     assert "(MIN_EXPORT_TILE_HALO..=512).contains(&spec.halo)" in EXPORT
     assert "required_export_tile_halo(exposure, masks)" in EXPORT
@@ -137,3 +137,9 @@ def test_export_sidebar_shows_live_progress_bar() -> None:
     assert "Preparing export…" in SIDEBAR
     assert "tiles" in SIDEBAR
 
+
+
+def test_export_sidebar_uses_post_crop_geometry_dimensions() -> None:
+    sidebar = (ROOT / "src/ui/sidebar/export.rs").read_text(encoding="utf-8")
+    assert "app.geometry.crop_pixel_dimensions(raw.width, raw.height)" in sidebar
+    assert ".map(|raw| (raw.width, raw.height))" not in sidebar

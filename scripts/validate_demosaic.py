@@ -27,6 +27,7 @@ x4 = text("src/shaders/xtrans_pass4.wgsl")
 x5 = text("src/shaders/xtrans_pass5.wgsl")
 x6 = text("src/shaders/xtrans_pass6.wgsl")
 x7 = text("src/shaders/xtrans_pass7.wgsl")
+dual = text("src/shaders/dual_demosaic.wgsl")
 gpu = text("src/pipeline/gpu.rs")
 common = text("src/shaders/common.wgsl")
 
@@ -60,7 +61,28 @@ require("X-Trans FDC uses a 13x13 carrier window and median cleanup",
 require("X-Trans dual mask uses radius-2 Gaussian normalization",
         "xt_gaussian5_weight" in x7 and "detail /= 256.0" in x7)
 
+require("Dual demosaic builds a dedicated full-resolution green guide",
+        "dual_green_reconstruct" in dual and "dual_green_write" in dual)
+require("Dual demosaic builds a dedicated robust RGB buffer",
+        "dual_rgb_reconstruct" in dual and "dual_low_write" in dual)
+require("Dual low branch uses symmetric gradient support",
+        "q0 = pos + vec2<i32>(dx, dy)" in dual and "q1 = pos - vec2<i32>(dx, dy)" in dual)
+require("Dual low branch is sensor-noise aware",
+        "params.noise_read" in dual and "params.noise_shot" in dual)
+require("Dual low branch exports reconstruction confidence",
+        "red.confidence" in dual and "green_sample.a" in dual)
+require("Bayer finish consumes the independent low buffer",
+        "dual_low_read" in p4 and "mix(low.rgb, reference" in p4)
+require("X-Trans finish consumes the independent low buffer",
+        "xtrans_dual_low_read" in x7 and "mix(low.rgb, reference" in x7)
+require("Dual passes are skipped unless Dual mode is enabled",
+        "needs_dual_demosaic_passes" in gpu
+        and "self.demosaic_dual_start_index" in gpu
+        and "if params.needs_dual_demosaic_passes()" in gpu)
+
 for entry in (
+    "dual_green_reconstruct",
+    "dual_rgb_reconstruct",
     "xtrans_seed",
     "xtrans_markesteijn_pass1",
     "xtrans_markesteijn_pass2",

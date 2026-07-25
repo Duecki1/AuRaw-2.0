@@ -3,10 +3,9 @@ use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::{
     apply_lensfun_correction, build_proxy, compose_inpaint_strokes, is_supported_raw_path,
-    lensfun_catalog, load_raw_display_dimensions, load_raw_file_with_profile_selection,
-    load_raw_thumbnail, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage,
-    MaskStack, ProcessingQuality, ProxySpec,
-    RawGpuPipeline, MAX_LOCAL_MASKS,
+    lensfun_catalog, load_raw_display_dimensions, load_raw_embedded_thumbnail,
+    load_raw_file_with_profile_selection, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry,
+    MaskRgbImage, MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
 };
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
 use std::cmp::Ordering as CmpOrdering;
@@ -1277,7 +1276,8 @@ fn render_uncached_developed_thumbnail(
     let mut masks = Arc::unwrap_or_clone(edits.masks);
     let inpaint_strokes = Arc::unwrap_or_clone(edits.inpainting);
     let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
-    let initial_params = GpuParams::new(&edits.exposure, &masks, &preview_raw);
+    let initial_params = GpuParams::new(&edits.exposure, &masks, &preview_raw)
+        .with_vignette_geometry(geometry);
     let gpu = developed_thumbnail_gpu()?;
     let gpu = gpu
         .lock()
@@ -1329,13 +1329,18 @@ fn render_uncached_developed_thumbnail(
             .update_mask_layer(&gpu.queue, layer, &values)
             .map_err(|error| format!("could not apply thumbnail local mask: {error:#}"))?;
     }
-    let params = GpuParams::new(&edits.exposure, &masks, &preview_raw);
+    let params = GpuParams::new(&edits.exposure, &masks, &preview_raw)
+        .with_vignette_geometry(geometry);
     pipeline.recompute(&gpu.queue, &gpu.device, &params);
     let thumbnail = pipeline
         .output_snapshot()
         .read_thumbnail_blocking(&gpu.device, &gpu.queue, maximum_edge)
         .map_err(|error| format!("could not read edited thumbnail pixels: {error:#}"))?;
-    let thumbnail = crate::pipeline::transform_thumbnail_geometry(&thumbnail, geometry);
+    let thumbnail = crate::pipeline::transform_thumbnail_geometry_with_lens(
+        &thumbnail,
+        geometry,
+        preview_raw.lens_geometry.as_deref(),
+    );
     crate::sidecar::save_developed_thumbnail_cache(path, &thumbnail, sidecar_fingerprint)?;
     Ok(Some(thumbnail))
 }
@@ -1376,8 +1381,8 @@ fn load_desktop_library_thumbnail(
         ),
     }
 
-    let thumbnail =
-        load_raw_thumbnail(path, THUMBNAIL_EDGE).map_err(|error| format!("{error:#}"))?;
+    let thumbnail = load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)
+        .map_err(|error| format!("embedded RAW preview unavailable: {error:#}"))?;
     if let Err(error) = crate::thumbnail_cache::save_desktop_raw_thumbnail(path, &thumbnail) {
         log::warn!(
             "could not persist RAW thumbnail cache for {}: {error}",
@@ -1824,6 +1829,7 @@ fn library_export_jobs(
         dialog = match format {
             ExportFormat::Png => dialog.add_filter("PNG image", &["png"]),
             ExportFormat::Jpeg => dialog.add_filter("JPEG image", &["jpg", "jpeg"]),
+            ExportFormat::Tiff => dialog.add_filter("TIFF image", &["tif", "tiff"]),
         };
         let mut destination = dialog.save_file()?;
         let valid_extension = destination
@@ -1834,6 +1840,10 @@ fn library_export_jobs(
                 ExportFormat::Jpeg => {
                     extension.eq_ignore_ascii_case("jpg")
                         || extension.eq_ignore_ascii_case("jpeg")
+                }
+                ExportFormat::Tiff => {
+                    extension.eq_ignore_ascii_case("tif")
+                        || extension.eq_ignore_ascii_case("tiff")
                 }
             });
         if !valid_extension {
@@ -2022,7 +2032,7 @@ impl Library {
             );
 
             let mut protected_thumbnail_indices = HashSet::new();
-            let scroll = egui::ScrollArea::vertical()
+            egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show_viewport(ui, |ui, viewport| {
                     let (content_rect, _) = ui.allocate_exact_size(
@@ -2233,7 +2243,7 @@ impl Library {
                     if !paths.is_empty() {
                         app.library.export_dialog = Some(LibraryExportDialog {
                             paths,
-                            settings: app.export_settings,
+                            settings: app.export_settings.clone(),
                             format: ExportFormat::Jpeg,
                         });
                     }
@@ -2365,7 +2375,7 @@ impl Library {
                     if !targets.is_empty() {
                         app.library.export_dialog = Some(LibraryExportDialog {
                             targets,
-                            settings: app.export_settings,
+                            settings: app.export_settings.clone(),
                             format: ExportFormat::Jpeg,
                         });
                     }
@@ -2494,7 +2504,20 @@ impl Library {
                             ui.label("Format");
                             ui.selectable_value(&mut dialog.format, ExportFormat::Jpeg, "JPEG");
                             ui.selectable_value(&mut dialog.format, ExportFormat::Png, "PNG");
+                            ui.selectable_value(&mut dialog.format, ExportFormat::Tiff, "TIFF");
                         });
+                        match dialog.format {
+                            ExportFormat::Jpeg => {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                            }
+                            ExportFormat::Png
+                                if dialog.settings.bit_depth
+                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
+                            {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                            }
+                            _ => {}
+                        }
                         ui.add_space(6.0);
                         crate::ui::sidebar::export_settings_controls(
                             ui,
@@ -2502,6 +2525,18 @@ impl Library {
                             None,
                             false,
                         );
+                        match dialog.format {
+                            ExportFormat::Jpeg => {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                            }
+                            ExportFormat::Png
+                                if dialog.settings.bit_depth
+                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
+                            {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                            }
+                            _ => {}
+                        }
                         ui.add_space(10.0);
                         ui.label(
                             egui::RichText::new(if count > 1 {
@@ -2536,7 +2571,7 @@ impl Library {
                         app.library.export_dialog = None;
                         app.start_library_exports(
                             jobs,
-                            dialog.settings,
+                            dialog.settings.clone(),
                             dialog.format,
                             frame,
                         );
@@ -2653,7 +2688,20 @@ impl Library {
                             ui.label("Format");
                             ui.selectable_value(&mut dialog.format, ExportFormat::Jpeg, "JPEG");
                             ui.selectable_value(&mut dialog.format, ExportFormat::Png, "PNG");
+                            ui.selectable_value(&mut dialog.format, ExportFormat::Tiff, "TIFF");
                         });
+                        match dialog.format {
+                            ExportFormat::Jpeg => {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                            }
+                            ExportFormat::Png
+                                if dialog.settings.bit_depth
+                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
+                            {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                            }
+                            _ => {}
+                        }
                         ui.add_space(6.0);
                         crate::ui::sidebar::export_settings_controls(
                             ui,
@@ -2661,6 +2709,18 @@ impl Library {
                             None,
                             false,
                         );
+                        match dialog.format {
+                            ExportFormat::Jpeg => {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                            }
+                            ExportFormat::Png
+                                if dialog.settings.bit_depth
+                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
+                            {
+                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                            }
+                            _ => {}
+                        }
                         ui.add_space(10.0);
                         ui.label(
                             egui::RichText::new(
@@ -2693,7 +2753,7 @@ impl Library {
                     app.library.export_dialog = None;
                     app.start_android_library_exports(
                         dialog.targets,
-                        dialog.settings,
+                        dialog.settings.clone(),
                         dialog.format,
                     );
                 }

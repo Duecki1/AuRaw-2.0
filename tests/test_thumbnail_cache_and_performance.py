@@ -15,15 +15,30 @@ def test_unedited_desktop_thumbnails_are_persisted() -> None:
     assert ".auraw-raw-thumb.png" in THUMBNAIL_CACHE
     assert "load_desktop_raw_thumbnail" in LIBRARY
     assert "save_desktop_raw_thumbnail" in LIBRARY
-    assert LIBRARY.index("load_desktop_raw_thumbnail") < LIBRARY.index("load_raw_thumbnail(path")
+    assert LIBRARY.index("load_desktop_raw_thumbnail") < LIBRARY.index("load_raw_embedded_thumbnail(path")
 
 
-def test_android_thumbnail_cache_survives_library_refresh() -> None:
+def test_android_thumbnail_cache_survives_refresh_restart_and_cache_scavenging() -> None:
     assert "rawThumbnailCachePath" in ACTIVITY
+    assert 'new File(getNoBackupFilesDir(), "library-thumbnails")' in ACTIVITY
     assert 'new File(getCacheDir(), "library-thumbnails")' in ACTIVITY
+    assert "migrateLegacyThumbnailCacheEntry" in ACTIVITY
+    assert "MAX_THUMBNAIL_CACHE_ENTRIES" in ACTIVITY
+    assert "deleteThumbnailCacheEntry" in ACTIVITY
     assert "load_png(&cache_path" in ANDROID
     assert "save_png(&cache_path" in ANDROID
     assert "materializeRawLibraryThumbnail" in ACTIVITY
+
+
+def test_library_unedited_thumbnails_never_unpack_sensor_pixels() -> None:
+    assert "load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)" in LIBRARY
+    desktop_loader = LIBRARY[
+        LIBRARY.index("fn load_desktop_library_thumbnail"):
+        LIBRARY.index("fn load_android_library_thumbnail")
+    ]
+    assert "load_raw_thumbnail(path" not in desktop_loader
+    assert "load_raw_embedded_thumbnail(&path, maximum_edge)" in ANDROID
+    assert "load_raw_embedded_thumbnail(&temporary, maximum_edge)" in ANDROID
 
 
 def test_android_embedded_previews_are_not_blocked_by_full_sensor_pixel_budget() -> None:

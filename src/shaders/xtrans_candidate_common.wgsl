@@ -108,7 +108,7 @@ fn mark_candidate(pos: vec2<i32>, index: u32) -> vec3<f32> {
         measured_channel,
         mark_component(center, measured_channel),
     );
-    return max(candidate, vec3<f32>(0.0));
+    return candidate;
 }
 
 fn mark_yuv(rgb: vec3<f32>) -> vec3<f32> {
@@ -138,5 +138,5 @@ fn mark_border_rgb(pos: vec2<i32>) -> vec3<f32> {
     var rgb = sum / max(weight_sum, vec3<f32>(1e-6));
     let measured_channel = color_at(pos);
     rgb = mark_set_component(rgb, measured_channel, raw_cfa_at(pos));
-    return max(rgb, vec3<f32>(0.0));
+    return rgb;
 }

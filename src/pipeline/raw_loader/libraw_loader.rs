@@ -3,6 +3,7 @@ use super::{
     CameraProfileMode, CameraWhiteBalanceModel, CfaKind, CompactPixelMap, DngColorEndpoint, LoadedRaw, RawThumbnail,
     MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
 };
+use super::super::noise::NoiseProfile;
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
 use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
@@ -295,12 +296,18 @@ pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
     })
 }
 
-/// Loads a display-ready sRGB thumbnail without unpacking the sensor data when
-/// the RAW contains an embedded preview. Files without a usable embedded
-/// preview fall back to LibRaw's half-size preview processing on this worker
-/// thread. Android only permits that sensor-unpack fallback for small RAWs;
-/// large preview-less files keep a placeholder instead of risking an
-/// out-of-memory termination while a Develop image is resident.
+/// Loads only the camera-generated preview embedded in a RAW. This never
+/// unpacks or processes the sensor pixels, which keeps library browsing fast
+/// and bounded even for very large files.
+pub fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+    validate_input_file(path, MAX_RAW_FILE_BYTES, "embedded RAW thumbnail input")?;
+    anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");
+    load_embedded_thumbnail(path, maximum_edge)
+}
+
+/// Loads a display-ready sRGB thumbnail, preferring the embedded preview but
+/// retaining the sensor-processing fallback for non-library callers that need
+/// a thumbnail even when the camera stored no usable preview.
 pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW thumbnail input")?;
     anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");
@@ -1262,6 +1269,19 @@ unsafe fn loaded_raw_from_context(
         white_levels(color.maximum, linear_max, physical_black_levels),
         cfa_map,
     );
+    let noise_profile = NoiseProfile::estimate(
+        width,
+        height,
+        &raw_pixels,
+        &color_indices,
+        &black_levels_per_pixel,
+        white_levels,
+        finite_positive_or_zero(other.iso_speed),
+        match cfa_kind {
+            CfaKind::Bayer => 2,
+            CfaKind::XTrans => 6,
+        },
+    );
 
     let mut camera_profile = dcp_profile
         .map(|profile| CameraProfile::from_dcp(profile, profile_weight))
@@ -1310,10 +1330,12 @@ unsafe fn loaded_raw_from_context(
         black_levels,
         black_levels_per_pixel,
         white_levels,
+        noise_profile,
         camera_profile,
         camera_profile_source: None,
         available_camera_profiles: Vec::new(),
         white_balance_model,
+        lens_geometry: None,
     })
 }
 

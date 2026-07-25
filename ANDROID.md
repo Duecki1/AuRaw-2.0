@@ -165,8 +165,11 @@ PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
 cargo run --release
 ```
 
-On a computer without desktop LibRaw, AuRaw still compiles, but the desktop RAW
-loader reports that it was disabled at build time.
+On a computer without desktop LibRaw, the build now fails by default. For a
+deliberate non-production check that does not exercise RAW loading, explicitly set
+`AURAW_ALLOW_NO_LIBRAW=1` (or the exact value `true`). Values such as `0`,
+`false`, or an empty value do not disable the requirement. Production and release
+builds must provide LibRaw.
 
 Normal local commands such as `cargo run --release` may build uncommitted work.
 The reproducible Linux and Android release scripts still require a clean Git

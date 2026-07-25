@@ -81,6 +81,14 @@ fn navigation_mask_edge() -> u32 {
     if cfg!(target_os = "android") { 256 } else { 384 }
 }
 
+fn detail_mask_edge() -> u32 {
+    // Detail and the full preview coexist while zooming. Reusing the full
+    // 1024/2048px, 32-layer atlas here duplicates 64/256 MiB before any image
+    // textures are counted. A dedicated atlas remains full-image normalized,
+    // but is sized for an interactive viewport rather than export.
+    if cfg!(target_os = "android") { 384 } else { 1024 }
+}
+
 /// Start a detailed crop for every real zoom level above fit. The previous
 /// 1.01 cutoff excluded an exact 101% zoom and, together with the former
 /// proxy-texel shortcut, kept the tiny navigation image visible until much deeper
@@ -158,7 +166,8 @@ impl AurawApp {
         // preview with the existing mask stack, then mark source-dependent
         // masks as stale so the user can explicitly refresh them.
         let preview_masks = self.masks.clone();
-        let params = GpuParams::new(&self.exposure, &preview_masks, &preview_raw);
+        let params = GpuParams::new(&self.exposure, &preview_masks, &preview_raw)
+            .with_vignette_geometry(self.geometry);
         let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
             &render_state.device,
             &render_state.queue,
@@ -174,6 +183,17 @@ impl AurawApp {
                 return;
             }
         };
+        #[cfg(not(target_os = "android"))]
+        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+            self.notice = Some(
+                "Could not prepare the preview color profile. The previous complete preview remains available."
+                    .to_owned(),
+            );
+            crate::diagnostics::record(format!(
+                "preview pipeline display-profile install failed: {error:#}"
+            ));
+            return;
+        }
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,
@@ -323,37 +343,105 @@ impl AurawApp {
             self.inpaint_layer.as_ref()
         };
 
+        // The main preview is the durable interactive surface. Optional zoom
+        // pipelines are caches: a failed cache upload must not make inpainting or
+        // original-preview toggling fail globally. Drop only the failed optional
+        // cache and let its normal scheduler rebuild it.
         if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
-            let _ = pipeline.update_inpaint_layer(
-                &render_state.queue, inpaint, 0, 0, raw.width, raw.height
-            );
-            let params = GpuParams::new(exposure, masks, raw);
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            if let Err(error) = pipeline.update_inpaint_layer(
+                &render_state.queue,
+                inpaint,
+                0,
+                0,
+                raw.width,
+                raw.height,
+            ) {
+                self.original_preview_rendered_state = None;
+                self.pending_stage = Some(ProcessingStage::Output);
+                self.notice = Some(
+                    "Could not update preview inpainting. The last complete preview is still shown."
+                        .to_owned(),
+                );
+                crate::diagnostics::record(format!(
+                    "main preview inpaint upload failed; rendered revision remains dirty: {error:#}"
+                ));
+                self.egui_ctx.request_repaint();
+                return;
+            }
         }
 
+        let navigation_upload_error = self.preview_navigation.as_ref().and_then(|navigation| {
+            navigation
+                .pipeline
+                .update_inpaint_layer(
+                    &render_state.queue,
+                    inpaint,
+                    0,
+                    0,
+                    navigation.raw.width,
+                    navigation.raw.height,
+                )
+                .err()
+        });
+        if let Some(error) = navigation_upload_error {
+            crate::diagnostics::record(format!(
+                "discarding navigation preview after inpaint upload failure: {error:#}"
+            ));
+            if let Some(old) = self.preview_navigation.take() {
+                if let Some(texture_id) = old.pipeline.egui_texture_id {
+                    render_state.renderer.write().free_texture(&texture_id);
+                }
+            }
+            self.navigation_pending_stage = Some(ProcessingStage::Output);
+        }
+
+        let detail_upload_error = self
+            .preview_detail
+            .as_ref()
+            .filter(|detail| detail.revision == self.preview_revision)
+            .and_then(|detail| {
+                detail
+                    .pipeline
+                    .update_inpaint_layer(
+                        &render_state.queue,
+                        inpaint,
+                        detail.virtual_origin[0],
+                        detail.virtual_origin[1],
+                        detail.virtual_full_size[0],
+                        detail.virtual_full_size[1],
+                    )
+                    .err()
+            });
+        if let Some(error) = detail_upload_error {
+            crate::diagnostics::record(format!(
+                "discarding zoom detail after inpaint upload failure: {error:#}"
+            ));
+            if let Some(old) = self.preview_detail.take() {
+                if let Some(texture_id) = old.pipeline.egui_texture_id {
+                    render_state.renderer.write().free_texture(&texture_id);
+                }
+            }
+            self.preview_motion_at = Some(Instant::now());
+            self.preview_detail_pending_stage = Some(ProcessingStage::Output);
+            self.preview_detail_urgent = true;
+        }
+
+        if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
+            let params = GpuParams::new(exposure, masks, raw).with_vignette_geometry(self.geometry);
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        }
         if let Some(navigation) = self.preview_navigation.as_ref() {
-            let _ = navigation.pipeline.update_inpaint_layer(
-                &render_state.queue, inpaint, 0, 0, navigation.raw.width, navigation.raw.height
-            );
-            let params = GpuParams::new(exposure, masks, &navigation.raw);
+            let params = GpuParams::new(exposure, masks, &navigation.raw)
+                .with_vignette_geometry(self.geometry);
             navigation
                 .pipeline
                 .recompute(&render_state.queue, &render_state.device, &params);
         }
-
         if let Some(detail) = self
             .preview_detail
             .as_ref()
             .filter(|detail| detail.revision == self.preview_revision)
         {
-            let _ = detail.pipeline.update_inpaint_layer(
-                &render_state.queue,
-                inpaint,
-                detail.virtual_origin[0],
-                detail.virtual_origin[1],
-                detail.virtual_full_size[0],
-                detail.virtual_full_size[1],
-            );
             let params = GpuParams::new_for_tile(
                 exposure,
                 masks,
@@ -362,12 +450,14 @@ impl AurawApp {
                 detail.virtual_origin[1],
                 detail.virtual_full_size[0],
                 detail.virtual_full_size[1],
-            );
+            )
+            .with_vignette_geometry(self.geometry);
             detail
                 .pipeline
                 .recompute(&render_state.queue, &render_state.device, &params);
         }
 
+        // This marker is the transaction commit point.
         self.original_preview_rendered_state = Some(requested_state);
         self.egui_ctx.request_repaint();
     }
@@ -445,7 +535,8 @@ impl AurawApp {
         } else {
             Arc::new(build_proxy(&full_raw, spec))
         };
-        let params = GpuParams::new(&self.exposure, &self.masks, &preview_raw);
+        let params = GpuParams::new(&self.exposure, &self.masks, &preview_raw)
+            .with_vignette_geometry(self.geometry);
         let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
             &render_state.device,
             &render_state.queue,
@@ -459,6 +550,17 @@ impl AurawApp {
                 return;
             }
         };
+        #[cfg(not(target_os = "android"))]
+        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+            self.notice = Some(
+                "Could not prepare the preview color profile. The previous complete preview remains available."
+                    .to_owned(),
+            );
+            crate::diagnostics::record(format!(
+                "preview pipeline display-profile install failed: {error:#}"
+            ));
+            return;
+        }
         if let Err(error) =
             Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &preview_raw)
         {
@@ -648,7 +750,8 @@ impl AurawApp {
             virtual_origin_y,
             virtual_full_width,
             virtual_full_height,
-        );
+        )
+        .with_vignette_geometry(self.geometry);
         // Prefer the normal proxy whenever its tone statistics are still current.
         let normal_tone_is_current = !matches!(
             self.pending_stage,
@@ -756,13 +859,14 @@ impl AurawApp {
         let Some(program_template) = self.gpu_pipeline.as_ref() else {
             return;
         };
-        let mut pipeline = match RawGpuPipeline::new_headless_reusing_programs(
+        let mut pipeline = match RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
             &render_state.device,
             &render_state.queue,
             &detail_raw,
             &params,
             ProcessingQuality::Preview,
             program_template,
+            detail_mask_edge(),
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
@@ -770,6 +874,17 @@ impl AurawApp {
                 return;
             }
         };
+        #[cfg(not(target_os = "android"))]
+        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+            self.notice = Some(
+                "Could not prepare the preview color profile. The previous complete preview remains available."
+                    .to_owned(),
+            );
+            crate::diagnostics::record(format!(
+                "preview pipeline display-profile install failed: {error:#}"
+            ));
+            return;
+        }
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,
@@ -875,7 +990,8 @@ impl AurawApp {
                     },
                 ))
             };
-            let params = GpuParams::new(&self.target_exposure, &self.masks, &raw);
+            let params = GpuParams::new(&self.target_exposure, &self.masks, &raw)
+                .with_vignette_geometry(self.geometry);
             let Some(template) = self.gpu_pipeline.as_ref() else {
                 return;
             };
@@ -896,6 +1012,17 @@ impl AurawApp {
                     return;
                 }
             };
+            #[cfg(not(target_os = "android"))]
+            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+                self.notice = Some(
+                    "Could not prepare the preview color profile. The previous complete preview remains available."
+                        .to_owned(),
+                );
+                crate::diagnostics::record(format!(
+                    "preview pipeline display-profile install failed: {error:#}"
+                ));
+                return;
+            }
             if let Err(error) =
                 Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &raw)
             {
@@ -968,7 +1095,8 @@ impl AurawApp {
             self.notice = Some(format!("Could not update navigation inpainting: {error:#}"));
             return;
         }
-        let params = GpuParams::new(&self.target_exposure, &self.masks, &preview.raw);
+        let params = GpuParams::new(&self.target_exposure, &self.masks, &preview.raw)
+            .with_vignette_geometry(self.geometry);
         let stages = match stage {
             ProcessingStage::Raw => &[
                 ProcessingStage::Raw,
@@ -1035,7 +1163,8 @@ impl AurawApp {
             virtual_origin[1],
             virtual_full_size[0],
             virtual_full_size[1],
-        );
+        )
+        .with_vignette_geometry(self.geometry);
 
         let normal_tone_is_current = !matches!(
             self.pending_stage,
@@ -1173,7 +1302,8 @@ impl AurawApp {
                 return;
             }
         }
-        let params = GpuParams::new(&self.target_exposure, &self.masks, raw);
+        let params = GpuParams::new(&self.target_exposure, &self.masks, raw)
+            .with_vignette_geometry(self.geometry);
         pipeline.dispatch_stage(&render_state.queue, &render_state.device, &params, stage);
         self.pending_stage = match stage {
             ProcessingStage::Raw => Some(ProcessingStage::Tone),
@@ -1254,6 +1384,39 @@ impl AurawApp {
         self.start_export(path, frame, ExportFormat::Jpeg);
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn export_tiff(&mut self, frame: &eframe::Frame) {
+        if !self.can_export() {
+            return;
+        }
+
+        let default_name = self
+            .current_path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{name}-auraw.tif"))
+            .unwrap_or_else(|| "auraw-export.tif".to_owned());
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("TIFF image", &["tif", "tiff"])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let has_tiff_extension = matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some(extension)
+                if extension.eq_ignore_ascii_case("tif")
+                    || extension.eq_ignore_ascii_case("tiff")
+        );
+        if !has_tiff_extension {
+            path.set_extension("tif");
+        }
+
+        self.start_export(path, frame, ExportFormat::Tiff);
+    }
+
     #[cfg(target_os = "android")]
     pub(crate) fn export_png(&mut self, frame: &eframe::Frame) {
         self.export_android(frame, ExportFormat::Png);
@@ -1262,6 +1425,11 @@ impl AurawApp {
     #[cfg(target_os = "android")]
     pub(crate) fn export_jpeg(&mut self, frame: &eframe::Frame) {
         self.export_android(frame, ExportFormat::Jpeg);
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn export_tiff(&mut self, frame: &eframe::Frame) {
+        self.export_android(frame, ExportFormat::Tiff);
     }
 
     #[cfg(target_os = "android")]
@@ -1340,8 +1508,8 @@ impl AurawApp {
                 self.inpaint_layer.clone(),
                 path,
                 TileSpec::default(),
-                self.export_settings,
-                metadata,
+                self.export_settings.clone(),
+                metadata.clone(),
             ),
             ExportFormat::Jpeg => spawn_tiled_jpeg_export(
                 render_state.device.clone(),
@@ -1353,7 +1521,20 @@ impl AurawApp {
                 self.inpaint_layer.clone(),
                 path,
                 TileSpec::default(),
-                self.export_settings,
+                self.export_settings.clone(),
+                metadata.clone(),
+            ),
+            ExportFormat::Tiff => spawn_tiled_tiff_export(
+                render_state.device.clone(),
+                render_state.queue.clone(),
+                Arc::clone(raw),
+                self.geometry,
+                self.exposure,
+                self.masks.clone(),
+                self.inpaint_layer.clone(),
+                path,
+                TileSpec::default(),
+                self.export_settings.clone(),
                 metadata,
             ),
         };
@@ -1470,6 +1651,7 @@ impl AurawApp {
             .map(|(uri, display_name)| LibraryBatchExportJob { uri, display_name })
             .collect::<VecDeque<_>>();
         let total = pending.len();
+        self.export_settings = settings.clone();
         self.library_batch_export = Some(LibraryBatchExportState {
             pending,
             current: None,
@@ -1480,7 +1662,6 @@ impl AurawApp {
             format,
             settings,
         });
-        self.export_settings = settings;
         self.active_tab = AppTab::Library;
         self.notice = Some(format!(
             "Preparing to export {total} {}…",
@@ -1558,9 +1739,9 @@ impl AurawApp {
         }
 
         let format = batch.format;
-        let settings = batch.settings;
+        let settings = batch.settings.clone();
         let display_name = current.display_name.clone();
-        self.export_settings = settings;
+        self.export_settings = settings.clone();
         let Some(data_dir) = self.android_app.internal_data_path() else {
             self.complete_android_library_batch_export_item(Err(format!(
                 "{display_name}: Android did not provide an app data directory"
@@ -1683,6 +1864,7 @@ impl AurawApp {
             .map(|(source, destination)| LibraryBatchExportJob { source, destination })
             .collect::<VecDeque<_>>();
         let total = pending.len();
+        self.export_settings = settings.clone();
         self.library_batch_export = Some(LibraryBatchExportState {
             pending,
             current: None,
@@ -1693,7 +1875,6 @@ impl AurawApp {
             format,
             settings,
         });
-        self.export_settings = settings;
         self.active_tab = AppTab::Library;
         self.notice = Some(format!(
             "Preparing to export {total} {}…",
@@ -1716,7 +1897,7 @@ impl AurawApp {
             } else {
                 batch.pending.pop_front().map(|job| {
                     batch.current = Some(job.clone());
-                    (job, batch.settings)
+                    (job, batch.settings.clone())
                 })
             }
         };
@@ -1725,7 +1906,7 @@ impl AurawApp {
             self.finish_library_batch_export();
             return;
         };
-        self.export_settings = settings;
+        self.export_settings = settings.clone();
         self.open_path(job.source, frame);
         // Batch export is initiated from Library. Loading uses the normal RAW
         // pipeline so sidecars, masks, inpainting, camera profiles and lens
@@ -1755,8 +1936,8 @@ impl AurawApp {
 
         let destination = current.destination.clone();
         let format = batch.format;
-        let settings = batch.settings;
-        self.export_settings = settings;
+        let settings = batch.settings.clone();
+        self.export_settings = settings.clone();
         self.start_export(destination, frame, format);
         if self.export_receiver.is_none() {
             if let Some(batch) = self.library_batch_export.as_mut() {
@@ -1928,6 +2109,12 @@ impl AurawApp {
                                                 || extension.eq_ignore_ascii_case("jpeg") =>
                                         {
                                             ExportFormat::Jpeg
+                                        }
+                                        Some(extension)
+                                            if extension.eq_ignore_ascii_case("tif")
+                                                || extension.eq_ignore_ascii_case("tiff") =>
+                                        {
+                                            ExportFormat::Tiff
                                         }
                                         _ => ExportFormat::Png,
                                     };

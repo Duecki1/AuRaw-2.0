@@ -954,13 +954,14 @@ impl Sidebar {
                 (MaskSection::ColorMixer, "Color Mixer", false),
             ] {
                 Self::adjustment_section(ui, label, default_open, true, |ui| {
-                    adjustments_changed |= Self::show_local_mask_adjustment_section(
+                    let (section_changed, _) = Self::show_local_mask_adjustment_section(
                         ui,
                         &mut mask.adjustments,
                         section,
                         &mut local_curve_tab,
                         &mut local_color_grade_tab,
                     );
+                    adjustments_changed |= section_changed;
                 });
             }
         }
@@ -1046,13 +1047,14 @@ impl Sidebar {
                         });
                     });
                     ui.add_space(4.0);
-                    adjustments_changed |= Self::show_local_mask_adjustment_section(
+                    let (section_changed, _) = Self::show_local_mask_adjustment_section(
                         ui,
                         &mut mask.adjustments,
                         section,
                         &mut local_curve_tab,
                         &mut local_color_grade_tab,
                     );
+                    adjustments_changed |= section_changed;
                 }
             }
         }
@@ -1598,27 +1600,31 @@ impl Sidebar {
         section: MaskSection,
         selected_tab: &mut ToneCurveTab,
         selected_grade_tab: &mut ColorGradeTab,
-    ) -> bool {
+    ) -> (bool, bool) {
         match section {
-            MaskSection::Properties => false,
+            MaskSection::Properties => (false, false),
             MaskSection::Light => Self::show_local_mask_light(ui, adjustment),
-            MaskSection::ToneCurve => {
-                Self::show_local_mask_tone_curve(ui, adjustment, selected_tab)
-            }
-            MaskSection::Color => Self::show_local_mask_color(ui, adjustment),
-            MaskSection::ColorGrading => {
-                Self::show_local_mask_color_grading(ui, adjustment, selected_grade_tab)
-            }
-            MaskSection::Effects => Self::show_local_mask_effects(ui, adjustment),
-            MaskSection::ColorMixer => Self::show_local_mask_color_mixer(ui, adjustment),
+            MaskSection::ToneCurve => (
+                Self::show_local_mask_tone_curve(ui, adjustment, selected_tab),
+                false,
+            ),
+            MaskSection::Color => (Self::show_local_mask_color(ui, adjustment), false),
+            MaskSection::ColorGrading => (
+                Self::show_local_mask_color_grading(ui, adjustment, selected_grade_tab),
+                false,
+            ),
+            MaskSection::Effects => (Self::show_local_mask_effects(ui, adjustment), false),
+            MaskSection::ColorMixer => (Self::show_local_mask_color_mixer(ui, adjustment), false),
         }
     }
 
     fn show_local_mask_light(
         ui: &mut Ui,
         adjustment: &mut crate::pipeline::LocalAdjustments,
-    ) -> bool {
+    ) -> (bool, bool) {
         let mut changed = false;
+        let shadows_before = adjustment.shadows;
+        let blacks_before = adjustment.blacks;
         changed |= adjustment_slider(
             ui,
             "Exposure",
@@ -1673,7 +1679,7 @@ impl Sidebar {
             1.0,
             None,
         );
-        changed
+        (changed, adjustment.shadows != shadows_before || adjustment.blacks != blacks_before)
     }
 
     fn show_local_mask_color(

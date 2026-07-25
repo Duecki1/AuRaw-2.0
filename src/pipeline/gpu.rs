@@ -2,11 +2,11 @@ use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams,
-    HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
-    ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams, GLOBAL_TEMPERATURE_LIMIT,
-    MAX_LOCAL_MASKS,
+    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
+    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
+    CURRENT_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
 use std::borrow::Cow;
@@ -22,12 +22,78 @@ use resources::*;
 #[cfg(test)]
 mod tests;
 
-const GPU_PARAMS_ABI_VERSION: u32 = 2;
-const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 25_056;
+const GPU_PARAMS_ABI_VERSION: u32 = 4;
+const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 25_136;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
+
+const RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY: u32 = 1 << 0;
+
+/// Logical domains carried by the post-demosaic graph. These contracts are
+/// independent of pass fusion: multiple adjacent nodes may execute in one GPU
+/// pass, but a scene-domain edit may never consume display-referred pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderDomain {
+    CameraLinear,
+    SceneLinear,
+    LookAdjustedScene,
+    DisplayLinear,
+    OutputEncoded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderStageContract {
+    name: &'static str,
+    input: RenderDomain,
+    output: RenderDomain,
+}
+
+const EXPLICIT_RENDER_GRAPH: [RenderStageContract; 6] = [
+    RenderStageContract {
+        name: "camera_characterization",
+        input: RenderDomain::CameraLinear,
+        output: RenderDomain::SceneLinear,
+    },
+    RenderStageContract {
+        name: "scene_edits",
+        input: RenderDomain::SceneLinear,
+        output: RenderDomain::SceneLinear,
+    },
+    RenderStageContract {
+        name: "optional_look",
+        input: RenderDomain::SceneLinear,
+        output: RenderDomain::LookAdjustedScene,
+    },
+    RenderStageContract {
+        name: "view_transform",
+        input: RenderDomain::LookAdjustedScene,
+        output: RenderDomain::DisplayLinear,
+    },
+    RenderStageContract {
+        name: "display_black_toe",
+        input: RenderDomain::DisplayLinear,
+        output: RenderDomain::DisplayLinear,
+    },
+    RenderStageContract {
+        name: "output_encoding",
+        input: RenderDomain::DisplayLinear,
+        output: RenderDomain::OutputEncoded,
+    },
+];
+
+fn render_graph_flags() -> u32 {
+    RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY
+}
+
+fn explicit_render_graph_contracts_are_contiguous() -> bool {
+    EXPLICIT_RENDER_GRAPH
+        .windows(2)
+        .all(|pair| pair[0].output == pair[1].input)
+        && EXPLICIT_RENDER_GRAPH[0].name == "camera_characterization"
+        && EXPLICIT_RENDER_GRAPH[3].name == "view_transform"
+}
 
 const SHADER_HIGHLIGHTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
@@ -87,8 +153,8 @@ fn highlight_final_read_slot(stage_count: usize) -> HighlightWorkSlot {
 
 fn expected_pass_count(cfa_kind: CfaKind) -> usize {
     let demosaic_passes = match cfa_kind {
-        CfaKind::Bayer => 4,
-        CfaKind::XTrans => 8,
+        CfaKind::Bayer => 6,
+        CfaKind::XTrans => 10,
     };
     // Highlight prepare + guided stages + two finalize variants, followed by
     // demosaic, four tone-analysis passes, and eleven adjustment/output passes
@@ -134,7 +200,17 @@ const SHADER_BAYER_RCD_P4: &str = concat!(
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
+    include_str!("../shaders/noise.wgsl"),
+    "\n",
     include_str!("../shaders/pass4.wgsl")
+);
+
+const SHADER_DUAL_DEMOSAIC: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/raw_sampling.wgsl"),
+    "\n",
+    include_str!("../shaders/dual_demosaic.wgsl")
 );
 
 const SHADER_XTRANS_P1: &str = concat!(
@@ -204,6 +280,8 @@ const SHADER_XTRANS_P7: &str = concat!(
     "\n",
     include_str!("../shaders/color.wgsl"),
     "\n",
+    include_str!("../shaders/noise.wgsl"),
+    "\n",
     include_str!("../shaders/xtrans_pass7.wgsl")
 );
 
@@ -244,7 +322,11 @@ const SHADER_ADJUSTMENTS: &str = concat!(
     "\n",
     include_str!("../shaders/tonemap.wgsl"),
     "\n",
-    include_str!("../shaders/adjustments.wgsl")
+    include_str!("../shaders/adjustments.wgsl"),
+    "\n",
+    include_str!("../shaders/detail_capture.wgsl"),
+    "\n",
+    include_str!("../shaders/detail_scale_space.wgsl")
 );
 
 const SHADER_INPAINT_DOWNSAMPLE: &str = r#"
@@ -377,6 +459,11 @@ pub struct GpuParams {
     vignette: [f32; 4],
     vignette_options: [f32; 4],
     highlight_options: [f32; 4],
+    // Per-CFA-plane sensor noise model: variance = shot * signal + read.
+    noise_shot: [f32; 4],
+    noise_read: [f32; 4],
+    // Luma strength, detail protection, quality tier, profile confidence.
+    noise_options: [f32; 4],
     tone_curve_0: [f32; 4],
     tone_curve_1: [f32; 4],
     tone_curve_2: [f32; 4],
@@ -431,8 +518,9 @@ pub struct GpuParams {
     profile_tone: [u32; 4],
     output_lut: [u32; 4],
     profile_flags: [u32; 4],
-    // Explicit processing-formula version. Future formula changes migrate this
-    // value deliberately rather than silently changing existing edits.
+    // Processing version, view-selection flags, user Exposure f32 bits, and
+    // render-graph contract flags. Formula changes are process-versioned so
+    // existing edits can stay on their historical stage ordering.
     process_info: [u32; 4],
     // Local mask count followed by reserved values. Each fixed mask index maps
     // directly to one layer in the normalized R16F mask atlas.
@@ -495,6 +583,11 @@ pub struct GpuParams {
     mask_grade_highlights: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_grade_global: [[f32; 4]; MAX_LOCAL_MASKS],
     mask_grade_options: [[f32; 4]; MAX_LOCAL_MASKS],
+    // Final-frame vignette mapping. `vignette_frame` stores source-space crop
+    // center followed by final-frame pixel dimensions. `vignette_transform` is
+    // the normalized source-to-final 2x2 affine matrix.
+    vignette_frame: [f32; 4],
+    vignette_transform: [f32; 4],
 }
 
 const _: () = assert!(std::mem::size_of::<GpuParams>() == GPU_PARAMS_ABI_SIZE_BYTES as usize);
@@ -665,6 +758,21 @@ fn composite_inpaint_rgba16f(destination: &mut [u16], rgb: [f32; 3], alpha: f32)
     destination[3] = f16::from_f32(output_alpha).to_bits();
 }
 
+fn canonicalize_green_noise(
+    mut coefficients: [f32; 4],
+    green2_present: bool,
+) -> [f32; 4] {
+    if green2_present {
+        let green = 0.5 * (coefficients[1] + coefficients[3]);
+        // Keep both green slots canonical. The dual-demosaic shader averages
+        // G1/G2 once; retaining the original G2 in alpha would bias the result
+        // to 25% G1 / 75% G2 after a second average.
+        coefficients[1] = green;
+        coefficients[3] = green;
+    }
+    coefficients
+}
+
 impl GpuParams {
     pub fn new(exposure: &ExposureParams, masks: &MaskStack, raw: &LoadedRaw) -> Self {
         Self::new_for_tile(exposure, masks, raw, 0, 0, raw.width, raw.height)
@@ -689,11 +797,17 @@ impl GpuParams {
             inpaint_neutral_to_current_transform(raw.cam_to_srgb, camera_transform);
         let mut profile_layout = raw.camera_profile.gpu_layout();
         profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
+        let profile_stages = profile_layout.stages();
+        debug_assert_eq!(
+            profile_stages.characterization.hue_sat_2,
+            profile_layout.hue_sat_2
+        );
         let sigmoid = sigmoid_coefficients(exposure.sigmoid);
-        // Keep the DCP profile tone as the baseline rendition at untouched
-        // Rendering defaults, but use a highlight-only display shoulder rather
-        // than the previous hard [0, 1] clamp. Custom Sigmoid settings still
-        // opt into the full AuRaw scene-to-display transform.
+        // Select the view transform, not an upstream tone stage. At default
+        // rendering settings a DCP ProfileToneCurve participates in the single
+        // DCP-aware view node. A customized Sigmoid replaces that view path
+        // entirely, avoiding ProfileToneCurve -> Sigmoid double tone in process
+        // 13+. Legacy process versions interpret the same flag as before.
         let use_profile_base_tone =
             raw.camera_profile.tone_curve.is_some() && exposure.sigmoid == SigmoidParams::default();
         let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
@@ -717,17 +831,9 @@ impl GpuParams {
         let mut mask_grade_options = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
             let adjustment = mask.adjustments;
-            let has_hsl = adjustment
-                .hsl_hue
-                .iter()
-                .chain(&adjustment.hsl_saturation)
-                .chain(&adjustment.hsl_luminance)
-                .any(|value| value.abs() > 1e-6);
-            let curve_flags = u32::from(!adjustment.tone_curve.is_identity())
-                | (u32::from(!adjustment.tone_curve_red.is_identity()) << 1)
-                | (u32::from(!adjustment.tone_curve_green.is_identity()) << 2)
-                | (u32::from(!adjustment.tone_curve_blue.is_identity()) << 3);
-            let has_grading = !adjustment.color_grading.is_neutral();
+            let has_hsl = adjustment.has_color_mixer();
+            let curve_flags = adjustment.curve_feature_flags();
+            let has_grading = adjustment.has_color_grading();
             mask_meta[index] = [
                 u32::from(mask.enabled),
                 u32::from(!adjustment.is_neutral()),
@@ -849,6 +955,25 @@ impl GpuParams {
                 exposure.highlight_iterations.clamp(1, 4) as f32,
                 exposure.highlight_color_adaptation.clamp(0.0, 1.0),
                 0.0,
+            ],
+            noise_shot: canonicalize_green_noise(
+                std::array::from_fn(|channel| {
+                    raw.noise_profile.shot[channel] * raw.wb_coeffs[channel].max(0.0)
+                }),
+                raw.noise_profile.green2_present,
+            ),
+            noise_read: canonicalize_green_noise(
+                std::array::from_fn(|channel| {
+                    let wb = raw.wb_coeffs[channel].max(0.0);
+                    raw.noise_profile.read[channel] * wb * wb
+                }),
+                raw.noise_profile.green2_present,
+            ),
+            noise_options: [
+                (exposure.luminance_denoise / 100.0).clamp(0.0, 1.0),
+                (exposure.denoise_detail / 100.0).clamp(0.0, 1.0),
+                exposure.denoise_quality.shader_value(),
+                raw.noise_profile.confidence.clamp(0.0, 1.0),
             ],
             tone_curve_0: [
                 exposure.tone_curve.points[0][0],
@@ -1010,16 +1135,16 @@ impl GpuParams {
             abi_version: GPU_PARAMS_ABI_VERSION,
             abi_size_bytes: GPU_PARAMS_ABI_SIZE_BYTES,
             tone_histogram_bounds: [0, 0, raw.width, raw.height],
-            profile_hue_sat: profile_layout.hue_sat,
-            profile_look: profile_layout.look,
-            profile_tone: profile_layout.tone,
-            output_lut: profile_layout.output,
+            profile_hue_sat: profile_stages.characterization.hue_sat,
+            profile_look: profile_stages.optional_look.look_table,
+            profile_tone: profile_stages.view.profile_tone,
+            output_lut: profile_stages.output.output_lut,
             profile_flags: profile_layout.flags,
             process_info: [
-                exposure.process_version,
+                CURRENT_PROCESS_VERSION,
                 u32::from(use_profile_base_tone),
                 exposure.exposure.to_bits(),
-                0,
+                render_graph_flags(),
             ],
             mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
             mask_meta,
@@ -1074,7 +1199,70 @@ impl GpuParams {
             mask_grade_highlights,
             mask_grade_global,
             mask_grade_options,
+            vignette_frame: [
+                0.5,
+                0.5,
+                full_width.max(1) as f32,
+                full_height.max(1) as f32,
+            ],
+            vignette_transform: [1.0, 0.0, 0.0, 1.0],
         }
+    }
+
+    pub fn with_vignette_geometry(mut self, geometry: GeometryTransform) -> Self {
+        let geometry = geometry.sanitized();
+        let crop = geometry.crop;
+        let source_width = self.full_width.max(1) as f32;
+        let source_height = self.full_height.max(1) as f32;
+        let crop_width = ((crop[2] - crop[0]) * source_width).max(1e-6);
+        let crop_height = ((crop[3] - crop[1]) * source_height).max(1e-6);
+        let center_u = (crop[0] + crop[2]) * 0.5;
+        let center_v = (crop[1] + crop[3]) * 0.5;
+
+        // Match GeometryInverseMap / preview geometry exactly: forward mapping
+        // is quarter-turn * rotation * shear * flip. Convert source-normalized
+        // deltas directly into final-frame normalized deltas so the shader can
+        // evaluate the vignette before geometry resampling without baking it
+        // into the source image's orientation.
+        let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
+        let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
+        let shx = geometry.horizontal_transform.to_radians().tan();
+        let shy = geometry.vertical_transform.to_radians().tan();
+        let angle = geometry.rotation_degrees.to_radians();
+        let cos = angle.cos();
+        let sin = angle.sin();
+        let affine = [
+            cos * fx - sin * shy * fx,
+            cos * shx * fy - sin * fy,
+            sin * fx + cos * shy * fx,
+            sin * shx * fy + cos * fy,
+        ];
+        let quarter = match geometry.quarter_turns % 4 {
+            0 => [1.0, 0.0, 0.0, 1.0],
+            1 => [0.0, -1.0, 1.0, 0.0],
+            2 => [-1.0, 0.0, 0.0, -1.0],
+            _ => [0.0, 1.0, -1.0, 0.0],
+        };
+        let forward = [
+            quarter[0] * affine[0] + quarter[1] * affine[2],
+            quarter[0] * affine[1] + quarter[1] * affine[3],
+            quarter[2] * affine[0] + quarter[3] * affine[2],
+            quarter[2] * affine[1] + quarter[3] * affine[3],
+        ];
+        let (output_width, output_height) = if geometry.quarter_turns % 2 == 0 {
+            (crop_width, crop_height)
+        } else {
+            (crop_height, crop_width)
+        };
+
+        self.vignette_frame = [center_u, center_v, output_width, output_height];
+        self.vignette_transform = [
+            forward[0] * source_width / output_width,
+            forward[1] * source_height / output_width,
+            forward[2] * source_width / output_height,
+            forward[3] * source_height / output_height,
+        ];
+        self
     }
 
     pub fn with_tone_histogram_bounds(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
@@ -1091,8 +1279,12 @@ impl GpuParams {
         self.highlight_options[0] >= 1.5 && self.highlight_reconstruction > 1e-6
     }
 
+    fn needs_dual_demosaic_passes(&self) -> bool {
+        self.demosaic_mode >= 1.5
+    }
+
     fn needs_intermediate_adjustment_passes(&self) -> bool {
-        // Saturation and Vibrance live in apply_lightroom_effects alongside the
+        // Saturation and Vibrance live in apply_scene_effects_node alongside the
         // presence controls. They must therefore keep the intermediate passes
         // enabled even when Texture, Clarity, Dehaze, Glow, and Vignette are
         // all neutral. Capture sharpening now lives in the always-run pre-tone
@@ -1131,7 +1323,6 @@ pub struct RawGpuPipeline {
     params_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
     tone_stats_buffer: wgpu::Buffer,
-    raw_stage_end: usize,
     tone_prepare_pass_index: usize,
     tone_reduce_pass_index: usize,
     tone_stage_end: usize,
@@ -1140,6 +1331,9 @@ pub struct RawGpuPipeline {
     highlight_finalize_guided_index: usize,
     highlight_finalize_direct_index: usize,
     demosaic_start_index: usize,
+    demosaic_dual_start_index: usize,
+    demosaic_dual_end_index: usize,
+    demosaic_finish_index: usize,
     adjustment_prepare_pass_index: usize,
     adjustment_tone_pass_index: usize,
     adjustment_effects_pass_index: usize,
@@ -1173,6 +1367,9 @@ pub struct RawGpuPipeline {
     out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
+    // Declared last so GPU textures/buffers are dropped before process-wide
+    // admission capacity is returned.
+    _gpu_budget_reservation: GpuBudgetReservation,
 }
 
 /// A cheap, thread-safe handle to one completed display output. Reading it on
@@ -1283,10 +1480,12 @@ impl RawGpuPipeline {
                 EDGE, EDGE, 1, 1, vec![0.0f32],
             ),
             white_levels: [65535.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: crate::pipeline::CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         };
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
@@ -1447,7 +1646,6 @@ impl RawGpuPipeline {
         mask_atlas_edge_override: Option<u32>,
     ) -> Result<Self> {
         validate_raw(raw)?;
-        validate_gpu_working_set(raw.width, raw.height, quality)?;
         if let Some(template) = program_template {
             if template.cfa_kind != raw.cfa_kind
                 || template.processing_quality != quality
@@ -1459,9 +1657,6 @@ impl RawGpuPipeline {
             }
         }
 
-        let raw_texture = create_raw_texture(device, queue, raw);
-        let color_texture = create_color_texture(device, queue, raw);
-        let black_texture = create_black_texture(device, queue, raw);
         let size = texture_size(raw.width, raw.height);
         let work_format = processing_work_format(quality);
         let demosaic_format = work_format;
@@ -1475,6 +1670,53 @@ impl RawGpuPipeline {
         let image_workgroups = [raw.width.div_ceil(8), raw.height.div_ceil(8), 1];
         let tone_workgroups = [tone_size.width.div_ceil(8), tone_size.height.div_ceil(8), 1];
         let single_workgroup = [1, 1, 1];
+
+        let default_mask_atlas_edge = mask_atlas_edge();
+        let mask_atlas_edge = mask_atlas_edge_override
+            .unwrap_or(default_mask_atlas_edge)
+            .clamp(64, export_mask_atlas_edge_limit());
+        let mask_layer_capacity = if mask_atlas_edge_override.is_some()
+            && quality == ProcessingQuality::High
+        {
+            (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
+        } else {
+            MAX_LOCAL_MASKS
+        };
+
+        let default_output_transform = IccOutputTransform::srgb();
+        let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
+        profile_gpu_data.validate()?;
+        let profile_buffer_size_bytes = u64::try_from(
+            profile_gpu_data
+                .words
+                .len()
+                .checked_mul(std::mem::size_of::<[f32; 4]>())
+                .ok_or_else(|| anyhow!("GPU profile buffer size overflows"))?,
+        )
+        .map_err(|_| anyhow!("GPU profile buffer size does not fit in u64"))?;
+
+        let resource_plan = build_gpu_resource_plan(GpuResourcePlanInput {
+            width: raw.width,
+            height: raw.height,
+            quality,
+            tone_scale,
+            mask_atlas_edge,
+            mask_layers: u32::try_from(mask_layer_capacity)
+                .map_err(|_| anyhow!("mask layer capacity does not fit in u32"))?,
+            profile_buffer_bytes: profile_buffer_size_bytes,
+            params_buffer_bytes: std::mem::size_of::<GpuParams>() as u64,
+        })?;
+        let gpu_budget_reservation =
+            GpuBudgetReservation::acquire(&resource_plan, gpu_working_set_limit_bytes())?;
+
+        // Admission succeeds before the first device allocation, including all
+        // other live main/detail/navigation/headless pipelines in this process. Every persistent
+        // allocation below has a corresponding named entry in `resource_plan`;
+        // on-demand conversion/readback peaks and the 20% safety margin are also
+        // reserved before construction begins.
+        let raw_texture = create_raw_texture(device, queue, raw);
+        let color_texture = create_color_texture(device, queue, raw);
+        let black_texture = create_black_texture(device, queue, raw);
 
         // This is the raw-CFA output of the Ansel LCh reconstruction pass. It
         // is deliberately separate from the demosaic scratch textures so all
@@ -1549,21 +1791,10 @@ impl RawGpuPipeline {
             tone_format,
             "auraw adaptive tone guide B",
         );
-        let default_mask_atlas_edge = mask_atlas_edge();
-        let mask_atlas_edge = mask_atlas_edge_override
-            .unwrap_or(default_mask_atlas_edge)
-            .clamp(64, export_mask_atlas_edge_limit());
         // Interactive pipelines reserve all 32 layers so masks can be added without
         // rebuilding the RAW pipeline. Full-quality export uses an explicit mask edge
         // and can allocate only the layers it will actually sample, avoiding a huge
         // 4K x 4K x 32 R16F texture for ordinary edits with just a few masks.
-        let mask_layer_capacity = if mask_atlas_edge_override.is_some()
-            && quality == ProcessingQuality::High
-        {
-            (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
-        } else {
-            MAX_LOCAL_MASKS
-        };
         let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw normalized local-mask atlas"),
             size: wgpu::Extent3d {
@@ -1592,13 +1823,24 @@ impl RawGpuPipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[wgpu::TextureFormat::Rgba16Float],
         });
-        let empty_inpaint = vec![0u16; raw.width as usize * raw.height as usize * 4];
+        let empty_inpaint_len = usize::try_from(
+            u64::from(raw.width)
+                .checked_mul(u64::from(raw.height))
+                .and_then(|value| value.checked_mul(4))
+                .ok_or_else(|| anyhow!("zero inpaint upload length overflows"))?,
+        )
+        .map_err(|_| anyhow!("zero inpaint upload length does not fit in usize"))?;
+        let empty_inpaint = vec![0u16; empty_inpaint_len];
         queue.write_texture(
             copy_texture(&inpaint_texture),
             bytemuck::cast_slice(&empty_inpaint),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(raw.width * 8),
+                bytes_per_row: Some(
+                    raw.width
+                        .checked_mul(8)
+                        .ok_or_else(|| anyhow!("inpaint upload row byte count overflows"))?,
+                ),
                 rows_per_image: Some(raw.height),
             },
             size,
@@ -1638,17 +1880,6 @@ impl RawGpuPipeline {
             ..Default::default()
         });
 
-        let default_output_transform = IccOutputTransform::srgb();
-        let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
-        profile_gpu_data.validate()?;
-        let profile_buffer_size_bytes = u64::try_from(
-            profile_gpu_data
-                .words
-                .len()
-                .checked_mul(std::mem::size_of::<[f32; 4]>())
-                .ok_or_else(|| anyhow!("GPU profile buffer size overflows"))?,
-        )
-        .map_err(|_| anyhow!("GPU profile buffer size does not fit in u64"))?;
         let output_lut_offset_bytes =
             u64::from(profile_gpu_data.layout.output[3]) * std::mem::size_of::<[f32; 4]>() as u64;
         let profile_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1686,10 +1917,13 @@ impl RawGpuPipeline {
         ];
 
         let demosaic_start_for_programs = 1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2;
-        let demosaic_pass_count = match raw.cfa_kind {
-            CfaKind::Bayer => 4,
-            CfaKind::XTrans => 8,
+        let (demosaic_high_pass_count, demosaic_pass_count) = match raw.cfa_kind {
+            CfaKind::Bayer => (3, 6),
+            CfaKind::XTrans => (7, 10),
         };
+        let dual_green_for_programs = demosaic_start_for_programs + demosaic_high_pass_count;
+        let dual_rgb_for_programs = dual_green_for_programs + 1;
+        let demosaic_finish_for_programs = dual_rgb_for_programs + 1;
         let tone_prepare_for_programs = demosaic_start_for_programs + demosaic_pass_count;
         let adjustment_prepare_for_programs = tone_prepare_for_programs + 4;
         let reused_layout = |pass_index: usize| {
@@ -1779,8 +2013,45 @@ impl RawGpuPipeline {
             })
         });
 
+        let bgl_dual_green = reused_layout(dual_green_for_programs).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl dual demosaic green"),
+                entries: &[
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        20,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
+
+        let bgl_dual_rgb = reused_layout(dual_rgb_for_programs).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl dual demosaic rgb"),
+                entries: &[
+                    common_entries[0],
+                    common_entries[1],
+                    common_entries[2],
+                    common_entries[3],
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(21, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_texture_entry(
+                        22,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                ],
+            })
+        });
+
         let bgl4 = (matches!(raw.cfa_kind, CfaKind::Bayer)
-            .then(|| reused_layout(demosaic_start_for_programs + 3))
+            .then(|| reused_layout(demosaic_finish_for_programs))
             .flatten())
         .unwrap_or_else(|| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1793,6 +2064,7 @@ impl RawGpuPipeline {
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(23, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
                         10,
                         demosaic_format,
@@ -1886,7 +2158,7 @@ impl RawGpuPipeline {
         });
 
         let bgl_xtrans_finish = (matches!(raw.cfa_kind, CfaKind::XTrans)
-            .then(|| reused_layout(demosaic_start_for_programs + 7))
+            .then(|| reused_layout(demosaic_finish_for_programs))
             .flatten())
         .unwrap_or_else(|| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1898,6 +2170,7 @@ impl RawGpuPipeline {
                     common_entries[3],
                     texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
                     texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(23, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(
                         10,
                         demosaic_format,
@@ -1944,7 +2217,7 @@ impl RawGpuPipeline {
         let bgl_adjust_prepare =
             reused_layout(adjustment_prepare_for_programs).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl adjustment preparation"),
+                    label: Some("bgl scene preparation"),
                     entries: &[
                         common_entries[0],
                         common_entries[1],
@@ -1972,7 +2245,7 @@ impl RawGpuPipeline {
         let bgl_adjust_tone =
             reused_layout(adjustment_prepare_for_programs + 1).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl capture sharpening and tone"),
+                    label: Some("bgl scene tone edits"),
                     entries: &[
                         buffer_entry(0),
                         texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
@@ -1996,7 +2269,7 @@ impl RawGpuPipeline {
         let bgl_adjust_effects =
             reused_layout(adjustment_prepare_for_programs + 2).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl Lightroom local effects"),
+                    label: Some("bgl scene presence and color"),
                     entries: &[
                         buffer_entry(0),
                         texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
@@ -2065,7 +2338,7 @@ impl RawGpuPipeline {
             });
 
         let bgl_adjust_render = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl perceptual color mixer and render"),
+            label: Some("bgl scene look view and output"),
             entries: &[
                 buffer_entry(0),
                 storage_texture_entry(
@@ -2231,6 +2504,77 @@ impl RawGpuPipeline {
             ],
         });
 
+        let (dual_green_view, dual_low_view) = match raw.cfa_kind {
+            CfaKind::Bayer => (&highlight_work_a_view, &highlight_work_b_view),
+            CfaKind::XTrans => (&tex1_view, &tex2_view),
+        };
+
+        let bg_dual_green = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg dual demosaic green"),
+            layout: &bgl_dual_green,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: wgpu::BindingResource::TextureView(dual_green_view),
+                },
+            ],
+        });
+
+        let bg_dual_rgb = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg dual demosaic rgb"),
+            layout: &bgl_dual_rgb,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: wgpu::BindingResource::TextureView(dual_green_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: wgpu::BindingResource::TextureView(dual_low_view),
+                },
+            ],
+        });
+
         let bg4 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg4"),
             layout: &bgl4,
@@ -2262,6 +2606,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 9,
                     resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: wgpu::BindingResource::TextureView(dual_low_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
@@ -2424,6 +2772,10 @@ impl RawGpuPipeline {
                     resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: wgpu::BindingResource::TextureView(dual_low_view),
+                },
+                wgpu::BindGroupEntry {
                     binding: 10,
                     resource: wgpu::BindingResource::TextureView(&scene_view),
                 },
@@ -2560,7 +2912,7 @@ impl RawGpuPipeline {
         });
 
         let bg_adjust_tone = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg capture sharpening and tone"),
+            label: Some("bg scene tone edits"),
             layout: &bgl_adjust_tone,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2599,7 +2951,7 @@ impl RawGpuPipeline {
         });
 
         let bg_adjust_effects = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg Lightroom local effects"),
+            label: Some("bg scene presence and color"),
             layout: &bgl_adjust_effects,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2712,7 +3064,7 @@ impl RawGpuPipeline {
         });
 
         let bg_adjust_render = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg perceptual color mixer and render"),
+            label: Some("bg scene look view and output"),
             layout: &bgl_adjust_render,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2753,19 +3105,34 @@ impl RawGpuPipeline {
         // Storage texture declarations are format-specific in WGSL. Generate
         // the full-float variants once when High quality is selected. This now
         // covers highlight reconstruction as well as demosaic/scene buffers.
-        let highlight_shader = work_shader_source(SHADER_HIGHLIGHTS, highlight_work_format);
-        let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format);
-        let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format);
-        let bayer_rcd_p3 = work_shader_source(SHADER_BAYER_RCD_P3, demosaic_format);
-        let bayer_rcd_p4 = work_shader_source(SHADER_BAYER_RCD_P4, demosaic_format);
-        let xtrans_p1 = work_shader_source(SHADER_XTRANS_P1, demosaic_format);
-        let xtrans_p2 = work_shader_source(SHADER_XTRANS_P2, demosaic_format);
-        let xtrans_p3 = work_shader_source(SHADER_XTRANS_P3, demosaic_format);
-        let xtrans_p4 = work_shader_source(SHADER_XTRANS_P4, demosaic_format);
-        let xtrans_p5 = work_shader_source(SHADER_XTRANS_P5, demosaic_format);
-        let xtrans_p6 = work_shader_source(SHADER_XTRANS_P6, demosaic_format);
-        let xtrans_p7 = work_shader_source(SHADER_XTRANS_P7, demosaic_format);
-        let adjustments_shader = work_shader_source(SHADER_ADJUSTMENTS, work_format);
+        let highlight_shader = work_shader_source(SHADER_HIGHLIGHTS, highlight_work_format)
+            .context("specialize highlight shader work format")?;
+        let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format)
+            .context("specialize Bayer RCD pass 1 work format")?;
+        let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format)
+            .context("specialize Bayer RCD pass 2 work format")?;
+        let bayer_rcd_p3 = work_shader_source(SHADER_BAYER_RCD_P3, demosaic_format)
+            .context("specialize Bayer RCD pass 3 work format")?;
+        let bayer_rcd_p4 = work_shader_source(SHADER_BAYER_RCD_P4, demosaic_format)
+            .context("specialize Bayer RCD pass 4 work format")?;
+        let dual_demosaic = work_shader_source(SHADER_DUAL_DEMOSAIC, demosaic_format)
+            .context("specialize dual-demosaic work format")?;
+        let xtrans_p1 = work_shader_source(SHADER_XTRANS_P1, demosaic_format)
+            .context("specialize X-Trans pass 1 work format")?;
+        let xtrans_p2 = work_shader_source(SHADER_XTRANS_P2, demosaic_format)
+            .context("specialize X-Trans pass 2 work format")?;
+        let xtrans_p3 = work_shader_source(SHADER_XTRANS_P3, demosaic_format)
+            .context("specialize X-Trans pass 3 work format")?;
+        let xtrans_p4 = work_shader_source(SHADER_XTRANS_P4, demosaic_format)
+            .context("specialize X-Trans pass 4 work format")?;
+        let xtrans_p5 = work_shader_source(SHADER_XTRANS_P5, demosaic_format)
+            .context("specialize X-Trans pass 5 work format")?;
+        let xtrans_p6 = work_shader_source(SHADER_XTRANS_P6, demosaic_format)
+            .context("specialize X-Trans pass 6 work format")?;
+        let xtrans_p7 = work_shader_source(SHADER_XTRANS_P7, demosaic_format)
+            .context("specialize X-Trans pass 7 work format")?;
+        let adjustments_shader = work_shader_source(SHADER_ADJUSTMENTS, work_format)
+            .context("specialize adjustments shader work format")?;
 
         let create_shader = |label: &'static str, source: &str| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2790,6 +3157,9 @@ impl RawGpuPipeline {
         let bayer_rcd_p4_module = program_template
             .is_none()
             .then(|| create_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref()));
+        let dual_demosaic_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw robust dual demosaic", dual_demosaic.as_ref()));
         let xtrans_p1_module = program_template
             .is_none()
             .then(|| create_shader("auraw X-Trans pass 1", xtrans_p1.as_ref()));
@@ -2817,6 +3187,7 @@ impl RawGpuPipeline {
         let adjustments_module = program_template
             .is_none()
             .then(|| create_shader("auraw adjustments", adjustments_shader.as_ref()));
+        debug_assert!(explicit_render_graph_contracts_are_contiguous());
 
         let mut next_program_index = 0usize;
         let mut make_pipeline = |shader: Option<&wgpu::ShaderModule>,
@@ -2933,10 +3304,9 @@ impl RawGpuPipeline {
         });
 
         let demosaic_start_index = passes.len();
-        // Select the demosaic family from LibRaw's CFA classification.
-        // Bayer uses the four-stage ratio-corrected reference path. Fuji
-        // X-Trans seeds an RGB image, performs three green/chroma refinement
-        // passes, then selects among eight homogeneity-guided candidates.
+        // Build the high-detail reference first. The robust low-frequency
+        // branch is represented by two real full-frame buffers, but its two
+        // dispatches are skipped at encode time unless Dual mode is selected.
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
                 Pass {
@@ -2960,15 +3330,6 @@ impl RawGpuPipeline {
                         &bgl3,
                     ),
                     bind_group: bg3,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        bayer_rcd_p4_module.as_ref(),
-                        "bayer_rcd_output",
-                        &bgl4,
-                    ),
-                    bind_group: bg4,
                     workgroups: image_workgroups,
                 },
             ]),
@@ -3032,19 +3393,53 @@ impl RawGpuPipeline {
                     bind_group: bg_xtrans_accumulate,
                     workgroups: image_workgroups,
                 },
-                Pass {
-                    pipeline: make_pipeline(
-                        xtrans_p7_module.as_ref(),
-                        "xtrans_demosaic_finish",
-                        &bgl_xtrans_finish,
-                    ),
-                    bind_group: bg_xtrans_finish,
-                    workgroups: image_workgroups,
-                },
             ]),
         }
 
-        let raw_stage_end = passes.len();
+        let demosaic_dual_start_index = passes.len();
+        passes.extend([
+            Pass {
+                pipeline: make_pipeline(
+                    dual_demosaic_module.as_ref(),
+                    "dual_green_reconstruct",
+                    &bgl_dual_green,
+                ),
+                bind_group: bg_dual_green,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    dual_demosaic_module.as_ref(),
+                    "dual_rgb_reconstruct",
+                    &bgl_dual_rgb,
+                ),
+                bind_group: bg_dual_rgb,
+                workgroups: image_workgroups,
+            },
+        ]);
+        let demosaic_dual_end_index = passes.len();
+
+        let demosaic_finish_index = passes.len();
+        match raw.cfa_kind {
+            CfaKind::Bayer => passes.push(Pass {
+                pipeline: make_pipeline(
+                    bayer_rcd_p4_module.as_ref(),
+                    "bayer_rcd_output",
+                    &bgl4,
+                ),
+                bind_group: bg4,
+                workgroups: image_workgroups,
+            }),
+            CfaKind::XTrans => passes.push(Pass {
+                pipeline: make_pipeline(
+                    xtrans_p7_module.as_ref(),
+                    "xtrans_demosaic_finish",
+                    &bgl_xtrans_finish,
+                ),
+                bind_group: bg_xtrans_finish,
+                workgroups: image_workgroups,
+            }),
+        }
 
         // Analyze the unexposed scene at reduced resolution. The guide is
         // bilateral and the histogram reduction emits robust tonal anchors.
@@ -3104,7 +3499,7 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
-                    "prepare_adjustment_base",
+                    "prepare_scene_node",
                     &bgl_adjust_prepare,
                 ),
                 bind_group: bg_adjust_prepare,
@@ -3113,7 +3508,7 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
-                    "apply_capture_sharpen_and_tone",
+                    "apply_scene_tone_node",
                     &bgl_adjust_tone,
                 ),
                 bind_group: bg_adjust_tone,
@@ -3122,7 +3517,7 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
-                    "apply_lightroom_effects",
+                    "apply_scene_effects_node",
                     &bgl_adjust_effects,
                 ),
                 bind_group: bg_adjust_effects,
@@ -3194,7 +3589,7 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
-                    "apply_lightroom_adjustments",
+                    "apply_view_node",
                     &bgl_adjust_render,
                 ),
                 bind_group: bg_adjust_render,
@@ -3202,7 +3597,16 @@ impl RawGpuPipeline {
             },
         ]);
 
-        debug_assert_eq!(next_program_index, expected_pass_count(raw.cfa_kind));
+        let expected_programs = expected_pass_count(raw.cfa_kind);
+        if next_program_index != expected_programs || passes.len() != expected_programs {
+            return Err(anyhow!(
+                "GPU render-plan mismatch for {:?}: built {} passes and consumed {} programs; expected {}",
+                raw.cfa_kind,
+                passes.len(),
+                next_program_index,
+                expected_programs,
+            ));
+        }
 
         let egui_texture_id = renderer.map(|renderer| {
             renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)
@@ -3217,7 +3621,6 @@ impl RawGpuPipeline {
             params_buffer,
             tone_histogram_buffer,
             tone_stats_buffer,
-            raw_stage_end,
             tone_prepare_pass_index,
             tone_reduce_pass_index,
             tone_stage_end,
@@ -3226,6 +3629,9 @@ impl RawGpuPipeline {
             highlight_finalize_guided_index,
             highlight_finalize_direct_index,
             demosaic_start_index,
+            demosaic_dual_start_index,
+            demosaic_dual_end_index,
+            demosaic_finish_index,
             adjustment_prepare_pass_index,
             adjustment_tone_pass_index,
             adjustment_effects_pass_index,
@@ -3259,6 +3665,7 @@ impl RawGpuPipeline {
             out_texture,
             _out_view: out_view,
             pipeline_cache,
+            _gpu_budget_reservation: gpu_budget_reservation,
         };
         Ok(pipeline)
     }
@@ -3324,7 +3731,12 @@ impl RawGpuPipeline {
         full_width: u32,
         full_height: u32,
     ) -> Result<()> {
-        let mut rgba16f = vec![0u16; self.width as usize * self.height as usize * 4];
+        let rgba_elements = u64::from(self.width)
+            .checked_mul(u64::from(self.height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|elements| usize::try_from(elements).ok())
+            .ok_or_else(|| anyhow!("GPU inpaint upload element count overflows"))?;
+        let mut rgba16f = vec![0u16; rgba_elements];
         if let Some(layer) = layer {
             if full_width == 0 || full_height == 0 {
                 return Err(anyhow!("invalid inpaint coordinate space for GPU upload"));
@@ -3340,12 +3752,22 @@ impl RawGpuPipeline {
                     / u64::from(patch.source_width)) as i64;
                 let global_y0 = ((u64::from(patch.y) * u64::from(full_height))
                     / u64::from(patch.source_height)) as i64;
-                let global_x1 = ((u64::from(patch.x + patch.width) * u64::from(full_width))
-                    .div_ceil(u64::from(patch.source_width)))
-                    as i64;
-                let global_y1 = ((u64::from(patch.y + patch.height) * u64::from(full_height))
-                    .div_ceil(u64::from(patch.source_height)))
-                    as i64;
+                let patch_right = patch
+                    .x
+                    .checked_add(patch.width)
+                    .ok_or_else(|| anyhow!("inpaint patch horizontal extent overflows"))?;
+                let patch_bottom = patch
+                    .y
+                    .checked_add(patch.height)
+                    .ok_or_else(|| anyhow!("inpaint patch vertical extent overflows"))?;
+                let global_x1 = (u64::from(patch_right)
+                    .checked_mul(u64::from(full_width))
+                    .ok_or_else(|| anyhow!("inpaint patch horizontal projection overflows"))?
+                    .div_ceil(u64::from(patch.source_width))) as i64;
+                let global_y1 = (u64::from(patch_bottom)
+                    .checked_mul(u64::from(full_height))
+                    .ok_or_else(|| anyhow!("inpaint patch vertical projection overflows"))?
+                    .div_ceil(u64::from(patch.source_height))) as i64;
 
                 let local_x0 =
                     (global_x0 - i64::from(tile_origin_x)).clamp(0, i64::from(self.width)) as u32;
@@ -3384,7 +3806,12 @@ impl RawGpuPipeline {
                             rgb,
                             self.legacy_inpaint_camera_to_working,
                         );
-                        let destination = (y as usize * self.width as usize + x as usize) * 4;
+                        let destination = u64::from(y)
+                            .checked_mul(u64::from(self.width))
+                            .and_then(|row| row.checked_add(u64::from(x)))
+                            .and_then(|pixel| pixel.checked_mul(4))
+                            .and_then(|offset| usize::try_from(offset).ok())
+                            .ok_or_else(|| anyhow!("GPU inpaint destination offset overflows"))?;
                         composite_inpaint_rgba16f(
                             &mut rgba16f[destination..destination + 4],
                             rgb,
@@ -3399,7 +3826,11 @@ impl RawGpuPipeline {
             bytemuck::cast_slice(&rgba16f),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.width * 8),
+                bytes_per_row: Some(
+                    self.width
+                        .checked_mul(8)
+                        .ok_or_else(|| anyhow!("GPU inpaint upload row byte count overflows"))?,
+                ),
                 rows_per_image: Some(self.height),
             },
             texture_size(self.width, self.height),
@@ -3428,8 +3859,9 @@ impl RawGpuPipeline {
         texture_id
     }
 
-    /// Updates the preview/display transform from an RGB ICC matrix-shaper
-    /// profile without rebuilding compute pipelines or bind groups.
+    /// Updates the preview/display transform from an RGB ICC profile. Desktop
+    /// builds accept matrix-shaper and LUT/CLUT profiles through LCMS2, then
+    /// upload the sampled 3D LUT without rebuilding pipelines or bind groups.
     pub fn set_display_icc_profile(
         &self,
         queue: &wgpu::Queue,
@@ -3660,72 +4092,18 @@ impl RawGpuPipeline {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
-        if width == 0 || height == 0 || x + width > self.width || y + height > self.height {
-            return Err(anyhow!("invalid GPU readback rectangle"));
-        }
-
-        let unpadded_bytes_per_row = width * 4;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
-        let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("auraw tiled export readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw tiled export copy encoder"),
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.out_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x, y, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let submission = queue.submit(Some(encoder.finish()));
-
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        readback.map_async(wgpu::MapMode::Read, .., move |result| {
-            let _ = sender.send(result);
-        });
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            })
-            .map_err(|error| anyhow!("GPU poll failed during export: {error}"))?;
-        receiver
-            .recv()
-            .map_err(|_| anyhow!("GPU readback callback was dropped"))?
-            .map_err(|error| anyhow!("GPU readback mapping failed: {error}"))?;
-
-        let mapped = readback.get_mapped_range(..);
-        let mut rgba = vec![0u8; (width * height * 4) as usize];
-        for row in 0..height as usize {
-            let src = row * padded_bytes_per_row as usize;
-            let dst = row * unpadded_bytes_per_row as usize;
-            rgba[dst..dst + unpadded_bytes_per_row as usize]
-                .copy_from_slice(&mapped[src..src + unpadded_bytes_per_row as usize]);
-        }
-        drop(mapped);
-        readback.unmap();
-        Ok(rgba)
+        read_rgba8_texture_region_blocking(
+            device,
+            queue,
+            &self.out_texture,
+            x,
+            y,
+            width,
+            height,
+            self.width,
+            self.height,
+            "auraw tiled export readback",
+        )
     }
 
     /// Queues a display-linear RGBA32F copy and immediately returns a mapped
@@ -4124,7 +4502,19 @@ impl RawGpuPipeline {
         } else {
             self.encode_pass(encoder, self.highlight_finalize_direct_index);
         }
-        self.encode_pass_range(encoder, self.demosaic_start_index, self.raw_stage_end);
+        self.encode_pass_range(
+            encoder,
+            self.demosaic_start_index,
+            self.demosaic_dual_start_index,
+        );
+        if params.needs_dual_demosaic_passes() {
+            self.encode_pass_range(
+                encoder,
+                self.demosaic_dual_start_index,
+                self.demosaic_dual_end_index,
+            );
+        }
+        self.encode_pass(encoder, self.demosaic_finish_index);
     }
 
     fn encode_output_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
