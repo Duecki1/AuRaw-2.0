@@ -124,6 +124,76 @@ impl Settings {
             );
         });
 
+        #[cfg(not(target_os = "android"))]
+        {
+            ui.add_space(8.0);
+            Self::group(ui, content_width, |ui| {
+                ui.heading("Display color management");
+                ui.add(
+                    egui::Label::new(
+                        "Use the active monitor ICC profile for the live preview. Matrix and LUT/CLUT profiles are converted once through LCMS2 into the GPU display LUT.",
+                    )
+                    .wrap(),
+                );
+                ui.add_space(4.0);
+
+                let mut enabled = app.display_color_management;
+                if ui
+                    .checkbox(&mut enabled, "Use monitor color profile")
+                    .on_hover_text(
+                        "Automatically follows the display containing the app window. Disable to render the preview as plain sRGB.",
+                    )
+                    .changed()
+                {
+                    app.set_display_color_management(enabled);
+                }
+
+                ui.separator();
+                ui.strong("Active display profile");
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&app.display_profile_label).strong())
+                        .wrap(),
+                );
+                if let Some(source) = app.display_profile_source() {
+                    ui.add(egui::Label::new(egui::RichText::new(source).monospace()).wrap());
+                } else if app.display_color_management {
+                    ui.small("No OS monitor profile was found; sRGB is used as the safe fallback.");
+                }
+
+                ui.separator();
+                ui.strong("Manual override");
+                if let Some(path) = app.display_profile_override.as_deref() {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(path.display().to_string()).monospace())
+                            .wrap(),
+                    );
+                } else {
+                    ui.small("Automatic per-monitor discovery is enabled.");
+                    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+                    ui.small(
+                        "Linux automatic discovery uses X11 _ICC_PROFILE properties; Wayland-only sessions can use a manual ICC override.",
+                    );
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Choose ICC…").clicked() {
+                        app.choose_display_profile_override();
+                    }
+                    if ui
+                        .add_enabled(
+                            app.display_profile_override.is_some(),
+                            egui::Button::new("Use automatic"),
+                        )
+                        .clicked()
+                    {
+                        app.clear_display_profile_override();
+                    }
+                });
+                ui.small(
+                    "The profile is rebuilt only when the selected monitor/profile changes; normal rendering is a single 3D-LUT lookup.",
+                );
+            });
+        }
+
         ui.add_space(8.0);
         Self::group(ui, content_width, |ui| {
             ui.heading("Copy & paste adjustments");

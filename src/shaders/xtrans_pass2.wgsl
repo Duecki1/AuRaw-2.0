@@ -86,7 +86,7 @@ fn mark13_pass1(pos: vec2<i32>) -> vec3<f32> {
         bounds.y,
     );
     var out = center;
-    out.g = max(green, 0.0);
+    out.g = green;
     out = mark13_set(out, measured_channel, raw_cfa_at(pos));
     return out;
 }
@@ -125,7 +125,7 @@ fn mark13_pass3(pos: vec2<i32>) -> vec3<f32> {
     if measured_channel != 0u { out.r = center.g + mark13_refine_channel(pos, 0u); }
     if measured_channel != 2u { out.b = center.g + mark13_refine_channel(pos, 2u); }
     out = mark13_set(out, measured_channel, raw_cfa_at(pos));
-    return max(out, vec3<f32>(0.0));
+    return out;
 }
 
 @compute @workgroup_size(8, 8, 1)

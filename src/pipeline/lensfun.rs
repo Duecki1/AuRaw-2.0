@@ -1,4 +1,4 @@
-use super::{CompactPixelMap, LoadedRaw};
+use super::{CompactPixelMap, LensGeometryMap, LoadedRaw};
 use anyhow::{anyhow, Result};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -58,135 +58,66 @@ mod imp {
     use super::*;
     use anyhow::Context;
     use rayon::prelude::*;
-    use std::ffi::{c_char, c_int, c_void, CStr, CString};
+    use std::ffi::{c_char, c_int, CStr, CString};
     use std::path::{Path, PathBuf};
     use std::ptr;
+    use std::sync::Arc;
 
-    const LF_NO_ERROR: c_int = 0;
-    const LF_SEARCH_LOOSE: c_int = 1;
-    const LF_SEARCH_SORT_AND_UNIQUIFY: c_int = 2;
-    const LF_PF_F32: c_int = 3;
-    const LF_MODIFY_TCA: c_int = 0x0000_0001;
-    const LF_MODIFY_VIGNETTING: c_int = 0x0000_0002;
-    const LF_MODIFY_DISTORTION: c_int = 0x0000_0008;
-    const LF_MODIFY_GEOMETRY: c_int = 0x0000_0010;
-    const LF_MODIFY_SCALE: c_int = 0x0000_0020;
-    const LF_CR_UNKNOWN: c_int = 2;
-    const LF_CR_RED: c_int = 4;
-    const LF_CR_GREEN: c_int = 5;
-    const LF_CR_BLUE: c_int = 6;
+    const LENSFUN_BUILD_VERSION: &str = env!("AURAW_LENSFUN_BUILD_VERSION");
+
+    // # Native safety contract
+    //
+    // * ABI: build.rs accepts Lensfun 0.3.2 through 0.3.4, verifies that the
+    //   pkg-config and selected header versions agree, and bindgen emits the
+    //   declarations plus compile-time layout tests from that exact header.
+    // * Ownership: Database and Modifier uniquely own pointers returned by
+    //   their constructors; OwnedPointerList owns only search-result arrays.
+    //   Camera/lens records and multilingual strings remain Lensfun-owned.
+    // * Lifetimes: record pointers are used only while their Database guard is
+    //   live, localized strings are copied immediately, and search arrays are
+    //   freed exactly once through lf_free.
+    // * Nullability: every constructor/list/record/string result is checked by
+    //   the safe wrapper before dereference or conversion.
+    // * Thread safety: database and modifier handles are never shared across
+    //   threads. Rayon work starts only after Lensfun has filled Rust-owned
+    //   coordinate/gain buffers and operates exclusively on those copies.
+    // * Buffer validity: each native call's SAFETY comment states the exact
+    //   element count, row stride, and live pointer requirements.
+    mod ffi {
+        #![allow(
+            dead_code,
+            non_camel_case_types,
+            non_snake_case,
+            non_upper_case_globals
+        )]
+        include!(concat!(env!("OUT_DIR"), "/lensfun_bindings.rs"));
+    }
+
+    use ffi::{
+        lf_db_destroy, lf_db_find_cameras, lf_db_find_cameras_ext, lf_db_find_lenses_hd,
+        lf_db_get_lenses, lf_db_load, lf_db_load_file, lf_db_new, lf_free, lf_mlstr_get,
+        lf_modifier_add_coord_callback_scale, lf_modifier_apply_color_modification,
+        lf_modifier_apply_subpixel_geometry_distortion, lf_modifier_destroy,
+        lf_modifier_get_auto_scale, lf_modifier_initialize, lf_modifier_new, lfCamera,
+        lfDatabase, lfLens, lfModifier,
+    };
+
+    // Bindgen reads these values and all accessed structure layouts from the
+    // exact Lensfun 0.3.2-0.3.4 header selected by pkg-config in build.rs.
+    const LF_NO_ERROR: ffi::lfError = ffi::LF_NO_ERROR;
+    const LF_SEARCH_LOOSE: c_int = ffi::LF_SEARCH_LOOSE as c_int;
+    const LF_SEARCH_SORT_AND_UNIQUIFY: c_int = ffi::LF_SEARCH_SORT_AND_UNIQUIFY as c_int;
+    const LF_MODIFY_TCA: c_int = ffi::LF_MODIFY_TCA as c_int;
+    const LF_MODIFY_VIGNETTING: c_int = ffi::LF_MODIFY_VIGNETTING as c_int;
+    const LF_MODIFY_DISTORTION: c_int = ffi::LF_MODIFY_DISTORTION as c_int;
+    const LF_MODIFY_GEOMETRY: c_int = ffi::LF_MODIFY_GEOMETRY as c_int;
+    const LF_MODIFY_SCALE: c_int = ffi::LF_MODIFY_SCALE as c_int;
+    const LF_CR_UNKNOWN: c_int = ffi::LF_CR_UNKNOWN as c_int;
+    const LF_CR_RED: c_int = ffi::LF_CR_RED as c_int;
+    const LF_CR_GREEN: c_int = ffi::LF_CR_GREEN as c_int;
+    const LF_CR_BLUE: c_int = ffi::LF_CR_BLUE as c_int;
     const LF_CR_RGBA: c_int =
         LF_CR_RED | (LF_CR_GREEN << 4) | (LF_CR_BLUE << 8) | (LF_CR_UNKNOWN << 12);
-
-    #[repr(C)]
-    struct lfDatabase {
-        _private: [u8; 0],
-    }
-
-    #[repr(C)]
-    struct lfModifier {
-        _private: [u8; 0],
-    }
-
-    // Lensfun 0.3.2–0.3.4 expose these fields at the beginning of the
-    // public C structs. AuRaw only reads this stable prefix; the database owns
-    // each object and keeps it alive for the lifetime of `Database`.
-    #[repr(C)]
-    struct lfCamera {
-        maker: *mut c_char,
-        model: *mut c_char,
-        variant: *mut c_char,
-        mount: *mut c_char,
-        crop_factor: f32,
-        score: c_int,
-    }
-
-    #[repr(C)]
-    struct lfLens {
-        maker: *mut c_char,
-        model: *mut c_char,
-        min_focal: f32,
-        max_focal: f32,
-        min_aperture: f32,
-        max_aperture: f32,
-        mounts: *mut *mut c_char,
-        center_x: f32,
-        center_y: f32,
-        crop_factor: f32,
-        aspect_ratio: f32,
-        lens_type: c_int,
-    }
-
-    unsafe extern "C" {
-        fn lf_free(data: *mut c_void);
-        fn lf_mlstr_get(value: *const c_char) -> *const c_char;
-        fn lf_db_new() -> *mut lfDatabase;
-        fn lf_db_destroy(db: *mut lfDatabase);
-        fn lf_db_load(db: *mut lfDatabase) -> c_int;
-        fn lf_db_load_file(db: *mut lfDatabase, filename: *const c_char) -> c_int;
-        fn lf_db_find_cameras(
-            db: *const lfDatabase,
-            maker: *const c_char,
-            model: *const c_char,
-        ) -> *mut *const lfCamera;
-        fn lf_db_find_cameras_ext(
-            db: *const lfDatabase,
-            maker: *const c_char,
-            model: *const c_char,
-            flags: c_int,
-        ) -> *mut *const lfCamera;
-        fn lf_db_find_lenses_hd(
-            db: *const lfDatabase,
-            camera: *const lfCamera,
-            maker: *const c_char,
-            lens: *const c_char,
-            flags: c_int,
-        ) -> *mut *const lfLens;
-        fn lf_db_get_lenses(db: *const lfDatabase) -> *const *const lfLens;
-        fn lf_modifier_new(
-            lens: *const lfLens,
-            crop: f32,
-            width: c_int,
-            height: c_int,
-        ) -> *mut lfModifier;
-        fn lf_modifier_destroy(modifier: *mut lfModifier);
-        fn lf_modifier_initialize(
-            modifier: *mut lfModifier,
-            lens: *const lfLens,
-            pixel_format: c_int,
-            focal: f32,
-            aperture: f32,
-            distance: f32,
-            scale: f32,
-            target_geometry: c_int,
-            flags: c_int,
-            reverse: c_int,
-        ) -> c_int;
-        fn lf_modifier_get_auto_scale(modifier: *mut lfModifier, reverse: c_int) -> f32;
-        fn lf_modifier_add_coord_callback_scale(
-            modifier: *mut lfModifier,
-            scale: f32,
-            reverse: c_int,
-        ) -> c_int;
-        fn lf_modifier_apply_subpixel_geometry_distortion(
-            modifier: *mut lfModifier,
-            x: f32,
-            y: f32,
-            width: c_int,
-            height: c_int,
-            result: *mut f32,
-        ) -> c_int;
-        fn lf_modifier_apply_color_modification(
-            modifier: *mut lfModifier,
-            pixels: *mut c_void,
-            x: f32,
-            y: f32,
-            width: c_int,
-            height: c_int,
-            component_role: c_int,
-            row_stride: c_int,
-        ) -> c_int;
-    }
 
     struct Database(*mut lfDatabase);
 
@@ -356,15 +287,8 @@ mod imp {
         let database = Database::load()?;
         let camera = find_camera(&database, &raw.camera_make, &raw.camera_model);
         let camera_label = camera
-            .map(|camera| unsafe {
-                format!(
-                    "{} {}",
-                    multilingual_string((*camera).maker),
-                    multilingual_string((*camera).model)
-                )
-                .trim()
-                .to_owned()
-            })
+            .and_then(camera_name)
+            .map(|(maker, model)| format!("{maker} {model}").trim().to_owned())
             .unwrap_or_else(|| {
                 let reported = format!("{} {}", raw.camera_make, raw.camera_model)
                     .trim()
@@ -382,7 +306,7 @@ mod imp {
         sort_and_deduplicate_lenses(&mut lenses);
 
         let auto_match = find_auto_lens(&database, camera, raw);
-        let status = if let Some(found) = &auto_match {
+        let message = if let Some(found) = &auto_match {
             format!("Auto-detected {} from RAW metadata", found.label())
         } else if raw.lens_model.trim().is_empty() {
             "The RAW file does not identify a lens. Select one manually.".to_owned()
@@ -397,6 +321,7 @@ mod imp {
                 raw.lens_model
             )
         };
+        let status = format!("Lensfun {LENSFUN_BUILD_VERSION}: {message}");
 
         Ok(LensfunCatalog {
             available: true,
@@ -413,17 +338,18 @@ mod imp {
         let lens = find_lens(&database, camera, selection)
             .ok_or_else(|| anyhow!("Lensfun has no profile for {}", selection.label()))?;
 
-        // SAFETY: camera/lens pointers are database-owned and valid for this scope.
-        // If the camera is absent from the database, Lensfun's calibration crop
-        // factor is the safest available fallback for manual correction.
+        // If the camera is absent from the database, Lensfun's calibration
+        // crop factor is the safest available fallback for manual correction.
+        let lens_fields = lens_fields(lens)
+            .ok_or_else(|| anyhow!("Lensfun returned a null lens profile"))?;
         let crop = camera
-            .map(|camera| unsafe { (*camera).crop_factor })
+            .and_then(camera_crop_factor)
             .and_then(positive)
-            .or_else(|| positive(unsafe { (*lens).crop_factor }))
+            .or_else(|| positive(lens_fields.crop_factor))
             .unwrap_or(1.0);
-        let focal = positive(raw.focal_length).unwrap_or_else(|| unsafe {
-            let min = (*lens).min_focal;
-            let max = (*lens).max_focal;
+        let focal = positive(raw.focal_length).unwrap_or_else(|| {
+            let min = lens_fields.min_focal;
+            let max = lens_fields.max_focal;
             if min.is_finite() && max.is_finite() && min > 0.0 && max >= min {
                 0.5 * (min + max)
             } else {
@@ -432,6 +358,93 @@ mod imp {
         });
         let width = c_int::try_from(raw.width).context("RAW width does not fit Lensfun")?;
         let height = c_int::try_from(raw.height).context("RAW height does not fit Lensfun")?;
+        let aperture = positive(raw.aperture).unwrap_or(8.0);
+        let distance = positive(raw.focus_distance).unwrap_or(1000.0);
+
+        // Keep only channel-relative TCA and multiplicative lens shading in CFA
+        // space. Common distortion is deliberately excluded here: warping the
+        // mosaic destroys X-Trans locality and forces an early u16 requantization.
+        let (early_modifier, early_flags) = initialize_modifier(
+            lens,
+            crop,
+            width,
+            height,
+            focal,
+            aperture,
+            distance,
+            LF_MODIFY_TCA | LF_MODIFY_VIGNETTING,
+        )?;
+
+        // Build a second modifier for the common geometric component. Its
+        // inverse map is retained and later composed with crop/rotate/keystone
+        // in the float RGB geometry pass, so the image is geometrically sampled
+        // only once.
+        let (geometry_modifier, mut geometry_flags) = initialize_modifier(
+            lens,
+            crop,
+            width,
+            height,
+            focal,
+            aperture,
+            distance,
+            LF_MODIFY_DISTORTION,
+        )?;
+
+        // Auto-scale must still account for the complete coordinate correction,
+        // including TCA. Probe the same TCA+distortion combination used by the
+        // former one-pass path, then attach only its common scale to the deferred
+        // geometry modifier so channel-relative TCA is not applied twice.
+        let (scale_probe_modifier, scale_probe_flags) = initialize_modifier(
+            lens,
+            crop,
+            width,
+            height,
+            focal,
+            aperture,
+            distance,
+            LF_MODIFY_TCA | LF_MODIFY_DISTORTION,
+        )?;
+        if scale_probe_flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_TCA) != 0 {
+            // SAFETY: Lensfun computes a scale for the configured live modifier.
+            let scale = unsafe { lf_modifier_get_auto_scale(scale_probe_modifier.0, 0) };
+            if scale.is_finite() && scale > 0.0 {
+                // SAFETY: the callback is added to the live deferred geometry modifier.
+                let scaling_added =
+                    unsafe { lf_modifier_add_coord_callback_scale(geometry_modifier.0, scale, 0) };
+                if scaling_added != 0 {
+                    geometry_flags |= LF_MODIFY_SCALE;
+                }
+            }
+        }
+
+        if early_flags & (LF_MODIFY_TCA | LF_MODIFY_VIGNETTING) == 0
+            && geometry_flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_SCALE) == 0
+        {
+            return Err(anyhow!(
+                "the selected Lensfun profile contains no applicable correction data"
+            ));
+        }
+
+        let lens_geometry = build_lens_geometry_map(raw, &geometry_modifier, geometry_flags)?;
+        if early_flags & (LF_MODIFY_TCA | LF_MODIFY_VIGNETTING) == 0 {
+            let mut corrected = raw.clone();
+            corrected.lens_geometry = lens_geometry;
+            return Ok(corrected);
+        }
+        correct_mosaic(raw, &early_modifier, early_flags, lens_geometry)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn initialize_modifier(
+        lens: *const lfLens,
+        crop: f32,
+        width: c_int,
+        height: c_int,
+        focal: f32,
+        aperture: f32,
+        distance: f32,
+        requested_flags: c_int,
+    ) -> Result<(Modifier, c_int)> {
         // SAFETY: all pointers and scalar parameters are valid. Lensfun 0.3.x
         // configures focal/aperture/distance through `lf_modifier_initialize`.
         let pointer = unsafe { lf_modifier_new(lens, crop.max(0.1), width, height) };
@@ -439,55 +452,101 @@ mod imp {
             return Err(anyhow!("Lensfun could not create a modifier"));
         }
         let modifier = Modifier(pointer);
-        let aperture = positive(raw.aperture).unwrap_or(8.0);
-        let distance = positive(raw.focus_distance).unwrap_or(1000.0);
-        // SAFETY: modifier and lens are live. reverse=0 applies correction rather
-        // than simulating defects, and the selected lens geometry is a valid enum.
-        let mut flags = unsafe {
+        let lens_type = lens_fields(lens)
+            .ok_or_else(|| anyhow!("Lensfun returned a null lens profile"))?
+            .lens_type;
+        // SAFETY: modifier and lens are live database-owned objects generated
+        // against the verified Lensfun headers. reverse=0 applies correction.
+        let flags = unsafe {
             lf_modifier_initialize(
                 modifier.0,
                 lens,
-                LF_PF_F32,
+                ffi::LF_PF_F32,
                 focal,
                 aperture,
                 distance,
                 1.0,
-                (*lens).lens_type,
-                LF_MODIFY_TCA | LF_MODIFY_VIGNETTING | LF_MODIFY_DISTORTION,
+                lens_type,
+                requested_flags,
                 0,
             )
         };
+        Ok((modifier, flags))
+    }
 
-        if flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_TCA) != 0 {
-            // SAFETY: Lensfun computes a scale for the configured live modifier.
-            let scale = unsafe { lf_modifier_get_auto_scale(modifier.0, 0) };
-            if scale.is_finite() && scale > 0.0 {
-                // SAFETY: the callback is added to the same initialized modifier.
-                let scaling_added =
-                    unsafe { lf_modifier_add_coord_callback_scale(modifier.0, scale, 0) };
-                if scaling_added != 0 {
-                    flags |= LF_MODIFY_SCALE;
-                }
+    fn build_lens_geometry_map(
+        raw: &LoadedRaw,
+        modifier: &Modifier,
+        flags: c_int,
+    ) -> Result<Option<Arc<LensGeometryMap>>> {
+        if flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_SCALE) == 0 {
+            return Ok(None);
+        }
+
+        // Lens distortion is smooth. Sampling it at <=32-pixel spacing keeps
+        // the retained map compact while accurately following strong corner
+        // curvature when the later float resampler interpolates this grid.
+        const MAX_GRID_STEP: u32 = 32;
+        let grid_width = raw.width.saturating_sub(1).div_ceil(MAX_GRID_STEP) + 1;
+        let grid_height = raw.height.saturating_sub(1).div_ceil(MAX_GRID_STEP) + 1;
+        let grid_width = grid_width.max(2);
+        let grid_height = grid_height.max(2);
+        let mut coordinates = Vec::with_capacity(grid_width as usize * grid_height as usize);
+        let mut mapped = [0.0f32; 6];
+
+        for grid_y in 0..grid_height {
+            let y = if grid_height <= 1 {
+                0.0
+            } else {
+                grid_y as f32 * raw.height.saturating_sub(1) as f32
+                    / (grid_height - 1) as f32
+            };
+            for grid_x in 0..grid_width {
+                let x = if grid_width <= 1 {
+                    0.0
+                } else {
+                    grid_x as f32 * raw.width.saturating_sub(1) as f32
+                        / (grid_width - 1) as f32
+                };
+                mapped.fill(0.0);
+                // SAFETY: the output contains six floats for one RGB subpixel
+                // coordinate. Distortion-only maps have identical RGB geometry;
+                // green is used as the common coordinate by convention.
+                let filled = unsafe {
+                    lf_modifier_apply_subpixel_geometry_distortion(
+                        modifier.0,
+                        x,
+                        y,
+                        1,
+                        1,
+                        mapped.as_mut_ptr(),
+                    )
+                };
+                coordinates.push(if filled == 0 {
+                    [x, y]
+                } else {
+                    [mapped[2], mapped[3]]
+                });
             }
         }
 
-        if flags
-            & (LF_MODIFY_DISTORTION
-                | LF_MODIFY_GEOMETRY
-                | LF_MODIFY_TCA
-                | LF_MODIFY_SCALE
-                | LF_MODIFY_VIGNETTING)
-            == 0
-        {
-            return Err(anyhow!(
-                "the selected Lensfun profile contains no applicable correction data"
-            ));
-        }
-
-        correct_mosaic(raw, &modifier, flags)
+        let map = LensGeometryMap::new(
+            raw.width,
+            raw.height,
+            grid_width,
+            grid_height,
+            coordinates,
+        )
+        .ok_or_else(|| anyhow!("Lensfun produced an invalid distortion map"))?;
+        Ok(Some(Arc::new(map)))
     }
 
-    fn correct_mosaic(raw: &LoadedRaw, modifier: &Modifier, flags: c_int) -> Result<LoadedRaw> {
+    fn correct_mosaic(
+        raw: &LoadedRaw,
+        modifier: &Modifier,
+        flags: c_int,
+        lens_geometry: Option<Arc<LensGeometryMap>>,
+    ) -> Result<LoadedRaw> {
         let width = raw.width as usize;
         let height = raw.height as usize;
         let mut raw_pixels = vec![0u16; raw.raw_pixels.len()];
@@ -633,7 +692,7 @@ mod imp {
             }
         }
         crate::diagnostics::record(format!(
-            "Lensfun coordinate warp/CFA resample finished in {:.3}s",
+            "Lensfun CFA TCA/shading correction finished in {:.3}s",
             warp_started.elapsed().as_secs_f64()
         ));
 
@@ -665,10 +724,12 @@ mod imp {
                 )
             },
             white_levels: raw.white_levels,
+            noise_profile: raw.noise_profile,
             camera_profile: raw.camera_profile.clone(),
             camera_profile_source: raw.camera_profile_source.clone(),
             available_camera_profiles: raw.available_camera_profiles.clone(),
             white_balance_model: raw.white_balance_model.clone(),
+            lens_geometry,
         })
     }
 
@@ -767,12 +828,100 @@ mod imp {
             }
         }
 
-        // X-Trans has an irregular 6x6 color layout, so keep the conservative
-        // same-color fallback there. Bayer is the common path and receives true
-        // subpixel interpolation below, which removes the nearest-neighbor
-        // stair-steps and color breaks that were visible after Lensfun warping.
+        if raw.cfa_kind == crate::pipeline::CfaKind::XTrans && x.is_finite() && y.is_finite() {
+            if let Some(sample) = sample_xtrans_same_color_weighted(
+                raw,
+                x,
+                y,
+                channel,
+                vignette_enabled,
+                vignette_gains,
+            ) {
+                return sample;
+            }
+        }
+
+        // Degenerate edge/corrupt-coordinate fallback only. Normal Bayer and
+        // X-Trans TCA paths interpolate strictly within the requested CFA color.
         let source_index = nearest_matching_sample(raw, x, y, channel);
         corrected_sample_at(raw, source_index, vignette_enabled, vignette_gains)
+    }
+
+    fn sample_xtrans_same_color_weighted(
+        raw: &LoadedRaw,
+        x: f32,
+        y: f32,
+        channel: u8,
+        vignette_enabled: bool,
+        vignette_gains: &[f32],
+    ) -> Option<(f32, f32)> {
+        let max_x = raw.width.saturating_sub(1) as i32;
+        let max_y = raw.height.saturating_sub(1) as i32;
+        let center_x = x.floor() as i32;
+        let center_y = y.floor() as i32;
+        const NEIGHBORS: usize = 4;
+        let mut nearest = [(f32::INFINITY, 0usize); NEIGHBORS];
+
+        // A 3-pixel search radius reaches several samples of every X-Trans
+        // color. Keep only the four closest same-color sites so TCA correction
+        // remains sharply local instead of averaging a broad irregular CFA
+        // neighborhood. Inverse-distance weighting then gives a continuous
+        // subpixel estimate without ever mixing colors.
+        for sample_y in (center_y - 3)..=(center_y + 3) {
+            if sample_y < 0 || sample_y > max_y {
+                continue;
+            }
+            for sample_x in (center_x - 3)..=(center_x + 3) {
+                if sample_x < 0 || sample_x > max_x {
+                    continue;
+                }
+                let index = sample_y as usize * raw.width as usize + sample_x as usize;
+                if raw.color_indices[index] != channel {
+                    continue;
+                }
+                let dx = sample_x as f32 - x;
+                let dy = sample_y as f32 - y;
+                let distance_squared = dx * dx + dy * dy;
+                if distance_squared > 12.25 {
+                    continue;
+                }
+                if distance_squared < 1e-8 {
+                    return Some(corrected_sample_at(
+                        raw,
+                        index,
+                        vignette_enabled,
+                        vignette_gains,
+                    ));
+                }
+
+                if distance_squared < nearest[NEIGHBORS - 1].0 {
+                    let mut slot = NEIGHBORS - 1;
+                    while slot > 0 && distance_squared < nearest[slot - 1].0 {
+                        nearest[slot] = nearest[slot - 1];
+                        slot -= 1;
+                    }
+                    nearest[slot] = (distance_squared, index);
+                }
+            }
+        }
+
+        let mut value_sum = 0.0f32;
+        let mut black_sum = 0.0f32;
+        let mut weight_sum = 0.0f32;
+        for (distance_squared, index) in nearest {
+            if !distance_squared.is_finite() {
+                continue;
+            }
+            // Squared inverse distance strongly favors the local sample nearest
+            // the requested TCA coordinate, retaining microdetail while the
+            // remaining neighbors stabilize interpolation between X-Trans sites.
+            let weight = 1.0 / distance_squared.max(1e-4).powi(2);
+            let sample = corrected_sample_at(raw, index, vignette_enabled, vignette_gains);
+            value_sum += sample.0 * weight;
+            black_sum += sample.1 * weight;
+            weight_sum += weight;
+        }
+        (weight_sum > 1e-6).then(|| (value_sum / weight_sum, black_sum / weight_sum))
     }
 
     fn sample_bayer_phase_bilinear(
@@ -1181,8 +1330,10 @@ mod imp {
         let Some(lens) = find_lens(database, camera, candidate) else {
             return true;
         };
-        // SAFETY: `lens` is database-owned and remains valid for this scope.
-        let (min_focal, max_focal) = unsafe { ((*lens).min_focal, (*lens).max_focal) };
+        let Some(fields) = lens_fields(lens) else {
+            return true;
+        };
+        let (min_focal, max_focal) = (fields.min_focal, fields.max_focal);
         if !min_focal.is_finite()
             || !max_focal.is_finite()
             || min_focal <= 0.0
@@ -1326,17 +1477,62 @@ mod imp {
             })
     }
 
+    #[derive(Clone, Copy)]
+    struct LensFields {
+        crop_factor: f32,
+        min_focal: f32,
+        max_focal: f32,
+        lens_type: ffi::lfLensType,
+    }
+
+    fn camera_name(pointer: *const lfCamera) -> Option<(String, String)> {
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: every camera pointer passed here comes from a live Lensfun
+        // database. Bindgen generated the field offsets from the exact verified
+        // 0.3.2-0.3.4 header selected during this build.
+        let camera = unsafe { &*pointer };
+        Some((
+            multilingual_string(camera.Maker),
+            multilingual_string(camera.Model),
+        ))
+    }
+
+    fn camera_crop_factor(pointer: *const lfCamera) -> Option<f32> {
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: same database ownership and generated-layout contract as
+        // `camera_name`.
+        Some(unsafe { (*pointer).CropFactor })
+    }
+
+    fn lens_fields(pointer: *const lfLens) -> Option<LensFields> {
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: every lens pointer passed here is database-owned and remains
+        // valid until the surrounding `Database` guard drops. All field offsets
+        // come from generated bindings for the accepted Lensfun ABI.
+        let lens = unsafe { &*pointer };
+        Some(LensFields {
+            crop_factor: lens.CropFactor,
+            min_focal: lens.MinFocal,
+            max_focal: lens.MaxFocal,
+            lens_type: lens.Type,
+        })
+    }
+
     fn lens_name(pointer: *const lfLens) -> Option<LensfunLens> {
         if pointer.is_null() {
             return None;
         }
-        // SAFETY: pointer is database-owned and valid for this read.
-        let (maker, model) = unsafe {
-            (
-                multilingual_string((*pointer).maker),
-                multilingual_string((*pointer).model),
-            )
-        };
+        // SAFETY: same database ownership and generated-layout contract as
+        // `lens_fields`.
+        let lens = unsafe { &*pointer };
+        let maker = multilingual_string(lens.Maker);
+        let model = multilingual_string(lens.Model);
         if maker.is_empty() && model.is_empty() {
             None
         } else {
@@ -1362,15 +1558,20 @@ mod imp {
         result
     }
 
-    unsafe fn multilingual_string(pointer: *const c_char) -> String {
+    fn multilingual_string(pointer: *mut c_char) -> String {
         if pointer.is_null() {
             return String::new();
         }
-        let localized = lf_mlstr_get(pointer);
+        // SAFETY: Lensfun owns both the multilingual string and the localized
+        // NUL-terminated result. The result is borrowed only for this copy and
+        // is never freed by Rust.
+        let localized = unsafe { lf_mlstr_get(pointer) };
         if localized.is_null() {
             String::new()
         } else {
-            CStr::from_ptr(localized)
+            // SAFETY: `lf_mlstr_get` returns a valid NUL-terminated string or
+            // null for the lifetime of its database-owned input.
+            unsafe { CStr::from_ptr(localized) }
                 .to_string_lossy()
                 .trim()
                 .to_owned()
@@ -1379,5 +1580,32 @@ mod imp {
 
     fn positive(value: f32) -> Option<f32> {
         (value.is_finite() && value > 0.0).then_some(value)
+    }
+
+    #[cfg(test)]
+    mod ffi_boundary_tests {
+        use super::*;
+
+        #[test]
+        fn null_native_results_are_normal_wrapper_misses() {
+            assert!(camera_name(ptr::null()).is_none());
+            assert!(camera_crop_factor(ptr::null()).is_none());
+            assert!(lens_fields(ptr::null()).is_none());
+            assert!(lens_name(ptr::null()).is_none());
+            assert!(pointer_list::<lfLens>(ptr::null()).is_empty());
+
+            let list = OwnedPointerList::<lfLens> {
+                pointer: ptr::null_mut(),
+            };
+            assert!(list.first().is_none());
+            assert!(list.values().is_empty());
+        }
+
+        #[test]
+        fn native_owners_remain_raii_guards() {
+            assert!(std::mem::needs_drop::<Database>());
+            assert!(std::mem::needs_drop::<Modifier>());
+            assert!(std::mem::needs_drop::<OwnedPointerList<lfLens>>());
+        }
     }
 }

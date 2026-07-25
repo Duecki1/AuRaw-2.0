@@ -42,6 +42,8 @@ impl eframe::App for AurawApp {
         }
 
         self.poll_load_worker(frame);
+        #[cfg(not(target_os = "android"))]
+        self.sync_display_color_management(ui.ctx(), frame);
         self.poll_export_worker(frame);
         self.poll_subject_worker();
         self.poll_object_worker();

@@ -70,5 +70,5 @@ fn bayer_rcd_chroma(@builtin(global_invocation_id) gid: vec3<u32>) {
         rgb.r = green + rcd_diagonal_difference(pos);
     }
 
-    textureStore(tex3_write, pos, vec4<f32>(max(rgb, vec3<f32>(0.0)), textureLoad(tex2_read, pos, 0).w));
+    textureStore(tex3_write, pos, vec4<f32>(rgb, textureLoad(tex2_read, pos, 0).w));
 }

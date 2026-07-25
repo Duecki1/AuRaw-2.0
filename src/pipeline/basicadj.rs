@@ -1,3 +1,4 @@
+use super::noise::DenoiseQuality;
 use super::sigmoid::SigmoidParams;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -8,8 +9,10 @@ pub enum DemosaicMode {
     Reference,
     /// Apply frequency-domain chroma suppression to the reference result.
     FrequencyDomainChroma,
-    /// Blend the high-detail result with a low-detail VNG-style result using
-    /// a Scharr/detail mask, following darktable's dual-demosaic behaviour.
+    /// Blend the high-detail result with a separate robust low-frequency
+    /// reconstruction using edge, sensor-noise, and reconstruction confidence.
+    /// The low branch is a clean-room gradient-guided alternative rather than
+    /// a direct VNG/LMMSE code port.
     Dual,
 }
 
@@ -26,7 +29,7 @@ impl DemosaicMode {
         match self {
             Self::Reference => "Reference (RCD / Markesteijn 3-pass)",
             Self::FrequencyDomainChroma => "Frequency-domain chroma",
-            Self::Dual => "Dual demosaic",
+            Self::Dual => "Dual demosaic (robust)",
         }
     }
 }
@@ -184,7 +187,23 @@ impl ColorGrading {
     }
 }
 
-pub const CURRENT_PROCESS_VERSION: u32 = 12;
+/// Historical process milestones are retained for decoding old sidecars and
+/// documenting shader changes. Runtime rendering is canonical: every supported
+/// edit is migrated to `CURRENT_PROCESS_VERSION` before it can be rendered,
+/// copied, or saved, so identical adjustment values cannot select different
+/// image-processing graphs.
+pub const LEGACY_SCENE_DISPLAY_PROCESS_VERSION: u32 = 12;
+pub const SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13;
+pub const SENSOR_DENOISE_PROCESS_VERSION: u32 = 14;
+pub const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15;
+pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;
+/// Process 17 separates the photographic roles of the two low-tone controls:
+/// Shadows is a bounded scene-EV zone remap with an actual-pixel-aware selector,
+/// while Blacks is a view-adjacent display-linear toe remap. This prevents DCP
+/// ProfileToneCurve/sigmoid compression from consuming most of the black-point
+/// authority and keeps low-key/high-key pivots from degenerating.
+pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;
+pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -196,8 +215,9 @@ pub const HSL_HUE_LIMIT: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ExposureParams {
-    /// Version of the processing formulas used by this edit. Saved edits must
-    /// migrate deliberately instead of silently adopting new shader behavior.
+    /// Serialized process marker. Supported historical values are accepted at
+    /// the sidecar boundary, then immediately canonicalized to the current
+    /// renderer so this field never changes image behaviour at runtime.
     pub process_version: u32,
     /// Additional normalized sensor-space black-point correction. It is applied
     /// per CFA plane before white balance and demosaic, and is deliberately
@@ -224,6 +244,16 @@ pub struct ExposureParams {
     pub tone_curve_green: PointCurve,
     pub tone_curve_blue: PointCurve,
     pub chroma_denoise: f32,
+    /// Sensor-profiled camera-linear luminance noise reduction, 0..100.
+    #[serde(default)]
+    pub luminance_denoise: f32,
+    /// Detail protection for sensor-profiled denoise, 0..100. Higher values
+    /// reject cross-edge samples more aggressively.
+    #[serde(default = "default_denoise_detail")]
+    pub denoise_detail: f32,
+    /// Tap budget / scale count for the multiscale denoise stage.
+    #[serde(default)]
+    pub denoise_quality: DenoiseQuality,
     /// Demosaic finishing mode. The reference algorithm is always run first.
     pub demosaic_mode: DemosaicMode,
     /// Detail threshold in darktable-compatible 0..100 units for dual mode.
@@ -246,8 +276,8 @@ pub struct ExposureParams {
     /// converging toward a neutral specular highlight.
     pub highlight_color_adaptation: f32,
 
-    // Lightroom-style tonal controls are applied as scene-linear, local
-    // exposure shaping before the final darktable sigmoid display transform.
+    // Basic tonal controls. Highlights/Whites and Shadows are scene-referred;
+    // Process 17+ Blacks is a view-adjacent display-linear toe/endpoint remap.
     pub highlights: f32,
     pub shadows: f32,
     pub whites: f32,
@@ -296,16 +326,12 @@ pub const LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV: f32 = 0.7;
 
 impl ExposureParams {
     pub fn migrate_to_current_process(&mut self) {
-        // Process versions 8 and 9 stored a zero-centered Exposure control
-        // while the renderer secretly added +0.7 EV. Version 10 removed that
-        // universal backend lift. Move it into the saved/user-visible Exposure
-        // value once so legacy edits keep their exact brightness without any
-        // continuing hidden offset. Version 11 introduced the scene-headroom
-        // DCP shoulder and protected Contrast S-curve. Version 12 moves capture
-        // sharpening into the pre-tone scene-referred stage. v10/v11 edits need
-        // no scalar parameter compensation, but migrate explicitly so each
-        // rendering-formula change is recorded rather than silently reinterpreted.
-        // Versions 0..=7 already stored the old rendition exposure explicitly.
+        // Versions 8 and 9 stored a zero-centered Exposure control while the
+        // renderer secretly added +0.7 EV. Preserve that brightness by moving
+        // the hidden lift into the visible value once. Every supported process
+        // version then adopts the current graph and formulas. This deliberately
+        // favors one deterministic interpretation of an adjustment set over
+        // retaining multiple image-dependent compatibility renderers.
         match self.process_version {
             0..=7 => {
                 self.process_version = CURRENT_PROCESS_VERSION;
@@ -314,16 +340,11 @@ impl ExposureParams {
                 self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV;
                 self.process_version = CURRENT_PROCESS_VERSION;
             }
-            10 => {
+            10..=CURRENT_PROCESS_VERSION => {
                 self.process_version = CURRENT_PROCESS_VERSION;
             }
-            11 => {
-                self.process_version = CURRENT_PROCESS_VERSION;
-            }
-            CURRENT_PROCESS_VERSION => {}
-            // Preserve unknown future versions. Callers can reject them or
-            // load them in a compatibility mode, but must not silently
-            // reinterpret them with older formulas.
+            // Preserve unknown future versions so the sidecar boundary can
+            // reject them rather than reinterpret them with older formulas.
             _ => {}
         }
     }
@@ -364,6 +385,9 @@ impl Default for ExposureParams {
             tone_curve_green: PointCurve::linear(),
             tone_curve_blue: PointCurve::linear(),
             chroma_denoise: 0.0,
+            luminance_denoise: 0.0,
+            denoise_detail: default_denoise_detail(),
+            denoise_quality: DenoiseQuality::default(),
             demosaic_mode: DemosaicMode::Reference,
             dual_threshold: 20.0,
             frequency_chroma: 1.0,
@@ -401,6 +425,10 @@ impl Default for ExposureParams {
     }
 }
 
+const fn default_denoise_detail() -> f32 {
+    50.0
+}
+
 const fn default_sharpen_amount() -> f32 {
     40.0
 }
@@ -432,6 +460,7 @@ mod tests {
     #[test]
     fn global_exposure_defaults_to_zero_in_the_edit_model() {
         let neutral = ExposureParams::default();
+        assert_eq!(neutral.process_version, CURRENT_PROCESS_VERSION);
         assert_eq!(neutral.exposure, 0.0);
         assert_eq!(neutral.black_point, 0.0);
 
@@ -444,6 +473,25 @@ mod tests {
         assert_eq!(rendition.tint, 0.0);
         assert_eq!(rendition.saturation, 0.0);
         assert_eq!(rendition.vibrance, 0.0);
+    }
+
+
+    #[test]
+    fn every_supported_process_version_uses_the_current_renderer() {
+        for process_version in 0..=CURRENT_PROCESS_VERSION {
+            let mut previous = ExposureParams {
+                process_version,
+                shadows: 42.0,
+                blacks: -31.0,
+                luminance_denoise: 55.0,
+                ..ExposureParams::default()
+            };
+            previous.migrate_to_current_process();
+            assert_eq!(previous.process_version, CURRENT_PROCESS_VERSION);
+            assert_eq!(previous.shadows, 42.0);
+            assert_eq!(previous.blacks, -31.0);
+            assert_eq!(previous.luminance_denoise, 55.0);
+        }
     }
 
     #[test]

@@ -1,9 +1,12 @@
 use super::{
-    color_grade_hue_turns, composite_inpaint_rgba16f, highlight_final_read_slot,
-    highlight_stage_slots, pack_local_point_curve, processing_work_format, shader_highlight_method,
+    canonicalize_green_noise, color_grade_hue_turns, composite_inpaint_rgba16f,
+    explicit_render_graph_contracts_are_contiguous, highlight_final_read_slot, highlight_stage_slots,
+    pack_local_point_curve, processing_work_format, render_graph_flags, shader_highlight_method,
     work_shader_source, HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS,
+    RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY,
     SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
-    SHADER_BAYER_RCD_P4, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
+    SHADER_BAYER_RCD_P4, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE,
+    SHADER_TONE_ANALYSIS,
     SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5,
     SHADER_XTRANS_P6, SHADER_XTRANS_P7,
 };
@@ -50,6 +53,7 @@ fn compute_shaders_parse_and_validate() {
         ("Bayer RCD pass 2", SHADER_BAYER_RCD_P2),
         ("Bayer RCD pass 3", SHADER_BAYER_RCD_P3),
         ("Bayer RCD pass 4", SHADER_BAYER_RCD_P4),
+        ("robust dual demosaic", SHADER_DUAL_DEMOSAIC),
         ("X-Trans pass 1", SHADER_XTRANS_P1),
         ("X-Trans pass 2", SHADER_XTRANS_P2),
         ("X-Trans pass 3", SHADER_XTRANS_P3),
@@ -80,21 +84,32 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
             work_shader_source(
                 SHADER_HIGHLIGHTS,
                 processing_work_format(ProcessingQuality::High),
-            ),
+            )
+            .expect("specialize high-quality shader"),
         ),
         (
             "32-bit Bayer pass 1",
             work_shader_source(
                 SHADER_BAYER_RCD_P1,
                 processing_work_format(ProcessingQuality::High),
-            ),
+            )
+            .expect("specialize high-quality shader"),
+        ),
+        (
+            "32-bit robust dual demosaic",
+            work_shader_source(
+                SHADER_DUAL_DEMOSAIC,
+                processing_work_format(ProcessingQuality::High),
+            )
+            .expect("specialize high-quality shader"),
         ),
         (
             "32-bit perceptual color mixer",
             work_shader_source(
                 SHADER_ADJUSTMENTS,
                 processing_work_format(ProcessingQuality::High),
-            ),
+            )
+            .expect("specialize high-quality shader"),
         ),
     ] {
         assert!(!source.contains("rgba16float"));
@@ -108,6 +123,30 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
         .validate(&module)
         .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
     }
+}
+
+#[test]
+fn shader_specialization_fails_closed_without_marker() {
+    let error = work_shader_source(
+        "@compute @workgroup_size(1) fn main() {}",
+        wgpu::TextureFormat::Rgba32Float,
+    )
+    .expect_err("missing marker must be an error in release builds");
+    assert!(error.to_string().contains("work-format marker"));
+}
+
+#[test]
+fn green_noise_is_averaged_once_and_stored_symmetrically() {
+    let canonical = canonicalize_green_noise([1.0, 2.0, 3.0, 6.0], true);
+    assert_eq!(canonical, [1.0, 4.0, 3.0, 4.0]);
+    let unchanged = canonicalize_green_noise([1.0, 2.0, 3.0, 6.0], false);
+    assert_eq!(unchanged, [1.0, 2.0, 3.0, 6.0]);
+}
+
+#[test]
+fn every_edit_uses_the_current_scene_display_contract_graph() {
+    assert_eq!(render_graph_flags(), RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY);
+    assert!(explicit_render_graph_contracts_are_contiguous());
 }
 
 #[test]
@@ -361,7 +400,7 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
     // Sixteen scalar values keep the stable 64-byte prefix. The two
     // darktable sigmoid vec4s follow the local-tone controls, then the
     // remaining adjustment, camera/raw, dimension and profile blocks.
-    assert_eq!(std::mem::size_of::<super::GpuParams>(), 25056);
+    assert_eq!(std::mem::size_of::<super::GpuParams>(), 25136);
     assert_eq!(std::mem::offset_of!(super::GpuParams, basic_tone), 64);
     assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_curve), 80);
     assert_eq!(std::mem::offset_of!(super::GpuParams, sigmoid_power), 96);
@@ -378,65 +417,70 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
         std::mem::offset_of!(super::GpuParams, highlight_options),
         176
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 192);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 256);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_0), 240);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, tone_curve_meta), 304);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_curve_red_0),
-        272
+        320
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_curve_green_0),
-        352
+        400
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_curve_blue_0),
-        432
+        480
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 608);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, inpaint_wb_0), 672);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, width), 752);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 760);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 768);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, wb), 656);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, inpaint_wb_0), 720);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, width), 800);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, tile_origin_x), 808);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, full_width), 816);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, tone_histogram_bounds),
-        784
+        832
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 800);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 864);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, process_info), 880);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 896);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 912);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 1424);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1936);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 2448);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 2960);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 6544);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_hue_sat), 848);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, profile_flags), 912);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, process_info), 928);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_counts), 944);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_meta), 960);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_0), 1472);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_1), 1984);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_adjust_2), 2496);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_0), 3008);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_curve_7), 6592);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_red_0),
-        7056
+        7104
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_green_0),
-        11152
+        11200
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
-        15248
+        15296
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 19344);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 19392);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
-        21904
+        21952
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 22416);
-    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 22480);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_shadows), 22464);
+    assert_eq!(std::mem::offset_of!(super::GpuParams, grade_options), 22528);
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_grade_shadows),
-        22496
+        22544
     );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_grade_options),
-        24544
+        24592
+    );
+    assert_eq!(std::mem::offset_of!(super::GpuParams, vignette_frame), 25104);
+    assert_eq!(
+        std::mem::offset_of!(super::GpuParams, vignette_transform),
+        25120
     );
 }
 
@@ -449,6 +493,53 @@ fn adjustments_shader_contains_darktable_sigmoid_paths() {
 }
 
 #[test]
+fn signed_scene_rgb_is_preserved_until_explicit_positive_domain_boundaries() {
+    // Shared projection is used only where a positive/unit RGB domain is part
+    // of the algorithm contract; scene intermediates must not floor channels.
+    assert!(SHADER_ADJUSTMENTS.contains("fn gamut_project_nonnegative("));
+    assert!(SHADER_ADJUSTMENTS.contains("fn gamut_project_unit("));
+    assert!(SHADER_ADJUSTMENTS.contains(
+        "let view_input = gamut_project_nonnegative_rec2020(looked)"
+    ));
+    assert!(SHADER_ADJUSTMENTS.contains("perceptual_gamut_compress_unit_rec2020"));
+
+    for forbidden in [
+        "max(REC2020_TO_PROPHOTO *",
+        "linear_srgb_to_oklab(REC2020_TO_SRGB * max(rgb",
+        "return max(adjusted, vec3<f32>(0.0))",
+        "vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0)",
+        "let view_input = max(map_negative_gamut",
+    ] {
+        assert!(
+            !SHADER_ADJUSTMENTS.contains(forbidden),
+            "premature RGB floor reintroduced: {forbidden}"
+        );
+    }
+
+    for (name, source) in [
+        ("Bayer pass 2", SHADER_BAYER_RCD_P2),
+        ("Bayer pass 3", SHADER_BAYER_RCD_P3),
+        ("Bayer finish", SHADER_BAYER_RCD_P4),
+        ("X-Trans pass 2", SHADER_XTRANS_P2),
+        ("X-Trans pass 3", SHADER_XTRANS_P3),
+        ("X-Trans accumulation", SHADER_XTRANS_P6),
+        ("X-Trans finish", SHADER_XTRANS_P7),
+    ] {
+        for forbidden in [
+            "max(camera_rgb, vec3<f32>(0.0))",
+            "max(rgb, vec3<f32>(0.0))",
+            "max(out, vec3<f32>(0.0))",
+            "max(green, 0.0)",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{name} reintroduced destructive demosaic flooring: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
 fn adjustments_shader_contains_lightroom_style_controls() {
     assert!(!SHADER_ADJUSTMENTS.contains("apply_camera_temperature_tint"));
     assert!(SHADER_ADJUSTMENTS.contains("bitcast<f32>(params.profile_flags.w)"));
@@ -456,14 +547,14 @@ fn adjustments_shader_contains_lightroom_style_controls() {
     assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
     assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
     assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
-    assert!(SHADER_ADJUSTMENTS.contains("prepare_adjustment_base"));
-    assert!(SHADER_ADJUSTMENTS.contains("apply_capture_sharpen_and_tone"));
-    assert!(SHADER_ADJUSTMENTS.contains("apply_lightroom_effects"));
+    assert!(SHADER_ADJUSTMENTS.contains("prepare_scene_node"));
+    assert!(SHADER_ADJUSTMENTS.contains("apply_scene_tone_node"));
+    assert!(SHADER_ADJUSTMENTS.contains("apply_scene_effects_node"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_creative_effects"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_glow"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_vignette"));
     assert!(SHADER_ADJUSTMENTS.contains("stabilized_mixer_sample"));
-    assert!(SHADER_ADJUSTMENTS.contains("nonnegative_rec2020_from_oklab"));
+    assert!(SHADER_ADJUSTMENTS.contains("perceptual_rec2020_from_oklab_nonnegative"));
     assert!(SHADER_ADJUSTMENTS.contains("mixer_luminance_ev"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_color_grading_wheels"));
     assert!(SHADER_ADJUSTMENTS.contains("color_grade_tonal_weights"));
@@ -473,31 +564,33 @@ fn adjustments_shader_contains_lightroom_style_controls() {
 }
 
 #[test]
-fn dcp_characterization_and_exposure_precede_pre_tone_capture_sharpening() {
-    let prepare_start = SHADER_ADJUSTMENTS.find("fn prepare_adjustment_base").unwrap();
-    let sharpen_start = SHADER_ADJUSTMENTS
-        .find("fn apply_capture_sharpen_and_tone")
-        .unwrap();
-    let effects_start = SHADER_ADJUSTMENTS.find("fn apply_lightroom_effects").unwrap();
-    let prepare = &SHADER_ADJUSTMENTS[prepare_start..sharpen_start];
-    let sharpen_tone = &SHADER_ADJUSTMENTS[sharpen_start..effects_start];
+fn explicit_graph_keeps_profile_look_and_tone_after_scene_edits() {
+    let prepare_start = SHADER_ADJUSTMENTS.find("fn prepare_scene_node").unwrap();
+    let tone_start = SHADER_ADJUSTMENTS.find("fn apply_scene_tone_node").unwrap();
+    let effects_start = SHADER_ADJUSTMENTS.find("fn apply_scene_effects_node").unwrap();
+    let view_start = SHADER_ADJUSTMENTS.find("fn apply_explicit_view_node").unwrap();
+    let prepare = &SHADER_ADJUSTMENTS[prepare_start..tone_start];
+    let tone = &SHADER_ADJUSTMENTS[tone_start..effects_start];
+    let view = &SHADER_ADJUSTMENTS[view_start..];
 
-    let hue_sat = prepare
-        .find("var rgb = apply_profile_hue_sat(scene_working_at(pos))")
+    let characterization = prepare
+        .find("var rgb = apply_camera_characterization(scene_working_at(pos))")
         .unwrap();
     let profile_exposure = prepare.find("let profile_exposure_ev").unwrap();
     let exposure = prepare.find("rgb = apply_exposure(rgb)").unwrap();
-    let look = prepare.find("rgb = apply_profile_look(rgb)").unwrap();
-    assert!(
-        hue_sat < profile_exposure && profile_exposure < exposure && exposure < look
-    );
-    assert!(!prepare.contains("apply_profile_tone_curve(rgb)"));
+    assert!(characterization < profile_exposure && profile_exposure < exposure);
+    assert!(prepare.contains("if !uses_explicit_scene_display_domains()"));
 
-    let sharpen = sharpen_tone.find("rgb = apply_capture_sharpening(pos, rgb)").unwrap();
-    let curve = sharpen_tone.find("rgb = apply_profile_tone_curve(rgb)").unwrap();
-    let gamut = sharpen_tone.find("rgb = map_negative_gamut(rgb)").unwrap();
-    let adaptive_tone = sharpen_tone.find("rgb = apply_lightroom_tone(rgb, pos)").unwrap();
-    assert!(sharpen < curve && curve < gamut && gamut < adaptive_tone);
+    let sharpen = tone.find("rgb = apply_capture_sharpening(pos, rgb)").unwrap();
+    let adaptive_tone = tone.find("rgb = apply_lightroom_tone(rgb, pos)").unwrap();
+    let contrast = tone.find("rgb = apply_basic_contrast_value").unwrap();
+    assert!(sharpen < adaptive_tone && adaptive_tone < contrast);
+    assert!(tone.contains("if !uses_explicit_scene_display_domains()"));
+
+    let look = view.find("apply_optional_profile_look(scene_rgb)").unwrap();
+    let profile_tone = view.find("apply_dcp_view_transform(view_input)").unwrap();
+    let sigmoid = view.find("apply_sigmoid_view_transform(view_input)").unwrap();
+    assert!(look < profile_tone && look < sigmoid);
     assert!(SHADER_ADJUSTMENTS.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
     assert!(SHADER_ADJUSTMENTS.contains("return profile_data[offset + maximum].x"));
 }
@@ -611,10 +704,12 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
             black_levels: [0.0; 4],
             black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
             white_levels: [4095.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: Default::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         };
         let params = super::GpuParams::new(
             &ExposureParams::default(),
@@ -887,10 +982,12 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
             black_levels: [0.0; 4],
             black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
             white_levels: [white; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: Default::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         }
     }
 
@@ -1179,10 +1276,12 @@ fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
         black_levels: [0.0; 4],
         black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
         white_levels: [white; 4],
+        noise_profile: crate::pipeline::NoiseProfile::default(),
         camera_profile: Default::default(),
         camera_profile_source: None,
         available_camera_profiles: Vec::new(),
         white_balance_model: None,
+        lens_geometry: None,
     };
     let exposure = ExposureParams::default();
     let params = super::GpuParams::new(&exposure, &crate::pipeline::MaskStack::default(), &raw);
@@ -1297,10 +1396,12 @@ fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
             black_levels: [0.0; 4],
             black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(WIDTH, HEIGHT, vec![0.0; (WIDTH * HEIGHT) as usize]),
             white_levels: [WHITE; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: Default::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
+        lens_geometry: None,
         }
     }
 

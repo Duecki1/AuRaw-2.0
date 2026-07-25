@@ -4,6 +4,7 @@
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(9) var tex3_read: texture_2d<f32>;
 @group(0) @binding(10) var scene_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
+@group(0) @binding(23) var dual_low_read: texture_2d<f32>;
 
 const RCD_MARGIN: i32 = 9;
 
@@ -103,7 +104,7 @@ fn ppg_rgb_at(pos: vec2<i32>) -> vec3<f32> {
             b = g + ppg_difference_pair(p, 2u, horizontal);
         }
     }
-    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+    return vec3<f32>(r, g, b);
 }
 
 fn rcd_green_channel(pos: vec2<i32>, channel: u32) -> f32 {
@@ -171,7 +172,7 @@ fn rcd_reference_at(pos: vec2<i32>) -> vec3<f32> {
     let g = green_plane_at(pos);
     let r = rcd_green_channel(pos, 0u);
     let b = rcd_green_channel(pos, 2u);
-    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+    return vec3<f32>(r, g, b);
 }
 
 fn bayer_uv(rgb: vec3<f32>) -> vec2<f32> {
@@ -183,7 +184,7 @@ fn bayer_from_yuv(y: f32, uv: vec2<f32>) -> vec3<f32> {
     let b = y + uv.x / 0.56433;
     let r = y + uv.y / 0.67815;
     let g = (y - 0.2627 * r - 0.0593 * b) / 0.6780;
-    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
+    return vec3<f32>(r, g, b);
 }
 
 fn bayer_median5(a: f32, b: f32, c: f32, d: f32, e: f32) -> f32 {
@@ -234,7 +235,7 @@ fn bayer_phase2(offset: i32) -> f32 {
 }
 
 fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
-    let center_uv = bayer_uv(center);
+    let center_opponents = bayer_uv(center);
     var carrier_x = vec2<f32>(0.0);
     var carrier_y = vec2<f32>(0.0);
     var carrier_xy = vec2<f32>(0.0);
@@ -250,7 +251,7 @@ fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
             let weight = wy * f32(7 - abs(dx));
             let px = bayer_phase2(dx);
             let uv = bayer_uv(rcd_reference_at(pos + vec2<i32>(dx, dy)));
-            let delta = uv - center_uv;
+            let delta = uv - center_opponents;
             carrier_x += weight * px * delta;
             carrier_y += weight * py * delta;
             carrier_xy += weight * px * py * delta;
@@ -264,35 +265,17 @@ fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
     let s = rcd_reference_at(pos + vec2<i32>(0,  1));
     let w = rcd_reference_at(pos + vec2<i32>(-1, 0));
     let e = rcd_reference_at(pos + vec2<i32>( 1, 0));
-    let center_y = dot(center, vec3<f32>(0.2627, 0.6780, 0.0593));
-    let luma_high = abs(4.0 * center_y
+    let center_signal = dot(center, vec3<f32>(0.2627, 0.6780, 0.0593));
+    let luma_high = abs(4.0 * center_signal
         - dot(n + s + w + e, vec3<f32>(0.2627, 0.6780, 0.0593)));
     let spectral_energy = max(length(carrier_alias) - 0.25 * luma_high, 0.0);
     let reject = smoothstep(0.0015, 0.030, spectral_energy)
         * clamp(params.frequency_chroma, 0.0, 1.0);
-    return bayer_from_yuv(center_y, center_uv - reject * carrier_alias);
+    return bayer_from_yuv(center_signal, center_opponents - reject * carrier_alias);
 }
 
-fn low_detail_rgb_at(pos: vec2<i32>) -> vec3<f32> {
-    // VNG-style low-detail reconstruction: measured samples are accumulated
-    // per channel with a green-edge range weight, then colour-smoothed.
-    let center_g = ppg_green_at(pos);
-    var sum = vec3<f32>(0.0);
-    var weights = vec3<f32>(0.0);
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            let q = pos + vec2<i32>(dx, dy);
-            if !demosaic_in_bounds(q) { continue; }
-            let channel = color_at(q);
-            let spatial = 1.0 / (1.0 + f32(dx * dx + dy * dy));
-            let range = 1.0 / (1.0 + 16.0 * abs(ppg_green_at(q) - center_g));
-            let weight = spatial * range;
-            if channel == 0u { sum.r += raw_cfa_at(q) * weight; weights.r += weight; }
-            if channel == 1u { sum.g += raw_cfa_at(q) * weight; weights.g += weight; }
-            if channel == 2u { sum.b += raw_cfa_at(q) * weight; weights.b += weight; }
-        }
-    }
-    return max(sum / max(weights, vec3<f32>(1e-6)), vec3<f32>(0.0));
+fn dual_low_at(pos: vec2<i32>) -> vec4<f32> {
+    return textureLoad(dual_low_read, clamp_pos(pos), 0);
 }
 
 fn reference_luma_at(pos: vec2<i32>) -> f32 {
@@ -306,10 +289,10 @@ fn scharr_detail_at(pos: vec2<i32>) -> f32 {
     let w  = reference_luma_at(pos + vec2<i32>(-1,  0));
     let e  = reference_luma_at(pos + vec2<i32>( 1,  0));
     let sw = reference_luma_at(pos + vec2<i32>(-1,  1));
-    let s  = reference_luma_at(pos + vec2<i32>( 0,  1));
+    let ss = reference_luma_at(pos + vec2<i32>( 0,  1));
     let se = reference_luma_at(pos + vec2<i32>( 1,  1));
     let gx = 3.0 * (ne - nw) + 10.0 * (e - w) + 3.0 * (se - sw);
-    let gy = 3.0 * (sw - nw) + 10.0 * (s - n) + 3.0 * (se - ne);
+    let gy = 3.0 * (sw - nw) + 10.0 * (ss - n) + 3.0 * (se - ne);
     return sqrt(gx * gx + gy * gy) / 32.0;
 }
 
@@ -320,7 +303,7 @@ fn gaussian5_weight(offset: i32) -> f32 {
     return 1.0;
 }
 
-fn dual_high_weight(pos: vec2<i32>) -> f32 {
+fn dual_high_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32 {
     var detail = 0.0;
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         let wy = gaussian5_weight(dy);
@@ -330,9 +313,29 @@ fn dual_high_weight(pos: vec2<i32>) -> f32 {
         }
     }
     detail /= 256.0;
+
     let threshold = 0.005 * pow(max(params.dual_threshold, 0.0), 1.1);
     if threshold <= 1e-7 { return 1.0; }
-    return smoothstep(threshold, max(4.0 * threshold, threshold + 1e-5), detail);
+
+    // Do not mistake sensor noise for real image detail. The low branch stores
+    // its own support/coherence confidence in alpha, so weak low estimates
+    // automatically fall back to RCD instead of smearing edges or borders.
+    let variance = nr_component_variance(0.5 * (reference + low.rgb));
+    let noise_floor = 2.25 * sqrt(max(variance.x, 1e-10));
+    let detail_signal = max(detail - noise_floor, 0.0);
+    let edge_confidence = smoothstep(
+        threshold,
+        max(4.0 * threshold, threshold + 1e-5),
+        detail_signal,
+    );
+
+    let opponent_delta = length(bayer_uv(reference) - bayer_uv(low.rgb));
+    let opponent_sigma = max(sqrt(max(variance.y, 1e-10)), 0.0015);
+    let disagreement = smoothstep(3.0 * opponent_sigma, 8.0 * opponent_sigma, opponent_delta);
+    let low_confidence = clamp(low.a, 0.0, 1.0);
+    let alias_penalty = 0.45 * disagreement * (1.0 - 0.35 * edge_confidence);
+    let high_confidence = clamp(edge_confidence * (1.0 - alias_penalty), 0.0, 1.0);
+    return clamp(1.0 - low_confidence * (1.0 - high_confidence), 0.0, 1.0);
 }
 
 fn warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
@@ -367,7 +370,7 @@ fn apply_ca(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return out;
 }
 
-fn apply_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+fn apply_legacy_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let strength = clamp(params.chroma_denoise, 0.0, 1.0);
     if strength <= 1e-6 { return rgb; }
     var sum = vec2<f32>(0.0);
@@ -384,7 +387,50 @@ fn apply_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     }
     let center = vec2<f32>(rgb.r - rgb.g, rgb.b - rgb.g);
     let chroma = mix(center, sum / max(weight_sum, 1e-6), strength);
-    return max(vec3<f32>(rgb.g + chroma.x, rgb.g, rgb.g + chroma.y), vec3<f32>(0.0));
+    return vec3<f32>(rgb.g + chroma.x, rgb.g, rgb.g + chroma.y);
+}
+
+fn apply_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
+    let signal_strength = clamp(params.noise_options.x, 0.0, 1.0);
+    let chroma_strength = clamp(params.chroma_denoise, 0.0, 1.0);
+    if signal_strength <= 1e-6 && chroma_strength <= 1e-6 { return rgb; }
+
+    let center_signal = nr_signal(rgb);
+    let center_opponents = nr_opponents(rgb);
+    let center_variance = nr_component_variance(rgb);
+    var signal_sum = center_signal;
+    var signal_weights = 1.0;
+    var opponent_sum = center_opponents;
+    var opponent_weights = 1.0;
+
+    let scale_count = nr_scale_count();
+    for (var scale = 0; scale < 3; scale = scale + 1) {
+        if scale >= scale_count { break; }
+        let radius = nr_scale_radius(scale);
+        for (var direction_index = 0; direction_index < 8; direction_index = direction_index + 1) {
+            let direction = NR_DIRECTIONS[direction_index];
+            let q = clamp_pos(pos + direction * radius);
+            let sample = rcd_reference_at(q);
+            let spatial = nr_scale_spatial_weight(radius, direction);
+            let sample_signal = nr_signal(sample);
+            let sample_opponents = nr_opponents(sample);
+            let sample_variance = nr_component_variance(sample);
+            let range_weights = nr_range_weights(
+                center_signal,
+                center_opponents,
+                center_variance,
+                sample_signal,
+                sample_opponents,
+                sample_variance,
+                spatial,
+            );
+            signal_sum += sample_signal * range_weights.x;
+            signal_weights += range_weights.x;
+            opponent_sum += sample_opponents * range_weights.y;
+            opponent_weights += range_weights.y;
+        }
+    }
+    return nr_finish(rgb, signal_sum, signal_weights, opponent_sum, opponent_weights);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -394,13 +440,20 @@ fn bayer_rcd_output(@builtin(global_invocation_id) gid: vec3<u32>) {
     let reference = rcd_reference_at(pos);
     var camera_rgb = reference;
     if params.demosaic_mode >= 1.5 {
-        camera_rgb = mix(low_detail_rgb_at(pos), reference, dual_high_weight(pos));
+        let low = dual_low_at(pos);
+        camera_rgb = mix(low.rgb, reference, dual_high_weight(pos, reference, low));
     } else if params.demosaic_mode >= 0.5 {
         camera_rgb = frequency_chroma_at(pos, reference);
     } else {
         camera_rgb = bayer_reference_false_color_guard(pos, reference);
     }
-    camera_rgb = apply_ca(pos, camera_rgb);
-    camera_rgb = apply_chroma_denoise(pos, camera_rgb);
-    textureStore(scene_write, pos, vec4<f32>(max(camera_rgb, vec3<f32>(0.0)), 1.0));
+    if params.process_info.x >= SENSOR_DENOISE_PROCESS_VERSION || params.noise_options.x > 1e-6 {
+        camera_rgb = apply_sensor_denoise(pos, camera_rgb);
+        camera_rgb = apply_ca(pos, camera_rgb);
+    } else {
+        // Preserve process-13-and-earlier chroma-NR rendering for existing edits.
+        camera_rgb = apply_ca(pos, camera_rgb);
+        camera_rgb = apply_legacy_chroma_denoise(pos, camera_rgb);
+    }
+    textureStore(scene_write, pos, vec4<f32>(camera_rgb, 1.0));
 }

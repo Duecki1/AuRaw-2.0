@@ -1,11 +1,14 @@
 use super::basicadj::GLOBAL_TEMPERATURE_LIMIT;
 use super::color_profile::CameraProfile;
+use super::geometry::LensGeometryMap;
+use super::noise::NoiseProfile;
 #[cfg(not(libraw_available))]
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::ops::Index;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -371,6 +374,8 @@ pub struct LoadedRaw {
     /// repeating row/column pattern from `cblack[4..]`.
     pub black_levels_per_pixel: CompactPixelMap<f32>,
     pub white_levels: [f32; 4],
+    /// Per-capture signal-dependent sensor noise estimate in normalized RAW units.
+    pub noise_profile: NoiseProfile,
     /// DCP creative profile stages and retained embedded camera ICC data.
     pub camera_profile: CameraProfile,
     /// External DCP actually applied to this RAW, when one was selected.
@@ -380,6 +385,10 @@ pub struct LoadedRaw {
     /// Camera/DCP calibration data retained so global white-balance edits can
     /// rebuild the camera transform instead of applying generic RGB gains.
     pub(crate) white_balance_model: Option<CameraWhiteBalanceModel>,
+    /// Smooth corrected-image -> native-source distortion map. Lens shading
+    /// and TCA are already applied to the CFA, while this common geometric
+    /// component is deferred until the float RGB geometry pass.
+    pub lens_geometry: Option<Arc<LensGeometryMap>>,
 }
 
 impl LoadedRaw {
@@ -413,6 +422,13 @@ impl LoadedRaw {
 pub fn load_raw_file(_path: &Path) -> Result<LoadedRaw> {
     Err(anyhow!(
         "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
+    ))
+}
+
+#[cfg(not(libraw_available))]
+pub fn load_raw_embedded_thumbnail(_path: &Path, _maximum_edge: u32) -> Result<RawThumbnail> {
+    Err(anyhow!(
+        "this build was compiled without LibRaw, so embedded RAW thumbnails are unavailable"
     ))
 }
 
@@ -495,6 +511,11 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
 }
 
 #[cfg(libraw_available)]
+pub fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+    libraw_loader::load_raw_embedded_thumbnail(path, maximum_edge)
+}
+
+#[cfg(libraw_available)]
 pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     libraw_loader::load_raw_thumbnail(path, maximum_edge)
 }
@@ -554,6 +575,7 @@ mod tests {
             black_levels: [0.0; 4],
             black_levels_per_pixel: CompactPixelMap::dense(1, 1, vec![0.0]),
             white_levels: [1.0; 4],
+            noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
@@ -570,6 +592,7 @@ mod tests {
                     ],
                 },
             }),
+            lens_geometry: None,
         }
     }
 

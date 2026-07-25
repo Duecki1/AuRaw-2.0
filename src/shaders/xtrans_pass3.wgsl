@@ -87,10 +87,10 @@ fn xtrans_markesteijn_pass2(@builtin(global_invocation_id) gid: vec3<u32>) {
     let measured_channel = color_at(pos);
     var out = mark2_load(pos);
     if measured_channel != 1u {
-        out.g = max(mark2_recalculate_green(pos, measured_channel), 0.0);
+        out.g = mark2_recalculate_green(pos, measured_channel);
     }
     if measured_channel != 0u { out.r = mark2_chroma(pos, 0u); }
     if measured_channel != 2u { out.b = mark2_chroma(pos, 2u); }
     out = mark2_set(out, measured_channel, raw_cfa_at(pos));
-    textureStore(markesteijn_write_2, pos, vec4<f32>(max(out, vec3<f32>(0.0)), 1.0));
+    textureStore(markesteijn_write_2, pos, vec4<f32>(out, 1.0));
 }

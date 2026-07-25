@@ -66,9 +66,11 @@ def test_inpaint_storage_keeps_placement_separate_from_model_raster() -> None:
 
 def test_gpu_inpaint_texture_is_linear_rgba16f_without_srgb_redecode() -> None:
     texture = GPU[GPU.index('label: Some("auraw pre-adjustment inpaint layer")'):]
-    texture = texture[:1000]
+    texture = texture[:1600]
     assert "wgpu::TextureFormat::Rgba16Float" in texture
-    assert "bytes_per_row: Some(raw.width * 8)" in texture
+    assert "raw.width" in texture
+    assert ".checked_mul(8)" in texture
+    assert "inpaint upload row byte count overflows" in texture
     assert "let replacement_neutral = replacement.rgb;" in ADJUSTMENTS
     assert "let linear_srgb = mix(lo, hi, cutoff);" not in ADJUSTMENTS
 

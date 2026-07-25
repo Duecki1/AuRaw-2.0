@@ -39,7 +39,7 @@ def test_saved_gpu_preview_refreshes_the_visible_library_entry() -> None:
 
 def test_library_prefers_cached_developed_thumbnail_over_embedded_raw_preview() -> None:
     cache = LIBRARY.index("load_developed_thumbnail_cache")
-    raw = LIBRARY.index("load_raw_thumbnail(path, THUMBNAIL_EDGE)", cache)
+    raw = LIBRARY.index("load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)", cache)
     assert cache < raw
     assert "developed_thumbnail && !loaded.developed" in LIBRARY
 
@@ -47,7 +47,7 @@ def test_library_prefers_cached_developed_thumbnail_over_embedded_raw_preview() 
 def test_uncached_edited_library_cards_render_raw_plus_sidecar_before_fallbacks() -> None:
     render = LIBRARY.index("render_uncached_developed_thumbnail")
     raw_cache = LIBRARY.index("load_desktop_raw_thumbnail", render)
-    embedded = LIBRARY.index("load_raw_thumbnail(path, THUMBNAIL_EDGE)", raw_cache)
+    embedded = LIBRARY.index("load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)", raw_cache)
     assert render < raw_cache < embedded
     assert "load_raw_file_with_profile_selection" in LIBRARY
     assert "RawGpuPipeline::new_headless_with_quality" in LIBRARY

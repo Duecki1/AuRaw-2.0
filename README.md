@@ -185,6 +185,19 @@ Enabling it reveals the darktable sigmoid internals, RAW/demosaic controls, and
 highlight-reconstruction settings. The default point curve contains only its
 two endpoints; users add interior points explicitly.
 
+RGB channel curves permit ascending or descending output segments. Their
+scene-domain extension below zero uses the signed slope of the first segment, so
+signed channel intermediates cross zero without a derivative mismatch. Extreme
+black endpoints near the top of the editor enter a finite C1 scene shoulder;
+the first segment's scene-domain slope is limited consistently on both sides of
+zero to prevent half-float precision from producing extreme false-colour steps.
+Raising the composite curve's black endpoint establishes a neutral lifted-black
+floor;
+this intentionally reduces shadow colorfulness as colored signals approach
+absolute black rather than preserving RGB ratios all the way to that floor. If
+the composite curve's first segment descends below a lifted endpoint, the floor
+makes its effective endpoint slope zero on both sides of zero luminance.
+
 ## Creative effects
 
 The Effects panel also contains a highlight-aware **Glow** and a post-crop

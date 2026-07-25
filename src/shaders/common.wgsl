@@ -22,8 +22,8 @@ struct Params {
     frequency_chroma: f32,
     // Global WB tint mirrored for the stable uniform ABI; see temperature.
     tint: f32,
-    // Highlights, shadows, whites, blacks. These are scene-linear local
-    // exposure-shaping controls evaluated before the display transform.
+    // Highlights, shadows, whites, blacks. Process 17+ defers Blacks to the
+    // view-adjacent display-linear toe; the packed ABI remains unchanged.
     basic_tone: vec4<f32>,
     // darktable sigmoid: white target, black target, paper exposure, film fog.
     sigmoid_curve: vec4<f32>,
@@ -39,6 +39,11 @@ struct Params {
     vignette_options: vec4<f32>,
     // Reconstruction method, guided passes, colour adaptation, reserved.
     highlight_options: vec4<f32>,
+    // Per-CFA-plane sensor noise model: variance = shot * signal + read.
+    noise_shot: vec4<f32>,
+    noise_read: vec4<f32>,
+    // Luma strength, detail protection, quality tier, profile confidence.
+    noise_options: vec4<f32>,
     // Eight editable point-curve coordinates, packed as x0,y0,x1,y1.
     tone_curve_0: vec4<f32>,
     tone_curve_1: vec4<f32>,
@@ -98,11 +103,11 @@ struct Params {
     // HueSat encoding, LookTable encoding, default exposure EV bits, and the
     // live DCP dual-illuminant interpolation weight as f32 bits.
     profile_flags: vec4<u32>,
-    // x = processing-formula version. y bit 0 = the active DCP provides the
-    // baseline ProfileToneCurve and AuRaw's default sigmoid should not be
-    // stacked on top of it. z stores the user-facing base Exposure as f32
-    // bits. Camera/DNG default rendering exposure lives independently in
-    // profile_flags.z, so adaptive tone reacts only to the explicit user edit.
+    // x = processing-formula version. y bit 0 selects the DCP-aware default
+    // view transform instead of the configurable sigmoid. z stores user-facing
+    // Exposure as f32 bits. w is the render-graph contract bitfield; bit 0
+    // enables explicit camera -> scene -> look -> view domain boundaries.
+    // Camera/DNG default rendering exposure lives independently in profile_flags.z.
     process_info: vec4<u32>,
     // Local adjustments. Each mask index maps directly to one layer in the
     // normalized R8 array texture sampled by adjustments.wgsl. mask_meta.w is
@@ -166,9 +171,23 @@ struct Params {
     mask_grade_highlights: array<vec4<f32>, 32>,
     mask_grade_global: array<vec4<f32>, 32>,
     mask_grade_options: array<vec4<f32>, 32>,
+    // Post-crop vignette mapping. Frame = source-space crop center (xy) plus
+    // final-frame pixel dimensions (zw). Transform maps normalized source
+    // deltas to normalized final-frame deltas and includes orientation, fine
+    // rotation, flips and keystone/shear.
+    vignette_frame: vec4<f32>,
+    vignette_transform: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
+
+// Render-graph contract flags shared by tone analysis and output shaders.
+const RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY: u32 = 1u;
+
+fn uses_explicit_scene_display_domains() -> bool {
+    return (params.process_info.w & RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY) != 0u;
+}
+
 @group(0) @binding(1) var raw_tex: texture_2d<u32>;
 @group(0) @binding(2) var color_tex: texture_2d<u32>;
 // LibRaw can provide a repeating row/column black pattern in addition to the

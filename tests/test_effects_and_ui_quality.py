@@ -7,6 +7,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
+DETAIL_SCALE = (ROOT / "src/shaders/detail_scale_space.wgsl").read_text(encoding="utf-8")
 TONEMAP = (ROOT / "src/shaders/tonemap.wgsl").read_text(encoding="utf-8")
 GPU = read_source_tree(ROOT / "src/pipeline/gpu.rs")
 BASIC = (ROOT / "src/pipeline/basicadj.rs").read_text(encoding="utf-8")
@@ -19,17 +20,17 @@ ALL_SHADERS = "\n".join(
 
 
 def test_effects_are_a_dedicated_same_stage_pass() -> None:
-    assert "fn prepare_adjustment_base" in ADJUSTMENTS
-    assert "fn apply_lightroom_effects" in ADJUSTMENTS
+    assert "fn prepare_scene_node" in ADJUSTMENTS
+    assert "fn apply_scene_effects_node" in ADJUSTMENTS
     assert "fn adjustment_base_at" in ADJUSTMENTS
     assert "textureLoad(adjustment_base_tex" in ADJUSTMENTS
     assert "scene_working_at(pos +" not in ADJUSTMENTS
 
-    prepare = GPU.index('"prepare_adjustment_base"')
-    sharpen_tone = GPU.index('"apply_capture_sharpen_and_tone"', prepare)
-    effects = GPU.index('"apply_lightroom_effects"', sharpen_tone)
+    prepare = GPU.index('"prepare_scene_node"')
+    sharpen_tone = GPU.index('"apply_scene_tone_node"', prepare)
+    effects = GPU.index('"apply_scene_effects_node"', sharpen_tone)
     creative = GPU.index('"apply_creative_effects"', effects)
-    render = GPU.index('"apply_lightroom_adjustments"', creative)
+    render = GPU.index('"apply_view_node"', creative)
     assert prepare < sharpen_tone < effects < creative < render
 
 
@@ -44,17 +45,19 @@ def test_saturation_and_vibrance_keep_the_effects_pass_enabled() -> None:
     assert "mask_adjust_2" in gate
     assert "params.needs_intermediate_adjustment_passes()" in GPU
 
-def test_texture_and_clarity_are_band_pass_not_global_exposure() -> None:
-    assert "fine_detail_ev = center_ev - fine_base_ev" in ADJUSTMENTS
-    assert "mid_detail_ev = center_ev - broad_base_ev - fine_detail_ev * 0.24" in ADJUSTMENTS
-    assert "atrous_log_luminance" in ADJUSTMENTS
-    assert "soft_detail_threshold" in ADJUSTMENTS
-    assert "rgb * exp2(delta_ev)" in ADJUSTMENTS
-    assert "if abs(texture) < 1e-6 && abs(clarity) < 1e-6" in ADJUSTMENTS
-    assert "texture_strength = select(1.75, 2.65" in ADJUSTMENTS
-    assert "clarity_strength = select(2.20, 3.25" in ADJUSTMENTS
-    assert "fn presence_reference_scale" in ADJUSTMENTS
-    assert "presence_step(clarity_reference, 12)" in ADJUSTMENTS
+def test_texture_and_clarity_are_adjacent_scale_space_bands() -> None:
+    assert "texture_band_ev = center_ev - fine_base_ev" in DETAIL_SCALE
+    assert "clarity_band_ev = fine_base_ev - broad_base_ev" in DETAIL_SCALE
+    assert "creative_fine_base_ev" in DETAIL_SCALE
+    assert "creative_broad_base_ev" in DETAIL_SCALE
+    assert "atrous_log_luminance" in DETAIL_SCALE
+    assert "soft_detail_threshold" in DETAIL_SCALE
+    assert "rgb * exp2(delta_ev)" in DETAIL_SCALE
+    assert "if abs(texture) < 1e-6 && abs(clarity) < 1e-6" in DETAIL_SCALE
+    assert "texture_strength = select(1.55, 2.10" in DETAIL_SCALE
+    assert "clarity_strength = select(1.90, 2.62" in DETAIL_SCALE
+    assert "presence_step(1.65, 5)" in DETAIL_SCALE
+    assert "presence_step(clarity_reference, 14)" in DETAIL_SCALE
 
 
 def test_dehaze_uses_airlight_and_transmission() -> None:
@@ -72,7 +75,9 @@ def test_dehaze_uses_airlight_and_transmission() -> None:
 
 def test_blacks_has_a_visible_lower_tonal_range() -> None:
     assert "black_fade_end" in TONEMAP
-    assert "signed_tone_range(blacks, 2.35, 1.90)" in TONEMAP
+    assert "apply_blacks_toe_v2" in TONEMAP
+    assert "gamma = exp2(-1.25 * blacks)" in TONEMAP
+    assert "gamma = exp2(1.25 * (-blacks))" in TONEMAP
 
     def smoothstep(edge0: float, edge1: float, value: float) -> float:
         x = max(0.0, min(1.0, (value - edge0) / max(edge1 - edge0, 1e-4)))
@@ -169,7 +174,7 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
 
 
 def test_revised_adjustment_formulas_increment_the_process_version() -> None:
-    assert "CURRENT_PROCESS_VERSION: u32 = 12" in BASIC
+    assert "SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13" in BASIC
     assert "0..=7 =>" in BASIC
     assert "8 | 9 =>" in BASIC
     assert "self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC
@@ -179,8 +184,8 @@ def test_presence_and_color_controls_use_perceptual_bounded_mappings() -> None:
     assert "fn perceptual_control" in ALL_SHADERS
     assert "muted_weight" in ALL_SHADERS
     assert "neutral_guard" in ALL_SHADERS
-    assert "edge_guard" in ADJUSTMENTS
-    assert "negative_fine" in ADJUSTMENTS
+    assert "creative_edge_guard" in DETAIL_SCALE
+    assert "negative_texture" in DETAIL_SCALE
     assert "dark_ratio" in ADJUSTMENTS
     assert "hue_safe" in ADJUSTMENTS
     assert "chroma_boost" in ADJUSTMENTS
