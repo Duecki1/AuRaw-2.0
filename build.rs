@@ -264,9 +264,17 @@ fn generate_lensfun_bindings(header: &Path, include_paths: &[PathBuf]) {
 }
 
 fn configure_desktop_libraw() {
-    let libraw = pkg_config::Config::new()
-        .probe("libraw")
-        .or_else(|_| pkg_config::Config::new().probe("libraw_r"));
+    let target_is_macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
+    let probe = |name| {
+        let mut config = pkg_config::Config::new();
+        // Homebrew LibRaw's pkg-config metadata currently contains
+        // `-lstdc++`, which Apple removed in favor of libc++. Suppress the
+        // automatic cargo directives on macOS so the dependency can be
+        // translated below without affecting other desktop targets.
+        config.cargo_metadata(!target_is_macos);
+        config.probe(name)
+    };
+    let libraw = probe("libraw").or_else(|_| probe("libraw_r"));
 
     let Ok(libraw) = libraw else {
         allow_or_fail_without_desktop_libraw(
@@ -274,6 +282,10 @@ fn configure_desktop_libraw() {
         );
         return;
     };
+
+    if target_is_macos {
+        emit_macos_libraw_link_metadata(&libraw);
+    }
 
     let Some(header) = find_libraw_header(&libraw.include_paths) else {
         allow_or_fail_without_desktop_libraw(
@@ -283,6 +295,22 @@ fn configure_desktop_libraw() {
     };
 
     generate_bindings(&header, &libraw.include_paths);
+}
+
+fn emit_macos_libraw_link_metadata(libraw: &pkg_config::Library) {
+    for path in &libraw.link_paths {
+        println!("cargo:rustc-link-search=native={}", path.display());
+    }
+    for path in &libraw.framework_paths {
+        println!("cargo:rustc-link-search=framework={}", path.display());
+    }
+    for library in &libraw.libs {
+        let library = if library == "stdc++" { "c++" } else { library };
+        println!("cargo:rustc-link-lib={library}");
+    }
+    for framework in &libraw.frameworks {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
 }
 
 fn allow_or_fail_without_desktop_libraw(reason: &str) {
