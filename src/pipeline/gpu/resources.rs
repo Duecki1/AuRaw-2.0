@@ -78,18 +78,22 @@ pub(super) struct GpuBudgetReservation {
 
 impl GpuBudgetReservation {
     pub(super) fn acquire(plan: &GpuResourcePlan, limit: u64) -> Result<Self> {
+        // Validate one pipeline's complete persistent + temporary peak, but only
+        // reserve its persistent allocation in the process-wide total. Charging
+        // every live preview for its mutually exclusive readback/inpainting peak
+        // made the main, navigation, and detail previews exceed the budget before
+        // zoom could create its first crop.
         validate_gpu_resource_plan(plan, limit)?;
-        reserve_gpu_bytes(&RESERVED_GPU_BYTES, limit, plan.admitted_gpu_bytes).map_err(|used| {
+        let bytes = plan.persistent_gpu_bytes;
+        reserve_gpu_bytes(&RESERVED_GPU_BYTES, limit, bytes).map_err(|used| {
             anyhow!(
-                "GPU pipelines already reserve {:.1} MiB; this pipeline needs another {:.1} MiB including its safety margin, exceeding the {:.1} MiB process budget; close optional detail/navigation previews, reduce proxy size or mask capacity, or use tiled export",
+                "GPU pipelines already reserve {:.1} MiB of resident resources; this pipeline needs another {:.1} MiB, exceeding the {:.1} MiB process budget; close optional detail/navigation previews, reduce proxy size or mask capacity, or use tiled export",
                 used as f64 / (1024.0 * 1024.0),
-                plan.admitted_gpu_bytes as f64 / (1024.0 * 1024.0),
+                bytes as f64 / (1024.0 * 1024.0),
                 limit as f64 / (1024.0 * 1024.0),
             )
         })?;
-        Ok(Self {
-            bytes: plan.admitted_gpu_bytes,
-        })
+        Ok(Self { bytes })
     }
 }
 

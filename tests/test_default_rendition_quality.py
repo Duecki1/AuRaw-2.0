@@ -16,7 +16,7 @@ def test_global_exposure_has_no_unconditional_backend_lift() -> None:
     assert "exposure.exposure + super::GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" not in GPU
     assert "LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC
     assert "8 | 9 =>" in BASIC
-    assert "10 | 11 =>" in BASIC
+    assert "10..=CURRENT_PROCESS_VERSION" in BASIC
     assert "self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC
 
 

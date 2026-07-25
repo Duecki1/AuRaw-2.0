@@ -187,22 +187,15 @@ impl ColorGrading {
     }
 }
 
-/// Process 12 is the last renderer where DCP LookTable/ProfileToneCurve were
-/// interleaved with scene-style edit controls. Keep it renderable so existing
-/// edits retain their saved appearance after the scene/display boundary split.
+/// Historical process milestones are retained for decoding old sidecars and
+/// documenting shader changes. Runtime rendering is canonical: every supported
+/// edit is migrated to `CURRENT_PROCESS_VERSION` before it can be rendered,
+/// copied, or saved, so identical adjustment values cannot select different
+/// image-processing graphs.
 pub const LEGACY_SCENE_DISPLAY_PROCESS_VERSION: u32 = 12;
-/// Process 13 establishes explicit camera-characterization -> scene-edit ->
-/// optional-look -> single-view-transform domain boundaries.
 pub const SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13;
-/// Process 14 adds sensor-profiled multiscale denoise while retaining the
-/// process-13 scene/display graph unchanged.
 pub const SENSOR_DENOISE_PROCESS_VERSION: u32 = 14;
-/// Process 15 makes guided RAW highlight reconstruction boundary/consensus
-/// aware.
 pub const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15;
-/// Process 16 repairs the original Basic-panel low-tone response. It remains a
-/// compatibility renderer for edits saved with the first stronger Shadows/
-/// Blacks implementation.
 pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;
 /// Process 17 separates the photographic roles of the two low-tone controls:
 /// Shadows is a bounded scene-EV zone remap with an actual-pixel-aware selector,
@@ -222,8 +215,9 @@ pub const HSL_HUE_LIMIT: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ExposureParams {
-    /// Version of the processing formulas used by this edit. Saved edits must
-    /// migrate deliberately instead of silently adopting new shader behavior.
+    /// Serialized process marker. Supported historical values are accepted at
+    /// the sidecar boundary, then immediately canonicalized to the current
+    /// renderer so this field never changes image behaviour at runtime.
     pub process_version: u32,
     /// Additional normalized sensor-space black-point correction. It is applied
     /// per CFA plane before white balance and demosaic, and is deliberately
@@ -332,46 +326,25 @@ pub const LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV: f32 = 0.7;
 
 impl ExposureParams {
     pub fn migrate_to_current_process(&mut self) {
-        // Process versions 8 and 9 stored a zero-centered Exposure control
-        // while the renderer secretly added +0.7 EV. Version 10 removed that
-        // universal backend lift. Move it into the saved/user-visible Exposure
-        // value once. Versions through 11 can safely migrate to process 12,
-        // which is the final legacy scene/display graph and preserves the
-        // historical DCP LookTable/ProfileToneCurve ordering.
-        //
-        // Process 13 intentionally does *not* auto-upgrade process-12 edits:
-        // reordering profile tone/look around scene controls is appearance
-        // changing and cannot be represented by a scalar parameter migration.
-        // Process 14 retains the process-13 graph and changes only denoise.
-        // Process 15 changes guided highlight reconstruction only. Process 16
-        // fixes a development-era Basic tone response bug. Process-15 builds
-        // were never a stable compatibility target, so they migrate to 16.
-        // Process 17 changes the actual Shadows/Blacks rendering again and is
-        // therefore never assigned by load-time migration. New edits start at
-        // 17; an existing process-16 edit opts in only when a low-tone control
-        // itself is edited. Unrelated changes (for example Noise Reduction)
-        // must leave its rendering pinned to process 16.
+        // Versions 8 and 9 stored a zero-centered Exposure control while the
+        // renderer secretly added +0.7 EV. Preserve that brightness by moving
+        // the hidden lift into the visible value once. Every supported process
+        // version then adopts the current graph and formulas. This deliberately
+        // favors one deterministic interpretation of an adjustment set over
+        // retaining multiple image-dependent compatibility renderers.
         match self.process_version {
             0..=7 => {
-                self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
+                self.process_version = CURRENT_PROCESS_VERSION;
             }
             8 | 9 => {
                 self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV;
-                self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
+                self.process_version = CURRENT_PROCESS_VERSION;
             }
-            10 | 11 => {
-                self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
+            10..=CURRENT_PROCESS_VERSION => {
+                self.process_version = CURRENT_PROCESS_VERSION;
             }
-            LEGACY_SCENE_DISPLAY_PROCESS_VERSION
-            | SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION
-            | SENSOR_DENOISE_PROCESS_VERSION => {}
-            HIGHLIGHT_CONSENSUS_PROCESS_VERSION => {
-                self.process_version = BASIC_TONE_RESPONSE_PROCESS_VERSION;
-            }
-            BASIC_TONE_RESPONSE_PROCESS_VERSION | CURRENT_PROCESS_VERSION => {}
-            // Preserve unknown future versions. Callers can reject them or
-            // load them in a compatibility mode, but must not silently
-            // reinterpret them with older formulas.
+            // Preserve unknown future versions so the sidecar boundary can
+            // reject them rather than reinterpret them with older formulas.
             _ => {}
         }
     }
@@ -471,9 +444,8 @@ const fn default_sharpen_detail() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DemosaicMode, ExposureParams, PointCurve, BASIC_TONE_RESPONSE_PROCESS_VERSION,
-        CURRENT_PROCESS_VERSION, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
-        LEGACY_SCENE_DISPLAY_PROCESS_VERSION, PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION,
+        DemosaicMode, ExposureParams, PointCurve, CURRENT_PROCESS_VERSION,
+        LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
     };
     use crate::pipeline::SigmoidParams;
 
@@ -505,20 +477,21 @@ mod tests {
 
 
     #[test]
-    fn process_16_low_tone_edits_are_not_silently_upgraded_on_load() {
-        let mut previous = ExposureParams {
-            process_version: BASIC_TONE_RESPONSE_PROCESS_VERSION,
-            shadows: 42.0,
-            blacks: -31.0,
-            luminance_denoise: 55.0,
-            ..ExposureParams::default()
-        };
-        previous.migrate_to_current_process();
-        assert_eq!(previous.process_version, BASIC_TONE_RESPONSE_PROCESS_VERSION);
-        assert_ne!(previous.process_version, PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION);
-        assert_eq!(previous.shadows, 42.0);
-        assert_eq!(previous.blacks, -31.0);
-        assert_eq!(previous.luminance_denoise, 55.0);
+    fn every_supported_process_version_uses_the_current_renderer() {
+        for process_version in 0..=CURRENT_PROCESS_VERSION {
+            let mut previous = ExposureParams {
+                process_version,
+                shadows: 42.0,
+                blacks: -31.0,
+                luminance_denoise: 55.0,
+                ..ExposureParams::default()
+            };
+            previous.migrate_to_current_process();
+            assert_eq!(previous.process_version, CURRENT_PROCESS_VERSION);
+            assert_eq!(previous.shadows, 42.0);
+            assert_eq!(previous.blacks, -31.0);
+            assert_eq!(previous.luminance_denoise, 55.0);
+        }
     }
 
     #[test]
@@ -548,7 +521,7 @@ mod tests {
             ..ExposureParams::default()
         };
         pre_backend.migrate_to_current_process();
-        assert_eq!(pre_backend.process_version, LEGACY_SCENE_DISPLAY_PROCESS_VERSION);
+        assert_eq!(pre_backend.process_version, CURRENT_PROCESS_VERSION);
         assert_eq!(pre_backend.exposure, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV);
 
         let mut hidden_backend = ExposureParams {
@@ -557,7 +530,7 @@ mod tests {
             ..ExposureParams::default()
         };
         hidden_backend.migrate_to_current_process();
-        assert_eq!(hidden_backend.process_version, LEGACY_SCENE_DISPLAY_PROCESS_VERSION);
+        assert_eq!(hidden_backend.process_version, CURRENT_PROCESS_VERSION);
         assert_eq!(hidden_backend.exposure, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV);
 
         let mut previous_tone_formula = ExposureParams {
@@ -567,7 +540,7 @@ mod tests {
             ..ExposureParams::default()
         };
         previous_tone_formula.migrate_to_current_process();
-        assert_eq!(previous_tone_formula.process_version, LEGACY_SCENE_DISPLAY_PROCESS_VERSION);
+        assert_eq!(previous_tone_formula.process_version, CURRENT_PROCESS_VERSION);
         assert_eq!(previous_tone_formula.exposure, 0.35);
         assert_eq!(previous_tone_formula.contrast, 42.0);
     }

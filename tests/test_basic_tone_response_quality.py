@@ -66,38 +66,38 @@ def display_black_toe(luma: float, amount: float, pivot: float = 0.15) -> float:
     return luma * 2.0 ** (a * endpoint * toe)
 
 
-def test_process_17_is_current_but_process_16_remains_compatible() -> None:
+def test_process_17_is_the_single_runtime_renderer() -> None:
     assert "pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;" in BASIC
     assert "pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;" in BASIC
     assert "pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;" in BASIC
     assert "const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16u;" in TONEMAP
     assert "const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17u;" in TONEMAP
-    assert "BASIC_TONE_RESPONSE_PROCESS_VERSION | CURRENT_PROCESS_VERSION => {}" in BASIC
-    assert "HIGHLIGHT_CONSENSUS_PROCESS_VERSION =>" in BASIC
-    assert "self.process_version = BASIC_TONE_RESPONSE_PROCESS_VERSION;" in BASIC
+    assert "10..=CURRENT_PROCESS_VERSION" in BASIC
+    assert "self.process_version = CURRENT_PROCESS_VERSION;" in BASIC
+    assert "CURRENT_PROCESS_VERSION," in GPU
+    assert "render_graph_flags()," in GPU
 
 
-def test_process_16_low_tone_formulas_are_preserved_behind_version_gate() -> None:
+def test_historical_low_tone_formulas_are_inaccessible_to_normal_edits() -> None:
     assert "if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION" in TONEMAP
     assert "apply_blacks_toe_v2" in TONEMAP
     assert "shadow_mask = shadow_mask * mix(0.28, 1.0, toe_guard)" in TONEMAP
     assert "signed_tone_range(shadows, 2.35, 3.20) * shadow_mask" in TONEMAP
+    assert "process_info: [" in GPU
+    assert "CURRENT_PROCESS_VERSION," in GPU
 
 
-def test_unrelated_noise_change_does_not_upgrade_process_16() -> None:
-    assert "exposure.process_version = CURRENT_PROCESS_VERSION;" not in DEVELOP
-    assert "exposure.process_version == BASIC_TONE_RESPONSE_PROCESS_VERSION" in DEVELOP
-    assert "shadows_changed || blacks_changed" in DEVELOP
-    assert "exposure.process_version = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;" in DEVELOP
+def test_global_controls_do_not_switch_process_versions() -> None:
+    assert "exposure.process_version =" not in DEVELOP
+    assert "exposure.process_version ==" not in DEVELOP
 
 
-def test_local_low_tone_edit_is_the_only_mask_action_that_opts_16_into_17() -> None:
+def test_local_controls_do_not_switch_process_versions() -> None:
     assert "let shadows_before = adjustment.shadows;" in MASKS
     assert "let blacks_before = adjustment.blacks;" in MASKS
     assert "adjustment.shadows != shadows_before || adjustment.blacks != blacks_before" in MASKS
-    assert "app.exposure.process_version == BASIC_TONE_RESPONSE_PROCESS_VERSION" in MASKS
-    assert "app.exposure.process_version = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;" in MASKS
-
+    assert "app.exposure.process_version =" not in MASKS
+    assert "app.exposure.process_version ==" not in MASKS
 
 def test_shadow_selector_dark_subject_cannot_inherit_bright_neighborhood() -> None:
     pixel_ev = -6.0

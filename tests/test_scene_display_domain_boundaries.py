@@ -80,9 +80,12 @@ def test_tone_analysis_is_profile_independent_on_new_process_path() -> None:
     assert "return map_negative_gamut(exposed);" in TONE[explicit_branch:legacy_look]
 
 
-def test_process_version_preserves_legacy_appearance() -> None:
+def test_supported_process_versions_are_canonicalized() -> None:
     assert "LEGACY_SCENE_DISPLAY_PROCESS_VERSION: u32 = 12" in BASIC
     assert "SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13" in BASIC
-    assert "does *not* auto-upgrade process-12 edits" in BASIC
-    assert "process_twelve_sidecars_keep_the_legacy_render_graph" in SIDECAR
-    assert "assert!(!loaded.migrated);" in SIDECAR
+    assert "10..=CURRENT_PROCESS_VERSION" in BASIC
+    assert "process_twelve_sidecars_are_canonicalized_to_current" in SIDECAR
+    assert "saving_an_old_process_writes_the_current_process" in SIDECAR
+    assert "copied_adjustments_cannot_reintroduce_a_legacy_process" in SIDECAR
+    assert "CURRENT_PROCESS_VERSION," in GPU
+    assert "render_graph_flags()," in GPU

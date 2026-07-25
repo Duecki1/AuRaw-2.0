@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 pub const SIDECAR_SCHEMA_VERSION: u32 = 4;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
-pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0002;
+pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0003;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
@@ -149,6 +149,7 @@ pub fn apply_copied_adjustments(
 ) {
     if settings.adjustments {
         destination.exposure = source.exposure;
+        destination.exposure.migrate_to_current_process();
         destination.geometry = source.geometry;
     }
     if settings.masks {
@@ -181,9 +182,8 @@ struct SidecarDocument {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedSidecar {
     pub edits: EditState,
-    /// True when an older supported schema or processing version was changed
-    /// in memory. Compatibility process versions that intentionally remain on
-    /// their legacy render graph do not cause perpetual rewrite-on-load.
+    /// True when an older supported schema or processing version was
+    /// canonicalized in memory and should be rewritten on load.
     pub migrated: bool,
 }
 
@@ -563,7 +563,7 @@ pub fn remove_desktop_edits(raw_path: &Path) -> Result<bool, String> {
     Ok(removed_any)
 }
 
-pub fn encode(edits: EditState) -> Result<Vec<u8>, SidecarError> {
+pub fn encode(mut edits: EditState) -> Result<Vec<u8>, SidecarError> {
     validate_edit_state(&edits)?;
     preflight_edit_size(&edits)?;
     if edits.exposure.process_version > CURRENT_PROCESS_VERSION {
@@ -572,6 +572,8 @@ pub fn encode(edits: EditState) -> Result<Vec<u8>, SidecarError> {
             edits.exposure.process_version, CURRENT_PROCESS_VERSION
         )));
     }
+    edits.exposure.migrate_to_current_process();
+    validate_edit_state(&edits)?;
     let document = SidecarDocument {
         format: SIDECAR_FORMAT.to_owned(),
         schema_version: SIDECAR_SCHEMA_VERSION,
@@ -631,7 +633,9 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
 
     Ok(LoadedSidecar {
         edits: document.edits,
-        migrated: original_schema != SIDECAR_SCHEMA_VERSION || migrated_process,
+        migrated: original_schema != SIDECAR_SCHEMA_VERSION
+            || original_process != CURRENT_PROCESS_VERSION
+            || migrated_process,
     })
 }
 
@@ -1780,13 +1784,13 @@ mod tests {
         let loaded = decode(&value).unwrap();
         assert_eq!(
             loaded.edits.exposure.process_version,
-            LEGACY_SCENE_DISPLAY_PROCESS_VERSION
+            CURRENT_PROCESS_VERSION
         );
         assert!(loaded.migrated);
     }
 
     #[test]
-    fn process_thirteen_sidecars_keep_their_saved_denoise_rendering() {
+    fn process_thirteen_sidecars_are_canonicalized_to_current() {
         let mut edits = sample_edits();
         edits.exposure.process_version = SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION;
         edits.exposure.chroma_denoise = 0.6;
@@ -1800,13 +1804,13 @@ mod tests {
         let loaded = decode(&value).unwrap();
         assert_eq!(
             loaded.edits.exposure.process_version,
-            SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION
+            CURRENT_PROCESS_VERSION
         );
-        assert!(!loaded.migrated);
+        assert!(loaded.migrated);
     }
 
     #[test]
-    fn process_twelve_sidecars_keep_the_legacy_render_graph() {
+    fn process_twelve_sidecars_are_canonicalized_to_current() {
         let mut edits = sample_edits();
         edits.exposure.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
         let value = serde_json::to_vec(&SidecarDocument {
@@ -1819,9 +1823,32 @@ mod tests {
         let loaded = decode(&value).unwrap();
         assert_eq!(
             loaded.edits.exposure.process_version,
-            LEGACY_SCENE_DISPLAY_PROCESS_VERSION
+            CURRENT_PROCESS_VERSION
         );
-        assert!(!loaded.migrated);
+        assert!(loaded.migrated);
+    }
+
+    #[test]
+    fn saving_an_old_process_writes_the_current_process() {
+        let mut edits = sample_edits();
+        edits.exposure.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
+        let encoded = encode(edits).unwrap();
+        let document: SidecarDocument = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(document.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(document.edits.exposure.process_version, CURRENT_PROCESS_VERSION);
+    }
+
+    #[test]
+    fn copied_adjustments_cannot_reintroduce_a_legacy_process() {
+        let mut source = sample_edits();
+        source.exposure.process_version = SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION;
+        let mut destination = sample_edits();
+        apply_copied_adjustments(
+            &mut destination,
+            &source,
+            AdjustmentCopySettings::default(),
+        );
+        assert_eq!(destination.exposure.process_version, CURRENT_PROCESS_VERSION);
     }
 
     #[test]

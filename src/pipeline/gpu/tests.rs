@@ -144,12 +144,8 @@ fn green_noise_is_averaged_once_and_stored_symmetrically() {
 }
 
 #[test]
-fn process_version_selects_the_scene_display_contract_graph() {
-    assert_eq!(render_graph_flags(12), 0);
-    assert_eq!(
-        render_graph_flags(crate::pipeline::SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION),
-        RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY
-    );
+fn every_edit_uses_the_current_scene_display_contract_graph() {
+    assert_eq!(render_graph_flags(), RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY);
     assert!(explicit_render_graph_contracts_are_contiguous());
 }
 

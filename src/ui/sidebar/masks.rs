@@ -914,7 +914,6 @@ impl Sidebar {
 
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
-        let mut low_tone_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
         let mut brush_mode = app.brush_mode;
@@ -955,26 +954,18 @@ impl Sidebar {
                 (MaskSection::ColorMixer, "Color Mixer", false),
             ] {
                 Self::adjustment_section(ui, label, default_open, true, |ui| {
-                    let (section_changed, section_low_tone_changed) =
-                        Self::show_local_mask_adjustment_section(
-                            ui,
-                            &mut mask.adjustments,
-                            section,
-                            &mut local_curve_tab,
-                            &mut local_color_grade_tab,
-                        );
+                    let (section_changed, _) = Self::show_local_mask_adjustment_section(
+                        ui,
+                        &mut mask.adjustments,
+                        section,
+                        &mut local_curve_tab,
+                        &mut local_color_grade_tab,
+                    );
                     adjustments_changed |= section_changed;
-                    low_tone_changed |= section_low_tone_changed;
                 });
             }
         }
 
-        if low_tone_changed
-            && app.exposure.process_version == BASIC_TONE_RESPONSE_PROCESS_VERSION
-        {
-            app.exposure.process_version = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
-            adjustments_changed = true;
-        }
         app.tone_curve_tab = local_curve_tab;
         app.color_grade_tab = local_color_grade_tab;
         app.brush_mode = brush_mode;
@@ -1018,7 +1009,6 @@ impl Sidebar {
 
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
-        let mut low_tone_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
         let mut brush_mode = app.brush_mode;
@@ -1057,26 +1047,18 @@ impl Sidebar {
                         });
                     });
                     ui.add_space(4.0);
-                    let (section_changed, section_low_tone_changed) =
-                        Self::show_local_mask_adjustment_section(
-                            ui,
-                            &mut mask.adjustments,
-                            section,
-                            &mut local_curve_tab,
-                            &mut local_color_grade_tab,
-                        );
+                    let (section_changed, _) = Self::show_local_mask_adjustment_section(
+                        ui,
+                        &mut mask.adjustments,
+                        section,
+                        &mut local_curve_tab,
+                        &mut local_color_grade_tab,
+                    );
                     adjustments_changed |= section_changed;
-                    low_tone_changed |= section_low_tone_changed;
                 }
             }
         }
 
-        if low_tone_changed
-            && app.exposure.process_version == BASIC_TONE_RESPONSE_PROCESS_VERSION
-        {
-            app.exposure.process_version = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
-            adjustments_changed = true;
-        }
         app.tone_curve_tab = local_curve_tab;
         app.color_grade_tab = local_color_grade_tab;
         app.brush_mode = brush_mode;

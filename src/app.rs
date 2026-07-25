@@ -75,9 +75,14 @@ impl PreviewQuality {
 
     pub const fn detail_edge(self) -> u32 {
         match (self, cfg!(target_os = "android")) {
-            (Self::Fast, true) => 1080,
-            (Self::Balanced, true) => 1600,
-            (Self::High, true) => 2048,
+            // Zoom detail coexists with the full preview and navigation proxy.
+            // The hybrid branch's additional scene/display working textures make
+            // the former 1600/2048 limits exceed the Android GPU budget before a
+            // crop can be shown. These still meet or exceed common phone viewport
+            // resolution while leaving room for inpainting's 512px work surface.
+            (Self::Fast, true) => 960,
+            (Self::Balanced, true) => 1152,
+            (Self::High, true) => 1280,
             (Self::Fast, false) => 1920,
             (Self::Balanced, false) => 2560,
             (Self::High, false) => 3072,

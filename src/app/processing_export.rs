@@ -81,6 +81,14 @@ fn navigation_mask_edge() -> u32 {
     if cfg!(target_os = "android") { 256 } else { 384 }
 }
 
+fn detail_mask_edge() -> u32 {
+    // Detail and the full preview coexist while zooming. Reusing the full
+    // 1024/2048px, 32-layer atlas here duplicates 64/256 MiB before any image
+    // textures are counted. A dedicated atlas remains full-image normalized,
+    // but is sized for an interactive viewport rather than export.
+    if cfg!(target_os = "android") { 384 } else { 1024 }
+}
+
 /// Start a detailed crop for every real zoom level above fit. The previous
 /// 1.01 cutoff excluded an exact 101% zoom and, together with the former
 /// proxy-texel shortcut, kept the tiny navigation image visible until much deeper
@@ -335,65 +343,87 @@ impl AurawApp {
             self.inpaint_layer.as_ref()
         };
 
-        // Update every present pipeline first, without dispatching any render. A
-        // partial upload therefore cannot become visible or advance the rendered
-        // marker. The next retry overwrites every present pipeline again.
-        let mut updates = Vec::new();
+        // The main preview is the durable interactive surface. Optional zoom
+        // pipelines are caches: a failed cache upload must not make inpainting or
+        // original-preview toggling fail globally. Drop only the failed optional
+        // cache and let its normal scheduler rebuild it.
         if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
-            updates.push((
-                "main preview",
-                pipeline.update_inpaint_layer(
-                    &render_state.queue,
-                    inpaint,
-                    0,
-                    0,
-                    raw.width,
-                    raw.height,
-                ),
-            ));
+            if let Err(error) = pipeline.update_inpaint_layer(
+                &render_state.queue,
+                inpaint,
+                0,
+                0,
+                raw.width,
+                raw.height,
+            ) {
+                self.original_preview_rendered_state = None;
+                self.pending_stage = Some(ProcessingStage::Output);
+                self.notice = Some(
+                    "Could not update preview inpainting. The last complete preview is still shown."
+                        .to_owned(),
+                );
+                crate::diagnostics::record(format!(
+                    "main preview inpaint upload failed; rendered revision remains dirty: {error:#}"
+                ));
+                self.egui_ctx.request_repaint();
+                return;
+            }
         }
-        if let Some(navigation) = self.preview_navigation.as_ref() {
-            updates.push((
-                "navigation preview",
-                navigation.pipeline.update_inpaint_layer(
+
+        let navigation_upload_error = self.preview_navigation.as_ref().and_then(|navigation| {
+            navigation
+                .pipeline
+                .update_inpaint_layer(
                     &render_state.queue,
                     inpaint,
                     0,
                     0,
                     navigation.raw.width,
                     navigation.raw.height,
-                ),
+                )
+                .err()
+        });
+        if let Some(error) = navigation_upload_error {
+            crate::diagnostics::record(format!(
+                "discarding navigation preview after inpaint upload failure: {error:#}"
             ));
+            if let Some(old) = self.preview_navigation.take() {
+                if let Some(texture_id) = old.pipeline.egui_texture_id {
+                    render_state.renderer.write().free_texture(&texture_id);
+                }
+            }
+            self.navigation_pending_stage = Some(ProcessingStage::Output);
         }
-        if let Some(detail) = self
+
+        let detail_upload_error = self
             .preview_detail
             .as_ref()
             .filter(|detail| detail.revision == self.preview_revision)
-        {
-            updates.push((
-                "detail preview",
-                detail.pipeline.update_inpaint_layer(
-                    &render_state.queue,
-                    inpaint,
-                    detail.virtual_origin[0],
-                    detail.virtual_origin[1],
-                    detail.virtual_full_size[0],
-                    detail.virtual_full_size[1],
-                ),
-            ));
-        }
-        if let Err(error) = collect_pipeline_update_results("install inpaint layer", updates) {
-            self.original_preview_rendered_state = None;
-            self.pending_stage = Some(ProcessingStage::Output);
-            self.notice = Some(
-                "Could not update every GPU preview. The last complete preview is still shown; retrying is safe."
-                    .to_owned(),
-            );
+            .and_then(|detail| {
+                detail
+                    .pipeline
+                    .update_inpaint_layer(
+                        &render_state.queue,
+                        inpaint,
+                        detail.virtual_origin[0],
+                        detail.virtual_origin[1],
+                        detail.virtual_full_size[0],
+                        detail.virtual_full_size[1],
+                    )
+                    .err()
+            });
+        if let Some(error) = detail_upload_error {
             crate::diagnostics::record(format!(
-                "transactional preview update failed; rendered revision remains dirty: {error:#}"
+                "discarding zoom detail after inpaint upload failure: {error:#}"
             ));
-            self.egui_ctx.request_repaint();
-            return;
+            if let Some(old) = self.preview_detail.take() {
+                if let Some(texture_id) = old.pipeline.egui_texture_id {
+                    render_state.renderer.write().free_texture(&texture_id);
+                }
+            }
+            self.preview_motion_at = Some(Instant::now());
+            self.preview_detail_pending_stage = Some(ProcessingStage::Output);
+            self.preview_detail_urgent = true;
         }
 
         if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
@@ -829,13 +859,14 @@ impl AurawApp {
         let Some(program_template) = self.gpu_pipeline.as_ref() else {
             return;
         };
-        let mut pipeline = match RawGpuPipeline::new_headless_reusing_programs(
+        let mut pipeline = match RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
             &render_state.device,
             &render_state.queue,
             &detail_raw,
             &params,
             ProcessingQuality::Preview,
             program_template,
+            detail_mask_edge(),
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
