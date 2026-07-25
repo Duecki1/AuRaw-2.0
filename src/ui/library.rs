@@ -3,10 +3,9 @@ use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::{
     apply_lensfun_correction, build_proxy, compose_inpaint_strokes, is_supported_raw_path,
-    lensfun_catalog, load_raw_display_dimensions, load_raw_file_with_profile_selection,
-    load_raw_thumbnail, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage,
-    MaskStack, ProcessingQuality, ProxySpec,
-    RawGpuPipeline, MAX_LOCAL_MASKS,
+    lensfun_catalog, load_raw_display_dimensions, load_raw_embedded_thumbnail,
+    load_raw_file_with_profile_selection, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry,
+    MaskRgbImage, MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
 };
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
 use std::cmp::Ordering as CmpOrdering;
@@ -1382,8 +1381,8 @@ fn load_desktop_library_thumbnail(
         ),
     }
 
-    let thumbnail =
-        load_raw_thumbnail(path, THUMBNAIL_EDGE).map_err(|error| format!("{error:#}"))?;
+    let thumbnail = load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)
+        .map_err(|error| format!("embedded RAW preview unavailable: {error:#}"))?;
     if let Err(error) = crate::thumbnail_cache::save_desktop_raw_thumbnail(path, &thumbnail) {
         log::warn!(
             "could not persist RAW thumbnail cache for {}: {error}",

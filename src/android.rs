@@ -358,7 +358,7 @@ pub fn load_library_thumbnail(
                 "direct Android RAW thumbnail extraction failed; retrying from private cache: {direct_error}"
             );
             let temporary = materialize_library_thumbnail(app, uri, display_name)?;
-            let result = crate::pipeline::load_raw_thumbnail(&temporary, maximum_edge)
+            let result = crate::pipeline::load_raw_embedded_thumbnail(&temporary, maximum_edge)
                 .map_err(|error| format!("{error:#}"));
             if let Err(error) = fs::remove_file(&temporary) {
                 log::warn!(
@@ -430,7 +430,7 @@ fn load_library_thumbnail_from_fd(
     // transferred sole ownership to Rust. `File` closes it exactly once.
     let descriptor = unsafe { File::from_raw_fd(fd) };
     let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
-    let result = crate::pipeline::load_raw_thumbnail(&path, maximum_edge)
+    let result = crate::pipeline::load_raw_embedded_thumbnail(&path, maximum_edge)
         .map_err(|error| format!("{error:#}"));
     drop(descriptor);
     result
