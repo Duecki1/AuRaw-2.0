@@ -4,9 +4,11 @@
 // Copyright (C) 2026 AuRaw contributors (WGSL port).
 // GPL-3.0-or-later.
 //
-// AuRaw's Highlights/Shadows/Whites/Blacks remain a separate scene-linear,
-// edge-aware exposure-shaping stage. The final scene-to-display transform below
-// is darktable's generalized log-logistic sigmoid and color processing.
+// AuRaw's Highlights/Whites and Shadows are separate scene-referred controls.
+// Process 17+ Blacks is deliberately view-adjacent in display-linear space so
+// the selected profile/sigmoid view cannot compress away black/toe authority.
+// The scene-to-display transform below includes darktable's generalized
+// log-logistic sigmoid path and color processing.
 
 @group(0) @binding(16) var<storage, read> tone_stats: ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
@@ -65,6 +67,7 @@ fn tone_percentiles() -> TonePercentiles {
 }
 
 const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16u;
+const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17u;
 
 fn basic_low_tone_control(value: f32) -> f32 {
     let normalized = clamp(value / 100.0, -1.0, 1.0);
@@ -89,13 +92,22 @@ fn adaptive_low_tone_ev(rgb: vec3<f32>, pos: vec2<i32>, guide_ev: f32) -> f32 {
         TONE_EV_MIN,
         TONE_EV_MAX,
     );
-    // The old low-tone masks were selected only from the reduced bilateral
-    // guide. A small dark subject inside a brighter guide cell could therefore
-    // miss Shadows/Blacks almost entirely. Keep the guide as a halo suppressor,
-    // but let actual pixel luminance dominate, especially across strong edges.
     let mismatch = abs(pixel_ev - guide_ev);
-    let guide_weight = mix(0.38, 0.16, smoothstep(0.75, 2.75, mismatch));
-    return mix(pixel_ev, guide_ev, guide_weight);
+    if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+        // Process 16 compatibility: blend directly toward the reduced guide.
+        let guide_weight = mix(0.38, 0.16, smoothstep(0.75, 2.75, mismatch));
+        return mix(pixel_ev, guide_ev, guide_weight);
+    }
+
+    // Process 17: the guide may suppress halos, but it may not reclassify a
+    // truly dark subject as a bright one merely because the reduced cell is
+    // dominated by a window/sky/background. Bound the guide's classification
+    // displacement asymmetrically: bright neighbours may pull a dark pixel by
+    // at most +0.75 EV, while dark neighbours may pull by -1.25 EV. Actual
+    // pixel luminance therefore remains authoritative across strong edges.
+    let bounded_guide_ev = pixel_ev + clamp(guide_ev - pixel_ev, -1.25, 0.75);
+    let guide_weight = mix(0.42, 0.22, smoothstep(0.50, 3.00, mismatch));
+    return mix(pixel_ev, bounded_guide_ev, guide_weight);
 }
 
 fn adaptive_tone_masks(
@@ -156,6 +168,56 @@ fn adaptive_tone_masks(
     return vec4<f32>(black_mask, shadow_mask, highlight_mask, white_mask);
 }
 
+fn photographic_shadow_bounds(percentiles: TonePercentiles) -> vec3<f32> {
+    // Keep the zone valid even for nearly-degenerate high-key/low-key
+    // histograms. The hard limits are photographic EV-domain guard rails, not
+    // exposure normalization: the selector still follows p0.5/p5/p50 inside
+    // them, but absolute black and bright midtones cannot be swallowed by an
+    // extreme histogram.
+    let raw_p005 = select(-8.0, percentiles.p005, finite_scalar(percentiles.p005));
+    let raw_p05 = select(-5.0, percentiles.p05, finite_scalar(percentiles.p05));
+    let raw_p50 = select(0.0, percentiles.p50, finite_scalar(percentiles.p50));
+    let p005 = clamp(raw_p005, TONE_EV_MIN + 0.5, TONE_EV_MAX - 1.0);
+    let p05 = max(clamp(raw_p05, TONE_EV_MIN + 0.75, TONE_EV_MAX - 0.75), p005 + 0.25);
+    let p50 = max(clamp(raw_p50, TONE_EV_MIN + 1.0, TONE_EV_MAX - 0.5), p05 + 0.50);
+
+    let lower = clamp(min(p005 - 0.50, p05 - 2.50), -13.0, -6.0);
+    let peak_candidate = clamp(p05 + 1.25, -6.0, -2.0);
+    let peak = max(peak_candidate, lower + 2.50);
+    var upper = min(max(p50 + 0.50, peak + 3.50), 0.75);
+    upper = max(upper, peak + 2.50);
+    return vec3<f32>(lower, peak, upper);
+}
+
+fn photographic_shadow_mask(low_ev: f32, bounds: vec3<f32>) -> f32 {
+    // Piecewise smoothstep creates one C1-continuous shadow zone. Unlike a
+    // one-sided low-pass mask it deliberately returns to zero at absolute black
+    // and above the lower midtones, separating Shadows from Blacks and Exposure.
+    if low_ev <= bounds.y {
+        return tone_smoothstep(bounds.x, bounds.y, low_ev);
+    }
+    return 1.0 - tone_smoothstep(bounds.y, bounds.z, low_ev);
+}
+
+fn photographic_shadow_offset_ev(shadows: f32, mask: f32, bounds: vec3<f32>) -> f32 {
+    if abs(shadows) < 1e-7 || mask <= 0.0 {
+        return 0.0;
+    }
+
+    // The endpoint requests are expressed directly in EV, but their effective
+    // authority is capped by the selector transition width. smoothstep's peak
+    // slope is 1.5/width; limiting displacement to 0.64*width keeps d(EV')/dEV
+    // positive with margin, proving monotonicity instead of relying on clipping.
+    if shadows >= 0.0 {
+        let requested = shadows * 3.40;
+        let monotone_limit = 0.64 * max(bounds.z - bounds.y, 0.25);
+        return min(requested, monotone_limit) * mask;
+    }
+    let requested = (-shadows) * 3.00;
+    let monotone_limit = 0.64 * max(bounds.y - bounds.x, 0.25);
+    return -min(requested, monotone_limit) * mask;
+}
+
 fn signed_tone_range(value: f32, negative_ev: f32, positive_ev: f32) -> f32 {
     return select(value * negative_ev, value * positive_ev, value >= 0.0);
 }
@@ -202,18 +264,28 @@ fn apply_blacks_toe_v2(
     return rgb * clamp(target_luminance / luminance, 0.0, 64.0);
 }
 
-fn apply_local_basic_tone_values(
+fn apply_local_basic_tone_values_with_low_strength(
     rgb: vec3<f32>,
     pos: vec2<i32>,
     highlights_value: f32,
     shadows_value: f32,
     whites_value: f32,
     blacks_value: f32,
+    low_tone_strength: f32,
 ) -> vec3<f32> {
     let highlights = clamp(highlights_value / 100.0, -1.0, 1.0);
-    let shadows = basic_low_tone_control(shadows_value);
+    var shadows = basic_low_tone_control(shadows_value);
     let whites = clamp(whites_value / 100.0, -1.0, 1.0);
-    let blacks = basic_low_tone_control(blacks_value);
+    var blacks = basic_low_tone_control(blacks_value);
+    if params.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+        // For nonlinear low-tone operations, local masks interpolate adjustment
+        // strength, not the fully-rendered RGB result. This makes a 50% feather
+        // exactly half the EV/toe authority and avoids mask-edge tone warping.
+        shadows = shadows * clamp(low_tone_strength, 0.0, 1.0);
+        // Process 17 Blacks is a display-linear toe applied after the selected
+        // view transform. Never spend Blacks authority in scene-linear here.
+        blacks = 0.0;
+    }
     if max(max(abs(highlights), abs(shadows)), max(abs(whites), abs(blacks))) < 1e-6 {
         return rgb;
     }
@@ -231,29 +303,53 @@ fn apply_local_basic_tone_values(
         return rgb * exp2(offset_ev);
     }
 
-    var adjusted = apply_blacks_toe_v2(rgb, blacks, percentiles);
+    if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+        var adjusted = apply_blacks_toe_v2(rgb, blacks, percentiles);
 
-    // Positive Shadows should open usable dark detail rather than simply lift
-    // the absolute black endpoint. Protect the deepest few percent and let the
-    // dedicated Blacks control own that endpoint. Negative Shadows may still
-    // deepen the whole lower range for a deliberately dramatic rendering.
-    var shadow_mask = masks.y;
-    if shadows > 0.0 {
-        let toe_guard = tone_smoothstep(
-            percentiles.p005 - 0.35,
-            percentiles.p05 + 0.90,
-            low_ev,
-        );
-        shadow_mask = shadow_mask * mix(0.28, 1.0, toe_guard);
+        // Process 16 compatibility.
+        var shadow_mask = masks.y;
+        if shadows > 0.0 {
+            let toe_guard = tone_smoothstep(
+                percentiles.p005 - 0.35,
+                percentiles.p05 + 0.90,
+                low_ev,
+            );
+            shadow_mask = shadow_mask * mix(0.28, 1.0, toe_guard);
+        }
+        let offset_ev = signed_tone_range(shadows, 2.35, 3.20) * shadow_mask
+            + signed_tone_range(highlights, 1.90, 1.15) * masks.z
+            + signed_tone_range(whites, 1.25, 1.40) * masks.w;
+        return adjusted * exp2(clamp(offset_ev, -6.5, 6.5));
     }
 
-    // Stronger but bounded scene-EV authority. At +50 the shaped Shadows value
-    // is ~0.61, yielding roughly +1.5 EV around the 5th percentile instead of
-    // the former sub-1-EV response that was mostly compressed by the view node.
-    let offset_ev = signed_tone_range(shadows, 2.35, 3.20) * shadow_mask
-        + signed_tone_range(highlights, 1.90, 1.15) * masks.z
+    // Process 17 Shadows is a bounded scene-EV zone remap. Its selector has an
+    // explicit black anchor and lower-midtone roll-off; authority is derived in
+    // EV then constrained by transition width so the transfer remains monotone.
+    let shadow_bounds = photographic_shadow_bounds(percentiles);
+    let shadow_mask = photographic_shadow_mask(low_ev, shadow_bounds);
+    let shadow_ev = photographic_shadow_offset_ev(shadows, shadow_mask, shadow_bounds);
+    let other_ev = signed_tone_range(highlights, 1.90, 1.15) * masks.z
         + signed_tone_range(whites, 1.25, 1.40) * masks.w;
-    return adjusted * exp2(clamp(offset_ev, -6.5, 6.5));
+    return rgb * exp2(clamp(shadow_ev + other_ev, -6.5, 6.5));
+}
+
+fn apply_local_basic_tone_values(
+    rgb: vec3<f32>,
+    pos: vec2<i32>,
+    highlights_value: f32,
+    shadows_value: f32,
+    whites_value: f32,
+    blacks_value: f32,
+) -> vec3<f32> {
+    return apply_local_basic_tone_values_with_low_strength(
+        rgb,
+        pos,
+        highlights_value,
+        shadows_value,
+        whites_value,
+        blacks_value,
+        1.0,
+    );
 }
 
 fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
@@ -470,6 +566,37 @@ fn apply_rgb_point_curves(rgb: vec3<f32>) -> vec3<f32> {
         result.b = scene_curve_decode(point_curve_value(3u, scene_curve_encode(result.b)));
     }
     return result;
+}
+
+fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
+    if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION || abs(amount) < 1e-7 {
+        return rgb;
+    }
+
+    // Blacks is a display-endpoint/toe control in Process 17. Applying it after
+    // the one selected view transform prevents DCP ProfileToneCurve or sigmoid
+    // compression from erasing most of its scene-domain movement. The fixed
+    // display-linear pivot also prevents low/high-key histogram statistics from
+    // collapsing or expanding the control's tonal reach.
+    let pivot = 0.15;
+    let luminance = dot(rgb, LUMA);
+    if luminance <= 1e-8 || luminance >= pivot {
+        return rgb;
+    }
+    let x = clamp(luminance / pivot, 0.0, 1.0);
+    let toe = (1.0 - x) * (1.0 - x);
+
+    // Positive endpoint is mathematically bounded for monotonicity. For
+    // f(x)=x*2^(A*(1-x)^2), f' stays positive when A < 2/ln(2)=2.885 EV;
+    // +2.60 EV leaves margin. Negative A only increases the derivative margin.
+    let endpoint_ev = select(3.10, 2.60, amount >= 0.0);
+    let offset_ev = clamp(amount, -1.0, 1.0) * endpoint_ev * toe;
+    let target_luminance = luminance * exp2(offset_ev);
+    return rgb * (target_luminance / luminance);
+}
+
+fn apply_display_blacks_toe_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
+    return apply_display_blacks_toe_amount(rgb, basic_low_tone_control(value));
 }
 
 fn apply_lightroom_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {

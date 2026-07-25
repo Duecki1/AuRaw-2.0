@@ -926,23 +926,57 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
         // scene-tone node, not a weighted parameter contribution to a shared
         // aggregate. This keeps overlap behavior deterministic for nonlinear
         // tone, contrast, WB, and curve operations.
-        var adjusted = rgb;
-        adjusted = apply_local_basic_tone_values(
-            adjusted,
-            pos,
-            params.mask_adjust_0[index].z,
-            params.mask_adjust_0[index].w,
-            params.mask_adjust_1[index].x,
-            params.mask_adjust_1[index].y,
-        );
-        adjusted = apply_basic_contrast_value(adjusted, params.mask_adjust_0[index].y);
-        adjusted = apply_temperature_tint_values(
-            adjusted,
-            params.mask_adjust_1[index].z,
-            params.mask_adjust_1[index].w,
-        );
-        adjusted = apply_local_curves_for_mask(index, adjusted);
-        rgb = mix(rgb, adjusted, weight);
+        if params.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+            // Shadows is an EV-zone remap, so feather/opacity scales the
+            // adjustment parameter itself. Mixing an already nonlinear fully-
+            // adjusted result would produce a different transfer at mask edges.
+            rgb = apply_local_basic_tone_values_with_low_strength(
+                rgb,
+                pos,
+                0.0,
+                params.mask_adjust_0[index].w,
+                0.0,
+                0.0,
+                weight,
+            );
+
+            // Preserve historical masked-result interpolation for unrelated
+            // local tone/WB/curve controls. Blacks is deferred to display-linear.
+            var adjusted = apply_local_basic_tone_values(
+                rgb,
+                pos,
+                params.mask_adjust_0[index].z,
+                0.0,
+                params.mask_adjust_1[index].x,
+                0.0,
+            );
+            adjusted = apply_basic_contrast_value(adjusted, params.mask_adjust_0[index].y);
+            adjusted = apply_temperature_tint_values(
+                adjusted,
+                params.mask_adjust_1[index].z,
+                params.mask_adjust_1[index].w,
+            );
+            adjusted = apply_local_curves_for_mask(index, adjusted);
+            rgb = mix(rgb, adjusted, weight);
+        } else {
+            var adjusted = rgb;
+            adjusted = apply_local_basic_tone_values(
+                adjusted,
+                pos,
+                params.mask_adjust_0[index].z,
+                params.mask_adjust_0[index].w,
+                params.mask_adjust_1[index].x,
+                params.mask_adjust_1[index].y,
+            );
+            adjusted = apply_basic_contrast_value(adjusted, params.mask_adjust_0[index].y);
+            adjusted = apply_temperature_tint_values(
+                adjusted,
+                params.mask_adjust_1[index].z,
+                params.mask_adjust_1[index].w,
+            );
+            adjusted = apply_local_curves_for_mask(index, adjusted);
+            rgb = mix(rgb, adjusted, weight);
+        }
     }
     return rgb;
 }
@@ -1291,6 +1325,25 @@ fn apply_legacy_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
     return darktable_sigmoid(scene_rgb);
 }
 
+fn apply_local_display_blacks(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+        return rgb;
+    }
+    let count = min(params.mask_counts.x, 32u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = params.mask_meta[index];
+        if state.x == 0u || state.y == 0u { continue; }
+        let value = params.mask_adjust_1[index].y;
+        if abs(value) < 1e-7 { continue; }
+        let weight = local_mask_weight(pos, index);
+        if weight <= 1e-5 { continue; }
+        let amount = basic_low_tone_control(value) * weight;
+        rgb = apply_display_blacks_toe_amount(rgb, amount);
+    }
+    return rgb;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.width || gid.y >= params.height { return; }
@@ -1312,6 +1365,10 @@ fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
         display_linear = apply_explicit_view_node(graded);
     } else {
         display_linear = apply_legacy_view_node(graded);
+    }
+    if params.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+        display_linear = apply_display_blacks_toe_value(display_linear, params.basic_tone.w);
+        display_linear = apply_local_display_blacks(pos, display_linear);
     }
     textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
     // Output ICC/device encoding is a separate display-domain operation, not a

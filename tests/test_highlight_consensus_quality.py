@@ -11,7 +11,8 @@ SIDEBAR = (ROOT / "src/ui/sidebar/develop.rs").read_text(encoding="utf-8")
 def test_new_edits_use_process_versioned_consensus_highlight_solver() -> None:
     assert "pub const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15;" in BASIC
     assert "pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;" in BASIC
-    assert "pub const CURRENT_PROCESS_VERSION: u32 = BASIC_TONE_RESPONSE_PROCESS_VERSION;" in BASIC
+    assert "pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;" in BASIC
+    assert "pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;" in BASIC
     assert "const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15u;" in HIGHLIGHT
     # The new behaviour must be gated so process-14 sidecars keep their saved look.
     assert HIGHLIGHT.count("params.process_info.x >= HIGHLIGHT_CONSENSUS_PROCESS_VERSION") >= 3

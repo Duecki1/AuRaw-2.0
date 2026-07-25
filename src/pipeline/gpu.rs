@@ -51,7 +51,7 @@ struct RenderStageContract {
     output: RenderDomain,
 }
 
-const EXPLICIT_RENDER_GRAPH: [RenderStageContract; 5] = [
+const EXPLICIT_RENDER_GRAPH: [RenderStageContract; 6] = [
     RenderStageContract {
         name: "camera_characterization",
         input: RenderDomain::CameraLinear,
@@ -70,6 +70,11 @@ const EXPLICIT_RENDER_GRAPH: [RenderStageContract; 5] = [
     RenderStageContract {
         name: "view_transform",
         input: RenderDomain::LookAdjustedScene,
+        output: RenderDomain::DisplayLinear,
+    },
+    RenderStageContract {
+        name: "display_black_toe",
+        input: RenderDomain::DisplayLinear,
         output: RenderDomain::DisplayLinear,
     },
     RenderStageContract {

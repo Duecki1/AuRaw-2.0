@@ -200,11 +200,17 @@ pub const SENSOR_DENOISE_PROCESS_VERSION: u32 = 14;
 /// Process 15 makes guided RAW highlight reconstruction boundary/consensus
 /// aware.
 pub const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15;
-/// Process 16 repairs the Basic-panel low-tone response. Shadows now use a
-/// broader pixel-aware scene-EV selector and Blacks uses a monotone toe/pivot
-/// remap instead of a weak masked exposure multiplier.
+/// Process 16 repairs the original Basic-panel low-tone response. It remains a
+/// compatibility renderer for edits saved with the first stronger Shadows/
+/// Blacks implementation.
 pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;
-pub const CURRENT_PROCESS_VERSION: u32 = BASIC_TONE_RESPONSE_PROCESS_VERSION;
+/// Process 17 separates the photographic roles of the two low-tone controls:
+/// Shadows is a bounded scene-EV zone remap with an actual-pixel-aware selector,
+/// while Blacks is a view-adjacent display-linear toe remap. This prevents DCP
+/// ProfileToneCurve/sigmoid compression from consuming most of the black-point
+/// authority and keeps low-key/high-key pivots from degenerating.
+pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;
+pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
 /// Global camera white-balance temperature range in mired displacement.
 /// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
 /// while retaining fine one-unit control near zero.
@@ -276,8 +282,8 @@ pub struct ExposureParams {
     /// converging toward a neutral specular highlight.
     pub highlight_color_adaptation: f32,
 
-    // Lightroom-style tonal controls are applied as scene-linear, local
-    // exposure shaping before the final darktable sigmoid display transform.
+    // Basic tonal controls. Highlights/Whites and Shadows are scene-referred;
+    // Process 17+ Blacks is a view-adjacent display-linear toe/endpoint remap.
     pub highlights: f32,
     pub shadows: f32,
     pub whites: f32,
@@ -339,8 +345,12 @@ impl ExposureParams {
         // Process 14 retains the process-13 graph and changes only denoise.
         // Process 15 changes guided highlight reconstruction only. Process 16
         // fixes a development-era Basic tone response bug. Process-15 builds
-        // were never a stable compatibility target, so they migrate to 16;
-        // released process-12/13/14 appearances remain pinned deliberately.
+        // were never a stable compatibility target, so they migrate to 16.
+        // Process 17 changes the actual Shadows/Blacks rendering again and is
+        // therefore never assigned by load-time migration. New edits start at
+        // 17; an existing process-16 edit opts in only when a low-tone control
+        // itself is edited. Unrelated changes (for example Noise Reduction)
+        // must leave its rendering pinned to process 16.
         match self.process_version {
             0..=7 => {
                 self.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
@@ -358,7 +368,7 @@ impl ExposureParams {
             HIGHLIGHT_CONSENSUS_PROCESS_VERSION => {
                 self.process_version = BASIC_TONE_RESPONSE_PROCESS_VERSION;
             }
-            CURRENT_PROCESS_VERSION => {}
+            BASIC_TONE_RESPONSE_PROCESS_VERSION | CURRENT_PROCESS_VERSION => {}
             // Preserve unknown future versions. Callers can reject them or
             // load them in a compatibility mode, but must not silently
             // reinterpret them with older formulas.
@@ -461,8 +471,9 @@ const fn default_sharpen_detail() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DemosaicMode, ExposureParams, PointCurve, CURRENT_PROCESS_VERSION,
-        LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV, LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
+        DemosaicMode, ExposureParams, PointCurve, BASIC_TONE_RESPONSE_PROCESS_VERSION,
+        CURRENT_PROCESS_VERSION, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
+        LEGACY_SCENE_DISPLAY_PROCESS_VERSION, PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION,
     };
     use crate::pipeline::SigmoidParams;
 
@@ -490,6 +501,24 @@ mod tests {
         assert_eq!(rendition.tint, 0.0);
         assert_eq!(rendition.saturation, 0.0);
         assert_eq!(rendition.vibrance, 0.0);
+    }
+
+
+    #[test]
+    fn process_16_low_tone_edits_are_not_silently_upgraded_on_load() {
+        let mut previous = ExposureParams {
+            process_version: BASIC_TONE_RESPONSE_PROCESS_VERSION,
+            shadows: 42.0,
+            blacks: -31.0,
+            luminance_denoise: 55.0,
+            ..ExposureParams::default()
+        };
+        previous.migrate_to_current_process();
+        assert_eq!(previous.process_version, BASIC_TONE_RESPONSE_PROCESS_VERSION);
+        assert_ne!(previous.process_version, PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION);
+        assert_eq!(previous.shadows, 42.0);
+        assert_eq!(previous.blacks, -31.0);
+        assert_eq!(previous.luminance_denoise, 55.0);
     }
 
     #[test]

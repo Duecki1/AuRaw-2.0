@@ -22,8 +22,8 @@ struct Params {
     frequency_chroma: f32,
     // Global WB tint mirrored for the stable uniform ABI; see temperature.
     tint: f32,
-    // Highlights, shadows, whites, blacks. These are scene-linear local
-    // exposure-shaping controls evaluated before the display transform.
+    // Highlights, shadows, whites, blacks. Process 17+ defers Blacks to the
+    // view-adjacent display-linear toe; the packed ABI remains unchanged.
     basic_tone: vec4<f32>,
     // darktable sigmoid: white target, black target, paper exposure, film fog.
     sigmoid_curve: vec4<f32>,
