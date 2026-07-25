@@ -452,17 +452,23 @@ pub(super) fn processing_work_format(quality: ProcessingQuality) -> wgpu::Textur
     }
 }
 
-pub(super) fn work_shader_source(source: &str, format: wgpu::TextureFormat) -> Cow<'_, str> {
-    let replacement = match format {
-        wgpu::TextureFormat::Rgba16Float => return Cow::Borrowed(source),
-        wgpu::TextureFormat::Rgba32Float => "rgba32float",
-        _ => unreachable!("unsupported AuRaw work texture format: {format:?}"),
-    };
-    debug_assert!(
-        source.contains(WORK_FORMAT_MARKER),
-        "format-specialized shader is missing the AuRaw work-format marker"
-    );
-    Cow::Owned(source.replace(WORK_FORMAT_MARKER, replacement))
+pub(super) fn work_shader_source(
+    source: &str,
+    format: wgpu::TextureFormat,
+) -> Result<Cow<'_, str>> {
+    let marker_count = source.matches(WORK_FORMAT_MARKER).count();
+    if marker_count == 0 {
+        return Err(anyhow!(
+            "format-specialized shader is missing the AuRaw work-format marker"
+        ));
+    }
+    match format {
+        wgpu::TextureFormat::Rgba16Float => Ok(Cow::Borrowed(source)),
+        wgpu::TextureFormat::Rgba32Float => {
+            Ok(Cow::Owned(source.replace(WORK_FORMAT_MARKER, "rgba32float")))
+        }
+        _ => Err(anyhow!("unsupported AuRaw work texture format: {format:?}")),
+    }
 }
 
 pub(super) fn create_demosaic_texture(

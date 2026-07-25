@@ -7,7 +7,7 @@ use crate::pipeline::{
     GLOBAL_TEMPERATURE_LIMIT,
     MAX_LOCAL_MASKS, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
 use std::borrow::Cow;
@@ -763,6 +763,21 @@ fn composite_inpaint_rgba16f(destination: &mut [u16], rgb: [f32; 3], alpha: f32)
     destination[3] = f16::from_f32(output_alpha).to_bits();
 }
 
+fn canonicalize_green_noise(
+    mut coefficients: [f32; 4],
+    green2_present: bool,
+) -> [f32; 4] {
+    if green2_present {
+        let green = 0.5 * (coefficients[1] + coefficients[3]);
+        // Keep both green slots canonical. The dual-demosaic shader averages
+        // G1/G2 once; retaining the original G2 in alpha would bias the result
+        // to 25% G1 / 75% G2 after a second average.
+        coefficients[1] = green;
+        coefficients[3] = green;
+    }
+    coefficients
+}
+
 impl GpuParams {
     pub fn new(exposure: &ExposureParams, masks: &MaskStack, raw: &LoadedRaw) -> Self {
         Self::new_for_tile(exposure, masks, raw, 0, 0, raw.width, raw.height)
@@ -946,25 +961,19 @@ impl GpuParams {
                 exposure.highlight_color_adaptation.clamp(0.0, 1.0),
                 0.0,
             ],
-            noise_shot: {
-                let mut coefficients = std::array::from_fn(|channel| {
+            noise_shot: canonicalize_green_noise(
+                std::array::from_fn(|channel| {
                     raw.noise_profile.shot[channel] * raw.wb_coeffs[channel].max(0.0)
-                });
-                if raw.noise_profile.green2_present {
-                    coefficients[1] = 0.5 * (coefficients[1] + coefficients[3]);
-                }
-                coefficients
-            },
-            noise_read: {
-                let mut coefficients = std::array::from_fn(|channel| {
+                }),
+                raw.noise_profile.green2_present,
+            ),
+            noise_read: canonicalize_green_noise(
+                std::array::from_fn(|channel| {
                     let wb = raw.wb_coeffs[channel].max(0.0);
                     raw.noise_profile.read[channel] * wb * wb
-                });
-                if raw.noise_profile.green2_present {
-                    coefficients[1] = 0.5 * (coefficients[1] + coefficients[3]);
-                }
-                coefficients
-            },
+                }),
+                raw.noise_profile.green2_present,
+            ),
             noise_options: [
                 (exposure.luminance_denoise / 100.0).clamp(0.0, 1.0),
                 (exposure.denoise_detail / 100.0).clamp(0.0, 1.0),
@@ -3101,20 +3110,34 @@ impl RawGpuPipeline {
         // Storage texture declarations are format-specific in WGSL. Generate
         // the full-float variants once when High quality is selected. This now
         // covers highlight reconstruction as well as demosaic/scene buffers.
-        let highlight_shader = work_shader_source(SHADER_HIGHLIGHTS, highlight_work_format);
-        let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format);
-        let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format);
-        let bayer_rcd_p3 = work_shader_source(SHADER_BAYER_RCD_P3, demosaic_format);
-        let bayer_rcd_p4 = work_shader_source(SHADER_BAYER_RCD_P4, demosaic_format);
-        let dual_demosaic = work_shader_source(SHADER_DUAL_DEMOSAIC, demosaic_format);
-        let xtrans_p1 = work_shader_source(SHADER_XTRANS_P1, demosaic_format);
-        let xtrans_p2 = work_shader_source(SHADER_XTRANS_P2, demosaic_format);
-        let xtrans_p3 = work_shader_source(SHADER_XTRANS_P3, demosaic_format);
-        let xtrans_p4 = work_shader_source(SHADER_XTRANS_P4, demosaic_format);
-        let xtrans_p5 = work_shader_source(SHADER_XTRANS_P5, demosaic_format);
-        let xtrans_p6 = work_shader_source(SHADER_XTRANS_P6, demosaic_format);
-        let xtrans_p7 = work_shader_source(SHADER_XTRANS_P7, demosaic_format);
-        let adjustments_shader = work_shader_source(SHADER_ADJUSTMENTS, work_format);
+        let highlight_shader = work_shader_source(SHADER_HIGHLIGHTS, highlight_work_format)
+            .context("specialize highlight shader work format")?;
+        let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format)
+            .context("specialize Bayer RCD pass 1 work format")?;
+        let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format)
+            .context("specialize Bayer RCD pass 2 work format")?;
+        let bayer_rcd_p3 = work_shader_source(SHADER_BAYER_RCD_P3, demosaic_format)
+            .context("specialize Bayer RCD pass 3 work format")?;
+        let bayer_rcd_p4 = work_shader_source(SHADER_BAYER_RCD_P4, demosaic_format)
+            .context("specialize Bayer RCD pass 4 work format")?;
+        let dual_demosaic = work_shader_source(SHADER_DUAL_DEMOSAIC, demosaic_format)
+            .context("specialize dual-demosaic work format")?;
+        let xtrans_p1 = work_shader_source(SHADER_XTRANS_P1, demosaic_format)
+            .context("specialize X-Trans pass 1 work format")?;
+        let xtrans_p2 = work_shader_source(SHADER_XTRANS_P2, demosaic_format)
+            .context("specialize X-Trans pass 2 work format")?;
+        let xtrans_p3 = work_shader_source(SHADER_XTRANS_P3, demosaic_format)
+            .context("specialize X-Trans pass 3 work format")?;
+        let xtrans_p4 = work_shader_source(SHADER_XTRANS_P4, demosaic_format)
+            .context("specialize X-Trans pass 4 work format")?;
+        let xtrans_p5 = work_shader_source(SHADER_XTRANS_P5, demosaic_format)
+            .context("specialize X-Trans pass 5 work format")?;
+        let xtrans_p6 = work_shader_source(SHADER_XTRANS_P6, demosaic_format)
+            .context("specialize X-Trans pass 6 work format")?;
+        let xtrans_p7 = work_shader_source(SHADER_XTRANS_P7, demosaic_format)
+            .context("specialize X-Trans pass 7 work format")?;
+        let adjustments_shader = work_shader_source(SHADER_ADJUSTMENTS, work_format)
+            .context("specialize adjustments shader work format")?;
 
         let create_shader = |label: &'static str, source: &str| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3579,7 +3602,16 @@ impl RawGpuPipeline {
             },
         ]);
 
-        debug_assert_eq!(next_program_index, expected_pass_count(raw.cfa_kind));
+        let expected_programs = expected_pass_count(raw.cfa_kind);
+        if next_program_index != expected_programs || passes.len() != expected_programs {
+            return Err(anyhow!(
+                "GPU render-plan mismatch for {:?}: built {} passes and consumed {} programs; expected {}",
+                raw.cfa_kind,
+                passes.len(),
+                next_program_index,
+                expected_programs,
+            ));
+        }
 
         let egui_texture_id = renderer.map(|renderer| {
             renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)

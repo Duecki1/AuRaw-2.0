@@ -235,7 +235,7 @@ fn bayer_phase2(offset: i32) -> f32 {
 }
 
 fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
-    let center_uv = bayer_uv(center);
+    let center_opponents = bayer_uv(center);
     var carrier_x = vec2<f32>(0.0);
     var carrier_y = vec2<f32>(0.0);
     var carrier_xy = vec2<f32>(0.0);
@@ -251,7 +251,7 @@ fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
             let weight = wy * f32(7 - abs(dx));
             let px = bayer_phase2(dx);
             let uv = bayer_uv(rcd_reference_at(pos + vec2<i32>(dx, dy)));
-            let delta = uv - center_uv;
+            let delta = uv - center_opponents;
             carrier_x += weight * px * delta;
             carrier_y += weight * py * delta;
             carrier_xy += weight * px * py * delta;
@@ -265,13 +265,13 @@ fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
     let s = rcd_reference_at(pos + vec2<i32>(0,  1));
     let w = rcd_reference_at(pos + vec2<i32>(-1, 0));
     let e = rcd_reference_at(pos + vec2<i32>( 1, 0));
-    let center_y = dot(center, vec3<f32>(0.2627, 0.6780, 0.0593));
-    let luma_high = abs(4.0 * center_y
+    let center_signal = dot(center, vec3<f32>(0.2627, 0.6780, 0.0593));
+    let luma_high = abs(4.0 * center_signal
         - dot(n + s + w + e, vec3<f32>(0.2627, 0.6780, 0.0593)));
     let spectral_energy = max(length(carrier_alias) - 0.25 * luma_high, 0.0);
     let reject = smoothstep(0.0015, 0.030, spectral_energy)
         * clamp(params.frequency_chroma, 0.0, 1.0);
-    return bayer_from_yuv(center_y, center_uv - reject * carrier_alias);
+    return bayer_from_yuv(center_signal, center_opponents - reject * carrier_alias);
 }
 
 fn dual_low_at(pos: vec2<i32>) -> vec4<f32> {
@@ -329,9 +329,9 @@ fn dual_high_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32
         detail_signal,
     );
 
-    let chroma_delta = length(bayer_uv(reference) - bayer_uv(low.rgb));
-    let chroma_sigma = max(sqrt(max(variance.y, 1e-10)), 0.0015);
-    let disagreement = smoothstep(3.0 * chroma_sigma, 8.0 * chroma_sigma, chroma_delta);
+    let opponent_delta = length(bayer_uv(reference) - bayer_uv(low.rgb));
+    let opponent_sigma = max(sqrt(max(variance.y, 1e-10)), 0.0015);
+    let disagreement = smoothstep(3.0 * opponent_sigma, 8.0 * opponent_sigma, opponent_delta);
     let low_confidence = clamp(low.a, 0.0, 1.0);
     let alias_penalty = 0.45 * disagreement * (1.0 - 0.35 * edge_confidence);
     let high_confidence = clamp(edge_confidence * (1.0 - alias_penalty), 0.0, 1.0);
@@ -391,17 +391,17 @@ fn apply_legacy_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn apply_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let luma_strength = clamp(params.noise_options.x, 0.0, 1.0);
+    let signal_strength = clamp(params.noise_options.x, 0.0, 1.0);
     let chroma_strength = clamp(params.chroma_denoise, 0.0, 1.0);
-    if luma_strength <= 1e-6 && chroma_strength <= 1e-6 { return rgb; }
+    if signal_strength <= 1e-6 && chroma_strength <= 1e-6 { return rgb; }
 
-    let center_y = nr_luma(rgb);
-    let center_uv = nr_chroma(rgb);
+    let center_signal = nr_signal(rgb);
+    let center_opponents = nr_opponents(rgb);
     let center_variance = nr_component_variance(rgb);
-    var luma_sum = center_y;
-    var luma_weights = 1.0;
-    var chroma_sum = center_uv;
-    var chroma_weights = 1.0;
+    var signal_sum = center_signal;
+    var signal_weights = 1.0;
+    var opponent_sum = center_opponents;
+    var opponent_weights = 1.0;
 
     let scale_count = nr_scale_count();
     for (var scale = 0; scale < 3; scale = scale + 1) {
@@ -412,25 +412,25 @@ fn apply_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
             let q = clamp_pos(pos + direction * radius);
             let sample = rcd_reference_at(q);
             let spatial = nr_scale_spatial_weight(radius, direction);
-            let sample_y = nr_luma(sample);
-            let sample_uv = nr_chroma(sample);
+            let sample_signal = nr_signal(sample);
+            let sample_opponents = nr_opponents(sample);
             let sample_variance = nr_component_variance(sample);
             let range_weights = nr_range_weights(
-                center_y,
-                center_uv,
+                center_signal,
+                center_opponents,
                 center_variance,
-                sample_y,
-                sample_uv,
+                sample_signal,
+                sample_opponents,
                 sample_variance,
                 spatial,
             );
-            luma_sum += sample_y * range_weights.x;
-            luma_weights += range_weights.x;
-            chroma_sum += sample_uv * range_weights.y;
-            chroma_weights += range_weights.y;
+            signal_sum += sample_signal * range_weights.x;
+            signal_weights += range_weights.x;
+            opponent_sum += sample_opponents * range_weights.y;
+            opponent_weights += range_weights.y;
         }
     }
-    return nr_finish(rgb, luma_sum, luma_weights, chroma_sum, chroma_weights);
+    return nr_finish(rgb, signal_sum, signal_weights, opponent_sum, opponent_weights);
 }
 
 @compute @workgroup_size(8, 8, 1)

@@ -473,7 +473,9 @@ fn tone_curve_secant(a: vec2<f32>, b: vec2<f32>) -> f32 {
 
 fn tone_curve_tangent(curve: u32, index: u32, count: u32) -> f32 {
     if index == 0u {
-        return tone_curve_secant(tone_curve_point(curve, 0u), tone_curve_point(curve, 1u));
+        let endpoint = tone_curve_point(curve, 0u);
+        let raw_slope = tone_curve_secant(endpoint, tone_curve_point(curve, 1u));
+        return limit_scene_curve_endpoint_tangent(endpoint.y, raw_slope);
     }
     if index + 1u >= count {
         return tone_curve_secant(
@@ -522,25 +524,195 @@ fn point_curve_value(curve: u32, input: f32) -> f32 {
     return clamp(hermite, min(p0.y, p1.y), max(p0.y, p1.y));
 }
 
-fn scene_curve_encode(value: f32) -> f32 {
-    let positive = max(value, 0.0);
-    return positive / (positive + SCENE_MIDDLE_GREY);
+const SCENE_CURVE_DECODE_MAX: f32 = 32768.0;
+const SCENE_CURVE_WORK_MAX: f32 = 60000.0;
+// Bound the scene-domain derivative at a curve's black endpoint. The value is
+// deliberately generous for creative curves, but it keeps the first
+// representable half-float signed input from becoming a multi-thousand-unit
+// false-colour jump near the upper endpoint.
+const SCENE_CURVE_ZERO_SLOPE_MAX: f32 = 1048576.0;
+// Begin a C1 Hermite shoulder at an exactly representable f32 coordinate. The
+// scene start and tangent are derived from the rational branch using the same
+// f32 constants, so the join matches in both value and first derivative.
+const SCENE_CURVE_SHOULDER_ENCODE_START: f32 = 0.9999915361404419;
+const SCENE_CURVE_SHOULDER_WIDTH: f32 =
+    1.0 - SCENE_CURVE_SHOULDER_ENCODE_START;
+const SCENE_CURVE_SHOULDER_START: f32 =
+    SCENE_MIDDLE_GREY * SCENE_CURVE_SHOULDER_ENCODE_START
+        / SCENE_CURVE_SHOULDER_WIDTH;
+const SCENE_CURVE_SHOULDER_TANGENT: f32 =
+    SCENE_MIDDLE_GREY / SCENE_CURVE_SHOULDER_WIDTH;
+
+fn scene_curve_shoulder_decode(t: f32) -> f32 {
+    let bounded_t = clamp(t, 0.0, 1.0);
+    let t2 = bounded_t * bounded_t;
+    let t3 = t2 * bounded_t;
+    return (2.0 * t3 - 3.0 * t2 + 1.0) * SCENE_CURVE_SHOULDER_START
+        + (t3 - 2.0 * t2 + bounded_t) * SCENE_CURVE_SHOULDER_TANGENT
+        + (-2.0 * t3 + 3.0 * t2) * SCENE_CURVE_DECODE_MAX;
+}
+
+fn scene_curve_shoulder_derivative(t: f32) -> f32 {
+    let bounded_t = clamp(t, 0.0, 1.0);
+    let t2 = bounded_t * bounded_t;
+    return (6.0 * t2 - 6.0 * bounded_t) * SCENE_CURVE_SHOULDER_START
+        + (3.0 * t2 - 4.0 * bounded_t + 1.0)
+            * SCENE_CURVE_SHOULDER_TANGENT
+        + (-6.0 * t2 + 6.0 * bounded_t) * SCENE_CURVE_DECODE_MAX;
 }
 
 fn scene_curve_decode(value: f32) -> f32 {
-    let bounded = clamp(value, 0.0, 0.999999);
-    return SCENE_MIDDLE_GREY * bounded / max(1.0 - bounded, 1e-6);
+    let bounded = clamp(value, 0.0, 1.0);
+    if bounded <= SCENE_CURVE_SHOULDER_ENCODE_START {
+        return SCENE_MIDDLE_GREY * bounded / max(1.0 - bounded, 1e-6);
+    }
+    let t = (bounded - SCENE_CURVE_SHOULDER_ENCODE_START)
+        / SCENE_CURVE_SHOULDER_WIDTH;
+    return clamp(scene_curve_shoulder_decode(t), 0.0, SCENE_CURVE_DECODE_MAX);
 }
 
-fn remap_scene_luminance(rgb: vec3<f32>, adjusted_luminance: f32) -> vec3<f32> {
-    let luminance = dot(rgb, LUMA);
-    let mapped_luminance = max(adjusted_luminance, 0.0);
-    if luminance <= 1e-7 {
-        return vec3<f32>(mapped_luminance);
+fn scene_curve_encode(value: f32) -> f32 {
+    // Invert the finite shoulder only for extreme scene values. Eight bisection
+    // steps resolve more finely than one encoded f32 step in this interval and
+    // preserve the identity curve to the precision available near 1.0.
+    let positive = clamp(value, 0.0, SCENE_CURVE_DECODE_MAX);
+    if positive <= SCENE_CURVE_SHOULDER_START {
+        // Float32 rounding at the scene-domain join can otherwise advance the
+        // rational inverse one encoded step into the shoulder. Clamp the
+        // branch to the exact shoulder coordinate so decode(encode(y)) remains
+        // monotonic across the join.
+        return min(
+            positive / (positive + SCENE_MIDDLE_GREY),
+            SCENE_CURVE_SHOULDER_ENCODE_START,
+        );
     }
-    // One scalar gain keeps signed RGB ratios intact. Near zero luminance the
-    // neutral fallback avoids unstable ratios without flooring channels.
-    return rgb * (mapped_luminance / luminance);
+
+    var low = 0.0;
+    var high = 1.0;
+    for (var iteration = 0u; iteration < 8u; iteration = iteration + 1u) {
+        let middle = 0.5 * (low + high);
+        if scene_curve_shoulder_decode(middle) < positive {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let low_encoded = SCENE_CURVE_SHOULDER_ENCODE_START
+        + SCENE_CURVE_SHOULDER_WIDTH * low;
+    let high_encoded = SCENE_CURVE_SHOULDER_ENCODE_START
+        + SCENE_CURVE_SHOULDER_WIDTH * high;
+    let low_error = abs(scene_curve_decode(low_encoded) - positive);
+    let high_error = abs(scene_curve_decode(high_encoded) - positive);
+    return select(low_encoded, high_encoded, high_error < low_error);
+}
+
+fn scene_curve_decode_slope_scale(encoded_endpoint: f32) -> f32 {
+    // Return d(scene output) / d(scene input) per unit encoded-curve tangent.
+    // scene_curve_encode'(0) is 1 / SCENE_MIDDLE_GREY. The scale is C1 at the
+    // shoulder join and falls smoothly to zero at an endpoint of 1.0.
+    let bounded = clamp(encoded_endpoint, 0.0, 1.0);
+    if bounded != encoded_endpoint {
+        return 0.0;
+    }
+    if bounded <= SCENE_CURVE_SHOULDER_ENCODE_START {
+        let denominator = max(1.0 - bounded, 1e-6);
+        return 1.0 / (denominator * denominator);
+    }
+
+    let t = (bounded - SCENE_CURVE_SHOULDER_ENCODE_START)
+        / SCENE_CURVE_SHOULDER_WIDTH;
+    let decoded_derivative = scene_curve_shoulder_derivative(t)
+        / SCENE_CURVE_SHOULDER_WIDTH;
+    return max(decoded_derivative / SCENE_MIDDLE_GREY, 0.0);
+}
+
+fn limit_scene_curve_endpoint_tangent(encoded_endpoint: f32, encoded_slope: f32) -> f32 {
+    let slope_scale = scene_curve_decode_slope_scale(encoded_endpoint);
+    if slope_scale <= 1e-12 {
+        return 0.0;
+    }
+    let encoded_limit = SCENE_CURVE_ZERO_SLOPE_MAX / slope_scale;
+    return clamp(encoded_slope, -encoded_limit, encoded_limit);
+}
+
+fn decoded_scene_curve_zero_slope(encoded_black: f32, encoded_slope: f32) -> f32 {
+    let slope_scale = scene_curve_decode_slope_scale(encoded_black);
+    let limited_encoded_slope =
+        limit_scene_curve_endpoint_tangent(encoded_black, encoded_slope);
+    return clamp(
+        limited_encoded_slope * slope_scale,
+        -SCENE_CURVE_ZERO_SLOPE_MAX,
+        SCENE_CURVE_ZERO_SLOPE_MAX,
+    );
+}
+
+fn clamp_scene_curve_value(value: f32) -> f32 {
+    return clamp(value, -SCENE_CURVE_WORK_MAX, SCENE_CURVE_WORK_MAX);
+}
+
+fn limit_scene_curve_rgb_ratio_preserving(value: vec3<f32>) -> vec3<f32> {
+    // Composite curves are luminance controls, so an extreme headroom limit
+    // must not clip one channel before the others. Uniformly scale the whole
+    // signed triplet and preserve RGB ratios, chromaticity, hue, and normalized
+    // chroma. Per-channel curves intentionally keep scalar component bounds.
+    let peak = max(max(abs(value.r), abs(value.g)), abs(value.b));
+    if peak <= SCENE_CURVE_WORK_MAX {
+        return value;
+    }
+    let scale = SCENE_CURVE_WORK_MAX / max(peak, 1e-12);
+    return clamp(
+        value * scale,
+        vec3<f32>(-SCENE_CURVE_WORK_MAX),
+        vec3<f32>(SCENE_CURVE_WORK_MAX),
+    );
+}
+
+fn remap_scene_luminance(
+    rgb: vec3<f32>,
+    adjusted_luminance: f32,
+    black_luminance: f32,
+    zero_slope: f32,
+) -> vec3<f32> {
+    let luminance = dot(rgb, LUMA);
+    let black = max(black_luminance, 0.0);
+    if luminance <= 0.0 {
+        // Continue the scene-domain master curve linearly through non-positive
+        // luminance. Using the same endpoint slope as the positive branch keeps
+        // signed opponent colors continuous across the zero-luminance plane.
+        return limit_scene_curve_rgb_ratio_preserving(vec3<f32>(black) + rgb * zero_slope);
+    }
+    // Separate the neutral black offset from the chromatic signal. A lifted
+    // endpoint intentionally reduces shadow colorfulness as pixels approach the
+    // neutral black floor; the endpoint slope controls both sides of zero.
+    let mapped_luminance = max(adjusted_luminance, black);
+    let chromatic_luminance = mapped_luminance - black;
+    return limit_scene_curve_rgb_ratio_preserving(
+        vec3<f32>(black) + rgb * (chromatic_luminance / luminance),
+    );
+}
+
+fn scene_curve_zero_slope(curve: u32) -> f32 {
+    let count = tone_curve_count(curve);
+    let encoded_black = point_curve_value(curve, 0.0);
+    let encoded_slope = tone_curve_tangent(curve, 0u, count);
+    return decoded_scene_curve_zero_slope(encoded_black, encoded_slope);
+}
+
+fn apply_scene_channel_curve(curve: u32, value: f32) -> f32 {
+    let encoded_black = point_curve_value(curve, 0.0);
+    let black = scene_curve_decode(encoded_black);
+    if value < 0.0 {
+        // Extend the nonnegative curve with its scene-domain slope at zero.
+        // This preserves signed intermediate detail and removes the jump from
+        // an untouched negative epsilon to a lifted zero endpoint. Bound the
+        // result to finite half-float-safe scene headroom.
+        return clamp_scene_curve_value(
+            black + value * scene_curve_zero_slope(curve),
+        );
+    }
+    return scene_curve_decode(
+        point_curve_value(curve, scene_curve_encode(value)),
+    );
 }
 
 fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
@@ -548,22 +720,32 @@ fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
         return rgb;
     }
     let luminance = max(dot(rgb, LUMA), 0.0);
+    let encoded_black = point_curve_value(0u, 0.0);
+    let black_luminance = scene_curve_decode(encoded_black);
     let adjusted_luminance = scene_curve_decode(
         point_curve_value(0u, scene_curve_encode(luminance)),
     );
-    return remap_scene_luminance(rgb, adjusted_luminance);
+    return remap_scene_luminance(
+        rgb,
+        adjusted_luminance,
+        black_luminance,
+        // The composite curve treats its decoded black endpoint as a floor.
+        // A descending first segment is therefore flat at the endpoint; use
+        // that effective nonnegative slope on the signed side as well.
+        max(scene_curve_zero_slope(0u), 0.0),
+    );
 }
 
 fn apply_rgb_point_curves(rgb: vec3<f32>) -> vec3<f32> {
     var result = rgb;
-    if !tone_curve_is_identity(1u) && result.r >= 0.0 {
-        result.r = scene_curve_decode(point_curve_value(1u, scene_curve_encode(result.r)));
+    if !tone_curve_is_identity(1u) {
+        result.r = apply_scene_channel_curve(1u, result.r);
     }
-    if !tone_curve_is_identity(2u) && result.g >= 0.0 {
-        result.g = scene_curve_decode(point_curve_value(2u, scene_curve_encode(result.g)));
+    if !tone_curve_is_identity(2u) {
+        result.g = apply_scene_channel_curve(2u, result.g);
     }
-    if !tone_curve_is_identity(3u) && result.b >= 0.0 {
-        result.b = scene_curve_decode(point_curve_value(3u, scene_curve_encode(result.b)));
+    if !tone_curve_is_identity(3u) {
+        result.b = apply_scene_channel_curve(3u, result.b);
     }
     return result;
 }
@@ -580,7 +762,10 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
     // collapsing or expanding the control's tonal reach.
     let pivot = 0.15;
     let luminance = dot(rgb, LUMA);
-    if luminance <= 1e-8 || luminance >= pivot {
+    // Preserve signed/non-positive intermediates, but do not introduce a
+    // positive epsilon branch: that branch made the toe discontinuous and
+    // non-monotone immediately above black.
+    if luminance <= 0.0 || luminance >= pivot {
         return rgb;
     }
     let x = clamp(luminance / pivot, 0.0, 1.0);

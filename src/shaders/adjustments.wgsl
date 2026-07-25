@@ -826,10 +826,12 @@ fn local_curve_secant(a: vec2<f32>, b: vec2<f32>) -> f32 {
 
 fn local_curve_tangent(mask_index: u32, curve: u32, index: u32, count: u32) -> f32 {
     if index == 0u {
-        return local_curve_secant(
-            local_curve_point(mask_index, curve, 0u),
+        let endpoint = local_curve_point(mask_index, curve, 0u);
+        let raw_slope = local_curve_secant(
+            endpoint,
             local_curve_point(mask_index, curve, 1u),
         );
+        return limit_scene_curve_endpoint_tangent(endpoint.y, raw_slope);
     }
     if index + 1u >= count {
         return local_curve_secant(
@@ -893,22 +895,53 @@ fn mixer_hue_shift_values(weights: MixerBandWeights, first_values: vec4<f32>, se
     return (dot(weights.first, first) + dot(weights.second, second)) / max(weights.total, 1e-6);
 }
 
+fn local_scene_curve_zero_slope(mask_index: u32, curve: u32) -> f32 {
+    let count = u32(clamp(local_curve_block(mask_index, curve, 4u).x, 2.0, 8.0));
+    let encoded_black = local_curve_value(mask_index, curve, 0.0);
+    let encoded_slope = local_curve_tangent(mask_index, curve, 0u, count);
+    return decoded_scene_curve_zero_slope(encoded_black, encoded_slope);
+}
+
+fn apply_local_scene_channel_curve(mask_index: u32, curve: u32, value: f32) -> f32 {
+    let encoded_black = local_curve_value(mask_index, curve, 0.0);
+    let black = scene_curve_decode(encoded_black);
+    if value < 0.0 {
+        return clamp_scene_curve_value(
+            black + value * local_scene_curve_zero_slope(mask_index, curve),
+        );
+    }
+    return scene_curve_decode(
+        local_curve_value(mask_index, curve, scene_curve_encode(value)),
+    );
+}
+
 fn apply_local_curves_for_mask(mask_index: u32, input_rgb: vec3<f32>) -> vec3<f32> {
     var adjusted = input_rgb;
     let state = params.mask_meta[mask_index];
     if (state.z & 1u) != 0u {
         let luminance = max(dot(adjusted, LUMA), 0.0);
-        let curved = scene_curve_decode(local_curve_value(mask_index, 0u, scene_curve_encode(luminance)));
-        adjusted = remap_scene_luminance(adjusted, curved);
+        let encoded_black = local_curve_value(mask_index, 0u, 0.0);
+        let black_luminance = scene_curve_decode(encoded_black);
+        let curved = scene_curve_decode(
+            local_curve_value(mask_index, 0u, scene_curve_encode(luminance)),
+        );
+        adjusted = remap_scene_luminance(
+            adjusted,
+            curved,
+            black_luminance,
+            // Match the composite curve's neutral black-floor policy on both
+            // sides of zero while channel curves retain signed slopes.
+            max(local_scene_curve_zero_slope(mask_index, 0u), 0.0),
+        );
     }
-    if (state.z & 2u) != 0u && adjusted.r >= 0.0 {
-        adjusted.r = scene_curve_decode(local_curve_value(mask_index, 1u, scene_curve_encode(adjusted.r)));
+    if (state.z & 2u) != 0u {
+        adjusted.r = apply_local_scene_channel_curve(mask_index, 1u, adjusted.r);
     }
-    if (state.z & 4u) != 0u && adjusted.g >= 0.0 {
-        adjusted.g = scene_curve_decode(local_curve_value(mask_index, 2u, scene_curve_encode(adjusted.g)));
+    if (state.z & 4u) != 0u {
+        adjusted.g = apply_local_scene_channel_curve(mask_index, 2u, adjusted.g);
     }
-    if (state.z & 8u) != 0u && adjusted.b >= 0.0 {
-        adjusted.b = scene_curve_decode(local_curve_value(mask_index, 3u, scene_curve_encode(adjusted.b)));
+    if (state.z & 8u) != 0u {
+        adjusted.b = apply_local_scene_channel_curve(mask_index, 3u, adjusted.b);
     }
     return adjusted;
 }
