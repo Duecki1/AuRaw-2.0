@@ -36,6 +36,15 @@ use std::time::{Duration, Instant};
 mod edit_history;
 use edit_history::EditHistory;
 
+#[cfg(not(target_os = "android"))]
+pub(crate) enum DesktopPickerEvent {
+    RawFile(Option<PathBuf>),
+    LibraryFolder(Option<PathBuf>),
+    CameraProfileFolder(Option<PathBuf>),
+    OnnxRuntime(Result<Option<(PathBuf, String)>, String>),
+    DisplayProfile(Option<PathBuf>),
+}
+
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) struct AndroidOriginalHold {
@@ -549,6 +558,8 @@ pub struct AurawApp {
     pub(crate) onnx_runtime_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
     pub(crate) onnx_runtime_sha256: Option<String>,
+    #[cfg(not(target_os = "android"))]
+    desktop_picker_receiver: Option<mpsc::Receiver<DesktopPickerEvent>>,
     pub status: String,
     /// Reveals low-level darktable/raw controls. The default Lightroom-like
     /// interface intentionally keeps these implementation details hidden.

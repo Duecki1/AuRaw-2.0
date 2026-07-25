@@ -371,6 +371,8 @@ impl AurawApp {
             ai_mask_update_failed: false,
             onnx_runtime_path,
             onnx_runtime_sha256,
+            #[cfg(not(target_os = "android"))]
+            desktop_picker_receiver: None,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
             lens_correction,
@@ -655,40 +657,67 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    pub fn open_file_dialog(&mut self, frame: &eframe::Frame) {
+    pub fn open_file_dialog(&mut self, _frame: &eframe::Frame) {
+        if self.desktop_picker_receiver.is_some() {
+            return;
+        }
         let extensions = crate::pipeline::SUPPORTED_RAW_EXTENSIONS
             .iter()
             .flat_map(|extension| [extension.to_string(), extension.to_ascii_uppercase()])
             .collect::<Vec<_>>();
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("RAW images", &extensions)
-            .pick_file()
-        else {
-            return;
-        };
-
-        self.open_path(path, frame);
+        let (sender, receiver) = mpsc::channel();
+        let context = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let path = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .add_filter("RAW images", &extensions)
+                    .pick_file(),
+            )
+            .map(|handle| handle.path().to_path_buf());
+            let _ = sender.send(crate::app::DesktopPickerEvent::RawFile(path));
+            context.request_repaint();
+        });
+        self.desktop_picker_receiver = Some(receiver);
     }
 
     #[cfg(not(target_os = "android"))]
     pub fn open_library_folder_dialog(&mut self) {
-        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+        if self.desktop_picker_receiver.is_some() {
             return;
-        };
-        self.library.open_folder(folder, &self.egui_ctx);
-        self.persist_performance_settings();
-        self.active_tab = AppTab::Library;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let context = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let folder = pollster::block_on(rfd::AsyncFileDialog::new().pick_folder())
+                .map(|handle| handle.path().to_path_buf());
+            let _ = sender.send(crate::app::DesktopPickerEvent::LibraryFolder(folder));
+            context.request_repaint();
+        });
+        self.desktop_picker_receiver = Some(receiver);
     }
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn choose_camera_profile_folder(&mut self) {
-        let mut dialog = rfd::FileDialog::new();
+        if self.desktop_picker_receiver.is_some() {
+            return;
+        }
+        let mut dialog = rfd::AsyncFileDialog::new();
         if let Some(folder) = &self.camera_profile_folder {
             dialog = dialog.set_directory(folder);
         }
-        let Some(folder) = dialog.pick_folder() else {
-            return;
-        };
+        let (sender, receiver) = mpsc::channel();
+        let context = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let folder = pollster::block_on(dialog.pick_folder())
+                .map(|handle| handle.path().to_path_buf());
+            let _ = sender.send(crate::app::DesktopPickerEvent::CameraProfileFolder(folder));
+            context.request_repaint();
+        });
+        self.desktop_picker_receiver = Some(receiver);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn apply_camera_profile_folder(&mut self, folder: PathBuf) {
         crate::pipeline::invalidate_dcp_profile_index();
         self.camera_profile_folder_label = folder
             .file_name()
@@ -983,20 +1012,72 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn choose_display_profile_override(&mut self) {
-        let mut dialog = rfd::FileDialog::new().add_filter("ICC profiles", &["icc", "icm"]);
+        if self.desktop_picker_receiver.is_some() {
+            return;
+        }
+        let mut dialog =
+            rfd::AsyncFileDialog::new().add_filter("ICC profiles", &["icc", "icm"]);
         if let Some(path) = self.display_profile_override.as_deref() {
             if let Some(parent) = path.parent() {
                 dialog = dialog.set_directory(parent);
             }
         }
-        let Some(path) = dialog.pick_file() else {
-            return;
-        };
+        let (sender, receiver) = mpsc::channel();
+        let context = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let path = pollster::block_on(dialog.pick_file())
+                .map(|handle| handle.path().to_path_buf());
+            let _ = sender.send(crate::app::DesktopPickerEvent::DisplayProfile(path));
+            context.request_repaint();
+        });
+        self.desktop_picker_receiver = Some(receiver);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn apply_display_profile_override(&mut self, path: PathBuf) {
         self.display_profile_override = Some(path);
         self.display_profile_last_probe = None;
         self.display_profile_fingerprint = None;
         self.persist_performance_settings();
         self.egui_ctx.request_repaint();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn poll_desktop_picker(&mut self, frame: &eframe::Frame) {
+        let result = self
+            .desktop_picker_receiver
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+        let Some(result) = result else {
+            return;
+        };
+        self.desktop_picker_receiver = None;
+        match result {
+            crate::app::DesktopPickerEvent::RawFile(Some(path)) => self.open_path(path, frame),
+            crate::app::DesktopPickerEvent::LibraryFolder(Some(folder)) => {
+                self.library.open_folder(folder, &self.egui_ctx);
+                self.persist_performance_settings();
+                self.active_tab = AppTab::Library;
+            }
+            crate::app::DesktopPickerEvent::CameraProfileFolder(Some(folder)) => {
+                self.apply_camera_profile_folder(folder);
+            }
+            crate::app::DesktopPickerEvent::OnnxRuntime(Ok(Some((path, sha256)))) => {
+                self.onnx_runtime_path = Some(path);
+                self.onnx_runtime_sha256 = Some(sha256);
+                self.notice = Some(
+                    "ONNX Runtime selection and SHA-256 pin saved. Restart AuRaw before generating another subject mask."
+                        .to_owned(),
+                );
+            }
+            crate::app::DesktopPickerEvent::OnnxRuntime(Err(error)) => {
+                self.notice = Some(error);
+            }
+            crate::app::DesktopPickerEvent::DisplayProfile(Some(path)) => {
+                self.apply_display_profile_override(path);
+            }
+            _ => {}
+        }
     }
 
     #[cfg(not(target_os = "android"))]
