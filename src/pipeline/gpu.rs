@@ -4,8 +4,7 @@ use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
     PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
-    GLOBAL_TEMPERATURE_LIMIT,
-    MAX_LOCAL_MASKS, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
+    CURRENT_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -84,12 +83,8 @@ const EXPLICIT_RENDER_GRAPH: [RenderStageContract; 6] = [
     },
 ];
 
-fn render_graph_flags(process_version: u32) -> u32 {
-    if process_version >= SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION {
-        RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY
-    } else {
-        0
-    }
+fn render_graph_flags() -> u32 {
+    RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY
 }
 
 fn explicit_render_graph_contracts_are_contiguous() -> bool {
@@ -1146,10 +1141,10 @@ impl GpuParams {
             output_lut: profile_stages.output.output_lut,
             profile_flags: profile_layout.flags,
             process_info: [
-                exposure.process_version,
+                CURRENT_PROCESS_VERSION,
                 u32::from(use_profile_base_tone),
                 exposure.exposure.to_bits(),
-                render_graph_flags(exposure.process_version),
+                render_graph_flags(),
             ],
             mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
             mask_meta,

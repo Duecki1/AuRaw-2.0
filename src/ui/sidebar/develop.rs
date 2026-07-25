@@ -185,7 +185,7 @@ impl Sidebar {
                 1.0,
                 Some("Recovers or brightens the upper tonal range without hard clipping."),
             );
-            let shadows_changed = adjustment_slider(
+            changed |= adjustment_slider(
                 ui,
                 "Shadows",
                 &mut exposure.shadows,
@@ -194,7 +194,6 @@ impl Sidebar {
                 1.0,
                 Some("Opens or deepens the lower tonal range."),
             );
-            changed |= shadows_changed;
             changed |= adjustment_slider(
                 ui,
                 "Whites",
@@ -204,7 +203,7 @@ impl Sidebar {
                 1.0,
                 Some("Moves the bright endpoint and specular range."),
             );
-            let blacks_changed = adjustment_slider(
+            changed |= adjustment_slider(
                 ui,
                 "Blacks",
                 &mut exposure.blacks,
@@ -213,16 +212,6 @@ impl Sidebar {
                 1.0,
                 Some("Moves the display black/toe endpoint while preserving sensor black calibration."),
             );
-            changed |= blacks_changed;
-            if (shadows_changed || blacks_changed)
-                && exposure.process_version == BASIC_TONE_RESPONSE_PROCESS_VERSION
-            {
-                // Process 17 changes only the low-tone rendering model. Opt an
-                // existing process-16 edit in only when the user actually edits
-                // Shadows or Blacks; unrelated controls must not reinterpret it.
-                exposure.process_version = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
-                changed = true;
-            }
         });
         changed
     }
@@ -372,12 +361,6 @@ impl Sidebar {
     fn show_detail(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Detail", false, foldable, |ui| {
-            let denoise_before = (
-                exposure.luminance_denoise,
-                exposure.chroma_denoise,
-                exposure.denoise_detail,
-                exposure.denoise_quality,
-            );
             ui.label(egui::RichText::new("Sensor-profiled noise reduction")
                 .strong()
                 .size(11.5));
@@ -443,22 +426,6 @@ impl Sidebar {
                     .color(ui.visuals().weak_text_color()),
             );
             changed |= previous_quality != exposure.denoise_quality;
-            let denoise_after = (
-                exposure.luminance_denoise,
-                exposure.chroma_denoise,
-                exposure.denoise_detail,
-                exposure.denoise_quality,
-            );
-            if denoise_before != denoise_after
-                && exposure.process_version == SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION
-            {
-                // Process 14 keeps the process-13 graph but opts edited NR into
-                // the new sensor-profiled algorithm. Older process-12 edits
-                // keep their legacy scene/display graph unless explicitly converted.
-                exposure.process_version = SENSOR_DENOISE_PROCESS_VERSION;
-                changed = true;
-            }
-
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);

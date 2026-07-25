@@ -14,7 +14,8 @@ def test_new_edits_use_process_versioned_consensus_highlight_solver() -> None:
     assert "pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;" in BASIC
     assert "pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;" in BASIC
     assert "const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15u;" in HIGHLIGHT
-    # The new behaviour must be gated so process-14 sidecars keep their saved look.
+    # Historical branches may remain in WGSL, but the host always supplies the
+    # current process marker, so identical edit values cannot select them.
     assert HIGHLIGHT.count("params.process_info.x >= HIGHLIGHT_CONSENSUS_PROCESS_VERSION") >= 3
 
 
@@ -46,8 +47,5 @@ def test_fully_clipped_regions_use_chroma_consensus_instead_of_blind_rgb_average
     assert "* mix(1.0, consensus, smoothstep(0.34, 1.0, unknown_fraction))" in HIGHLIGHT
 
 
-def test_process_13_denoise_opt_in_does_not_silently_enable_process_15_highlights() -> None:
-    # Editing denoise on a saved process-13 image should opt only into process 14's
-    # denoise formulas; otherwise an unrelated NR tweak would change highlights.
-    assert "exposure.process_version = SENSOR_DENOISE_PROCESS_VERSION;" in SIDEBAR
-    assert "exposure.process_version = CURRENT_PROCESS_VERSION;" not in SIDEBAR
+def test_ui_controls_do_not_select_image_specific_process_versions() -> None:
+    assert "exposure.process_version =" not in SIDEBAR
