@@ -1,0 +1,191 @@
+name: Build macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    name: macOS ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            artifact_arch: arm64
+          - name: Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_arch: x86_64
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-14
+        with:
+          toolchain: 1.92.0
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: macos-${{ matrix.target }}
+
+      - name: Install native dependencies
+        run: brew install libraw lensfun llvm pkg-config dylibbundler
+
+      - name: Verify native toolchain
+        run: |
+          set -euxo pipefail
+
+          test "$(uname -m)" = "${{ matrix.artifact_arch }}"
+          rustc --version
+          cargo --version
+          pkg-config --modversion libraw
+          pkg-config --modversion lensfun
+          test -d "$(brew --prefix llvm)/lib"
+
+      - name: Build release application
+        run: |
+          set -euxo pipefail
+
+          revision="$(git rev-parse --verify HEAD)"
+          export AURAW_REQUIRE_COMMITTED_SOURCE=1
+          export AURAW_SOURCE_REVISION="$revision"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$revision")"
+          export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
+
+          cargo build \
+            --locked \
+            --release \
+            --target "${{ matrix.target }}" \
+            --bin auraw
+
+          binary="target/${{ matrix.target }}/release/auraw"
+          test -f "$binary"
+          test "$(file "$binary")" != "${binary}: data"
+          file "$binary" | grep -q "${{ matrix.artifact_arch }}"
+          test "$(git rev-parse --verify HEAD)" = "$revision"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Package macOS application
+        run: |
+          set -euxo pipefail
+
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          package_name="AuRaw-macos-${{ matrix.artifact_arch }}"
+          app_dir="dist/$package_name/AuRaw.app"
+          contents="$app_dir/Contents"
+          executable="$contents/MacOS/auraw"
+
+          rm -rf dist
+          mkdir -p \
+            "$contents/MacOS" \
+            "$contents/MacOS/lensfun" \
+            "$contents/Frameworks" \
+            "$contents/Resources"
+
+          cp "target/${{ matrix.target }}/release/auraw" "$executable"
+          chmod +x "$executable"
+          cp COPYING THIRD_PARTY_NOTICES.md README.md "$contents/Resources/"
+
+          lensfun_db="$(find "$(brew --prefix lensfun)/share/lensfun" -type f -name '*.xml' -print | head -n 1)"
+          test -n "$lensfun_db"
+          lensfun_db="$(dirname "$lensfun_db")"
+          cp -a "$lensfun_db"/. "$contents/MacOS/lensfun/"
+          test -n "$(find "$contents/MacOS/lensfun" -name '*.xml' -print -quit)"
+
+          cat > "$contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleDisplayName</key>
+            <string>AuRaw</string>
+            <key>CFBundleExecutable</key>
+            <string>auraw</string>
+            <key>CFBundleIdentifier</key>
+            <string>de.duecki.auraw</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>AuRaw</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>$version</string>
+            <key>CFBundleVersion</key>
+            <string>${{ github.run_number }}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>12.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          dylibbundler \
+            -od \
+            -b \
+            -x "$executable" \
+            -d "$contents/Frameworks" \
+            -p '@executable_path/../Frameworks'
+
+          {
+            echo "AuRaw macOS ${{ matrix.artifact_arch }} build"
+            echo "Source revision: $(git rev-parse --verify HEAD)"
+            echo "Rust compiler: $(rustc --version)"
+            echo "Target: ${{ matrix.target }}"
+            echo "LibRaw: $(pkg-config --modversion libraw)"
+            echo "Lensfun: $(pkg-config --modversion lensfun)"
+          } > "$contents/Resources/BUILD-INFO.txt"
+
+          # GitHub builds are intentionally ad-hoc signed. Distribution through
+          # Gatekeeper still requires a future Developer ID signature/notarization.
+          codesign --force --deep --sign - "$app_dir"
+          codesign --verify --deep --strict --verbose=2 "$app_dir"
+
+          file "$executable" | grep -q "${{ matrix.artifact_arch }}"
+          test -n "$(find "$contents/Frameworks" -name '*.dylib' -print -quit)"
+          test -z "$(otool -L "$executable" | awk '/\\/opt\\/homebrew|\\/usr\\/local\\/Cellar/ { print }')"
+
+          (
+            cd "dist/$package_name"
+            shasum -a 256 "AuRaw.app/Contents/MacOS/auraw" > SHA256SUMS.txt
+          )
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app_dir" \
+            "dist/$package_name.zip"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: AuRaw-macos-${{ matrix.artifact_arch }}
+          path: |
+            dist/AuRaw-macos-${{ matrix.artifact_arch }}.zip
+            dist/AuRaw-macos-${{ matrix.artifact_arch }}/SHA256SUMS.txt
+          if-no-files-found: error

@@ -1,6 +1,6 @@
 # AuRaw
 
-GPU-based RAW image editor for Linux, Windows, and Android.
+GPU-based RAW image editor for Linux, Windows, macOS, and Android.
 
 AuRaw is an independent Rust/egui implementation whose product direction was
 inspired by the open-source RAW-editing work of
@@ -16,6 +16,8 @@ as part of AuRaw.
 
 - **Linux (supported):** primary desktop development and AppImage packaging target.
 - **Windows (supported):** x86_64 GNU build with LibRaw, produced by the Windows workflow.
+- **macOS (supported):** native Apple Silicon and Intel application bundles with
+  LibRaw and Lensfun, produced by the macOS GitHub workflow.
 - **Android (experimental):** arm64 application build; device GPU and camera compatibility vary.
 
 ## RAW library
