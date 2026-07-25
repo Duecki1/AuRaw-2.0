@@ -296,12 +296,18 @@ pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
     })
 }
 
-/// Loads a display-ready sRGB thumbnail without unpacking the sensor data when
-/// the RAW contains an embedded preview. Files without a usable embedded
-/// preview fall back to LibRaw's half-size preview processing on this worker
-/// thread. Android only permits that sensor-unpack fallback for small RAWs;
-/// large preview-less files keep a placeholder instead of risking an
-/// out-of-memory termination while a Develop image is resident.
+/// Loads only the camera-generated preview embedded in a RAW. This never
+/// unpacks or processes the sensor pixels, which keeps library browsing fast
+/// and bounded even for very large files.
+pub fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+    validate_input_file(path, MAX_RAW_FILE_BYTES, "embedded RAW thumbnail input")?;
+    anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");
+    load_embedded_thumbnail(path, maximum_edge)
+}
+
+/// Loads a display-ready sRGB thumbnail, preferring the embedded preview but
+/// retaining the sensor-processing fallback for non-library callers that need
+/// a thumbnail even when the camera stored no usable preview.
 pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW thumbnail input")?;
     anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");

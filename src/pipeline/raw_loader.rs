@@ -426,6 +426,13 @@ pub fn load_raw_file(_path: &Path) -> Result<LoadedRaw> {
 }
 
 #[cfg(not(libraw_available))]
+pub fn load_raw_embedded_thumbnail(_path: &Path, _maximum_edge: u32) -> Result<RawThumbnail> {
+    Err(anyhow!(
+        "this build was compiled without LibRaw, so embedded RAW thumbnails are unavailable"
+    ))
+}
+
+#[cfg(not(libraw_available))]
 pub fn load_raw_thumbnail(_path: &Path, _maximum_edge: u32) -> Result<RawThumbnail> {
     Err(anyhow!(
         "this build was compiled without LibRaw, so RAW thumbnails are unavailable"
@@ -501,6 +508,11 @@ pub fn load_raw_file_with_profile_selection(
 #[cfg(libraw_available)]
 pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<LoadedRaw> {
     libraw_loader::load_raw_file_with_dcp(path, profile_path)
+}
+
+#[cfg(libraw_available)]
+pub fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+    libraw_loader::load_raw_embedded_thumbnail(path, maximum_edge)
 }
 
 #[cfg(libraw_available)]
