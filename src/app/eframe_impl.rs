@@ -1,5 +1,7 @@
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(not(target_os = "android"))]
+        self.poll_desktop_picker(frame);
         #[cfg(target_os = "android")]
         {
             self.poll_android_picker(frame);
@@ -145,6 +147,12 @@ impl eframe::App for AurawApp {
             || self.inpaint_receiver.is_some()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
+        }
+        #[cfg(not(target_os = "android"))]
+        if self.desktop_picker_receiver.is_some() {
+            // Native dialogs are asynchronous. Keep the app event loop visibly
+            // alive while the operating-system picker is open.
+            ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
         #[cfg(target_os = "android")]
         if self.active_tab != AppTab::Library {

@@ -1001,15 +1001,30 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn choose_onnx_runtime(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Select the ONNX Runtime shared library")
-            .pick_file()
-        else {
+        if self.desktop_picker_receiver.is_some() {
             return;
-        };
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let context = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let result = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Select the ONNX Runtime shared library")
+                    .pick_file(),
+            )
+            .map(|handle| handle.path().to_path_buf())
+            .map(Self::validate_and_persist_onnx_runtime)
+            .transpose();
+            let _ = sender.send(crate::app::DesktopPickerEvent::OnnxRuntime(result));
+            context.request_repaint();
+        });
+        self.desktop_picker_receiver = Some(receiver);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn validate_and_persist_onnx_runtime(path: PathBuf) -> Result<(PathBuf, String), String> {
         if !path.is_file() {
-            self.notice = Some(format!("{} is not a file.", path.display()));
-            return;
+            return Err(format!("{} is not a file.", path.display()));
         }
         let file_name = path
             .file_name()
@@ -1025,36 +1040,20 @@ impl AurawApp {
             file_name == "libonnxruntime.so" || file_name.starts_with("libonnxruntime.so.")
         };
         if !looks_like_runtime {
-            self.notice = Some(
+            return Err(
                 "Select the ONNX Runtime shared library (onnxruntime.dll, libonnxruntime.so, or libonnxruntime.dylib)."
                     .to_owned(),
             );
-            return;
         }
-        let sha256 = match crate::ai_masks::sha256_file_hex(&path) {
-            Ok(sha256) => sha256,
-            Err(error) => {
-                self.notice = Some(format!("Could not hash selected ONNX Runtime: {error:#}"));
-                return;
-            }
-        };
+        let sha256 = crate::ai_masks::sha256_file_hex(&path)
+            .map_err(|error| format!("Could not hash selected ONNX Runtime: {error:#}"))?;
         if let Err(error) = crate::ai_masks::probe_runtime_subprocess(&path, &sha256) {
-            self.notice = Some(format!(
+            return Err(format!(
                 "This ONNX Runtime could not be loaded safely: {error:#}"
             ));
-            return;
         }
-        match Self::persist_onnx_runtime_selection(Some((&path, &sha256))) {
-            Ok(()) => {
-                self.onnx_runtime_path = Some(path);
-                self.onnx_runtime_sha256 = Some(sha256);
-                self.notice = Some(
-                    "ONNX Runtime selection and SHA-256 pin saved. Restart AuRaw before generating another subject mask."
-                        .to_owned(),
-                );
-            }
-            Err(error) => self.notice = Some(error),
-        }
+        Self::persist_onnx_runtime_selection(Some((&path, &sha256)))?;
+        Ok((path, sha256))
     }
 
     #[cfg(not(target_os = "android"))]
