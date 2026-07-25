@@ -36,6 +36,7 @@ pub use geometry::{
     transform_thumbnail_geometry, transform_thumbnail_geometry_with_lens, CropAspectRatio,
     GeometryTransform, LensGeometryMap,
 };
+#[cfg(target_os = "android")]
 pub(crate) use gpu_cache::PersistentGpuPipelineCache;
 pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
 pub use noise::{DenoiseQuality, NoiseProfile};

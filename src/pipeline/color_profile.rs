@@ -411,6 +411,12 @@ pub enum RenderingIntent {
     AbsoluteColorimetric,
 }
 
+/// Sampled output transform shared by CPU export and the GPU preview path.
+///
+/// The cube is indexed by display-linear D65 Rec.2020 after one shared
+/// perceptual projection into the unit Rec.2020 gamut and an sRGB coordinate
+/// shaper. Each entry is encoded destination-device RGB. No caller may apply a
+/// linear-sRGB operation to the sampled result.
 #[derive(Clone, Debug)]
 pub struct IccOutputTransform {
     size: u32,
@@ -486,9 +492,13 @@ impl IccOutputTransform {
         self.size
     }
 
-    /// CPU trilinear evaluation for image export. Input is display-referred
-    /// linear Rec.2020 in the 0..1 domain; the cube uses a fixed sRGB input
-    /// shaper and returns encoded device RGB.
+    /// CPU trilinear evaluation for image export.
+    ///
+    /// Input is display-linear D65 Rec.2020. Values outside the unit cube use
+    /// the same pre-LUT perceptual gamut policy as `apply_output_lut` in WGSL.
+    /// Coordinates are sRGB-shaped and clamped, interpolation is trilinear with
+    /// clamped cube edges, and the returned value is encoded destination-device
+    /// RGB with no post-LUT gamut operation.
     pub fn transform_rgb(&self, rgb: [f32; 3]) -> [f32; 3] {
         sample_rgb_lut(&self.entries, self.size, rgb)
     }
@@ -992,11 +1002,169 @@ fn output_lut_linear_node(index: u32, size: u32) -> f32 {
     srgb_decode(index as f32 / (size.max(2) - 1) as f32)
 }
 
+fn output_lut_shaper(value: f32) -> f32 {
+    let magnitude = value.abs();
+    let encoded = if magnitude <= 0.003_130_8 {
+        magnitude * 12.92
+    } else {
+        1.055 * magnitude.powf(1.0 / 2.4) - 0.055
+    };
+    (value.signum() * encoded).clamp(0.0, 1.0)
+}
+
+fn signed_cuberoot(value: f32) -> f32 {
+    value.signum() * value.abs().powf(1.0 / 3.0)
+}
+
+fn linear_srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+    let lms = mul3(
+        [
+            [0.412_221_46, 0.536_332_55, 0.051_445_99],
+            [0.211_903_5, 0.680_699_5, 0.107_396_96],
+            [0.088_302_46, 0.281_718_85, 0.629_978_7],
+        ],
+        rgb,
+    )
+    .map(signed_cuberoot);
+    mul3(
+        [
+            [0.210_454_26, 0.793_617_8, -0.004_072_05],
+            [1.977_998_5, -2.428_592_2, 0.450_593_7],
+            [0.025_904_04, 0.782_771_77, -0.808_675_77],
+        ],
+        lms,
+    )
+}
+
+fn oklab_to_linear_srgb(lab: [f32; 3]) -> [f32; 3] {
+    let root = mul3(
+        [
+            [1.0, 0.396_337_78, 0.215_803_76],
+            [1.0, -0.105_561_35, -0.063_854_17],
+            [1.0, -0.089_484_18, -1.291_485_5],
+        ],
+        lab,
+    );
+    let lms = root.map(|value| value * value * value);
+    mul3(
+        [
+            [4.076_741_7, -3.307_711_6, 0.230_969_94],
+            [-1.268_438, 2.609_757_4, -0.341_319_4],
+            [-0.004_196_09, -0.703_418_6, 1.707_614_7],
+        ],
+        lms,
+    )
+}
+
+fn rec2020_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+    linear_srgb_to_oklab(mul3(
+        [
+            [1.660_491, -0.587_641_1, -0.072_849_9],
+            [-0.124_550_5, 1.132_899_9, -0.008_349_4],
+            [-0.018_150_8, -0.100_578_9, 1.118_729_7],
+        ],
+        rgb,
+    ))
+}
+
+fn rec2020_from_oklab(lab: [f32; 3]) -> [f32; 3] {
+    mul3(
+        [
+            [0.627_403_9, 0.329_283, 0.043_313_1],
+            [0.069_097_3, 0.919_540_4, 0.011_362_3],
+            [0.016_391_4, 0.088_013_3, 0.895_595_3],
+        ],
+        oklab_to_linear_srgb(lab),
+    )
+}
+
+fn rgb_is_unit(rgb: [f32; 3]) -> bool {
+    rgb[0].min(rgb[1]).min(rgb[2]) >= -1e-7
+        && rgb[0].max(rgb[1]).max(rgb[2]) <= 1.000_000_1
+}
+
+fn perceptual_soft_chroma(requested: f32, boundary: f32) -> f32 {
+    if boundary <= 1e-8 {
+        return 0.0;
+    }
+    let chroma = requested.max(0.0);
+    let knee = boundary * 0.90;
+    if chroma <= knee {
+        return chroma;
+    }
+    let span = (boundary - knee).max(1e-8);
+    (knee + span * (1.0 - (-(chroma - knee) / span).exp())).min(boundary * 0.999_95)
+}
+
+fn rec2020_unit_boundary(lightness: f32, hue: [f32; 2], requested: f32) -> f32 {
+    let lightness = lightness.clamp(0.0, 1.0);
+    let mut low = 0.0;
+    let mut high = requested.max(0.04);
+    for _ in 0..8 {
+        let probe = rec2020_from_oklab([
+            lightness,
+            hue[0] * high,
+            hue[1] * high,
+        ]);
+        if rgb_is_unit(probe) {
+            low = high;
+            high *= 2.0;
+        }
+    }
+    for _ in 0..11 {
+        let middle = 0.5 * (low + high);
+        let probe = rec2020_from_oklab([
+            lightness,
+            hue[0] * middle,
+            hue[1] * middle,
+        ]);
+        if rgb_is_unit(probe) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+/// Shared CPU half of the output-LUT input contract. The WGSL implementation
+/// is `perceptual_gamut_compress_unit_rec2020` in `color.wgsl`.
+fn map_output_lut_input_rec2020(rgb: [f32; 3]) -> [f32; 3] {
+    // Preserve all valid cube coordinates exactly. Only out-of-cube values
+    // need the shared perceptual projection before the LUT shaper.
+    if rgb_is_unit(rgb) {
+        return rgb.map(|value| value.clamp(0.0, 1.0));
+    }
+    let lab = rec2020_to_oklab(rgb);
+    let lightness = lab[0].clamp(0.0, 1.0);
+    let chroma = lab[1].hypot(lab[2]);
+    if chroma <= 1e-9 {
+        return rec2020_from_oklab([lightness, 0.0, 0.0]);
+    }
+    let hue = [lab[1] / chroma, lab[2] / chroma];
+    let knee_probe = rec2020_from_oklab([
+        lightness,
+        hue[0] * (chroma / 0.90),
+        hue[1] * (chroma / 0.90),
+    ]);
+    if (lightness - lab[0]).abs() <= 1e-7 && rgb_is_unit(rgb) && rgb_is_unit(knee_probe) {
+        return rgb;
+    }
+    let boundary = rec2020_unit_boundary(lightness, hue, chroma);
+    let compressed = perceptual_soft_chroma(chroma, boundary);
+    rec2020_from_oklab([
+        lightness,
+        hue[0] * compressed,
+        hue[1] * compressed,
+    ])
+}
+
 fn sample_rgb_lut(entries: &[[f32; 4]], size: u32, rgb: [f32; 3]) -> [f32; 3] {
     let edge = size.max(2);
-    let coord = rgb.map(|v| srgb_encode(v) * (edge - 1) as f32);
-    let lo = coord.map(|v| v.floor() as u32);
-    let hi = lo.map(|v| (v + 1).min(edge - 1));
+    let mapped = map_output_lut_input_rec2020(rgb);
+    let coord = mapped.map(|value| output_lut_shaper(value) * (edge - 1) as f32);
+    let lo = coord.map(|value| (value.floor() as u32).min(edge - 1));
+    let hi = lo.map(|value| value.saturating_add(1).min(edge - 1));
     let f = [
         coord[0] - lo[0] as f32,
         coord[1] - lo[1] as f32,
@@ -1007,7 +1175,6 @@ fn sample_rgb_lut(entries: &[[f32; 4]], size: u32, rgb: [f32; 3]) -> [f32; 3] {
         let entry = entries[index];
         [entry[0], entry[1], entry[2]]
     };
-    // Spell out vector interpolation to keep each channel independent.
     let lerp = |a: [f32; 3], b: [f32; 3], t: f32| {
         [
             a[0] + (b[0] - a[0]) * t,

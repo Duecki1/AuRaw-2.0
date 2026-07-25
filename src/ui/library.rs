@@ -2033,7 +2033,7 @@ impl Library {
             );
 
             let mut protected_thumbnail_indices = HashSet::new();
-            let scroll = egui::ScrollArea::vertical()
+            egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show_viewport(ui, |ui, viewport| {
                     let (content_rect, _) = ui.allocate_exact_size(

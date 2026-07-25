@@ -282,13 +282,13 @@ jobs:
         with:
           path: |
             ~/android-sdk
-            ~/gradle-8.11.1
+            ~/.gradle/wrapper
             ~/.cargo/bin/cargo-ndk
             ~/.cargo/bin/cargo-ndk-env
             ~/.cargo/bin/cargo-ndk-runner
             ~/.cargo/bin/cargo-ndk-test
             android/native
-          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-ndk-28.2.13676358-cmake-3.22.1-gradle-8.11.1-cargo-ndk-4.1.2-libraw-0.22.1-v1
+          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-ndk-28.2.13676358-cmake-3.22.1-wrapper-8.11.1-cargo-ndk-4.1.2-libraw-0.22.1-v1
 
       - name: Restore Android dependency and build cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
@@ -391,7 +391,6 @@ jobs:
           ANDROID_SDK_ROOT="$ANDROID_HOME"
           ANDROID_NDK_VERSION="28.2.13676358"
           ANDROID_CMAKE_VERSION="3.22.1"
-          GRADLE_VERSION="8.11.1"
           export ANDROID_HOME ANDROID_SDK_ROOT ANDROID_NDK_VERSION ANDROID_CMAKE_VERSION
 
           if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
@@ -432,17 +431,8 @@ jobs:
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          if [ ! -x "$HOME/gradle-${GRADLE_VERSION}/bin/gradle" ]; then
-            download_verified \
-              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-              /tmp/gradle.zip \
-              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip.sha256"
-            rm -rf "$HOME/gradle-${GRADLE_VERSION}"
-            unzip -q /tmp/gradle.zip -d "$HOME"
-          fi
-          export PATH="$HOME/gradle-${GRADLE_VERSION}/bin:$PATH"
-
-          gradle --version
+          python3 scripts/check-gradle-wrapper.py
+          ./gradlew --version
           case "$GITHUB_RUN_NUMBER" in
             ''|*[!0-9]*)
               echo "GITHUB_RUN_NUMBER must be a positive integer" >&2
@@ -450,7 +440,7 @@ jobs:
               ;;
           esac
 
-          gradle \
+          ./gradlew \
             --no-daemon \
             --stacktrace \
             -p android \

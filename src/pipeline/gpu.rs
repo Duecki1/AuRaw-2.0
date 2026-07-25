@@ -1363,6 +1363,9 @@ pub struct RawGpuPipeline {
     out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
+    // Declared last so GPU textures/buffers are dropped before process-wide
+    // admission capacity is returned.
+    _gpu_budget_reservation: GpuBudgetReservation,
 }
 
 /// A cheap, thread-safe handle to one completed display output. Reading it on
@@ -1639,7 +1642,6 @@ impl RawGpuPipeline {
         mask_atlas_edge_override: Option<u32>,
     ) -> Result<Self> {
         validate_raw(raw)?;
-        validate_gpu_working_set(raw.width, raw.height, quality)?;
         if let Some(template) = program_template {
             if template.cfa_kind != raw.cfa_kind
                 || template.processing_quality != quality
@@ -1651,9 +1653,6 @@ impl RawGpuPipeline {
             }
         }
 
-        let raw_texture = create_raw_texture(device, queue, raw);
-        let color_texture = create_color_texture(device, queue, raw);
-        let black_texture = create_black_texture(device, queue, raw);
         let size = texture_size(raw.width, raw.height);
         let work_format = processing_work_format(quality);
         let demosaic_format = work_format;
@@ -1667,6 +1666,53 @@ impl RawGpuPipeline {
         let image_workgroups = [raw.width.div_ceil(8), raw.height.div_ceil(8), 1];
         let tone_workgroups = [tone_size.width.div_ceil(8), tone_size.height.div_ceil(8), 1];
         let single_workgroup = [1, 1, 1];
+
+        let default_mask_atlas_edge = mask_atlas_edge();
+        let mask_atlas_edge = mask_atlas_edge_override
+            .unwrap_or(default_mask_atlas_edge)
+            .clamp(64, export_mask_atlas_edge_limit());
+        let mask_layer_capacity = if mask_atlas_edge_override.is_some()
+            && quality == ProcessingQuality::High
+        {
+            (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
+        } else {
+            MAX_LOCAL_MASKS
+        };
+
+        let default_output_transform = IccOutputTransform::srgb();
+        let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
+        profile_gpu_data.validate()?;
+        let profile_buffer_size_bytes = u64::try_from(
+            profile_gpu_data
+                .words
+                .len()
+                .checked_mul(std::mem::size_of::<[f32; 4]>())
+                .ok_or_else(|| anyhow!("GPU profile buffer size overflows"))?,
+        )
+        .map_err(|_| anyhow!("GPU profile buffer size does not fit in u64"))?;
+
+        let resource_plan = build_gpu_resource_plan(GpuResourcePlanInput {
+            width: raw.width,
+            height: raw.height,
+            quality,
+            tone_scale,
+            mask_atlas_edge,
+            mask_layers: u32::try_from(mask_layer_capacity)
+                .map_err(|_| anyhow!("mask layer capacity does not fit in u32"))?,
+            profile_buffer_bytes: profile_buffer_size_bytes,
+            params_buffer_bytes: std::mem::size_of::<GpuParams>() as u64,
+        })?;
+        let gpu_budget_reservation =
+            GpuBudgetReservation::acquire(&resource_plan, gpu_working_set_limit_bytes())?;
+
+        // Admission succeeds before the first device allocation, including all
+        // other live main/detail/navigation/headless pipelines in this process. Every persistent
+        // allocation below has a corresponding named entry in `resource_plan`;
+        // on-demand conversion/readback peaks and the 20% safety margin are also
+        // reserved before construction begins.
+        let raw_texture = create_raw_texture(device, queue, raw);
+        let color_texture = create_color_texture(device, queue, raw);
+        let black_texture = create_black_texture(device, queue, raw);
 
         // This is the raw-CFA output of the Ansel LCh reconstruction pass. It
         // is deliberately separate from the demosaic scratch textures so all
@@ -1741,21 +1787,10 @@ impl RawGpuPipeline {
             tone_format,
             "auraw adaptive tone guide B",
         );
-        let default_mask_atlas_edge = mask_atlas_edge();
-        let mask_atlas_edge = mask_atlas_edge_override
-            .unwrap_or(default_mask_atlas_edge)
-            .clamp(64, export_mask_atlas_edge_limit());
         // Interactive pipelines reserve all 32 layers so masks can be added without
         // rebuilding the RAW pipeline. Full-quality export uses an explicit mask edge
         // and can allocate only the layers it will actually sample, avoiding a huge
         // 4K x 4K x 32 R16F texture for ordinary edits with just a few masks.
-        let mask_layer_capacity = if mask_atlas_edge_override.is_some()
-            && quality == ProcessingQuality::High
-        {
-            (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
-        } else {
-            MAX_LOCAL_MASKS
-        };
         let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw normalized local-mask atlas"),
             size: wgpu::Extent3d {
@@ -1784,13 +1819,24 @@ impl RawGpuPipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[wgpu::TextureFormat::Rgba16Float],
         });
-        let empty_inpaint = vec![0u16; raw.width as usize * raw.height as usize * 4];
+        let empty_inpaint_len = usize::try_from(
+            u64::from(raw.width)
+                .checked_mul(u64::from(raw.height))
+                .and_then(|value| value.checked_mul(4))
+                .ok_or_else(|| anyhow!("zero inpaint upload length overflows"))?,
+        )
+        .map_err(|_| anyhow!("zero inpaint upload length does not fit in usize"))?;
+        let empty_inpaint = vec![0u16; empty_inpaint_len];
         queue.write_texture(
             copy_texture(&inpaint_texture),
             bytemuck::cast_slice(&empty_inpaint),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(raw.width * 8),
+                bytes_per_row: Some(
+                    raw.width
+                        .checked_mul(8)
+                        .ok_or_else(|| anyhow!("inpaint upload row byte count overflows"))?,
+                ),
                 rows_per_image: Some(raw.height),
             },
             size,
@@ -1830,17 +1876,6 @@ impl RawGpuPipeline {
             ..Default::default()
         });
 
-        let default_output_transform = IccOutputTransform::srgb();
-        let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
-        profile_gpu_data.validate()?;
-        let profile_buffer_size_bytes = u64::try_from(
-            profile_gpu_data
-                .words
-                .len()
-                .checked_mul(std::mem::size_of::<[f32; 4]>())
-                .ok_or_else(|| anyhow!("GPU profile buffer size overflows"))?,
-        )
-        .map_err(|_| anyhow!("GPU profile buffer size does not fit in u64"))?;
         let output_lut_offset_bytes =
             u64::from(profile_gpu_data.layout.output[3]) * std::mem::size_of::<[f32; 4]>() as u64;
         let profile_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3603,6 +3638,7 @@ impl RawGpuPipeline {
             out_texture,
             _out_view: out_view,
             pipeline_cache,
+            _gpu_budget_reservation: gpu_budget_reservation,
         };
         Ok(pipeline)
     }
@@ -3668,7 +3704,12 @@ impl RawGpuPipeline {
         full_width: u32,
         full_height: u32,
     ) -> Result<()> {
-        let mut rgba16f = vec![0u16; self.width as usize * self.height as usize * 4];
+        let rgba_elements = u64::from(self.width)
+            .checked_mul(u64::from(self.height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|elements| usize::try_from(elements).ok())
+            .ok_or_else(|| anyhow!("GPU inpaint upload element count overflows"))?;
+        let mut rgba16f = vec![0u16; rgba_elements];
         if let Some(layer) = layer {
             if full_width == 0 || full_height == 0 {
                 return Err(anyhow!("invalid inpaint coordinate space for GPU upload"));
@@ -3684,12 +3725,22 @@ impl RawGpuPipeline {
                     / u64::from(patch.source_width)) as i64;
                 let global_y0 = ((u64::from(patch.y) * u64::from(full_height))
                     / u64::from(patch.source_height)) as i64;
-                let global_x1 = ((u64::from(patch.x + patch.width) * u64::from(full_width))
-                    .div_ceil(u64::from(patch.source_width)))
-                    as i64;
-                let global_y1 = ((u64::from(patch.y + patch.height) * u64::from(full_height))
-                    .div_ceil(u64::from(patch.source_height)))
-                    as i64;
+                let patch_right = patch
+                    .x
+                    .checked_add(patch.width)
+                    .ok_or_else(|| anyhow!("inpaint patch horizontal extent overflows"))?;
+                let patch_bottom = patch
+                    .y
+                    .checked_add(patch.height)
+                    .ok_or_else(|| anyhow!("inpaint patch vertical extent overflows"))?;
+                let global_x1 = (u64::from(patch_right)
+                    .checked_mul(u64::from(full_width))
+                    .ok_or_else(|| anyhow!("inpaint patch horizontal projection overflows"))?
+                    .div_ceil(u64::from(patch.source_width))) as i64;
+                let global_y1 = (u64::from(patch_bottom)
+                    .checked_mul(u64::from(full_height))
+                    .ok_or_else(|| anyhow!("inpaint patch vertical projection overflows"))?
+                    .div_ceil(u64::from(patch.source_height))) as i64;
 
                 let local_x0 =
                     (global_x0 - i64::from(tile_origin_x)).clamp(0, i64::from(self.width)) as u32;
@@ -3728,7 +3779,12 @@ impl RawGpuPipeline {
                             rgb,
                             self.legacy_inpaint_camera_to_working,
                         );
-                        let destination = (y as usize * self.width as usize + x as usize) * 4;
+                        let destination = u64::from(y)
+                            .checked_mul(u64::from(self.width))
+                            .and_then(|row| row.checked_add(u64::from(x)))
+                            .and_then(|pixel| pixel.checked_mul(4))
+                            .and_then(|offset| usize::try_from(offset).ok())
+                            .ok_or_else(|| anyhow!("GPU inpaint destination offset overflows"))?;
                         composite_inpaint_rgba16f(
                             &mut rgba16f[destination..destination + 4],
                             rgb,
@@ -3743,7 +3799,11 @@ impl RawGpuPipeline {
             bytemuck::cast_slice(&rgba16f),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.width * 8),
+                bytes_per_row: Some(
+                    self.width
+                        .checked_mul(8)
+                        .ok_or_else(|| anyhow!("GPU inpaint upload row byte count overflows"))?,
+                ),
                 rows_per_image: Some(self.height),
             },
             texture_size(self.width, self.height),
@@ -4005,72 +4065,18 @@ impl RawGpuPipeline {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
-        if width == 0 || height == 0 || x + width > self.width || y + height > self.height {
-            return Err(anyhow!("invalid GPU readback rectangle"));
-        }
-
-        let unpadded_bytes_per_row = width * 4;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
-        let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("auraw tiled export readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw tiled export copy encoder"),
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.out_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x, y, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let submission = queue.submit(Some(encoder.finish()));
-
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        readback.map_async(wgpu::MapMode::Read, .., move |result| {
-            let _ = sender.send(result);
-        });
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            })
-            .map_err(|error| anyhow!("GPU poll failed during export: {error}"))?;
-        receiver
-            .recv()
-            .map_err(|_| anyhow!("GPU readback callback was dropped"))?
-            .map_err(|error| anyhow!("GPU readback mapping failed: {error}"))?;
-
-        let mapped = readback.get_mapped_range(..);
-        let mut rgba = vec![0u8; (width * height * 4) as usize];
-        for row in 0..height as usize {
-            let src = row * padded_bytes_per_row as usize;
-            let dst = row * unpadded_bytes_per_row as usize;
-            rgba[dst..dst + unpadded_bytes_per_row as usize]
-                .copy_from_slice(&mapped[src..src + unpadded_bytes_per_row as usize]);
-        }
-        drop(mapped);
-        readback.unmap();
-        Ok(rgba)
+        read_rgba8_texture_region_blocking(
+            device,
+            queue,
+            &self.out_texture,
+            x,
+            y,
+            width,
+            height,
+            self.width,
+            self.height,
+            "auraw tiled export readback",
+        )
     }
 
     /// Queues a display-linear RGBA32F copy and immediately returns a mapped

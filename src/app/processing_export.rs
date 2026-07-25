@@ -176,7 +176,16 @@ impl AurawApp {
             }
         };
         #[cfg(not(target_os = "android"))]
-        self.apply_display_output_transform(&render_state.queue, &pipeline);
+        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+            self.notice = Some(
+                "Could not prepare the preview color profile. The previous complete preview remains available."
+                    .to_owned(),
+            );
+            crate::diagnostics::record(format!(
+                "preview pipeline display-profile install failed: {error:#}"
+            ));
+            return;
+        }
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,
@@ -326,39 +335,83 @@ impl AurawApp {
             self.inpaint_layer.as_ref()
         };
 
+        // Update every present pipeline first, without dispatching any render. A
+        // partial upload therefore cannot become visible or advance the rendered
+        // marker. The next retry overwrites every present pipeline again.
+        let mut updates = Vec::new();
         if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
-            let _ = pipeline.update_inpaint_layer(
-                &render_state.queue, inpaint, 0, 0, raw.width, raw.height
+            updates.push((
+                "main preview",
+                pipeline.update_inpaint_layer(
+                    &render_state.queue,
+                    inpaint,
+                    0,
+                    0,
+                    raw.width,
+                    raw.height,
+                ),
+            ));
+        }
+        if let Some(navigation) = self.preview_navigation.as_ref() {
+            updates.push((
+                "navigation preview",
+                navigation.pipeline.update_inpaint_layer(
+                    &render_state.queue,
+                    inpaint,
+                    0,
+                    0,
+                    navigation.raw.width,
+                    navigation.raw.height,
+                ),
+            ));
+        }
+        if let Some(detail) = self
+            .preview_detail
+            .as_ref()
+            .filter(|detail| detail.revision == self.preview_revision)
+        {
+            updates.push((
+                "detail preview",
+                detail.pipeline.update_inpaint_layer(
+                    &render_state.queue,
+                    inpaint,
+                    detail.virtual_origin[0],
+                    detail.virtual_origin[1],
+                    detail.virtual_full_size[0],
+                    detail.virtual_full_size[1],
+                ),
+            ));
+        }
+        if let Err(error) = collect_pipeline_update_results("install inpaint layer", updates) {
+            self.original_preview_rendered_state = None;
+            self.pending_stage = Some(ProcessingStage::Output);
+            self.notice = Some(
+                "Could not update every GPU preview. The last complete preview is still shown; retrying is safe."
+                    .to_owned(),
             );
-            let params =
-                GpuParams::new(exposure, masks, raw).with_vignette_geometry(self.geometry);
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            crate::diagnostics::record(format!(
+                "transactional preview update failed; rendered revision remains dirty: {error:#}"
+            ));
+            self.egui_ctx.request_repaint();
+            return;
         }
 
+        if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
+            let params = GpuParams::new(exposure, masks, raw).with_vignette_geometry(self.geometry);
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        }
         if let Some(navigation) = self.preview_navigation.as_ref() {
-            let _ = navigation.pipeline.update_inpaint_layer(
-                &render_state.queue, inpaint, 0, 0, navigation.raw.width, navigation.raw.height
-            );
             let params = GpuParams::new(exposure, masks, &navigation.raw)
                 .with_vignette_geometry(self.geometry);
             navigation
                 .pipeline
                 .recompute(&render_state.queue, &render_state.device, &params);
         }
-
         if let Some(detail) = self
             .preview_detail
             .as_ref()
             .filter(|detail| detail.revision == self.preview_revision)
         {
-            let _ = detail.pipeline.update_inpaint_layer(
-                &render_state.queue,
-                inpaint,
-                detail.virtual_origin[0],
-                detail.virtual_origin[1],
-                detail.virtual_full_size[0],
-                detail.virtual_full_size[1],
-            );
             let params = GpuParams::new_for_tile(
                 exposure,
                 masks,
@@ -374,6 +427,7 @@ impl AurawApp {
                 .recompute(&render_state.queue, &render_state.device, &params);
         }
 
+        // This marker is the transaction commit point.
         self.original_preview_rendered_state = Some(requested_state);
         self.egui_ctx.request_repaint();
     }
@@ -467,7 +521,16 @@ impl AurawApp {
             }
         };
         #[cfg(not(target_os = "android"))]
-        self.apply_display_output_transform(&render_state.queue, &pipeline);
+        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+            self.notice = Some(
+                "Could not prepare the preview color profile. The previous complete preview remains available."
+                    .to_owned(),
+            );
+            crate::diagnostics::record(format!(
+                "preview pipeline display-profile install failed: {error:#}"
+            ));
+            return;
+        }
         if let Err(error) =
             Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &preview_raw)
         {
@@ -781,7 +844,16 @@ impl AurawApp {
             }
         };
         #[cfg(not(target_os = "android"))]
-        self.apply_display_output_transform(&render_state.queue, &pipeline);
+        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+            self.notice = Some(
+                "Could not prepare the preview color profile. The previous complete preview remains available."
+                    .to_owned(),
+            );
+            crate::diagnostics::record(format!(
+                "preview pipeline display-profile install failed: {error:#}"
+            ));
+            return;
+        }
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,
@@ -910,7 +982,16 @@ impl AurawApp {
                 }
             };
             #[cfg(not(target_os = "android"))]
-            self.apply_display_output_transform(&render_state.queue, &pipeline);
+            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+                self.notice = Some(
+                    "Could not prepare the preview color profile. The previous complete preview remains available."
+                        .to_owned(),
+                );
+                crate::diagnostics::record(format!(
+                    "preview pipeline display-profile install failed: {error:#}"
+                ));
+                return;
+            }
             if let Err(error) =
                 Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &raw)
             {
