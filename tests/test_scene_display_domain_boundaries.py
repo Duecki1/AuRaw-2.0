@@ -46,11 +46,13 @@ def test_dcp_payload_is_split_by_domain_role() -> None:
 def test_scene_controls_precede_optional_look_and_view_transform() -> None:
     prepare_start = ADJUSTMENTS.index("fn prepare_scene_node")
     tone_start = ADJUSTMENTS.index("fn apply_scene_tone_node", prepare_start)
-    effects_start = ADJUSTMENTS.index("fn apply_scene_effects_node", tone_start)
+    local_tone_start = ADJUSTMENTS.index("fn apply_local_scene_tone_node", tone_start)
+    effects_start = ADJUSTMENTS.index("fn apply_scene_effects_node", local_tone_start)
     explicit_view_start = ADJUSTMENTS.index("fn apply_explicit_view_node", effects_start)
 
     prepare = ADJUSTMENTS[prepare_start:tone_start]
-    tone = ADJUSTMENTS[tone_start:effects_start]
+    tone = ADJUSTMENTS[tone_start:local_tone_start]
+    local_tone_stage = ADJUSTMENTS[local_tone_start:effects_start]
     view = ADJUSTMENTS[explicit_view_start:]
 
     assert "apply_camera_characterization(scene_working_at(pos))" in prepare
@@ -61,8 +63,8 @@ def test_scene_controls_precede_optional_look_and_view_transform() -> None:
     legacy_gate = tone.index("if !uses_explicit_scene_display_domains()")
     profile_tone = tone.index("rgb = apply_profile_view_tone(rgb)", legacy_gate)
     adaptive_tone = tone.index("rgb = apply_lightroom_tone(rgb, pos)", profile_tone)
-    local_tone = tone.index("rgb = apply_local_scene_tone_nodes(pos, rgb)", adaptive_tone)
-    assert legacy_gate < profile_tone < adaptive_tone < local_tone
+    assert legacy_gate < profile_tone < adaptive_tone
+    assert "rgb = apply_local_scene_tone_nodes(pos, rgb)" in local_tone_stage
 
     look = view.index("apply_optional_profile_look(scene_rgb)")
     profile_view = view.index("apply_dcp_view_transform(view_input)", look)
