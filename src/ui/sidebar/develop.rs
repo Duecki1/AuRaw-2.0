@@ -185,7 +185,7 @@ impl Sidebar {
                 1.0,
                 Some("Recovers or brightens the upper tonal range without hard clipping."),
             );
-            changed |= adjustment_slider(
+            let shadows_changed = adjustment_slider(
                 ui,
                 "Shadows",
                 &mut exposure.shadows,
@@ -194,6 +194,7 @@ impl Sidebar {
                 1.0,
                 Some("Opens or deepens the lower tonal range."),
             );
+            changed |= shadows_changed;
             changed |= adjustment_slider(
                 ui,
                 "Whites",
@@ -203,15 +204,25 @@ impl Sidebar {
                 1.0,
                 Some("Moves the bright endpoint and specular range."),
             );
-            changed |= adjustment_slider(
+            let blacks_changed = adjustment_slider(
                 ui,
                 "Blacks",
                 &mut exposure.blacks,
                 -100.0..=100.0,
                 0,
                 1.0,
-                Some("Moves the dark endpoint while preserving sensor black calibration."),
+                Some("Moves the display black/toe endpoint while preserving sensor black calibration."),
             );
+            changed |= blacks_changed;
+            if (shadows_changed || blacks_changed)
+                && exposure.process_version == BASIC_TONE_RESPONSE_PROCESS_VERSION
+            {
+                // Process 17 changes only the low-tone rendering model. Opt an
+                // existing process-16 edit in only when the user actually edits
+                // Shadows or Blacks; unrelated controls must not reinterpret it.
+                exposure.process_version = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
+                changed = true;
+            }
         });
         changed
     }
