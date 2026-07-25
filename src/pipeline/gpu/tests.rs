@@ -1,5 +1,5 @@
 use super::{
-    color_grade_hue_turns, composite_inpaint_rgba16f,
+    canonicalize_green_noise, color_grade_hue_turns, composite_inpaint_rgba16f,
     explicit_render_graph_contracts_are_contiguous, highlight_final_read_slot, highlight_stage_slots,
     pack_local_point_curve, processing_work_format, render_graph_flags, shader_highlight_method,
     work_shader_source, HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS,
@@ -84,28 +84,32 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
             work_shader_source(
                 SHADER_HIGHLIGHTS,
                 processing_work_format(ProcessingQuality::High),
-            ),
+            )
+            .expect("specialize high-quality shader"),
         ),
         (
             "32-bit Bayer pass 1",
             work_shader_source(
                 SHADER_BAYER_RCD_P1,
                 processing_work_format(ProcessingQuality::High),
-            ),
+            )
+            .expect("specialize high-quality shader"),
         ),
         (
             "32-bit robust dual demosaic",
             work_shader_source(
                 SHADER_DUAL_DEMOSAIC,
                 processing_work_format(ProcessingQuality::High),
-            ),
+            )
+            .expect("specialize high-quality shader"),
         ),
         (
             "32-bit perceptual color mixer",
             work_shader_source(
                 SHADER_ADJUSTMENTS,
                 processing_work_format(ProcessingQuality::High),
-            ),
+            )
+            .expect("specialize high-quality shader"),
         ),
     ] {
         assert!(!source.contains("rgba16float"));
@@ -119,6 +123,24 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
         .validate(&module)
         .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
     }
+}
+
+#[test]
+fn shader_specialization_fails_closed_without_marker() {
+    let error = work_shader_source(
+        "@compute @workgroup_size(1) fn main() {}",
+        wgpu::TextureFormat::Rgba32Float,
+    )
+    .expect_err("missing marker must be an error in release builds");
+    assert!(error.to_string().contains("work-format marker"));
+}
+
+#[test]
+fn green_noise_is_averaged_once_and_stored_symmetrically() {
+    let canonical = canonicalize_green_noise([1.0, 2.0, 3.0, 6.0], true);
+    assert_eq!(canonical, [1.0, 4.0, 3.0, 4.0]);
+    let unchanged = canonicalize_green_noise([1.0, 2.0, 3.0, 6.0], false);
+    assert_eq!(unchanged, [1.0, 2.0, 3.0, 6.0]);
 }
 
 #[test]

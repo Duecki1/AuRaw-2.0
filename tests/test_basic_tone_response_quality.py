@@ -57,7 +57,7 @@ def shadow_output_ev(ev: float, amount: float, p005=-8.0, p05=-5.0, p50=0.0) -> 
 
 
 def display_black_toe(luma: float, amount: float, pivot: float = 0.15) -> float:
-    if luma <= 1e-8 or luma >= pivot or amount == 0.0:
+    if luma <= 0.0 or luma >= pivot or amount == 0.0:
         return luma
     x = max(0.0, min(1.0, luma / pivot))
     toe = (1.0 - x) ** 2

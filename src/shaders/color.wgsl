@@ -203,7 +203,14 @@ fn perceptual_gamut_compress_unit_rec2020(rgb: vec3<f32>) -> vec3<f32> {
     }
     let boundary = rec2020_unit_boundary(l, hue, chroma);
     let compressed = perceptual_soft_chroma(chroma, boundary);
-    return rec2020_from_oklab(vec3<f32>(l, hue * compressed));
+    // The boundary solve can leave sub-ULP excursions at saturated edges.
+    // Clamp only after out-of-cube projection; valid unit-cube inputs return
+    // unchanged through the fast path above.
+    return clamp(
+        rec2020_from_oklab(vec3<f32>(l, hue * compressed)),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
 }
 
 fn perceptual_gamut_compress_unit_srgb(rgb: vec3<f32>) -> vec3<f32> {

@@ -1157,6 +1157,7 @@ fn map_output_lut_input_rec2020(rgb: [f32; 3]) -> [f32; 3] {
         hue[0] * compressed,
         hue[1] * compressed,
     ])
+    .map(|value| value.clamp(0.0, 1.0))
 }
 
 fn sample_rgb_lut(entries: &[[f32; 4]], size: u32, rgb: [f32; 3]) -> [f32; 3] {

@@ -60,6 +60,11 @@ fn main() {
     }
 }
 
+fn allow_no_libraw() -> bool {
+    std::env::var("AURAW_ALLOW_NO_LIBRAW")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
+}
+
 fn configure_source_revision() {
     for path in ["Cargo.toml", "Cargo.lock", "src"] {
         println!("cargo:rerun-if-changed={path}");
@@ -152,7 +157,7 @@ fn configure_android_libraw() {
     let library = root.join("lib/libraw.a");
 
     if !header.is_file() || !library.is_file() {
-        if std::env::var_os("AURAW_ALLOW_NO_LIBRAW").is_some() {
+        if allow_no_libraw() {
             println!(
                 "cargo:warning=Android LibRaw is absent at {}; RAW loading is disabled for this check",
                 root.display()
@@ -264,16 +269,33 @@ fn configure_desktop_libraw() {
         .or_else(|_| pkg_config::Config::new().probe("libraw_r"));
 
     let Ok(libraw) = libraw else {
-        println!("cargo:warning=LibRaw was not found through pkg-config; building with a disabled RAW loader. Install libraw/libraw.pc on the target machine to enable RAW decoding.");
+        allow_or_fail_without_desktop_libraw(
+            "LibRaw was not found through pkg-config. Install libraw/libraw.pc to enable RAW decoding.",
+        );
         return;
     };
 
     let Some(header) = find_libraw_header(&libraw.include_paths) else {
-        println!("cargo:warning=LibRaw pkg-config entry was found, but libraw.h was not in the reported include paths; building with a disabled RAW loader.");
+        allow_or_fail_without_desktop_libraw(
+            "LibRaw pkg-config metadata was found, but libraw.h was absent from its include paths.",
+        );
         return;
     };
 
     generate_bindings(&header, &libraw.include_paths);
+}
+
+fn allow_or_fail_without_desktop_libraw(reason: &str) {
+    if allow_no_libraw() {
+        println!(
+            "cargo:warning={reason} AURAW_ALLOW_NO_LIBRAW explicitly permits this non-production check build to use a disabled RAW loader."
+        );
+        return;
+    }
+
+    panic!(
+        "{reason} AuRaw desktop builds require LibRaw by default; set AURAW_ALLOW_NO_LIBRAW=1 only for an intentional non-production check build."
+    );
 }
 
 fn find_libraw_header(include_paths: &[PathBuf]) -> Option<PathBuf> {

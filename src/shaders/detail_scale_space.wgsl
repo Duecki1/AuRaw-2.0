@@ -77,5 +77,8 @@ fn apply_texture_and_clarity_values(
     let texture_ev = texture * selected_texture * texture_strength * mix(0.72, 1.0, signal_gate);
     let clarity_ev = clarity * selected_clarity * clarity_strength * midtone_gate * halo_guard;
     let delta_ev = clamp(texture_ev + clarity_ev, -0.95, 1.05);
-    return max(rgb * exp2(delta_ev), vec3<f32>(0.0));
+    // Scalar detail gain preserves RGB ratios. Keep already-nonnegative
+    // camera-characterized Rec.2020 values exact; invoke the perceptual
+    // projector only when the operation creates a negative component.
+    return gamut_project_nonnegative_rec2020(rgb * exp2(delta_ev));
 }
