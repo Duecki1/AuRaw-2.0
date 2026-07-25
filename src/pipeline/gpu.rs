@@ -157,10 +157,11 @@ fn expected_pass_count(cfa_kind: CfaKind) -> usize {
         CfaKind::XTrans => 10,
     };
     // Highlight prepare + guided stages + two finalize variants, followed by
-    // demosaic, four tone-analysis passes, and eleven adjustment/output passes
-    // (pre-tone base, capture-sharpen/tone, local effects, Glow extraction +
-    // five diffusion stages, creative composite, and final render).
-    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + demosaic_passes + 4 + 11
+    // demosaic, four tone-analysis passes, and thirteen adjustment/output passes
+    // (pre-tone base, global tone, local tone, presence/color, stabilization
+    // copy, Glow extraction + five diffusion stages, creative composite, and
+    // final render).
+    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + demosaic_passes + 4 + 13
 }
 
 const SHADER_BAYER_RCD_P1: &str = concat!(
@@ -2267,7 +2268,7 @@ impl RawGpuPipeline {
             });
 
         let bgl_adjust_effects =
-            reused_layout(adjustment_prepare_for_programs + 2).unwrap_or_else(|| {
+            reused_layout(adjustment_prepare_for_programs + 3).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl scene presence and color"),
                     entries: &[
@@ -2289,7 +2290,7 @@ impl RawGpuPipeline {
             });
 
         let bgl_glow_prepare =
-            reused_layout(adjustment_prepare_for_programs + 3).unwrap_or_else(|| {
+            reused_layout(adjustment_prepare_for_programs + 5).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl Glow source extraction"),
                     entries: &[
@@ -2305,7 +2306,7 @@ impl RawGpuPipeline {
             });
 
         let bgl_glow_blur =
-            reused_layout(adjustment_prepare_for_programs + 4).unwrap_or_else(|| {
+            reused_layout(adjustment_prepare_for_programs + 6).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl Glow diffusion"),
                     entries: &[
@@ -2320,7 +2321,7 @@ impl RawGpuPipeline {
                 })
             });
 
-        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 9)
+        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 11)
             .unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl creative glow and vignette"),
@@ -2359,7 +2360,7 @@ impl RawGpuPipeline {
             ],
         });
         let bgl_adjust_render =
-            reused_layout(adjustment_prepare_for_programs + 10).unwrap_or(bgl_adjust_render);
+            reused_layout(adjustment_prepare_for_programs + 12).unwrap_or(bgl_adjust_render);
 
         let make_highlight_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
@@ -2950,8 +2951,78 @@ impl RawGpuPipeline {
             ],
         });
 
+        let bg_adjust_local_tone = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg local scene tone edits"),
+            layout: &bgl_adjust_tone,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: tone_stats_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: profile_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+            ],
+        });
+
         let bg_adjust_effects = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg scene presence and color"),
+            layout: &bgl_adjust_effects,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: tone_stats_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+            ],
+        });
+
+        let bg_adjust_effects_copy = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg scene effects copy"),
             layout: &bgl_adjust_effects,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -3488,9 +3559,9 @@ impl RawGpuPipeline {
         let tone_stage_end = passes.len();
         let adjustment_prepare_pass_index = passes.len();
         let adjustment_tone_pass_index = adjustment_prepare_pass_index + 1;
-        let adjustment_effects_pass_index = adjustment_prepare_pass_index + 2;
-        let glow_prepare_pass_index = adjustment_prepare_pass_index + 3;
-        let glow_blur_start_index = adjustment_prepare_pass_index + 4;
+        let adjustment_effects_pass_index = adjustment_prepare_pass_index + 3;
+        let glow_prepare_pass_index = adjustment_prepare_pass_index + 5;
+        let glow_blur_start_index = adjustment_prepare_pass_index + 6;
         let glow_blur_end_index = glow_blur_start_index + 5;
         let adjustment_creative_pass_index = glow_blur_end_index;
         let adjustment_render_pass_index = adjustment_creative_pass_index + 1;
@@ -3517,10 +3588,28 @@ impl RawGpuPipeline {
             Pass {
                 pipeline: make_pipeline(
                     adjustments_module.as_ref(),
+                    "apply_local_scene_tone_node",
+                    &bgl_adjust_tone,
+                ),
+                bind_group: bg_adjust_local_tone,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
                     "apply_scene_effects_node",
                     &bgl_adjust_effects,
                 ),
                 bind_group: bg_adjust_effects,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    adjustments_module.as_ref(),
+                    "copy_scene_effects_node",
+                    &bgl_adjust_effects,
+                ),
+                bind_group: bg_adjust_effects_copy,
                 workgroups: image_workgroups,
             },
             Pass {
@@ -4524,7 +4613,9 @@ impl RawGpuPipeline {
         // writes the final adjustment image into tex2 for the render pass.
         self.encode_pass(encoder, self.adjustment_tone_pass_index);
         if params.needs_intermediate_adjustment_passes() {
+            self.encode_pass(encoder, self.adjustment_effects_pass_index - 1);
             self.encode_pass(encoder, self.adjustment_effects_pass_index);
+            self.encode_pass(encoder, self.adjustment_effects_pass_index + 1);
             if params.needs_glow_passes() {
                 self.encode_pass(encoder, self.glow_prepare_pass_index);
                 self.encode_pass_range(

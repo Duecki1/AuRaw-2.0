@@ -1190,6 +1190,14 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
         rgb = apply_profile_view_tone(rgb);
     }
     rgb = apply_lightroom_tone(rgb, pos);
+    textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn apply_local_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    var rgb = adjustment_base_at(pos);
     rgb = apply_local_scene_tone_nodes(pos, rgb);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
@@ -1204,6 +1212,13 @@ fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_saturation_vibrance(rgb);
     rgb = apply_local_scene_effect_nodes(pos, rgb);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn copy_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= params.width || gid.y >= params.height { return; }
+    let pos = vec2<i32>(i32(gid.x), i32(gid.y));
+    textureStore(local_effects_out, pos, vec4<f32>(adjustment_base_at(pos), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
