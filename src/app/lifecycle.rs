@@ -124,7 +124,7 @@ fn spawn_gpu_preview_prewarm(
             let result = RawGpuPipeline::prewarm_preview_template_with_cache(
                 &device,
                 &queue,
-                CfaKind::Bayer,
+                crate::pipeline::CfaKind::Bayer,
                 persistent_cache,
             )
             .map_err(|error| format!("GPU preview prewarm failed: {error:#}"));
