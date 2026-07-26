@@ -68,7 +68,7 @@ impl AurawApp {
             self.note_inpainting_edit_changed();
             self.note_inpainting_changed_for_ai_masks();
             self.ai_masks_need_update |= merged.ai_masks_need_update;
-            self.queue_preview_processing(crate::pipeline::ProcessingStage::Output);
+            self.queue_preview_processing(crate::pipeline::ProcessingStage::Tone);
         }
 
         if clipboard.settings.lens_correction {

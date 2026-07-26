@@ -2213,6 +2213,7 @@ impl RawGpuPipeline {
                     storage_buffer_entry(15, false),
                     storage_buffer_entry(20, true),
                     storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
+                    texture_entry(32, wgpu::TextureSampleType::Float { filterable: false }),
                 ],
             })
         });
@@ -2829,6 +2830,10 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 32,
+                    resource: wgpu::BindingResource::TextureView(&inpaint_view),
                 },
             ],
         });
