@@ -125,10 +125,9 @@ impl AurawApp {
                 || self
                     .sidecar_in_flight
                     .is_some_and(|job| job.generation == generation && job.revision == revision)
-                || self
-                    .sidecar_pending
-                    .iter()
-                    .any(|request| request.generation == generation && request.revision == revision))
+                || self.sidecar_pending.iter().any(|request| {
+                    request.generation == generation && request.revision == revision
+                }))
         {
             return;
         }
@@ -175,9 +174,10 @@ impl AurawApp {
             return;
         }
 
-        let stale_pending = self.sidecar_pending.iter().any(|request| {
-            request.generation == generation && request.revision != revision
-        });
+        let stale_pending = self
+            .sidecar_pending
+            .iter()
+            .any(|request| request.generation == generation && request.revision != revision);
         if stale_pending && !interaction_active {
             // This generation already reached an earlier deadline while a
             // worker or interaction kept it queued. Replace that snapshot
@@ -247,24 +247,16 @@ impl AurawApp {
         let was_current =
             self.detach_current_android_document_for_library_action(raw_uri, display_name);
         let result = (|| {
-            let Some(mut loaded) = crate::sidecar::load_android(
-                &self.android_app,
-                raw_uri,
-                display_name,
-            )
-            .map_err(|error| error.to_string())?
+            let Some(mut loaded) =
+                crate::sidecar::load_android(&self.android_app, raw_uri, display_name)
+                    .map_err(|error| error.to_string())?
             else {
                 return Ok(());
             };
             crate::sidecar::reset_adjustments_preserving_mask_properties(&mut loaded.edits);
-            crate::sidecar::save_android(
-                &self.android_app,
-                raw_uri,
-                display_name,
-                loaded.edits,
-            )
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+            crate::sidecar::save_android(&self.android_app, raw_uri, display_name, loaded.edits)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         })();
         if was_current {
             self.open_android_library_document(raw_uri, display_name);
@@ -289,11 +281,8 @@ impl AurawApp {
     ) -> Result<(), String> {
         let was_current =
             self.detach_current_android_document_for_library_action(raw_uri, display_name);
-        let result = crate::android::delete_library_document(
-            &self.android_app,
-            raw_uri,
-            display_name,
-        );
+        let result =
+            crate::android::delete_library_document(&self.android_app, raw_uri, display_name);
         if result.is_err() && was_current {
             self.open_android_library_document(raw_uri, display_name);
         }
@@ -329,11 +318,17 @@ impl AurawApp {
                 .any(|request| request.generation == self.sidecar_generation)
     }
 
+    pub(crate) fn sidecar_save_succeeded_recently(&self) -> bool {
+        self.sidecar_save_feedback_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
     pub(crate) fn save_edits_now(&mut self) {
         if !self.can_save_edits() {
             return;
         }
         self.commit_edit_history_now();
+        self.sidecar_save_feedback_until = None;
         self.sidecar_failed_revision = None;
         self.queue_current_sidecar_save(true);
         self.start_next_sidecar_save();
@@ -351,15 +346,11 @@ impl AurawApp {
         if self.sidecar_in_flight.is_some() {
             return;
         }
-        if self
-            .sidecar_pending
-            .front()
-            .is_some_and(|request| {
-                !request.explicit
-                    && request.generation == self.sidecar_generation
-                    && sidecar_interaction_active(&self.egui_ctx)
-            })
-        {
+        if self.sidecar_pending.front().is_some_and(|request| {
+            !request.explicit
+                && request.generation == self.sidecar_generation
+                && sidecar_interaction_active(&self.egui_ctx)
+        }) {
             self.egui_ctx
                 .request_repaint_after(SIDECAR_AUTOSAVE_ACTIVE_POLL);
             return;
@@ -445,8 +436,15 @@ impl AurawApp {
                     if event.job.explicit || recovered_from_failure {
                         self.notice = Some(format!("Edits saved to {location}."));
                     }
+                    if event.job.explicit {
+                        self.sidecar_save_feedback_until =
+                            Some(Instant::now() + Duration::from_millis(1_200));
+                        self.egui_ctx
+                            .request_repaint_after(Duration::from_millis(1_200));
+                    }
                 }
                 Err(error) => {
+                    self.sidecar_save_feedback_until = None;
                     self.sidecar_failed_revision = Some(event.job.revision);
                     self.notice = Some(format!("Could not save edits: {error}"));
                 }
@@ -528,11 +526,7 @@ impl AurawApp {
         // filesystems whose modification timestamps have coarse resolution.
         match self.load_developed_thumbnail_for_target(&job.target) {
             Ok(Some(thumbnail)) => {
-                self.install_developed_thumbnail_result(
-                    &job.target,
-                    thumbnail,
-                    revision,
-                );
+                self.install_developed_thumbnail_result(&job.target, thumbnail, revision);
                 if self.developed_thumbnail_pending.as_ref() == Some(&job) {
                     self.developed_thumbnail_pending = None;
                 }
@@ -649,17 +643,17 @@ impl AurawApp {
                     let thumbnail = snapshot
                         .read_thumbnail_blocking(&device, &queue, 512)
                         .map_err(|error| format!("GPU thumbnail readback failed: {error:#}"))?;
-                    let thumbnail = crate::pipeline::transform_thumbnail_geometry(&thumbnail, geometry);
+                    let thumbnail =
+                        crate::pipeline::transform_thumbnail_geometry(&thumbnail, geometry);
                     match &worker_target {
                         #[cfg(not(target_os = "android"))]
                         crate::sidecar::SidecarTarget::Desktop { raw_path } => {
-                            let fingerprint =
-                                crate::sidecar::desktop_sidecar_fingerprint(raw_path)?.ok_or_else(
-                                    || {
-                                        "edit sidecar disappeared before thumbnail capture"
-                                            .to_owned()
-                                    },
-                                )?;
+                            let fingerprint = crate::sidecar::desktop_sidecar_fingerprint(
+                                raw_path,
+                            )?
+                            .ok_or_else(|| {
+                                "edit sidecar disappeared before thumbnail capture".to_owned()
+                            })?;
                             crate::sidecar::save_developed_thumbnail_cache(
                                 raw_path,
                                 &thumbnail,
@@ -669,7 +663,7 @@ impl AurawApp {
                         #[cfg(target_os = "android")]
                         crate::sidecar::SidecarTarget::Desktop { .. } => {
                             return Err(
-                                "desktop sidecar target is unavailable on Android".to_owned(),
+                                "desktop sidecar target is unavailable on Android".to_owned()
                             );
                         }
                         #[cfg(target_os = "android")]

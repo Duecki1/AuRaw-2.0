@@ -68,22 +68,32 @@ impl eframe::App for AurawApp {
         if self.active_tab == AppTab::Develop {
             match layout {
                 ScreenLayout::Horizontal => {
-                    egui::Panel::right("develop_tool_rail")
-                        .resizable(false)
-                        .exact_size(Sidebar::DESKTOP_TOOL_RAIL_WIDTH)
-                        .show(ui, |ui| Sidebar::show_desktop_tool_rail(ui, self));
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        egui::Panel::right("develop_tool_rail")
+                            .resizable(false)
+                            .exact_size(Sidebar::DESKTOP_TOOL_RAIL_WIDTH)
+                            .show(ui, |ui| Sidebar::show_desktop_tool_rail(ui, self));
 
-                    let remembered_width = self.desktop_sidebar_width.unwrap_or(sidebar_size);
-                    let sidebar_response = egui::Panel::right("develop_sidebar_right")
+                        let remembered_width = self.desktop_sidebar_width.unwrap_or(sidebar_size);
+                        let sidebar_response = egui::Panel::right("develop_sidebar_right")
+                            .resizable(true)
+                            .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
+                            .max_size(
+                                (viewport_size.x * 0.65)
+                                    .max(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH),
+                            )
+                            .default_size(remembered_width)
+                            .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
+                        self.desktop_sidebar_width = Some(sidebar_response.response.rect.width());
+                    }
+
+                    #[cfg(target_os = "android")]
+                    egui::Panel::right("develop_sidebar_right")
                         .resizable(true)
                         .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
-                        .max_size(
-                            (viewport_size.x * 0.65)
-                                .max(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH),
-                        )
-                        .default_size(remembered_width)
+                        .default_size(sidebar_size)
                         .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
-                    self.desktop_sidebar_width = Some(sidebar_response.response.rect.width());
 
                     // Panel call order places the mask strip to the left of the
                     // resizable properties panel, with the tool rail outermost.
