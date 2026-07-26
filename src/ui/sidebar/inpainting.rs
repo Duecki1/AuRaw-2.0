@@ -10,9 +10,12 @@ impl Sidebar {
         // center itself inside the entire remaining scroll-area height.
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let clear = ui.add_enabled(
+                let clear = crate::ui::icons::phosphor_icon_button_enabled(
+                    ui,
                     !app.inpaint_strokes.is_empty() && !app.inpaint_busy(),
-                    egui::Button::new("Clear all"),
+                    egui_phosphor::regular::TRASH,
+                    egui::vec2(28.0, 22.0),
+                    "Clear all inpainting strokes",
                 );
                 if clear.clicked() {
                     app.clear_inpainting();
@@ -68,29 +71,30 @@ impl Sidebar {
                                     selected,
                                     format!("◎  Stroke {}  ·  {dab_count} dabs", index + 1),
                                 )
-                                .on_hover_text("Show this stroke on the image. Click to keep it highlighted.");
+                                .on_hover_text(
+                                    "Show this stroke on the image. Click to keep it highlighted.",
+                                );
                             if stroke_response.hovered() {
                                 app.inpaint_hovered_stroke = Some(index);
                                 ui.ctx().request_repaint();
                             }
                             if stroke_response.clicked() {
-                                app.inpaint_selected_stroke = if selected {
-                                    None
-                                } else {
-                                    Some(index)
-                                };
+                                app.inpaint_selected_stroke =
+                                    if selected { None } else { Some(index) };
                                 app.inpaint_focus_texture_key = None;
                                 ui.ctx().request_repaint();
                             }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui
-                                        .add_enabled(
-                                            !app.inpaint_busy(),
-                                            egui::Button::new("Delete").small(),
-                                        )
-                                        .clicked()
+                                    if crate::ui::icons::phosphor_icon_button_enabled(
+                                        ui,
+                                        !app.inpaint_busy(),
+                                        egui_phosphor::regular::TRASH,
+                                        egui::vec2(28.0, 22.0),
+                                        "Delete this inpainting stroke",
+                                    )
+                                    .clicked()
                                     {
                                         delete_stroke = Some(index);
                                     }
@@ -126,10 +130,7 @@ impl Sidebar {
 
         if app.gpu_pipeline.is_none() {
             ui.add_space(8.0);
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Open a RAW image to use Inpainting.",
-            );
+            ui.colored_label(egui::Color32::YELLOW, "Open a RAW image to use Inpainting.");
         }
     }
 }

@@ -13,7 +13,14 @@ impl Sidebar {
         // invisible crop handles in the preview, not by oversized visible widgets.
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Reset").clicked() {
+                if crate::ui::icons::phosphor_icon_button(
+                    ui,
+                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                    egui::vec2(28.0, 22.0),
+                    "Reset crop and geometry",
+                )
+                .clicked()
+                {
                     app.geometry = GeometryTransform::default();
                     app.crop_constraint_reference = Some(app.geometry.crop);
                     app.crop_drag = None;

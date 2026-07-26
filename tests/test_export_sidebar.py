@@ -29,7 +29,8 @@ def test_sidebar_has_exactly_four_requested_tabs() -> None:
     assert 'ui.heading("Masks")' not in SIDEBAR
     assert 'ui.heading("Inpainting")' not in SIDEBAR
     assert 'ui.heading("Export")' not in SIDEBAR
-    assert 'ui.small_button("Reset all")' in SIDEBAR
+    assert '"Reset all develop adjustments"' in SIDEBAR
+    assert "egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE" in SIDEBAR
     assert '"Drag on the image. Releasing each stroke runs the local LaMa eraser."' in SIDEBAR
 
 
