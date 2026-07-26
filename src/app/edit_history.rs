@@ -647,7 +647,7 @@ impl AurawApp {
                 self.mark_all_mask_layers_dirty();
             }
             if inpainting_changed {
-                self.queue_preview_processing(crate::pipeline::ProcessingStage::Output);
+                self.queue_preview_processing(crate::pipeline::ProcessingStage::Tone);
             }
             self.mark_pipeline_dirty();
         }

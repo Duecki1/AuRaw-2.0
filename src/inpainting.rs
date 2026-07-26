@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ort::{session::Session, value::Tensor};
+use rayon::prelude::*;
 use ring::digest::{Context as Sha256Context, SHA256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -487,6 +488,7 @@ fn infer_lama(
     // scene-linear domain keeps the fill attached to its surroundings when
     // Develop Exposure or the display transform is changed later.
     let mut generated_scene = decode_lama_output_scene(&output, scene_scale);
+    suppress_lama_checkerboard(&mut generated_scene, &painted_values, LAMA_EDGE);
     match_lama_boundary_color(
         &mut generated_scene,
         &prepared.rgb_rec2020,
@@ -495,7 +497,13 @@ fn infer_lama(
         LAMA_EDGE,
     );
 
-    build_resampled_inpaint_patch(&prepared, &generated_scene, &composite_mask, storage_bounds)
+    build_resampled_inpaint_patch(
+        &prepared,
+        &generated_scene,
+        &composite_mask,
+        &painted_mask,
+        storage_bounds,
+    )
 }
 
 fn localize_dabs(
@@ -625,6 +633,58 @@ fn decode_lama_output_scene(output: &[f32], scene_scale: f32) -> Vec<f32> {
         scene[destination + 2] = generated[2] * inverse_scale;
     }
     scene
+}
+
+/// Reduces the periodic transpose-convolution texture produced by LaMa in
+/// smooth fills. A small binomial filter is blended only into the generated
+/// region and is normalized by mask coverage, so real pixels outside the
+/// stroke cannot bleed into the replacement or soften its boundary.
+fn suppress_lama_checkerboard(generated: &mut [f32], painted_mask: &[f32], edge: u32) {
+    let edge = edge as usize;
+    let pixels = edge.saturating_mul(edge);
+    if edge < 5 || generated.len() != pixels.saturating_mul(3) || painted_mask.len() != pixels {
+        return;
+    }
+
+    const WEIGHTS: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
+    const BLEND: f32 = 0.42;
+    let source = generated.to_vec();
+    generated
+        .par_chunks_mut(3)
+        .enumerate()
+        .for_each(|(index, destination)| {
+            if painted_mask[index] < 0.5 {
+                return;
+            }
+            let x = index % edge;
+            let y = index / edge;
+            let mut sum = [0.0f32; 3];
+            let mut weight_sum = 0.0f32;
+            for (kernel_y, y_weight) in WEIGHTS.iter().copied().enumerate() {
+                let sample_y = (y as isize + kernel_y as isize - 2)
+                    .clamp(0, edge.saturating_sub(1) as isize)
+                    as usize;
+                for (kernel_x, x_weight) in WEIGHTS.iter().copied().enumerate() {
+                    let sample_x = (x as isize + kernel_x as isize - 2)
+                        .clamp(0, edge.saturating_sub(1) as isize)
+                        as usize;
+                    let sample_index = sample_y * edge + sample_x;
+                    let mask_weight = painted_mask[sample_index].clamp(0.0, 1.0);
+                    let weight = x_weight * y_weight * mask_weight;
+                    let source_index = sample_index * 3;
+                    for channel in 0..3 {
+                        sum[channel] += source[source_index + channel] * weight;
+                    }
+                    weight_sum += weight;
+                }
+            }
+            if weight_sum > 1e-5 {
+                for channel in 0..3 {
+                    let filtered = sum[channel] / weight_sum;
+                    destination[channel] += (filtered - destination[channel]) * BLEND;
+                }
+            }
+        });
 }
 
 fn median(values: &mut [f32]) -> Option<f32> {
@@ -889,6 +949,7 @@ fn build_resampled_inpaint_patch(
     prepared: &PreparedInpaintSource,
     generated_scene: &[f32],
     composite_mask: &[u8],
+    painted_mask: &[u8],
     bounds: PixelRect,
 ) -> Result<InpaintPatch> {
     anyhow::ensure!(
@@ -916,7 +977,9 @@ fn build_resampled_inpaint_patch(
         })
         .context("inpainting source dimensions overflow")?;
     anyhow::ensure!(
-        generated_scene.len() == model_pixels * 3 && composite_mask.len() == prepared_pixels,
+        generated_scene.len() == model_pixels * 3
+            && composite_mask.len() == prepared_pixels
+            && painted_mask.len() == prepared_pixels,
         "inpainting result buffers are incomplete"
     );
 
@@ -942,12 +1005,26 @@ fn build_resampled_inpaint_patch(
             .checked_mul(4)
             .context("patch size overflow")?
     ];
-    let replacement_mask = resample_composite_mask(
+    let mut replacement_mask = resample_composite_mask(
         composite_mask,
         prepared.width,
         bounds,
         [raster_width, raster_height],
     );
+    let painted_coverage = resample_composite_mask(
+        painted_mask,
+        prepared.width,
+        bounds,
+        [raster_width, raster_height],
+    );
+    // Every raster cell touched by the user's hard brush is a true removal,
+    // not a translucent blend. Keep the soft composite mask only outside that
+    // painted core so tone/highlight changes can never reveal the old pixels.
+    for (replacement, painted) in replacement_mask.iter_mut().zip(painted_coverage) {
+        if painted > 0 {
+            *replacement = 255;
+        }
+    }
     for raster_y in 0..raster_height {
         let source_y = bounds.y as f32
             + ((raster_y as f32 + 0.5) * bounds.height as f32 / raster_height as f32)
@@ -1069,7 +1146,8 @@ mod tests {
         build_lama_image_tensor, build_lama_mask_tensor, build_resampled_inpaint_patch,
         decode_lama_output_scene, feathered_composite_dabs, inpaint_storage_bounds,
         lama_model_scene_scale, match_lama_boundary_color, resample_composite_mask,
-        sample_scene_bilinear, PixelRect, PreparedInpaintSource, LAMA_EDGE,
+        sample_scene_bilinear, suppress_lama_checkerboard, PixelRect, PreparedInpaintSource,
+        LAMA_EDGE,
     };
     use crate::pipeline::BrushDab;
 
@@ -1142,7 +1220,8 @@ mod tests {
             full_width: 2000,
             full_height: 2000,
         };
-        let patch = build_resampled_inpaint_patch(&prepared, &generated, &mask, bounds).unwrap();
+        let patch =
+            build_resampled_inpaint_patch(&prepared, &generated, &mask, &mask, bounds).unwrap();
         assert_eq!([patch.width, patch.height], [804, 104]);
         assert_eq!(patch.raster_dimensions(), [402, 52]);
         assert_eq!(patch.mask.len(), 402 * 52);
@@ -1237,6 +1316,29 @@ mod tests {
         for channel in 0..3 {
             assert!((generated[center + channel] - source_rgb[channel]).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn checkerboard_suppression_reduces_periodic_generated_texture() {
+        let edge = 16;
+        let pixels = edge * edge;
+        let mut generated = Vec::with_capacity(pixels * 3);
+        for y in 0..edge {
+            for x in 0..edge {
+                let value = if (x + y) % 2 == 0 { 0.4 } else { 0.6 };
+                generated.extend_from_slice(&[value; 3]);
+            }
+        }
+        let mask = vec![1.0; pixels];
+        let contrast = |values: &[f32]| {
+            values
+                .chunks_exact(3)
+                .map(|rgb| (rgb[0] - 0.5).abs())
+                .sum::<f32>()
+        };
+        let before = contrast(&generated);
+        suppress_lama_checkerboard(&mut generated, &mask, edge as u32);
+        assert!(contrast(&generated) < before * 0.7);
     }
 
     #[test]

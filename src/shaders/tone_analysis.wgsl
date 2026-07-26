@@ -11,6 +11,7 @@ struct ToneHistogram {
 @group(0) @binding(16) var<storage, read_write> tone_stats_out: ToneStats;
 @group(0) @binding(17) var tone_guide_read: texture_2d<f32>;
 @group(0) @binding(18) var tone_guide_write: texture_storage_2d<r32float, write>;
+@group(0) @binding(32) var tone_inpaint_tex: texture_2d<f32>;
 
 fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(tone_scene_tex, clamp_pos(pos), 0).xyz;
@@ -23,7 +24,20 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     // Legacy process versions retain their historical fully-profiled analysis
     // path so existing edits do not change appearance. User Exposure remains
     // omitted in both paths and is reintroduced analytically by tonemap.wgsl.
-    let working = cam_to_working(camera_rgb);
+    var working = cam_to_working(camera_rgb);
+    // Tone masks and histogram anchors must analyze the same inpainted scene
+    // that the adjustment graph renders. Reading the original scene here made
+    // erased objects reappear as tonal silhouettes when Highlights/Shadows or
+    // related adaptive controls were moved.
+    let replacement = textureLoad(tone_inpaint_tex, clamp_pos(pos), 0);
+    if replacement.a > 1e-6 {
+        let replacement_working = vec3<f32>(
+            dot(params.inpaint_wb_0.xyz, replacement.rgb),
+            dot(params.inpaint_wb_1.xyz, replacement.rgb),
+            dot(params.inpaint_wb_2.xyz, replacement.rgb),
+        );
+        working = mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
+    }
     let characterized = apply_camera_characterization(working);
     let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
     let exposed = characterized * exp2(profile_exposure_ev);
