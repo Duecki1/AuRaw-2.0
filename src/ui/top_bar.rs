@@ -13,35 +13,13 @@ impl TopBar {
 
     #[cfg(target_os = "android")]
     pub(crate) fn back_icon_button(ui: &mut Ui, size: egui::Vec2) -> egui::Response {
-        let response = ui.add_sized(size, egui::Button::new(""));
-        let visuals = ui.style().interact(&response);
-        let stroke = egui::Stroke::new(
-            visuals.fg_stroke.width.max(2.0),
-            visuals.fg_stroke.color,
-        );
-        let center = response.rect.center();
-        let arm = response.rect.height() * 0.18;
-        let shaft_left = center.x - arm * 0.55;
-        let shaft_right = center.x + arm * 0.90;
-        ui.painter().line_segment(
-            [egui::pos2(shaft_left, center.y), egui::pos2(shaft_right, center.y)],
-            stroke,
-        );
-        ui.painter().line_segment(
-            [
-                egui::pos2(shaft_left, center.y),
-                egui::pos2(shaft_left + arm, center.y - arm),
-            ],
-            stroke,
-        );
-        ui.painter().line_segment(
-            [
-                egui::pos2(shaft_left, center.y),
-                egui::pos2(shaft_left + arm, center.y + arm),
-            ],
-            stroke,
-        );
-        response.on_hover_text("Back to Library")
+        ui.add_sized(
+            size,
+            egui::Button::new(
+                egui::RichText::new(egui_phosphor::regular::ARROW_LEFT).size(size.y * 0.55),
+            ),
+        )
+        .on_hover_text("Back to Library")
     }
 
     fn history_icon_button(
@@ -51,46 +29,16 @@ impl TopBar {
         size: egui::Vec2,
         hover_text: &str,
     ) -> egui::Response {
-        // Paint the symbol instead of using Unicode arrow glyphs. Some Android
-        // font fallbacks render those glyphs as empty squares.
-        let response = ui
-            .add_enabled_ui(enabled, |ui| ui.add_sized(size, egui::Button::new("")))
-            .inner;
-        let widget_visuals = ui.style().interact(&response);
-        let stroke = egui::Stroke::new(
-            widget_visuals.fg_stroke.width.max(2.0),
-            widget_visuals.fg_stroke.color,
-        );
-        let radius = response.rect.width().min(response.rect.height()) * 0.25;
-        let center = response.rect.center() + egui::vec2(0.0, radius * 0.06);
-        let mut arc = Vec::with_capacity(17);
-        for step in 0..=16 {
-            let progress = step as f32 / 16.0;
-            let angle = (150.0_f32 - 220.0 * progress).to_radians();
-            let x = angle.cos() * radius;
-            let y = -angle.sin() * radius;
-            arc.push(center + egui::vec2(if redo { -x } else { x }, y));
-        }
-
-        let arrow_tip = arc[0];
-        ui.painter().add(egui::Shape::line(arc, stroke));
-        let head_direction = if redo { -1.0 } else { 1.0 };
-        ui.painter().line_segment(
-            [
-                arrow_tip,
-                arrow_tip + egui::vec2(head_direction * radius * 0.62, -radius * 0.44),
-            ],
-            stroke,
-        );
-        ui.painter().line_segment(
-            [
-                arrow_tip,
-                arrow_tip + egui::vec2(head_direction * radius * 0.62, radius * 0.44),
-            ],
-            stroke,
-        );
-
-        response.on_hover_text(hover_text)
+        let icon = if redo {
+            egui_phosphor::regular::ARROW_U_UP_RIGHT
+        } else {
+            egui_phosphor::regular::ARROW_U_UP_LEFT
+        };
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(egui::RichText::new(icon).size(size.y * 0.55)).min_size(size),
+        )
+        .on_hover_text(hover_text)
     }
 
     #[cfg(target_os = "android")]
@@ -138,7 +86,6 @@ impl TopBar {
                 app.save_edits_now();
             }
         });
-
     }
 
     #[cfg(not(target_os = "android"))]
@@ -216,7 +163,6 @@ impl TopBar {
                     app.toggle_original_preview();
                 }
             }
-
         });
     }
 }

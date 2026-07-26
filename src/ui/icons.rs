@@ -1,0 +1,43 @@
+use eframe::egui::{self, Response, RichText, Ui, Vec2};
+use egui_phosphor::regular;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiIcon {
+    Adjustments,
+    Crop,
+    Mask,
+    Heal,
+    Export,
+    RotateLeft,
+    RotateRight,
+}
+
+impl UiIcon {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Adjustments => regular::SLIDERS_HORIZONTAL,
+            Self::Crop => regular::CROP,
+            Self::Mask => regular::SELECTION,
+            Self::Heal => regular::BANDAIDS,
+            Self::Export => regular::EXPORT,
+            Self::RotateLeft => regular::ARROW_COUNTER_CLOCKWISE,
+            Self::RotateRight => regular::ARROW_CLOCKWISE,
+        }
+    }
+}
+
+pub fn icon_toggle_button(
+    ui: &mut Ui,
+    icon: UiIcon,
+    selected: bool,
+    size: Vec2,
+    tooltip: &str,
+) -> Response {
+    ui.add_sized(
+        size,
+        egui::Button::new(RichText::new(icon.glyph()).size(size.y * 0.52))
+            .selected(selected)
+            .frame(selected),
+    )
+    .on_hover_text(tooltip)
+}

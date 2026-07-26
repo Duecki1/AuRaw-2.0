@@ -55,10 +55,26 @@ impl Sidebar {
         ui.add_space(4.0);
         ui.strong("Rotation");
         ui.horizontal(|ui| {
-            if ui.button("↶ 90°").clicked() {
+            if crate::ui::icons::icon_toggle_button(
+                ui,
+                crate::ui::icons::UiIcon::RotateLeft,
+                false,
+                egui::vec2(36.0, 30.0),
+                "Rotate 90° counter-clockwise",
+            )
+            .clicked()
+            {
                 app.geometry.rotate_quarter_turn(false);
             }
-            if ui.button("90° ↷").clicked() {
+            if crate::ui::icons::icon_toggle_button(
+                ui,
+                crate::ui::icons::UiIcon::RotateRight,
+                false,
+                egui::vec2(36.0, 30.0),
+                "Rotate 90° clockwise",
+            )
+            .clicked()
+            {
                 app.geometry.rotate_quarter_turn(true);
             }
         });
@@ -139,10 +155,8 @@ impl Sidebar {
         // Keep the crop rectangle itself inside the usable transformed image.
         // Fine rotation and keystone otherwise expose pasteboard at the crop
         // corners even though the overlay can be visually clipped there.
-        app.geometry.fit_crop_inside_transformed_source(
-            source_dimensions.0,
-            source_dimensions.1,
-        );
+        app.geometry
+            .fit_crop_inside_transformed_source(source_dimensions.0, source_dimensions.1);
         if app.geometry != before {
             app.note_geometry_changed();
         }

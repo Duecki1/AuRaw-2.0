@@ -110,7 +110,6 @@ impl PreviewQuality {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CropHandle {
     Move,
@@ -517,6 +516,8 @@ pub struct AurawApp {
     pub(crate) selected_camera_profile: Option<PathBuf>,
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) desktop_sidebar_width: Option<f32>,
     pub(crate) geometry: GeometryTransform,
     /// Runtime-only crop before automatic rotation/keystone containment. This
     /// lets the crop expand again when the user reduces the straighten angle.
@@ -690,7 +691,10 @@ impl AurawApp {
         renderer: &mut eframe::egui_wgpu::Renderer,
     ) -> Option<RawGpuPipeline> {
         let pipeline = self.gpu_pipeline.take();
-        if let Some(texture_id) = pipeline.as_ref().and_then(|pipeline| pipeline.egui_texture_id) {
+        if let Some(texture_id) = pipeline
+            .as_ref()
+            .and_then(|pipeline| pipeline.egui_texture_id)
+        {
             renderer.free_texture(&texture_id);
         }
         for texture_id in [
