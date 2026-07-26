@@ -951,8 +951,13 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                     }
                     bounded("linear feather", *feather, 0.0, 16.0)?;
                 }
-                MaskGeometry::Ai { mask, feather } => {
-                    finite("AI mask feather", &[*feather])?;
+                MaskGeometry::Ai {
+                    mask,
+                    grow,
+                    feather,
+                } => {
+                    finite("AI mask settings", &[*grow, *feather])?;
+                    bounded("AI mask grow", *grow, 0.0, 1.0)?;
                     bounded("AI mask feather", *feather, 0.0, 1.0)?;
                     if let Some(image) = mask {
                         validate_image(image.width, image.height, image.pixels.len(), 1)?;
@@ -960,6 +965,7 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                 }
                 MaskGeometry::Object {
                     mask,
+                    grow,
                     feather,
                     brush_size,
                     edge_refine,
@@ -968,8 +974,9 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                 } => {
                     finite(
                         "object mask settings",
-                        &[*feather, *brush_size, *edge_refine],
+                        &[*grow, *feather, *brush_size, *edge_refine],
                     )?;
+                    bounded("object mask grow", *grow, 0.0, 1.0)?;
                     bounded("object mask feather", *feather, 0.0, 1.0)?;
                     bounded("object brush size", *brush_size, 0.0, 16.0)?;
                     bounded("object edge refine", *edge_refine, 0.0, 1.0)?;
@@ -1957,6 +1964,7 @@ mod tests {
             invert: false,
             geometry: MaskGeometry::Object {
                 mask: Some(MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap()),
+                grow: 0.0,
                 feather: 0.1,
                 brush_size: 0.08,
                 edge_refine: 0.7,

@@ -604,10 +604,14 @@ pub enum MaskGeometry {
     },
     Ai {
         mask: Option<MaskImage>,
+        #[serde(default)]
+        grow: f32,
         feather: f32,
     },
     Object {
         mask: Option<MaskImage>,
+        #[serde(default)]
+        grow: f32,
         feather: f32,
         /// Radius as a fraction of the image's shorter edge. This controls the
         /// on-canvas object prompt brush and is captured before SAM inference.
@@ -667,10 +671,12 @@ impl MaskGeometry {
             },
             MaskKind::Subject | MaskKind::Background => Self::Ai {
                 mask: None,
+                grow: 0.0,
                 feather: 0.0,
             },
             MaskKind::Object => Self::Object {
                 mask: None,
+                grow: 0.0,
                 feather: 0.0,
                 brush_size: default_object_brush_size(),
                 edge_refine: default_object_edge_refine(),
@@ -1335,9 +1341,16 @@ fn rasterize_component(
         ),
         MaskGeometry::Ai {
             mask: Some(mask),
+            grow,
             feather,
         } => {
             let mut coverage = rasterize_mask_image(width, height, mask);
+            let grow = if component.kind == MaskKind::Background {
+                -*grow
+            } else {
+                *grow
+            };
+            grow_probability_mask(&mut coverage, width, height, grow);
             // Feather the subject boundary once, then complement it for Not
             // Subject. This keeps the two AI masks exact opposites at every
             // feather value instead of separately blurring an inverted map.
@@ -1351,10 +1364,12 @@ fn rasterize_component(
         }
         MaskGeometry::Object {
             mask: Some(mask),
+            grow,
             feather,
             ..
         } => {
             let mut coverage = rasterize_mask_image(width, height, mask);
+            grow_probability_mask(&mut coverage, width, height, *grow);
             feather_probability_mask(&mut coverage, width, height, *feather);
             coverage
         }
@@ -1492,6 +1507,33 @@ fn feather_probability_mask(mask: &mut [f32], width: u32, height: u32, feather: 
         let signed_distance =
             distance_to_outside[index] - distance_to_inside[index] + confidence_offset;
         *value = smoothstep(-radius, radius, signed_distance);
+    });
+}
+
+fn grow_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32) {
+    if width == 0 || height == 0 || mask.is_empty() {
+        return;
+    }
+    let grow = grow.clamp(-1.0, 1.0);
+    if grow.abs() <= 1e-5 {
+        return;
+    }
+
+    let width_usize = width as usize;
+    let height_usize = height as usize;
+    let binary = mask
+        .iter()
+        .map(|value| u8::from(*value >= 0.5))
+        .collect::<Vec<_>>();
+    let distance_to_inside = chamfer_distance(&binary, width_usize, height_usize, 1);
+    let distance_to_outside = chamfer_distance(&binary, width_usize, height_usize, 0);
+    let radius = grow * width.min(height) as f32 * 0.05;
+
+    mask.par_iter_mut().enumerate().for_each(|(index, value)| {
+        let confidence_offset = (*value - 0.5) * 1.5;
+        let signed_distance =
+            distance_to_outside[index] - distance_to_inside[index] + confidence_offset + radius;
+        *value = smoothstep(-0.75, 0.75, signed_distance);
     });
 }
 
@@ -2194,14 +2236,14 @@ mod tests {
         let subject = MaskImage::new(8, 8, pixels).unwrap();
         let mut stack = MaskStack::default();
         stack.add_mask(MaskKind::Subject);
-        if let MaskGeometry::Ai { mask, feather } =
+        if let MaskGeometry::Ai { mask, feather, .. } =
             &mut stack.selected_component_mut().unwrap().geometry
         {
             *mask = Some(subject.clone());
             *feather = 0.65;
         }
         stack.add_mask(MaskKind::Background);
-        if let MaskGeometry::Ai { mask, feather } =
+        if let MaskGeometry::Ai { mask, feather, .. } =
             &mut stack.selected_component_mut().unwrap().geometry
         {
             *mask = Some(subject);
@@ -2214,6 +2256,20 @@ mod tests {
             .iter()
             .zip(background.iter())
             .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255));
+    }
+
+    #[test]
+    fn grow_expands_ai_mask_coverage() {
+        let mut coverage = vec![0.0; 64 * 64];
+        for y in 28..36 {
+            for x in 28..36 {
+                coverage[y * 64 + x] = 1.0;
+            }
+        }
+        let original_covered = coverage.iter().filter(|value| **value >= 0.5).count();
+        grow_probability_mask(&mut coverage, 64, 64, 0.5);
+        let grown_covered = coverage.iter().filter(|value| **value >= 0.5).count();
+        assert!(grown_covered > original_covered);
     }
 
     #[test]
