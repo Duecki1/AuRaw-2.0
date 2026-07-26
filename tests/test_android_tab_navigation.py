@@ -31,7 +31,8 @@ def test_android_removes_persistent_page_tab_buttons() -> None:
 
 def test_android_library_has_count_refresh_and_settings_without_path() -> None:
     assert '"{count} RAW {}"' in LIBRARY
-    assert 'egui::Button::new("Refresh")' in LIBRARY
+    assert '"Refresh library"' in LIBRARY
+    assert "egui_phosphor::regular::ARROW_CLOCKWISE" in LIBRARY
     assert 'if ui.button("Settings").clicked()' in LIBRARY
     assert 'app.activate_tab(AppTab::Settings);' in LIBRARY
     assert '#[cfg(not(target_os = "android"))]\n        if let Some(location)' in LIBRARY

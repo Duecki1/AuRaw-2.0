@@ -1674,7 +1674,13 @@ fn android_selection_menu(
     } else {
         "Reset all adjustments"
     };
-    if ui.button(reset_label).clicked() {
+    if ui
+        .button(format!(
+            "{}  {reset_label}",
+            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+        ))
+        .clicked()
+    {
         *library_action = Some(LibraryCardAction::ResetAdjustments(targets()));
         ui.close();
     }
@@ -1934,12 +1940,14 @@ impl Library {
                     }
                 }
 
-                if ui
-                    .add_enabled(
-                        app.library.location.is_some() && !app.library.scanning,
-                        egui::Button::new("Refresh"),
-                    )
-                    .clicked()
+                if crate::ui::icons::phosphor_icon_button_enabled(
+                    ui,
+                    app.library.location.is_some() && !app.library.scanning,
+                    egui_phosphor::regular::ARROW_CLOCKWISE,
+                    egui::vec2(32.0, 26.0),
+                    "Refresh library",
+                )
+                .clicked()
                 {
                     refresh = true;
                 }
@@ -2185,7 +2193,13 @@ impl Library {
                                     "Reset all adjustments"
                                 };
                                 if ui
-                                    .add_enabled(action_enabled, egui::Button::new(reset_label))
+                                    .add_enabled(
+                                        action_enabled,
+                                        egui::Button::new(format!(
+                                            "{}  {reset_label}",
+                                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                                        )),
+                                    )
                                     .clicked()
                                 {
                                     library_action = Some(LibraryCardAction::ResetAdjustments(

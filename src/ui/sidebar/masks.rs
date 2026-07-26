@@ -14,7 +14,24 @@ struct MaskRenameDialog {
     request_focus: bool,
 }
 
+#[derive(Clone)]
+struct SubmaskDragState {
+    source_mask: usize,
+    source_component: usize,
+    source_texture: Option<egui::TextureHandle>,
+    source_name: String,
+    source_badge: String,
+    source_enabled: bool,
+    hover_group: Option<(usize, std::time::Instant)>,
+    drop_target: Option<(usize, usize)>,
+    target_loss_started: Option<std::time::Instant>,
+}
+
 impl Sidebar {
+    fn submask_drag_id() -> egui::Id {
+        egui::Id::new("submask-component-drag")
+    }
+
     fn show_masks(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
         if app.ai_masks_need_update() {
             ui.group(|ui| {
@@ -102,6 +119,26 @@ impl Sidebar {
         let mut group_enabled_changed = false;
         let mut group_geometry_dirty = None;
         let mut component_dirty_mask = None;
+        let (pointer_pos, pointer_down, pointer_released) = ui.input(|input| {
+            (
+                input.pointer.interact_pos(),
+                input.pointer.primary_down(),
+                input.pointer.primary_released(),
+            )
+        });
+        let mut submask_drag = ui
+            .ctx()
+            .data(|data| data.get_temp::<SubmaskDragState>(Self::submask_drag_id()));
+        // Layout uses the target found on the previous frame to reserve a real
+        // card-sized insertion slot. Pointer movement schedules another frame,
+        // so this follows the before/after half of the hovered card without
+        // trying to mutate an already-built egui layout.
+        let displayed_drop_target = submask_drag.as_ref().and_then(|drag| drag.drop_target);
+        if let Some(drag) = &mut submask_drag {
+            drag.drop_target = None;
+        }
+        let mut hovered_group_this_frame = None;
+        let mut hover_open_mask = None;
 
         {
             let mut show_cards = |ui: &mut Ui| {
@@ -152,6 +189,29 @@ impl Sidebar {
                     if response.clicked() && !overflow_clicked {
                         select_mask = Some(index);
                     }
+                    if let (Some(drag), Some(pointer)) = (&mut submask_drag, pointer_pos) {
+                        if response.rect.contains(pointer) {
+                            ui.painter().rect_stroke(
+                                response.rect.shrink(1.0),
+                                5.0,
+                                egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                                egui::StrokeKind::Inside,
+                            );
+                            hovered_group_this_frame = Some(index);
+                            drag.drop_target =
+                                Some((index, app.masks.masks[index].components.len()));
+                            match drag.hover_group {
+                                Some((hovered, started)) if hovered == index => {
+                                    if started.elapsed() >= std::time::Duration::from_millis(650) {
+                                        hover_open_mask = Some(index);
+                                    }
+                                }
+                                _ => {
+                                    drag.hover_group = Some((index, std::time::Instant::now()));
+                                }
+                            }
+                        }
+                    }
                     response.context_menu(|ui| {
                         let mut geometry_changed = false;
                         Self::mask_group_context_menu(
@@ -176,6 +236,17 @@ impl Sidebar {
                     if selected_mask_before == Some(index) {
                         ui.add_space(1.0);
                         for component_index in 0..component_count {
+                            if displayed_drop_target == Some((index, component_index)) {
+                                let placeholder = Self::submask_drop_placeholder(ui);
+                                if pointer_pos
+                                    .is_some_and(|pointer| placeholder.rect.contains(pointer))
+                                {
+                                    if let Some(drag) = &mut submask_drag {
+                                        drag.drop_target = displayed_drop_target;
+                                        drag.hover_group = None;
+                                    }
+                                }
+                            }
                             let component = &app.masks.masks[index].components[component_index];
                             let component_name = component.name.clone();
                             let component_enabled = component.enabled;
@@ -188,6 +259,16 @@ impl Sidebar {
                                     MaskCombineMode::Intersect => egui_phosphor::regular::INTERSECT,
                                 }
                             };
+                            let source_is_dragging = submask_drag.as_ref().is_some_and(|drag| {
+                                drag.source_mask == index
+                                    && drag.source_component == component_index
+                            });
+                            if source_is_dragging {
+                                // Do not reserve an invisible source slot: the
+                                // neighboring cards should immediately close the
+                                // gap while the floating card represents it.
+                                continue;
+                            }
                             let response = Self::mask_thumbnail_card(
                                 ui,
                                 app.mask_thumbnail_component_textures.get(component_index),
@@ -197,6 +278,14 @@ impl Sidebar {
                                 component_enabled,
                                 MaskCardSize::Submask,
                             );
+                            let component_can_drag = component_count > 1;
+                            // `drag_started` only becomes true after the pointer
+                            // travels beyond egui's drag threshold. Give immediate
+                            // feedback while the primary button is merely held so
+                            // the component already feels ready to move.
+                            if component_can_drag && response.is_pointer_button_down_on() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            }
                             let mut menu_geometry_changed = false;
                             let mut menu_remove_component = None;
                             #[cfg(target_os = "android")]
@@ -233,6 +322,43 @@ impl Sidebar {
                             if response.clicked() && !overflow_clicked {
                                 select_component = Some(component_index);
                             }
+                            if response.drag_started() && component_can_drag {
+                                submask_drag = Some(SubmaskDragState {
+                                    source_mask: index,
+                                    source_component: component_index,
+                                    source_texture: app
+                                        .mask_thumbnail_component_textures
+                                        .get(component_index)
+                                        .cloned(),
+                                    source_name: component_name.clone(),
+                                    source_badge: component_badge.to_owned(),
+                                    source_enabled: component_enabled,
+                                    hover_group: None,
+                                    drop_target: Some((index, component_index)),
+                                    target_loss_started: None,
+                                });
+                            }
+                            if let (Some(drag), Some(pointer)) = (&mut submask_drag, pointer_pos) {
+                                if response.rect.contains(pointer) {
+                                    ui.painter().rect_stroke(
+                                        response.rect.shrink(1.0),
+                                        5.0,
+                                        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    let before = match orientation {
+                                        MaskStripOrientation::Horizontal => {
+                                            pointer.x < response.rect.center().x
+                                        }
+                                        MaskStripOrientation::Vertical => {
+                                            pointer.y < response.rect.center().y
+                                        }
+                                    };
+                                    drag.drop_target =
+                                        Some((index, component_index + usize::from(!before)));
+                                    drag.hover_group = None;
+                                }
+                            }
                             response.context_menu(|ui| {
                                 Self::submask_context_menu(
                                     ui,
@@ -252,6 +378,18 @@ impl Sidebar {
                             }
                             if let Some(component_index) = menu_remove_component {
                                 remove_component = Some((index, component_index));
+                            }
+                        }
+                        if displayed_drop_target.is_some_and(|(mask, insert)| {
+                            mask == index && insert >= component_count
+                        }) {
+                            let placeholder = Self::submask_drop_placeholder(ui);
+                            if pointer_pos.is_some_and(|pointer| placeholder.rect.contains(pointer))
+                            {
+                                if let Some(drag) = &mut submask_drag {
+                                    drag.drop_target = displayed_drop_target;
+                                    drag.hover_group = None;
+                                }
                             }
                         }
                         Self::create_submask_card(ui, &mut add_component, orientation);
@@ -282,6 +420,59 @@ impl Sidebar {
             }
         }
 
+        if let Some(drag) = &mut submask_drag {
+            if drag.drop_target.is_some() {
+                drag.target_loss_started = None;
+            } else if let Some(previous_target) = displayed_drop_target {
+                let lost_at = drag
+                    .target_loss_started
+                    .get_or_insert_with(std::time::Instant::now);
+                if lost_at.elapsed() < std::time::Duration::from_millis(120) {
+                    // Crossing the small layout boundary between a placeholder
+                    // and its neighbor can produce one frame with no hit. Keep
+                    // the last slot briefly so the red preview does not flash.
+                    drag.drop_target = Some(previous_target);
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(16));
+                }
+            }
+            if hovered_group_this_frame.is_none() && drag.drop_target.is_none() {
+                drag.hover_group = None;
+            }
+            if drag.drop_target.is_none() {
+                if let Some(pointer) = pointer_pos {
+                    Self::paint_floating_submask(ui, drag, pointer);
+                }
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        if let Some(index) = hover_open_mask {
+            app.masks.selected_mask = Some(index);
+            app.masks.selected_component = Some(0);
+            app.mask_thumbnail_component_mask = None;
+            ui.ctx().request_repaint();
+        }
+
+        let component_drop = if pointer_released {
+            submask_drag
+                .take()
+                .and_then(|drag| drag.drop_target.map(|target| (drag, target)))
+        } else {
+            None
+        };
+        if !pointer_down && !pointer_released {
+            submask_drag = None;
+        }
+        ui.ctx().data_mut(|data| {
+            if let Some(drag) = submask_drag.clone() {
+                data.insert_temp(Self::submask_drag_id(), drag);
+            } else {
+                data.remove::<SubmaskDragState>(Self::submask_drag_id());
+            }
+        });
+
         if group_enabled_changed {
             app.mark_mask_adjustments_dirty();
         }
@@ -292,7 +483,29 @@ impl Sidebar {
             app.mark_mask_geometry_dirty(mask_index);
         }
 
-        if let Some(index) = remove_mask {
+        if let Some((drag, (target_mask, target_insert))) = component_drop {
+            if app
+                .masks
+                .move_submask_component(
+                    drag.source_mask,
+                    drag.source_component,
+                    target_mask,
+                    target_insert,
+                )
+                .is_some()
+            {
+                app.mark_all_mask_layers_dirty();
+                app.mask_thumbnail_component_mask = None;
+                if let Some(kind) = app
+                    .masks
+                    .selected_component()
+                    .map(|component| component.kind)
+                {
+                    app.select_mask_tool(kind);
+                }
+                Self::refresh_mask_thumbnails(ui, app);
+            }
+        } else if let Some(index) = remove_mask {
             app.masks.selected_mask = Some(index);
             app.masks.remove_selected_mask();
             app.mark_all_mask_layers_dirty();
@@ -493,7 +706,13 @@ impl Sidebar {
             ui.close();
         }
         ui.separator();
-        if ui.button("Delete mask group").clicked() {
+        if ui
+            .button(format!(
+                "{}  Delete mask group",
+                egui_phosphor::regular::TRASH
+            ))
+            .clicked()
+        {
             *remove_mask = Some(mask_index);
             ui.close();
         }
@@ -562,7 +781,13 @@ impl Sidebar {
         }
         ui.separator();
         if ui
-            .add_enabled(can_delete, egui::Button::new("Delete sub-mask"))
+            .add_enabled(
+                can_delete,
+                egui::Button::new(format!(
+                    "{}  Delete sub-mask",
+                    egui_phosphor::regular::TRASH
+                )),
+            )
             .on_disabled_hover_text("A mask group must contain at least one sub-mask")
             .clicked()
         {
@@ -890,6 +1115,93 @@ impl Sidebar {
         );
     }
 
+    fn submask_drop_placeholder(ui: &mut Ui) -> egui::Response {
+        use eframe::egui::{Align2, Color32, FontId, Stroke, StrokeKind};
+
+        let (rect, response) =
+            ui.allocate_exact_size(MaskCardSize::Submask.card_size(), egui::Sense::hover());
+        let red = Color32::from_rgb(225, 62, 62);
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 5.0, red.gamma_multiply(0.18));
+        painter.rect_stroke(rect, 5.0, Stroke::new(2.0, red), StrokeKind::Inside);
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "DROP",
+            FontId::proportional(9.0),
+            red,
+        );
+        response
+    }
+
+    fn paint_floating_submask(ui: &Ui, drag: &SubmaskDragState, pointer: egui::Pos2) {
+        use eframe::egui::{Align2, Color32, FontId, LayerId, Order, Stroke, StrokeKind};
+
+        let card_size = MaskCardSize::Submask;
+        let rect =
+            egui::Rect::from_center_size(pointer + egui::vec2(12.0, 12.0), card_size.card_size());
+        let painter = ui.ctx().layer_painter(LayerId::new(
+            Order::Tooltip,
+            egui::Id::new("floating-submask-drag-card"),
+        ));
+        let visuals = ui.visuals();
+        painter.rect_filled(rect, 5.0, visuals.widgets.active.bg_fill);
+        painter.rect_stroke(
+            rect,
+            5.0,
+            Stroke::new(2.0, visuals.selection.bg_fill),
+            StrokeKind::Inside,
+        );
+
+        let image_edge = card_size.image_edge();
+        let image_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.center().x - image_edge * 0.5, rect.min.y + 5.0),
+            egui::vec2(image_edge, image_edge),
+        );
+        painter.rect_filled(image_rect, 3.0, Color32::BLACK);
+        if let Some(texture) = drag.source_texture.as_ref() {
+            painter.image(
+                texture.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                if drag.source_enabled {
+                    Color32::WHITE
+                } else {
+                    Color32::from_white_alpha(80)
+                },
+            );
+        }
+
+        let badge_height = 16.0;
+        let badge_size = egui::vec2(
+            (drag.source_badge.chars().count() as f32 * 9.0 * 0.62 + 8.0).max(badge_height + 2.0),
+            badge_height,
+        );
+        let badge_rect =
+            egui::Rect::from_min_size(image_rect.right_bottom() - badge_size, badge_size);
+        painter.rect_filled(badge_rect, 3.0, Color32::from_black_alpha(210));
+        painter.text(
+            badge_rect.center(),
+            Align2::CENTER_CENTER,
+            &drag.source_badge,
+            FontId::proportional(9.0),
+            Color32::WHITE,
+        );
+
+        let display_label: String = drag.source_name.chars().take(10).collect();
+        painter.text(
+            egui::pos2(rect.center().x, rect.bottom() - 9.0),
+            Align2::CENTER_CENTER,
+            display_label,
+            FontId::proportional(card_size.label_font_size()),
+            if drag.source_enabled {
+                visuals.text_color()
+            } else {
+                visuals.weak_text_color()
+            },
+        );
+    }
+
     fn show_masks_horizontal_details(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         let Some(mask_index) = app.masks.selected_mask else {
             return;
@@ -939,7 +1251,14 @@ impl Sidebar {
             ui.horizontal(|ui| {
                 ui.strong("Local Adjustments");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Reset adjustments").clicked() {
+                    if crate::ui::icons::phosphor_icon_button(
+                        ui,
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                        egui::vec2(28.0, 22.0),
+                        "Reset local adjustments",
+                    )
+                    .clicked()
+                    {
                         mask.adjustments.reset();
                         adjustments_changed = true;
                     }
@@ -1041,7 +1360,14 @@ impl Sidebar {
                             MaskSection::Properties => "Mask Properties",
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Reset adjustments").clicked() {
+                            if crate::ui::icons::phosphor_icon_button(
+                                ui,
+                                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                egui::vec2(28.0, 22.0),
+                                "Reset local adjustments",
+                            )
+                            .clicked()
+                            {
                                 mask.adjustments.reset();
                                 adjustments_changed = true;
                             }
@@ -1151,7 +1477,14 @@ impl Sidebar {
                         0.01,
                         Some("Softness from the brush core to its edge."),
                     );
-                    if ui.small_button("Clear strokes").clicked() {
+                    if crate::ui::icons::phosphor_icon_button(
+                        ui,
+                        egui_phosphor::regular::ERASER,
+                        egui::vec2(28.0, 22.0),
+                        "Clear brush strokes",
+                    )
+                    .clicked()
+                    {
                         dabs.clear();
                         geometry_changed = true;
                     }
@@ -1249,10 +1582,24 @@ impl Sidebar {
                         *request_object = true;
                     }
                     ui.horizontal_wrapped(|ui| {
-                        if ui.small_button("Recalculate object").clicked() {
+                        if crate::ui::icons::phosphor_icon_button(
+                            ui,
+                            egui_phosphor::regular::ARROW_CLOCKWISE,
+                            egui::vec2(28.0, 22.0),
+                            "Recalculate object selection",
+                        )
+                        .clicked()
+                        {
                             *request_object = true;
                         }
-                        if ui.small_button("Clear selection").clicked() {
+                        if crate::ui::icons::phosphor_icon_button(
+                            ui,
+                            egui_phosphor::regular::X,
+                            egui::vec2(28.0, 22.0),
+                            "Clear object selection",
+                        )
+                        .clicked()
+                        {
                             strokes.clear();
                             *generated_mask = None;
                             geometry_changed = true;
@@ -1489,7 +1836,7 @@ impl Sidebar {
 
         let size = card_size.card_size();
         let image_edge = card_size.image_edge();
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         let visuals = ui.visuals();
         let fill = if selected {
             visuals.selection.bg_fill.gamma_multiply(0.24)
@@ -1788,7 +2135,14 @@ impl Sidebar {
                 ui.selectable_value(selected_tab, tab, egui::RichText::new(label).color(color));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Reset curve").clicked() {
+                if crate::ui::icons::phosphor_icon_button(
+                    ui,
+                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                    egui::vec2(28.0, 22.0),
+                    "Reset the selected tone curve",
+                )
+                .clicked()
+                {
                     match *selected_tab {
                         ToneCurveTab::Rgb => adjustment.tone_curve.reset(),
                         ToneCurveTab::Red => adjustment.tone_curve_red.reset(),

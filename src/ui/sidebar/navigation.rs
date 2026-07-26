@@ -87,7 +87,7 @@ impl Sidebar {
                     ui,
                     icon,
                     app.sidebar_tab == tab,
-                    egui::vec2(42.0, 42.0),
+                    egui::vec2(38.0, 38.0),
                     tooltip,
                 )
                 .clicked()
@@ -119,7 +119,14 @@ impl Sidebar {
         // whole Develop panel after the title row was removed.
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Reset all").clicked() {
+                if crate::ui::icons::phosphor_icon_button(
+                    ui,
+                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                    egui::vec2(28.0, 22.0),
+                    "Reset all develop adjustments",
+                )
+                .clicked()
+                {
                     app.reset_develop_adjustments();
                 }
             });

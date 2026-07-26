@@ -41,3 +41,28 @@ pub fn icon_toggle_button(
     )
     .on_hover_text(tooltip)
 }
+
+pub fn phosphor_icon_button(ui: &mut Ui, glyph: &str, size: Vec2, tooltip: &str) -> Response {
+    ui.add_sized(
+        size,
+        egui::Button::new(RichText::new(glyph).size(size.y * 0.55)),
+    )
+    .on_hover_text(tooltip)
+}
+
+pub fn phosphor_icon_button_enabled(
+    ui: &mut Ui,
+    enabled: bool,
+    glyph: &str,
+    size: Vec2,
+    tooltip: &str,
+) -> Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.add_sized(
+            size,
+            egui::Button::new(RichText::new(glyph).size(size.y * 0.55)),
+        )
+    })
+    .inner
+    .on_hover_text(tooltip)
+}

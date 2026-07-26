@@ -10,8 +10,10 @@ TOP_BAR = (ROOT / "src/ui/top_bar.rs").read_text(encoding="utf-8")
 
 def test_desktop_toolbar_toggles_original_and_edited_preview() -> None:
     assert '#[cfg(not(target_os = "android"))]' in TOP_BAR
-    assert '"Show Original"' in TOP_BAR
-    assert '"Show Edited"' in TOP_BAR
+    assert '"Show original preview"' in TOP_BAR
+    assert '"Show edited preview"' in TOP_BAR
+    assert "egui_phosphor::regular::EYE" in TOP_BAR
+    assert "egui_phosphor::regular::EYE_SLASH" in TOP_BAR
     assert "app.original_preview_visible()" in TOP_BAR
     assert "app.toggle_original_preview();" in TOP_BAR
 

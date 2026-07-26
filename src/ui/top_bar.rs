@@ -168,18 +168,25 @@ impl TopBar {
                 if save_response.clicked() {
                     app.save_edits_now();
                 }
-                if ui
-                    .add_enabled(
-                        app.gpu_pipeline.is_some(),
-                        egui::Button::new(if app.original_preview_visible() {
-                            "Show Edited"
-                        } else {
-                            "Show Original"
-                        })
-                        .selected(app.original_preview_visible()),
-                    )
-                    .on_hover_text("Toggle between the original and edited preview")
-                    .clicked()
+                let original_visible = app.original_preview_visible();
+                let preview_icon = if original_visible {
+                    egui_phosphor::regular::EYE
+                } else {
+                    egui_phosphor::regular::EYE_SLASH
+                };
+                let preview_tooltip = if original_visible {
+                    "Show edited preview"
+                } else {
+                    "Show original preview"
+                };
+                if crate::ui::icons::phosphor_icon_button_enabled(
+                    ui,
+                    app.gpu_pipeline.is_some(),
+                    preview_icon,
+                    egui::vec2(32.0, 26.0),
+                    preview_tooltip,
+                )
+                .clicked()
                 {
                     app.toggle_original_preview();
                 }

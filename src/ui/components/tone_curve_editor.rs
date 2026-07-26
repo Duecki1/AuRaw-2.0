@@ -11,6 +11,10 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, CURVE_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
+    // The graph background and grid belong inside the plot, but the curve stroke
+    // and control points need the surrounding UI's clip rect. Otherwise points
+    // on the 0/1 boundaries are cut in half by `painter_at(rect)`.
+    let overlay_painter = ui.painter().with_clip_rect(ui.clip_rect());
     let visuals = ui.visuals();
 
     painter.rect_filled(rect, 4.0, visuals.extreme_bg_color);
@@ -48,14 +52,14 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color
     for sample in 1..=128 {
         let x = sample as f32 / 128.0;
         let next = curve_to_screen(rect, [x, sample_curve(curve, x)]);
-        painter.line_segment([previous, next], Stroke::new(2.0, curve_color));
+        overlay_painter.line_segment([previous, next], Stroke::new(2.0, curve_color));
         previous = next;
     }
 
     for point in curve.points.iter().take(curve.len as usize) {
         let center = curve_to_screen(rect, *point);
-        painter.circle_filled(center, POINT_RADIUS, Color32::WHITE);
-        painter.circle_stroke(center, POINT_RADIUS, Stroke::new(1.5, curve_color));
+        overlay_painter.circle_filled(center, POINT_RADIUS, Color32::WHITE);
+        overlay_painter.circle_stroke(center, POINT_RADIUS, Stroke::new(1.5, curve_color));
     }
 
     let mut changed = false;

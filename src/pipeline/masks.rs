@@ -1028,6 +1028,37 @@ impl MaskStack {
         Some((mask_index, component_index))
     }
 
+    pub fn move_submask_component(
+        &mut self,
+        source_mask: usize,
+        source_component: usize,
+        target_mask: usize,
+        target_insert: usize,
+    ) -> Option<(usize, usize)> {
+        let source = self.masks.get(source_mask)?;
+        if source.components.len() <= 1 || source_component >= source.components.len() {
+            return None;
+        }
+        let target = self.masks.get(target_mask)?;
+        if source_mask != target_mask && target.components.len() >= MAX_MASK_COMPONENTS {
+            return None;
+        }
+
+        let component = self.masks[source_mask].components.remove(source_component);
+        let adjusted_insert = if source_mask == target_mask && target_insert > source_component {
+            target_insert - 1
+        } else {
+            target_insert
+        };
+        let insert_at = adjusted_insert.min(self.masks[target_mask].components.len());
+        self.masks[target_mask]
+            .components
+            .insert(insert_at, component);
+        self.selected_mask = Some(target_mask);
+        self.selected_component = Some(insert_at);
+        Some((target_mask, insert_at))
+    }
+
     pub fn move_mask(&mut self, from: usize, to: usize) -> bool {
         if from == to || from >= self.masks.len() || to >= self.masks.len() {
             return false;
@@ -2361,5 +2392,33 @@ mod tests {
         assert_eq!(both.patches[1], second.patch);
         let after_delete = compose_inpaint_strokes(std::slice::from_ref(&first)).unwrap();
         assert_eq!(after_delete.patches[0], first.patch);
+    }
+
+    #[test]
+    fn submask_components_can_be_reordered_with_insertion_indices() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Brush);
+        stack.add_component(MaskKind::Radial, MaskCombineMode::Add);
+        stack.add_component(MaskKind::Linear, MaskCombineMode::Subtract);
+
+        assert_eq!(stack.masks[0].components[1].kind, MaskKind::Radial);
+        assert_eq!(stack.move_submask_component(0, 1, 0, 3), Some((0, 2)));
+        assert_eq!(stack.masks[0].components[2].kind, MaskKind::Radial);
+        assert_eq!(stack.selected_component, Some(2));
+    }
+
+    #[test]
+    fn submask_components_can_move_between_nonempty_groups() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Brush);
+        stack.add_component(MaskKind::Radial, MaskCombineMode::Add);
+        stack.add_mask(MaskKind::Linear);
+
+        assert_eq!(stack.move_submask_component(0, 1, 1, 1), Some((1, 1)));
+        assert_eq!(stack.masks[0].components.len(), 1);
+        assert_eq!(stack.masks[1].components[1].kind, MaskKind::Radial);
+        assert_eq!(stack.selected_mask, Some(1));
+        assert_eq!(stack.selected_component, Some(1));
+        assert_eq!(stack.move_submask_component(0, 0, 1, 0), None);
     }
 }

@@ -238,7 +238,14 @@ impl Sidebar {
                     ui.selectable_value(selected_tab, tab, text);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Reset curve").clicked() {
+                    if crate::ui::icons::phosphor_icon_button(
+                        ui,
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                        egui::vec2(28.0, 22.0),
+                        "Reset the selected tone curve",
+                    )
+                    .clicked()
+                    {
                         match selected_tab {
                             ToneCurveTab::Rgb => exposure.tone_curve.reset(),
                             ToneCurveTab::Red => exposure.tone_curve_red.reset(),
