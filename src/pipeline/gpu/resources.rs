@@ -149,7 +149,9 @@ fn texture_allocation_bytes(
     format: wgpu::TextureFormat,
 ) -> Result<u64> {
     if width == 0 || height == 0 || depth_or_layers == 0 || mip_levels == 0 {
-        return Err(anyhow!("GPU texture dimensions, layers, and mip levels must be non-zero"));
+        return Err(anyhow!(
+            "GPU texture dimensions, layers, and mip levels must be non-zero"
+        ));
     }
     let bytes_per_texel = texture_format_bytes_per_texel(format)?;
     let mut total = 0u64;
@@ -241,7 +243,12 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
         "demosaic scratch 1",
         "demosaic scratch 2",
     ] {
-        push_entry(&mut entries, name, GpuResourceResidency::Persistent, full(work_format)?);
+        push_entry(
+            &mut entries,
+            name,
+            GpuResourceResidency::Persistent,
+            full(work_format)?,
+        );
     }
     push_entry(
         &mut entries,
@@ -252,15 +259,19 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
 
     let tone_width = input.width.div_ceil(input.tone_scale);
     let tone_height = input.height.div_ceil(input.tone_scale);
-    let tone_bytes = texture_allocation_bytes(
-        tone_width,
-        tone_height,
-        1,
-        1,
-        tone_guide_format(),
-    )?;
-    push_entry(&mut entries, "tone guide A", GpuResourceResidency::Persistent, tone_bytes);
-    push_entry(&mut entries, "tone guide B", GpuResourceResidency::Persistent, tone_bytes);
+    let tone_bytes = texture_allocation_bytes(tone_width, tone_height, 1, 1, tone_guide_format())?;
+    push_entry(
+        &mut entries,
+        "tone guide A",
+        GpuResourceResidency::Persistent,
+        tone_bytes,
+    );
+    push_entry(
+        &mut entries,
+        "tone guide B",
+        GpuResourceResidency::Persistent,
+        tone_bytes,
+    );
 
     let mask_bytes = texture_allocation_bytes(
         input.mask_atlas_edge,
@@ -468,9 +479,9 @@ pub(super) fn work_shader_source(
     }
     match format {
         wgpu::TextureFormat::Rgba16Float => Ok(Cow::Borrowed(source)),
-        wgpu::TextureFormat::Rgba32Float => {
-            Ok(Cow::Owned(source.replace(WORK_FORMAT_MARKER, "rgba32float")))
-        }
+        wgpu::TextureFormat::Rgba32Float => Ok(Cow::Owned(
+            source.replace(WORK_FORMAT_MARKER, "rgba32float"),
+        )),
         _ => Err(anyhow!("unsupported AuRaw work texture format: {format:?}")),
     }
 }
@@ -669,7 +680,6 @@ pub(super) fn validate_raw(raw: &LoadedRaw) -> Result<()> {
     Ok(())
 }
 
-
 fn joint_period(left: u32, right: u32, logical: u32) -> u32 {
     fn gcd(mut a: u64, mut b: u64) -> u64 {
         while b != 0 {
@@ -777,11 +787,7 @@ pub(super) fn create_black_texture(
     texture
 }
 
-pub(super) fn upload_black_texture(
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    raw: &LoadedRaw,
-) {
+pub(super) fn upload_black_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, raw: &LoadedRaw) {
     if raw.black_levels_per_pixel.storage_width() == raw.width
         && raw.black_levels_per_pixel.storage_height() == raw.height
     {
@@ -801,7 +807,9 @@ pub(super) fn upload_black_texture(
     const MAX_EXPANSION_BYTES: usize = MAX_UPLOAD_SCRATCH_BYTES;
     let width = raw.width as usize;
     let row_bytes = width.saturating_mul(std::mem::size_of::<f32>()).max(1);
-    let rows_per_chunk = (MAX_EXPANSION_BYTES / row_bytes).max(1).min(raw.height as usize);
+    let rows_per_chunk = (MAX_EXPANSION_BYTES / row_bytes)
+        .max(1)
+        .min(raw.height as usize);
     BLACK_UPLOAD_SCRATCH.with(|scratch| {
         let mut values = scratch.borrow_mut();
         values.clear();
@@ -821,7 +829,11 @@ pub(super) fn upload_black_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: row_start, z: 0 },
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: row_start,
+                        z: 0,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 bytemuck::cast_slice(values.as_slice()),
@@ -856,11 +868,7 @@ pub(super) fn create_color_texture(
     texture
 }
 
-pub(super) fn upload_color_texture(
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    raw: &LoadedRaw,
-) {
+pub(super) fn upload_color_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, raw: &LoadedRaw) {
     if raw.color_indices.storage_width() == raw.width
         && raw.color_indices.storage_height() == raw.height
     {
@@ -879,7 +887,9 @@ pub(super) fn upload_color_texture(
 
     const MAX_EXPANSION_BYTES: usize = MAX_UPLOAD_SCRATCH_BYTES;
     let width = raw.width as usize;
-    let rows_per_chunk = (MAX_EXPANSION_BYTES / width.max(1)).max(1).min(raw.height as usize);
+    let rows_per_chunk = (MAX_EXPANSION_BYTES / width.max(1))
+        .max(1)
+        .min(raw.height as usize);
     COLOR_UPLOAD_SCRATCH.with(|scratch| {
         let mut values = scratch.borrow_mut();
         values.clear();
@@ -899,7 +909,11 @@ pub(super) fn upload_color_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: row_start, z: 0 },
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: row_start,
+                        z: 0,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 values.as_slice(),
@@ -973,12 +987,8 @@ mod resource_plan_tests {
     fn plan_includes_mask_atlas_and_full_resolution_inpaint() {
         let plan = build_gpu_resource_plan(input()).unwrap();
         assert_eq!(entry_bytes(&plan, "local-mask atlas"), 256 * 256 * 4 * 2);
-        assert_eq!(
-            entry_bytes(&plan, "inpaint texture"),
-            640 * 480 * 8
-        );
+        assert_eq!(entry_bytes(&plan, "inpaint texture"), 640 * 480 * 8);
     }
-
 
     #[test]
     fn plan_includes_fixed_size_inpaint_model_resources_for_small_pipelines() {
@@ -988,9 +998,7 @@ mod resource_plan_tests {
         let plan = build_gpu_resource_plan(small).unwrap();
         assert_eq!(
             entry_bytes(&plan, "scene/inpaint conversion texture"),
-            u64::from(crate::inpainting::LAMA_EDGE)
-                * u64::from(crate::inpainting::LAMA_EDGE)
-                * 16
+            u64::from(crate::inpainting::LAMA_EDGE) * u64::from(crate::inpainting::LAMA_EDGE) * 16
         );
         assert_eq!(
             entry_bytes(&plan, "readback buffer peak"),
@@ -1068,9 +1076,7 @@ mod resource_plan_tests {
         assert!(plan.safety_margin_bytes > 0);
         assert_eq!(
             plan.admitted_gpu_bytes,
-            plan.persistent_gpu_bytes
-                + plan.transient_gpu_peak_bytes
-                + plan.safety_margin_bytes
+            plan.persistent_gpu_bytes + plan.transient_gpu_peak_bytes + plan.safety_margin_bytes
         );
     }
 }

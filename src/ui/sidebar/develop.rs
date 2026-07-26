@@ -112,11 +112,7 @@ impl Sidebar {
                     .width(ui.available_width())
                     .show_ui(ui, |ui| {
                         for model in &models {
-                            ui.selectable_value(
-                                &mut state.selected_model,
-                                model.clone(),
-                                model,
-                            );
+                            ui.selectable_value(&mut state.selected_model, model.clone(), model);
                         }
                     });
             });
@@ -127,7 +123,10 @@ impl Sidebar {
                     state.catalog.status = if state.enabled {
                         format!("Applying {}…", selection.label())
                     } else {
-                        format!("Selected {}. Enable correction to apply it.", selection.label())
+                        format!(
+                            "Selected {}. Enable correction to apply it.",
+                            selection.label()
+                        )
                     };
                 }
                 if state.enabled {
@@ -146,11 +145,7 @@ impl Sidebar {
             } else {
                 state.catalog.status.as_str()
             };
-            ui.label(
-                egui::RichText::new(status)
-                    .size(11.5)
-                    .color(status_color),
-            );
+            ui.label(egui::RichText::new(status).size(11.5).color(status_color));
         });
         rebuild
     }
@@ -287,19 +282,51 @@ impl Sidebar {
         changed
     }
 
-    fn show_color(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
+    fn show_color(
+        ui: &mut Ui,
+        exposure: &mut ExposureParams,
+        as_shot_temperature: Option<f32>,
+        foldable: bool,
+    ) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Color", true, foldable, |ui| {
-            changed |= adjustment_slider(
-                ui,
-                "Temperature",
-                &mut exposure.temperature,
-                -crate::pipeline::GLOBAL_TEMPERATURE_LIMIT
-                    ..=crate::pipeline::GLOBAL_TEMPERATURE_LIMIT,
-                0,
-                1.0,
-                Some("Metadata-aware blue-yellow adaptation with an extended warm/cool range; zero preserves the camera as-shot white balance."),
-            );
+            if let Some(base_kelvin) = as_shot_temperature {
+                let mut kelvin = crate::pipeline::temperature_kelvin_from_offset(
+                    base_kelvin,
+                    exposure.temperature,
+                );
+                let kelvin_changed = ui
+                    // The slider's double-click reset is cached by widget id.
+                    // Include this image's neutral so loading another camera
+                    // white balance also updates the reset value.
+                    .push_id(base_kelvin.to_bits(), |ui| {
+                        adjustment_slider(
+                            ui,
+                            "Temperature (K)",
+                            &mut kelvin,
+                            crate::pipeline::MIN_TEMPERATURE_KELVIN
+                                ..=crate::pipeline::MAX_TEMPERATURE_KELVIN,
+                            0,
+                            10.0,
+                            Some("Scene illuminant color temperature in Kelvin; the as-shot camera white balance is the reset value."),
+                        )
+                    })
+                    .inner;
+                if kelvin_changed {
+                    exposure.temperature =
+                        crate::pipeline::temperature_offset_from_kelvin(base_kelvin, kelvin);
+                    changed = true;
+                }
+            } else {
+                ui.label("Temperature");
+                ui.label(
+                    egui::RichText::new(
+                        "Unavailable: this image has no usable white-balance metadata",
+                    )
+                    .size(11.5)
+                    .color(ui.visuals().weak_text_color()),
+                );
+            }
             changed |= adjustment_slider(
                 ui,
                 "Tint",
@@ -340,11 +367,9 @@ impl Sidebar {
         let mut changed = false;
         let mut contents = |ui: &mut Ui| {
             ui.label(
-                egui::RichText::new(
-                    "Perceptual four-way grading in scene-linear Rec.2020",
-                )
-                .size(11.5)
-                .color(ui.visuals().weak_text_color()),
+                egui::RichText::new("Perceptual four-way grading in scene-linear Rec.2020")
+                    .size(11.5)
+                    .color(ui.visuals().weak_text_color()),
             );
             changed |= color_grading_editor(ui, grading, selected_tab);
         };
@@ -361,13 +386,17 @@ impl Sidebar {
     fn show_detail(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Detail", false, foldable, |ui| {
-            ui.label(egui::RichText::new("Sensor-profiled noise reduction")
-                .strong()
-                .size(11.5));
             ui.label(
-                egui::RichText::new("Signal-dependent multiscale filtering before tone, texture, and sharpening")
-                    .size(10.5)
-                    .color(ui.visuals().weak_text_color()),
+                egui::RichText::new("Sensor-profiled noise reduction")
+                    .strong()
+                    .size(11.5),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Signal-dependent multiscale filtering before tone, texture, and sharpening",
+                )
+                .size(10.5)
+                .color(ui.visuals().weak_text_color()),
             );
             changed |= adjustment_slider(
                 ui,
@@ -520,7 +549,9 @@ impl Sidebar {
                     0.0..=100.0,
                     0,
                     1.0,
-                    Some("Softens and blooms bright light sources without lifting the entire image."),
+                    Some(
+                        "Softens and blooms bright light sources without lifting the entire image.",
+                    ),
                 );
                 if expert_mode {
                     ui.push_id("advanced-glow", |ui| {

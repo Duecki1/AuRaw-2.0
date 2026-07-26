@@ -1524,7 +1524,8 @@ fn sample_rgb_mask(
                 .min(source.height.saturating_sub(1) as u64) as usize;
             for (x, value) in row.iter_mut().enumerate() {
                 let source_x = (x as u64 * source.width as u64 / width.max(1) as u64)
-                    .min(source.width.saturating_sub(1) as u64) as usize;
+                    .min(source.width.saturating_sub(1) as u64)
+                    as usize;
                 let index = (source_y * source.width as usize + source_x) * 4;
                 let rgb = [
                     source.rgba[index] as f32 / 255.0,

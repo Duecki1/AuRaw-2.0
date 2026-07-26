@@ -241,7 +241,9 @@ fn cfa_plane_present(
     (0..scan_height).any(|y| {
         (0..scan_width).any(|x| {
             let index = (y * width + x) as usize;
-            color_indices.get(index).is_some_and(|value| *value == plane)
+            color_indices
+                .get(index)
+                .is_some_and(|value| *value == plane)
         })
     })
 }

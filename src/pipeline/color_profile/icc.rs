@@ -236,8 +236,8 @@ pub(super) fn build_lcms_output_lut(
         },
     };
     let linear = LcmsToneCurve::new(1.0);
-    let input = Profile::new_rgb(&white, &primaries, &[&linear, &linear, &linear])
-        .map_err(|error| {
+    let input =
+        Profile::new_rgb(&white, &primaries, &[&linear, &linear, &linear]).map_err(|error| {
             anyhow!("LCMS2 could not create linear Rec.2020 input profile: {error}")
         })?;
     let absolute_colorimetric = intent == RenderingIntent::AbsoluteColorimetric;
@@ -512,7 +512,9 @@ pub(super) struct DiscoveredDisplayProfile {
 }
 
 #[cfg(not(target_os = "android"))]
-pub(super) fn read_display_profile_file(path: &std::path::Path) -> Result<DiscoveredDisplayProfile> {
+pub(super) fn read_display_profile_file(
+    path: &std::path::Path,
+) -> Result<DiscoveredDisplayProfile> {
     const MAX_DISPLAY_PROFILE_BYTES: u64 = 32 * 1024 * 1024;
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("could not inspect display ICC {}", path.display()))?;
@@ -621,8 +623,18 @@ fn windows_display_profile_path(
     }
     let mut info = MonitorInfoExW {
         cb_size: std::mem::size_of::<MonitorInfoExW>() as u32,
-        monitor: Rect { left: 0, top: 0, right: 0, bottom: 0 },
-        work: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+        monitor: Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        work: Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
         flags: 0,
         device: [0; 32],
     };
@@ -631,14 +643,7 @@ fn windows_display_profile_path(
     }
 
     const DISPLAY: [u16; 8] = [
-        'D' as u16,
-        'I' as u16,
-        'S' as u16,
-        'P' as u16,
-        'L' as u16,
-        'A' as u16,
-        'Y' as u16,
-        0,
+        'D' as u16, 'I' as u16, 'S' as u16, 'P' as u16, 'L' as u16, 'A' as u16, 'Y' as u16, 0,
     ];
     let dc = unsafe {
         CreateDCW(
@@ -661,7 +666,10 @@ fn windows_display_profile_path(
     if !success || capacity == 0 {
         return Ok(None);
     }
-    let end = filename.iter().position(|unit| *unit == 0).unwrap_or(filename.len());
+    let end = filename
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(filename.len());
     let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&filename[..end]));
     if path.as_os_str().is_empty() {
         return Ok(None);
@@ -785,7 +793,10 @@ fn x11_display_profile_bytes(screen_point: Option<[i32; 2]>) -> Result<Option<Ve
     } else {
         format!("_ICC_PROFILE_{monitor_index}")
     };
-    let output = match Command::new("xprop").args(["-root", "-notype", &property]).output() {
+    let output = match Command::new("xprop")
+        .args(["-root", "-notype", &property])
+        .output()
+    {
         Ok(output) if output.status.success() => output,
         _ => return Ok(None),
     };
@@ -899,6 +910,9 @@ mod x11_tests {
     #[test]
     fn parses_decimal_and_hex_xprop_payloads() {
         assert_eq!(parse_xprop_icc_values(" 0, 255, 17 "), vec![0, 255, 17]);
-        assert_eq!(parse_xprop_icc_values(" 0x00, 0xff, 0x11 "), vec![0, 255, 17]);
+        assert_eq!(
+            parse_xprop_icc_values(" 0x00, 0xff, 0x11 "),
+            vec![0, 255, 17]
+        );
     }
 }

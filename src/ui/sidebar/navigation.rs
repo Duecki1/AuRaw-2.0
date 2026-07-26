@@ -81,6 +81,10 @@ impl Sidebar {
 
         let mut changed = false;
         let mut lens_changed = false;
+        let as_shot_temperature = app
+            .original_raw
+            .as_ref()
+            .and_then(|raw| raw.as_shot_temperature_kelvin());
         if layout == ScreenLayout::Vertical {
             match app.adjustment_section {
                 AdjustmentSection::Light => {
@@ -95,7 +99,7 @@ impl Sidebar {
                     );
                 }
                 AdjustmentSection::Color => {
-                    changed |= Self::show_color(ui, &mut app.exposure, false);
+                    changed |= Self::show_color(ui, &mut app.exposure, as_shot_temperature, false);
                 }
                 AdjustmentSection::ColorGrading => {
                     changed |= Self::show_color_grading(
@@ -109,12 +113,7 @@ impl Sidebar {
                     changed |= Self::show_detail(ui, &mut app.exposure, false);
                 }
                 AdjustmentSection::Effects => {
-                    changed |= Self::show_presence(
-                        ui,
-                        &mut app.exposure,
-                        app.expert_mode,
-                        false,
-                    );
+                    changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, false);
                 }
                 AdjustmentSection::ColorMixer => {
                     changed |= Self::show_hsl(ui, &mut app.exposure, false);
@@ -132,13 +131,8 @@ impl Sidebar {
             }
         } else {
             changed |= Self::show_basic(ui, &mut app.exposure, true);
-            changed |= Self::show_tone_curve(
-                ui,
-                &mut app.exposure,
-                &mut app.tone_curve_tab,
-                true,
-            );
-            changed |= Self::show_color(ui, &mut app.exposure, true);
+            changed |= Self::show_tone_curve(ui, &mut app.exposure, &mut app.tone_curve_tab, true);
+            changed |= Self::show_color(ui, &mut app.exposure, as_shot_temperature, true);
             changed |= Self::show_color_grading(
                 ui,
                 &mut app.exposure.color_grading,
@@ -230,7 +224,9 @@ impl Sidebar {
         ui.label(
             egui::RichText::new(format!(
                 "{} matching DCP profiles found for {} {}.",
-                candidates.len(), raw.camera_make, raw.camera_model
+                candidates.len(),
+                raw.camera_make,
+                raw.camera_model
             ))
             .size(11.0)
             .color(ui.visuals().weak_text_color()),

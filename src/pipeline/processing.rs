@@ -86,12 +86,12 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         let end = start + width as usize;
         raw_pixels.extend_from_slice(&raw.raw_pixels[start..end]);
     }
-    let color_indices = raw
-        .color_indices
-        .subregion_clamped(i64::from(x), i64::from(y), width, height);
-    let black_levels_per_pixel = raw
-        .black_levels_per_pixel
-        .subregion_clamped(i64::from(x), i64::from(y), width, height);
+    let color_indices =
+        raw.color_indices
+            .subregion_clamped(i64::from(x), i64::from(y), width, height);
+    let black_levels_per_pixel =
+        raw.black_levels_per_pixel
+            .subregion_clamped(i64::from(x), i64::from(y), width, height);
 
     LoadedRaw {
         width,
@@ -190,10 +190,10 @@ pub fn build_region_proxy(
                 let output_phase_x = px % cfa_period;
                 let macro_x0 = x + (px / cfa_period) * scale * cfa_period;
                 let macro_x1 = (macro_x0 + scale * cfa_period).min(x + region_width);
-                let center_x = (macro_x0 + (macro_x1.saturating_sub(macro_x0)) / 2)
-                    .min(raw.width - 1);
-                let center_y = (macro_y0 + (macro_y1.saturating_sub(macro_y0)) / 2)
-                    .min(raw.height - 1);
+                let center_x =
+                    (macro_x0 + (macro_x1.saturating_sub(macro_x0)) / 2).min(raw.width - 1);
+                let center_y =
+                    (macro_y0 + (macro_y1.saturating_sub(macro_y0)) / 2).min(raw.height - 1);
 
                 // Preserve the source region's CFA phase for detail crops.
                 let phase_x = (x + output_phase_x).min(raw.width - 1);
@@ -250,9 +250,16 @@ pub fn build_region_proxy(
         wb_coeffs: raw.wb_coeffs,
         cam_to_srgb: raw.cam_to_srgb,
         black_levels: raw.black_levels,
-        black_levels_per_pixel: CompactPixelMap::compact_from_dense(width, height, black_levels_per_pixel, 64),
+        black_levels_per_pixel: CompactPixelMap::compact_from_dense(
+            width,
+            height,
+            black_levels_per_pixel,
+            64,
+        ),
         white_levels: raw.white_levels,
-        noise_profile: raw.noise_profile.scaled_variance(1.0 / (scale * scale) as f32),
+        noise_profile: raw
+            .noise_profile
+            .scaled_variance(1.0 / (scale * scale) as f32),
         camera_profile: raw.camera_profile.clone(),
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
@@ -527,9 +534,7 @@ fn fill_padded_tile(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw)
     let width = tile.padded_width as usize;
     let height = tile.padded_height as usize;
     // Keep the reusable tile buffer fully allocated before row slices are taken.
-    tile_raw
-        .raw_pixels
-        .resize(width.saturating_mul(height), 0);
+    tile_raw.raw_pixels.resize(width.saturating_mul(height), 0);
 
     let source_width = raw.width as i64;
     let max_x = source_width.saturating_sub(1);
@@ -615,7 +620,7 @@ mod tests {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
-        lens_geometry: None,
+            lens_geometry: None,
         }
     }
 
@@ -747,7 +752,10 @@ mod tests {
         exposure.glow_amount = 1.0;
         assert!(required_export_tile_halo(&exposure, &masks) > MIN_EXPORT_TILE_HALO);
         exposure.clarity = 1.0;
-        assert_eq!(required_export_tile_halo(&exposure, &masks), EXPORT_TILE_HALO);
+        assert_eq!(
+            required_export_tile_halo(&exposure, &masks),
+            EXPORT_TILE_HALO
+        );
     }
 
     #[test]
@@ -782,18 +790,26 @@ mod tests {
             capture_metadata: Default::default(),
             cfa_kind: CfaKind::Bayer,
             raw_pixels: (0..width * height).map(|value| value as u16).collect(),
-            color_indices: CompactPixelMap::dense(width, height, (0..width * height).map(|value| (value % 4) as u8).collect()),
+            color_indices: CompactPixelMap::dense(
+                width,
+                height,
+                (0..width * height).map(|value| (value % 4) as u8).collect(),
+            ),
             wb_coeffs: [1.0; 4],
             cam_to_srgb: [[0.0; 4]; 3],
             black_levels: [0.0; 4],
-            black_levels_per_pixel: CompactPixelMap::dense(width, height, (0..width * height).map(|value| value as f32).collect()),
+            black_levels_per_pixel: CompactPixelMap::dense(
+                width,
+                height,
+                (0..width * height).map(|value| value as f32).collect(),
+            ),
             white_levels: [1023.0; 4],
             noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
-        lens_geometry: None,
+            lens_geometry: None,
         };
 
         let cropped = crop_raw(&raw, 1, 1, 2, 2);
@@ -846,14 +862,18 @@ mod tests {
             wb_coeffs: [1.0; 4],
             cam_to_srgb: [[0.0; 4]; 3],
             black_levels: [0.0; 4],
-            black_levels_per_pixel: CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
+            black_levels_per_pixel: CompactPixelMap::dense(
+                width,
+                height,
+                vec![0.0; (width * height) as usize],
+            ),
             white_levels: [1023.0; 4],
             noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
-        lens_geometry: None,
+            lens_geometry: None,
         };
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 4 });

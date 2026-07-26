@@ -138,7 +138,6 @@ pub(crate) struct CameraWhiteBalanceModel {
     pub color: CameraColorModel,
 }
 
-
 #[derive(Clone, Debug)]
 pub struct CompactPixelMap<T> {
     width: u32,
@@ -150,8 +149,17 @@ pub struct CompactPixelMap<T> {
 
 impl<T> CompactPixelMap<T> {
     pub fn dense(width: u32, height: u32, values: Vec<T>) -> Self {
-        debug_assert_eq!(values.len(), (width as usize).saturating_mul(height as usize));
-        Self { width, height, storage_width: width, storage_height: height, values }
+        debug_assert_eq!(
+            values.len(),
+            (width as usize).saturating_mul(height as usize)
+        );
+        Self {
+            width,
+            height,
+            storage_width: width,
+            storage_height: height,
+            values,
+        }
     }
 
     pub fn repeating(
@@ -162,18 +170,35 @@ impl<T> CompactPixelMap<T> {
         values: Vec<T>,
     ) -> Self {
         debug_assert!(storage_width > 0 && storage_height > 0);
-        debug_assert_eq!(values.len(), (storage_width as usize).saturating_mul(storage_height as usize));
-        Self { width, height, storage_width, storage_height, values }
+        debug_assert_eq!(
+            values.len(),
+            (storage_width as usize).saturating_mul(storage_height as usize)
+        );
+        Self {
+            width,
+            height,
+            storage_width,
+            storage_height,
+            values,
+        }
     }
 
     pub fn len(&self) -> usize {
         (self.width as usize).saturating_mul(self.height as usize)
     }
 
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
-    pub fn storage_width(&self) -> u32 { self.storage_width }
-    pub fn storage_height(&self) -> u32 { self.storage_height }
-    pub fn storage_slice(&self) -> &[T] { &self.values }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn storage_width(&self) -> u32 {
+        self.storage_width
+    }
+    pub fn storage_height(&self) -> u32 {
+        self.storage_height
+    }
+    pub fn storage_slice(&self) -> &[T] {
+        &self.values
+    }
 
     fn storage_index(&self, index: usize) -> usize {
         let width = self.width.max(1) as usize;
@@ -227,8 +252,14 @@ impl<T: Copy + PartialEq> CompactPixelMap<T> {
             return Self::dense(width, height, values);
         }
         let candidates = [1u32, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
-        for ph in candidates.into_iter().filter(|p| *p <= height && *p <= max_period.max(1)) {
-            for pw in candidates.into_iter().filter(|p| *p <= width && *p <= max_period.max(1)) {
+        for ph in candidates
+            .into_iter()
+            .filter(|p| *p <= height && *p <= max_period.max(1))
+        {
+            for pw in candidates
+                .into_iter()
+                .filter(|p| *p <= width && *p <= max_period.max(1))
+            {
                 let mut matches = true;
                 'outer: for y in 0..height {
                     for x in 0..width {
@@ -254,13 +285,7 @@ impl<T: Copy + PartialEq> CompactPixelMap<T> {
         Self::dense(width, height, values)
     }
 
-    pub fn subregion_clamped(
-        &self,
-        origin_x: i64,
-        origin_y: i64,
-        width: u32,
-        height: u32,
-    ) -> Self {
+    pub fn subregion_clamped(&self, origin_x: i64, origin_y: i64, width: u32, height: u32) -> Self {
         let source_width = self.width.max(1) as i64;
         let source_height = self.height.max(1) as i64;
         let fully_inside = origin_x >= 0
@@ -315,7 +340,9 @@ impl<'a, T> Iterator for CompactPixelMapIter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
         let index = self.next;
-        if index >= self.map.len() { return None; }
+        if index >= self.map.len() {
+            return None;
+        }
         self.next += 1;
         Some(&self.map[index])
     }
@@ -330,7 +357,9 @@ impl<'a, T> ExactSizeIterator for CompactPixelMapIter<'a, T> {}
 impl<'a, T> IntoIterator for &'a CompactPixelMap<T> {
     type Item = &'a T;
     type IntoIter = CompactPixelMapIter<'a, T>;
-    fn into_iter(self) -> Self::IntoIter { self.iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -392,6 +421,15 @@ pub struct LoadedRaw {
 }
 
 impl LoadedRaw {
+    /// Estimated as-shot scene illuminant temperature used as the neutral point
+    /// for the user-facing Kelvin control.
+    pub fn as_shot_temperature_kelvin(&self) -> Option<f32> {
+        self.white_balance_model
+            .as_ref()
+            .map(|model| model.base_cct)
+            .filter(|temperature| temperature.is_finite() && *temperature > 0.0)
+    }
+
     /// Returns the camera-to-working transform and DCP blend for a relative
     /// global white-balance edit. Temperature is expressed as a reciprocal-
     /// temperature (mired) displacement; tint is a Planckian-locus-normal Duv
@@ -547,8 +585,8 @@ mod libraw_loader;
 #[cfg(all(test, libraw_available))]
 mod tests {
     use super::{
-        CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, CompactPixelMap, LoadedRaw,
-        GLOBAL_TEMPERATURE_LIMIT,
+        CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, CompactPixelMap,
+        LoadedRaw, GLOBAL_TEMPERATURE_LIMIT,
     };
 
     fn raw_with_white_balance_model() -> LoadedRaw {

@@ -1,10 +1,10 @@
+use super::geometry::GeometryInverseMap;
 use super::{
     export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
-    required_export_tile_halo, ExposureParams, GpuParams, IccOutputTransform, InpaintLayer,
-    GeometryTransform, LensGeometryMap, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline, TilePlan,
-    TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    required_export_tile_halo, ExposureParams, GeometryTransform, GpuParams, IccOutputTransform,
+    InpaintLayer, LensGeometryMap, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline,
+    TilePlan, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
-use super::geometry::GeometryInverseMap;
 use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
 use eframe::wgpu;
@@ -610,11 +610,7 @@ fn built_in_srgb_icc() -> Vec<u8> {
     )
 }
 
-fn build_matrix_shaper_icc(
-    _name: &str,
-    matrix: [[f32; 3]; 3],
-    transfer: IccTransfer,
-) -> Vec<u8> {
+fn build_matrix_shaper_icc(_name: &str, matrix: [[f32; 3]; 3], transfer: IccTransfer) -> Vec<u8> {
     fn fixed(value: f32) -> [u8; 4] {
         ((value as f64 * 65_536.0).round() as i32).to_be_bytes()
     }
@@ -658,9 +654,18 @@ fn build_matrix_shaper_icc(
 
     let tags = [
         (*b"wtpt", xyz_tag([0.9642, 1.0, 0.8249])),
-        (*b"rXYZ", xyz_tag([matrix[0][0], matrix[1][0], matrix[2][0]])),
-        (*b"gXYZ", xyz_tag([matrix[0][1], matrix[1][1], matrix[2][1]])),
-        (*b"bXYZ", xyz_tag([matrix[0][2], matrix[1][2], matrix[2][2]])),
+        (
+            *b"rXYZ",
+            xyz_tag([matrix[0][0], matrix[1][0], matrix[2][0]]),
+        ),
+        (
+            *b"gXYZ",
+            xyz_tag([matrix[0][1], matrix[1][1], matrix[2][1]]),
+        ),
+        (
+            *b"bXYZ",
+            xyz_tag([matrix[0][2], matrix[1][2], matrix[2][2]]),
+        ),
         (*b"rTRC", curve_tag(transfer)),
         (*b"gTRC", curve_tag(transfer)),
         (*b"bTRC", curve_tag(transfer)),
@@ -742,11 +747,9 @@ fn resolve_export_color(settings: &ExportSettings) -> Result<ResolvedExportColor
                 (132..=64 * 1024 * 1024).contains(&bytes.len()),
                 "output ICC profile has an invalid size"
             );
-            let transform = IccOutputTransform::from_icc(
-                &bytes,
-                super::RenderingIntent::RelativeColorimetric,
-            )
-            .with_context(|| format!("build output transform from {}", path.display()))?;
+            let transform =
+                IccOutputTransform::from_icc(&bytes, super::RenderingIntent::RelativeColorimetric)
+                    .with_context(|| format!("build output transform from {}", path.display()))?;
             Ok(ResolvedExportColor {
                 transform: Some(transform),
                 embedded_icc: Some(bytes),
@@ -831,10 +834,7 @@ fn render_tiled_output<W: Write>(
     row_format: ExportRowFormat,
 ) -> Result<()> {
     validate_export_dimensions(request.output_width, request.output_height)?;
-    let output_transform = request
-        .color
-        .transform
-        .as_ref();
+    let output_transform = request.color.transform.as_ref();
     let mut resizer = LinearLightResizer::new_with_format(
         request.raw.width,
         request.raw.height,
@@ -1040,13 +1040,7 @@ where
                 let rgb = previous_readback
                     .finish(device)
                     .with_context(|| format!("read export tile {}", previous_index + 1))?;
-                stitch_linear_tile_into_band(
-                    &mut band,
-                    raw.width,
-                    band_y,
-                    previous_tile,
-                    &rgb,
-                )?;
+                stitch_linear_tile_into_band(&mut band, raw.width, band_y, previous_tile, &rgb)?;
                 completed_tiles += 1;
                 if !first_progress_logged {
                     first_progress_logged = true;
@@ -1143,7 +1137,9 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
         info.bit_depth = match request.bit_depth {
             ExportBitDepth::Eight => png::BitDepth::Eight,
             ExportBitDepth::Sixteen => png::BitDepth::Sixteen,
-            ExportBitDepth::Float32Linear => unreachable!("float PNG rejected before geometry export"),
+            ExportBitDepth::Float32Linear => {
+                unreachable!("float PNG rejected before geometry export")
+            }
         };
         if let Some(profile) = request.color.embedded_icc.as_ref() {
             info.icc_profile = Some(Cow::Owned(profile.clone()));
@@ -1186,22 +1182,15 @@ fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<
         let row_format = match request.bit_depth {
             ExportBitDepth::Eight => ExportRowFormat::Rgba8,
             ExportBitDepth::Sixteen => ExportRowFormat::Rgba16Be,
-            ExportBitDepth::Float32Linear => unreachable!("float PNG rejected before geometry export"),
+            ExportBitDepth::Float32Linear => {
+                unreachable!("float PNG rejected before geometry export")
+            }
         };
         for y in 0..request.output_height {
             let linear = resampler.output_row(y)?;
-            output_sharpen.push_row(
-                linear,
-                output_transform,
-                row_format,
-                &mut stream,
-            )?;
+            output_sharpen.push_row(linear, output_transform, row_format, &mut stream)?;
         }
-        output_sharpen.finish(
-            output_transform,
-            row_format,
-            &mut stream,
-        )?;
+        output_sharpen.finish(output_transform, row_format, &mut stream)?;
         stream.finish().context("finish transformed PNG data")?;
         writer.finish().context("finish transformed PNG file")?;
         Ok(())
@@ -1247,7 +1236,8 @@ fn export_tiled_jpeg_geometry(
         // SAFETY: the source raster remains open and immutable for the mapping lifetime.
         let source_map = unsafe { memmap2::MmapOptions::new().map(&source_file) }
             .with_context(|| format!("map geometry linear raster {}", source_linear.display()))?;
-        let source = validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
+        let source =
+            validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
         let resampler = GeometryResampler::new_with_lens(
             source,
             request.raw.width,
@@ -1264,7 +1254,10 @@ fn export_tiled_jpeg_geometry(
                 .create_new(true)
                 .open(&transformed_rgb)
                 .with_context(|| {
-                    format!("create transformed RGB raster {}", transformed_rgb.display())
+                    format!(
+                        "create transformed RGB raster {}",
+                        transformed_rgb.display()
+                    )
                 })?;
             let mut writer = BufWriter::new(file);
             let (geometry_width, geometry_height) = request
@@ -1285,22 +1278,23 @@ fn export_tiled_jpeg_geometry(
                     &mut writer,
                 )?;
             }
-            output_sharpen.finish(
-                output_transform,
-                ExportRowFormat::Rgb8,
-                &mut writer,
-            )?;
+            output_sharpen.finish(output_transform, ExportRowFormat::Rgb8, &mut writer)?;
             writer.flush().context("flush transformed RGB raster")?;
         }
         drop(source_map);
         drop(source_file);
 
-        let transformed_file = fs::File::open(&transformed_rgb)
-            .with_context(|| format!("open transformed RGB raster {}", transformed_rgb.display()))?;
+        let transformed_file = fs::File::open(&transformed_rgb).with_context(|| {
+            format!("open transformed RGB raster {}", transformed_rgb.display())
+        })?;
         // SAFETY: the transformed raster remains open and immutable for the mapping lifetime.
         let transformed_map = unsafe { memmap2::MmapOptions::new().map(&transformed_file) }
             .with_context(|| format!("map transformed RGB raster {}", transformed_rgb.display()))?;
-        validate_rgb_raster_len(&transformed_map, request.output_width, request.output_height)?;
+        validate_rgb_raster_len(
+            &transformed_map,
+            request.output_width,
+            request.output_height,
+        )?;
 
         let file = OpenOptions::new()
             .write(true)
@@ -1309,7 +1303,8 @@ fn export_tiled_jpeg_geometry(
             .with_context(|| format!("create staged JPEG {}", encoded_jpeg.display()))?;
         let mut writer = BufWriter::new(file);
         {
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality);
+            let mut encoder =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality);
             encoder
                 .encode(
                     &transformed_map[..],
@@ -1371,14 +1366,18 @@ fn export_tiled_tiff_geometry(
                 .write(true)
                 .create_new(true)
                 .open(&staged_linear)
-                .with_context(|| format!("create geometry linear raster {}", staged_linear.display()))?;
+                .with_context(|| {
+                    format!("create geometry linear raster {}", staged_linear.display())
+                })?;
             let mut writer = BufWriter::new(file);
             stream_tiled_linear_rows(context, request, |_source_y, row| {
                 writer
                     .write_all(bytemuck::cast_slice(row))
                     .context("write TIFF geometry linear source row")
             })?;
-            writer.flush().context("flush TIFF geometry source raster")?;
+            writer
+                .flush()
+                .context("flush TIFF geometry source raster")?;
         }
 
         let source_file = fs::File::open(&staged_linear)
@@ -1386,7 +1385,8 @@ fn export_tiled_tiff_geometry(
         // SAFETY: the staged source remains immutable while mapped.
         let source_map = unsafe { memmap2::MmapOptions::new().map(&source_file) }
             .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
-        let source = validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
+        let source =
+            validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
         let resampler = GeometryResampler::new_with_lens(
             source,
             request.raw.width,
@@ -1443,10 +1443,7 @@ fn tiff_row_format(bit_depth: ExportBitDepth) -> ExportRowFormat {
 }
 
 fn tiff_embedded_profile(color: &ResolvedExportColor) -> Vec<u8> {
-    color
-        .embedded_icc
-        .clone()
-        .unwrap_or_else(built_in_srgb_icc)
+    color.embedded_icc.clone().unwrap_or_else(built_in_srgb_icc)
 }
 
 #[derive(Clone)]
@@ -1495,27 +1492,82 @@ fn write_tiff_header<W: Write>(
         .checked_mul(u64::from(request.output_height))
         .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
         .context("TIFF pixel byte count overflow")?;
-    let pixel_bytes_u32 = u32::try_from(pixel_bytes)
-        .context("TIFF pixel data exceeds classic TIFF's 4 GiB limit")?;
+    let pixel_bytes_u32 =
+        u32::try_from(pixel_bytes).context("TIFF pixel data exceeds classic TIFF's 4 GiB limit")?;
 
     let mut entries = vec![
-        TiffEntry { tag: 256, field_type: 4, count: 1, data: tiff_long(request.output_width) },
-        TiffEntry { tag: 257, field_type: 4, count: 1, data: tiff_long(request.output_height) },
+        TiffEntry {
+            tag: 256,
+            field_type: 4,
+            count: 1,
+            data: tiff_long(request.output_width),
+        },
+        TiffEntry {
+            tag: 257,
+            field_type: 4,
+            count: 1,
+            data: tiff_long(request.output_height),
+        },
         TiffEntry {
             tag: 258,
             field_type: 3,
             count: 3,
             data: [bits.to_le_bytes(), bits.to_le_bytes(), bits.to_le_bytes()].concat(),
         },
-        TiffEntry { tag: 259, field_type: 3, count: 1, data: tiff_short(1) },
-        TiffEntry { tag: 262, field_type: 3, count: 1, data: tiff_short(2) },
-        TiffEntry { tag: 273, field_type: 4, count: 1, data: tiff_long(0) },
-        TiffEntry { tag: 274, field_type: 3, count: 1, data: tiff_short(1) },
-        TiffEntry { tag: 277, field_type: 3, count: 1, data: tiff_short(3) },
-        TiffEntry { tag: 278, field_type: 4, count: 1, data: tiff_long(request.output_height) },
-        TiffEntry { tag: 279, field_type: 4, count: 1, data: tiff_long(pixel_bytes_u32) },
-        TiffEntry { tag: 284, field_type: 3, count: 1, data: tiff_short(1) },
-        TiffEntry { tag: 305, field_type: 2, count: 10, data: tiff_ascii("AuRaw 2.0") },
+        TiffEntry {
+            tag: 259,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(1),
+        },
+        TiffEntry {
+            tag: 262,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(2),
+        },
+        TiffEntry {
+            tag: 273,
+            field_type: 4,
+            count: 1,
+            data: tiff_long(0),
+        },
+        TiffEntry {
+            tag: 274,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(1),
+        },
+        TiffEntry {
+            tag: 277,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(3),
+        },
+        TiffEntry {
+            tag: 278,
+            field_type: 4,
+            count: 1,
+            data: tiff_long(request.output_height),
+        },
+        TiffEntry {
+            tag: 279,
+            field_type: 4,
+            count: 1,
+            data: tiff_long(pixel_bytes_u32),
+        },
+        TiffEntry {
+            tag: 284,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(1),
+        },
+        TiffEntry {
+            tag: 305,
+            field_type: 2,
+            count: 10,
+            data: tiff_ascii("AuRaw 2.0"),
+        },
         TiffEntry {
             tag: 339,
             field_type: 3,
@@ -1539,40 +1591,70 @@ fn write_tiff_header<W: Write>(
         let description = combined_image_description(request.metadata);
         if !description.is_empty() {
             let data = tiff_ascii(&description);
-            entries.push(TiffEntry { tag: 270, field_type: 2, count: data.len() as u32, data });
+            entries.push(TiffEntry {
+                tag: 270,
+                field_type: 2,
+                count: data.len() as u32,
+                data,
+            });
         }
         if !request.metadata.camera_make.trim().is_empty() {
             let data = tiff_ascii(request.metadata.camera_make.trim());
-            entries.push(TiffEntry { tag: 271, field_type: 2, count: data.len() as u32, data });
+            entries.push(TiffEntry {
+                tag: 271,
+                field_type: 2,
+                count: data.len() as u32,
+                data,
+            });
         }
         if !request.metadata.camera_model.trim().is_empty() {
             let data = tiff_ascii(request.metadata.camera_model.trim());
-            entries.push(TiffEntry { tag: 272, field_type: 2, count: data.len() as u32, data });
+            entries.push(TiffEntry {
+                tag: 272,
+                field_type: 2,
+                count: data.len() as u32,
+                data,
+            });
         }
         if !request.metadata.artist.trim().is_empty() {
             let data = tiff_ascii(request.metadata.artist.trim());
-            entries.push(TiffEntry { tag: 315, field_type: 2, count: data.len() as u32, data });
+            entries.push(TiffEntry {
+                tag: 315,
+                field_type: 2,
+                count: data.len() as u32,
+                data,
+            });
         }
     }
 
     entries.sort_by_key(|entry| entry.tag);
     let ifd_size = 2usize
-        .checked_add(entries.len().checked_mul(12).context("TIFF IFD size overflow")?)
+        .checked_add(
+            entries
+                .len()
+                .checked_mul(12)
+                .context("TIFF IFD size overflow")?,
+        )
         .and_then(|value| value.checked_add(4))
         .context("TIFF IFD size overflow")?;
-    let mut cursor = 8usize.checked_add(ifd_size).context("TIFF header size overflow")?;
+    let mut cursor = 8usize
+        .checked_add(ifd_size)
+        .context("TIFF header size overflow")?;
     let mut external_offsets = Vec::with_capacity(entries.len());
     for entry in &entries {
         if entry.data.len() > 4 {
             cursor = (cursor + 1) & !1;
             external_offsets.push(Some(cursor));
-            cursor = cursor.checked_add(entry.data.len()).context("TIFF metadata size overflow")?;
+            cursor = cursor
+                .checked_add(entry.data.len())
+                .context("TIFF metadata size overflow")?;
         } else {
             external_offsets.push(None);
         }
     }
     cursor = (cursor + 3) & !3;
-    let pixel_offset = u32::try_from(cursor).context("TIFF header exceeds classic TIFF offset range")?;
+    let pixel_offset =
+        u32::try_from(cursor).context("TIFF header exceeds classic TIFF offset range")?;
     let total_len = u64::from(pixel_offset)
         .checked_add(pixel_bytes)
         .context("TIFF file size overflow")?;
@@ -1585,27 +1667,45 @@ fn write_tiff_header<W: Write>(
     }
 
     output.write_all(b"II").context("write TIFF byte order")?;
-    output.write_all(&42u16.to_le_bytes()).context("write TIFF magic")?;
-    output.write_all(&8u32.to_le_bytes()).context("write TIFF IFD offset")?;
+    output
+        .write_all(&42u16.to_le_bytes())
+        .context("write TIFF magic")?;
+    output
+        .write_all(&8u32.to_le_bytes())
+        .context("write TIFF IFD offset")?;
     output
         .write_all(&(entries.len() as u16).to_le_bytes())
         .context("write TIFF entry count")?;
 
     for (entry, external_offset) in entries.iter().zip(&external_offsets) {
-        output.write_all(&entry.tag.to_le_bytes()).context("write TIFF tag")?;
-        output.write_all(&entry.field_type.to_le_bytes()).context("write TIFF field type")?;
-        output.write_all(&entry.count.to_le_bytes()).context("write TIFF field count")?;
+        output
+            .write_all(&entry.tag.to_le_bytes())
+            .context("write TIFF tag")?;
+        output
+            .write_all(&entry.field_type.to_le_bytes())
+            .context("write TIFF field type")?;
+        output
+            .write_all(&entry.count.to_le_bytes())
+            .context("write TIFF field count")?;
         if let Some(offset) = external_offset {
             output
-                .write_all(&u32::try_from(*offset).context("TIFF metadata offset overflow")?.to_le_bytes())
+                .write_all(
+                    &u32::try_from(*offset)
+                        .context("TIFF metadata offset overflow")?
+                        .to_le_bytes(),
+                )
                 .context("write TIFF value offset")?;
         } else {
             let mut inline = [0u8; 4];
             inline[..entry.data.len()].copy_from_slice(&entry.data);
-            output.write_all(&inline).context("write TIFF inline value")?;
+            output
+                .write_all(&inline)
+                .context("write TIFF inline value")?;
         }
     }
-    output.write_all(&0u32.to_le_bytes()).context("write TIFF next IFD")?;
+    output
+        .write_all(&0u32.to_le_bytes())
+        .context("write TIFF next IFD")?;
 
     let mut written = 8 + ifd_size;
     for (entry, external_offset) in entries.iter().zip(external_offsets) {
@@ -1614,7 +1714,9 @@ fn write_tiff_header<W: Write>(
                 output.write_all(&[0]).context("pad TIFF metadata")?;
                 written += 1;
             }
-            output.write_all(&entry.data).context("write TIFF metadata payload")?;
+            output
+                .write_all(&entry.data)
+                .context("write TIFF metadata payload")?;
             written += entry.data.len();
         }
     }
@@ -1637,7 +1739,8 @@ fn validate_linear_rgb_raster(bytes: &[u8], width: u32, height: u32) -> Result<&
         u64::try_from(bytes.len()).unwrap_or(u64::MAX) == expected_bytes,
         "linear RGB raster length does not match its dimensions"
     );
-    bytemuck::try_cast_slice(bytes).map_err(|error| anyhow::anyhow!("map linear RGB raster: {error}"))
+    bytemuck::try_cast_slice(bytes)
+        .map_err(|error| anyhow::anyhow!("map linear RGB raster: {error}"))
 }
 
 fn validate_rgb_raster_len(bytes: &[u8], width: u32, height: u32) -> Result<()> {
@@ -1702,7 +1805,10 @@ impl<'a> GeometryResampler<'a> {
         output_height: u32,
     ) -> Result<Self> {
         validate_export_dimensions(output_width, output_height)?;
-        anyhow::ensure!(source_width > 0 && source_height > 0, "source image is empty");
+        anyhow::ensure!(
+            source_width > 0 && source_height > 0,
+            "source image is empty"
+        );
         anyhow::ensure!(
             source.len() == checked_rgb_len(source_width, source_height)?,
             "linear geometry raster length does not match its dimensions"
@@ -1715,8 +1821,9 @@ impl<'a> GeometryResampler<'a> {
             output_width,
             output_height,
         );
-        let affine_filter =
-            lens_geometry.is_none().then(|| geometry_filter_axes(inverse_map.pixel_jacobian()));
+        let affine_filter = lens_geometry
+            .is_none()
+            .then(|| geometry_filter_axes(inverse_map.pixel_jacobian()));
         Ok(Self {
             source,
             source_width,
@@ -1809,9 +1916,8 @@ impl<'a> GeometryResampler<'a> {
                 if weight == 0.0 {
                     continue;
                 }
-                let index = (source_y as usize * self.source_width as usize
-                    + source_x as usize)
-                    * 3;
+                let index =
+                    (source_y as usize * self.source_width as usize + source_x as usize) * 3;
                 for channel in 0..3 {
                     sum[channel] += self.source[index + channel] * weight;
                 }
@@ -1826,10 +1932,18 @@ impl<'a> GeometryResampler<'a> {
             return sum;
         }
 
-        let nearest_x = x.round().clamp(0.0, self.source_width.saturating_sub(1) as f32) as u32;
-        let nearest_y = y.round().clamp(0.0, self.source_height.saturating_sub(1) as f32) as u32;
+        let nearest_x = x
+            .round()
+            .clamp(0.0, self.source_width.saturating_sub(1) as f32) as u32;
+        let nearest_y = y
+            .round()
+            .clamp(0.0, self.source_height.saturating_sub(1) as f32) as u32;
         let index = (nearest_y as usize * self.source_width as usize + nearest_x as usize) * 3;
-        [self.source[index], self.source[index + 1], self.source[index + 2]]
+        [
+            self.source[index],
+            self.source[index + 1],
+            self.source[index + 2],
+        ]
     }
 }
 
@@ -1870,10 +1984,8 @@ fn geometry_filter_axes(jacobian: [[f32; 2]; 2]) -> GeometryFilterAxes {
     let minor = [-major[1], major[0]];
     let major_scale = lambda_major.sqrt().max(1.0);
     let minor_scale = lambda_minor.sqrt().max(1.0);
-    let radius_x = 2.0
-        * (major[0].abs() * major_scale + minor[0].abs() * minor_scale);
-    let radius_y = 2.0
-        * (major[1].abs() * major_scale + minor[1].abs() * minor_scale);
+    let radius_x = 2.0 * (major[0].abs() * major_scale + minor[0].abs() * minor_scale);
+    let radius_y = 2.0 * (major[1].abs() * major_scale + minor[1].abs() * minor_scale);
     GeometryFilterAxes {
         major,
         minor,
@@ -1955,10 +2067,8 @@ fn export_tiled_jpeg(
             .with_context(|| format!("create staged JPEG {}", encoded_jpeg.display()))?;
         let mut writer = BufWriter::new(file);
         {
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                &mut writer,
-                quality,
-            );
+            let mut encoder =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality);
             encoder
                 .encode(
                     &mapped[..],
@@ -2007,7 +2117,8 @@ fn write_final_jpeg(
                     .with_context(|| format!("open staged JPEG {}", encoded_path.display()))?,
             );
             let mut output = BufWriter::new(open_export_destination(output_path)?);
-            std::io::copy(&mut input, &mut output).context("copy JPEG to direct export destination")?;
+            std::io::copy(&mut input, &mut output)
+                .context("copy JPEG to direct export destination")?;
             output.flush().context("flush direct JPEG export")?;
             return Ok(());
         }
@@ -2047,7 +2158,9 @@ fn write_final_jpeg(
             .context("JPEG EXIF segment length overflow")?;
         let segment_len = u16::try_from(segment_len)
             .context("JPEG EXIF metadata exceeds the APP1 segment limit")?;
-        output.write_all(&[0xff, 0xe1]).context("write JPEG APP1 marker")?;
+        output
+            .write_all(&[0xff, 0xe1])
+            .context("write JPEG APP1 marker")?;
         output
             .write_all(&segment_len.to_be_bytes())
             .context("write JPEG APP1 length")?;
@@ -2071,16 +2184,25 @@ fn write_jpeg_icc_segments<W: Write>(output: &mut W, profile: &[u8]) -> Result<(
         "ICC profile is too large for JPEG APP2 chunking"
     );
     for (index, chunk) in profile.chunks(MAX_CHUNK).enumerate() {
-        let payload_len = ICC_HEADER.len()
+        let payload_len = ICC_HEADER
+            .len()
             .checked_add(2)
             .and_then(|value| value.checked_add(chunk.len()))
             .context("JPEG ICC segment length overflow")?;
-        let segment_len = u16::try_from(payload_len + 2)
-            .context("JPEG ICC segment exceeds APP2 size limit")?;
-        output.write_all(&[0xff, 0xe2]).context("write JPEG APP2 marker")?;
-        output.write_all(&segment_len.to_be_bytes()).context("write JPEG ICC length")?;
-        output.write_all(ICC_HEADER).context("write JPEG ICC signature")?;
-        output.write_all(&[(index + 1) as u8, total as u8]).context("write JPEG ICC sequence")?;
+        let segment_len =
+            u16::try_from(payload_len + 2).context("JPEG ICC segment exceeds APP2 size limit")?;
+        output
+            .write_all(&[0xff, 0xe2])
+            .context("write JPEG APP2 marker")?;
+        output
+            .write_all(&segment_len.to_be_bytes())
+            .context("write JPEG ICC length")?;
+        output
+            .write_all(ICC_HEADER)
+            .context("write JPEG ICC signature")?;
+        output
+            .write_all(&[(index + 1) as u8, total as u8])
+            .context("write JPEG ICC sequence")?;
         output.write_all(chunk).context("write JPEG ICC payload")?;
     }
     Ok(())
@@ -2097,7 +2219,6 @@ struct OutputSampleWeight {
     output_index: u32,
     weight: f32,
 }
-
 
 // Stage 3: output detail.
 //
@@ -2650,7 +2771,9 @@ fn encode_output_row(
         .checked_mul(bytes_per_pixel)
         .context("encoded row overflow")?;
     let mut encoded = Vec::new();
-    encoded.try_reserve_exact(bytes).context("reserve encoded export row")?;
+    encoded
+        .try_reserve_exact(bytes)
+        .context("reserve encoded export row")?;
 
     for rgb in row.chunks_exact(3) {
         anyhow::ensure!(
@@ -3263,9 +3386,8 @@ fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_heigh
         });
     }
     let mut user_comment = b"ASCII\0\0\0".to_vec();
-    user_comment.extend_from_slice(
-        &nul_terminated_exif_ascii(&combined_image_description(metadata))[..],
-    );
+    user_comment
+        .extend_from_slice(&nul_terminated_exif_ascii(&combined_image_description(metadata))[..]);
     exif_entries.push(ExifEntry {
         tag: 0x9286,
         value: ExifValue::Undefined(user_comment),
@@ -3367,7 +3489,9 @@ mod tests {
             b"Studio portrait".as_slice(),
             b"Photographer\0".as_slice(),
         ] {
-            assert!(exif.windows(expected.len()).any(|window| window == expected));
+            assert!(exif
+                .windows(expected.len())
+                .any(|window| window == expected));
         }
 
         let read_u16 = |offset: usize| u16::from_le_bytes([exif[offset], exif[offset + 1]]);
@@ -3412,12 +3536,9 @@ mod tests {
     fn jpeg_rows_omit_png_alpha_bytes() {
         let transform = crate::pipeline::IccOutputTransform::srgb();
         let rgba = encode_srgb_row(&[0.18, 0.18, 0.18], &transform).unwrap();
-        let rgb = encode_srgb_row_with_format(
-            &[0.18, 0.18, 0.18],
-            &transform,
-            ExportRowFormat::Rgb8,
-        )
-        .unwrap();
+        let rgb =
+            encode_srgb_row_with_format(&[0.18, 0.18, 0.18], &transform, ExportRowFormat::Rgb8)
+                .unwrap();
         assert_eq!(rgba.len(), 4);
         assert_eq!(rgb.len(), 3);
         assert_eq!(&rgba[..3], &rgb);
@@ -3467,15 +3588,8 @@ mod tests {
         let source = (0..4 * 3 * 3)
             .map(|index| index as f32 / 37.0)
             .collect::<Vec<_>>();
-        let resampler = GeometryResampler::new(
-            &source,
-            4,
-            3,
-            GeometryTransform::default(),
-            4,
-            3,
-        )
-        .unwrap();
+        let resampler =
+            GeometryResampler::new(&source, 4, 3, GeometryTransform::default(), 4, 3).unwrap();
         let mut output = Vec::new();
         for y in 0..3 {
             output.extend_from_slice(&resampler.output_row(y).unwrap());
@@ -3486,8 +3600,8 @@ mod tests {
     #[test]
     fn geometry_resampler_quarter_turn_preserves_exact_pixels() {
         let source = [
-            1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0,
-            4.0, 4.0, 4.0, 5.0, 5.0, 5.0, 6.0, 6.0, 6.0,
+            1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 5.0, 5.0, 5.0, 6.0, 6.0,
+            6.0,
         ];
         let geometry = GeometryTransform {
             quarter_turns: 1,
@@ -3495,9 +3609,8 @@ mod tests {
         };
         let resampler = GeometryResampler::new(&source, 3, 2, geometry, 2, 3).unwrap();
         let expected = [
-            4.0, 4.0, 4.0, 1.0, 1.0, 1.0,
-            5.0, 5.0, 5.0, 2.0, 2.0, 2.0,
-            6.0, 6.0, 6.0, 3.0, 3.0, 3.0,
+            4.0, 4.0, 4.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 2.0, 2.0, 2.0, 6.0, 6.0, 6.0, 3.0, 3.0,
+            3.0,
         ];
         let mut output = Vec::new();
         for y in 0..3 {
@@ -3509,25 +3622,15 @@ mod tests {
     #[test]
     fn geometry_downsample_accumulates_linear_values_before_encoding() {
         let source = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        let resampler = GeometryResampler::new(
-            &source,
-            2,
-            1,
-            GeometryTransform::default(),
-            1,
-            1,
-        )
-        .unwrap();
+        let resampler =
+            GeometryResampler::new(&source, 2, 1, GeometryTransform::default(), 1, 1).unwrap();
         let row = resampler.output_row(0).unwrap();
         for value in &row {
             assert!((*value - 0.5).abs() < 1e-5);
         }
-        let encoded = encode_srgb_row_with_format(
-            &row,
-            &IccOutputTransform::srgb(),
-            ExportRowFormat::Rgb8,
-        )
-        .unwrap();
+        let encoded =
+            encode_srgb_row_with_format(&row, &IccOutputTransform::srgb(), ExportRowFormat::Rgb8)
+                .unwrap();
         assert!(encoded.iter().all(|value| *value > 170));
     }
 

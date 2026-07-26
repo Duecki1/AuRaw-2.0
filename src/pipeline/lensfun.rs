@@ -94,12 +94,11 @@ mod imp {
     }
 
     use ffi::{
-        lf_db_destroy, lf_db_find_cameras, lf_db_find_cameras_ext, lf_db_find_lenses_hd,
-        lf_db_get_lenses, lf_db_load, lf_db_load_file, lf_db_new, lf_free, lf_mlstr_get,
-        lf_modifier_add_coord_callback_scale, lf_modifier_apply_color_modification,
-        lf_modifier_apply_subpixel_geometry_distortion, lf_modifier_destroy,
-        lf_modifier_get_auto_scale, lf_modifier_initialize, lf_modifier_new, lfCamera,
-        lfDatabase, lfLens, lfModifier,
+        lfCamera, lfDatabase, lfLens, lfModifier, lf_db_destroy, lf_db_find_cameras,
+        lf_db_find_cameras_ext, lf_db_find_lenses_hd, lf_db_get_lenses, lf_db_load,
+        lf_db_load_file, lf_db_new, lf_free, lf_mlstr_get, lf_modifier_add_coord_callback_scale,
+        lf_modifier_apply_color_modification, lf_modifier_apply_subpixel_geometry_distortion,
+        lf_modifier_destroy, lf_modifier_get_auto_scale, lf_modifier_initialize, lf_modifier_new,
     };
 
     // Bindgen reads these values and all accessed structure layouts from the
@@ -340,8 +339,8 @@ mod imp {
 
         // If the camera is absent from the database, Lensfun's calibration
         // crop factor is the safest available fallback for manual correction.
-        let lens_fields = lens_fields(lens)
-            .ok_or_else(|| anyhow!("Lensfun returned a null lens profile"))?;
+        let lens_fields =
+            lens_fields(lens).ok_or_else(|| anyhow!("Lensfun returned a null lens profile"))?;
         let crop = camera
             .and_then(camera_crop_factor)
             .and_then(positive)
@@ -498,15 +497,13 @@ mod imp {
             let y = if grid_height <= 1 {
                 0.0
             } else {
-                grid_y as f32 * raw.height.saturating_sub(1) as f32
-                    / (grid_height - 1) as f32
+                grid_y as f32 * raw.height.saturating_sub(1) as f32 / (grid_height - 1) as f32
             };
             for grid_x in 0..grid_width {
                 let x = if grid_width <= 1 {
                     0.0
                 } else {
-                    grid_x as f32 * raw.width.saturating_sub(1) as f32
-                        / (grid_width - 1) as f32
+                    grid_x as f32 * raw.width.saturating_sub(1) as f32 / (grid_width - 1) as f32
                 };
                 mapped.fill(0.0);
                 // SAFETY: the output contains six floats for one RGB subpixel
@@ -530,14 +527,8 @@ mod imp {
             }
         }
 
-        let map = LensGeometryMap::new(
-            raw.width,
-            raw.height,
-            grid_width,
-            grid_height,
-            coordinates,
-        )
-        .ok_or_else(|| anyhow!("Lensfun produced an invalid distortion map"))?;
+        let map = LensGeometryMap::new(raw.width, raw.height, grid_width, grid_height, coordinates)
+            .ok_or_else(|| anyhow!("Lensfun produced an invalid distortion map"))?;
         Ok(Some(Arc::new(map)))
     }
 
@@ -955,10 +946,7 @@ mod imp {
         let d = corrected_sample_at(raw, indices[3], vignette_enabled, vignette_gains);
         let top = (lerp(a.0, b.0, tx), lerp(a.1, b.1, tx));
         let bottom = (lerp(c.0, d.0, tx), lerp(c.1, d.1, tx));
-        Some((
-            lerp(top.0, bottom.0, ty),
-            lerp(top.1, bottom.1, ty),
-        ))
+        Some((lerp(top.0, bottom.0, ty), lerp(top.1, bottom.1, ty)))
     }
 
     fn bayer_axis_samples(coordinate: f32, extent: u32, phase: u32) -> Option<(u32, u32, f32)> {
@@ -975,8 +963,7 @@ mod imp {
             return Some((first, first, 0.0));
         }
 
-        let lattice = ((coordinate - first as f32) * 0.5)
-            .clamp(0.0, ((last - first) / 2) as f32);
+        let lattice = ((coordinate - first as f32) * 0.5).clamp(0.0, ((last - first) / 2) as f32);
         let lower_step = lattice.floor() as u32;
         let upper_step = (lower_step + 1).min((last - first) / 2);
         let lower = first + lower_step * 2;
