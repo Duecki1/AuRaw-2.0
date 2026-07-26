@@ -1514,6 +1514,7 @@ impl Sidebar {
                 }
                 MaskGeometry::Ai {
                     mask: generated_mask,
+                    grow,
                     feather,
                 } => {
                     if generated_mask.is_none() {
@@ -1527,6 +1528,15 @@ impl Sidebar {
                     }
                     geometry_changed |= adjustment_slider(
                         ui,
+                        "Grow",
+                        grow,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Expands the AI mask beyond its detected boundary."),
+                    );
+                    geometry_changed |= adjustment_slider(
+                        ui,
                         "Feather",
                         feather,
                         0.0..=1.0,
@@ -1537,6 +1547,7 @@ impl Sidebar {
                 }
                 MaskGeometry::Object {
                     mask: generated_mask,
+                    grow,
                     feather,
                     brush_size,
                     edge_refine,
@@ -1559,6 +1570,15 @@ impl Sidebar {
                         Some("Controls the hard-edged selection brush. Its on-screen size stays constant while zooming for finer detail."),
                     );
                     ui.add_space(4.0);
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Grow",
+                        grow,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Expands the final object mask beyond its detected boundary."),
+                    );
                     geometry_changed |= adjustment_slider(
                         ui,
                         "Mask feather",
