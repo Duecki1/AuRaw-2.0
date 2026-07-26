@@ -27,10 +27,18 @@ def test_legacy_sibling_thumbnail_caches_are_migrated_not_recreated() -> None:
 
 def test_export_sidebar_reserves_the_scrollbar_gutter_for_all_controls() -> None:
     show_export = EXPORT[EXPORT.index("fn show_export"):]
-    assert "ui.available_width() - Self::SCROLLBAR_GUTTER" in show_export
-    assert show_export.index("ui.set_width(content_width)") < show_export.index(
-        "export_settings_controls"
-    )
-    assert show_export.index("ui.set_max_width(content_width)") < show_export.index(
-        'Button::new("Export PNG…")'
-    )
+    assert "let content_width = ui.available_width().max(1.0);" in show_export
+    assert "ui.available_width() - Self::SCROLLBAR_GUTTER" not in show_export
+    assert "let column_width = content_width;" in show_export
+    assert "egui::vec2(column_width, 0.0)" in show_export
+    assert "allocate_ui_with_layout" in show_export
+    assert "ui.set_min_width(column_width)" in show_export
+    assert "ui.set_max_width(column_width)" in show_export
+    assert show_export.count("[action_width, 30.0]") == 3
+
+
+def test_jpeg_quality_uses_the_shared_full_width_adjustment_slider() -> None:
+    jpeg = EXPORT[EXPORT.index('ui.strong("JPEG")') : EXPORT.index("impl Sidebar")]
+    assert "adjustment_slider(" in jpeg
+    assert "&mut settings.jpeg_quality" in jpeg
+    assert "egui::Slider::new(&mut settings.jpeg_quality" not in jpeg

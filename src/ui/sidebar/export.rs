@@ -99,8 +99,12 @@ pub(crate) fn export_settings_controls(
         ui.label(
             egui::RichText::new(match settings.bit_depth {
                 ExportBitDepth::Eight => "Standard delivery. JPEG is always 8-bit.",
-                ExportBitDepth::Sixteen => "High-bit-depth PNG/TIFF for smooth gradients and editing headroom.",
-                ExportBitDepth::Float32Linear => "TIFF only. Stores linear Rec.2020 float RGB without output-profile encoding.",
+                ExportBitDepth::Sixteen => {
+                    "High-bit-depth PNG/TIFF for smooth gradients and editing headroom."
+                }
+                ExportBitDepth::Float32Linear => {
+                    "TIFF only. Stores linear Rec.2020 float RGB without output-profile encoding."
+                }
             })
             .small()
             .color(ui.visuals().weak_text_color()),
@@ -161,7 +165,10 @@ pub(crate) fn export_settings_controls(
                     .small(),
                 );
             } else {
-                ui.colored_label(ui.visuals().warn_fg_color, "Choose an ICC profile before export.");
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Choose an ICC profile before export.",
+                );
             }
         }
     });
@@ -180,20 +187,25 @@ pub(crate) fn export_settings_controls(
     ui.group(|ui| {
         ui.set_width(ui.available_width());
         ui.strong("JPEG");
-        ui.add(egui::Slider::new(&mut settings.jpeg_quality, 1..=100).text("Quality"))
-            .on_hover_text("Higher quality keeps more detail and produces a larger JPEG file.");
+        adjustment_slider(
+            ui,
+            "Quality",
+            &mut settings.jpeg_quality,
+            1..=100,
+            0,
+            1.0,
+            Some("Higher quality keeps more detail and produces a larger JPEG file."),
+        );
     });
 }
 
 impl Sidebar {
     fn show_export(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        // A vertical ScrollArea reports the scrollbar lane as available child
-        // width. Constrain the complete Export tab to the same content column
-        // used by the other Develop controls so the JPEG card and full-width
-        // buttons do not extend underneath that lane.
-        let content_width = (ui.available_width() - Self::SCROLLBAR_GUTTER).max(1.0);
-        ui.set_width(content_width);
-        ui.set_max_width(content_width);
+        // Sidebar::show already reserves the scrollbar gutter. Use the actual
+        // remaining width directly so this column follows sidebar resizing
+        // without another inset or a fixed pixel width.
+        let content_width = ui.available_width().max(1.0);
+        let column_width = content_width;
 
         // Export sizing is defined after non-destructive crop/orientation.
         // Using the full RAW dimensions here made the sidebar disagree with the
@@ -203,71 +215,96 @@ impl Sidebar {
             .loaded_raw
             .as_ref()
             .map(|raw| app.geometry.crop_pixel_dimensions(raw.width, raw.height));
-        export_settings_controls(ui, &mut app.export_settings, source_dimensions, true);
+        ui.allocate_ui_with_layout(
+            egui::vec2(column_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                // This child UI is the single source of truth for horizontal
+                // sizing. Cards, progress, and actions all receive precisely
+                // the same available width.
+                ui.set_min_width(column_width);
+                ui.set_max_width(column_width);
+                export_settings_controls(ui, &mut app.export_settings, source_dimensions, true);
 
-        if let Some((completed, total)) = app.export_progress_state() {
-            ui.add_space(8.0);
-            let (fraction, text) = if total == 0 {
-                (0.0, "Preparing export…".to_owned())
-            } else {
-                (
-                    (completed as f32 / total as f32).clamp(0.0, 1.0),
-                    format!("Exporting — {completed}/{total} tiles"),
-                )
-            };
-            ui.add(egui::ProgressBar::new(fraction).text(text));
-            if let Some((done, batch_total)) = app.library_batch_export_progress() {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Batch: {done}/{batch_total} images completed"
-                    ))
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-                );
-            }
-        }
+                if let Some((completed, total)) = app.export_progress_state() {
+                    ui.add_space(8.0);
+                    let (fraction, text) = if total == 0 {
+                        (0.0, "Preparing export…".to_owned())
+                    } else {
+                        (
+                            (completed as f32 / total as f32).clamp(0.0, 1.0),
+                            format!("Exporting — {completed}/{total} tiles"),
+                        )
+                    };
+                    ui.add_sized(
+                        [ui.available_width(), 18.0],
+                        egui::ProgressBar::new(fraction).text(text),
+                    );
+                    if let Some((done, batch_total)) = app.library_batch_export_progress() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Batch: {done}/{batch_total} images completed"
+                            ))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                    }
+                }
 
-        ui.add_space(10.0);
-        let dimensions_valid = source_dimensions.is_some_and(|(width, height)| {
-            app.export_settings
-                .checked_output_dimensions(width, height)
-                .is_ok()
-        });
-        let export_enabled = app.can_export() && dimensions_valid;
-        let profile_ready = app.export_settings.color_profile != ExportColorProfile::CustomIcc
-            || app.export_settings.custom_icc_path.is_some()
-            || app.export_settings.bit_depth.is_float();
-        let png_enabled = export_enabled
-            && profile_ready
-            && app.export_settings.bit_depth != ExportBitDepth::Float32Linear;
-        let png_button =
-            egui::Button::new("Export PNG…").min_size(egui::vec2(ui.available_width(), 30.0));
-        if ui.add_enabled(png_enabled, png_button).clicked() {
-            app.export_png(frame);
-        }
-        ui.add_space(4.0);
-        let tiff_button =
-            egui::Button::new("Export TIFF…").min_size(egui::vec2(ui.available_width(), 30.0));
-        if ui.add_enabled(export_enabled && profile_ready, tiff_button).clicked() {
-            app.export_tiff(frame);
-        }
-        ui.add_space(4.0);
-        let jpeg_button =
-            egui::Button::new("Export JPEG…").min_size(egui::vec2(ui.available_width(), 30.0));
-        let jpeg_enabled = export_enabled
-            && profile_ready
-            && app.export_settings.bit_depth != ExportBitDepth::Float32Linear;
-        if ui.add_enabled(jpeg_enabled, jpeg_button).clicked() {
-            app.export_jpeg(frame);
-        }
-        if !app.can_export() && app.export_progress_state().is_none() {
-            ui.label(
-                egui::RichText::new(
-                    "Export becomes available after a RAW image has finished loading.",
-                )
-                .small()
-                .color(ui.visuals().weak_text_color()),
-            );
-        }
+                ui.add_space(10.0);
+                let dimensions_valid = source_dimensions.is_some_and(|(width, height)| {
+                    app.export_settings
+                        .checked_output_dimensions(width, height)
+                        .is_ok()
+                });
+                let export_enabled = app.can_export() && dimensions_valid;
+                let profile_ready = app.export_settings.color_profile
+                    != ExportColorProfile::CustomIcc
+                    || app.export_settings.custom_icc_path.is_some()
+                    || app.export_settings.bit_depth.is_float();
+                let png_enabled = export_enabled
+                    && profile_ready
+                    && app.export_settings.bit_depth != ExportBitDepth::Float32Linear;
+                let action_width = ui.available_width();
+                let png_response = ui
+                    .add_enabled_ui(png_enabled, |ui| {
+                        ui.add_sized([action_width, 30.0], egui::Button::new("Export PNG…"))
+                    })
+                    .inner;
+                if png_response.clicked() {
+                    app.export_png(frame);
+                }
+                ui.add_space(4.0);
+                let tiff_response = ui
+                    .add_enabled_ui(export_enabled && profile_ready, |ui| {
+                        ui.add_sized([action_width, 30.0], egui::Button::new("Export TIFF…"))
+                    })
+                    .inner;
+                if tiff_response.clicked() {
+                    app.export_tiff(frame);
+                }
+                ui.add_space(4.0);
+                let jpeg_enabled = export_enabled
+                    && profile_ready
+                    && app.export_settings.bit_depth != ExportBitDepth::Float32Linear;
+                let jpeg_response = ui
+                    .add_enabled_ui(jpeg_enabled, |ui| {
+                        ui.add_sized([action_width, 30.0], egui::Button::new("Export JPEG…"))
+                    })
+                    .inner;
+                if jpeg_response.clicked() {
+                    app.export_jpeg(frame);
+                }
+                if !app.can_export() && app.export_progress_state().is_none() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Export becomes available after a RAW image has finished loading.",
+                        )
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                }
+            },
+        );
     }
 }

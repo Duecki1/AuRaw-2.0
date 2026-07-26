@@ -79,39 +79,41 @@ fn spawn_gpu_preview_prewarm(
             crate::diagnostics::record("GPU preview prewarm started at app initialization");
 
             let persistent_cache = match cache_root.as_deref() {
-                Some(cache_root) => match crate::pipeline::PersistentGpuPipelineCache::load_or_create(
-                    &device,
-                    &adapter_info,
-                    cache_root,
-                ) {
-                    Ok(Some((cache, loaded_bytes))) => {
-                        if loaded_bytes == 0 {
-                            crate::diagnostics::record(format!(
-                                "GPU pipeline cache cold start: {}",
-                                cache.path().display()
-                            ));
-                        } else {
-                            crate::diagnostics::record(format!(
-                                "GPU pipeline cache loaded: {} bytes from {}",
-                                loaded_bytes,
-                                cache.path().display()
-                            ));
+                Some(cache_root) => {
+                    match crate::pipeline::PersistentGpuPipelineCache::load_or_create(
+                        &device,
+                        &adapter_info,
+                        cache_root,
+                    ) {
+                        Ok(Some((cache, loaded_bytes))) => {
+                            if loaded_bytes == 0 {
+                                crate::diagnostics::record(format!(
+                                    "GPU pipeline cache cold start: {}",
+                                    cache.path().display()
+                                ));
+                            } else {
+                                crate::diagnostics::record(format!(
+                                    "GPU pipeline cache loaded: {} bytes from {}",
+                                    loaded_bytes,
+                                    cache.path().display()
+                                ));
+                            }
+                            Some(cache)
                         }
-                        Some(cache)
+                        Ok(None) => {
+                            crate::diagnostics::record(
+                                "GPU pipeline cache unavailable on this wgpu device/backend",
+                            );
+                            None
+                        }
+                        Err(error) => {
+                            crate::diagnostics::record(format!(
+                                "GPU pipeline cache could not be initialized: {error:#}"
+                            ));
+                            None
+                        }
                     }
-                    Ok(None) => {
-                        crate::diagnostics::record(
-                            "GPU pipeline cache unavailable on this wgpu device/backend",
-                        );
-                        None
-                    }
-                    Err(error) => {
-                        crate::diagnostics::record(format!(
-                            "GPU pipeline cache could not be initialized: {error:#}"
-                        ));
-                        None
-                    }
-                },
+                }
                 None => {
                     crate::diagnostics::record(
                         "GPU pipeline cache path unavailable; using in-process prewarm only",
@@ -213,6 +215,10 @@ fn install_missing_range_sources(masks: &mut MaskStack, source: &MaskRgbImage) {
 
 impl AurawApp {
     fn install_lightroom_visuals(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        ctx.set_fonts(fonts);
+
         // Start from egui's robust dark palette, then make the editor panels a
         // little calmer and denser for a Lightroom-like darkroom layout.
         let mut visuals = egui::Visuals::dark();
@@ -255,9 +261,12 @@ impl AurawApp {
         let mut camera_profile_folder = performance.camera_profile_folder.clone();
         let mut camera_profile_folder_label = performance.camera_profile_folder_label.clone();
         if performance.camera_profile_auto_detect
-            && camera_profile_folder.as_ref().is_none_or(|folder| !folder.is_dir())
+            && camera_profile_folder
+                .as_ref()
+                .is_none_or(|folder| !folder.is_dir())
         {
-            camera_profile_folder = crate::performance_settings::detected_adobe_camera_profile_folder();
+            camera_profile_folder =
+                crate::performance_settings::detected_adobe_camera_profile_folder();
             if let Some(folder) = &camera_profile_folder {
                 crate::diagnostics::record(format!(
                     "Camera profiles: auto-detected Adobe Camera Raw folder {}",
@@ -334,6 +343,8 @@ impl AurawApp {
             selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
+            #[cfg(not(target_os = "android"))]
+            desktop_sidebar_width: None,
             geometry: GeometryTransform::default(),
             crop_constraint_reference: None,
             crop_drag: None,
@@ -476,8 +487,7 @@ impl AurawApp {
             .ok();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
-        let gpu_preview_prewarm_receiver =
-            spawn_gpu_preview_prewarm(cc, gpu_pipeline_cache_root);
+        let gpu_preview_prewarm_receiver = spawn_gpu_preview_prewarm(cc, gpu_pipeline_cache_root);
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -545,6 +555,8 @@ impl AurawApp {
             selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
+            #[cfg(not(target_os = "android"))]
+            desktop_sidebar_width: None,
             geometry: GeometryTransform::default(),
             crop_constraint_reference: None,
             crop_drag: None,
@@ -708,8 +720,8 @@ impl AurawApp {
         let (sender, receiver) = mpsc::channel();
         let context = self.egui_ctx.clone();
         std::thread::spawn(move || {
-            let folder = pollster::block_on(dialog.pick_folder())
-                .map(|handle| handle.path().to_path_buf());
+            let folder =
+                pollster::block_on(dialog.pick_folder()).map(|handle| handle.path().to_path_buf());
             let _ = sender.send(crate::app::DesktopPickerEvent::CameraProfileFolder(folder));
             context.request_repaint();
         });
@@ -910,7 +922,8 @@ impl AurawApp {
                     return;
                 }
             };
-            match crate::android::open_library_document(&self.android_app, &raw_uri, &display_name) {
+            match crate::android::open_library_document(&self.android_app, &raw_uri, &display_name)
+            {
                 Ok(()) => {
                     self.pending_android_profile_reload = Some((selection, edit_override));
                     self.picker_pending = true;
@@ -1015,8 +1028,7 @@ impl AurawApp {
         if self.desktop_picker_receiver.is_some() {
             return;
         }
-        let mut dialog =
-            rfd::AsyncFileDialog::new().add_filter("ICC profiles", &["icc", "icm"]);
+        let mut dialog = rfd::AsyncFileDialog::new().add_filter("ICC profiles", &["icc", "icm"]);
         if let Some(path) = self.display_profile_override.as_deref() {
             if let Some(parent) = path.parent() {
                 dialog = dialog.set_directory(parent);
@@ -1025,8 +1037,8 @@ impl AurawApp {
         let (sender, receiver) = mpsc::channel();
         let context = self.egui_ctx.clone();
         std::thread::spawn(move || {
-            let path = pollster::block_on(dialog.pick_file())
-                .map(|handle| handle.path().to_path_buf());
+            let path =
+                pollster::block_on(dialog.pick_file()).map(|handle| handle.path().to_path_buf());
             let _ = sender.send(crate::app::DesktopPickerEvent::DisplayProfile(path));
             context.request_repaint();
         });
@@ -1187,12 +1199,7 @@ impl AurawApp {
                 {
                     return;
                 }
-                (
-                    crate::pipeline::IccOutputTransform::srgb(),
-                    label,
-                    None,
-                    0,
-                )
+                (crate::pipeline::IccOutputTransform::srgb(), label, None, 0)
             }
             Err(error) => {
                 let source = Some(format!("Profile discovery error: {error:#}"));
@@ -1267,19 +1274,17 @@ impl AurawApp {
             if let Some(detail) = self.preview_detail.as_ref() {
                 rollbacks.push((
                     "detail preview",
-                    detail.pipeline.write_output_transform(
-                        &render_state.queue,
-                        &previous_transform,
-                    ),
+                    detail
+                        .pipeline
+                        .write_output_transform(&render_state.queue, &previous_transform),
                 ));
             }
             if let Some(navigation) = self.preview_navigation.as_ref() {
                 rollbacks.push((
                     "navigation preview",
-                    navigation.pipeline.write_output_transform(
-                        &render_state.queue,
-                        &previous_transform,
-                    ),
+                    navigation
+                        .pipeline
+                        .write_output_transform(&render_state.queue, &previous_transform),
                 ));
             }
             let rollback = collect_pipeline_update_results("restore display ICC LUT", rollbacks);
@@ -1312,7 +1317,9 @@ impl AurawApp {
     ) -> anyhow::Result<()> {
         pipeline
             .write_output_transform(queue, &self.display_output_transform)
-            .map_err(|error| anyhow::anyhow!("preview pipeline: install display ICC LUT: {error:#}"))
+            .map_err(|error| {
+                anyhow::anyhow!("preview pipeline: install display ICC LUT: {error:#}")
+            })
     }
 
     fn persist_performance_settings(&self) -> bool {
@@ -1337,10 +1344,7 @@ impl AurawApp {
         let Some(settings_path) = self.performance_settings_path.as_deref() else {
             return false;
         };
-        match crate::performance_settings::save(
-            Some(settings_path),
-            settings,
-        ) {
+        match crate::performance_settings::save(Some(settings_path), settings) {
             Ok(()) => true,
             Err(error) => {
                 log::warn!("{error}");

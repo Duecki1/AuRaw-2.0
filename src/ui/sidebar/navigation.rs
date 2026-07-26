@@ -11,30 +11,40 @@ impl Sidebar {
         ui.set_max_width(content_width);
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
 
-        let previous_sidebar_tab = app.sidebar_tab;
-        egui::ScrollArea::horizontal()
-            .id_salt("develop-sidebar-tabs")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (tab, label) in [
-                        (SidebarTab::Adjustments, "Adjustments"),
-                        (SidebarTab::Crop, "Crop"),
-                        (SidebarTab::Masks, "Masks"),
-                        (SidebarTab::Inpainting, "Inpainting"),
-                        (SidebarTab::Export, "Export"),
-                    ] {
-                        ui.selectable_value(&mut app.sidebar_tab, tab, label);
-                    }
+        if layout == ScreenLayout::Vertical {
+            let previous_sidebar_tab = app.sidebar_tab;
+            egui::ScrollArea::horizontal()
+                .id_salt("develop-sidebar-tabs")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (tab, label) in [
+                            (SidebarTab::Adjustments, "Adjustments"),
+                            (SidebarTab::Crop, "Crop"),
+                            (SidebarTab::Masks, "Masks"),
+                            (SidebarTab::Inpainting, "Inpainting"),
+                            (SidebarTab::Export, "Export"),
+                        ] {
+                            ui.selectable_value(&mut app.sidebar_tab, tab, label);
+                        }
+                    });
+                });
+            Self::finish_sidebar_tab_change(app, previous_sidebar_tab);
+            ui.add_space(2.0);
+            ui.separator();
+        } else {
+            ui.horizontal(|ui| {
+                ui.heading(match app.sidebar_tab {
+                    SidebarTab::Adjustments => "Edit",
+                    SidebarTab::Crop => "Crop & Straighten",
+                    SidebarTab::Masks => "Masking",
+                    SidebarTab::Inpainting => "Remove & Heal",
+                    SidebarTab::Export => "Export",
                 });
             });
-        if previous_sidebar_tab == SidebarTab::Crop && app.sidebar_tab != SidebarTab::Crop {
-            app.crop_drag = None;
-            app.straighten_tool_active = false;
-            app.straighten_drag = None;
+            ui.add_space(3.0);
+            ui.separator();
         }
-        ui.add_space(2.0);
-        ui.separator();
 
         if layout == ScreenLayout::Vertical {
             Self::show_vertical_section_tabs(ui, app);
@@ -56,6 +66,45 @@ impl Sidebar {
                 SidebarTab::Inpainting => Self::show_inpainting(ui, app, layout, frame),
                 SidebarTab::Export => Self::show_export(ui, app, frame),
             });
+    }
+
+    pub(crate) fn show_desktop_tool_rail(ui: &mut Ui, app: &mut AurawApp) {
+        use crate::ui::icons::{icon_toggle_button, UiIcon};
+
+        ui.set_width(Self::DESKTOP_TOOL_RAIL_WIDTH);
+        ui.spacing_mut().item_spacing.y = 4.0;
+        let previous = app.sidebar_tab;
+        ui.vertical_centered(|ui| {
+            ui.add_space(5.0);
+            for (tab, icon, tooltip) in [
+                (SidebarTab::Adjustments, UiIcon::Adjustments, "Edit"),
+                (SidebarTab::Crop, UiIcon::Crop, "Crop and straighten"),
+                (SidebarTab::Masks, UiIcon::Mask, "Masking"),
+                (SidebarTab::Inpainting, UiIcon::Heal, "Remove and heal"),
+                (SidebarTab::Export, UiIcon::Export, "Export"),
+            ] {
+                if icon_toggle_button(
+                    ui,
+                    icon,
+                    app.sidebar_tab == tab,
+                    egui::vec2(42.0, 42.0),
+                    tooltip,
+                )
+                .clicked()
+                {
+                    app.sidebar_tab = tab;
+                }
+            }
+        });
+        Self::finish_sidebar_tab_change(app, previous);
+    }
+
+    fn finish_sidebar_tab_change(app: &mut AurawApp, previous: SidebarTab) {
+        if previous == SidebarTab::Crop && app.sidebar_tab != SidebarTab::Crop {
+            app.crop_drag = None;
+            app.straighten_tool_active = false;
+            app.straighten_drag = None;
+        }
     }
 
     fn show_adjustments(

@@ -127,33 +127,24 @@ impl Sidebar {
                     let can_add_group = app.masks.masks.len() < MAX_LOCAL_MASKS;
                     #[cfg(target_os = "android")]
                     let overflow_clicked = {
-                        let menu_id = ui.make_persistent_id((
-                            "android-mask-group-overflow",
-                            index,
-                        ));
-                        crate::ui::android_overflow_menu(
-                            ui,
-                            response.rect,
-                            menu_id,
-                            22.0,
-                            |ui| {
-                                let mut geometry_changed = false;
-                                Self::mask_group_context_menu(
-                                    ui,
-                                    &mut app.masks.masks[index],
-                                    can_add_group,
-                                    &mut group_enabled_changed,
-                                    &mut geometry_changed,
-                                    &mut duplicate_mask,
-                                    &mut paste_mask,
-                                    &mut remove_mask,
-                                    index,
-                                );
-                                if geometry_changed {
-                                    group_geometry_dirty = Some(index);
-                                }
-                            },
-                        )
+                        let menu_id = ui.make_persistent_id(("android-mask-group-overflow", index));
+                        crate::ui::android_overflow_menu(ui, response.rect, menu_id, 22.0, |ui| {
+                            let mut geometry_changed = false;
+                            Self::mask_group_context_menu(
+                                ui,
+                                &mut app.masks.masks[index],
+                                can_add_group,
+                                &mut group_enabled_changed,
+                                &mut geometry_changed,
+                                &mut duplicate_mask,
+                                &mut paste_mask,
+                                &mut remove_mask,
+                                index,
+                            );
+                            if geometry_changed {
+                                group_geometry_dirty = Some(index);
+                            }
+                        })
                         .clicked()
                     };
                     #[cfg(not(target_os = "android"))]
@@ -192,9 +183,9 @@ impl Sidebar {
                                 "BASE"
                             } else {
                                 match component.combine {
-                                    MaskCombineMode::Add => "+",
-                                    MaskCombineMode::Subtract => "−",
-                                    MaskCombineMode::Intersect => "∩",
+                                    MaskCombineMode::Add => egui_phosphor::regular::PLUS,
+                                    MaskCombineMode::Subtract => egui_phosphor::regular::MINUS,
+                                    MaskCombineMode::Intersect => egui_phosphor::regular::INTERSECT,
                                 }
                             };
                             let response = Self::mask_thumbnail_card(
@@ -854,12 +845,17 @@ impl Sidebar {
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 ui.spacing_mut().interact_size = size;
-                ui.menu_button(egui::RichText::new("+").size(20.0).strong(), |ui| {
-                    *new_mask = Self::mask_kind_menu(
-                        ui,
-                        "This mask type is planned but not implemented yet.",
-                    );
-                })
+                ui.menu_button(
+                    egui::RichText::new(egui_phosphor::regular::PLUS)
+                        .size(20.0)
+                        .strong(),
+                    |ui| {
+                        *new_mask = Self::mask_kind_menu(
+                            ui,
+                            "This mask type is planned but not implemented yet.",
+                        );
+                    },
+                )
                 .response
                 .on_hover_text("Create a new mask group");
             },
@@ -877,12 +873,17 @@ impl Sidebar {
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 ui.spacing_mut().interact_size = size;
-                ui.menu_button(egui::RichText::new("+").size(18.0).strong(), |ui| {
-                    *add_component = Self::submask_creation_menu(
-                        ui,
-                        "This sub-mask type is planned but not implemented yet.",
-                    );
-                })
+                ui.menu_button(
+                    egui::RichText::new(egui_phosphor::regular::PLUS)
+                        .size(18.0)
+                        .strong(),
+                    |ui| {
+                        *add_component = Self::submask_creation_menu(
+                            ui,
+                            "This sub-mask type is planned but not implemented yet.",
+                        );
+                    },
+                )
                 .response
                 .on_hover_text("Add a sub-mask to the selected group");
             },
@@ -1679,7 +1680,10 @@ impl Sidebar {
             1.0,
             None,
         );
-        (changed, adjustment.shadows != shadows_before || adjustment.blacks != blacks_before)
+        (
+            changed,
+            adjustment.shadows != shadows_before || adjustment.blacks != blacks_before,
+        )
     }
 
     fn show_local_mask_color(
@@ -1874,5 +1878,4 @@ impl Sidebar {
         }
         changed
     }
-
 }

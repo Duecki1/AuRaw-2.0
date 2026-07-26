@@ -4,6 +4,17 @@ These notices identify source-derived components and separately licensed runtime
 assets. They do not replace the license texts supplied by the respective
 projects.
 
+## Phosphor Icons
+
+Application interface icons come from
+[Phosphor Icons](https://github.com/phosphor-icons/core), used through the
+`egui-phosphor` Rust crate.
+
+Copyright (c) 2020 Phosphor Icons.
+
+Phosphor Icons is licensed under the MIT License. The `egui-phosphor` crate is
+licensed under MIT OR Apache-2.0.
+
 ## darktable sigmoid
 
 Portions of this project are adapted from darktable 5.6.0:

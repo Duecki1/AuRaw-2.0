@@ -1,5 +1,4 @@
 use crate::app::{AppTab, AurawApp};
-use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::{
     apply_lensfun_correction, build_proxy, compose_inpaint_strokes, is_supported_raw_path,
@@ -7,6 +6,7 @@ use crate::pipeline::{
     load_raw_file_with_profile_selection, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry,
     MaskRgbImage, MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
 };
+use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
 use std::cmp::Ordering as CmpOrdering;
 #[cfg(not(target_os = "android"))]
@@ -22,9 +22,9 @@ use std::path::Path;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
 #[cfg(not(target_os = "android"))]
 use std::sync::OnceLock;
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::Duration;
 #[cfg(not(target_os = "android"))]
 use std::time::SystemTime;
@@ -904,16 +904,11 @@ impl LibraryState {
             .entries
             .iter()
             .enumerate()
-            .filter(|(index, entry)| {
-                entry.texture.is_some() && !protected_indices.contains(index)
-            })
+            .filter(|(index, entry)| entry.texture.is_some() && !protected_indices.contains(index))
             .map(|(index, entry)| (entry.last_used, index))
             .collect::<Vec<_>>();
         candidates.sort_unstable();
-        for (_, index) in candidates
-            .into_iter()
-            .take(texture_count - effective_limit)
-        {
+        for (_, index) in candidates.into_iter().take(texture_count - effective_limit) {
             self.entries[index].texture = None;
             self.entries[index].texture_is_resident = false;
             // Keep decoded dimensions and a bounded resident pixel fallback after GPU
@@ -1046,11 +1041,9 @@ fn make_resident_thumbnail(thumbnail: &RawThumbnail) -> RawThumbnail {
         return thumbnail.clone();
     }
 
-    let Some(image) = image::RgbaImage::from_raw(
-        thumbnail.width,
-        thumbnail.height,
-        thumbnail.rgba.clone(),
-    ) else {
+    let Some(image) =
+        image::RgbaImage::from_raw(thumbnail.width, thumbnail.height, thumbnail.rgba.clone())
+    else {
         return thumbnail.clone();
     };
     let image = image::DynamicImage::ImageRgba8(image)
@@ -1199,33 +1192,30 @@ fn render_uncached_developed_thumbnail(
 
     // A different worker may have completed the cache while this request was
     // waiting for the render gate.
-    if let Some(thumbnail) =
-        crate::sidecar::load_developed_thumbnail_cache(path, maximum_edge)?
-    {
+    if let Some(thumbnail) = crate::sidecar::load_developed_thumbnail_cache(path, maximum_edge)? {
         return Ok(Some(thumbnail));
     }
 
-    let performance = crate::performance_settings::load(
-        crate::performance_settings::desktop_path().as_deref(),
-    );
+    let performance =
+        crate::performance_settings::load(crate::performance_settings::desktop_path().as_deref());
     let mut camera_profile_folder = performance.camera_profile_folder;
     if performance.camera_profile_auto_detect
         && camera_profile_folder
             .as_ref()
             .is_none_or(|folder| !folder.is_dir())
     {
-        camera_profile_folder =
-            crate::performance_settings::detected_adobe_camera_profile_folder();
+        camera_profile_folder = crate::performance_settings::detected_adobe_camera_profile_folder();
     }
-    let requested_camera_profile = loaded_sidecar
-        .edits
-        .camera_profile
-        .as_ref()
-        .and_then(|relative| {
-            camera_profile_folder
-                .as_ref()
-                .map(|root| root.join(relative))
-        });
+    let requested_camera_profile =
+        loaded_sidecar
+            .edits
+            .camera_profile
+            .as_ref()
+            .and_then(|relative| {
+                camera_profile_folder
+                    .as_ref()
+                    .map(|root| root.join(relative))
+            });
     let full_raw = load_raw_file_with_profile_selection(
         path,
         performance.camera_profile_mode,
@@ -1276,8 +1266,8 @@ fn render_uncached_developed_thumbnail(
     let mut masks = Arc::unwrap_or_clone(edits.masks);
     let inpaint_strokes = Arc::unwrap_or_clone(edits.inpainting);
     let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
-    let initial_params = GpuParams::new(&edits.exposure, &masks, &preview_raw)
-        .with_vignette_geometry(geometry);
+    let initial_params =
+        GpuParams::new(&edits.exposure, &masks, &preview_raw).with_vignette_geometry(geometry);
     let gpu = developed_thumbnail_gpu()?;
     let gpu = gpu
         .lock()
@@ -1329,8 +1319,8 @@ fn render_uncached_developed_thumbnail(
             .update_mask_layer(&gpu.queue, layer, &values)
             .map_err(|error| format!("could not apply thumbnail local mask: {error:#}"))?;
     }
-    let params = GpuParams::new(&edits.exposure, &masks, &preview_raw)
-        .with_vignette_geometry(geometry);
+    let params =
+        GpuParams::new(&edits.exposure, &masks, &preview_raw).with_vignette_geometry(geometry);
     pipeline.recompute(&gpu.queue, &gpu.device, &params);
     let thumbnail = pipeline
         .output_snapshot()
@@ -1351,9 +1341,7 @@ fn load_desktop_library_thumbnail(
 ) -> Result<LoadedLibraryThumbnail, String> {
     let LibrarySource::File(path) = source;
     match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
-        Ok(Some(thumbnail)) => {
-            return Ok(loaded_library_thumbnail(thumbnail, true))
-        }
+        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
         Ok(None) => {}
         Err(error) => log::warn!(
             "could not use developed thumbnail cache for {}: {error}",
@@ -1371,9 +1359,7 @@ fn load_desktop_library_thumbnail(
         }
     }
     match crate::thumbnail_cache::load_desktop_raw_thumbnail(path, THUMBNAIL_EDGE) {
-        Ok(Some(thumbnail)) => {
-            return Ok(loaded_library_thumbnail(thumbnail, false))
-        }
+        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, false)),
         Ok(None) => {}
         Err(error) => log::warn!(
             "could not use RAW thumbnail cache for {}: {error}",
@@ -1404,9 +1390,7 @@ fn load_android_library_thumbnail(
         modified_seconds,
     } = source;
     match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE) {
-        Ok(Some(thumbnail)) => {
-            return Ok(loaded_library_thumbnail(thumbnail, true))
-        }
+        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
         Ok(None) => {}
         Err(error) => log::warn!(
             "could not use Android developed-thumbnail cache for {display_name}: {error}"
@@ -1426,10 +1410,8 @@ fn load_android_library_thumbnail(
     // yet; opening/saving the image later replaces this with the fully developed
     // geometry-aware thumbnail.
     if let Ok(Some(sidecar)) = crate::sidecar::load_android(app, uri, display_name) {
-        thumbnail = crate::pipeline::transform_thumbnail_geometry(
-            &thumbnail,
-            sidecar.edits.geometry,
-        );
+        thumbnail =
+            crate::pipeline::transform_thumbnail_geometry(&thumbnail, sidecar.edits.geometry);
     }
     Ok(loaded_library_thumbnail(thumbnail, false))
 }
@@ -1811,10 +1793,7 @@ fn unique_library_export_path(
 }
 
 #[cfg(not(target_os = "android"))]
-fn library_export_jobs(
-    paths: &[PathBuf],
-    format: ExportFormat,
-) -> Option<Vec<(PathBuf, PathBuf)>> {
+fn library_export_jobs(paths: &[PathBuf], format: ExportFormat) -> Option<Vec<(PathBuf, PathBuf)>> {
     if paths.is_empty() {
         return None;
     }
@@ -1838,12 +1817,10 @@ fn library_export_jobs(
             .is_some_and(|extension| match format {
                 ExportFormat::Png => extension.eq_ignore_ascii_case("png"),
                 ExportFormat::Jpeg => {
-                    extension.eq_ignore_ascii_case("jpg")
-                        || extension.eq_ignore_ascii_case("jpeg")
+                    extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
                 }
                 ExportFormat::Tiff => {
-                    extension.eq_ignore_ascii_case("tif")
-                        || extension.eq_ignore_ascii_case("tiff")
+                    extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff")
                 }
             });
         if !valid_extension {
@@ -1943,7 +1920,11 @@ impl Library {
 
                 #[cfg(not(target_os = "android"))]
                 if ui
-                    .button(if desktop_selection_mode { "Cancel" } else { "Select" })
+                    .button(if desktop_selection_mode {
+                        "Cancel"
+                    } else {
+                        "Select"
+                    })
                     .clicked()
                 {
                     if desktop_selection_mode {
@@ -1969,11 +1950,7 @@ impl Library {
                     .width(128.0)
                     .show_ui(ui, |ui| {
                         for sort_order in LibrarySortOrder::ALL {
-                            ui.selectable_value(
-                                &mut selected_sort,
-                                sort_order,
-                                sort_order.label(),
-                            );
+                            ui.selectable_value(&mut selected_sort, sort_order, sort_order.label());
                         }
                     });
                 app.library.set_sort_order(selected_sort);
@@ -2086,7 +2063,9 @@ impl Library {
                                     app.library.selected_sources.insert(source.clone());
                                 }
 
-                                if app.library.selection_mode() && app.library.selected_sources.is_empty() {
+                                if app.library.selection_mode()
+                                    && app.library.selected_sources.is_empty()
+                                {
                                     app.library.clear_selection();
                                     crate::android::set_back_navigation_active(false);
                                 }
@@ -2124,7 +2103,9 @@ impl Library {
                                     .entries
                                     .iter()
                                     .filter(|candidate| {
-                                        app.library.selected_sources.contains(&candidate.info.source)
+                                        app.library
+                                            .selected_sources
+                                            .contains(&candidate.info.source)
                                     })
                                     .filter_map(|candidate| match &candidate.info.source {
                                         LibrarySource::File(path) => Some(path.clone()),
@@ -2176,9 +2157,7 @@ impl Library {
                                         can_paste_adjustments,
                                         egui::Button::new(paste_label),
                                     )
-                                    .on_disabled_hover_text(
-                                        "Copy adjustments from an image first",
-                                    )
+                                    .on_disabled_hover_text("Copy adjustments from an image first")
                                     .clicked()
                                 {
                                     library_action = Some(LibraryCardAction::PasteAdjustments(
@@ -2232,8 +2211,7 @@ impl Library {
                         }
                     }
                 });
-            app.library
-                .evict_old_textures(&protected_thumbnail_indices);
+            app.library.evict_old_textures(&protected_thumbnail_indices);
         }
 
         #[cfg(not(target_os = "android"))]
@@ -2280,9 +2258,10 @@ impl Library {
                     app.library.duplicate_raws_with_sidecars(paths, ui.ctx());
                 }
                 LibraryCardAction::ResetAdjustments(paths) => {
-                    let current_to_reopen = app.current_path.as_ref().and_then(|current| {
-                        paths.iter().find(|path| *path == current).cloned()
-                    });
+                    let current_to_reopen = app
+                        .current_path
+                        .as_ref()
+                        .and_then(|current| paths.iter().find(|path| *path == current).cloned());
                     if let Some(path) = current_to_reopen.as_deref() {
                         app.detach_current_file_for_library_action(path);
                     }
@@ -2296,7 +2275,7 @@ impl Library {
                                 if reset {
                                     reset_count += 1;
                                 }
-                            },
+                            }
                             Err(error) => failures.push(format!("{}: {error}", path.display())),
                         }
                     }
@@ -2319,9 +2298,10 @@ impl Library {
                     }
                 }
                 LibraryCardAction::Delete(paths) => {
-                    let current_target = app.current_path.as_ref().and_then(|current| {
-                        paths.iter().find(|path| *path == current).cloned()
-                    });
+                    let current_target = app
+                        .current_path
+                        .as_ref()
+                        .and_then(|current| paths.iter().find(|path| *path == current).cloned());
                     if let Some(path) = current_target.as_deref() {
                         app.detach_current_file_for_library_action(path);
                     }
@@ -2357,7 +2337,10 @@ impl Library {
                     } else {
                         let mut details = failures;
                         details.extend(cleanup_warnings);
-                        format!("Deleted {deleted} of {total} selected images. {}", details.join(" · "))
+                        format!(
+                            "Deleted {deleted} of {total} selected images. {}",
+                            details.join(" · ")
+                        )
                     };
                     if !deleted_current {
                         if let Some(path) = current_target {
@@ -2381,16 +2364,16 @@ impl Library {
                     }
                 }
                 LibraryCardAction::CopyAdjustments((uri, display_name)) => {
-                    let status = match app.copy_library_adjustments_from_android(&uri, &display_name) {
-                        Ok(()) => format!("Copied adjustments from {display_name}"),
-                        Err(error) => format!("Could not copy adjustments: {error}"),
-                    };
+                    let status =
+                        match app.copy_library_adjustments_from_android(&uri, &display_name) {
+                            Ok(()) => format!("Copied adjustments from {display_name}"),
+                            Err(error) => format!("Could not copy adjustments: {error}"),
+                        };
                     app.library.status = status;
                 }
                 LibraryCardAction::PasteAdjustments(targets) => {
                     let total = targets.len();
-                    let (completed, failures) =
-                        app.paste_library_adjustments_to_android(&targets);
+                    let (completed, failures) = app.paste_library_adjustments_to_android(&targets);
                     app.library.clear_selection();
                     crate::android::set_back_navigation_active(false);
                     app.library.refresh(ui.ctx());
@@ -2410,7 +2393,8 @@ impl Library {
                     let total = targets.len();
                     let mut failures = Vec::new();
                     for (uri, display_name) in targets {
-                        if let Err(error) = app.duplicate_android_library_item(&uri, &display_name) {
+                        if let Err(error) = app.duplicate_android_library_item(&uri, &display_name)
+                        {
                             failures.push(format!("{display_name}: {error}"));
                         }
                     }
@@ -2611,9 +2595,10 @@ impl Library {
                         .default_width(420.0)
                         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                         .show(ui.ctx(), |ui| {
-                            ui.label(egui::RichText::new(format!(
-                                "{exported} / {total} exported"
-                            )).strong());
+                            ui.label(
+                                egui::RichText::new(format!("{exported} / {total} exported"))
+                                    .strong(),
+                            );
                             ui.add_space(6.0);
                             ui.add(
                                 egui::ProgressBar::new(overall_fraction)
@@ -2785,7 +2770,9 @@ impl Library {
                     };
 
                     egui::Window::new("Exporting images")
-                        .id(egui::Id::new("android-library-batch-export-progress-dialog"))
+                        .id(egui::Id::new(
+                            "android-library-batch-export-progress-dialog",
+                        ))
                         .collapsible(false)
                         .resizable(false)
                         .default_width(360.0)
@@ -2853,21 +2840,10 @@ impl Library {
             let rect = egui::Rect::from_min_size(bounds.right_bottom() - size, size);
             let response = ui.put(
                 rect,
-                egui::Button::new("")
+                egui::Button::new(egui::RichText::new(egui_phosphor::regular::PLUS).size(26.0))
                     .min_size(size)
                     .corner_radius(28)
                     .fill(ui.visuals().selection.bg_fill),
-            );
-            let center = response.rect.center();
-            let half = 9.0;
-            let stroke = egui::Stroke::new(2.5, ui.visuals().selection.stroke.color);
-            ui.painter().line_segment(
-                [egui::pos2(center.x - half, center.y), egui::pos2(center.x + half, center.y)],
-                stroke,
-            );
-            ui.painter().line_segment(
-                [egui::pos2(center.x, center.y - half), egui::pos2(center.x, center.y + half)],
-                stroke,
             );
             if response.clicked() {
                 import_raw = true;
@@ -2993,9 +2969,7 @@ fn balanced_justified_row_ranges(
         // image, the final row cannot collapse into a few oversized leftovers.
         while end < max_end {
             let with_next = row_weight + weights[end];
-            if (row_weight - desired_weight).abs()
-                <= (with_next - desired_weight).abs()
-            {
+            if (row_weight - desired_weight).abs() <= (with_next - desired_weight).abs() {
                 break;
             }
             row_weight = with_next;
@@ -3026,20 +3000,14 @@ fn justified_thumbnail_layout(
                 .layout_size
                 .or(entry.thumbnail_size)
                 .and_then(|[width, source_height]| {
-                    (width > 0 && source_height > 0)
-                        .then_some(width as f32 / source_height as f32)
+                    (width > 0 && source_height > 0).then_some(width as f32 / source_height as f32)
                 })
                 .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
                 .unwrap_or(1.5)
         })
         .collect();
 
-    let row_ranges = balanced_justified_row_ranges(
-        &aspects,
-        available_width,
-        target_height,
-        gap,
-    );
+    let row_ranges = balanced_justified_row_ranges(&aspects, available_width, target_height, gap);
     let mut placements = Vec::with_capacity(entries.len());
     let mut y = 0.0;
 
@@ -3048,9 +3016,8 @@ fn justified_thumbnail_layout(
         let item_count = row_aspects.len();
         let aspect_sum = row_aspects.iter().sum::<f32>();
         let gaps_width = gap * (item_count.saturating_sub(1) as f32);
-        let row_height = ((available_width - gaps_width).max(1.0)
-            / aspect_sum.max(f32::EPSILON))
-            .max(1.0);
+        let row_height =
+            ((available_width - gaps_width).max(1.0) / aspect_sum.max(f32::EPSILON)).max(1.0);
         let mut x = 0.0;
 
         for (row_offset, aspect) in row_aspects.iter().copied().enumerate() {
@@ -3080,7 +3047,8 @@ fn justified_thumbnail_layout(
 }
 
 fn thumbnail_cover_uv(source_size: Option<[u32; 2]>, target_size: egui::Vec2) -> egui::Rect {
-    let Some([width, height]) = source_size.filter(|[width, height]| *width > 0 && *height > 0) else {
+    let Some([width, height]) = source_size.filter(|[width, height]| *width > 0 && *height > 0)
+    else {
         return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
     };
     if target_size.x <= 0.0 || target_size.y <= 0.0 {
@@ -3311,7 +3279,10 @@ fn scan_folder_with_limit(
     }
     let mut files = files.into_vec();
     files.sort();
-    let mut files = files.into_iter().map(|ranked| ranked.info).collect::<Vec<_>>();
+    let mut files = files
+        .into_iter()
+        .map(|ranked| ranked.info)
+        .collect::<Vec<_>>();
 
     // Reserve the final gallery geometry before any preview pixels arrive.
     // LibRaw can expose display-oriented active dimensions from the header
@@ -3359,9 +3330,9 @@ mod tests {
     use super::{
         balanced_justified_row_ranges, duplicate_raw_and_sidecar, elide_middle, format_file_size,
         justified_thumbnail_layout, loaded_library_thumbnail, make_resident_thumbnail,
-        new_library_entry, run_thumbnail_workers, scan_folder,
-        scan_folder_with_limit, LibraryFileInfo, LibraryState, LoadedLibraryThumbnail, ScanEvent,
-        ThumbnailRequest, ThumbnailWorker,
+        new_library_entry, run_thumbnail_workers, scan_folder, scan_folder_with_limit,
+        LibraryFileInfo, LibraryState, LoadedLibraryThumbnail, ScanEvent, ThumbnailRequest,
+        ThumbnailWorker,
     };
     use crate::pipeline::RawThumbnail;
     #[cfg(unix)]
@@ -3413,23 +3384,15 @@ mod tests {
             modified: None,
         };
         let mut entry = new_library_entry(info);
-        let (before, before_height) = justified_thumbnail_layout(
-            std::slice::from_ref(&entry),
-            900.0,
-            140.0,
-            6.0,
-        );
+        let (before, before_height) =
+            justified_thumbnail_layout(std::slice::from_ref(&entry), 900.0, 140.0, 6.0);
 
         // Embedded previews can have a slightly different crop/aspect. Loading
         // those pixels must not invalidate the geometry already reserved from
         // the RAW header.
         entry.thumbnail_size = Some([1600, 1200]);
-        let (after, after_height) = justified_thumbnail_layout(
-            std::slice::from_ref(&entry),
-            900.0,
-            140.0,
-            6.0,
-        );
+        let (after, after_height) =
+            justified_thumbnail_layout(std::slice::from_ref(&entry), 900.0, 140.0, 6.0);
 
         assert_eq!(before, after);
         assert_eq!(before_height, after_height);

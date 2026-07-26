@@ -4,8 +4,7 @@ use crate::app::{
 use crate::pipeline::{
     BrushMode, DemosaicMode, DenoiseQuality, ExportBitDepth, ExportColorProfile, ExportResizeMode,
     ExposureParams, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry, MaskKind,
-    SigmoidColorProcessing, HSL_HUE_LIMIT, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS,
-    MAX_MASK_COMPONENTS,
+    SigmoidColorProcessing, HSL_HUE_LIMIT, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use crate::ui::components::adjustment_slider::{adjustment_slider, slider_scroll_locked};
 use crate::ui::components::color_grading::color_grading_editor;
@@ -65,6 +64,7 @@ impl MaskCardSize {
 
 impl Sidebar {
     const SCROLLBAR_GUTTER: f32 = 18.0;
+    pub(crate) const DESKTOP_TOOL_RAIL_WIDTH: f32 = 50.0;
     const MASK_THUMBNAIL_EDGE: u32 = 64;
     pub(crate) const VERTICAL_MASK_STRIP_HEIGHT: f32 = 92.0;
     pub(crate) const HORIZONTAL_MASK_STRIP_WIDTH: f32 = 92.0;
