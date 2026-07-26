@@ -370,6 +370,7 @@ impl Preview {
                 app,
                 image_rect,
                 visible_screen,
+                outer_rect,
                 source_dimensions.0,
                 source_dimensions.1,
             );
@@ -508,8 +509,7 @@ impl Preview {
                         let target = nearest_straight_axis_degrees(angle);
                         let correction = normalize_degrees(target - angle);
                         let previous = app.geometry.rotation_degrees;
-                        app.geometry.rotation_degrees =
-                            (previous + correction).clamp(-45.0, 45.0);
+                        app.geometry.rotation_degrees = (previous + correction).clamp(-45.0, 45.0);
                         if (app.geometry.rotation_degrees - previous).abs() > 1e-4 {
                             let reference = if let Some(reference) = app.crop_constraint_reference {
                                 reference
@@ -519,10 +519,8 @@ impl Preview {
                                 reference
                             };
                             app.geometry.crop = reference;
-                            app.geometry.fit_crop_inside_transformed_source(
-                                source_width,
-                                source_height,
-                            );
+                            app.geometry
+                                .fit_crop_inside_transformed_source(source_width, source_height);
                             app.note_geometry_changed();
                         }
                     }
@@ -534,13 +532,10 @@ impl Preview {
         }
 
         if primary_pressed {
-            if let Some(pointer) = pointer.filter(|point| image_rect.expand(28.0).contains(*point)) {
-                let display_crop_rect = crop_preview_screen_rect(
-                    image_rect,
-                    app.geometry,
-                    source_width,
-                    source_height,
-                );
+            if let Some(pointer) = pointer.filter(|point| image_rect.expand(28.0).contains(*point))
+            {
+                let display_crop_rect =
+                    crop_preview_screen_rect(image_rect, app.geometry, source_width, source_height);
                 if let Some(display_handle) = crop_handle_at(display_crop_rect, pointer, 28.0) {
                     let handle = crop_source_handle_for_display(display_handle, quarter_turns);
                     let start = crop_preview_pointer_to_source_normalized(
@@ -639,16 +634,17 @@ impl Preview {
         app: &AurawApp,
         image_rect: Rect,
         visible_rect: Rect,
+        overlay_clip_rect: Rect,
         source_width: u32,
         source_height: u32,
     ) {
-        let painter = ui.painter_at(visible_rect);
-        let crop_rect = crop_preview_screen_rect(
-            image_rect,
-            app.geometry,
-            source_width,
-            source_height,
-        );
+        // Shade only real image pixels below, but allow the crop border stroke
+        // and handles to paint into the surrounding pasteboard. Clipping the
+        // painter to visible_rect cut off half of every edge handle whenever
+        // the crop touched an image boundary.
+        let painter = ui.painter_at(overlay_clip_rect);
+        let crop_rect =
+            crop_preview_screen_rect(image_rect, app.geometry, source_width, source_height);
         let visible_crop = crop_rect.intersect(visible_rect);
         if visible_crop.width() <= 0.0 || visible_crop.height() <= 0.0 {
             return;
@@ -658,12 +654,8 @@ impl Preview {
         // that pasteboard makes the overlay look as if it extends beyond the
         // photograph. Clip each outside-crop band against the transformed full-
         // image quadrilateral instead.
-        let image_polygon = crop_workspace_image_polygon(
-            image_rect,
-            app.geometry,
-            source_width,
-            source_height,
-        );
+        let image_polygon =
+            crop_workspace_image_polygon(image_rect, app.geometry, source_width, source_height);
         let shade = Color32::from_black_alpha(150);
         for rect in [
             Rect::from_min_max(
@@ -714,8 +706,14 @@ impl Preview {
             let x = egui::lerp(crop_rect.left()..=crop_rect.right(), fraction);
             let y = egui::lerp(crop_rect.top()..=crop_rect.bottom(), fraction);
             for (a, b) in [
-                (Pos2::new(x, crop_rect.top()), Pos2::new(x, crop_rect.bottom())),
-                (Pos2::new(crop_rect.left(), y), Pos2::new(crop_rect.right(), y)),
+                (
+                    Pos2::new(x, crop_rect.top()),
+                    Pos2::new(x, crop_rect.bottom()),
+                ),
+                (
+                    Pos2::new(crop_rect.left(), y),
+                    Pos2::new(crop_rect.right(), y),
+                ),
             ] {
                 if let Some([a, b]) = clip_crop_workspace_segment_to_source_image(
                     image_rect,
@@ -725,10 +723,7 @@ impl Preview {
                     a,
                     b,
                 ) {
-                    painter.line_segment(
-                        [a, b],
-                        Stroke::new(1.0, Color32::from_white_alpha(115)),
-                    );
+                    painter.line_segment([a, b], Stroke::new(1.0, Color32::from_white_alpha(115)));
                 }
             }
         }
@@ -776,8 +771,10 @@ impl Preview {
             )
         });
 
-        let allowed = !matches!(app.sidebar_tab, SidebarTab::Crop | SidebarTab::Masks | SidebarTab::Inpainting)
-            && !touch_navigation
+        let allowed = !matches!(
+            app.sidebar_tab,
+            SidebarTab::Crop | SidebarTab::Masks | SidebarTab::Inpainting
+        ) && !touch_navigation
             && !multi_touch
             && any_touches;
         if !allowed {
@@ -977,19 +974,14 @@ impl Preview {
                 return;
             };
             let hovered = app.inpaint_hovered_stroke == Some(index);
-            let max_edge = if cfg!(target_os = "android") { 384 } else { 512 };
-            let (width, height) = source_overlay_texture_dimensions(
-                pipeline.width,
-                pipeline.height,
-                max_edge,
-            );
-            let key = (
-                index,
-                app.inpaint_texture_revision,
-                width,
-                height,
-                hovered,
-            );
+            let max_edge = if cfg!(target_os = "android") {
+                384
+            } else {
+                512
+            };
+            let (width, height) =
+                source_overlay_texture_dimensions(pipeline.width, pipeline.height, max_edge);
+            let key = (index, app.inpaint_texture_revision, width, height, hovered);
             if app.inpaint_focus_texture_key != Some(key) {
                 let coverage = rasterize_inpaint_dabs_binary(
                     width,
@@ -1071,12 +1063,13 @@ impl Preview {
             let Some(pipeline) = app.gpu_pipeline.as_ref() else {
                 return;
             };
-            let max_edge = if cfg!(target_os = "android") { 384 } else { 512 };
-            let (width, height) = source_overlay_texture_dimensions(
-                pipeline.width,
-                pipeline.height,
-                max_edge,
-            );
+            let max_edge = if cfg!(target_os = "android") {
+                384
+            } else {
+                512
+            };
+            let (width, height) =
+                source_overlay_texture_dimensions(pipeline.width, pipeline.height, max_edge);
             let key = (app.inpaint_stroke.len(), width, height);
             if app.inpaint_stroke_texture_key != Some(key) {
                 let coverage = rasterize_inpaint_dabs_binary(
@@ -1443,7 +1436,8 @@ impl Preview {
                         pointer_angle,
                         rotation: original_rotation,
                     }) => {
-                        let current_angle = source_angle_from(*center, uv, source_width, source_height);
+                        let current_angle =
+                            source_angle_from(*center, uv, source_width, source_height);
                         *rotation =
                             original_rotation + shortest_angle_delta(pointer_angle, current_angle);
                         changed = true;
@@ -1495,12 +1489,13 @@ impl Preview {
                             (original_start[0] + original_end[0]) * 0.5,
                             (original_start[1] + original_end[1]) * 0.5,
                         ];
-                        let vector_x = (original_end[0] - original_start[0])
-                            * source_width.max(1) as f32;
-                        let vector_y = (original_end[1] - original_start[1])
-                            * source_height.max(1) as f32;
+                        let vector_x =
+                            (original_end[0] - original_start[0]) * source_width.max(1) as f32;
+                        let vector_y =
+                            (original_end[1] - original_start[1]) * source_height.max(1) as f32;
                         let original_angle = vector_y.atan2(vector_x);
-                        let current_angle = source_angle_from(midpoint, uv, source_width, source_height);
+                        let current_angle =
+                            source_angle_from(midpoint, uv, source_width, source_height);
                         let angle =
                             original_angle + shortest_angle_delta(pointer_angle, current_angle);
                         let half_length = (vector_x * vector_x + vector_y * vector_y).sqrt() * 0.5;
@@ -1963,12 +1958,13 @@ impl Preview {
         let Some(pipeline) = app.gpu_pipeline.as_ref() else {
             return;
         };
-        let max_edge = if cfg!(target_os = "android") { 384 } else { 512 };
-        let (width, height) = source_overlay_texture_dimensions(
-            pipeline.width,
-            pipeline.height,
-            max_edge,
-        );
+        let max_edge = if cfg!(target_os = "android") {
+            384
+        } else {
+            512
+        };
+        let (width, height) =
+            source_overlay_texture_dimensions(pipeline.width, pipeline.height, max_edge);
         let key = (
             mask_index,
             component_index,
@@ -2390,12 +2386,9 @@ fn linear_isot_geometry_screen_points(
             start,
         )];
     }
-    let Some((q0, q1)) = clip_infinite_source_line(
-        center,
-        perpendicular,
-        source_width,
-        source_height,
-    ) else {
+    let Some((q0, q1)) =
+        clip_infinite_source_line(center, perpendicular, source_width, source_height)
+    else {
         return Vec::new();
     };
     let segments = segments.max(2);
@@ -2496,14 +2489,7 @@ fn radial_handles_geometry_screen(
             lens_geometry,
             source_width,
             source_height,
-            radial_source_uv_at(
-                center,
-                radius,
-                rotation,
-                angle,
-                source_width,
-                source_height,
-            ),
+            radial_source_uv_at(center, radius, rotation, angle, source_width, source_height),
         )
     })
 }
@@ -2561,14 +2547,7 @@ fn radial_outline_geometry_screen_points(
                 lens_geometry,
                 source_width,
                 source_height,
-                radial_source_uv_at(
-                    center,
-                    radius,
-                    rotation,
-                    angle,
-                    source_width,
-                    source_height,
-                ),
+                radial_source_uv_at(center, radius, rotation, angle, source_width, source_height),
             )
         })
         .collect()
@@ -2595,7 +2574,6 @@ fn distance_to_polyline(point: Pos2, points: &[Pos2]) -> f32 {
     }
 }
 
-
 fn geometry_forward_affine(geometry: GeometryTransform, dx: f32, dy: f32) -> [f32; 2] {
     let geometry = geometry.sanitized();
     let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
@@ -2610,10 +2588,7 @@ fn geometry_forward_affine(geometry: GeometryTransform, dx: f32, dy: f32) -> [f3
     let flipped_y = dy * fy;
     let sheared_x = flipped_x + shx * flipped_y;
     let sheared_y = shy * flipped_x + flipped_y;
-    [
-        c * sheared_x - s * sheared_y,
-        s * sheared_x + c * sheared_y,
-    ]
+    [c * sheared_x - s * sheared_y, s * sheared_x + c * sheared_y]
 }
 
 fn geometry_inverse_affine(geometry: GeometryTransform, dx: f32, dy: f32) -> [f32; 2] {
@@ -2633,7 +2608,10 @@ fn geometry_inverse_affine(geometry: GeometryTransform, dx: f32, dy: f32) -> [f3
     if determinant.abs() < 1e-6 {
         return [0.0, 0.0];
     }
-    [(d * dx - b * dy) / determinant, (-c2 * dx + a * dy) / determinant]
+    [
+        (d * dx - b * dy) / determinant,
+        (-c2 * dx + a * dy) / determinant,
+    ]
 }
 
 fn quarter_rotate_delta(quarter_turns: u8, dx: f32, dy: f32) -> [f32; 2] {
@@ -2747,12 +2725,7 @@ fn final_geometry_native_source_to_screen(
     source_uv: [f32; 2],
 ) -> Pos2 {
     let corrected_uv = lens_geometry.map_or(source_uv, |lens_geometry| {
-        native_source_to_corrected_uv(
-            lens_geometry,
-            source_width,
-            source_height,
-            source_uv,
-        )
+        native_source_to_corrected_uv(lens_geometry, source_width, source_height, source_uv)
     });
     final_geometry_source_to_screen(
         image_rect,
@@ -2842,12 +2815,21 @@ fn geometry_brush_radius_screen(
         lens_geometry,
         source_width,
         source_height,
-        [center[0], center[1] + radius_source_pixels / source_height_f],
+        [
+            center[0],
+            center[1] + radius_source_pixels / source_height_f,
+        ],
     );
-    center_screen.distance(x_screen).max(center_screen.distance(y_screen))
+    center_screen
+        .distance(x_screen)
+        .max(center_screen.distance(y_screen))
 }
 
-fn source_overlay_texture_dimensions(source_width: u32, source_height: u32, max_edge: u32) -> (u32, u32) {
+fn source_overlay_texture_dimensions(
+    source_width: u32,
+    source_height: u32,
+    max_edge: u32,
+) -> (u32, u32) {
     let source_width = source_width.max(1);
     let source_height = source_height.max(1);
     let longest = source_width.max(source_height) as f32;
@@ -2886,7 +2868,10 @@ fn crop_workspace_source_to_screen(
     };
     normalized_to_screen(
         image_rect,
-        [canvas_point[0] / canvas_width, canvas_point[1] / canvas_height],
+        [
+            canvas_point[0] / canvas_width,
+            canvas_point[1] / canvas_height,
+        ],
     )
 }
 
@@ -3177,19 +3162,9 @@ fn final_geometry_screen_to_native_source(
     source_height: u32,
     screen: Pos2,
 ) -> [f32; 2] {
-    let corrected_uv = final_geometry_screen_to_source(
-        image_rect,
-        geometry,
-        source_width,
-        source_height,
-        screen,
-    );
-    corrected_uv_to_native_source(
-        corrected_uv,
-        lens_geometry,
-        source_width,
-        source_height,
-    )
+    let corrected_uv =
+        final_geometry_screen_to_source(image_rect, geometry, source_width, source_height, screen);
+    corrected_uv_to_native_source(corrected_uv, lens_geometry, source_width, source_height)
 }
 
 fn crop_workspace_screen_to_native_source(
@@ -3200,19 +3175,9 @@ fn crop_workspace_screen_to_native_source(
     source_height: u32,
     screen: Pos2,
 ) -> [f32; 2] {
-    let corrected_uv = crop_workspace_screen_to_source(
-        image_rect,
-        geometry,
-        source_width,
-        source_height,
-        screen,
-    );
-    corrected_uv_to_native_source(
-        corrected_uv,
-        lens_geometry,
-        source_width,
-        source_height,
-    )
+    let corrected_uv =
+        crop_workspace_screen_to_source(image_rect, geometry, source_width, source_height, screen);
+    corrected_uv_to_native_source(corrected_uv, lens_geometry, source_width, source_height)
 }
 
 fn corrected_uv_to_native_source(
@@ -3377,7 +3342,10 @@ fn crop_preview_screen_rect(
         };
     let center = normalized_to_screen(
         image_rect,
-        [display_center[0] / canvas_width, display_center[1] / canvas_height],
+        [
+            display_center[0] / canvas_width,
+            display_center[1] / canvas_height,
+        ],
     );
     Rect::from_center_size(
         center,
@@ -3449,9 +3417,11 @@ fn crop_preview_pointer_to_source_normalized(
         source_height_f,
         [canvas_uv[0] * canvas_width, canvas_uv[1] * canvas_height],
     );
-    [source_point[0] / source_width_f, source_point[1] / source_height_f]
+    [
+        source_point[0] / source_width_f,
+        source_point[1] / source_height_f,
+    ]
 }
-
 
 fn source_uv_inside_image(uv: [f32; 2]) -> bool {
     const EPSILON: f32 = 1e-4;
@@ -3489,13 +3459,7 @@ fn crop_workspace_image_polygon(
     [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
         .into_iter()
         .map(|uv| {
-            crop_workspace_source_to_screen(
-                image_rect,
-                geometry,
-                source_width,
-                source_height,
-                uv,
-            )
+            crop_workspace_source_to_screen(image_rect, geometry, source_width, source_height, uv)
         })
         .collect()
 }
@@ -3547,7 +3511,11 @@ fn clip_polygon_to_rect(polygon: &[Pos2], rect: Rect) -> Vec<Pos2> {
         |p| p.x <= right,
         |a, b| {
             let denom = b.x - a.x;
-            let t = if denom.abs() <= f32::EPSILON { 0.0 } else { (right - a.x) / denom };
+            let t = if denom.abs() <= f32::EPSILON {
+                0.0
+            } else {
+                (right - a.x) / denom
+            };
             Pos2::new(right, a.y + (b.y - a.y) * t)
         },
     );
@@ -3557,7 +3525,11 @@ fn clip_polygon_to_rect(polygon: &[Pos2], rect: Rect) -> Vec<Pos2> {
         |p| p.y >= top,
         |a, b| {
             let denom = b.y - a.y;
-            let t = if denom.abs() <= f32::EPSILON { 0.0 } else { (top - a.y) / denom };
+            let t = if denom.abs() <= f32::EPSILON {
+                0.0
+            } else {
+                (top - a.y) / denom
+            };
             Pos2::new(a.x + (b.x - a.x) * t, top)
         },
     );
@@ -3567,7 +3539,11 @@ fn clip_polygon_to_rect(polygon: &[Pos2], rect: Rect) -> Vec<Pos2> {
         |p| p.y <= bottom,
         |a, b| {
             let denom = b.y - a.y;
-            let t = if denom.abs() <= f32::EPSILON { 0.0 } else { (bottom - a.y) / denom };
+            let t = if denom.abs() <= f32::EPSILON {
+                0.0
+            } else {
+                (bottom - a.y) / denom
+            };
             Pos2::new(a.x + (b.x - a.x) * t, bottom)
         },
     )
@@ -3583,19 +3559,24 @@ fn crop_rect_segments(rect: Rect) -> [(Pos2, Pos2); 4] {
 }
 
 fn liang_barsky_clip_test(p: f32, q: f32, t0: &mut f32, t1: &mut f32) -> bool {
-    if p.abs() <= f32::EPSILON {
-        return q >= 0.0;
+    // Screen/source round-trips at crop boundaries can differ by a few ULPs as
+    // zoom changes. Treat nearly parallel segments and boundary coordinates
+    // with a normalized-source tolerance so an edge does not flicker between
+    // accepted and rejected at isolated zoom levels.
+    const CLIP_EPSILON: f32 = 1.0e-5;
+    if p.abs() <= CLIP_EPSILON {
+        return q >= -CLIP_EPSILON;
     }
     let r = q / p;
     if p < 0.0 {
-        if r > *t1 {
+        if r > *t1 + CLIP_EPSILON {
             return false;
         }
         if r > *t0 {
             *t0 = r;
         }
     } else {
-        if r < *t0 {
+        if r < *t0 - CLIP_EPSILON {
             return false;
         }
         if r < *t1 {
@@ -3613,20 +3594,9 @@ fn clip_crop_workspace_segment_to_source_image(
     a: Pos2,
     b: Pos2,
 ) -> Option<[Pos2; 2]> {
-    let start = crop_workspace_screen_to_source(
-        image_rect,
-        geometry,
-        source_width,
-        source_height,
-        a,
-    );
-    let end = crop_workspace_screen_to_source(
-        image_rect,
-        geometry,
-        source_width,
-        source_height,
-        b,
-    );
+    let start =
+        crop_workspace_screen_to_source(image_rect, geometry, source_width, source_height, a);
+    let end = crop_workspace_screen_to_source(image_rect, geometry, source_width, source_height, b);
     let delta = [end[0] - start[0], end[1] - start[1]];
     let mut t0 = 0.0_f32;
     let mut t1 = 1.0_f32;
@@ -3634,12 +3604,16 @@ fn clip_crop_workspace_segment_to_source_image(
         || !liang_barsky_clip_test(delta[0], 1.0 - start[0], &mut t0, &mut t1)
         || !liang_barsky_clip_test(-delta[1], start[1], &mut t0, &mut t1)
         || !liang_barsky_clip_test(delta[1], 1.0 - start[1], &mut t0, &mut t1)
-        || t1 < t0
+        || t1 + 1.0e-5 < t0
     {
         return None;
     }
+    t0 = t0.clamp(0.0, 1.0);
+    t1 = t1.clamp(t0, 1.0);
     let source_a = [start[0] + delta[0] * t0, start[1] + delta[1] * t0];
     let source_b = [start[0] + delta[0] * t1, start[1] + delta[1] * t1];
+    let source_a = [source_a[0].clamp(0.0, 1.0), source_a[1].clamp(0.0, 1.0)];
+    let source_b = [source_b[0].clamp(0.0, 1.0), source_b[1].clamp(0.0, 1.0)];
     Some([
         crop_workspace_source_to_screen(
             image_rect,
@@ -3678,7 +3652,10 @@ fn crop_handle_at(rect: Rect, pointer: Pos2, radius: f32) -> Option<CropHandle> 
         (CropHandle::BottomLeft, rect.left_bottom()),
         (CropHandle::BottomRight, rect.right_bottom()),
         (CropHandle::Top, Pos2::new(rect.center().x, rect.top())),
-        (CropHandle::Bottom, Pos2::new(rect.center().x, rect.bottom())),
+        (
+            CropHandle::Bottom,
+            Pos2::new(rect.center().x, rect.bottom()),
+        ),
         (CropHandle::Left, Pos2::new(rect.left(), rect.center().y)),
         (CropHandle::Right, Pos2::new(rect.right(), rect.center().y)),
     ];
@@ -3734,12 +3711,8 @@ fn constrain_crop_corner_aspect(
     handle: CropHandle,
 ) -> Option<[f32; 4]> {
     let raw = app.loaded_raw.as_ref()?;
-    let ratio = app
-        .geometry
-        .aspect_ratio
-        .value(raw.width, raw.height)?;
-    let normalized_ratio =
-        ratio / (raw.width.max(1) as f32 / raw.height.max(1) as f32);
+    let ratio = app.geometry.aspect_ratio.value(raw.width, raw.height)?;
+    let normalized_ratio = ratio / (raw.width.max(1) as f32 / raw.height.max(1) as f32);
     if !normalized_ratio.is_finite() || normalized_ratio <= f32::EPSILON {
         return None;
     }
@@ -3759,8 +3732,8 @@ fn constrain_crop_corner_aspect(
     // satisfy width / height == normalized_ratio. This makes diagonal, mostly
     // horizontal, and mostly vertical drags all feel continuous.
     let inv_ratio = 1.0 / normalized_ratio;
-    let projected_width = (desired_width + desired_height * inv_ratio)
-        / (1.0 + inv_ratio * inv_ratio);
+    let projected_width =
+        (desired_width + desired_height * inv_ratio) / (1.0 + inv_ratio * inv_ratio);
 
     let max_width_from_x = if x_sign < 0.0 {
         anchor_x
@@ -3804,13 +3777,17 @@ fn constrain_crop_aspect(app: &AurawApp, mut crop: [f32; 4], handle: CropHandle)
     let target_width = height * normalized_ratio;
 
     let horizontal_edge = matches!(handle, CropHandle::Left | CropHandle::Right);
-    if horizontal_edge || (target_height <= 1.0 && (target_height - height).abs() <= (target_width - width).abs()) {
-        let new_height = target_height.clamp(crate::pipeline::GeometryTransform::MIN_CROP_EXTENT, 1.0);
+    if horizontal_edge
+        || (target_height <= 1.0 && (target_height - height).abs() <= (target_width - width).abs())
+    {
+        let new_height =
+            target_height.clamp(crate::pipeline::GeometryTransform::MIN_CROP_EXTENT, 1.0);
         let center = (crop[1] + crop[3]) * 0.5;
         crop[1] = (center - new_height * 0.5).clamp(0.0, 1.0 - new_height);
         crop[3] = crop[1] + new_height;
     } else {
-        let new_width = target_width.clamp(crate::pipeline::GeometryTransform::MIN_CROP_EXTENT, 1.0);
+        let new_width =
+            target_width.clamp(crate::pipeline::GeometryTransform::MIN_CROP_EXTENT, 1.0);
         let center = (crop[0] + crop[2]) * 0.5;
         crop[0] = (center - new_width * 0.5).clamp(0.0, 1.0 - new_width);
         crop[2] = crop[0] + new_width;

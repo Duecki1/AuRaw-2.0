@@ -72,17 +72,28 @@ impl TopBar {
             {
                 app.redo_edit();
             }
-            if ui
-                .add_enabled(
-                    app.can_save_edits(),
-                    egui::Button::new(if app.sidecar_save_in_progress() {
-                        "Saving…"
-                    } else {
-                        "Save"
-                    }),
-                )
-                .clicked()
-            {
+            let save_tooltip = if app.sidecar_save_in_progress() {
+                "Saving non-destructive edits…"
+            } else if app.sidecar_save_succeeded_recently() {
+                "Edits saved"
+            } else {
+                "Save non-destructive edits"
+            };
+            let save_icon = if app.sidecar_save_succeeded_recently() {
+                egui_phosphor::regular::CHECK
+            } else {
+                egui_phosphor::regular::FLOPPY_DISK
+            };
+            let save_response = ui
+                .add_enabled_ui(app.can_save_edits(), |ui| {
+                    ui.add_sized(
+                        egui::vec2(42.0, 36.0),
+                        egui::Button::new(egui::RichText::new(save_icon).size(19.8)),
+                    )
+                })
+                .inner
+                .on_hover_text(save_tooltip);
+            if save_response.clicked() {
                 app.save_edits_now();
             }
         });
@@ -133,18 +144,28 @@ impl TopBar {
                 {
                     app.redo_edit();
                 }
-                if ui
-                    .add_enabled(
-                        app.can_save_edits(),
-                        egui::Button::new(if app.sidecar_save_in_progress() {
-                            "Saving Edits…"
-                        } else {
-                            "Save Edits"
-                        }),
-                    )
-                    .on_hover_text("Save non-destructive edits beside the RAW (Ctrl/Cmd+S)")
-                    .clicked()
-                {
+                let save_tooltip = if app.sidecar_save_in_progress() {
+                    "Saving non-destructive edits…"
+                } else if app.sidecar_save_succeeded_recently() {
+                    "Edits saved"
+                } else {
+                    "Save non-destructive edits beside the RAW (Ctrl/Cmd+S)"
+                };
+                let save_icon = if app.sidecar_save_succeeded_recently() {
+                    egui_phosphor::regular::CHECK
+                } else {
+                    egui_phosphor::regular::FLOPPY_DISK
+                };
+                let save_response = ui
+                    .add_enabled_ui(app.can_save_edits(), |ui| {
+                        ui.add_sized(
+                            egui::vec2(32.0, 26.0),
+                            egui::Button::new(egui::RichText::new(save_icon).size(14.3)),
+                        )
+                    })
+                    .inner
+                    .on_hover_text(save_tooltip);
+                if save_response.clicked() {
                     app.save_edits_now();
                 }
                 if ui

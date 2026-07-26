@@ -577,6 +577,7 @@ pub struct AurawApp {
     sidecar_pending: VecDeque<SidecarSaveRequest>,
     sidecar_in_flight: Option<SidecarSaveJob>,
     sidecar_receiver: Option<mpsc::Receiver<SidecarSaveEvent>>,
+    sidecar_save_feedback_until: Option<Instant>,
     sidecar_autosave_deadline: Option<SidecarAutosaveDeadline>,
     developed_thumbnail_pending: Option<DevelopedThumbnailJob>,
     developed_thumbnail_in_flight: Option<DevelopedThumbnailJob>,
