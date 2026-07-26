@@ -636,6 +636,446 @@ fn global_wb_changes_camera_transform_for_dng_metadata() {
     assert!(magenta_axis(magenta) > magenta_axis(green));
 }
 
+#[derive(Clone, Copy)]
+enum LocalToneSchedulingCase {
+    Contrast,
+    Highlights,
+    Shadows,
+    Whites,
+    Temperature,
+    Tint,
+    Curves,
+}
+
+impl LocalToneSchedulingCase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Contrast => "masked Contrast",
+            Self::Highlights => "masked Highlights",
+            Self::Shadows => "masked Shadows",
+            Self::Whites => "masked Whites",
+            Self::Temperature => "masked Temperature",
+            Self::Tint => "masked Tint",
+            Self::Curves => "masked Curves",
+        }
+    }
+
+    fn apply(self, adjustments: &mut crate::pipeline::LocalAdjustments) {
+        match self {
+            Self::Contrast => adjustments.contrast = 70.0,
+            Self::Highlights => adjustments.highlights = -75.0,
+            Self::Shadows => adjustments.shadows = 75.0,
+            Self::Whites => adjustments.whites = 70.0,
+            Self::Temperature => adjustments.temperature = 70.0,
+            Self::Tint => adjustments.tint = 70.0,
+            Self::Curves => {
+                let mut curve = PointCurve::linear();
+                curve.points[1] = [0.42, 0.68];
+                curve.points[2] = [1.0, 1.0];
+                curve.len = 3;
+                adjustments.tone_curve = curve;
+            }
+        }
+    }
+}
+
+struct LocalMaskSchedulingHarness {
+    device: eframe::wgpu::Device,
+    queue: eframe::wgpu::Queue,
+    pipeline: super::RawGpuPipeline,
+    raw: super::LoadedRaw,
+    exposure: super::ExposureParams,
+}
+
+impl LocalMaskSchedulingHarness {
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 64;
+    const MASK_EDGE: u32 = 64;
+
+    fn try_new() -> Option<Self> {
+        use eframe::wgpu;
+        use half::f16;
+
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        )
+        .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("auraw local-mask scheduling test device"),
+                ..Default::default()
+            },
+        ))
+        .ok()?;
+
+        let raw = local_mask_scheduling_fixture(Self::WIDTH, Self::HEIGHT);
+        let exposure = super::ExposureParams {
+            highlight_method: crate::pipeline::HighlightReconstructionMethod::Off,
+            sharpen_amount: 0.0,
+            ..super::ExposureParams::default()
+        };
+        let masks = local_mask_scheduling_stack(None);
+        let params = super::GpuParams::new(&exposure, &masks, &raw);
+        let pipeline = super::RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            &device,
+            &queue,
+            &raw,
+            &params,
+            super::ProcessingQuality::High,
+            Self::MASK_EDGE,
+        )
+        .unwrap_or_else(|error| panic!("local-mask GPU pipeline creation failed: {error:#}"));
+
+        let mask = (0..Self::MASK_EDGE)
+            .flat_map(|y| {
+                let value = f16::from_f32(if y < Self::MASK_EDGE / 2 { 1.0 } else { 0.0 })
+                    .to_bits();
+                std::iter::repeat_n(value, Self::MASK_EDGE as usize)
+            })
+            .collect::<Vec<_>>();
+        pipeline
+            .update_mask_layer(&queue, 0, &mask)
+            .expect("upload local-mask scheduling test layer");
+
+        Some(Self {
+            device,
+            queue,
+            pipeline,
+            raw,
+            exposure,
+        })
+    }
+
+    fn render_preview(&self, params: &super::GpuParams) -> Vec<f32> {
+        self.pipeline.dispatch_stage(
+            &self.queue,
+            &self.device,
+            params,
+            super::ProcessingStage::Raw,
+        );
+        self.pipeline.dispatch_stage(
+            &self.queue,
+            &self.device,
+            params,
+            super::ProcessingStage::Tone,
+        );
+        self.pipeline.dispatch_stage(
+            &self.queue,
+            &self.device,
+            params,
+            super::ProcessingStage::Output,
+        );
+        self.pipeline
+            .read_display_linear_region_blocking(
+                &self.device,
+                &self.queue,
+                0,
+                0,
+                Self::WIDTH,
+                Self::HEIGHT,
+            )
+            .expect("read local-mask preview pixels")
+    }
+
+    fn render_export(&self, params: &super::GpuParams) -> Vec<f32> {
+        self.pipeline
+            .begin_export_tone_analysis(&self.queue, &self.device);
+        self.pipeline
+            .accumulate_export_tone_tile(&self.queue, &self.device, params);
+        self.pipeline
+            .finish_export_tone_analysis(&self.queue, &self.device);
+        self.pipeline
+            .dispatch_export_tile(&self.queue, &self.device, params);
+        self.pipeline
+            .read_display_linear_region_blocking(
+                &self.device,
+                &self.queue,
+                0,
+                0,
+                Self::WIDTH,
+                Self::HEIGHT,
+            )
+            .expect("read local-mask export pixels")
+    }
+
+    fn assert_case(&self, case: LocalToneSchedulingCase) {
+        let empty_masks = crate::pipeline::MaskStack::default();
+        let neutral_masks = local_mask_scheduling_stack(None);
+        let adjusted_masks = local_mask_scheduling_stack(Some(case));
+        let empty_params = super::GpuParams::new(&self.exposure, &empty_masks, &self.raw);
+        let neutral_params = super::GpuParams::new(&self.exposure, &neutral_masks, &self.raw);
+        let adjusted_params = super::GpuParams::new(&self.exposure, &adjusted_masks, &self.raw);
+
+        assert!(
+            !neutral_params.needs_intermediate_adjustment_passes(),
+            "{} scheduled an intermediate pass at neutral",
+            case.label()
+        );
+        assert!(
+            adjusted_params.needs_intermediate_adjustment_passes(),
+            "{} did not schedule the local tone pass",
+            case.label()
+        );
+
+        let preview_empty = self.render_preview(&empty_params);
+        let preview_neutral = self.render_preview(&neutral_params);
+        let preview_adjusted = self.render_preview(&adjusted_params);
+        let export_empty = self.render_export(&empty_params);
+        let export_neutral = self.render_export(&neutral_params);
+        let export_adjusted = self.render_export(&adjusted_params);
+
+        assert_max_delta(
+            case.label(),
+            "preview neutral mask",
+            &preview_empty,
+            &preview_neutral,
+            3e-6,
+        );
+        assert_max_delta(
+            case.label(),
+            "export neutral mask",
+            &export_empty,
+            &export_neutral,
+            3e-6,
+        );
+        assert_masked_pixels_change(
+            case.label(),
+            &preview_neutral,
+            &preview_adjusted,
+            Self::WIDTH,
+            Self::HEIGHT,
+        );
+        assert_masked_pixels_change(
+            case.label(),
+            &export_neutral,
+            &export_adjusted,
+            Self::WIDTH,
+            Self::HEIGHT,
+        );
+        assert_max_delta(
+            case.label(),
+            "preview/export neutral",
+            &preview_neutral,
+            &export_neutral,
+            3e-5,
+        );
+        assert_max_delta(
+            case.label(),
+            "preview/export adjusted",
+            &preview_adjusted,
+            &export_adjusted,
+            3e-5,
+        );
+    }
+}
+
+fn local_mask_scheduling_fixture(width: u32, height: u32) -> super::LoadedRaw {
+    let white = 4095.0f32;
+    let mut raw_pixels = Vec::with_capacity((width * height) as usize);
+    let mut color_indices = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let channel = match (x % 2, y % 2) {
+                (0, 0) => 0,
+                (1, 1) => 2,
+                _ => 1,
+            };
+            color_indices.push(channel);
+            let gradient = 0.035 + 0.90 * x as f32 / (width - 1) as f32;
+            let vertical = 0.035 * (y as f32 / (height - 1) as f32 - 0.5);
+            let texture = if (x / 3 + y / 3) % 2 == 0 {
+                0.018
+            } else {
+                -0.018
+            };
+            let channel_scale = [1.04, 0.94, 0.82, 0.94][channel as usize];
+            let value = (gradient + vertical + texture).clamp(0.0, 0.98) * channel_scale;
+            raw_pixels.push((value.clamp(0.0, 1.0) * white).round() as u16);
+        }
+    }
+
+    super::LoadedRaw {
+        width,
+        height,
+        camera_make: "test".to_owned(),
+        camera_model: "local-mask-scheduling".to_owned(),
+        lens_make: String::new(),
+        lens_model: String::new(),
+        focal_length: 0.0,
+        aperture: 0.0,
+        focus_distance: 0.0,
+        capture_metadata: Default::default(),
+        cfa_kind: crate::pipeline::CfaKind::Bayer,
+        raw_pixels,
+        color_indices: crate::pipeline::CompactPixelMap::dense(width, height, color_indices),
+        wb_coeffs: [1.0; 4],
+        cam_to_srgb: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        black_levels: [0.0; 4],
+        black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(
+            width,
+            height,
+            vec![0.0; (width * height) as usize],
+        ),
+        white_levels: [white; 4],
+        noise_profile: crate::pipeline::NoiseProfile::default(),
+        camera_profile: Default::default(),
+        camera_profile_source: None,
+        available_camera_profiles: Vec::new(),
+        white_balance_model: None,
+        lens_geometry: None,
+    }
+}
+
+fn local_mask_scheduling_stack(
+    case: Option<LocalToneSchedulingCase>,
+) -> crate::pipeline::MaskStack {
+    let mut mask = crate::pipeline::LocalMask::new(crate::pipeline::MaskKind::Brush, 1);
+    if let Some(case) = case {
+        case.apply(&mut mask.adjustments);
+    }
+    crate::pipeline::MaskStack {
+        masks: vec![mask],
+        selected_mask: None,
+        selected_component: None,
+    }
+}
+
+fn assert_max_delta(
+    adjustment: &str,
+    comparison: &str,
+    left: &[f32],
+    right: &[f32],
+    tolerance: f32,
+) {
+    let max_delta = left
+        .iter()
+        .zip(right)
+        .map(|(before, after)| (after - before).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_delta <= tolerance,
+        "{adjustment} {comparison} diverged by {max_delta}, tolerance {tolerance}"
+    );
+}
+
+fn assert_masked_pixels_change(
+    adjustment: &str,
+    neutral: &[f32],
+    adjusted: &[f32],
+    width: u32,
+    height: u32,
+) {
+    let mut inside_max = 0.0f32;
+    let mut outside_max = 0.0f32;
+    for y in 4..height - 4 {
+        for x in 4..width - 4 {
+            let pixel = ((y * width + x) * 3) as usize;
+            let delta = (0..3)
+                .map(|channel| (adjusted[pixel + channel] - neutral[pixel + channel]).abs())
+                .fold(0.0f32, f32::max);
+            if y < height / 4 {
+                inside_max = inside_max.max(delta);
+            } else if y >= height * 3 / 4 {
+                outside_max = outside_max.max(delta);
+            }
+        }
+    }
+    assert!(
+        inside_max > 2e-4,
+        "{adjustment} changed no masked pixels: max delta {inside_max}"
+    );
+    assert!(
+        outside_max <= 3e-5,
+        "{adjustment} leaked outside the mask: max delta {outside_max}"
+    );
+}
+
+fn assert_local_tone_scheduling_case(case: LocalToneSchedulingCase) {
+    use std::sync::{Mutex, OnceLock};
+
+    // This assertion remains active even on GPU-less CI and directly guards
+    // the scheduler regression that originally made these controls silent.
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams {
+        highlight_method: crate::pipeline::HighlightReconstructionMethod::Off,
+        sharpen_amount: 0.0,
+        ..super::ExposureParams::default()
+    };
+    let neutral_params = super::GpuParams::new(
+        &exposure,
+        &local_mask_scheduling_stack(None),
+        &raw,
+    );
+    let adjusted_params = super::GpuParams::new(
+        &exposure,
+        &local_mask_scheduling_stack(Some(case)),
+        &raw,
+    );
+    assert!(
+        !neutral_params.needs_intermediate_adjustment_passes(),
+        "{} scheduled an intermediate pass at neutral",
+        case.label()
+    );
+    assert!(
+        adjusted_params.needs_intermediate_adjustment_passes(),
+        "{} did not schedule the local tone pass",
+        case.label()
+    );
+
+    static HARNESS: OnceLock<Option<Mutex<LocalMaskSchedulingHarness>>> = OnceLock::new();
+    let Some(harness) = HARNESS.get_or_init(|| LocalMaskSchedulingHarness::try_new().map(Mutex::new))
+    else {
+        // Headless CI is allowed to have no usable GPU. The scheduling
+        // assertions still run when an adapter is available, matching the
+        // repository's existing GPU behavior-test convention.
+        return;
+    };
+    harness
+        .lock()
+        .expect("local-mask scheduling harness mutex poisoned")
+        .assert_case(case);
+}
+
+#[test]
+fn masked_contrast_is_independently_scheduled_in_preview_and_export() {
+    assert_local_tone_scheduling_case(LocalToneSchedulingCase::Contrast);
+}
+
+#[test]
+fn masked_highlights_are_independently_scheduled_in_preview_and_export() {
+    assert_local_tone_scheduling_case(LocalToneSchedulingCase::Highlights);
+}
+
+#[test]
+fn masked_shadows_are_independently_scheduled_in_preview_and_export() {
+    assert_local_tone_scheduling_case(LocalToneSchedulingCase::Shadows);
+}
+
+#[test]
+fn masked_whites_are_independently_scheduled_in_preview_and_export() {
+    assert_local_tone_scheduling_case(LocalToneSchedulingCase::Whites);
+}
+
+#[test]
+fn masked_temperature_is_independently_scheduled_in_preview_and_export() {
+    assert_local_tone_scheduling_case(LocalToneSchedulingCase::Temperature);
+}
+
+#[test]
+fn masked_tint_is_independently_scheduled_in_preview_and_export() {
+    assert_local_tone_scheduling_case(LocalToneSchedulingCase::Tint);
+}
+
+#[test]
+fn masked_curves_are_independently_scheduled_in_preview_and_export() {
+    assert_local_tone_scheduling_case(LocalToneSchedulingCase::Curves);
+}
+
 #[test]
 fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
