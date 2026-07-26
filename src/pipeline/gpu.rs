@@ -1298,9 +1298,30 @@ impl GpuParams {
         let creative = self.creative_effects[0].abs() > 1e-6
             || self.vignette[0].abs() > 1e-6;
         let local_count = (self.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
-        let local_effects = self.mask_adjust_2[..local_count]
-            .iter()
-            .any(|values| values.iter().any(|value| value.abs() > 1e-6));
+        let local_effects = (0..local_count).any(|index| {
+            let state = self.mask_meta[index];
+            if state[0] == 0 || state[1] == 0 {
+                return false;
+            }
+
+            // The local tone shader is physically part of the optional
+            // intermediate chain. Keep that chain scheduled when any control
+            // handled by apply_local_scene_tone_node is active. Exposure is
+            // already applied by prepare_scene_node, Blacks is deferred to the
+            // display-linear view node, and local mixer/grading run in the
+            // always-dispatched view pass, so none of those need this gate.
+            let tone = self.mask_adjust_0[index][1..]
+                .iter()
+                .any(|value| value.abs() > 1e-6);
+            let white_balance = self.mask_adjust_1[index][0].abs() > 1e-6
+                || self.mask_adjust_1[index][2].abs() > 1e-6
+                || self.mask_adjust_1[index][3].abs() > 1e-6;
+            let curves = state[2] != 0;
+            let presence_or_saturation = self.mask_adjust_2[index]
+                .iter()
+                .any(|value| value.abs() > 1e-6);
+            tone || white_balance || curves || presence_or_saturation
+        });
         global_effects || creative || local_effects
     }
 
