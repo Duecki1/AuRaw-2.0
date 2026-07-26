@@ -142,18 +142,10 @@ impl LensGeometryMap {
             if dx.abs() <= 1e-6 || dy.abs() <= 1e-6 {
                 break;
             }
-            let mapped_x = self.source_position_for_raster(
-                sample_x,
-                estimate[1],
-                raster_width,
-                raster_height,
-            );
-            let mapped_y = self.source_position_for_raster(
-                estimate[0],
-                sample_y,
-                raster_width,
-                raster_height,
-            );
+            let mapped_x =
+                self.source_position_for_raster(sample_x, estimate[1], raster_width, raster_height);
+            let mapped_y =
+                self.source_position_for_raster(estimate[0], sample_y, raster_width, raster_height);
             if [mapped_x[0], mapped_x[1], mapped_y[0], mapped_y[1]]
                 .iter()
                 .any(|value| !value.is_finite())
@@ -180,7 +172,11 @@ impl LensGeometryMap {
                 (estimate[0] - correction[0].clamp(-64.0, 64.0)).clamp(0.0, max_x),
                 (estimate[1] - correction[1].clamp(-64.0, 64.0)).clamp(0.0, max_y),
             ];
-            if (next[0] - estimate[0]).abs().max((next[1] - estimate[1]).abs()) < 1e-4 {
+            if (next[0] - estimate[0])
+                .abs()
+                .max((next[1] - estimate[1]).abs())
+                < 1e-4
+            {
                 break;
             }
             estimate = next;
@@ -210,9 +206,7 @@ impl LensGeometryMap {
         let y1 = (y0 + 1).min(self.grid_height - 1);
         let tx = gx - x0 as f32;
         let ty = gy - y0 as f32;
-        let load = |px: u32, py: u32| {
-            self.coordinates[(py * self.grid_width + px) as usize]
-        };
+        let load = |px: u32, py: u32| self.coordinates[(py * self.grid_width + px) as usize];
         let a = load(x0, y0);
         let b = load(x1, y0);
         let c = load(x0, y1);
@@ -418,8 +412,14 @@ impl GeometryTransform {
         let mut high = 1.0_f32;
         for _ in 0..32 {
             let mid = (low + high) * 0.5;
-            if feasible_crop_center_bounds(geometry, width * mid, height * mid, source_width_f, source_height_f)
-                .is_some()
+            if feasible_crop_center_bounds(
+                geometry,
+                width * mid,
+                height * mid,
+                source_width_f,
+                source_height_f,
+            )
+            .is_some()
             {
                 low = mid;
             } else {
@@ -671,10 +671,7 @@ impl<'a> GeometryInverseMap<'a> {
 
         // Geometry is naturally expressed in pixel-edge coordinates, while
         // the raster is indexed by pixel centers at integer coordinates.
-        [
-            center_x + source_dx - 0.5,
-            center_y + source_dy - 0.5,
-        ]
+        [center_x + source_dx - 0.5, center_y + source_dy - 0.5]
     }
 }
 
@@ -709,7 +706,10 @@ fn inverse_affine_corner_delta(geometry: GeometryTransform, dx: f32, dy: f32) ->
     if determinant.abs() < 1e-6 {
         return [0.0, 0.0];
     }
-    [(d * dx - b * dy) / determinant, (-c2 * dx + a * dy) / determinant]
+    [
+        (d * dx - b * dy) / determinant,
+        (-c2 * dx + a * dy) / determinant,
+    ]
 }
 
 fn transformed_crop_corner_deltas(
@@ -735,10 +735,22 @@ fn feasible_crop_center_bounds(
     source_height: f32,
 ) -> Option<([f32; 2], [f32; 2])> {
     let corners = transformed_crop_corner_deltas(geometry, crop_width, crop_height);
-    let min_dx = corners.iter().map(|point| point[0]).fold(f32::INFINITY, f32::min);
-    let max_dx = corners.iter().map(|point| point[0]).fold(f32::NEG_INFINITY, f32::max);
-    let min_dy = corners.iter().map(|point| point[1]).fold(f32::INFINITY, f32::min);
-    let max_dy = corners.iter().map(|point| point[1]).fold(f32::NEG_INFINITY, f32::max);
+    let min_dx = corners
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_dx = corners
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_dy = corners
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::INFINITY, f32::min);
+    let max_dy = corners
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::NEG_INFINITY, f32::max);
     let x_bounds = [-min_dx, source_width - max_dx];
     let y_bounds = [-min_dy, source_height - max_dy];
     if x_bounds[0] <= x_bounds[1] + 1e-4 && y_bounds[0] <= y_bounds[1] + 1e-4 {
@@ -826,7 +838,8 @@ pub fn transform_thumbnail_geometry_with_lens(
                 source_x,
                 source_y,
             );
-            let index = ((output_y as usize * output_width as usize + output_x as usize) * 4) as usize;
+            let index =
+                ((output_y as usize * output_width as usize + output_x as usize) * 4) as usize;
             rgba[index..index + 4].copy_from_slice(&pixel);
         }
     }
@@ -863,7 +876,10 @@ fn sample_thumbnail_rgba_bilinear(
     let ty = y - y0 as f32;
     let load = |px: u32, py: u32, channel: usize| -> f32 {
         let index = ((py as usize * width as usize + px as usize) * 4) + channel;
-        source.get(index).copied().unwrap_or(if channel == 3 { 255 } else { 0 }) as f32
+        source
+            .get(index)
+            .copied()
+            .unwrap_or(if channel == 3 { 255 } else { 0 }) as f32
     };
     let mut result = [0u8; 4];
     for channel in 0..4 {
@@ -922,16 +938,25 @@ mod tests {
         assert_eq!(geometry.crop_pixel_dimensions(4000, 3000), (2000, 1500));
     }
 
-
     #[test]
     fn constrained_rotation_shrinks_full_crop_inside_source() {
         let mut geometry = GeometryTransform {
             rotation_degrees: 20.0,
             ..Default::default()
         };
-        assert!(!crop_fits_transformed_source(geometry, geometry.crop, 4000, 3000));
+        assert!(!crop_fits_transformed_source(
+            geometry,
+            geometry.crop,
+            4000,
+            3000
+        ));
         assert!(geometry.fit_crop_inside_transformed_source(4000, 3000));
-        assert!(crop_fits_transformed_source(geometry, geometry.crop, 4000, 3000));
+        assert!(crop_fits_transformed_source(
+            geometry,
+            geometry.crop,
+            4000,
+            3000
+        ));
         assert!(geometry.crop[0] > 0.0);
         assert!(geometry.crop[1] > 0.0);
         assert!(geometry.crop[2] < 1.0);
@@ -961,15 +986,16 @@ mod tests {
         fitted.fit_crop_inside_transformed_source(4000, 3000);
         let start = fitted.crop;
         let proposed = [0.0, 0.0, start[2], start[3]];
-        let constrained = fitted.constrain_crop_drag_to_transformed_source(
-            start,
-            proposed,
-            4000,
-            3000,
-        );
+        let constrained =
+            fitted.constrain_crop_drag_to_transformed_source(start, proposed, 4000, 3000);
         assert!((constrained[2] - start[2]).abs() < 1e-6);
         assert!((constrained[3] - start[3]).abs() < 1e-6);
-        assert!(crop_fits_transformed_source(fitted, constrained, 4000, 3000));
+        assert!(crop_fits_transformed_source(
+            fitted,
+            constrained,
+            4000,
+            3000
+        ));
     }
 
     #[test]
@@ -978,8 +1004,7 @@ mod tests {
             width: 2,
             height: 2,
             rgba: vec![
-                255, 0, 0, 255, 0, 255, 0, 255,
-                0, 0, 255, 255, 255, 255, 255, 255,
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ],
         };
         assert_eq!(
@@ -1011,8 +1036,7 @@ mod tests {
             width: 3,
             height: 2,
             rgba: vec![
-                1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255,
-                4, 0, 0, 255, 5, 0, 0, 255, 6, 0, 0, 255,
+                1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255, 4, 0, 0, 255, 5, 0, 0, 255, 6, 0, 0, 255,
             ],
         };
         let transformed = transform_thumbnail_geometry(

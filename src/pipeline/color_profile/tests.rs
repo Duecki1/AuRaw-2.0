@@ -1,9 +1,9 @@
-use super::{
-    map_output_lut_input_rec2020, output_lut_shaper, CameraProfile, HsvMap,
-    IccOutputTransform, ProfileEncoding, ToneCurve,
-};
 #[cfg(not(target_os = "android"))]
 use super::RenderingIntent;
+use super::{
+    map_output_lut_input_rec2020, output_lut_shaper, CameraProfile, HsvMap, IccOutputTransform,
+    ProfileEncoding, ToneCurve,
+};
 
 fn identity_encoded_lut(edge: u32) -> IccOutputTransform {
     let mut entries = Vec::with_capacity((edge * edge * edge) as usize);
@@ -20,7 +20,10 @@ fn identity_encoded_lut(edge: u32) -> IccOutputTransform {
             }
         }
     }
-    IccOutputTransform { size: edge, entries }
+    IccOutputTransform {
+        size: edge,
+        entries,
+    }
 }
 
 fn constant_encoded_lut(edge: u32, value: [f32; 3]) -> IccOutputTransform {
@@ -30,11 +33,7 @@ fn constant_encoded_lut(edge: u32, value: [f32; 3]) -> IccOutputTransform {
     }
 }
 
-fn shader_reference_sample(
-    entries: &[[f32; 4]],
-    edge: u32,
-    rgb: [f32; 3],
-) -> [f32; 3] {
+fn shader_reference_sample(entries: &[[f32; 4]], edge: u32, rgb: [f32; 3]) -> [f32; 3] {
     let mapped = map_output_lut_input_rec2020(rgb);
     let shaped = mapped.map(output_lut_shaper);
     let coordinate = shaped.map(|value| value.clamp(0.0, 1.0) * (edge - 1) as f32);
@@ -57,13 +56,29 @@ fn shader_reference_sample(
         ]
     };
     let low_z = mix(
-        mix(fetch(low[0], low[1], low[2]), fetch(high[0], low[1], low[2]), fraction[0]),
-        mix(fetch(low[0], high[1], low[2]), fetch(high[0], high[1], low[2]), fraction[0]),
+        mix(
+            fetch(low[0], low[1], low[2]),
+            fetch(high[0], low[1], low[2]),
+            fraction[0],
+        ),
+        mix(
+            fetch(low[0], high[1], low[2]),
+            fetch(high[0], high[1], low[2]),
+            fraction[0],
+        ),
         fraction[1],
     );
     let high_z = mix(
-        mix(fetch(low[0], low[1], high[2]), fetch(high[0], low[1], high[2]), fraction[0]),
-        mix(fetch(low[0], high[1], high[2]), fetch(high[0], high[1], high[2]), fraction[0]),
+        mix(
+            fetch(low[0], low[1], high[2]),
+            fetch(high[0], low[1], high[2]),
+            fraction[0],
+        ),
+        mix(
+            fetch(low[0], high[1], high[2]),
+            fetch(high[0], high[1], high[2]),
+            fraction[0],
+        ),
         fraction[1],
     );
     mix(low_z, high_z, fraction[2])
@@ -140,7 +155,10 @@ fn cpu_and_gpu_reference_lut_sampling_agree_for_deterministic_random_points() {
     for _ in 0..edge * edge * edge {
         entries.push([next(), next(), next(), 0.0]);
     }
-    let lut = IccOutputTransform { size: edge, entries };
+    let lut = IccOutputTransform {
+        size: edge,
+        entries,
+    };
     for _ in 0..512 {
         let input = [next(), next(), next()];
         assert_rgb_close(
@@ -165,7 +183,10 @@ fn cpu_and_gpu_reference_lut_sampling_agree_for_out_of_gamut_points() {
     for _ in 0..edge * edge * edge {
         entries.push([next(), next(), next(), 0.0]);
     }
-    let lut = IccOutputTransform { size: edge, entries };
+    let lut = IccOutputTransform {
+        size: edge,
+        entries,
+    };
     for _ in 0..256 {
         let input = [next() * 2.0 - 0.5, next() * 2.0 - 0.5, next() * 2.0 - 0.5];
         assert_rgb_close(
@@ -187,7 +208,10 @@ fn exact_unit_cube_edges_select_valid_terminal_cells() {
             }
         }
     }
-    let lut = IccOutputTransform { size: edge, entries };
+    let lut = IccOutputTransform {
+        size: edge,
+        entries,
+    };
     assert_rgb_close(lut.transform_rgb([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0], 0.0);
     assert_rgb_close(lut.transform_rgb([1.0, 1.0, 1.0]), [3.0, 3.0, 3.0], 0.0);
     assert_rgb_close(lut.transform_rgb([1.0, 0.0, 1.0]), [3.0, 0.0, 3.0], 0.0);
@@ -200,10 +224,11 @@ fn pre_lut_gamut_policy_preserves_in_cube_values_and_maps_outliers_to_unit_rec20
     for input in [[1.4, -0.2, 0.3], [-0.5, 0.8, 1.7], [2.0, 2.0, 2.0]] {
         let mapped = map_output_lut_input_rec2020(input);
         assert!(mapped.iter().all(|value| value.is_finite()));
-        assert!(mapped.iter().all(|value| (-1e-5..=1.000_01).contains(value)));
+        assert!(mapped
+            .iter()
+            .all(|value| (-1e-5..=1.000_01).contains(value)));
     }
 }
-
 
 #[test]
 fn dual_illuminant_maps_interpolate_entrywise() {

@@ -42,11 +42,13 @@ pub fn read_display_icc_profile(path: &Path) -> Result<DisplayIccProfile> {
 pub fn discover_display_icc_profile(
     screen_point: Option<[i32; 2]>,
 ) -> Result<Option<DisplayIccProfile>> {
-    Ok(icc::discover_display_profile(screen_point)?.map(|profile| DisplayIccProfile {
-        bytes: profile.bytes,
-        label: profile.label,
-        source: profile.source,
-    }))
+    Ok(
+        icc::discover_display_profile(screen_point)?.map(|profile| DisplayIccProfile {
+            bytes: profile.bytes,
+            label: profile.label,
+            source: profile.source,
+        }),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -226,7 +228,6 @@ impl DcpMatrixSet {
         }
     }
 }
-
 
 #[derive(Clone, Debug, Default)]
 pub struct DcpProfileIdentity {
@@ -1079,8 +1080,7 @@ fn rec2020_from_oklab(lab: [f32; 3]) -> [f32; 3] {
 }
 
 fn rgb_is_unit(rgb: [f32; 3]) -> bool {
-    rgb[0].min(rgb[1]).min(rgb[2]) >= -1e-7
-        && rgb[0].max(rgb[1]).max(rgb[2]) <= 1.000_000_1
+    rgb[0].min(rgb[1]).min(rgb[2]) >= -1e-7 && rgb[0].max(rgb[1]).max(rgb[2]) <= 1.000_000_1
 }
 
 fn perceptual_soft_chroma(requested: f32, boundary: f32) -> f32 {
@@ -1101,11 +1101,7 @@ fn rec2020_unit_boundary(lightness: f32, hue: [f32; 2], requested: f32) -> f32 {
     let mut low = 0.0;
     let mut high = requested.max(0.04);
     for _ in 0..8 {
-        let probe = rec2020_from_oklab([
-            lightness,
-            hue[0] * high,
-            hue[1] * high,
-        ]);
+        let probe = rec2020_from_oklab([lightness, hue[0] * high, hue[1] * high]);
         if rgb_is_unit(probe) {
             low = high;
             high *= 2.0;
@@ -1113,11 +1109,7 @@ fn rec2020_unit_boundary(lightness: f32, hue: [f32; 2], requested: f32) -> f32 {
     }
     for _ in 0..11 {
         let middle = 0.5 * (low + high);
-        let probe = rec2020_from_oklab([
-            lightness,
-            hue[0] * middle,
-            hue[1] * middle,
-        ]);
+        let probe = rec2020_from_oklab([lightness, hue[0] * middle, hue[1] * middle]);
         if rgb_is_unit(probe) {
             low = middle;
         } else {
@@ -1152,12 +1144,8 @@ fn map_output_lut_input_rec2020(rgb: [f32; 3]) -> [f32; 3] {
     }
     let boundary = rec2020_unit_boundary(lightness, hue, chroma);
     let compressed = perceptual_soft_chroma(chroma, boundary);
-    rec2020_from_oklab([
-        lightness,
-        hue[0] * compressed,
-        hue[1] * compressed,
-    ])
-    .map(|value| value.clamp(0.0, 1.0))
+    rec2020_from_oklab([lightness, hue[0] * compressed, hue[1] * compressed])
+        .map(|value| value.clamp(0.0, 1.0))
 }
 
 fn sample_rgb_lut(entries: &[[f32; 4]], size: u32, rgb: [f32; 3]) -> [f32; 3] {

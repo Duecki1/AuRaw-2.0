@@ -144,8 +144,10 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
     # Global WB is camera/profile metadata-driven on the CPU; its result reaches
     # shaders through the live camera matrix and DCP interpolation weight.
     compact_gpu = re.sub(r"\s+", "", GPU)
+    assert "temperature_offset_from_kelvin" in SIDEBAR
+    assert "exposure.temperature=" in re.sub(r"\s+", "", SIDEBAR)
+    assert "&mut exposure.tint" in SIDEBAR
     for ui_field in ("exposure.temperature", "exposure.tint"):
-        assert f"&mut {ui_field}" in SIDEBAR, ui_field
         assert f"{ui_field}.clamp" in compact_gpu, ui_field
     assert "raw.adjusted_camera_transform(" in GPU
     assert "cam_to_working(camera_rgb)" in ALL_SHADERS
@@ -191,7 +193,10 @@ def test_presence_and_color_controls_use_perceptual_bounded_mappings() -> None:
     assert "chroma_boost" in ADJUSTMENTS
 
 
-def test_global_temperature_has_an_extended_metadata_aware_range() -> None:
-    assert "GLOBAL_TEMPERATURE_LIMIT: f32 = 150.0" in BASIC
-    assert "-crate::pipeline::GLOBAL_TEMPERATURE_LIMIT" in SIDEBAR
+def test_global_temperature_is_presented_as_metadata_aware_kelvin() -> None:
+    assert "MIN_TEMPERATURE_KELVIN: f32 = 1_901.0" in BASIC
+    assert "MAX_TEMPERATURE_KELVIN: f32 = 25_000.0" in BASIC
+    assert "temperature_kelvin_from_offset" in SIDEBAR
+    assert "temperature_offset_from_kelvin" in SIDEBAR
+    assert '"Temperature (K)"' in SIDEBAR
     assert "GLOBAL_TEMPERATURE_LIMIT" in GPU

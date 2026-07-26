@@ -204,10 +204,28 @@ pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;
 /// authority and keeps low-key/high-key pivots from degenerating.
 pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;
 pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
-/// Global camera white-balance temperature range in mired displacement.
-/// +/-150 reaches roughly 2,850 K to 20,000 K around a 5,000 K as-shot neutral
-/// while retaining fine one-unit control near zero.
-pub const GLOBAL_TEMPERATURE_LIMIT: f32 = 150.0;
+/// Kelvin limits presented by the global white-balance control. These match
+/// darktable's physical temperature control rather than exposing our internal
+/// reciprocal-temperature offset.
+pub const MIN_TEMPERATURE_KELVIN: f32 = 1_901.0;
+pub const MAX_TEMPERATURE_KELVIN: f32 = 25_000.0;
+/// Maximum serialized mired displacement. This covers the complete Kelvin UI
+/// range for every as-shot neutral inside that range.
+pub const GLOBAL_TEMPERATURE_LIMIT: f32 = 500.0;
+
+pub fn temperature_kelvin_from_offset(base_kelvin: f32, offset_mired: f32) -> f32 {
+    let base_mired =
+        1_000_000.0 / base_kelvin.clamp(MIN_TEMPERATURE_KELVIN, MAX_TEMPERATURE_KELVIN);
+    (1_000_000.0 / (base_mired - offset_mired).max(1.0))
+        .clamp(MIN_TEMPERATURE_KELVIN, MAX_TEMPERATURE_KELVIN)
+}
+
+pub fn temperature_offset_from_kelvin(base_kelvin: f32, target_kelvin: f32) -> f32 {
+    let base = base_kelvin.clamp(MIN_TEMPERATURE_KELVIN, MAX_TEMPERATURE_KELVIN);
+    let target = target_kelvin.clamp(MIN_TEMPERATURE_KELVIN, MAX_TEMPERATURE_KELVIN);
+    (1_000_000.0 / base - 1_000_000.0 / target)
+        .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT)
+}
 /// Extended Color Mixer hue range. Values through +/-100 retain the original
 /// response for sidecar compatibility, while the extra travel allows stronger
 /// creative shifts toward and beyond the neighbouring named hue.
@@ -230,10 +248,9 @@ pub struct ExposureParams {
     pub contrast: f32,
     /// darktable-compatible sigmoid scene-to-display transform.
     pub sigmoid: SigmoidParams,
-    /// Relative metadata-aware white balance. Temperature uses the extended
-    /// +/-150 mired domain while tint retains the familiar -100..100 domain.
-    /// Temperature is a mired displacement and tint is a Planckian-normal Duv
-    /// displacement; zero preserves the camera's as-shot neutral exactly.
+    /// Relative metadata-aware white balance. Temperature is serialized as an
+    /// internal mired displacement but presented to users in Kelvin; tint is a
+    /// Planckian-normal Duv displacement. Zero preserves the as-shot neutral.
     pub temperature: f32,
     pub tint: f32,
     pub saturation: f32,
@@ -444,10 +461,28 @@ const fn default_sharpen_detail() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DemosaicMode, ExposureParams, PointCurve, CURRENT_PROCESS_VERSION,
-        LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
+        temperature_kelvin_from_offset, temperature_offset_from_kelvin, DemosaicMode,
+        ExposureParams, PointCurve, CURRENT_PROCESS_VERSION,
+        LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV, MAX_TEMPERATURE_KELVIN, MIN_TEMPERATURE_KELVIN,
     };
     use crate::pipeline::SigmoidParams;
+
+    #[test]
+    fn kelvin_ui_round_trips_through_the_serialized_mired_offset() {
+        let base = 5_000.0;
+        for target in [
+            MIN_TEMPERATURE_KELVIN,
+            3_200.0,
+            base,
+            6_500.0,
+            MAX_TEMPERATURE_KELVIN,
+        ] {
+            let offset = temperature_offset_from_kelvin(base, target);
+            let round_trip = temperature_kelvin_from_offset(base, offset);
+            assert!((round_trip - target).abs() < 0.01, "{target} K");
+        }
+        assert_eq!(temperature_offset_from_kelvin(base, base), 0.0);
+    }
 
     #[test]
     fn reference_demosaic_is_the_default() {
@@ -474,7 +509,6 @@ mod tests {
         assert_eq!(rendition.saturation, 0.0);
         assert_eq!(rendition.vibrance, 0.0);
     }
-
 
     #[test]
     fn every_supported_process_version_uses_the_current_renderer() {
@@ -522,7 +556,10 @@ mod tests {
         };
         pre_backend.migrate_to_current_process();
         assert_eq!(pre_backend.process_version, CURRENT_PROCESS_VERSION);
-        assert_eq!(pre_backend.exposure, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV);
+        assert_eq!(
+            pre_backend.exposure,
+            LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV
+        );
 
         let mut hidden_backend = ExposureParams {
             process_version: 9,
@@ -531,7 +568,10 @@ mod tests {
         };
         hidden_backend.migrate_to_current_process();
         assert_eq!(hidden_backend.process_version, CURRENT_PROCESS_VERSION);
-        assert_eq!(hidden_backend.exposure, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV);
+        assert_eq!(
+            hidden_backend.exposure,
+            LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV
+        );
 
         let mut previous_tone_formula = ExposureParams {
             process_version: 10,
@@ -540,7 +580,10 @@ mod tests {
             ..ExposureParams::default()
         };
         previous_tone_formula.migrate_to_current_process();
-        assert_eq!(previous_tone_formula.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(
+            previous_tone_formula.process_version,
+            CURRENT_PROCESS_VERSION
+        );
         assert_eq!(previous_tone_formula.exposure, 0.35);
         assert_eq!(previous_tone_formula.contrast, 42.0);
     }

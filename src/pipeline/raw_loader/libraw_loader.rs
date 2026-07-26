@@ -1,9 +1,9 @@
+use super::super::noise::NoiseProfile;
 use super::{
     validate_raw_dimensions, CameraColorModel, CameraProfile, CameraProfileCandidate,
-    CameraProfileMode, CameraWhiteBalanceModel, CfaKind, CompactPixelMap, DngColorEndpoint, LoadedRaw, RawThumbnail,
-    MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
+    CameraProfileMode, CameraWhiteBalanceModel, CfaKind, CompactPixelMap, DngColorEndpoint,
+    LoadedRaw, RawThumbnail, MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
 };
-use super::super::noise::NoiseProfile;
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
 use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
@@ -285,7 +285,10 @@ pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
     let sizes = unsafe { &(*ctx.raw).rawdata.sizes };
     let width = u32::from(sizes.width);
     let height = u32::from(sizes.height);
-    anyhow::ensure!(width > 0 && height > 0, "LibRaw header reports empty active dimensions");
+    anyhow::ensure!(
+        width > 0 && height > 0,
+        "LibRaw header reports empty active dimensions"
+    );
 
     // LibRaw orientation 5/6 rotates the active image by 90/270 degrees. 180°
     // keeps the same dimensions. Unknown orientations are left unswapped here;
@@ -712,7 +715,10 @@ pub(super) fn prewarm_dcp_profile_index(folder: &Path) {
 fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
     let metadata = fs::metadata(folder)
         .with_context(|| format!("inspect DCP profile folder {}", folder.display()))?;
-    anyhow::ensure!(metadata.is_dir(), "configured DCP profile path is not a folder");
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "configured DCP profile path is not a folder"
+    );
     let cache_key = fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
     let root_modified = metadata.modified().ok();
 
@@ -748,13 +754,18 @@ fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) => {
-                log::warn!("could not read DCP directory {}: {error}", directory.display());
+                log::warn!(
+                    "could not read DCP directory {}: {error}",
+                    directory.display()
+                );
                 continue;
             }
         };
         for entry in entries {
             if scanned >= MAX_DCP_SCAN_FILES {
-                log::warn!("stopped DCP profile scan after {MAX_DCP_SCAN_FILES} filesystem entries");
+                log::warn!(
+                    "stopped DCP profile scan after {MAX_DCP_SCAN_FILES} filesystem entries"
+                );
                 break 'scan;
             }
             scanned += 1;
@@ -792,7 +803,10 @@ fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
                 Ok(Some(identity)) => identity,
                 Ok(None) => continue,
                 Err(error) => {
-                    log::warn!("ignoring invalid DCP profile identity {}: {error:#}", path.display());
+                    log::warn!(
+                        "ignoring invalid DCP profile identity {}: {error:#}",
+                        path.display()
+                    );
                     continue;
                 }
             };
@@ -929,17 +943,13 @@ fn dcp_match_score(
     model_key: &str,
     combined_key: &str,
 ) -> i32 {
-    let declared = camera_model
-        .map(normalize_camera_name)
-        .unwrap_or_default();
+    let declared = camera_model.map(normalize_camera_name).unwrap_or_default();
     let filename = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .map(normalize_camera_name)
         .unwrap_or_default();
-    let profile_name = profile_name
-        .map(normalize_camera_name)
-        .unwrap_or_default();
+    let profile_name = profile_name.map(normalize_camera_name).unwrap_or_default();
     let path_key = normalize_camera_name(&path.to_string_lossy());
 
     let mut score = if !declared.is_empty() {
@@ -1287,10 +1297,8 @@ unsafe fn loaded_raw_from_context(
         .map(|profile| CameraProfile::from_dcp(profile, profile_weight))
         .unwrap_or_default();
     let baseline_exposure = valid_baseline_exposure(color.dng_levels.baseline_exposure);
-    camera_profile.default_exposure_ev = resolve_default_exposure_ev(
-        baseline_exposure,
-        camera_profile.profile_exposure_offset_ev,
-    );
+    camera_profile.default_exposure_ev =
+        resolve_default_exposure_ev(baseline_exposure, camera_profile.profile_exposure_offset_ev);
     if !color.profile.is_null() && color.profile_length > 0 {
         let length = usize::try_from(color.profile_length).unwrap_or(0);
         if length <= 16 * 1024 * 1024 {
@@ -1435,10 +1443,8 @@ unsafe fn copy_active_pixels(
         // address as an integer so the immutable LibRaw buffer can be read from
         // worker threads without sharing a mutable raw pointer wrapper.
         let raw_image_addr = raw_image as usize;
-        pixels
-            .par_chunks_mut(out_width)
-            .enumerate()
-            .try_for_each(|(y, destination)| -> Result<()> {
+        pixels.par_chunks_mut(out_width).enumerate().try_for_each(
+            |(y, destination)| -> Result<()> {
                 for (x, output) in destination.iter_mut().enumerate() {
                     let (src_x, src_y) = oriented_source_pos(x, y, width, height, flip);
                     let raw_x = crop_x + src_x;
@@ -1448,13 +1454,13 @@ unsafe fn copy_active_pixels(
                         .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
                     // SAFETY: crop bounds were validated above and LibRaw keeps
                     // the decoded mosaic alive and immutable for this entire call.
-                    let row_ptr = unsafe {
-                        (raw_image_addr as *const u8).add(row_offset) as *const u16
-                    };
+                    let row_ptr =
+                        unsafe { (raw_image_addr as *const u8).add(row_offset) as *const u16 };
                     *output = unsafe { *row_ptr.add(raw_x) };
                 }
                 Ok(())
-            })?;
+            },
+        )?;
     }
 
     // CFA channels and metadata black levels are periodic for supported Bayer
@@ -1471,9 +1477,15 @@ unsafe fn copy_active_pixels(
     let source_period_x = lcm_usize(cfa_period, black_cols).max(1);
     let source_period_y = lcm_usize(cfa_period, black_rows).max(1);
     let (period_width, period_height) = if matches!(flip, 5 | 6) {
-        (source_period_y.min(out_width), source_period_x.min(out_height))
+        (
+            source_period_y.min(out_width),
+            source_period_x.min(out_height),
+        )
     } else {
-        (source_period_x.min(out_width), source_period_y.min(out_height))
+        (
+            source_period_x.min(out_width),
+            source_period_y.min(out_height),
+        )
     };
     let pattern_len = period_width
         .checked_mul(period_height)
@@ -2905,10 +2917,9 @@ mod tests {
         adjusted_camera_transform, black_levels, cam_to_working, canonical_cfa_map,
         canonicalize_f32x4, cfa_kind_from_filters, effective_black_level, identity_4x4,
         load_raw_thumbnail, matching_thumbnail_orientation, oriented_source_pos,
-        resolve_default_exposure_ev, valid_baseline_exposure,
-        validate_embedded_thumbnail_metadata, white_balance, white_levels, CameraColorModel,
-        CameraWhiteBalanceModel, CfaKind, DngColorEndpoint, MAX_EMBEDDED_THUMBNAIL_BYTES,
-        MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
+        resolve_default_exposure_ev, valid_baseline_exposure, validate_embedded_thumbnail_metadata,
+        white_balance, white_levels, CameraColorModel, CameraWhiteBalanceModel, CfaKind,
+        DngColorEndpoint, MAX_EMBEDDED_THUMBNAIL_BYTES, MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
     };
 
     const RGBG: [u8; 4] = *b"RGBG";
@@ -2920,8 +2931,7 @@ mod tests {
         assert_eq!(valid_baseline_exposure(-0.35), Some(-0.35));
         assert!((resolve_default_exposure_ev(Some(-0.35), 0.20) + 0.15).abs() < 1e-6);
         assert!(
-            (resolve_default_exposure_ev(None, 0.0) - MISSING_BASELINE_EXPOSURE_FALLBACK_EV)
-                .abs()
+            (resolve_default_exposure_ev(None, 0.0) - MISSING_BASELINE_EXPOSURE_FALLBACK_EV).abs()
                 < 1e-6
         );
         assert!(

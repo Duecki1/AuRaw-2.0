@@ -39,9 +39,8 @@ impl PersistentGpuPipelineCache {
             return Ok(None);
         };
 
-        let cache_dir = cache_root.join(format!(
-            "wgpu-pipeline-cache-{AURAW_PIPELINE_CACHE_SCHEMA}"
-        ));
+        let cache_dir =
+            cache_root.join(format!("wgpu-pipeline-cache-{AURAW_PIPELINE_CACHE_SCHEMA}"));
         let path = cache_dir.join(adapter_key);
         let cache_data = match fs::read(&path) {
             Ok(data) => Some(data),

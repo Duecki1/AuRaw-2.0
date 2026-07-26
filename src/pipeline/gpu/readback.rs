@@ -118,9 +118,6 @@ pub(super) fn read_rgba8_texture_region_blocking(
     Ok(rgba)
 }
 
-
-
-
 pub(crate) struct PendingRgba32Readback {
     readback: wgpu::Buffer,
     submission: wgpu::SubmissionIndex,
@@ -137,7 +134,9 @@ impl PendingRgba32Readback {
                 submission_index: Some(self.submission),
                 timeout: None,
             })
-            .map_err(|error| anyhow!("GPU poll failed during pipelined export readback: {error}"))?;
+            .map_err(|error| {
+                anyhow!("GPU poll failed during pipelined export readback: {error}")
+            })?;
         self.receiver
             .recv()
             .map_err(|_| anyhow!("GPU export readback callback was dropped"))?
@@ -182,7 +181,9 @@ impl PendingRgba32Readback {
         drop(mapped);
         self.readback.unmap();
         if rgb.iter().any(|value| !value.is_finite()) {
-            return Err(anyhow!("display-linear export readback contains NaN or infinity"));
+            return Err(anyhow!(
+                "display-linear export readback contains NaN or infinity"
+            ));
         }
         Ok(rgb)
     }

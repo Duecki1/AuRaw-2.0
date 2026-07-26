@@ -1,10 +1,10 @@
 use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
-    export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams,
-    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
-    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
-    CURRENT_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
+    export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams, GeometryTransform,
+    HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
+    ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams, CURRENT_PROCESS_VERSION,
+    GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -759,10 +759,7 @@ fn composite_inpaint_rgba16f(destination: &mut [u16], rgb: [f32; 3], alpha: f32)
     destination[3] = f16::from_f32(output_alpha).to_bits();
 }
 
-fn canonicalize_green_noise(
-    mut coefficients: [f32; 4],
-    green2_present: bool,
-) -> [f32; 4] {
+fn canonicalize_green_noise(mut coefficients: [f32; 4], green2_present: bool) -> [f32; 4] {
     if green2_present {
         let green = 0.5 * (coefficients[1] + coefficients[3]);
         // Keep both green slots canonical. The dual-demosaic shader averages
@@ -1295,8 +1292,7 @@ impl GpuParams {
         let global_effects = self.saturation.abs() > 1e-6
             || self.vibrance.abs() > 1e-6
             || self.presence[..3].iter().any(|value| value.abs() > 1e-6);
-        let creative = self.creative_effects[0].abs() > 1e-6
-            || self.vignette[0].abs() > 1e-6;
+        let creative = self.creative_effects[0].abs() > 1e-6 || self.vignette[0].abs() > 1e-6;
         let local_count = (self.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
         let local_effects = (0..local_count).any(|index| {
             let state = self.mask_meta[index];
@@ -1465,7 +1461,10 @@ impl RawGpuPipeline {
         let pixels = (EDGE * EDGE) as usize;
         let cfa_pattern = match cfa_kind {
             CfaKind::Bayer => vec![0u8, 1, 1, 2],
-            CfaKind::XTrans => vec![0u8, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0],
+            CfaKind::XTrans => vec![
+                0u8, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1,
+                2, 1, 2, 0, 1, 0, 0, 1, 0,
+            ],
         };
         let cfa_period = match cfa_kind {
             CfaKind::Bayer => (2, 2),
@@ -1499,7 +1498,11 @@ impl RawGpuPipeline {
             ],
             black_levels: [0.0; 4],
             black_levels_per_pixel: crate::pipeline::CompactPixelMap::repeating(
-                EDGE, EDGE, 1, 1, vec![0.0f32],
+                EDGE,
+                EDGE,
+                1,
+                1,
+                vec![0.0f32],
             ),
             white_levels: [65535.0; 4],
             noise_profile: crate::pipeline::NoiseProfile::default(),
@@ -1507,7 +1510,7 @@ impl RawGpuPipeline {
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
-        lens_geometry: None,
+            lens_geometry: None,
         };
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
@@ -1697,13 +1700,12 @@ impl RawGpuPipeline {
         let mask_atlas_edge = mask_atlas_edge_override
             .unwrap_or(default_mask_atlas_edge)
             .clamp(64, export_mask_atlas_edge_limit());
-        let mask_layer_capacity = if mask_atlas_edge_override.is_some()
-            && quality == ProcessingQuality::High
-        {
-            (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
-        } else {
-            MAX_LOCAL_MASKS
-        };
+        let mask_layer_capacity =
+            if mask_atlas_edge_override.is_some() && quality == ProcessingQuality::High {
+                (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
+            } else {
+                MAX_LOCAL_MASKS
+            };
 
         let default_output_transform = IccOutputTransform::srgb();
         let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
@@ -3514,11 +3516,7 @@ impl RawGpuPipeline {
         let demosaic_finish_index = passes.len();
         match raw.cfa_kind {
             CfaKind::Bayer => passes.push(Pass {
-                pipeline: make_pipeline(
-                    bayer_rcd_p4_module.as_ref(),
-                    "bayer_rcd_output",
-                    &bgl4,
-                ),
+                pipeline: make_pipeline(bayer_rcd_p4_module.as_ref(), "bayer_rcd_output", &bgl4),
                 bind_group: bg4,
                 workgroups: image_workgroups,
             }),
@@ -3873,11 +3871,13 @@ impl RawGpuPipeline {
                 let global_x1 = (u64::from(patch_right)
                     .checked_mul(u64::from(full_width))
                     .ok_or_else(|| anyhow!("inpaint patch horizontal projection overflows"))?
-                    .div_ceil(u64::from(patch.source_width))) as i64;
+                    .div_ceil(u64::from(patch.source_width)))
+                    as i64;
                 let global_y1 = (u64::from(patch_bottom)
                     .checked_mul(u64::from(full_height))
                     .ok_or_else(|| anyhow!("inpaint patch vertical projection overflows"))?
-                    .div_ceil(u64::from(patch.source_height))) as i64;
+                    .div_ceil(u64::from(patch.source_height)))
+                    as i64;
 
                 let local_x0 =
                     (global_x0 - i64::from(tile_origin_x)).clamp(0, i64::from(self.width)) as u32;

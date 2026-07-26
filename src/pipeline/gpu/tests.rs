@@ -1,12 +1,11 @@
 use super::{
     canonicalize_green_noise, color_grade_hue_turns, composite_inpaint_rgba16f,
-    explicit_render_graph_contracts_are_contiguous, highlight_final_read_slot, highlight_stage_slots,
-    pack_local_point_curve, processing_work_format, render_graph_flags, shader_highlight_method,
-    work_shader_source, HighlightWorkSlot, ProcessingQuality, HIGHLIGHT_GUIDED_ENTRY_POINTS,
-    RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY,
-    SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
-    SHADER_BAYER_RCD_P4, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE,
-    SHADER_TONE_ANALYSIS,
+    explicit_render_graph_contracts_are_contiguous, highlight_final_read_slot,
+    highlight_stage_slots, pack_local_point_curve, processing_work_format, render_graph_flags,
+    shader_highlight_method, work_shader_source, HighlightWorkSlot, ProcessingQuality,
+    HIGHLIGHT_GUIDED_ENTRY_POINTS, RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY, SHADER_ADJUSTMENTS,
+    SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
+    SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
     SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5,
     SHADER_XTRANS_P6, SHADER_XTRANS_P7,
 };
@@ -462,7 +461,10 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
         std::mem::offset_of!(super::GpuParams, mask_curve_blue_0),
         15296
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0), 19392);
+    assert_eq!(
+        std::mem::offset_of!(super::GpuParams, mask_hsl_hue_0),
+        19392
+    );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, mask_hsl_luminance_1),
         21952
@@ -477,7 +479,10 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
         std::mem::offset_of!(super::GpuParams, mask_grade_options),
         24592
     );
-    assert_eq!(std::mem::offset_of!(super::GpuParams, vignette_frame), 25104);
+    assert_eq!(
+        std::mem::offset_of!(super::GpuParams, vignette_frame),
+        25104
+    );
     assert_eq!(
         std::mem::offset_of!(super::GpuParams, vignette_transform),
         25120
@@ -498,9 +503,9 @@ fn signed_scene_rgb_is_preserved_until_explicit_positive_domain_boundaries() {
     // of the algorithm contract; scene intermediates must not floor channels.
     assert!(SHADER_ADJUSTMENTS.contains("fn gamut_project_nonnegative("));
     assert!(SHADER_ADJUSTMENTS.contains("fn gamut_project_unit("));
-    assert!(SHADER_ADJUSTMENTS.contains(
-        "let view_input = gamut_project_nonnegative_rec2020(looked)"
-    ));
+    assert!(
+        SHADER_ADJUSTMENTS.contains("let view_input = gamut_project_nonnegative_rec2020(looked)")
+    );
     assert!(SHADER_ADJUSTMENTS.contains("perceptual_gamut_compress_unit_rec2020"));
 
     for forbidden in [
@@ -567,8 +572,12 @@ fn adjustments_shader_contains_lightroom_style_controls() {
 fn explicit_graph_keeps_profile_look_and_tone_after_scene_edits() {
     let prepare_start = SHADER_ADJUSTMENTS.find("fn prepare_scene_node").unwrap();
     let tone_start = SHADER_ADJUSTMENTS.find("fn apply_scene_tone_node").unwrap();
-    let effects_start = SHADER_ADJUSTMENTS.find("fn apply_scene_effects_node").unwrap();
-    let view_start = SHADER_ADJUSTMENTS.find("fn apply_explicit_view_node").unwrap();
+    let effects_start = SHADER_ADJUSTMENTS
+        .find("fn apply_scene_effects_node")
+        .unwrap();
+    let view_start = SHADER_ADJUSTMENTS
+        .find("fn apply_explicit_view_node")
+        .unwrap();
     let prepare = &SHADER_ADJUSTMENTS[prepare_start..tone_start];
     let tone = &SHADER_ADJUSTMENTS[tone_start..effects_start];
     let view = &SHADER_ADJUSTMENTS[view_start..];
@@ -581,7 +590,9 @@ fn explicit_graph_keeps_profile_look_and_tone_after_scene_edits() {
     assert!(characterization < profile_exposure && profile_exposure < exposure);
     assert!(prepare.contains("if !uses_explicit_scene_display_domains()"));
 
-    let sharpen = tone.find("rgb = apply_capture_sharpening(pos, rgb)").unwrap();
+    let sharpen = tone
+        .find("rgb = apply_capture_sharpening(pos, rgb)")
+        .unwrap();
     let adaptive_tone = tone.find("rgb = apply_lightroom_tone(rgb, pos)").unwrap();
     let contrast = tone.find("rgb = apply_basic_contrast_value").unwrap();
     assert!(sharpen < adaptive_tone && adaptive_tone < contrast);
@@ -589,7 +600,9 @@ fn explicit_graph_keeps_profile_look_and_tone_after_scene_edits() {
 
     let look = view.find("apply_optional_profile_look(scene_rgb)").unwrap();
     let profile_tone = view.find("apply_dcp_view_transform(view_input)").unwrap();
-    let sigmoid = view.find("apply_sigmoid_view_transform(view_input)").unwrap();
+    let sigmoid = view
+        .find("apply_sigmoid_view_transform(view_input)")
+        .unwrap();
     assert!(look < profile_tone && look < sigmoid);
     assert!(SHADER_ADJUSTMENTS.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
     assert!(SHADER_ADJUSTMENTS.contains("return profile_data[offset + maximum].x"));
@@ -697,16 +710,13 @@ impl LocalMaskSchedulingHarness {
         use half::f16;
 
         let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-        )
-        .ok()?;
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("auraw local-mask scheduling test device"),
-                ..Default::default()
-            },
-        ))
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("auraw local-mask scheduling test device"),
+            ..Default::default()
+        }))
         .ok()?;
 
         let raw = local_mask_scheduling_fixture(Self::WIDTH, Self::HEIGHT);
@@ -729,8 +739,8 @@ impl LocalMaskSchedulingHarness {
 
         let mask = (0..Self::MASK_EDGE)
             .flat_map(|y| {
-                let value = f16::from_f32(if y < Self::MASK_EDGE / 2 { 1.0 } else { 0.0 })
-                    .to_bits();
+                let value =
+                    f16::from_f32(if y < Self::MASK_EDGE / 2 { 1.0 } else { 0.0 }).to_bits();
                 std::iter::repeat_n(value, Self::MASK_EDGE as usize)
             })
             .collect::<Vec<_>>();
@@ -1006,16 +1016,9 @@ fn assert_local_tone_scheduling_case(case: LocalToneSchedulingCase) {
         sharpen_amount: 0.0,
         ..super::ExposureParams::default()
     };
-    let neutral_params = super::GpuParams::new(
-        &exposure,
-        &local_mask_scheduling_stack(None),
-        &raw,
-    );
-    let adjusted_params = super::GpuParams::new(
-        &exposure,
-        &local_mask_scheduling_stack(Some(case)),
-        &raw,
-    );
+    let neutral_params = super::GpuParams::new(&exposure, &local_mask_scheduling_stack(None), &raw);
+    let adjusted_params =
+        super::GpuParams::new(&exposure, &local_mask_scheduling_stack(Some(case)), &raw);
     assert!(
         !neutral_params.needs_intermediate_adjustment_passes(),
         "{} scheduled an intermediate pass at neutral",
@@ -1028,7 +1031,8 @@ fn assert_local_tone_scheduling_case(case: LocalToneSchedulingCase) {
     );
 
     static HARNESS: OnceLock<Option<Mutex<LocalMaskSchedulingHarness>>> = OnceLock::new();
-    let Some(harness) = HARNESS.get_or_init(|| LocalMaskSchedulingHarness::try_new().map(Mutex::new))
+    let Some(harness) =
+        HARNESS.get_or_init(|| LocalMaskSchedulingHarness::try_new().map(Mutex::new))
     else {
         // Headless CI is allowed to have no usable GPU. The scheduling
         // assertions still run when an adapter is available, matching the
@@ -1142,14 +1146,18 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
                 [0.01, 0.06, 0.72, 0.0],
             ],
             black_levels: [0.0; 4],
-            black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
+            black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(
+                width,
+                height,
+                vec![0.0; (width * height) as usize],
+            ),
             white_levels: [4095.0; 4],
             noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: Default::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
-        lens_geometry: None,
+            lens_geometry: None,
         };
         let params = super::GpuParams::new(
             &ExposureParams::default(),
@@ -1420,14 +1428,18 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
                 [0.0, 0.0, 1.0, 0.0],
             ],
             black_levels: [0.0; 4],
-            black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
+            black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(
+                width,
+                height,
+                vec![0.0; (width * height) as usize],
+            ),
             white_levels: [white; 4],
             noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: Default::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
-        lens_geometry: None,
+            lens_geometry: None,
         }
     }
 
@@ -1714,7 +1726,11 @@ fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
             [0.0, 0.0, 1.0, 0.0],
         ],
         black_levels: [0.0; 4],
-        black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(width, height, vec![0.0; (width * height) as usize]),
+        black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(
+            width,
+            height,
+            vec![0.0; (width * height) as usize],
+        ),
         white_levels: [white; 4],
         noise_profile: crate::pipeline::NoiseProfile::default(),
         camera_profile: Default::default(),
@@ -1834,14 +1850,18 @@ fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
                 [0.0, 0.0, 1.0, 0.0],
             ],
             black_levels: [0.0; 4],
-            black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(WIDTH, HEIGHT, vec![0.0; (WIDTH * HEIGHT) as usize]),
+            black_levels_per_pixel: crate::pipeline::CompactPixelMap::dense(
+                WIDTH,
+                HEIGHT,
+                vec![0.0; (WIDTH * HEIGHT) as usize],
+            ),
             white_levels: [WHITE; 4],
             noise_profile: crate::pipeline::NoiseProfile::default(),
             camera_profile: Default::default(),
             camera_profile_source: None,
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
-        lens_geometry: None,
+            lens_geometry: None,
         }
     }
 
