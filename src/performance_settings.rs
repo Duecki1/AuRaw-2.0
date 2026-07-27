@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 5;
+const SETTINGS_VERSION: u32 = 6;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,13 +92,19 @@ impl PerformanceSettings {
     pub(crate) fn sanitized(mut self) -> Self {
         let loaded_version = self.version;
         self.version = SETTINGS_VERSION;
-        // Copy/paste categories were introduced with version 3. Their original
-        // defaults enabled every category, including geometry-dependent edits.
-        // Version 4 makes inpainting and lens correction opt-in so upgrading
-        // from that first release also receives the safer defaults.
+        // Copy/paste categories were introduced with version 3. Version 4
+        // made inpainting and lens correction opt-in. Version 6 separates
+        // geometry, camera profiles, and AI masks from their former combined
+        // categories. Preserve the user's old Masks choice for the new AI mask
+        // category while applying the requested geometry/profile defaults.
         if loaded_version < 4 {
             self.adjustment_copy_settings.inpainting = false;
             self.adjustment_copy_settings.lens_correction = false;
+        }
+        if loaded_version < 6 {
+            self.adjustment_copy_settings.geometry = false;
+            self.adjustment_copy_settings.camera_profile = true;
+            self.adjustment_copy_settings.ai_masks = self.adjustment_copy_settings.masks;
         }
         self.raw_cache_files = self
             .raw_cache_files
@@ -264,7 +270,10 @@ mod tests {
             display_profile_override: None,
             adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings {
                 adjustments: true,
+                geometry: true,
+                camera_profile: false,
                 masks: false,
+                ai_masks: true,
                 inpainting: true,
                 lens_correction: false,
             },
@@ -293,7 +302,10 @@ mod tests {
             settings.last_camera_profile,
             Some(PathBuf::from("Sony/Camera ST.dcp"))
         );
+        assert!(settings.adjustment_copy_settings.geometry);
+        assert!(!settings.adjustment_copy_settings.camera_profile);
         assert!(!settings.adjustment_copy_settings.masks);
+        assert!(settings.adjustment_copy_settings.ai_masks);
         assert!(!settings.adjustment_copy_settings.lens_correction);
     }
 
@@ -306,9 +318,26 @@ mod tests {
         .sanitized();
 
         assert!(settings.adjustment_copy_settings.adjustments);
+        assert!(!settings.adjustment_copy_settings.geometry);
+        assert!(settings.adjustment_copy_settings.camera_profile);
         assert!(settings.adjustment_copy_settings.masks);
+        assert!(settings.adjustment_copy_settings.ai_masks);
         assert!(!settings.adjustment_copy_settings.inpainting);
         assert!(!settings.adjustment_copy_settings.lens_correction);
+    }
+
+    #[test]
+    fn version_five_masks_choice_is_reused_for_ai_masks() {
+        let settings: PerformanceSettings = serde_json::from_str(
+            r#"{"version":5,"raw_cache_files":1,"thumbnail_workers":1,"adjustment_copy_settings":{"adjustments":true,"masks":false,"inpainting":false,"lens_correction":false}}"#,
+        )
+        .expect("version 5 settings should remain readable")
+        .sanitized();
+
+        assert!(!settings.adjustment_copy_settings.geometry);
+        assert!(settings.adjustment_copy_settings.camera_profile);
+        assert!(!settings.adjustment_copy_settings.masks);
+        assert!(!settings.adjustment_copy_settings.ai_masks);
     }
 
     #[test]

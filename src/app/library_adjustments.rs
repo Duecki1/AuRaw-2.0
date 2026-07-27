@@ -44,26 +44,34 @@ impl AurawApp {
                 .map(|root| root.join(relative))
         });
 
-        let adjustments_changed = clipboard.settings.adjustments
-            || mode == AdjustmentPasteMode::Replace;
-        let masks_changed = clipboard.settings.masks || mode == AdjustmentPasteMode::Replace;
-        let inpainting_changed =
-            clipboard.settings.inpainting || mode == AdjustmentPasteMode::Replace;
+        let replacing = mode == AdjustmentPasteMode::Replace;
+        let adjustments_changed = clipboard.settings.adjustments || replacing;
+        let geometry_changed = clipboard.settings.geometry || replacing;
+        let camera_profile_category_changed = clipboard.settings.camera_profile || replacing;
+        let pipeline_adjustments_changed =
+            adjustments_changed || geometry_changed || camera_profile_category_changed;
+        let masks_changed = clipboard.settings.masks || clipboard.settings.ai_masks || replacing;
+        let inpainting_changed = clipboard.settings.inpainting || replacing;
         let inpainting_content_changed = inpainting_changed
             && self.inpaint_strokes.as_slice() != merged.inpainting.as_slice();
-        let lens_changed = (clipboard.settings.lens_correction
-            || mode == AdjustmentPasteMode::Replace)
+        let lens_changed = (clipboard.settings.lens_correction || replacing)
             && (self.lens_correction.enabled != merged.lens.enabled
                 || self.lens_correction.selected_maker != merged.lens.maker
                 || self.lens_correction.selected_model != merged.lens.model);
 
         if adjustments_changed {
             self.exposure = merged.exposure;
+            self.exposure.sanitize_tone_curves();
+        }
+        if geometry_changed {
             self.geometry = merged.geometry.sanitized();
-            self.selected_camera_profile = pasted_camera_profile.clone();
             self.crop_constraint_reference = None;
             self.note_geometry_changed();
-            self.exposure.sanitize_tone_curves();
+        }
+        if camera_profile_category_changed {
+            self.selected_camera_profile = pasted_camera_profile.clone();
+        }
+        if pipeline_adjustments_changed {
             self.note_edit_changed();
             self.ai_masks_need_update |= merged.ai_masks_need_update;
         }
@@ -90,7 +98,7 @@ impl AurawApp {
             self.queue_preview_processing(crate::pipeline::ProcessingStage::Tone);
         }
 
-        if clipboard.settings.lens_correction || mode == AdjustmentPasteMode::Replace {
+        if clipboard.settings.lens_correction || replacing {
             self.lens_correction.enabled = merged.lens.enabled;
             self.lens_correction.selected_maker = merged.lens.maker;
             self.lens_correction.selected_model = merged.lens.model;
@@ -101,14 +109,14 @@ impl AurawApp {
             }
         }
 
-        if adjustments_changed && !lens_changed {
+        if pipeline_adjustments_changed && !lens_changed {
             self.mark_pipeline_dirty();
         }
 
         self.commit_edit_history_now();
         self.queue_explicit_sidecar_save();
         let needs_ai_refresh = self.ai_masks_need_update();
-        if adjustments_changed && previous_camera_profile != pasted_camera_profile {
+        if camera_profile_category_changed && previous_camera_profile != pasted_camera_profile {
             let edit_override = self.capture_sidecar_edit_state();
             self.reload_current_after_adjustment_paste(
                 frame,
