@@ -22,8 +22,11 @@ android/.gradle/
 android/build/
 android/app/build/
 android/app/src/main/jniLibs/
+android/app/src/main/assets/lensfun/
 android/native/build/
 android/native/libraw/
+android/native/lensfun/
+android/native/tools/
 android/native/src/
 local.properties
 android/local.properties

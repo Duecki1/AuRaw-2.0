@@ -106,11 +106,35 @@ impl AurawApp {
         self.note_edit_changed();
         if self.original_raw.is_some() {
             self.lens_correction_dirty = true;
+            #[cfg(target_os = "android")]
+            {
+                self.lens_correction_generation =
+                    self.lens_correction_generation.wrapping_add(1);
+            }
             self.notice = None;
         }
     }
 
     fn apply_pending_lens_correction(&mut self, frame: &eframe::Frame) {
+        #[cfg(target_os = "android")]
+        self.apply_pending_lens_correction_android(frame);
+        #[cfg(not(target_os = "android"))]
+        self.apply_pending_lens_correction_sync(frame);
+    }
+
+    pub(crate) fn lens_correction_busy(&self) -> bool {
+        #[cfg(target_os = "android")]
+        {
+            self.lens_correction_receiver.is_some()
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn apply_pending_lens_correction_sync(&mut self, frame: &eframe::Frame) {
         if !self.lens_correction_dirty {
             return;
         }
@@ -259,6 +283,227 @@ impl AurawApp {
                 "Lens correction disabled; using the original RAW geometry.".to_owned();
         }
         self.notice = correction_notice;
+    }
+
+    #[cfg(target_os = "android")]
+    fn apply_pending_lens_correction_android(&mut self, frame: &eframe::Frame) {
+        self.poll_lens_correction_worker(frame);
+        if self.lens_correction_receiver.is_some() || !self.lens_correction_dirty {
+            return;
+        }
+        self.lens_correction_dirty = false;
+
+        let Some(original_raw) = self.original_raw.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let selection = if self.lens_correction.enabled {
+            let Some(selection) = self.lens_correction.selected_lens() else {
+                self.lens_correction.enabled = false;
+                self.lens_correction.applied = false;
+                self.lens_correction.catalog.status =
+                    "Select a lens profile before enabling correction.".to_owned();
+                return;
+            };
+            Some(selection)
+        } else {
+            None
+        };
+
+        if let Some(restored_masks) = self.history_lens_restore_masks.take() {
+            self.masks = restored_masks;
+            self.rehydrate_restored_mask_state();
+        }
+
+        let generation = self.lens_correction_generation;
+        let repaint = self.egui_ctx.clone();
+        let preview_quality = self.preview_quality;
+        let cached_raws = match selection.as_ref() {
+            Some(requested) => self
+                .lens_corrected_preview_cache
+                .as_ref()
+                .filter(|(cached, quality, _, _)| {
+                    cached == requested && *quality == preview_quality
+                })
+                .map(|(_, _, full_raw, preview_raw)| {
+                    (Arc::clone(full_raw), Arc::clone(preview_raw))
+                }),
+            None => self
+                .lens_original_preview_cache
+                .as_ref()
+                .filter(|(quality, _)| *quality == preview_quality)
+                .map(|(_, preview_raw)| (Arc::clone(&original_raw), Arc::clone(preview_raw))),
+        };
+        let status_label = selection
+            .as_ref()
+            .map(LensfunLens::label)
+            .unwrap_or_else(|| "original RAW geometry".to_owned());
+        self.lens_correction.catalog.status = if selection.is_some() {
+            format!("Applying {status_label} in the background…")
+        } else {
+            "Disabling lens correction in the background…".to_owned()
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        let spawn_result = std::thread::Builder::new()
+            .name("auraw-lens-correction".to_owned())
+            .spawn(move || {
+                let started = Instant::now();
+                let result = (|| -> Result<PreparedLensCorrection, String> {
+                    let applied_label = selection.as_ref().map(LensfunLens::label);
+                    let (full_raw, preview_raw) = if let Some(cached_raws) = cached_raws {
+                        cached_raws
+                    } else {
+                        let full_raw = if let Some(selection) = selection.as_ref() {
+                            let corrected = apply_lensfun_correction(&original_raw, selection)
+                                .map_err(|error| {
+                                    format!("Could not apply {}: {error:#}", selection.label())
+                                })?;
+                            Arc::new(corrected)
+                        } else {
+                            Arc::clone(&original_raw)
+                        };
+                        let preview_spec = ProxySpec {
+                            max_edge: preview_quality.proxy_edge(),
+                        };
+                        let preview_raw =
+                            if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
+                                Arc::clone(&full_raw)
+                            } else {
+                                Arc::new(build_proxy(&full_raw, preview_spec))
+                            };
+                        (full_raw, preview_raw)
+                    };
+
+                    Ok(PreparedLensCorrection {
+                        full_raw,
+                        preview_raw,
+                        applied_label,
+                        selection,
+                        preview_quality,
+                    })
+                })();
+                crate::diagnostics::record(format!(
+                    "Interactive lens correction worker finished in {:.3}s ({})",
+                    started.elapsed().as_secs_f64(),
+                    if result.is_ok() { "success" } else { "failure" }
+                ));
+                let _ = sender.send(LensCorrectionEvent { generation, result });
+                repaint.request_repaint();
+            });
+
+        match spawn_result {
+            Ok(_) => {
+                self.lens_correction_receiver = Some(receiver);
+                self.egui_ctx.request_repaint_after(Duration::from_millis(50));
+            }
+            Err(error) => {
+                self.lens_correction.enabled = self.lens_correction.applied;
+                self.lens_correction.catalog.status =
+                    format!("Could not start lens correction: {error}");
+                self.notice = Some("Could not start the lens-correction worker.".to_owned());
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn poll_lens_correction_worker(&mut self, frame: &eframe::Frame) {
+        let received = self
+            .lens_correction_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        let event = match received {
+            Some(Ok(event)) => Some(event),
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.lens_correction_receiver = None;
+                self.lens_correction.enabled = self.lens_correction.applied;
+                self.lens_correction.catalog.status =
+                    "Lens-correction worker stopped unexpectedly.".to_owned();
+                self.notice = Some(self.lens_correction.catalog.status.clone());
+                None
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => None,
+        };
+        let Some(event) = event else {
+            return;
+        };
+        self.lens_correction_receiver = None;
+
+        if event.generation != self.lens_correction_generation {
+            self.lens_correction_dirty = true;
+            return;
+        }
+
+        let prepared = match event.result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.lens_correction.enabled = self.lens_correction.applied;
+                self.lens_correction.catalog.status = error;
+                self.notice =
+                    Some("Lens correction failed; restored the previous preview.".to_owned());
+                return;
+            }
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+            return;
+        };
+
+        let Some(pipeline) = self.gpu_pipeline.as_ref() else {
+            self.notice = Some("The preview pipeline is unavailable.".to_owned());
+            return;
+        };
+        if let Err(error) = pipeline.upload_raw_tile(&render_state.queue, &prepared.preview_raw) {
+            self.notice = Some(format!(
+                "Could not update the lens-corrected preview pixels: {error:#}"
+            ));
+            return;
+        }
+        let params = GpuParams::new(&self.exposure, &self.masks, &prepared.preview_raw)
+            .with_vignette_geometry(self.geometry);
+        pipeline.recompute(&render_state.queue, &render_state.device, &params);
+
+        self.rehydrate_restored_mask_state();
+        self.note_lens_correction_changed_for_masks();
+        self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
+        self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
+        if let Some(selection) = prepared.selection.clone() {
+            self.lens_corrected_preview_cache = Some((
+                selection,
+                prepared.preview_quality,
+                Arc::clone(&prepared.full_raw),
+                Arc::clone(&prepared.preview_raw),
+            ));
+        } else {
+            self.lens_original_preview_cache = Some((
+                prepared.preview_quality,
+                Arc::clone(&prepared.preview_raw),
+            ));
+        }
+        self.loaded_raw = Some(prepared.full_raw);
+        self.preview_raw = Some(prepared.preview_raw);
+        self.inpaint_source_cache = None;
+        self.preview_zoom = 1.0;
+        self.preview_center = [0.5, 0.5];
+        self.preview_visible_uv = PreviewUvRect {
+            min: [0.0, 0.0],
+            max: [1.0, 1.0],
+        };
+        self.preview_viewport_pixels = [1, 1];
+        self.preview_motion_at = None;
+        self.preview_touch_navigation_active = false;
+        self.preview_revision = self.preview_revision.wrapping_add(1);
+        self.preview_detail_pending_stage = None;
+        self.navigation_pending_stage = None;
+        self.preview_detail_urgent = false;
+        self.target_exposure = self.exposure;
+        self.pending_stage = None;
+        self.lens_correction.applied = prepared.applied_label.is_some();
+        self.lens_correction.catalog.status = prepared.applied_label.map_or_else(
+            || "Lens correction disabled; using the original RAW geometry.".to_owned(),
+            |label| format!("Applied {label}"),
+        );
+        self.notice = None;
+        self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn note_preview_motion(&mut self) {
@@ -514,7 +759,10 @@ impl AurawApp {
     }
 
     fn apply_pending_preview_quality(&mut self, frame: &eframe::Frame) {
-        if !self.preview_quality_dirty || self.load_receiver.is_some() {
+        if !self.preview_quality_dirty
+            || self.load_receiver.is_some()
+            || self.lens_correction_busy()
+        {
             return;
         }
         let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
@@ -587,6 +835,26 @@ impl AurawApp {
         drop(renderer);
 
         self.preview_raw = Some(preview_raw);
+        #[cfg(target_os = "android")]
+        {
+            if self.lens_correction.applied {
+                if let (Some(selection), Some(full_raw), Some(preview_raw)) = (
+                    self.lens_correction.selected_lens(),
+                    self.loaded_raw.as_ref(),
+                    self.preview_raw.as_ref(),
+                ) {
+                    self.lens_corrected_preview_cache = Some((
+                        selection,
+                        self.preview_quality,
+                        Arc::clone(full_raw),
+                        Arc::clone(preview_raw),
+                    ));
+                }
+            } else if let Some(preview_raw) = self.preview_raw.as_ref() {
+                self.lens_original_preview_cache =
+                    Some((self.preview_quality, Arc::clone(preview_raw)));
+            }
+        }
         self.gpu_pipeline = Some(pipeline);
         self.inpaint_source_cache = inpaint_source;
         self.target_exposure = self.exposure;
@@ -637,6 +905,7 @@ impl AurawApp {
         if self.active_tab != AppTab::Develop
             || self.preview_quality_dirty
             || self.lens_correction_dirty
+            || self.lens_correction_busy()
             || self.load_receiver.is_some()
         {
             return;
@@ -2210,6 +2479,8 @@ impl AurawApp {
     fn refresh_status(&mut self) {
         self.status = if let Some(label) = &self.loading_label {
             format!("Decoding and preparing proxy for {label}…")
+        } else if self.lens_correction_busy() {
+            self.lens_correction.catalog.status.clone()
         } else if let Some((completed, total)) = self.export_progress {
             if total == 0 {
                 "Preparing tiled export…".to_owned()

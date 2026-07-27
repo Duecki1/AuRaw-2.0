@@ -5,6 +5,12 @@ plugins {
 def aurawVersionCode = providers.gradleProperty("aurawVersionCode")
     .getOrElse("1")
     .toInteger()
+def rustAbi = providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")
+def repositoryRoot = rootProject.projectDir.parentFile
+def lensfunAssets = new File(
+    repositoryRoot,
+    "android/native/lensfun/${rustAbi}/apk-assets"
+)
 
 android {
     namespace "de.duecki.auraw"
@@ -25,6 +31,7 @@ android {
 
     sourceSets {
         main.jniLibs.srcDirs = ["src/main/jniLibs"]
+        main.assets.srcDirs = [lensfunAssets]
     }
 
     // AGP 8.5.1+ page-aligns uncompressed JNI libraries for 16 KiB-page devices.
@@ -48,8 +55,6 @@ android {
     }
 }
 
-def rustAbi = providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")
-def repositoryRoot = rootProject.projectDir.parentFile
 def buildRustEnabled = providers.gradleProperty("aurawBuildRust").map { it.toBoolean() }.getOrElse(true)
 
 tasks.register("buildRustDebug", Exec) {

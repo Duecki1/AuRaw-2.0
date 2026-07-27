@@ -288,7 +288,7 @@ jobs:
             ~/.cargo/bin/cargo-ndk-runner
             ~/.cargo/bin/cargo-ndk-test
             android/native
-          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-ndk-28.2.13676358-cmake-3.22.1-wrapper-8.11.1-cargo-ndk-4.1.2-libraw-0.22.1-v1
+          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-ndk-28.2.13676358-cmake-3.22.1-wrapper-8.11.1-cargo-ndk-4.1.2-libraw-0.22.1-lensfun-0.3.4-glib-2.78.6-v1
 
       - name: Restore Android dependency and build cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
@@ -452,6 +452,7 @@ jobs:
           test -f "$APK"
           unzip -tq "$APK" 'lib/arm64-v8a/libauraw.so'
           unzip -tq "$APK" 'lib/arm64-v8a/libc++_shared.so'
+          unzip -tq "$APK" 'assets/lensfun/version_1/*.xml'
           sh scripts/verify-android-16kb.sh "$APK"
           mkdir -p dist
           cp "$APK" dist/AuRaw-debug-arm64-v8a.apk

@@ -131,7 +131,7 @@ Desktop builds discover Lensfun through `pkg-config`. Packaged builds may ship a
 database beside the executable in `lensfun/` or under
 `share/auraw/lensfun/`; `AURAW_LENSFUN_DB` takes priority during database
 discovery. Builds without Lensfun keep the Optics section visible but disabled.
-Android currently builds without native Lensfun support.
+Android builds Lensfun and bundles its profile database with the APK.
 
 Double-click any adjustment slider, its label/value field, or a color wheel to
 restore the value captured when that control was first shown.

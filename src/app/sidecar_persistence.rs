@@ -599,7 +599,10 @@ impl AurawApp {
             self.developed_thumbnail_pending = None;
             return;
         }
-        if self.preview_quality_dirty || self.lens_correction_dirty {
+        if self.preview_quality_dirty
+            || self.lens_correction_dirty
+            || self.lens_correction_busy()
+        {
             self.egui_ctx.request_repaint();
             return;
         }

@@ -273,6 +273,27 @@ pub fn gpu_pipeline_cache_dir(app: &AndroidApp) -> Result<PathBuf, String> {
     }
 }
 
+pub fn lensfun_database_dir(app: &AndroidApp) -> Result<PathBuf, String> {
+    let path = with_activity(app, |env, activity| {
+        let object = env
+            .call_method(
+                activity,
+                jni::jni_str!("lensfunDatabaseDir"),
+                jni::jni_sig!(() -> JString),
+                &[],
+            )?
+            .l()?;
+        let path = env.cast_local::<JString>(object)?;
+        Ok(path.to_string())
+    })
+    .map_err(|error| format!("could not materialize bundled Lensfun database: {error:#}"))?;
+    if path.is_empty() {
+        Err("Android returned no Lensfun database directory".to_owned())
+    } else {
+        Ok(PathBuf::from(path))
+    }
+}
+
 pub fn library_location(app: &AndroidApp) -> Result<String, String> {
     with_activity(app, |env, activity| {
         let object = env
