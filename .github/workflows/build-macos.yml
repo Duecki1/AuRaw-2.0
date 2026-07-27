@@ -111,6 +111,20 @@ jobs:
           chmod +x "$executable"
           cp COPYING THIRD_PARTY_NOTICES.md README.md "$contents/Resources/"
 
+          icon_source="packaging/icons/auraw-1024.png"
+          iconset="$contents/Resources/AuRaw.iconset"
+          mkdir -p "$iconset"
+          for icon_size in 16 32 128 256 512; do
+            retina_size=$((icon_size * 2))
+            sips -z "$icon_size" "$icon_size" "$icon_source" \
+              --out "$iconset/icon_${icon_size}x${icon_size}.png"
+            sips -z "$retina_size" "$retina_size" "$icon_source" \
+              --out "$iconset/icon_${icon_size}x${icon_size}@2x.png"
+          done
+          iconutil -c icns "$iconset" -o "$contents/Resources/AuRaw.icns"
+          rm -rf "$iconset"
+          test -s "$contents/Resources/AuRaw.icns"
+
           lensfun_db="$(find "$(brew --prefix lensfun)/share/lensfun" -type f -name '*.xml' -print | head -n 1)"
           test -n "$lensfun_db"
           lensfun_db="$(dirname "$lensfun_db")"
@@ -130,6 +144,8 @@ jobs:
             <string>auraw</string>
             <key>CFBundleIdentifier</key>
             <string>de.duecki.auraw</string>
+            <key>CFBundleIconFile</key>
+            <string>AuRaw.icns</string>
             <key>CFBundleInfoDictionaryVersion</key>
             <string>6.0</string>
             <key>CFBundleName</key>
