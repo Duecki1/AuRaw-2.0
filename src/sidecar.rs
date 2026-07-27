@@ -69,8 +69,16 @@ pub struct LensEditState {
 pub struct AdjustmentCopySettings {
     #[serde(default = "default_true")]
     pub adjustments: bool,
+    #[serde(default)]
+    pub geometry: bool,
+    #[serde(default = "default_true")]
+    pub camera_profile: bool,
+    /// Mask groups made only from manual Brush, Radial, and Linear components.
     #[serde(default = "default_true")]
     pub masks: bool,
+    /// Mask groups containing AI or source-dependent components.
+    #[serde(default = "default_true")]
+    pub ai_masks: bool,
     #[serde(default)]
     pub inpainting: bool,
     #[serde(default)]
@@ -92,7 +100,10 @@ impl Default for AdjustmentCopySettings {
     fn default() -> Self {
         Self {
             adjustments: true,
+            geometry: false,
+            camera_profile: true,
             masks: true,
+            ai_masks: true,
             inpainting: false,
             lens_correction: false,
         }
@@ -127,6 +138,54 @@ pub fn default_edit_state() -> EditState {
         lens: LensEditState::default(),
         ai_masks_need_update: false,
     }
+}
+
+fn is_manual_mask_kind(kind: MaskKind) -> bool {
+    matches!(kind, MaskKind::Brush | MaskKind::Radial | MaskKind::Linear)
+}
+
+fn mask_group_is_ai(mask: &crate::pipeline::LocalMask) -> bool {
+    mask.components
+        .iter()
+        .any(|component| !is_manual_mask_kind(component.kind))
+}
+
+fn filtered_mask_stack(masks: &MaskStack, include_manual: bool, include_ai: bool) -> MaskStack {
+    if include_manual && include_ai {
+        return masks.clone();
+    }
+
+    let mut filtered = MaskStack::default();
+    filtered.masks = masks
+        .masks
+        .iter()
+        .filter(|mask| {
+            if mask_group_is_ai(mask) {
+                include_ai
+            } else {
+                include_manual
+            }
+        })
+        .cloned()
+        .collect();
+    filtered
+}
+
+fn replace_selected_mask_categories(
+    destination: &mut MaskStack,
+    source: &MaskStack,
+    include_manual: bool,
+    include_ai: bool,
+) {
+    if include_manual && include_ai {
+        *destination = source.clone();
+        return;
+    }
+
+    let mut merged = filtered_mask_stack(destination, !include_manual, !include_ai);
+    let copied = filtered_mask_stack(source, include_manual, include_ai);
+    merged.masks.extend(copied.masks);
+    *destination = merged;
 }
 
 fn masks_contain_content_aware_components(masks: &MaskStack) -> bool {
@@ -190,19 +249,35 @@ pub fn apply_copied_adjustments_with_mode(
         *destination = default_edit_state();
     }
     if settings.adjustments {
-        let camera_profile_changed = destination.camera_profile != source.camera_profile;
         destination.exposure = source.exposure;
         destination.exposure.migrate_to_current_process();
+    }
+    if settings.geometry {
         destination.geometry = source.geometry;
+    }
+    if settings.camera_profile {
+        let camera_profile_changed = destination.camera_profile != source.camera_profile;
         destination.camera_profile = source.camera_profile.clone();
         if camera_profile_changed && masks_contain_content_aware_components(&destination.masks) {
             destination.ai_masks_need_update = true;
         }
     }
-    if settings.masks {
-        destination.masks = Arc::clone(&source.masks);
-        destination.ai_masks_need_update =
-            masks_contain_content_aware_components(&destination.masks);
+    if settings.masks || settings.ai_masks {
+        let previous_ai_masks_need_update = destination.ai_masks_need_update;
+        let mut masks = destination.masks.as_ref().clone();
+        replace_selected_mask_categories(
+            &mut masks,
+            &source.masks,
+            settings.masks,
+            settings.ai_masks,
+        );
+        destination.masks = Arc::new(masks);
+        destination.ai_masks_need_update = if settings.ai_masks {
+            source.ai_masks_need_update
+                || masks_contain_content_aware_components(&destination.masks)
+        } else {
+            previous_ai_masks_need_update
+        };
     }
     if settings.inpainting {
         let inpainting_changed = destination.inpainting != source.inpainting;
@@ -1595,7 +1670,10 @@ mod tests {
             &source,
             AdjustmentCopySettings {
                 adjustments: false,
-                masks: true,
+                geometry: false,
+                camera_profile: false,
+                masks: false,
+                ai_masks: true,
                 inpainting: false,
                 lens_correction: false,
             },
@@ -1605,6 +1683,68 @@ mod tests {
         assert_eq!(destination.lens, original_lens);
         assert_eq!(destination.masks.masks.len(), 1);
         assert_eq!(destination.masks.masks[0].components[0].kind, MaskKind::Subject);
+        assert!(destination.ai_masks_need_update);
+    }
+
+    #[test]
+    fn manual_and_ai_masks_can_be_copied_independently() {
+        let mut source = sample_edits();
+        let mut source_masks = MaskStack::default();
+        source_masks.add_mask(MaskKind::Brush);
+        source_masks.add_mask(MaskKind::Subject);
+        if let MaskGeometry::Ai { mask, .. } =
+            &mut source_masks.masks[1].components[0].geometry
+        {
+            *mask = Some(
+                crate::pipeline::MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap(),
+            );
+        }
+        source.masks = Arc::new(source_masks);
+
+        let mut destination = default_edit_state();
+        apply_copied_adjustments(
+            &mut destination,
+            &source,
+            AdjustmentCopySettings {
+                adjustments: false,
+                geometry: false,
+                camera_profile: false,
+                masks: true,
+                ai_masks: false,
+                inpainting: false,
+                lens_correction: false,
+            },
+        );
+
+        assert_eq!(destination.masks.masks.len(), 1);
+        assert_eq!(destination.masks.masks[0].components[0].kind, MaskKind::Brush);
+        assert!(!destination.ai_masks_need_update);
+
+        apply_copied_adjustments(
+            &mut destination,
+            &source,
+            AdjustmentCopySettings {
+                adjustments: false,
+                geometry: false,
+                camera_profile: false,
+                masks: false,
+                ai_masks: true,
+                inpainting: false,
+                lens_correction: false,
+            },
+        );
+
+        assert_eq!(destination.masks.masks.len(), 2);
+        assert!(destination
+            .masks
+            .masks
+            .iter()
+            .any(|mask| mask.components[0].kind == MaskKind::Brush));
+        assert!(destination
+            .masks
+            .masks
+            .iter()
+            .any(|mask| mask.components[0].kind == MaskKind::Subject));
         assert!(destination.ai_masks_need_update);
     }
 
@@ -1621,7 +1761,10 @@ mod tests {
             &source,
             AdjustmentCopySettings {
                 adjustments: true,
+                geometry: false,
+                camera_profile: true,
                 masks: false,
+                ai_masks: false,
                 inpainting: false,
                 lens_correction: false,
             },

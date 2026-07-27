@@ -2846,48 +2846,45 @@ impl Library {
         if let Some((completed, total, failed, current_name)) =
             app.library_ai_mask_refresh_status()
         {
-            if total > 1 {
-                let fraction = if total == 0 {
-                    0.0
-                } else {
-                    (completed as f32 / total as f32).clamp(0.0, 1.0)
-                };
-                egui::Window::new("Regenerating AI masks")
-                    .id(egui::Id::new("library-ai-mask-refresh-progress"))
-                    .collapsible(false)
-                    .resizable(false)
-                    .default_width(360.0)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ui.ctx(), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{completed} / {total} processed"))
-                                .strong(),
-                        );
+            let fraction = if total == 0 {
+                0.0
+            } else {
+                (completed as f32 / total as f32).clamp(0.0, 1.0)
+            };
+            egui::Window::new("Regenerating AI masks")
+                .id(egui::Id::new("library-ai-mask-refresh-progress"))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(360.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ui.ctx(), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{completed} / {total} processed")).strong(),
+                    );
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .show_percentage()
+                            .animate(completed < total),
+                    );
+                    if let Some(name) = current_name.as_deref() {
                         ui.add_space(6.0);
-                        ui.add(
-                            egui::ProgressBar::new(fraction)
-                                .show_percentage()
-                                .animate(completed < total),
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(format!("Refreshing {name}…"));
+                        });
+                    }
+                    if failed > 0 {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{failed} {} failed",
+                                if failed == 1 { "image" } else { "images" }
+                            ))
+                            .small()
+                            .color(ui.visuals().warn_fg_color),
                         );
-                        if let Some(name) = current_name.as_deref() {
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(format!("Refreshing {name}…"));
-                            });
-                        }
-                        if failed > 0 {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{failed} {} failed",
-                                    if failed == 1 { "image" } else { "images" }
-                                ))
-                                .small()
-                                .color(ui.visuals().warn_fg_color),
-                            );
-                        }
-                    });
-            }
+                    }
+                });
         }
 
         #[cfg(not(target_os = "android"))]

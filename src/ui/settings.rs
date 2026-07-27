@@ -209,11 +209,23 @@ impl Settings {
             let mut changed = false;
             changed |= ui
                 .checkbox(&mut settings.adjustments, "Adjustments")
-                .on_hover_text("Global light, color, tone curve, effects, color mixer, RAW adjustment values, crop/geometry, and the per-image camera profile selection.")
+                .on_hover_text("Global light, color, tone curve, effects, color mixer, and RAW adjustment values.")
                 .changed();
             changed |= ui
-                .checkbox(&mut settings.masks, "Masks")
-                .on_hover_text("Mask groups, geometry, components, and their local adjustments. Pasted AI/content-aware masks are marked for refresh on the destination image.")
+                .checkbox(&mut settings.geometry, "Geometry")
+                .on_hover_text("Crop, rotation, straighten, perspective, flips, and geometry transforms. Disabled by default.")
+                .changed();
+            changed |= ui
+                .checkbox(&mut settings.camera_profile, "Camera profile")
+                .on_hover_text("The per-image camera/DCP profile selection. Enabled by default.")
+                .changed();
+            changed |= ui
+                .checkbox(&mut settings.masks, "Normal masks")
+                .on_hover_text("Mask groups made only from brush, radial-gradient, and linear-gradient components, including their local adjustments.")
+                .changed();
+            changed |= ui
+                .checkbox(&mut settings.ai_masks, "AI masks")
+                .on_hover_text("Mask groups containing subject, background, object, luminance-range, or color-range components, including any manual refinements. Generated/source-dependent results are marked for regeneration on the destination image.")
                 .changed();
             changed |= ui
                 .checkbox(&mut settings.inpainting, "Inpainting")
