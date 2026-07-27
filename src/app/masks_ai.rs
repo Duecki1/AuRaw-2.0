@@ -162,6 +162,39 @@ impl AurawApp {
         self.ai_masks_need_update && !self.masks.masks.is_empty()
     }
 
+    /// Number of content-aware mask components still awaiting the active
+    /// batch refresh. Subject/background components share one worker, but
+    /// each component is counted so Library can report meaningful progress.
+    pub(crate) fn ai_mask_update_remaining_target_count(&self) -> usize {
+        if !self.ai_mask_update_active {
+            return 0;
+        }
+
+        let subject_targets = self
+            .masks
+            .masks
+            .iter()
+            .flat_map(|mask| &mask.components)
+            .filter(|component| {
+                matches!(
+                    (component.kind, &component.geometry),
+                    (
+                        MaskKind::Subject | MaskKind::Background,
+                        MaskGeometry::Ai { .. },
+                    )
+                )
+            })
+            .count();
+        let current_object = usize::from(
+            self.object_receiver.is_some() || self.object_pending_target.is_some(),
+        );
+        let subject_remaining = usize::from(self.ai_mask_update_subject_pending) * subject_targets;
+        subject_remaining + self.ai_mask_update_object_queue.len() + current_object
+    }
+
+    /// Find masks that can be regenerated from their semantic component or
+    /// saved prompt data. A pasted/stale mask may intentionally have no cached
+    /// generated bitmap, so `mask: Some(_)` must not be required here.
     fn generated_ai_mask_targets(&self) -> (bool, VecDeque<(usize, usize)>) {
         let mut subject = false;
         let mut objects = VecDeque::new();
@@ -170,15 +203,11 @@ impl AurawApp {
                 match (component.kind, &component.geometry) {
                     (
                         MaskKind::Subject | MaskKind::Background,
-                        MaskGeometry::Ai { mask: Some(_), .. },
+                        MaskGeometry::Ai { .. },
                     ) => subject = true,
                     (
                         MaskKind::Object,
-                        MaskGeometry::Object {
-                            mask: Some(_),
-                            strokes,
-                            ..
-                        },
+                        MaskGeometry::Object { strokes, .. },
                     ) if strokes
                         .iter()
                         .any(|stroke| stroke.positive && !stroke.points.is_empty()) =>
@@ -354,11 +383,7 @@ impl AurawApp {
                 .is_some_and(|component| {
                     matches!(
                         &component.geometry,
-                        MaskGeometry::Object {
-                            mask: Some(_),
-                            strokes,
-                            ..
-                        } if strokes
+                        MaskGeometry::Object { strokes, .. } if strokes
                             .iter()
                             .any(|stroke| stroke.positive && !stroke.points.is_empty())
                     )
@@ -1088,13 +1113,17 @@ impl AurawApp {
     }
 
     fn show_subject_dialogs(&mut self, ctx: &egui::Context) {
+        let library_batch_refreshing = self.library_ai_mask_refresh.is_some();
         if self.subject_consent_open {
-            egui::Window::new("Download subject-selection model?")
+            crate::ui::responsive_popup(
+                egui::Window::new("Download subject-selection model?"),
+                ctx,
+                520.0,
+            )
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    ui.set_max_width(520.0);
                     ui.label("Subject masks use BiRefNet for the coarse selection, then ViTMatte refines uncertain boundaries for hair, fur, and translucent edge detail. Not Subject is the exact inverse of the refined subject alpha.");
                     ui.label(format!(
                         "The first use downloads about {:.0} MB total and stores both ONNX models in AuRaw's cache.",
@@ -1143,8 +1172,11 @@ impl AurawApp {
                     });
                 });
         }
-        if self.subject_receiver.is_some() {
-            egui::Window::new("Preparing subject mask")
+        // The Library batch progress is the operation-level dialog. Do not
+        // cover it with a second worker-level window while refreshing pasted
+        // masks; the batch dialog stays visible for the entire operation.
+        if self.subject_receiver.is_some() && !library_batch_refreshing {
+            crate::ui::responsive_popup(egui::Window::new("Preparing subject mask"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -1174,12 +1206,15 @@ impl AurawApp {
         }
 
         if self.object_consent_open {
-            egui::Window::new("Download object-selection model?")
+            crate::ui::responsive_popup(
+                egui::Window::new("Download object-selection model?"),
+                ctx,
+                520.0,
+            )
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    ui.set_max_width(520.0);
                     ui.label("Object masks use SAM 2.1 Hiera Tiny followed automatically by ViTMatte trimap-guided alpha matting for fine hair, fur, and semi-transparent boundaries.");
                     ui.label(format!(
                         "The first use downloads about {:.0} MB for SAM plus {:.0} MB for ViTMatte and stores the ONNX files in AuRaw's model cache.",
@@ -1226,8 +1261,8 @@ impl AurawApp {
                     });
                 });
         }
-        if self.object_receiver.is_some() {
-            egui::Window::new("Preparing object mask")
+        if self.object_receiver.is_some() && !library_batch_refreshing {
+            crate::ui::responsive_popup(egui::Window::new("Preparing object mask"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -1262,10 +1297,9 @@ impl AurawApp {
 
         if let Some(message) = self.object_error_dialog.clone() {
             let mut close = false;
-            egui::Window::new("Object mask failed")
+            crate::ui::responsive_popup(egui::Window::new("Object mask failed"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(true)
-                .default_width(420.0)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     ui.label(message);

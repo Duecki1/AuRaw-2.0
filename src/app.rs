@@ -449,6 +449,7 @@ struct LibraryAdjustmentClipboard {
 #[derive(Clone, Debug)]
 struct LibraryAiMaskRefreshJob {
     source: PathBuf,
+    mask_targets: usize,
 }
 
 #[cfg(target_os = "android")]
@@ -456,12 +457,14 @@ struct LibraryAiMaskRefreshJob {
 struct LibraryAiMaskRefreshJob {
     uri: String,
     display_name: String,
+    mask_targets: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LibraryAiMaskRefreshPhase {
     Loading,
     Updating,
+    Saving,
 }
 
 #[derive(Debug)]
@@ -471,6 +474,8 @@ struct LibraryAiMaskRefreshState {
     phase: LibraryAiMaskRefreshPhase,
     total: usize,
     completed: usize,
+    mask_total: usize,
+    mask_completed: usize,
     failures: Vec<String>,
 }
 

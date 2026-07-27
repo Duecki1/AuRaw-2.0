@@ -73,10 +73,10 @@ pub struct AdjustmentCopySettings {
     pub geometry: bool,
     #[serde(default = "default_true")]
     pub camera_profile: bool,
-    /// Mask groups made only from manual Brush, Radial, and Linear components.
+    /// Manual Brush, Radial, and Linear mask components.
     #[serde(default = "default_true")]
     pub masks: bool,
-    /// Mask groups containing AI or source-dependent components.
+    /// AI and source-dependent mask components.
     #[serde(default = "default_true")]
     pub ai_masks: bool,
     #[serde(default)]
@@ -144,12 +144,6 @@ fn is_manual_mask_kind(kind: MaskKind) -> bool {
     matches!(kind, MaskKind::Brush | MaskKind::Radial | MaskKind::Linear)
 }
 
-fn mask_group_is_ai(mask: &crate::pipeline::LocalMask) -> bool {
-    mask.components
-        .iter()
-        .any(|component| !is_manual_mask_kind(component.kind))
-}
-
 fn filtered_mask_stack(masks: &MaskStack, include_manual: bool, include_ai: bool) -> MaskStack {
     if include_manual && include_ai {
         return masks.clone();
@@ -159,14 +153,21 @@ fn filtered_mask_stack(masks: &MaskStack, include_manual: bool, include_ai: bool
     filtered.masks = masks
         .masks
         .iter()
-        .filter(|mask| {
-            if mask_group_is_ai(mask) {
-                include_ai
-            } else {
-                include_manual
-            }
+        .filter_map(|mask| {
+            // A local-mask group can combine a brush/radial/linear component
+            // with an AI or range component. Filter those components one by
+            // one: classifying the whole group as AI used to leak the manual
+            // refinement even when "Normal masks" was disabled.
+            let mut selected = mask.clone();
+            selected.components.retain(|component| {
+                if is_manual_mask_kind(component.kind) {
+                    include_manual
+                } else {
+                    include_ai
+                }
+            });
+            (!selected.components.is_empty()).then_some(selected)
         })
-        .cloned()
         .collect();
     filtered
 }
@@ -189,15 +190,22 @@ fn replace_selected_mask_categories(
 }
 
 fn masks_contain_content_aware_components(masks: &MaskStack) -> bool {
+    // Generated bitmaps are caches, not the identity of an AI component. A
+    // stale pasted mask can have `mask: None` and still require regeneration.
     masks.masks.iter().any(|mask| {
         mask.components
             .iter()
             .any(|component| match (component.kind, &component.geometry) {
                 (
                     MaskKind::Subject | MaskKind::Background,
-                    MaskGeometry::Ai { mask: Some(_), .. },
+                    MaskGeometry::Ai { .. },
                 ) => true,
-                (MaskKind::Object, MaskGeometry::Object { mask: Some(_), .. }) => true,
+                (
+                    MaskKind::Object,
+                    MaskGeometry::Object { strokes, .. },
+                ) => strokes
+                    .iter()
+                    .any(|stroke| stroke.positive && !stroke.points.is_empty()),
                 (MaskKind::LuminanceRange, MaskGeometry::LuminanceRange { .. }) => true,
                 (
                     MaskKind::ColorRange,
@@ -1687,6 +1695,38 @@ mod tests {
     }
 
     #[test]
+    fn copied_uncached_ai_masks_are_still_marked_stale() {
+        let mut source = default_edit_state();
+        let mut source_masks = MaskStack::default();
+        source_masks.add_mask(MaskKind::Subject);
+        // A generated bitmap is a cache. Pasted AI masks may not include one,
+        // but their semantic component still has to be regenerated for the
+        // destination image.
+        assert!(matches!(
+            &source_masks.masks[0].components[0].geometry,
+            MaskGeometry::Ai { mask: None, .. }
+        ));
+        source.masks = Arc::new(source_masks);
+
+        let mut destination = default_edit_state();
+        apply_copied_adjustments(
+            &mut destination,
+            &source,
+            AdjustmentCopySettings {
+                adjustments: false,
+                geometry: false,
+                camera_profile: false,
+                masks: false,
+                ai_masks: true,
+                inpainting: false,
+                lens_correction: false,
+            },
+        );
+
+        assert!(destination.ai_masks_need_update);
+    }
+
+    #[test]
     fn manual_and_ai_masks_can_be_copied_independently() {
         let mut source = sample_edits();
         let mut source_masks = MaskStack::default();
@@ -1746,6 +1786,60 @@ mod tests {
             .iter()
             .any(|mask| mask.components[0].kind == MaskKind::Subject));
         assert!(destination.ai_masks_need_update);
+    }
+
+    #[test]
+    fn mixed_mask_groups_do_not_copy_disabled_manual_components() {
+        let mut source = default_edit_state();
+        let mut masks = MaskStack::default();
+        masks.add_mask(MaskKind::Brush);
+        masks.add_component(MaskKind::Subject, crate::pipeline::MaskCombineMode::Add);
+        source.masks = Arc::new(masks);
+
+        let mut destination = default_edit_state();
+        apply_copied_adjustments(
+            &mut destination,
+            &source,
+            AdjustmentCopySettings {
+                adjustments: false,
+                geometry: false,
+                camera_profile: false,
+                masks: false,
+                ai_masks: true,
+                inpainting: false,
+                lens_correction: false,
+            },
+        );
+
+        assert_eq!(destination.masks.masks.len(), 1);
+        assert_eq!(destination.masks.masks[0].components.len(), 1);
+        assert_eq!(destination.masks.masks[0].components[0].kind, MaskKind::Subject);
+        assert!(destination.ai_masks_need_update);
+
+        apply_copied_adjustments(
+            &mut destination,
+            &source,
+            AdjustmentCopySettings {
+                adjustments: false,
+                geometry: false,
+                camera_profile: false,
+                masks: true,
+                ai_masks: false,
+                inpainting: false,
+                lens_correction: false,
+            },
+        );
+
+        assert!(destination
+            .masks
+            .masks
+            .iter()
+            .any(|mask| mask.components.len() == 1 && mask.components[0].kind == MaskKind::Brush));
+        assert!(destination
+            .masks
+            .masks
+            .iter()
+            .all(|mask| mask.components.len() == 1));
     }
 
     #[test]

@@ -387,6 +387,10 @@ impl LibraryState {
         self.location.as_deref()
     }
 
+    pub(crate) fn set_status(&mut self, status: impl Into<String>) {
+        self.status = status.into();
+    }
+
     pub(crate) fn has_selection(&self) -> bool {
         !self.selected_sources.is_empty()
     }
@@ -1371,6 +1375,16 @@ fn render_uncached_developed_thumbnail(
     let loaded_sidecar = match crate::sidecar::load_desktop(path) {
         Ok(Some(sidecar)) => sidecar,
         Ok(None) => return Ok(None),
+        // Match RAW opening: malformed edit JSON is recoverable. Returning
+        // None lets the library use its normal cached/embedded RAW thumbnail
+        // instead of leaving the card without any preview.
+        Err(crate::sidecar::SidecarError::Invalid(error)) => {
+            log::warn!(
+                "ignoring invalid sidecar while rendering library thumbnail for {}: {error}",
+                path.display()
+            );
+            return Ok(None);
+        }
         Err(error) => {
             return Err(format!(
                 "could not load edits for {}: {error}",
@@ -2894,13 +2908,12 @@ impl Library {
             let mut paste_action = 0u8;
             if let Some(dialog) = app.library.adjustment_paste_dialog.as_ref() {
                 let target_count = dialog.paths.len();
-                egui::Window::new("Paste adjustments")
+                crate::ui::responsive_popup(egui::Window::new("Paste adjustments"), ui.ctx(), 480.0)
                     .id(egui::Id::new("library-adjustment-paste-conflict-dialog"))
                     .collapsible(false)
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ui.ctx(), |ui| {
-                        ui.set_max_width(480.0);
                         ui.label(format!(
                             "{} of the {} selected {} already contain edits.",
                             dialog.edited_count,
@@ -2954,13 +2967,12 @@ impl Library {
             let can_regenerate = app.can_start_library_ai_mask_refresh();
             if let Some(prompt) = app.library.ai_mask_refresh_prompt.as_ref() {
                 let target_count = prompt.paths.len();
-                egui::Window::new("Regenerate AI masks?")
+                crate::ui::responsive_popup(egui::Window::new("Regenerate AI masks?"), ui.ctx(), 460.0)
                     .id(egui::Id::new("library-ai-mask-refresh-prompt"))
                     .collapsible(false)
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ui.ctx(), |ui| {
-                        ui.set_max_width(460.0);
                         ui.label(format!(
                             "{} pasted {} contain content-aware masks that belong to the source image.",
                             target_count,
@@ -2972,7 +2984,7 @@ impl Library {
                         if !can_regenerate {
                             ui.label(
                                 egui::RichText::new(
-                                    "Waiting for the pasted camera profile to finish loading…",
+                                    "Waiting for the current RAW load or edit save to finish…",
                                 )
                                 .small()
                                 .color(ui.visuals().weak_text_color()),
@@ -3006,7 +3018,7 @@ impl Library {
             let mut paste_action = 0u8;
             if let Some(dialog) = app.library.adjustment_paste_dialog.as_ref() {
                 let target_count = dialog.targets.len();
-                egui::Window::new("Paste adjustments")
+                crate::ui::responsive_popup(egui::Window::new("Paste adjustments"), ui.ctx(), 480.0)
                     .id(egui::Id::new(
                         "android-library-adjustment-paste-conflict-dialog",
                     ))
@@ -3014,7 +3026,6 @@ impl Library {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ui.ctx(), |ui| {
-                        ui.set_max_width(480.0);
                         ui.label(format!(
                             "{} of the {} selected {} already contain edits.",
                             dialog.edited_count,
@@ -3068,13 +3079,12 @@ impl Library {
             let can_regenerate = app.can_start_library_ai_mask_refresh();
             if let Some(prompt) = app.library.ai_mask_refresh_prompt.as_ref() {
                 let target_count = prompt.targets.len();
-                egui::Window::new("Regenerate AI masks?")
+                crate::ui::responsive_popup(egui::Window::new("Regenerate AI masks?"), ui.ctx(), 460.0)
                     .id(egui::Id::new("android-library-ai-mask-refresh-prompt"))
                     .collapsible(false)
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ui.ctx(), |ui| {
-                        ui.set_max_width(460.0);
                         ui.label(format!(
                             "{} pasted {} contain content-aware masks that belong to the source image.",
                             target_count,
@@ -3086,7 +3096,7 @@ impl Library {
                         if !can_regenerate {
                             ui.label(
                                 egui::RichText::new(
-                                    "Waiting for the pasted camera profile to finish loading…",
+                                    "Waiting for the current RAW load or edit save to finish…",
                                 )
                                 .small()
                                 .color(ui.visuals().weak_text_color()),
@@ -3123,15 +3133,15 @@ impl Library {
             } else {
                 (completed as f32 / total as f32).clamp(0.0, 1.0)
             };
-            egui::Window::new("Regenerating AI masks")
+            crate::ui::responsive_popup(egui::Window::new("Regenerating AI masks"), ui.ctx(), 360.0)
                 .id(egui::Id::new("library-ai-mask-refresh-progress"))
                 .collapsible(false)
                 .resizable(false)
-                .default_width(360.0)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ui.ctx(), |ui| {
                     ui.label(
-                        egui::RichText::new(format!("{completed} / {total} processed")).strong(),
+                        egui::RichText::new(format!("{completed} / {total} AI masks updated"))
+                            .strong(),
                     );
                     ui.add_space(6.0);
                     ui.add(
@@ -3170,11 +3180,10 @@ impl Library {
                 } else {
                     format!("Export {count} images")
                 };
-                egui::Window::new(title)
+                crate::ui::responsive_popup(egui::Window::new(title), ui.ctx(), 480.0)
                     .id(egui::Id::new("library-export-dialog"))
                     .collapsible(false)
                     .resizable(true)
-                    .default_width(380.0)
                     .show(ui.ctx(), |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Format");
@@ -3280,11 +3289,10 @@ impl Library {
                         ((completed as f32 + current_fraction) / total as f32).clamp(0.0, 1.0)
                     };
 
-                    egui::Window::new("Exporting images")
+                    crate::ui::responsive_popup(egui::Window::new("Exporting images"), ui.ctx(), 420.0)
                         .id(egui::Id::new("library-batch-export-progress-dialog"))
                         .collapsible(false)
                         .resizable(false)
-                        .default_width(420.0)
                         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                         .show(ui.ctx(), |ui| {
                             ui.label(
@@ -3355,11 +3363,10 @@ impl Library {
                 } else {
                     format!("Export {count} images")
                 };
-                egui::Window::new(title)
+                crate::ui::responsive_popup(egui::Window::new(title), ui.ctx(), 480.0)
                     .id(egui::Id::new("android-library-export-dialog"))
                     .collapsible(false)
                     .resizable(true)
-                    .default_width(380.0)
                     .show(ui.ctx(), |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Format");
@@ -3461,13 +3468,12 @@ impl Library {
                         ((completed as f32 + current_fraction) / total as f32).clamp(0.0, 1.0)
                     };
 
-                    egui::Window::new("Exporting images")
+                    crate::ui::responsive_popup(egui::Window::new("Exporting images"), ui.ctx(), 420.0)
                         .id(egui::Id::new(
                             "android-library-batch-export-progress-dialog",
                         ))
                         .collapsible(false)
                         .resizable(false)
-                        .default_width(360.0)
                         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                         .show(ui.ctx(), |ui| {
                             ui.label(

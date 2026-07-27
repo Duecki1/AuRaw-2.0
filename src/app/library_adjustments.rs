@@ -195,9 +195,7 @@ impl AurawApp {
         &mut self,
         raw_path: &std::path::Path,
     ) -> Result<SidecarEditState, String> {
-        let persisted = crate::sidecar::load_desktop(raw_path)
-            .map_err(|error| error.to_string())?
-            .map(|loaded| loaded.edits);
+        let persisted = desktop_library_sidecar_edits(raw_path)?;
         if self.current_path.as_deref() == Some(raw_path) && self.loaded_raw.is_some() {
             self.finish_mask_geometry_interaction();
             self.commit_edit_history_now();
@@ -260,17 +258,31 @@ impl AurawApp {
         let mut completed = Vec::new();
         let mut ai_refresh = Vec::new();
         let mut failures = Vec::new();
+        let current_path = self
+            .loaded_raw
+            .as_ref()
+            .and(self.current_path.as_ref())
+            .cloned();
 
-        for raw_path in raw_paths {
-            let result = if self.current_path.as_deref() == Some(raw_path.as_path())
-                && self.loaded_raw.is_some()
-            {
+        // Applying a copied camera profile to the loaded image starts an
+        // asynchronous RAW reload. Process every sidecar-only destination
+        // first so that reload cannot interrupt a multi-image paste halfway
+        // through the selection.
+        let ordered_paths = raw_paths
+            .iter()
+            .filter(|raw_path| current_path.as_deref() != Some(raw_path.as_path()))
+            .chain(
+                raw_paths
+                    .iter()
+                    .filter(|raw_path| current_path.as_deref() == Some(raw_path.as_path())),
+            );
+
+        for raw_path in ordered_paths {
+            let result = if current_path.as_deref() == Some(raw_path.as_path()) {
                 self.apply_adjustment_clipboard_to_current(&clipboard, mode, frame)
             } else {
                 (|| {
-                    let mut destination = crate::sidecar::load_desktop(raw_path)
-                        .map_err(|error| error.to_string())?
-                        .map(|loaded| loaded.edits)
+                    let mut destination = desktop_library_sidecar_edits(raw_path)?
                         .unwrap_or_else(crate::sidecar::default_edit_state);
                     crate::sidecar::apply_copied_adjustments_with_mode(
                         &mut destination,
@@ -378,9 +390,35 @@ impl AurawApp {
         let mut completed = Vec::new();
         let mut ai_refresh = Vec::new();
         let mut failures = Vec::new();
+        let current_target = self.loaded_raw.as_ref().and_then(|_| {
+            let crate::sidecar::SidecarTarget::Android {
+                raw_uri,
+                display_name,
+            } = self.sidecar_target.as_ref()?
+            else {
+                return None;
+            };
+            Some((raw_uri.clone(), display_name.clone()))
+        });
 
-        for (raw_uri, display_name) in targets {
-            let result = if self.current_android_library_target_matches(raw_uri, display_name) {
+        // As on desktop, leave the loaded image until last because applying a
+        // copied camera profile launches an asynchronous document reopen.
+        let ordered_targets = targets
+            .iter()
+            .filter(|target| current_target.as_ref() != Some(*target))
+            .chain(
+                targets
+                    .iter()
+                    .filter(|target| current_target.as_ref() == Some(*target)),
+            );
+
+        for (raw_uri, display_name) in ordered_targets {
+            let result = if current_target
+                .as_ref()
+                .is_some_and(|(current_uri, current_name)| {
+                    current_uri == raw_uri && current_name == display_name
+                })
+            {
                 self.apply_adjustment_clipboard_to_current(&clipboard, mode, frame)
             } else {
                 (|| {
@@ -425,12 +463,70 @@ impl AurawApp {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn desktop_library_sidecar_edits(
+    raw_path: &std::path::Path,
+) -> Result<Option<SidecarEditState>, String> {
+    match crate::sidecar::load_desktop(raw_path) {
+        Ok(loaded) => Ok(loaded.map(|loaded| loaded.edits)),
+        // Opening a RAW already recovers from malformed sidecars by using the
+        // default edit state. Library copy/paste must do the same so one bad
+        // JSON file cannot make its thumbnail disappear or block a paste that
+        // will replace it with a valid sidecar.
+        Err(crate::sidecar::SidecarError::Invalid(error)) => {
+            log::warn!(
+                "ignoring invalid sidecar while handling library adjustments for {}: {error}",
+                raw_path.display()
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn ai_mask_refresh_target_count(masks: &crate::pipeline::MaskStack) -> usize {
+    masks
+        .masks
+        .iter()
+        .flat_map(|mask| &mask.components)
+        .filter(|component| match (component.kind, &component.geometry) {
+            (
+                crate::pipeline::MaskKind::Subject | crate::pipeline::MaskKind::Background,
+                crate::pipeline::MaskGeometry::Ai { .. },
+            ) => true,
+            (
+                crate::pipeline::MaskKind::Object,
+                crate::pipeline::MaskGeometry::Object { strokes, .. },
+            ) => strokes
+                .iter()
+                .any(|stroke| stroke.positive && !stroke.points.is_empty()),
+            (
+                crate::pipeline::MaskKind::LuminanceRange,
+                crate::pipeline::MaskGeometry::LuminanceRange { .. },
+            )
+            | (
+                crate::pipeline::MaskKind::ColorRange,
+                crate::pipeline::MaskGeometry::ColorRange { .. },
+            ) => true,
+            _ => false,
+        })
+        .count()
+}
+
+fn complete_library_ai_mask_refresh_item(state: &mut LibraryAiMaskRefreshState) {
+    if let Some(job) = state.current.take() {
+        state.completed += 1;
+        state.mask_completed += job.mask_targets;
+    }
+}
+
 impl AurawApp {
     pub(crate) fn can_start_library_ai_mask_refresh(&self) -> bool {
         let ready = self.library_ai_mask_refresh.is_none()
             && self.library_batch_export.is_none()
             && self.export_receiver.is_none()
             && self.load_receiver.is_none()
+            && !self.sidecar_save_in_progress()
             && !self.export_publish_pending;
         #[cfg(not(target_os = "android"))]
         {
@@ -446,6 +542,22 @@ impl AurawApp {
         &self,
     ) -> Option<(usize, usize, usize, Option<String>)> {
         self.library_ai_mask_refresh.as_ref().map(|state| {
+            let current_mask_progress = state.current.as_ref().map_or(0, |job| {
+                if state.phase == LibraryAiMaskRefreshPhase::Loading {
+                    return 0;
+                }
+                if state.phase == LibraryAiMaskRefreshPhase::Updating
+                    && self.ai_masks_need_update()
+                    && !self.ai_mask_update_busy()
+                {
+                    // The update could not start (for example a missing model
+                    // or runtime). Keep its progress at zero until the batch
+                    // records the failure on this frame.
+                    return 0;
+                }
+                job.mask_targets
+                    .saturating_sub(self.ai_mask_update_remaining_target_count())
+            });
             let current = state.current.as_ref().map(|job| {
                 #[cfg(not(target_os = "android"))]
                 {
@@ -460,8 +572,8 @@ impl AurawApp {
                 }
             });
             (
-                state.completed,
-                state.total,
+                state.mask_completed + current_mask_progress,
+                state.mask_total,
                 state.failures.len(),
                 current,
             )
@@ -485,15 +597,29 @@ impl AurawApp {
             return;
         }
         let total = paths.len();
+        let pending = paths
+            .into_iter()
+            .map(|source| {
+                let mask_targets = crate::sidecar::load_desktop(&source)
+                    .ok()
+                    .flatten()
+                    .map(|loaded| ai_mask_refresh_target_count(&loaded.edits.masks))
+                    .unwrap_or_default();
+                LibraryAiMaskRefreshJob {
+                    source,
+                    mask_targets,
+                }
+            })
+            .collect::<VecDeque<_>>();
+        let mask_total = pending.iter().map(|job| job.mask_targets).sum();
         self.library_ai_mask_refresh = Some(LibraryAiMaskRefreshState {
-            pending: paths
-                .into_iter()
-                .map(|source| LibraryAiMaskRefreshJob { source })
-                .collect(),
+            pending,
             current: None,
             phase: LibraryAiMaskRefreshPhase::Loading,
             total,
             completed: 0,
+            mask_total,
+            mask_completed: 0,
             failures: Vec::new(),
         });
         self.start_next_library_ai_mask_refresh(frame);
@@ -516,15 +642,34 @@ impl AurawApp {
             return;
         }
         let total = targets.len();
+        let pending = targets
+            .into_iter()
+            .map(|(uri, display_name)| {
+                let mask_targets = crate::sidecar::load_android(
+                    &self.android_app,
+                    &uri,
+                    &display_name,
+                )
+                .ok()
+                .flatten()
+                .map(|loaded| ai_mask_refresh_target_count(&loaded.edits.masks))
+                .unwrap_or_default();
+                LibraryAiMaskRefreshJob {
+                    uri,
+                    display_name,
+                    mask_targets,
+                }
+            })
+            .collect::<VecDeque<_>>();
+        let mask_total = pending.iter().map(|job| job.mask_targets).sum();
         self.library_ai_mask_refresh = Some(LibraryAiMaskRefreshState {
-            pending: targets
-                .into_iter()
-                .map(|(uri, display_name)| LibraryAiMaskRefreshJob { uri, display_name })
-                .collect(),
+            pending,
             current: None,
             phase: LibraryAiMaskRefreshPhase::Loading,
             total,
             completed: 0,
+            mask_total,
+            mask_completed: 0,
             failures: Vec::new(),
         });
         self.start_next_library_ai_mask_refresh(frame);
@@ -562,8 +707,7 @@ impl AurawApp {
                 state
                     .failures
                     .push(format!("{}: could not start RAW load", job.source.display()));
-                state.completed += 1;
-                state.current = None;
+                complete_library_ai_mask_refresh_item(state);
             }
         }
     }
@@ -607,8 +751,7 @@ impl AurawApp {
                         state
                             .failures
                             .push(format!("{}: {error}", job.display_name));
-                        state.completed += 1;
-                        state.current = None;
+                        complete_library_ai_mask_refresh_item(state);
                     }
                 }
             }
@@ -634,8 +777,7 @@ impl AurawApp {
             let label = current.display_name.clone();
             if let Some(state) = self.library_ai_mask_refresh.as_mut() {
                 state.failures.push(format!("{label}: RAW load failed"));
-                state.completed += 1;
-                state.current = None;
+                complete_library_ai_mask_refresh_item(state);
             }
             self.start_next_library_ai_mask_refresh(frame);
             return;
@@ -662,26 +804,20 @@ impl AurawApp {
             .unwrap_or_else(|| "image".to_owned());
         if let Some(state) = self.library_ai_mask_refresh.as_mut() {
             state.failures.push(format!("{label}: {error}"));
-            state.completed += 1;
-            state.current = None;
+            complete_library_ai_mask_refresh_item(state);
         }
         self.start_next_library_ai_mask_refresh(frame);
     }
 
     pub(crate) fn poll_library_ai_mask_refresh(&mut self, frame: &eframe::Frame) {
-        let ready = self
+        let phase = self
             .library_ai_mask_refresh
             .as_ref()
-            .is_some_and(|state| {
-                state.current.is_some()
-                    && state.phase == LibraryAiMaskRefreshPhase::Updating
-                    && !self.ai_mask_update_busy()
-            });
-        if !ready {
+            .and_then(|state| state.current.as_ref().map(|_| state.phase));
+        let Some(phase) = phase else {
             return;
-        }
+        };
 
-        let failed = self.ai_masks_need_update();
         let label = self
             .library_ai_mask_refresh
             .as_ref()
@@ -698,24 +834,59 @@ impl AurawApp {
             })
             .unwrap_or_else(|| "image".to_owned());
 
-        if failed {
-            let reason = self
-                .notice
-                .clone()
-                .unwrap_or_else(|| "AI masks still need an update".to_owned());
-            if let Some(state) = self.library_ai_mask_refresh.as_mut() {
-                state.failures.push(format!("{label}: {reason}"));
-            }
-        } else {
-            self.commit_edit_history_now();
-            self.queue_explicit_sidecar_save();
-        }
+        match phase {
+            LibraryAiMaskRefreshPhase::Loading => return,
+            LibraryAiMaskRefreshPhase::Updating => {
+                if self.ai_mask_update_busy() {
+                    return;
+                }
 
-        if let Some(state) = self.library_ai_mask_refresh.as_mut() {
-            state.completed += 1;
-            state.current = None;
+                if self.ai_masks_need_update() {
+                    let reason = self
+                        .notice
+                        .clone()
+                        .unwrap_or_else(|| "AI masks still need an update".to_owned());
+                    if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                        state.failures.push(format!("{label}: {reason}"));
+                        complete_library_ai_mask_refresh_item(state);
+                    }
+                    self.start_next_library_ai_mask_refresh(frame);
+                    return;
+                }
+
+                // Do not advance to the next RAW until the regenerated masks
+                // are durable. Otherwise the final item can be reported as
+                // complete (and the library refreshed) while its sidecar is
+                // still writing, and a following load can observe stale data.
+                self.commit_edit_history_now();
+                self.queue_explicit_sidecar_save();
+                if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                    state.phase = LibraryAiMaskRefreshPhase::Saving;
+                }
+                return;
+            }
+            LibraryAiMaskRefreshPhase::Saving => {
+                if self.sidecar_save_in_progress() {
+                    return;
+                }
+
+                let revision = self.edit_commit_revision();
+                if self.sidecar_failed_revision == Some(revision) {
+                    let reason = self
+                        .notice
+                        .clone()
+                        .unwrap_or_else(|| "could not save regenerated AI masks".to_owned());
+                    if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                        state.failures.push(format!("{label}: {reason}"));
+                    }
+                }
+
+                if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                    complete_library_ai_mask_refresh_item(state);
+                }
+                self.start_next_library_ai_mask_refresh(frame);
+            }
         }
-        self.start_next_library_ai_mask_refresh(frame);
     }
 
     fn finish_library_ai_mask_refresh(&mut self) {
@@ -725,18 +896,23 @@ impl AurawApp {
         let succeeded = state.completed.saturating_sub(state.failures.len());
         self.active_tab = AppTab::Library;
         self.library.refresh(&self.egui_ctx);
-        self.notice = if state.failures.is_empty() {
-            Some(format!(
+        let summary = if state.failures.is_empty() {
+            format!(
                 "Regenerated AI masks for {succeeded} {}.",
                 if succeeded == 1 { "image" } else { "images" }
-            ))
+            )
         } else {
-            Some(format!(
+            format!(
                 "Regenerated AI masks for {succeeded} of {} images. {}",
                 state.total,
                 state.failures.join(" · ")
-            ))
+            )
         };
+        // The progress window closes as soon as the batch ends. Keep the
+        // outcome in the Library itself so a setup or inference failure never
+        // looks like a successful no-op.
+        self.library.set_status(summary.clone());
+        self.notice = Some(summary);
         self.egui_ctx.request_repaint();
     }
 }

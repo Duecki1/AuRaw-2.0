@@ -334,12 +334,11 @@ impl AurawApp {
 
     pub(crate) fn show_inpainting_dialogs(&mut self, ctx: &egui::Context) {
         if self.inpaint_consent_open {
-            egui::Window::new("Download inpainting model?")
+            crate::ui::responsive_popup(egui::Window::new("Download inpainting model?"), ctx, 520.0)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    ui.set_max_width(520.0);
                     ui.label("Inpainting uses the LaMa ONNX model to remove painted content.");
                     ui.label(format!(
                         "The first use downloads {:.0} MB and stores the model in AuRaw's cache.",
@@ -383,7 +382,7 @@ impl AurawApp {
                 });
         }
         if self.inpaint_receiver.is_some() {
-            egui::Window::new("Erasing selection")
+            crate::ui::responsive_popup(egui::Window::new("Erasing selection"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
