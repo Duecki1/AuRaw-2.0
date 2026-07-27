@@ -22,6 +22,9 @@ const PROPHOTO_LUMA: vec3<f32> = vec3<f32>(0.26828944, 0.71515419, 0.01656066);
 
 fn profile_srgb_encode_value(value: f32) -> f32 {
     let magnitude = abs(value);
+    if magnitude >= 1.0 {
+        return sign(value);
+    }
     let encoded = select(
         12.92 * magnitude,
         1.055 * pow(magnitude, 1.0 / 2.4) - 0.055,

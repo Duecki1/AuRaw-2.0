@@ -794,6 +794,7 @@ mod imp {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sample_corrected_cfa_subpixel(
         raw: &LoadedRaw,
         x: f32,
@@ -915,6 +916,7 @@ mod imp {
         (weight_sum > 1e-6).then(|| (value_sum / weight_sum, black_sum / weight_sum))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sample_bayer_phase_bilinear(
         raw: &LoadedRaw,
         x: f32,

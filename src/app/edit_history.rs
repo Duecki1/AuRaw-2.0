@@ -212,15 +212,6 @@ impl EditHistory {
         history.push_back(snapshot);
     }
 
-    pub(super) fn reset(
-        &mut self,
-        exposure: &ExposureParams,
-        masks: &MaskStack,
-        lens: &LensCorrectionState,
-    ) {
-        self.reset_with_inpainting(exposure, masks, lens, &[]);
-    }
-
     pub(super) fn reset_with_inpainting(
         &mut self,
         exposure: &ExposureParams,
@@ -270,6 +261,7 @@ impl EditHistory {
     /// baseline and defer the one comparison/snapshot until release/focus
     /// loss. A whole slider drag, curve drag, brush stroke, geometry drag, or
     /// text rename is therefore one edit without O(mask-size) work per frame.
+    #[cfg(test)]
     pub(super) fn observe(
         &mut self,
         exposure: &ExposureParams,
@@ -398,6 +390,7 @@ impl EditHistory {
             && !self.redo.is_empty()
     }
 
+    #[cfg(test)]
     fn undo(
         &mut self,
         exposure: &ExposureParams,
@@ -425,6 +418,7 @@ impl EditHistory {
         Some((target, masks_changed, inpainting_changed))
     }
 
+    #[cfg(test)]
     fn redo(
         &mut self,
         exposure: &ExposureParams,
@@ -831,9 +825,7 @@ mod tests {
         let first_masks = first_undo.materialize_masks();
         assert_eq!(first_masks.masks[0].opacity, 0.8);
 
-        let (second_undo, masks_changed) = history
-            .undo(&exposure, &first_masks, &lens)
-            .unwrap();
+        let (second_undo, masks_changed) = history.undo(&exposure, &first_masks, &lens).unwrap();
         assert!(masks_changed);
         assert_eq!(second_undo.materialize_masks().masks[0].opacity, 1.0);
 

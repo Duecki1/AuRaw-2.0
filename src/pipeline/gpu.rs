@@ -1247,7 +1247,7 @@ impl GpuParams {
             quarter[2] * affine[0] + quarter[3] * affine[2],
             quarter[2] * affine[1] + quarter[3] * affine[3],
         ];
-        let (output_width, output_height) = if geometry.quarter_turns % 2 == 0 {
+        let (output_width, output_height) = if geometry.quarter_turns.is_multiple_of(2) {
             (crop_width, crop_height)
         } else {
             (crop_height, crop_width)

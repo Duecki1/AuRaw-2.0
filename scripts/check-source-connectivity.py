@@ -40,6 +40,10 @@ except (KeyError, OSError, ValueError, tomllib.TOMLDecodeError) as error:
 MODULE_RE = re.compile(
     r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
 )
+PATH_MODULE_RE = re.compile(
+    r'(?ms)#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]\s*'
+    r'(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;'
+)
 INCLUDE_RE = re.compile(r'\binclude!\(\s*"([^"]+)"\s*\)\s*;')
 DERIVE_RE = re.compile(r"#\s*\[\s*derive\b[^]]*\]")
 
@@ -164,7 +168,20 @@ def visit(module: Path) -> None:
         else:
             visit(included)
 
+    path_modules = {name for _, name in PATH_MODULE_RE.findall(text)}
+    for relative, name in PATH_MODULE_RE.findall(text):
+        target = (module.parent / relative).resolve()
+        if target.is_file():
+            visit(target)
+        else:
+            errors.append(
+                f"module {name!r} declared by {module.relative_to(ROOT)} "
+                f"references missing source: {relative}"
+            )
+
     for name in MODULE_RE.findall(text):
+        if name in path_modules:
+            continue
         direct, nested = module_candidates(module, name)
         matches = [candidate for candidate in (direct, nested) if candidate.is_file()]
         if len(matches) == 1:
@@ -203,6 +220,23 @@ rust_sources = "\n".join(
 )
 included_names = set(re.findall(r'include_str!\("\.\./shaders/([^"\\]+\.wgsl)"\)', rust_sources))
 included = {f"src/shaders/{name}" for name in included_names}
+
+# Build-time templates are expanded into OUT_DIR and then included through
+# concat!(env!("OUT_DIR"), ...), so they cannot appear in the direct
+# include_str! scan above. Count both each declared template and its explicit
+# sibling fragments as connected shader inputs.
+preprocessor = (ROOT / "build_support/shader_preprocessor.rs").read_text(encoding="utf-8")
+generated_templates = set(
+    re.findall(r'\("([^"\\]+\.wgsl)",\s*"[^"\\]+\.generated\.wgsl"\)', preprocessor)
+)
+for template_name in generated_templates:
+    template = SRC / "shaders" / template_name
+    if not template.is_file():
+        continue
+    included.add(f"src/shaders/{template_name}")
+    template_source = template.read_text(encoding="utf-8")
+    for fragment in re.findall(r'//\s*@include\s+"([^"\\]+\.wgsl)"', template_source):
+        included.add(f"src/shaders/{fragment}")
 for path in sorted(shader_paths - included):
     errors.append(f"WGSL file is not included by Rust source: {path}")
 

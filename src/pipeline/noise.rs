@@ -33,6 +33,7 @@ impl NoiseProfile {
     /// Estimate one heteroscedastic `a*signal+b` model per CFA plane directly
     /// from the decoded mosaic. Sampling is bounded so RAW open time remains
     /// effectively independent of megapixel count.
+    #[allow(clippy::too_many_arguments)]
     pub fn estimate(
         width: u32,
         height: u32,
@@ -158,8 +159,8 @@ impl NoiseProfile {
             // enough for measured sensor variation without encouraging plasticity.
             let min_shot = fallback.shot[channel] * 0.15;
             let min_read = fallback.read[channel] * 0.15;
-            let max_shot = (fallback.shot[channel] * 8.0).max(0.001).min(0.08);
-            let max_read = (fallback.read[channel] * 64.0).max(1e-5).min(0.02);
+            let max_shot = (fallback.shot[channel] * 8.0).clamp(0.001, 0.08);
+            let max_read = (fallback.read[channel] * 64.0).clamp(1e-5, 0.02);
             let fitted_a = ((sw * sxy - sx * sy) / denom).clamp(min_shot, max_shot);
             let fitted_b = ((sy - fitted_a * sx) / sw).clamp(min_read, max_read);
 

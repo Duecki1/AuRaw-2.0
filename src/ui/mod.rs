@@ -29,10 +29,7 @@ pub(crate) fn responsive_popup<'a>(
 const ANDROID_OVERFLOW_INSET: f32 = 5.0;
 
 #[cfg(any(target_os = "android", test))]
-fn android_overflow_button_rect(
-    anchor_rect: eframe::egui::Rect,
-    edge: f32,
-) -> eframe::egui::Rect {
+fn android_overflow_button_rect(anchor_rect: eframe::egui::Rect, edge: f32) -> eframe::egui::Rect {
     eframe::egui::Rect::from_min_size(
         eframe::egui::pos2(
             anchor_rect.right() - edge - ANDROID_OVERFLOW_INSET,

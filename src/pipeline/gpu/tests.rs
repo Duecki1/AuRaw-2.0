@@ -10,17 +10,14 @@ use super::{
     SHADER_XTRANS_P6, SHADER_XTRANS_P7,
 };
 use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
+use eframe::wgpu;
 
 fn shader_module(name: &str, source: &str) -> naga::Module {
     naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|error| panic!("{name} did not parse: {error}"))
 }
 
-fn append_direct_call_names(
-    module: &naga::Module,
-    block: &naga::Block,
-    calls: &mut Vec<String>,
-) {
+fn append_direct_call_names(module: &naga::Module, block: &naga::Block, calls: &mut Vec<String>) {
     for statement in block {
         match statement {
             naga::Statement::Block(block) => append_direct_call_names(module, block, calls),
@@ -464,7 +461,8 @@ fn basic_contrast_has_protected_toe_midtones_and_shoulder() {
 #[test]
 fn lifted_black_curve_uses_continuous_luminance_remapping() {
     assert!(SHADER_ADJUSTMENTS.contains("fn remap_scene_luminance"));
-    assert!(SHADER_ADJUSTMENTS.contains("smoothstep(1e-7, 1e-5, luminance)"));
+    assert!(SHADER_ADJUSTMENTS.contains("if luminance <= 0.0"));
+    assert!(SHADER_ADJUSTMENTS.contains("vec3<f32>(black) + rgb * zero_slope"));
     assert!(!SHADER_ADJUSTMENTS.contains("adjusted * clamp(curved / luminance, 0.0, 256.0)"));
 }
 

@@ -18,6 +18,7 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 #[cfg(not(target_os = "android"))]
 use std::io;
+#[cfg(not(target_os = "android"))]
 use std::path::Path;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
@@ -114,6 +115,7 @@ enum LibrarySource {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "android", test))]
 enum TouchThumbnailAction {
     Open,
     SelectionChanged { back_navigation_active: bool },
@@ -132,7 +134,10 @@ const ANDROID_LIBRARY_IMPORT_FAB_EDGE: f32 = 56.0;
 
 #[cfg(any(target_os = "android", test))]
 fn android_library_import_fab_rect(bounds: egui::Rect) -> egui::Rect {
-    let size = egui::vec2(ANDROID_LIBRARY_IMPORT_FAB_EDGE, ANDROID_LIBRARY_IMPORT_FAB_EDGE);
+    let size = egui::vec2(
+        ANDROID_LIBRARY_IMPORT_FAB_EDGE,
+        ANDROID_LIBRARY_IMPORT_FAB_EDGE,
+    );
     egui::Rect::from_min_size(bounds.right_bottom() - size, size)
 }
 
@@ -146,7 +151,6 @@ struct LibraryFileInfo {
     source: LibrarySource,
     display_path: String,
     name: String,
-    parent: String,
     bytes: u64,
     dimensions_hint: Option<[u32; 2]>,
     #[cfg(not(target_os = "android"))]
@@ -391,6 +395,7 @@ impl LibraryState {
         self.status = status.into();
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn has_selection(&self) -> bool {
         !self.selected_sources.is_empty()
     }
@@ -408,6 +413,7 @@ impl LibraryState {
         self.selection_mode = false;
     }
 
+    #[cfg(any(target_os = "android", test))]
     fn handle_touch_thumbnail_activation(
         &mut self,
         source: &LibrarySource,
@@ -720,10 +726,6 @@ impl LibraryState {
                         .into_iter()
                         .take(MAX_LIBRARY_FILES)
                         .map(|document| {
-                            let parent = Path::new(&document.display_path)
-                                .parent()
-                                .map(|parent| parent.display().to_string())
-                                .unwrap_or_default();
                             let dimensions_hint = crate::android::load_library_display_dimensions(
                                 &android_app,
                                 &document.uri,
@@ -738,7 +740,6 @@ impl LibraryState {
                                 },
                                 display_path: document.display_path,
                                 name: document.display_name,
-                                parent,
                                 bytes: document.bytes,
                                 dimensions_hint,
                             }
@@ -1066,6 +1067,7 @@ impl LibraryState {
         self.evict_resident_thumbnails_to_limit_protecting(resident_limit, protected_indices);
     }
 
+    #[cfg(target_os = "android")]
     fn evict_textures_to_limit(&mut self, limit: usize) {
         self.evict_textures_to_limit_protecting(limit, &HashSet::new());
     }
@@ -2090,10 +2092,7 @@ fn raw_import_status(result: &RawImportResult) -> String {
         ));
     }
     if result.already_present > 0 {
-        parts.push(format!(
-            "{} already in this folder",
-            result.already_present
-        ));
+        parts.push(format!("{} already in this folder", result.already_present));
     }
     if result.ignored > 0 {
         parts.push(format!(
@@ -2209,7 +2208,11 @@ fn apply_library_adjustment_paste(
         format!(
             "Pasted adjustments to {} selected {}",
             completed.len(),
-            if completed.len() == 1 { "image" } else { "images" }
+            if completed.len() == 1 {
+                "image"
+            } else {
+                "images"
+            }
         )
     } else {
         format!(
@@ -2218,8 +2221,8 @@ fn apply_library_adjustment_paste(
             failures.join(" · ")
         )
     };
-    app.library.ai_mask_refresh_prompt = (!ai_refresh.is_empty())
-        .then_some(LibraryAiMaskRefreshPrompt { paths: ai_refresh });
+    app.library.ai_mask_refresh_prompt =
+        (!ai_refresh.is_empty()).then_some(LibraryAiMaskRefreshPrompt { paths: ai_refresh });
 }
 
 #[cfg(target_os = "android")]
@@ -2240,7 +2243,11 @@ fn apply_library_adjustment_paste(
         format!(
             "Pasted adjustments to {} selected {}",
             completed.len(),
-            if completed.len() == 1 { "image" } else { "images" }
+            if completed.len() == 1 {
+                "image"
+            } else {
+                "images"
+            }
         )
     } else {
         format!(
@@ -2249,8 +2256,8 @@ fn apply_library_adjustment_paste(
             failures.join(" · ")
         )
     };
-    app.library.ai_mask_refresh_prompt = (!ai_refresh.is_empty())
-        .then_some(LibraryAiMaskRefreshPrompt {
+    app.library.ai_mask_refresh_prompt =
+        (!ai_refresh.is_empty()).then_some(LibraryAiMaskRefreshPrompt {
             targets: ai_refresh,
         });
 }
@@ -2519,8 +2526,8 @@ impl Library {
                                             .selected_sources
                                             .contains(&candidate.info.source)
                                     })
-                                    .filter_map(|candidate| match &candidate.info.source {
-                                        LibrarySource::File(path) => Some(path.clone()),
+                                    .map(|candidate| match &candidate.info.source {
+                                        LibrarySource::File(path) => path.clone(),
                                     })
                                     .collect::<Vec<_>>()
                             } else {
@@ -2656,8 +2663,7 @@ impl Library {
                     app.library.status = status;
                 }
                 LibraryCardAction::PasteAdjustments(paths) => {
-                    let (edited_count, failures) =
-                        app.library_adjustment_edit_count_paths(&paths);
+                    let (edited_count, failures) = app.library_adjustment_edit_count_paths(&paths);
                     if failures.is_empty() {
                         if edited_count > 0 {
                             app.library.adjustment_paste_dialog =
@@ -3125,48 +3131,50 @@ impl Library {
             }
         }
 
-        if let Some((completed, total, failed, current_name)) =
-            app.library_ai_mask_refresh_status()
+        if let Some((completed, total, failed, current_name)) = app.library_ai_mask_refresh_status()
         {
             let fraction = if total == 0 {
                 0.0
             } else {
                 (completed as f32 / total as f32).clamp(0.0, 1.0)
             };
-            crate::ui::responsive_popup(egui::Window::new("Regenerating AI masks"), ui.ctx(), 360.0)
-                .id(egui::Id::new("library-ai-mask-refresh-progress"))
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ui.ctx(), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{completed} / {total} AI masks updated"))
-                            .strong(),
-                    );
+            crate::ui::responsive_popup(
+                egui::Window::new("Regenerating AI masks"),
+                ui.ctx(),
+                360.0,
+            )
+            .id(egui::Id::new("library-ai-mask-refresh-progress"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{completed} / {total} AI masks updated")).strong(),
+                );
+                ui.add_space(6.0);
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .show_percentage()
+                        .animate(completed < total),
+                );
+                if let Some(name) = current_name.as_deref() {
                     ui.add_space(6.0);
-                    ui.add(
-                        egui::ProgressBar::new(fraction)
-                            .show_percentage()
-                            .animate(completed < total),
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("Refreshing {name}…"));
+                    });
+                }
+                if failed > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{failed} {} failed",
+                            if failed == 1 { "image" } else { "images" }
+                        ))
+                        .small()
+                        .color(ui.visuals().warn_fg_color),
                     );
-                    if let Some(name) = current_name.as_deref() {
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(format!("Refreshing {name}…"));
-                        });
-                    }
-                    if failed > 0 {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{failed} {} failed",
-                                if failed == 1 { "image" } else { "images" }
-                            ))
-                            .small()
-                            .color(ui.visuals().warn_fg_color),
-                        );
-                    }
-                });
+                }
+            });
         }
 
         #[cfg(not(target_os = "android"))]
@@ -3289,62 +3297,63 @@ impl Library {
                         ((completed as f32 + current_fraction) / total as f32).clamp(0.0, 1.0)
                     };
 
-                    crate::ui::responsive_popup(egui::Window::new("Exporting images"), ui.ctx(), 420.0)
-                        .id(egui::Id::new("library-batch-export-progress-dialog"))
-                        .collapsible(false)
-                        .resizable(false)
-                        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                        .show(ui.ctx(), |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{exported} / {total} exported"))
-                                    .strong(),
-                            );
-                            ui.add_space(6.0);
-                            ui.add(
-                                egui::ProgressBar::new(overall_fraction)
-                                    .show_percentage()
-                                    .animate(!cancelling),
-                            );
-                            ui.add_space(6.0);
+                    crate::ui::responsive_popup(
+                        egui::Window::new("Exporting images"),
+                        ui.ctx(),
+                        420.0,
+                    )
+                    .id(egui::Id::new("library-batch-export-progress-dialog"))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{exported} / {total} exported")).strong(),
+                        );
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::ProgressBar::new(overall_fraction)
+                                .show_percentage()
+                                .animate(!cancelling),
+                        );
+                        ui.add_space(6.0);
 
-                            if let Some(name) = current_name.as_deref() {
-                                let preparing = app
-                                    .export_progress_state()
-                                    .is_none_or(|(_, tiles_total)| tiles_total == 0);
-                                ui.label(if preparing {
-                                    format!("Preparing {name}…")
-                                } else {
-                                    format!("Exporting {name}…")
-                                });
-                            }
-                            if failed > 0 {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{failed} {} failed",
-                                        if failed == 1 { "image" } else { "images" }
-                                    ))
-                                    .small()
-                                    .color(ui.visuals().warn_fg_color),
-                                );
-                            }
-                            if cancelling {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Cancelling after the current image finishes…",
-                                    )
+                        if let Some(name) = current_name.as_deref() {
+                            let preparing = app
+                                .export_progress_state()
+                                .is_none_or(|(_, tiles_total)| tiles_total == 0);
+                            ui.label(if preparing {
+                                format!("Preparing {name}…")
+                            } else {
+                                format!("Exporting {name}…")
+                            });
+                        }
+                        if failed > 0 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{failed} {} failed",
+                                    if failed == 1 { "image" } else { "images" }
+                                ))
+                                .small()
+                                .color(ui.visuals().warn_fg_color),
+                            );
+                        }
+                        if cancelling {
+                            ui.label(
+                                egui::RichText::new("Cancelling after the current image finishes…")
                                     .small()
                                     .color(ui.visuals().weak_text_color()),
-                                );
-                            }
+                            );
+                        }
 
-                            ui.add_space(8.0);
-                            if ui
-                                .add_enabled(!cancelling, egui::Button::new("Cancel"))
-                                .clicked()
-                            {
-                                cancel_batch_export = true;
-                            }
-                        });
+                        ui.add_space(8.0);
+                        if ui
+                            .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                            .clicked()
+                        {
+                            cancel_batch_export = true;
+                        }
+                    });
                 }
             }
             if cancel_batch_export {
@@ -3468,62 +3477,63 @@ impl Library {
                         ((completed as f32 + current_fraction) / total as f32).clamp(0.0, 1.0)
                     };
 
-                    crate::ui::responsive_popup(egui::Window::new("Exporting images"), ui.ctx(), 420.0)
-                        .id(egui::Id::new(
-                            "android-library-batch-export-progress-dialog",
-                        ))
-                        .collapsible(false)
-                        .resizable(false)
-                        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                        .show(ui.ctx(), |ui| {
+                    crate::ui::responsive_popup(
+                        egui::Window::new("Exporting images"),
+                        ui.ctx(),
+                        420.0,
+                    )
+                    .id(egui::Id::new(
+                        "android-library-batch-export-progress-dialog",
+                    ))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{exported} / {total} exported")).strong(),
+                        );
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::ProgressBar::new(overall_fraction)
+                                .show_percentage()
+                                .animate(!cancelling),
+                        );
+                        ui.add_space(6.0);
+                        if let Some(name) = current_name.as_deref() {
+                            let preparing = app
+                                .export_progress_state()
+                                .is_none_or(|(_, tiles_total)| tiles_total == 0);
+                            ui.label(if preparing {
+                                format!("Preparing {name}…")
+                            } else {
+                                format!("Exporting {name}…")
+                            });
+                        }
+                        if failed > 0 {
                             ui.label(
-                                egui::RichText::new(format!("{exported} / {total} exported"))
-                                    .strong(),
+                                egui::RichText::new(format!(
+                                    "{failed} {} failed",
+                                    if failed == 1 { "image" } else { "images" }
+                                ))
+                                .small()
+                                .color(ui.visuals().warn_fg_color),
                             );
-                            ui.add_space(6.0);
-                            ui.add(
-                                egui::ProgressBar::new(overall_fraction)
-                                    .show_percentage()
-                                    .animate(!cancelling),
-                            );
-                            ui.add_space(6.0);
-                            if let Some(name) = current_name.as_deref() {
-                                let preparing = app
-                                    .export_progress_state()
-                                    .is_none_or(|(_, tiles_total)| tiles_total == 0);
-                                ui.label(if preparing {
-                                    format!("Preparing {name}…")
-                                } else {
-                                    format!("Exporting {name}…")
-                                });
-                            }
-                            if failed > 0 {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{failed} {} failed",
-                                        if failed == 1 { "image" } else { "images" }
-                                    ))
-                                    .small()
-                                    .color(ui.visuals().warn_fg_color),
-                                );
-                            }
-                            if cancelling {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Cancelling after the current image finishes…",
-                                    )
+                        }
+                        if cancelling {
+                            ui.label(
+                                egui::RichText::new("Cancelling after the current image finishes…")
                                     .small()
                                     .color(ui.visuals().weak_text_color()),
-                                );
-                            }
-                            ui.add_space(8.0);
-                            if ui
-                                .add_enabled(!cancelling, egui::Button::new("Cancel"))
-                                .clicked()
-                            {
-                                cancel_batch_export = true;
-                            }
-                        });
+                            );
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                            .clicked()
+                        {
+                            cancel_batch_export = true;
+                        }
+                    });
                 }
             }
             if cancel_batch_export {
@@ -3956,7 +3966,6 @@ fn scan_folder_with_limit(
             source: LibrarySource::File(path.clone()),
             display_path: path.display().to_string(),
             name: entry.file_name().to_string_lossy().into_owned(),
-            parent: String::new(),
             bytes: file_metadata.as_ref().map_or(0, std::fs::Metadata::len),
             dimensions_hint: None,
             modified: file_metadata.and_then(|metadata| metadata.modified().ok()),
@@ -3996,6 +4005,7 @@ fn scan_folder_with_limit(
     Ok(Some((files, warning_count, truncated)))
 }
 
+#[cfg(test)]
 fn format_file_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -4030,8 +4040,8 @@ mod tests {
         elide_middle, format_file_size, import_raw_into_folder, justified_thumbnail_layout,
         loaded_library_thumbnail, make_resident_thumbnail, new_library_entry,
         run_thumbnail_workers, scan_folder, scan_folder_with_limit, LibraryFileInfo, LibraryState,
-        LoadedLibraryThumbnail, RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker,
-        TouchThumbnailAction, ANDROID_LIBRARY_IMPORT_FAB_EDGE,
+        RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
+        ANDROID_LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     #[cfg(unix)]
@@ -4134,7 +4144,6 @@ mod tests {
             source: LibrarySource::File(PathBuf::from("stable-layout.dng")),
             display_path: "stable-layout.dng".to_owned(),
             name: "stable-layout.dng".to_owned(),
-            parent: String::new(),
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
             modified: None,
@@ -4184,7 +4193,6 @@ mod tests {
             source: LibrarySource::File(PathBuf::from("resident-restore.dng")),
             display_path: "resident-restore.dng".to_owned(),
             name: "resident-restore.dng".to_owned(),
-            parent: String::new(),
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
             modified: None,

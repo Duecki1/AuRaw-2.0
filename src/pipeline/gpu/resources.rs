@@ -8,8 +8,8 @@ std::thread_local! {
     // Queue::write_texture copies the supplied bytes before returning, so these
     // bounded per-thread staging vectors can be safely reused for every tile.
     // This removes repeated multi-megabyte allocations from tiled export.
-    static BLACK_UPLOAD_SCRATCH: RefCell<Vec<f32>> = RefCell::new(Vec::new());
-    static COLOR_UPLOAD_SCRATCH: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static BLACK_UPLOAD_SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+    static COLOR_UPLOAD_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn tone_analysis_scale() -> u32 {

@@ -22,9 +22,7 @@ impl Settings {
 
         #[cfg(target_os = "android")]
         {
-            if crate::ui::top_bar::TopBar::back_icon_button(ui, egui::vec2(42.0, 36.0))
-                .clicked()
-            {
+            if crate::ui::top_bar::TopBar::back_icon_button(ui, egui::vec2(42.0, 36.0)).clicked() {
                 app.activate_tab(crate::app::AppTab::Library);
             }
             ui.add_space(4.0);
@@ -164,8 +162,10 @@ impl Settings {
                 ui.strong("Manual override");
                 if let Some(path) = app.display_profile_override.as_deref() {
                     ui.add(
-                        egui::Label::new(egui::RichText::new(path.display().to_string()).monospace())
-                            .wrap(),
+                        egui::Label::new(
+                            egui::RichText::new(path.display().to_string()).monospace(),
+                        )
+                        .wrap(),
                     );
                 } else {
                     ui.small("Automatic per-monitor discovery is enabled.");

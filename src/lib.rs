@@ -75,7 +75,6 @@ fn native_options() -> eframe::NativeOptions {
     options
 }
 
-
 #[cfg(not(target_os = "android"))]
 pub fn run_onnx_runtime_probe_cli(args: &[String]) -> Option<i32> {
     if args.len() != 4 || args.get(1).map(String::as_str) != Some("--auraw-onnx-runtime-probe") {

@@ -82,8 +82,7 @@ fn generate_shader_sources() {
 }
 
 fn allow_no_libraw() -> bool {
-    std::env::var("AURAW_ALLOW_NO_LIBRAW")
-        .is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
+    std::env::var("AURAW_ALLOW_NO_LIBRAW").is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
 }
 
 fn configure_source_revision() {
@@ -228,14 +227,7 @@ fn configure_android_lensfun() {
         root.join("lib").display()
     );
     for library in [
-        "lensfun",
-        "glib-2.0",
-        "pcre2-8",
-        "ffi",
-        "z",
-        "intl",
-        "iconv",
-        "charset",
+        "lensfun", "glib-2.0", "pcre2-8", "ffi", "z", "intl", "iconv", "charset",
     ] {
         println!("cargo:rustc-link-lib=static={library}");
     }

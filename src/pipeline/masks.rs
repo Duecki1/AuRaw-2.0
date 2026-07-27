@@ -1503,7 +1503,10 @@ fn shape_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32, 
     let feather_radius = (feather.powf(1.30) * edge * 0.045).max(0.75);
 
     mask.par_iter_mut().enumerate().for_each(|(index, value)| {
-        let confidence_offset = (*value - 0.5) * 1.5;
+        // Preserve soft-model confidence without letting it overpower the
+        // user-visible grow radius. A full-strength ±0.5 grow must cross at
+        // least one pixel boundary on a 64 px mask in either direction.
+        let confidence_offset = (*value - 0.5) * 0.5;
         let signed_distance = distance_to_outside[index] - distance_to_inside[index]
             + confidence_offset
             + grow_radius;

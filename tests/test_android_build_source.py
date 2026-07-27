@@ -11,6 +11,11 @@ def test_android_gpu_preview_prewarm_resolves_cfa_kind_explicitly() -> None:
     pipeline = (ROOT / "src/pipeline/mod.rs").read_text(encoding="utf-8")
 
     assert '#[cfg(target_os = "android")]\nfn spawn_gpu_preview_prewarm' in lifecycle
-    assert "CameraProfileCandidate, CameraProfileMode, CfaKind," in pipeline
+    raw_exports = pipeline[
+        pipeline.index("pub use raw_loader::{") : pipeline.index("pub use sigmoid")
+    ]
+    assert "CameraProfileCandidate" in raw_exports
+    assert "CameraProfileMode" in raw_exports
+    assert "CfaKind" in raw_exports
     assert "crate::pipeline::CfaKind::Bayer" in lifecycle
     assert re.search(r"(?m)^\s*CfaKind::Bayer,\s*$", lifecycle) is None

@@ -40,8 +40,9 @@ static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(not(target_os = "android"))]
-static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<(PathBuf, String, Option<String>)>>> =
-    OnceLock::new();
+type RuntimeProbeResult = (PathBuf, String, Option<String>);
+#[cfg(not(target_os = "android"))]
+static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
 
 #[derive(Debug)]
 pub enum SubjectMaskEvent {
@@ -286,10 +287,7 @@ fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Resul
 }
 
 #[cfg(not(target_os = "android"))]
-pub(crate) fn probe_runtime_subprocess(
-    runtime_path: &Path,
-    expected_sha256: &str,
-) -> Result<()> {
+pub(crate) fn probe_runtime_subprocess(runtime_path: &Path, expected_sha256: &str) -> Result<()> {
     let runtime_path = fs::canonicalize(runtime_path)
         .with_context(|| format!("resolve selected ONNX Runtime {}", runtime_path.display()))?;
     let cache = RUNTIME_PROBE_CACHE.get_or_init(|| Mutex::new(None));
@@ -307,7 +305,8 @@ pub(crate) fn probe_runtime_subprocess(
         }
     }
 
-    let executable = std::env::current_exe().context("locate AuRaw executable for ONNX Runtime probe")?;
+    let executable =
+        std::env::current_exe().context("locate AuRaw executable for ONNX Runtime probe")?;
     let status = std::process::Command::new(&executable)
         .arg("--auraw-onnx-runtime-probe")
         .arg(&runtime_path)
@@ -430,7 +429,7 @@ fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, Str
     Ok((path.to_path_buf(), None, actual_sha256))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
     let digest = sha256_file_hex(path).context("verify selected ONNX Runtime SHA-256")?;
     Ok((path.to_path_buf(), None, digest))
@@ -523,11 +522,15 @@ fn create_windows_sam_encoder_session(model_path: &Path) -> Result<Session> {
         .with_parallel_execution(false)
         .map_err(|error| anyhow::anyhow!("force sequential Windows SAM execution: {error}"))?
         .with_intra_threads(1)
-        .map_err(|error| anyhow::anyhow!("limit Windows SAM encoder to one inference thread: {error}"))?
+        .map_err(|error| {
+            anyhow::anyhow!("limit Windows SAM encoder to one inference thread: {error}")
+        })?
         .with_optimization_level(GraphOptimizationLevel::Disable)
         .map_err(|error| anyhow::anyhow!("disable Windows SAM graph optimizations: {error}"))?
         .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
-        .map_err(|error| anyhow::anyhow!("configure conservative Windows SAM CPU provider: {error}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("configure conservative Windows SAM CPU provider: {error}")
+        })?;
     builder.commit_from_file(model_path).with_context(|| {
         format!(
             "load SAM 2.1 encoder with conservative Windows CPU settings from {}",
@@ -549,7 +552,7 @@ fn cache_object_ai_sessions() -> bool {
         // the object-mask pipeline conservative there: do not retain the SAM
         // encoder/decoder/ViTMatte sessions simultaneously between runs. This
         // reduces peak resident memory and avoids stale provider state.
-        return !running_from_appimage();
+        !running_from_appimage()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -735,15 +738,8 @@ fn infer_subject(
         width,
         height,
     )?;
-    mask = refine_mask_with_vitmatte(
-        vitmatte_path,
-        image.as_raw(),
-        width,
-        height,
-        &mask,
-        1.0,
-    )
-    .context("refine subject edges with ViTMatte")?;
+    mask = refine_mask_with_vitmatte(vitmatte_path, image.as_raw(), width, height, &mask, 1.0)
+        .context("refine subject edges with ViTMatte")?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -894,7 +890,6 @@ fn restore_from_letterbox(
         .collect())
 }
 
-
 fn ensure_vitmatte_model<F>(path: &Path, mut progress: F) -> Result<()>
 where
     F: FnMut(u64, u64),
@@ -962,15 +957,15 @@ where
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
             if downloaded > VITMATTE_MODEL_BYTES {
-                fs::remove_file(&temporary)
-                    .context("remove oversized partial ViTMatte model")?;
+                fs::remove_file(&temporary).context("remove oversized partial ViTMatte model")?;
                 downloaded = 0;
             }
             if downloaded == VITMATTE_MODEL_BYTES
                 && sha256_file_hex(&temporary).ok().as_deref() == Some(VITMATTE_MODEL_SHA256_HEX)
             {
-                fs::rename(&temporary, path)
-                    .with_context(|| format!("publish resumed ViTMatte model to {}", path.display()))?;
+                fs::rename(&temporary, path).with_context(|| {
+                    format!("publish resumed ViTMatte model to {}", path.display())
+                })?;
                 return Ok(());
             }
             if downloaded > 0 {
@@ -1200,9 +1195,8 @@ fn build_vitmatte_trimap(mask: &[u8], width: usize, height: usize) -> Vec<u8> {
                     let max_y = (y + 1).min(height - 1);
                     let min_x = x.saturating_sub(1);
                     let max_x = (x + 1).min(width - 1);
-                    *value = (min_y..=max_y).any(|ny| {
-                        (min_x..=max_x).any(|nx| source[ny * width + nx])
-                    });
+                    *value =
+                        (min_y..=max_y).any(|ny| (min_x..=max_x).any(|nx| source[ny * width + nx]));
                 }
             });
     }
@@ -1235,18 +1229,27 @@ fn refine_mask_with_vitmatte(
 ) -> Result<Vec<u8>> {
     let pixels = usize::try_from(u64::from(width) * u64::from(height))
         .context("ViTMatte source dimensions overflow")?;
-    anyhow::ensure!(coarse_mask.len() == pixels, "ViTMatte coarse-mask size mismatch");
-    anyhow::ensure!(rgba.len() == pixels.saturating_mul(4), "ViTMatte RGB size mismatch");
+    anyhow::ensure!(
+        coarse_mask.len() == pixels,
+        "ViTMatte coarse-mask size mismatch"
+    );
+    anyhow::ensure!(
+        rgba.len() == pixels.saturating_mul(4),
+        "ViTMatte RGB size mismatch"
+    );
     let Some(crop) = matte_crop_for_mask(coarse_mask, width, height) else {
         return Ok(coarse_mask.to_vec());
     };
 
     let source = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())
         .context("invalid ViTMatte source image")?;
-    let crop_image = image::imageops::crop_imm(&source, crop.x, crop.y, crop.width, crop.height).to_image();
+    let crop_image =
+        image::imageops::crop_imm(&source, crop.x, crop.y, crop.width, crop.height).to_image();
     let full_mask_image = ImageBuffer::<Luma<u8>, _>::from_raw(width, height, coarse_mask.to_vec())
         .context("invalid ViTMatte coarse mask")?;
-    let crop_mask = image::imageops::crop_imm(&full_mask_image, crop.x, crop.y, crop.width, crop.height).to_image();
+    let crop_mask =
+        image::imageops::crop_imm(&full_mask_image, crop.x, crop.y, crop.width, crop.height)
+            .to_image();
 
     let max_edge = if cfg!(target_os = "android") {
         VITMATTE_MAX_EDGE_ANDROID
@@ -1271,7 +1274,7 @@ fn refine_mask_with_vitmatte(
         model_width as usize,
         model_height as usize,
     );
-    if !trimap.iter().any(|&value| value == 128) {
+    if !trimap.contains(&128) {
         return Ok(coarse_mask.to_vec());
     }
 
@@ -1327,13 +1330,24 @@ fn refine_mask_with_vitmatte(
         }
     };
 
-    let alpha_image = ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)
-        .context("invalid ViTMatte alpha buffer")?;
-    let alpha_crop = image::imageops::crop_imm(&alpha_image, 0, 0, model_width.min(output_width), model_height.min(output_height)).to_image();
-    let alpha_full = image::imageops::resize(&alpha_crop, crop.width, crop.height, FilterType::Lanczos3);
-    let trimap_image = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(model_width, model_height, trimap)
-        .context("invalid ViTMatte trimap buffer")?;
-    let trimap_full = image::imageops::resize(&trimap_image, crop.width, crop.height, FilterType::Nearest);
+    let alpha_image =
+        ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)
+            .context("invalid ViTMatte alpha buffer")?;
+    let alpha_crop = image::imageops::crop_imm(
+        &alpha_image,
+        0,
+        0,
+        model_width.min(output_width),
+        model_height.min(output_height),
+    )
+    .to_image();
+    let alpha_full =
+        image::imageops::resize(&alpha_crop, crop.width, crop.height, FilterType::Lanczos3);
+    let trimap_image =
+        ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(model_width, model_height, trimap)
+            .context("invalid ViTMatte trimap buffer")?;
+    let trimap_full =
+        image::imageops::resize(&trimap_image, crop.width, crop.height, FilterType::Nearest);
 
     let mut output = coarse_mask.to_vec();
     let strength = strength.clamp(0.0, 1.0);
@@ -1357,7 +1371,10 @@ fn run_vitmatte_session(session: &mut Session, input: Tensor<f32>) -> Result<(u3
     let outputs = session
         .run(ort::inputs![input])
         .context("run ViTMatte ONNX inference")?;
-    let output = outputs.values().next().context("ViTMatte returned no output tensors")?;
+    let output = outputs
+        .values()
+        .next()
+        .context("ViTMatte returned no output tensors")?;
     let (shape, alphas) = output
         .try_extract_tensor::<f32>()
         .context("read ViTMatte output tensor")?;
@@ -1367,93 +1384,22 @@ fn run_vitmatte_session(session: &mut Session, input: Tensor<f32>) -> Result<(u3
     );
     let height = usize::try_from(shape[2]).context("ViTMatte output height is invalid")?;
     let width = usize::try_from(shape[3]).context("ViTMatte output width is invalid")?;
-    let elements = width.checked_mul(height).context("ViTMatte output dimensions overflow")?;
-    anyhow::ensure!(alphas.len() == elements, "ViTMatte output tensor length mismatch");
-    anyhow::ensure!(alphas.iter().all(|value| value.is_finite()), "ViTMatte output contains non-finite alpha values");
+    let elements = width
+        .checked_mul(height)
+        .context("ViTMatte output dimensions overflow")?;
+    anyhow::ensure!(
+        alphas.len() == elements,
+        "ViTMatte output tensor length mismatch"
+    );
+    anyhow::ensure!(
+        alphas.iter().all(|value| value.is_finite()),
+        "ViTMatte output contains non-finite alpha values"
+    );
     Ok((
         u32::try_from(width).context("ViTMatte output width exceeds u32")?,
         u32::try_from(height).context("ViTMatte output height exceeds u32")?,
         alphas.to_vec(),
     ))
-}
-
-/// Joint-bilateral cleanup of the upscaled BiRefNet probability map. The
-/// network still runs at 1024px, but the canonical RAW rendition is retained
-/// at a higher resolution. Using that RGB image as a guide keeps sub-pixel mask
-/// transitions from bleeding across strong image edges after upsampling.
-fn refine_subject_mask_edges(mask: &mut [u8], rgba: &[u8], width: u32, height: u32) -> Result<()> {
-    let width = usize::try_from(width).context("subject-mask width exceeds usize")?;
-    let height = usize::try_from(height).context("subject-mask height exceeds usize")?;
-    let pixels = width
-        .checked_mul(height)
-        .context("subject-mask refinement dimensions overflow")?;
-    anyhow::ensure!(
-        mask.len() == pixels,
-        "subject-mask refinement size mismatch"
-    );
-    anyhow::ensure!(
-        rgba.len() == pixels.saturating_mul(4),
-        "subject-mask refinement RGB size mismatch"
-    );
-    if width < 2 || height < 2 {
-        return Ok(());
-    }
-
-    let source_mask = mask.to_vec();
-    mask.par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(y, output_row)| {
-            for (x, output) in output_row.iter_mut().enumerate() {
-                let index = y * width + x;
-                let center_probability = source_mask[index] as f32 / 255.0;
-                // Confident interiors do not need filtering; restricting work
-                // to the uncertain band also keeps large 3K sources fast.
-                if !(0.025..=0.975).contains(&center_probability) {
-                    continue;
-                }
-
-                let center_rgba = index * 4;
-                let center = [
-                    rgba[center_rgba] as f32,
-                    rgba[center_rgba + 1] as f32,
-                    rgba[center_rgba + 2] as f32,
-                ];
-                let min_y = y.saturating_sub(1);
-                let max_y = (y + 1).min(height - 1);
-                let min_x = x.saturating_sub(1);
-                let max_x = (x + 1).min(width - 1);
-                let mut weighted_probability = 0.0f32;
-                let mut weight_sum = 0.0f32;
-
-                for sample_y in min_y..=max_y {
-                    for sample_x in min_x..=max_x {
-                        let sample_index = sample_y * width + sample_x;
-                        let sample_rgba = sample_index * 4;
-                        let dr = (rgba[sample_rgba] as f32 - center[0]) / 255.0;
-                        let dg = (rgba[sample_rgba + 1] as f32 - center[1]) / 255.0;
-                        let db = (rgba[sample_rgba + 2] as f32 - center[2]) / 255.0;
-                        let color_distance = dr * dr + dg * dg + db * db;
-                        let diagonal = sample_x != x && sample_y != y;
-                        let spatial_weight = if sample_x == x && sample_y == y {
-                            1.0
-                        } else if diagonal {
-                            0.55
-                        } else {
-                            0.78
-                        };
-                        let color_weight = 1.0 / (1.0 + 42.0 * color_distance);
-                        let weight = spatial_weight * color_weight;
-                        weighted_probability += source_mask[sample_index] as f32 / 255.0 * weight;
-                        weight_sum += weight;
-                    }
-                }
-
-                let guided = weighted_probability / weight_sum.max(1e-6);
-                let refined = center_probability * 0.40 + guided * 0.60;
-                *output = (refined.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            }
-        });
-    Ok(())
 }
 
 fn sigmoid_probability(logit: f32) -> f32 {
@@ -1773,8 +1719,10 @@ fn download_sam_model(
             let mut response = match response_result {
                 Ok(response) => response,
                 Err(error) => {
-                    last_error = Some(anyhow::Error::new(error)
-                        .context(format!("download {label} (attempt {}/{MAX_ATTEMPTS})", attempt + 1)));
+                    last_error = Some(anyhow::Error::new(error).context(format!(
+                        "download {label} (attempt {}/{MAX_ATTEMPTS})",
+                        attempt + 1
+                    )));
                     if attempt + 1 < MAX_ATTEMPTS {
                         std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
                         continue;
@@ -1811,9 +1759,9 @@ fn download_sam_model(
             } else {
                 options.truncate(true);
             }
-            let mut file = options
-                .open(&temporary)
-                .with_context(|| format!("open partial {label} download {}", temporary.display()))?;
+            let mut file = options.open(&temporary).with_context(|| {
+                format!("open partial {label} download {}", temporary.display())
+            })?;
             let mut reader = response.body_mut().as_reader();
             let mut buffer = [0u8; 256 * 1024];
             let mut transfer_error: Option<anyhow::Error> = None;
@@ -1861,8 +1809,8 @@ fn download_sam_model(
             }
 
             file.sync_all().with_context(|| format!("flush {label}"))?;
-            let actual = sha256_file_hex(&temporary)
-                .with_context(|| format!("hash downloaded {label}"))?;
+            let actual =
+                sha256_file_hex(&temporary).with_context(|| format!("hash downloaded {label}"))?;
             if actual == expected_sha256 {
                 fs::rename(&temporary, path)
                     .with_context(|| format!("publish {label} to {}", path.display()))?;
