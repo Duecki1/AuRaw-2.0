@@ -1030,14 +1030,20 @@ impl AurawApp {
         if self.desktop_picker_receiver.is_some() {
             return;
         }
+        let mut dialog = rfd::AsyncFileDialog::new()
+            .set_title("Select the ONNX Runtime shared library");
+        if let Some(parent) = self
+            .onnx_runtime_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            dialog = dialog.set_directory(parent);
+        }
         let (sender, receiver) = std::sync::mpsc::channel();
         let context = self.egui_ctx.clone();
         std::thread::spawn(move || {
-            let result = pollster::block_on(
-                rfd::AsyncFileDialog::new()
-                    .set_title("Select the ONNX Runtime shared library")
-                    .pick_file(),
-            )
+            let result = pollster::block_on(dialog.pick_file())
             .map(|handle| handle.path().to_path_buf())
             .map(Self::validate_and_persist_onnx_runtime)
             .transpose();

@@ -90,9 +90,30 @@ def test_android_library_bulk_actions_keep_required_jni_bridge_contracts() -> No
     assert 'LibraryCardAction::Duplicate(targets())' in LIBRARY
     assert 'jni::jni_str!("duplicateRawLibraryDocument")' in android_bridge
     assert 'jni::jni_str!("deleteRawLibraryDocument")' in android_bridge
+    assert 'jni::jni_str!("removeRawSidecar")' in android_bridge
     assert "public String duplicateRawLibraryDocument" in android_activity
     assert "public void deleteRawLibraryDocument" in android_activity
-    assert "reset_adjustments_preserving_mask_properties" in sidecar_persistence
+    assert "public void removeRawSidecar" in android_activity
+    assert "crate::android::remove_raw_sidecar" in sidecar_persistence
+    assert "reset_adjustments_preserving_mask_properties" not in sidecar_persistence
+    android_reset = android_bridge[
+        android_bridge.index("pub fn remove_raw_sidecar") : android_bridge.index(
+            "fn clear_developed_thumbnail_cache"
+        )
+    ]
+    assert "clear_developed_thumbnail_cache(app, raw_uri)" in android_reset
+
+
+def test_desktop_reset_all_deletes_the_sidecar_instead_of_rewriting_masks() -> None:
+    sidecar = (ROOT / "src/sidecar.rs").read_text(encoding="utf-8")
+    reset = sidecar[
+        sidecar.index("pub fn reset_desktop_adjustments") : sidecar.index(
+            "pub fn load_android"
+        )
+    ]
+    assert "remove_desktop_edits(raw_path)" in reset
+    assert "save_desktop" not in reset
+    assert "reset_adjustments_preserving_mask_properties" not in sidecar
 
 
 def test_android_library_uses_one_shared_selection_overflow_instead_of_card_menus() -> None:
@@ -121,7 +142,8 @@ def test_desktop_library_export_context_menu_supports_single_and_batch_destinati
     assert 'LibraryCardAction::Export(context_paths.clone())' in LIBRARY
     assert 'library-export-dialog' in LIBRARY
     assert 'Export {count} images' in LIBRARY
-    assert 'rfd::FileDialog::new().pick_folder()' in LIBRARY
+    assert 'let folder = dialog.pick_folder()?' in LIBRARY
+    assert 'dialog = dialog.set_directory(parent)' in LIBRARY
     assert 'rfd::FileDialog::new().set_file_name(default_name)' in LIBRARY
     assert 'start_library_exports(' in LIBRARY
 

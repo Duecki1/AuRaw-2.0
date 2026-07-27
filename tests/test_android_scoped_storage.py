@@ -77,6 +77,13 @@ def test_sidecars_for_new_library_are_atomic_sibling_files() -> None:
     assert "publishRawSidecarFile" in public_publish
 
 
+def test_reset_all_removes_the_complete_sidecar_document() -> None:
+    remove = method(STORAGE, "void removeRawSidecar", "private void removeRawSidecarLegacyMediaStore")
+    assert "verifyRawLibraryIdentity(rawUri, displayName)" in remove
+    assert "removeRawSidecarLegacyMediaStore(displayName)" in remove
+    assert "sidecar.delete()" in remove
+
+
 def test_upgrade_migration_moves_old_locations_and_only_deletes_after_copy() -> None:
     migration = method(STORAGE, "void startLegacyRawStorageMigration", "private void deleteStoredRaw")
     assert "migrateLegacyExternalMediaRoot()" in migration
