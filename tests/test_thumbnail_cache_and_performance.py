@@ -8,6 +8,7 @@ SETTINGS = (ROOT / "src/ui/settings.rs").read_text()
 THUMBNAIL_CACHE = (ROOT / "src/thumbnail_cache.rs").read_text()
 ANDROID = (ROOT / "src/android.rs").read_text()
 ACTIVITY = (ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java").read_text()
+STORAGE = (ROOT / "android/app/src/main/java/de/duecki/auraw/StorageManager.java").read_text()
 RAW = (ROOT / "src/pipeline/raw_loader/libraw_loader.rs").read_text()
 
 
@@ -19,15 +20,15 @@ def test_unedited_desktop_thumbnails_are_persisted() -> None:
 
 
 def test_android_thumbnail_cache_survives_refresh_restart_and_cache_scavenging() -> None:
-    assert "rawThumbnailCachePath" in ACTIVITY
-    assert 'new File(getNoBackupFilesDir(), "library-thumbnails")' in ACTIVITY
-    assert 'new File(getCacheDir(), "library-thumbnails")' in ACTIVITY
-    assert "migrateLegacyThumbnailCacheEntry" in ACTIVITY
-    assert "MAX_THUMBNAIL_CACHE_ENTRIES" in ACTIVITY
-    assert "deleteThumbnailCacheEntry" in ACTIVITY
+    assert "rawThumbnailCachePath" in STORAGE
+    assert 'new File(activity.getNoBackupFilesDir(), "library-thumbnails")' in STORAGE
+    assert 'new File(activity.getCacheDir(), "library-thumbnails")' in STORAGE
+    assert "migrateLegacyThumbnailCacheEntry" in STORAGE
+    assert "MAX_THUMBNAIL_CACHE_ENTRIES" in STORAGE
+    assert "deleteThumbnailCacheEntry" in STORAGE
     assert "load_png(&cache_path" in ANDROID
     assert "save_png(&cache_path" in ANDROID
-    assert "materializeRawLibraryThumbnail" in ACTIVITY
+    assert "materializeRawLibraryThumbnail" in STORAGE
 
 
 def test_library_unedited_thumbnails_never_unpack_sensor_pixels() -> None:
@@ -91,21 +92,21 @@ def test_reopening_the_same_folder_keeps_live_thumbnail_textures() -> None:
 def test_android_import_picker_supports_single_and_batch_selection() -> None:
     lifecycle = (ROOT / "src/app/lifecycle.rs").read_text()
     top_bar = (ROOT / "src/ui/top_bar.rs").read_text()
-    assert "Intent.EXTRA_ALLOW_MULTIPLE" in ACTIVITY
-    assert "selectedDocumentUris" in ACTIVITY
-    assert "importSingleDocument" in ACTIVITY
+    assert "Intent.EXTRA_ALLOW_MULTIPLE" in STORAGE
+    assert "selectedDocumentUris" in STORAGE
+    assert "importSingleDocument" in STORAGE
     assert "nativeOnImportBatchFinished" in ACTIVITY
     assert "Java_de_duecki_auraw_AuRawActivity_nativeOnImportBatchFinished" in ANDROID
     assert "BatchImported" in ANDROID
     assert "BatchImported" in lifecycle
     assert "self.active_tab = AppTab::Library" in lifecycle
     assert 'button("Open RAW…")' not in top_bar
-    batch = ACTIVITY[ACTIVITY.index("private void importDocuments"):ACTIVITY.index("private void importSingleDocument")]
-    single = ACTIVITY[ACTIVITY.index("private void importSingleDocument"):ACTIVITY.index("private StoredRaw importDocumentIntoLibrary")]
+    batch = STORAGE[STORAGE.index("private void importDocuments"):STORAGE.index("private void importSingleDocument")]
+    single = STORAGE[STORAGE.index("private void importSingleDocument"):STORAGE.index("private StoredRaw importDocumentIntoLibrary")]
     assert "materializeLibraryRaw" not in batch
-    assert "nativeOnImportBatchFinished" in batch
+    assert "callbacks.onImportBatchFinished" in batch
     assert "deliverLibraryRawFd" in single
-    assert "materializeLibraryRaw" not in ACTIVITY
+    assert "materializeLibraryRaw" not in STORAGE
 
 
 def test_android_previewless_raw_fallback_handles_modern_sensors_serially() -> None:

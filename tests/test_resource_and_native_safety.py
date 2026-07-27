@@ -11,7 +11,10 @@ RAW = read_source_tree(ROOT / "src/pipeline/raw_loader.rs")
 COLOR_PROFILE = read_source_tree(ROOT / "src/pipeline/color_profile.rs")
 CARGO = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
 CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-ANDROID_ACTIVITY = (ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java").read_text(encoding="utf-8")
+ANDROID_JAVA_ROOT = ROOT / "android/app/src/main/java/de/duecki/auraw"
+ANDROID_ACTIVITY = "\n".join(
+    path.read_text(encoding="utf-8") for path in sorted(ANDROID_JAVA_ROOT.glob("*.java"))
+)
 LIBRAW_BUILD = (ROOT / "scripts/build-android-libraw.sh").read_text(encoding="utf-8")
 
 
