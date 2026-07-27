@@ -1,5 +1,6 @@
 package de.duecki.auraw;
 
+import android.content.ContentResolver;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
@@ -21,6 +22,8 @@ final class ProfileImporter {
     private static final int MAX_DCP_FILES = 10_000;
     private static final int MAX_DCP_TREE_DEPTH = 16;
     private static final String CAMERA_PROFILE_MIRROR_PREFIX = "camera-profiles-";
+    private static final String PICKER_PREFERENCES = "auraw-picker-locations";
+    private static final String CAMERA_PROFILE_PICKER_URI_KEY = "camera-profile-tree-uri";
 
     interface Callbacks {
         void onImportStarted(String displayName);
@@ -40,7 +43,18 @@ final class ProfileImporter {
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
                 | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                 | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        Uri initialUri = rememberedProfileFolderUri();
+        if (initialUri != null) {
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
+        }
         return intent;
+    }
+
+    void clearFolderPickerLocation() {
+        activity.getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
+                .edit()
+                .remove(CAMERA_PROFILE_PICKER_URI_KEY)
+                .apply();
     }
 
     void handleFolderPickerResult(int resultCode, Intent data) {
@@ -95,6 +109,7 @@ final class ProfileImporter {
                 throw new IllegalArgumentException(
                         "The selected folder contains no .dcp camera profiles");
             }
+            rememberProfileFolderUri(treeUri);
             String importedPath = destination.getAbsolutePath();
             int importedProfiles = stats.files;
             activity.runOnUiThread(() -> callbacks.onFolderPicked(
@@ -104,6 +119,31 @@ final class ProfileImporter {
             String message = error.toString();
             activity.runOnUiThread(() -> callbacks.onFolderPicked("", label, 0, message));
         }
+    }
+
+    private Uri rememberedProfileFolderUri() {
+        String uriText = activity
+                .getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
+                .getString(CAMERA_PROFILE_PICKER_URI_KEY, "");
+        if (uriText == null || uriText.isEmpty()) {
+            return null;
+        }
+        try {
+            Uri uri = Uri.parse(uriText);
+            return ContentResolver.SCHEME_CONTENT.equals(uri.getScheme()) ? uri : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void rememberProfileFolderUri(Uri uri) {
+        if (uri == null || !ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
+            return;
+        }
+        activity.getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
+                .edit()
+                .putString(CAMERA_PROFILE_PICKER_URI_KEY, uri.toString())
+                .apply();
     }
 
     private void copyCameraProfileTree(

@@ -180,6 +180,21 @@ pub fn remove_camera_profile_mirror(app: &AndroidApp, path: &Path) -> Result<(),
     .map_err(|error| format!("could not schedule Android camera-profile cleanup: {error:#}"))
 }
 
+pub fn clear_camera_profile_folder_picker_location(app: &AndroidApp) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("clearCameraProfileFolderPickerLocation"),
+            jni::jni_sig!(() -> void),
+            &[],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| {
+        format!("could not clear Android's camera-profile picker location: {error:#}")
+    })
+}
+
 pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
     // SAFETY: Android owns the JavaVM for the process lifetime; `JavaVM` is a non-owning handle and does not destroy the VM on drop.
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
@@ -698,6 +713,33 @@ pub fn delete_library_document(
         Ok(())
     })
     .map_err(|error| format!("could not delete Android RAW library item: {error:#}"))?;
+    clear_developed_thumbnail_cache(app, raw_uri);
+    Ok(())
+}
+
+pub fn remove_raw_sidecar(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+) -> Result<(), String> {
+    let raw_uri_owned = raw_uri.to_owned();
+    let display_name_owned = display_name.to_owned();
+    with_activity(app, |env, activity| {
+        let raw_uri = env.new_string(&raw_uri_owned)?;
+        let display_name = env.new_string(&display_name_owned)?;
+        env.call_method(
+            activity,
+            jni::jni_str!("removeRawSidecar"),
+            jni::jni_sig!((JString, JString) -> void),
+            &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not reset Android RAW adjustments: {error:#}"))?;
+
+    // Developed previews are keyed by the old sidecar fingerprint. Remove
+    // both the preview and fingerprint immediately so the Library cannot show
+    // a stale grade after Reset All.
     clear_developed_thumbnail_cache(app, raw_uri);
     Ok(())
 }

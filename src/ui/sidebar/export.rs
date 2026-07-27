@@ -3,7 +3,10 @@ pub(crate) fn export_settings_controls(
     settings: &mut crate::pipeline::ExportSettings,
     source_dimensions: Option<(u32, u32)>,
     show_dimension_summary: bool,
+    fallback_picker_directory: Option<&std::path::Path>,
 ) {
+    #[cfg(target_os = "android")]
+    let _ = fallback_picker_directory;
     ui.group(|ui| {
         ui.set_width(ui.available_width());
         ui.strong("Image sizing");
@@ -147,10 +150,18 @@ pub(crate) fn export_settings_controls(
             #[cfg(not(target_os = "android"))]
             {
                 if ui.button("Choose ICC profile…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("ICC profiles", &["icc", "icm"])
-                        .pick_file()
-                    {
+                    let mut dialog = rfd::FileDialog::new()
+                        .add_filter("ICC profiles", &["icc", "icm"]);
+                    let selected_directory = settings
+                        .custom_icc_path
+                        .as_deref()
+                        .and_then(|path| path.parent())
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .or(fallback_picker_directory);
+                    if let Some(directory) = selected_directory {
+                        dialog = dialog.set_directory(directory);
+                    }
+                    if let Some(path) = dialog.pick_file() {
                         settings.custom_icc_path = Some(path);
                     }
                 }
@@ -215,6 +226,15 @@ impl Sidebar {
             .loaded_raw
             .as_ref()
             .map(|raw| app.geometry.crop_pixel_dimensions(raw.width, raw.height));
+        #[cfg(not(target_os = "android"))]
+        let export_picker_directory = app
+            .current_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
+        #[cfg(target_os = "android")]
+        let export_picker_directory: Option<std::path::PathBuf> = None;
         ui.allocate_ui_with_layout(
             egui::vec2(column_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
@@ -224,7 +244,13 @@ impl Sidebar {
                 // the same available width.
                 ui.set_min_width(column_width);
                 ui.set_max_width(column_width);
-                export_settings_controls(ui, &mut app.export_settings, source_dimensions, true);
+                export_settings_controls(
+                    ui,
+                    &mut app.export_settings,
+                    source_dimensions,
+                    true,
+                    export_picker_directory.as_deref(),
+                );
 
                 if let Some((completed, total)) = app.export_progress_state() {
                     ui.add_space(8.0);

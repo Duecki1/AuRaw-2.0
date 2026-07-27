@@ -10,6 +10,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -42,6 +43,8 @@ final class StorageManager {
     private static final String LEGACY_MEDIASTORE_RAW_RELATIVE_PATH =
             Environment.DIRECTORY_DOWNLOADS + "/AuRaw/";
     private static final String RAW_LIBRARY_DIRECTORY_NAME = ".library";
+    private static final String PICKER_PREFERENCES = "auraw-picker-locations";
+    private static final String RAW_PICKER_URI_KEY = "raw-document-uri";
     private static final Set<String> RAW_SUFFIXES = new HashSet<>(Arrays.asList(
             "3fr", "ari", "arw", "bay", "bmq", "cap", "cine", "cr2", "cr3", "crw",
             "cs1", "dc2", "dcr", "dcs", "dng", "drf", "eip", "erf", "fff", "gpr",
@@ -76,6 +79,10 @@ final class StorageManager {
         intent.setType("*/*");
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        Uri initialUri = rememberedPickerUri(RAW_PICKER_URI_KEY);
+        if (initialUri != null) {
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
+        }
         return intent;
     }
 
@@ -93,6 +100,31 @@ final class StorageManager {
                 () -> importDocuments(uris),
                 uris.size() == 1 ? "AuRaw document import" : "AuRaw document batch import")
                 .start();
+    }
+
+    private Uri rememberedPickerUri(String key) {
+        String uriText = activity
+                .getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
+                .getString(key, "");
+        if (uriText == null || uriText.isEmpty()) {
+            return null;
+        }
+        try {
+            Uri uri = Uri.parse(uriText);
+            return ContentResolver.SCHEME_CONTENT.equals(uri.getScheme()) ? uri : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void rememberPickerUri(String key, Uri uri) {
+        if (uri == null || !ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
+            return;
+        }
+        activity.getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
+                .edit()
+                .putString(key, uri.toString())
+                .apply();
     }
 
     void scavengeTemporaryRawFiles() {
@@ -159,6 +191,9 @@ final class StorageManager {
             StoredRaw stored = null;
             try {
                 stored = importDocumentIntoLibrary(uri, displayName);
+                if (imported == 0) {
+                    rememberPickerUri(RAW_PICKER_URI_KEY, uri);
+                }
                 imported++;
             } catch (Exception error) {
                 if (stored != null) {
@@ -180,6 +215,7 @@ final class StorageManager {
         StoredRaw stored = null;
         try {
             stored = importDocumentIntoLibrary(uri, displayName);
+            rememberPickerUri(RAW_PICKER_URI_KEY, uri);
             deliverLibraryRawFd(stored.uri, stored.displayName);
         } catch (Exception error) {
             if (stored != null) {

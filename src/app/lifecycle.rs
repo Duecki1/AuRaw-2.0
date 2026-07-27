@@ -61,6 +61,17 @@ fn prewarm_dcp_profile_folder(folder: Option<std::path::PathBuf>) {
         });
 }
 
+#[cfg(not(target_os = "android"))]
+fn selected_picker_directory(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if path.is_dir() {
+        Some(path.to_path_buf())
+    } else {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+    }
+}
+
 #[cfg(any(target_os = "android", test))]
 fn gpu_preview_prewarm_cfa_kind() -> crate::pipeline::CfaKind {
     crate::pipeline::CfaKind::Bayer
@@ -710,15 +721,20 @@ impl AurawApp {
             .iter()
             .flat_map(|extension| [extension.to_string(), extension.to_ascii_uppercase()])
             .collect::<Vec<_>>();
+        let initial_directory = self
+            .current_path
+            .as_deref()
+            .and_then(selected_picker_directory)
+            .or_else(|| self.library.folder().map(std::path::Path::to_path_buf));
+        let mut dialog = rfd::AsyncFileDialog::new().add_filter("RAW images", &extensions);
+        if let Some(directory) = initial_directory {
+            dialog = dialog.set_directory(directory);
+        }
         let (sender, receiver) = mpsc::channel();
         let context = self.egui_ctx.clone();
         std::thread::spawn(move || {
-            let path = pollster::block_on(
-                rfd::AsyncFileDialog::new()
-                    .add_filter("RAW images", &extensions)
-                    .pick_file(),
-            )
-            .map(|handle| handle.path().to_path_buf());
+            let path = pollster::block_on(dialog.pick_file())
+                .map(|handle| handle.path().to_path_buf());
             let _ = sender.send(crate::app::DesktopPickerEvent::RawFile(path));
             context.request_repaint();
         });
@@ -730,10 +746,14 @@ impl AurawApp {
         if self.desktop_picker_receiver.is_some() {
             return;
         }
+        let mut dialog = rfd::AsyncFileDialog::new();
+        if let Some(folder) = self.library.folder() {
+            dialog = dialog.set_directory(folder);
+        }
         let (sender, receiver) = mpsc::channel();
         let context = self.egui_ctx.clone();
         std::thread::spawn(move || {
-            let folder = pollster::block_on(rfd::AsyncFileDialog::new().pick_folder())
+            let folder = pollster::block_on(dialog.pick_folder())
                 .map(|handle| handle.path().to_path_buf());
             let _ = sender.send(crate::app::DesktopPickerEvent::LibraryFolder(folder));
             context.request_repaint();
@@ -804,6 +824,12 @@ impl AurawApp {
             self.camera_profile_auto_detect = false;
             self.last_camera_profile = None;
             self.raw_cache.clear();
+            #[cfg(target_os = "android")]
+            if let Err(error) = crate::android::clear_camera_profile_folder_picker_location(
+                &self.android_app,
+            ) {
+                log::warn!("{error}");
+            }
             if self.persist_performance_settings() {
                 #[cfg(target_os = "android")]
                 if let Some(previous_folder) = previous_folder {

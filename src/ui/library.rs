@@ -2153,6 +2153,12 @@ fn library_export_jobs(paths: &[PathBuf], format: ExportFormat) -> Option<Vec<(P
             .map(|name| format!("{name}-auraw.{}", format.extension()))
             .unwrap_or_else(|| format!("auraw-export.{}", format.extension()));
         let mut dialog = rfd::FileDialog::new().set_file_name(default_name);
+        if let Some(parent) = source
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            dialog = dialog.set_directory(parent);
+        }
         dialog = match format {
             ExportFormat::Png => dialog.add_filter("PNG image", &["png"]),
             ExportFormat::Jpeg => dialog.add_filter("JPEG image", &["jpg", "jpeg"]),
@@ -2177,7 +2183,15 @@ fn library_export_jobs(paths: &[PathBuf], format: ExportFormat) -> Option<Vec<(P
         return Some(vec![(source.clone(), destination)]);
     }
 
-    let folder = rfd::FileDialog::new().pick_folder()?;
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(parent) = paths
+        .first()
+        .and_then(|path| path.parent())
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        dialog = dialog.set_directory(parent);
+    }
+    let folder = dialog.pick_folder()?;
     let mut reserved = HashSet::new();
     Some(
         paths
@@ -2717,12 +2731,12 @@ impl Library {
                     app.library.refresh(ui.ctx());
                     app.library.status = if failures.is_empty() {
                         format!(
-                            "Reset adjustments for {total} selected {} ({reset_count} changed)",
+                            "Cleared all adjustments for {total} selected {} ({reset_count} changed)",
                             if total == 1 { "image" } else { "images" }
                         )
                     } else {
                         format!(
-                            "Reset adjustments for {} of {total} selected images. {}",
+                            "Cleared all adjustments for {} of {total} selected images. {}",
                             total.saturating_sub(failures.len()),
                             failures.join(" · ")
                         )
@@ -2871,12 +2885,12 @@ impl Library {
                     app.library.refresh(ui.ctx());
                     app.library.status = if failures.is_empty() {
                         format!(
-                            "Reset adjustments for {total} selected {}",
+                            "Cleared all adjustments for {total} selected {}",
                             if total == 1 { "image" } else { "images" }
                         )
                     } else {
                         format!(
-                            "Completed {} of {total} selected actions. {}",
+                            "Cleared all adjustments for {} of {total} selected images. {}",
                             total.saturating_sub(failures.len()),
                             failures.join(" · ")
                         )
@@ -3183,6 +3197,12 @@ impl Library {
             let mut confirm_export = false;
             if let Some(dialog) = app.library.export_dialog.as_mut() {
                 let count = dialog.paths.len();
+                let export_picker_directory = dialog
+                    .paths
+                    .first()
+                    .and_then(|path| path.parent())
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(std::path::Path::to_path_buf);
                 let title = if count == 1 {
                     "Export image".to_owned()
                 } else {
@@ -3217,6 +3237,7 @@ impl Library {
                             &mut dialog.settings,
                             None,
                             false,
+                            export_picker_directory.as_deref(),
                         );
                         match dialog.format {
                             ExportFormat::Jpeg => {
@@ -3401,6 +3422,7 @@ impl Library {
                             &mut dialog.settings,
                             None,
                             false,
+                            None,
                         );
                         match dialog.format {
                             ExportFormat::Jpeg => {

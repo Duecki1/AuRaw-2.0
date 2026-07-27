@@ -159,6 +159,11 @@ public final class AuRawActivity extends NativeActivity {
         profileImporter.removeCameraProfileMirror(mirrorPath);
     }
 
+    /** Clears the SAF start location when no camera-profile folder is selected. */
+    public void clearCameraProfileFolderPickerLocation() {
+        profileImporter.clearFolderPickerLocation();
+    }
+
     /** Copies text through Android's native clipboard service. */
     public void copyTextToClipboard(String label, String text) {
         final String safeLabel = label == null || label.isEmpty()
@@ -268,6 +273,9 @@ public final class AuRawActivity extends NativeActivity {
     public String publishRawSidecar(
             String cachedPath, String rawUriText, String displayName) throws Exception {
         return storageManager.publishRawSidecar(cachedPath, rawUriText, displayName);
+    }
+    public void removeRawSidecar(String rawUriText, String displayName) throws Exception {
+        storageManager.removeRawSidecar(rawUriText, displayName);
     }
 
     public String createPendingExport(String requestedName, String mimeType) throws Exception {

@@ -246,18 +246,14 @@ impl AurawApp {
     ) -> Result<(), String> {
         let was_current =
             self.detach_current_android_document_for_library_action(raw_uri, display_name);
-        let result = (|| {
-            let Some(mut loaded) =
-                crate::sidecar::load_android(&self.android_app, raw_uri, display_name)
-                    .map_err(|error| error.to_string())?
-            else {
-                return Ok(());
-            };
-            crate::sidecar::reset_adjustments_preserving_mask_properties(&mut loaded.edits);
-            crate::sidecar::save_android(&self.android_app, raw_uri, display_name, loaded.edits)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })();
+        // The Android sidecar contains the entire edit document, including
+        // generated AI-mask data. Deleting it (rather than rewriting neutral
+        // values) makes Reset All equivalent to opening an untouched RAW.
+        let result = crate::android::remove_raw_sidecar(
+            &self.android_app,
+            raw_uri,
+            display_name,
+        );
         if was_current {
             self.open_android_library_document(raw_uri, display_name);
         }

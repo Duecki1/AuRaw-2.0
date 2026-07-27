@@ -1602,11 +1602,18 @@ impl AurawApp {
             .and_then(|name| name.to_str())
             .map(|name| format!("{name}-auraw.png"))
             .unwrap_or_else(|| "auraw-export.png".to_owned());
-        let Some(mut path) = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .add_filter("PNG image", &["png"])
-            .set_file_name(default_name)
-            .save_file()
-        else {
+            .set_file_name(default_name);
+        if let Some(parent) = self
+            .current_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            dialog = dialog.set_directory(parent);
+        }
+        let Some(mut path) = dialog.save_file() else {
             return;
         };
         let has_png_extension = matches!(
@@ -1633,11 +1640,18 @@ impl AurawApp {
             .and_then(|name| name.to_str())
             .map(|name| format!("{name}-auraw.jpg"))
             .unwrap_or_else(|| "auraw-export.jpg".to_owned());
-        let Some(mut path) = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .add_filter("JPEG image", &["jpg", "jpeg"])
-            .set_file_name(default_name)
-            .save_file()
-        else {
+            .set_file_name(default_name);
+        if let Some(parent) = self
+            .current_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            dialog = dialog.set_directory(parent);
+        }
+        let Some(mut path) = dialog.save_file() else {
             return;
         };
         let has_jpeg_extension = matches!(
@@ -1666,11 +1680,18 @@ impl AurawApp {
             .and_then(|name| name.to_str())
             .map(|name| format!("{name}-auraw.tif"))
             .unwrap_or_else(|| "auraw-export.tif".to_owned());
-        let Some(mut path) = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .add_filter("TIFF image", &["tif", "tiff"])
-            .set_file_name(default_name)
-            .save_file()
-        else {
+            .set_file_name(default_name);
+        if let Some(parent) = self
+            .current_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            dialog = dialog.set_directory(parent);
+        }
+        let Some(mut path) = dialog.save_file() else {
             return;
         };
         let has_tiff_extension = matches!(
