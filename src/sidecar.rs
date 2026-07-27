@@ -23,8 +23,7 @@ pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
 #[cfg(not(target_os = "android"))]
-pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str =
-    crate::thumbnail_cache::DESKTOP_THUMBNAIL_CACHE_DIR;
+pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str = crate::thumbnail_cache::DESKTOP_THUMBNAIL_CACHE_DIR;
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-thumb.fingerprint";
 pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
@@ -149,27 +148,28 @@ fn filtered_mask_stack(masks: &MaskStack, include_manual: bool, include_ai: bool
         return masks.clone();
     }
 
-    let mut filtered = MaskStack::default();
-    filtered.masks = masks
-        .masks
-        .iter()
-        .filter_map(|mask| {
-            // A local-mask group can combine a brush/radial/linear component
-            // with an AI or range component. Filter those components one by
-            // one: classifying the whole group as AI used to leak the manual
-            // refinement even when "Normal masks" was disabled.
-            let mut selected = mask.clone();
-            selected.components.retain(|component| {
-                if is_manual_mask_kind(component.kind) {
-                    include_manual
-                } else {
-                    include_ai
-                }
-            });
-            (!selected.components.is_empty()).then_some(selected)
-        })
-        .collect();
-    filtered
+    MaskStack {
+        masks: masks
+            .masks
+            .iter()
+            .filter_map(|mask| {
+                // A local-mask group can combine a brush/radial/linear component
+                // with an AI or range component. Filter those components one by
+                // one: classifying the whole group as AI used to leak the manual
+                // refinement even when "Normal masks" was disabled.
+                let mut selected = mask.clone();
+                selected.components.retain(|component| {
+                    if is_manual_mask_kind(component.kind) {
+                        include_manual
+                    } else {
+                        include_ai
+                    }
+                });
+                (!selected.components.is_empty()).then_some(selected)
+            })
+            .collect(),
+        ..Default::default()
+    }
 }
 
 fn replace_selected_mask_categories(
@@ -196,21 +196,12 @@ fn masks_contain_content_aware_components(masks: &MaskStack) -> bool {
         mask.components
             .iter()
             .any(|component| match (component.kind, &component.geometry) {
-                (
-                    MaskKind::Subject | MaskKind::Background,
-                    MaskGeometry::Ai { .. },
-                ) => true,
-                (
-                    MaskKind::Object,
-                    MaskGeometry::Object { strokes, .. },
-                ) => strokes
+                (MaskKind::Subject | MaskKind::Background, MaskGeometry::Ai { .. }) => true,
+                (MaskKind::Object, MaskGeometry::Object { strokes, .. }) => strokes
                     .iter()
                     .any(|stroke| stroke.positive && !stroke.points.is_empty()),
                 (MaskKind::LuminanceRange, MaskGeometry::LuminanceRange { .. }) => true,
-                (
-                    MaskKind::ColorRange,
-                    MaskGeometry::ColorRange { sampled: true, .. },
-                ) => true,
+                (MaskKind::ColorRange, MaskGeometry::ColorRange { sampled: true, .. }) => true,
                 _ => false,
             })
     })
@@ -234,12 +225,7 @@ pub fn apply_copied_adjustments(
     source: &EditState,
     settings: AdjustmentCopySettings,
 ) {
-    apply_copied_adjustments_with_mode(
-        destination,
-        source,
-        settings,
-        AdjustmentPasteMode::Merge,
-    );
+    apply_copied_adjustments_with_mode(destination, source, settings, AdjustmentPasteMode::Merge);
 }
 
 /// Applies copied edits using an explicit conflict policy.
@@ -383,10 +369,7 @@ fn developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
 
 #[cfg(not(target_os = "android"))]
 fn legacy_developed_thumbnail_path_for_raw(raw_path: &Path) -> PathBuf {
-    crate::thumbnail_cache::legacy_sibling_cache_path_for_raw(
-        raw_path,
-        DEVELOPED_THUMBNAIL_SUFFIX,
-    )
+    crate::thumbnail_cache::legacy_sibling_cache_path_for_raw(raw_path, DEVELOPED_THUMBNAIL_SUFFIX)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -571,7 +554,11 @@ pub fn save_developed_thumbnail_cache(
     })?;
     atomic_write(
         &fingerprint_path,
-        format!("{:016x}\n", expected_sidecar_fingerprint ^ DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT).as_bytes(),
+        format!(
+            "{:016x}\n",
+            expected_sidecar_fingerprint ^ DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT
+        )
+        .as_bytes(),
     )
     .map_err(|error| {
         format!(
@@ -664,9 +651,9 @@ pub fn invalidate_developed_thumbnail_cache(raw_path: &Path) -> Result<(), Strin
 
 #[cfg(not(target_os = "android"))]
 fn remove_legacy_developed_thumbnail_cache(raw_path: &Path) {
-    crate::thumbnail_cache::remove_legacy_cache_file(
-        &legacy_developed_thumbnail_path_for_raw(raw_path),
-    );
+    crate::thumbnail_cache::remove_legacy_cache_file(&legacy_developed_thumbnail_path_for_raw(
+        raw_path,
+    ));
     crate::thumbnail_cache::remove_legacy_cache_file(
         &legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path),
     );
@@ -1659,12 +1646,8 @@ mod tests {
         source.lens.enabled = false;
         let mut source_masks = MaskStack::default();
         source_masks.add_mask(MaskKind::Subject);
-        if let MaskGeometry::Ai { mask, .. } =
-            &mut source_masks.masks[0].components[0].geometry
-        {
-            *mask = Some(
-                crate::pipeline::MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap(),
-            );
+        if let MaskGeometry::Ai { mask, .. } = &mut source_masks.masks[0].components[0].geometry {
+            *mask = Some(crate::pipeline::MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap());
         }
         source.masks = Arc::new(source_masks);
 
@@ -1689,8 +1672,13 @@ mod tests {
 
         assert_eq!(destination.exposure, original_exposure);
         assert_eq!(destination.lens, original_lens);
-        assert_eq!(destination.masks.masks.len(), 1);
-        assert_eq!(destination.masks.masks[0].components[0].kind, MaskKind::Subject);
+        // Merge mode preserves the destination's manual radial mask while
+        // replacing only the selected AI category.
+        assert_eq!(destination.masks.masks.len(), 2);
+        assert_eq!(
+            destination.masks.masks[1].components[0].kind,
+            MaskKind::Subject
+        );
         assert!(destination.ai_masks_need_update);
     }
 
@@ -1732,12 +1720,8 @@ mod tests {
         let mut source_masks = MaskStack::default();
         source_masks.add_mask(MaskKind::Brush);
         source_masks.add_mask(MaskKind::Subject);
-        if let MaskGeometry::Ai { mask, .. } =
-            &mut source_masks.masks[1].components[0].geometry
-        {
-            *mask = Some(
-                crate::pipeline::MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap(),
-            );
+        if let MaskGeometry::Ai { mask, .. } = &mut source_masks.masks[1].components[0].geometry {
+            *mask = Some(crate::pipeline::MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap());
         }
         source.masks = Arc::new(source_masks);
 
@@ -1757,7 +1741,10 @@ mod tests {
         );
 
         assert_eq!(destination.masks.masks.len(), 1);
-        assert_eq!(destination.masks.masks[0].components[0].kind, MaskKind::Brush);
+        assert_eq!(
+            destination.masks.masks[0].components[0].kind,
+            MaskKind::Brush
+        );
         assert!(!destination.ai_masks_need_update);
 
         apply_copied_adjustments(
@@ -1813,7 +1800,10 @@ mod tests {
 
         assert_eq!(destination.masks.masks.len(), 1);
         assert_eq!(destination.masks.masks[0].components.len(), 1);
-        assert_eq!(destination.masks.masks[0].components[0].kind, MaskKind::Subject);
+        assert_eq!(
+            destination.masks.masks[0].components[0].kind,
+            MaskKind::Subject
+        );
         assert!(destination.ai_masks_need_update);
 
         apply_copied_adjustments(
@@ -2172,7 +2162,10 @@ mod tests {
         let encoded = encode(edits).unwrap();
         let document: SidecarDocument = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(document.process_version, CURRENT_PROCESS_VERSION);
-        assert_eq!(document.edits.exposure.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(
+            document.edits.exposure.process_version,
+            CURRENT_PROCESS_VERSION
+        );
     }
 
     #[test]
@@ -2180,12 +2173,11 @@ mod tests {
         let mut source = sample_edits();
         source.exposure.process_version = SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION;
         let mut destination = sample_edits();
-        apply_copied_adjustments(
-            &mut destination,
-            &source,
-            AdjustmentCopySettings::default(),
+        apply_copied_adjustments(&mut destination, &source, AdjustmentCopySettings::default());
+        assert_eq!(
+            destination.exposure.process_version,
+            CURRENT_PROCESS_VERSION
         );
-        assert_eq!(destination.exposure.process_version, CURRENT_PROCESS_VERSION);
     }
 
     #[test]
@@ -2355,7 +2347,9 @@ mod tests {
         let raw = Path::new("photos/photo.CR3");
         let cache = developed_thumbnail_path_for_raw(raw);
         assert!(cache.starts_with(crate::thumbnail_cache::desktop_thumbnail_cache_root()));
-        assert!(cache.to_string_lossy().ends_with(DEVELOPED_THUMBNAIL_SUFFIX));
+        assert!(cache
+            .to_string_lossy()
+            .ends_with(DEVELOPED_THUMBNAIL_SUFFIX));
         assert_ne!(cache.parent(), raw.parent());
     }
 

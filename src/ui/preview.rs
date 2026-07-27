@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::app::{
     AurawApp, CropDragState, CropHandle, MaskDragState, MaskOverlayBlink, SidebarTab,
     StraightenDragState,
@@ -2704,7 +2706,7 @@ fn final_geometry_source_to_screen(
     let source_x = source_uv[0] * source_width.max(1) as f32;
     let source_y = source_uv[1] * source_height.max(1) as f32;
     let transformed = geometry_forward_linear(geometry, source_x - center_x, source_y - center_y);
-    let (output_width, output_height) = if geometry.quarter_turns % 2 == 0 {
+    let (output_width, output_height) = if geometry.quarter_turns.is_multiple_of(2) {
         (crop_width, crop_height)
     } else {
         (crop_height, crop_width)
@@ -2747,7 +2749,7 @@ fn final_geometry_screen_to_source(
     let ([center_x, center_y], [crop_width, crop_height]) =
         geometry_crop_metrics(geometry, source_width, source_height);
     let output_uv = screen_to_normalized_unclamped(image_rect, screen);
-    let (output_width, output_height) = if geometry.quarter_turns % 2 == 0 {
+    let (output_width, output_height) = if geometry.quarter_turns.is_multiple_of(2) {
         (crop_width, crop_height)
     } else {
         (crop_height, crop_width)
@@ -2861,7 +2863,7 @@ fn crop_workspace_source_to_screen(
         source_height_f,
         pre_quarter,
     );
-    let (canvas_width, canvas_height) = if geometry.quarter_turns % 2 == 0 {
+    let (canvas_width, canvas_height) = if geometry.quarter_turns.is_multiple_of(2) {
         (source_width_f, source_height_f)
     } else {
         (source_height_f, source_width_f)
@@ -2886,7 +2888,7 @@ fn crop_workspace_screen_to_source(
     let ([center_x, center_y], _) = geometry_crop_metrics(geometry, source_width, source_height);
     let source_width_f = source_width.max(1) as f32;
     let source_height_f = source_height.max(1) as f32;
-    let (canvas_width, canvas_height) = if geometry.quarter_turns % 2 == 0 {
+    let (canvas_width, canvas_height) = if geometry.quarter_turns.is_multiple_of(2) {
         (source_width_f, source_height_f)
     } else {
         (source_height_f, source_width_f)
@@ -3335,7 +3337,7 @@ fn crop_preview_screen_rect(
     let crop_width = (crop[2] - crop[0]) * source_width_f;
     let crop_height = (crop[3] - crop[1]) * source_height_f;
     let (canvas_width, canvas_height, display_width, display_height) =
-        if geometry.quarter_turns % 2 == 0 {
+        if geometry.quarter_turns.is_multiple_of(2) {
             (source_width_f, source_height_f, crop_width, crop_height)
         } else {
             (source_height_f, source_width_f, crop_height, crop_width)
@@ -3405,7 +3407,7 @@ fn crop_preview_pointer_to_source_normalized(
 ) -> [f32; 2] {
     let source_width_f = source_width.max(1) as f32;
     let source_height_f = source_height.max(1) as f32;
-    let (canvas_width, canvas_height) = if quarter_turns % 2 == 0 {
+    let (canvas_width, canvas_height) = if quarter_turns.is_multiple_of(2) {
         (source_width_f, source_height_f)
     } else {
         (source_height_f, source_width_f)
@@ -4041,11 +4043,6 @@ fn inpaint_stroke_geometry_screen_bounds(
         }
     }
     bounds
-}
-
-fn screen_to_normalized(rect: Rect, point: Pos2) -> [f32; 2] {
-    let uv = screen_to_normalized_unclamped(rect, point);
-    [uv[0].clamp(0.0, 1.0), uv[1].clamp(0.0, 1.0)]
 }
 
 fn screen_to_normalized_unclamped(rect: Rect, point: Pos2) -> [f32; 2] {

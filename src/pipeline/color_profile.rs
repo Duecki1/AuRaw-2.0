@@ -18,6 +18,7 @@ const PROFILE_TONE_LUT_SIZE: usize = 4096;
 const MAX_DCP_TAG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DCP_MAP_ENTRIES: usize = 1_000_000;
 const MAX_DCP_TONE_POINTS: usize = 65_536;
+#[cfg(any(target_os = "android", test))]
 const D50_XYZ: [f32; 3] = [0.964_22, 1.0, 0.825_21];
 
 #[cfg(not(target_os = "android"))]
@@ -465,7 +466,7 @@ impl IccOutputTransform {
         #[cfg(not(target_os = "android"))]
         {
             let entries = icc::build_lcms_output_lut(bytes, intent, size)?;
-            return Ok(Self { size, entries });
+            Ok(Self { size, entries })
         }
 
         #[cfg(target_os = "android")]
@@ -924,6 +925,7 @@ fn mul3(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
     matrix.map(|row| row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2])
 }
 
+#[cfg(any(target_os = "android", test))]
 fn invert3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
@@ -970,6 +972,7 @@ fn perceptual_gamut_compress(rgb: [f32; 3]) -> [f32; 3] {
     rgb.map(|value| (luma + (value - luma) * scale.clamp(0.0, 1.0)).clamp(0.0, 1.0))
 }
 
+#[cfg(any(target_os = "android", test))]
 fn saturation_gamut_compress(rgb: [f32; 3]) -> [f32; 3] {
     let min = rgb[0].min(rgb[1]).min(rgb[2]);
     let shifted = rgb.map(|v| v - min.min(0.0));
@@ -1005,6 +1008,9 @@ fn output_lut_linear_node(index: u32, size: u32) -> f32 {
 
 fn output_lut_shaper(value: f32) -> f32 {
     let magnitude = value.abs();
+    if magnitude >= 1.0 {
+        return value.signum().clamp(0.0, 1.0);
+    }
     let encoded = if magnitude <= 0.003_130_8 {
         magnitude * 12.92
     } else {

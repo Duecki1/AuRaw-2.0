@@ -685,10 +685,9 @@ impl AurawApp {
                 if state.current.is_some() {
                     return;
                 }
-                state.pending.pop_front().map(|job| {
+                state.pending.pop_front().inspect(|job| {
                     state.current = Some(job.clone());
                     state.phase = LibraryAiMaskRefreshPhase::Loading;
-                    job
                 })
             };
 
@@ -835,7 +834,7 @@ impl AurawApp {
             .unwrap_or_else(|| "image".to_owned());
 
         match phase {
-            LibraryAiMaskRefreshPhase::Loading => return,
+            LibraryAiMaskRefreshPhase::Loading => (),
             LibraryAiMaskRefreshPhase::Updating => {
                 if self.ai_mask_update_busy() {
                     return;
@@ -863,7 +862,6 @@ impl AurawApp {
                 if let Some(state) = self.library_ai_mask_refresh.as_mut() {
                     state.phase = LibraryAiMaskRefreshPhase::Saving;
                 }
-                return;
             }
             LibraryAiMaskRefreshPhase::Saving => {
                 if self.sidecar_save_in_progress() {

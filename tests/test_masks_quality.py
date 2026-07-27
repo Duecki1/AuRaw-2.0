@@ -112,12 +112,13 @@ def test_brush_input_and_rasterization_avoid_progressive_slowdown() -> None:
 
 def test_ai_subject_feather_is_resolution_relative_and_background_is_exact_complement() -> None:
     assert "fn chamfer_distance" in MASKS
-    assert "width.min(height) as f32 * 0.045" in MASKS
+    assert "let edge = width.min(height) as f32" in MASKS
+    assert "edge * 0.045" in MASKS
     assert "distance_to_outside[index] - distance_to_inside[index]" in MASKS
-    assert "feather_probability_mask(&mut coverage" in MASKS
+    assert "shape_probability_mask(&mut coverage" in MASKS
     assert "component.kind == MaskKind::Background" in MASKS
     assert "*value = 1.0 - *value" in MASKS
-    assert "fixed 32-texel box blur" in MASKS
+    assert "fixed 32-texel box blur" not in MASKS
 
 
 def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
@@ -128,12 +129,12 @@ def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
 
 
 
-def test_ai_subject_edges_use_high_resolution_rgb_guidance() -> None:
+def test_ai_subject_edges_use_high_resolution_vitmatte_guidance() -> None:
     ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
-    assert "refine_subject_mask_edges" in ai
-    assert "color_distance" in ai
-    assert "weighted_probability" in ai
-    assert "center_probability * 0.40 + guided * 0.60" in ai
+    subject = ai[ai.index("fn infer_subject(") : ai.index("fn run_subject_session")]
+    assert "refine_mask_with_vitmatte(" in subject
+    assert "image.as_raw()" in subject
+    assert "width" in subject and "height" in subject
 
 def test_mask_brushes_stay_on_image_but_geometry_handles_can_leave_preview() -> None:
     assert "let mut interaction_rect = if app.sidebar_tab == SidebarTab::Masks" in PREVIEW
@@ -282,7 +283,7 @@ def test_lens_preview_mesh_adapts_to_source_resolution() -> None:
 def test_inpaint_focus_bounds_follow_warped_brush_footprint() -> None:
     preview = (ROOT / "src/ui/preview.rs").read_text(encoding="utf-8")
     fn = preview[preview.index("fn inpaint_stroke_geometry_screen_bounds(") :]
-    fn = fn[: fn.index("\nfn screen_to_normalized(")]
+    fn = fn[: fn.index("\nfn screen_to_normalized_unclamped(")]
     assert "brush_outline_geometry_screen_points(" in fn
     assert "dab.center" in fn and "dab.size" in fn
     assert "dab.center[0] - du" not in fn

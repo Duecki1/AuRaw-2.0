@@ -1,3 +1,7 @@
+// The matrix-shaper parser is the Android fallback. It remains compiled in
+// tests so its cross-platform contract can be validated on desktop CI.
+#![cfg_attr(test, allow(dead_code))]
+
 use super::*;
 
 #[cfg(any(target_os = "android", test))]
@@ -873,14 +877,11 @@ fn x11_monitor_index_from_text(text: &str, [px, py]: [i32; 2]) -> Option<usize> 
             continue;
         };
         let offsets = &rest[slash + 1..];
-        let Some(first_sign) = offsets.find(|c| c == '+' || c == '-') else {
+        let Some(first_sign) = offsets.find(['+', '-']) else {
             continue;
         };
         let offsets = &offsets[first_sign..];
-        let Some(second_sign_rel) = offsets[1..]
-            .find(|c| c == '+' || c == '-')
-            .map(|offset| offset + 1)
-        else {
+        let Some(second_sign_rel) = offsets[1..].find(['+', '-']).map(|offset| offset + 1) else {
             continue;
         };
         let Some(x) = offsets[..second_sign_rel].parse::<i32>().ok() else {

@@ -27,7 +27,11 @@ pub fn preprocess_shader(path: &Path) -> Result<String, String> {
     preprocess_shader_source(path, shader_dir, &source)
 }
 
-fn preprocess_shader_source(path: &Path, shader_dir: &Path, source: &str) -> Result<String, String> {
+fn preprocess_shader_source(
+    path: &Path,
+    shader_dir: &Path,
+    source: &str,
+) -> Result<String, String> {
     let mut generated = String::with_capacity(source.len());
 
     for line in source.lines() {
@@ -72,7 +76,10 @@ fn parse_include_argument<'a>(
 
     if include.is_empty()
         || include.contains('\\')
-        || Path::new(include).file_name().and_then(|name| name.to_str()) != Some(include)
+        || Path::new(include)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(include)
     {
         return Err(format!(
             "{} includes an invalid shader fragment path: {include:?}",
@@ -122,9 +129,7 @@ mod tests {
         let template = root.join("template.wgsl");
         fs::write(
             &template,
-            format!(
-                "fn before() {{}}\n{INCLUDE_DIRECTIVE}\"shared.wgsl\"\nfn after() {{}}\n"
-            ),
+            format!("fn before() {{}}\n{INCLUDE_DIRECTIVE}\"shared.wgsl\"\nfn after() {{}}\n"),
         )
         .unwrap();
         fs::write(root.join("shared.wgsl"), "fn shared() {}\n").unwrap();

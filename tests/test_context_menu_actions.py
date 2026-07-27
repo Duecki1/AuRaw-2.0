@@ -72,10 +72,13 @@ def test_desktop_library_selection_context_menu_offers_bulk_actions() -> None:
     assert 'LibraryCardAction::ResetAdjustments(' in LIBRARY
     assert 'LibraryCardAction::Delete(context_paths.clone())' in LIBRARY
 
-def test_android_library_bulk_actions_keep_the_jni_bridge_contract() -> None:
+def test_android_library_bulk_actions_keep_required_jni_bridge_contracts() -> None:
     android_bridge = (ROOT / "src/android.rs").read_text(encoding="utf-8")
     android_activity = (
         ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java"
+    ).read_text(encoding="utf-8")
+    sidecar_persistence = (
+        ROOT / "src/app/sidecar_persistence.rs"
     ).read_text(encoding="utf-8")
 
     # Touch-selection state transitions are exercised by native LibraryState tests.
@@ -86,11 +89,10 @@ def test_android_library_bulk_actions_keep_the_jni_bridge_contract() -> None:
     assert 'LibraryCardAction::Export(targets())' in LIBRARY
     assert 'LibraryCardAction::Duplicate(targets())' in LIBRARY
     assert 'jni::jni_str!("duplicateRawLibraryDocument")' in android_bridge
-    assert 'jni::jni_str!("removeRawSidecar")' in android_bridge
     assert 'jni::jni_str!("deleteRawLibraryDocument")' in android_bridge
     assert "public String duplicateRawLibraryDocument" in android_activity
-    assert "public void removeRawSidecar" in android_activity
     assert "public void deleteRawLibraryDocument" in android_activity
+    assert "reset_adjustments_preserving_mask_properties" in sidecar_persistence
 
 
 def test_android_library_uses_one_shared_selection_overflow_instead_of_card_menus() -> None:

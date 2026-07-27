@@ -2302,7 +2302,7 @@ impl AurawApp {
         }
     }
 
-    fn poll_export_worker(&mut self, frame: &eframe::Frame) {
+    fn poll_export_worker(&mut self, _frame: &eframe::Frame) {
         let mut events = Vec::new();
         let mut disconnected = false;
         if let Some(receiver) = &self.export_receiver {
@@ -2455,11 +2455,11 @@ impl AurawApp {
 
         #[cfg(not(target_os = "android"))]
         if let Some(result) = batch_result {
-            self.complete_library_batch_export_item(result, frame);
+            self.complete_library_batch_export_item(result, _frame);
         } else if disconnected && self.library_batch_export.is_some() {
             self.complete_library_batch_export_item(
                 Err("export worker stopped unexpectedly".to_owned()),
-                frame,
+                _frame,
             );
         }
 

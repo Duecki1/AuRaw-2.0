@@ -742,8 +742,10 @@ mod tests {
     #[test]
     fn export_halo_shrinks_when_wide_radius_effects_are_neutral() {
         let masks = MaskStack::default();
-        let mut exposure = ExposureParams::default();
-        exposure.sharpen_amount = 0.0;
+        let mut exposure = ExposureParams {
+            sharpen_amount: 0.0,
+            ..Default::default()
+        };
         assert_eq!(
             required_export_tile_halo(&exposure, &masks),
             MIN_EXPORT_TILE_HALO

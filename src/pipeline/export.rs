@@ -722,7 +722,7 @@ fn resolve_export_color(settings: &ExportSettings) -> Result<ResolvedExportColor
                 [
                     [0.673_424_1, 0.165_641_1, 0.125_128_6],
                     [0.279_017_7, 0.675_340_2, 0.045_637_7],
-                    [-0.001_930_0, 0.029_978_4, 0.797_333_0],
+                    [-0.001_930_0, 0.029_978_4, 0.797_333],
                 ],
                 IccTransfer::Linear,
             )),
@@ -763,7 +763,6 @@ fn resolve_export_color(settings: &ExportSettings) -> Result<ResolvedExportColor
 enum ExportRowFormat {
     Rgb8,
     Rgba8,
-    Rgb16Be,
     Rgba16Be,
     Rgb16Le,
     RgbF32Le,
@@ -1776,6 +1775,7 @@ struct GeometryResampler<'a> {
 }
 
 impl<'a> GeometryResampler<'a> {
+    #[cfg(test)]
     fn new(
         source: &'a [f32],
         source_width: u32,
@@ -1918,8 +1918,8 @@ impl<'a> GeometryResampler<'a> {
                 }
                 let index =
                     (source_y as usize * self.source_width as usize + source_x as usize) * 3;
-                for channel in 0..3 {
-                    sum[channel] += self.source[index + channel] * weight;
+                for (channel, value) in sum.iter_mut().enumerate() {
+                    *value += self.source[index + channel] * weight;
                 }
                 weight_sum += weight;
             }
@@ -2414,6 +2414,7 @@ struct LinearLightResizer {
 }
 
 impl LinearLightResizer {
+    #[cfg(test)]
     fn new(
         source_width: u32,
         source_height: u32,
@@ -2738,10 +2739,12 @@ fn resize_horizontal_row(source: &[f32], weights: &[Vec<SampleWeight>]) -> Resul
     Ok(output)
 }
 
+#[cfg(test)]
 fn encode_srgb_row(row: &[f32], transform: &IccOutputTransform) -> Result<Vec<u8>> {
     encode_output_row(row, Some(transform), ExportRowFormat::Rgba8)
 }
 
+#[cfg(test)]
 fn encode_srgb_row_with_format(
     row: &[f32],
     transform: &IccOutputTransform,
@@ -2763,7 +2766,7 @@ fn encode_output_row(
     let bytes_per_pixel = match row_format {
         ExportRowFormat::Rgb8 => 3,
         ExportRowFormat::Rgba8 => 4,
-        ExportRowFormat::Rgb16Be | ExportRowFormat::Rgb16Le => 6,
+        ExportRowFormat::Rgb16Le => 6,
         ExportRowFormat::Rgba16Be => 8,
         ExportRowFormat::RgbF32Le => 12,
     };
@@ -2798,7 +2801,7 @@ fn encode_output_row(
                     encoded.push(255);
                 }
             }
-            ExportRowFormat::Rgb16Be | ExportRowFormat::Rgba16Be | ExportRowFormat::Rgb16Le => {
+            ExportRowFormat::Rgba16Be | ExportRowFormat::Rgb16Le => {
                 for value in device {
                     let sample = (value.clamp(0.0, 1.0) * 65_535.0).round() as u16;
                     if row_format == ExportRowFormat::Rgb16Le {
@@ -3426,9 +3429,9 @@ mod tests {
         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
         encode_srgb_row_with_format, publish_completed_export, stitch_linear_tile_into_band,
         validate_export_dimensions, ExportMetadata, ExportResizeMode, ExportRowFormat,
-        ExportSettings, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
+        ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
     };
-    use crate::pipeline::ExportTile;
+    use crate::pipeline::{ExportTile, GeometryTransform, IccOutputTransform};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -3485,7 +3488,7 @@ mod tests {
             b"Model X\0".as_slice(),
             b"LensCo\0".as_slice(),
             b"Prime 50\0".as_slice(),
-            b"IMG_0042.CR3\0".as_slice(),
+            b"IMG_0042.CR3".as_slice(),
             b"Studio portrait".as_slice(),
             b"Photographer\0".as_slice(),
         ] {
@@ -3663,9 +3666,9 @@ mod tests {
         resizer
             .push_source_row(0, &[0.18, 0.18, 0.18], Some(&transform), &mut output)
             .unwrap();
-        assert_eq!(output.len(), 128 * 4);
         assert!(resizer.pending_rows.iter().all(Option::is_none));
         resizer.finish(Some(&transform), &mut output).unwrap();
+        assert_eq!(output.len(), 128 * 4);
     }
 
     #[test]

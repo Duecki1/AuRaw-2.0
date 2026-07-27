@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn version_three_copy_settings_migrate_geometry_dependent_categories_to_opt_in() {
-        let settings: PerformanceSettings = serde_json::from_str(
+        let settings = serde_json::from_str::<PerformanceSettings>(
             r#"{"version":3,"raw_cache_files":1,"thumbnail_workers":1,"adjustment_copy_settings":{"adjustments":true,"masks":true,"inpainting":true,"lens_correction":true}}"#,
         )
         .expect("version 3 settings should remain readable")
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn version_five_masks_choice_is_reused_for_ai_masks() {
-        let settings: PerformanceSettings = serde_json::from_str(
+        let settings = serde_json::from_str::<PerformanceSettings>(
             r#"{"version":5,"raw_cache_files":1,"thumbnail_workers":1,"adjustment_copy_settings":{"adjustments":true,"masks":false,"inpainting":false,"lens_correction":false}}"#,
         )
         .expect("version 5 settings should remain readable")

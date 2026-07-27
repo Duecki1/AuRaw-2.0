@@ -83,9 +83,12 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
+    @SuppressWarnings("deprecation") // Required on API 30–34; API 35+ is always edge-to-edge.
     private void configureSystemBarsAndInsets() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            getWindow().setDecorFitsSystemWindows(false);
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                getWindow().setDecorFitsSystemWindows(false);
+            }
             View decorView = getWindow().getDecorView();
             decorView.setOnApplyWindowInsetsListener((view, windowInsets) -> {
                 Insets safeInsets = windowInsets.getInsets(
@@ -248,9 +251,6 @@ public final class AuRawActivity extends NativeActivity {
     }
     public void openRawLibraryDocument(String uriText, String displayName) {
         storageManager.openRawLibraryDocument(uriText, displayName);
-    }
-    public void removeRawSidecar(String rawUriText, String displayName) throws Exception {
-        storageManager.removeRawSidecar(rawUriText, displayName);
     }
     public String duplicateRawLibraryDocument(String rawUriText, String displayName)
             throws Exception {

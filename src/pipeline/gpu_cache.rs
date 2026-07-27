@@ -1,5 +1,7 @@
+#[cfg(target_os = "android")]
 use anyhow::{Context, Result};
 use eframe::wgpu;
+#[cfg(target_os = "android")]
 use std::{
     fs,
     io::ErrorKind,
@@ -11,6 +13,7 @@ use std::{
 /// pipeline cache blobs. The directory name also pins the wgpu major because
 /// PipelineCache::get_data() is an implementation-detail format and must not be
 /// assumed compatible after a wgpu upgrade.
+#[cfg(target_os = "android")]
 const AURAW_PIPELINE_CACHE_SCHEMA: &str = "wgpu29-v1";
 
 /// One application-managed wgpu/Vulkan pipeline cache plus the path used to
@@ -19,6 +22,7 @@ const AURAW_PIPELINE_CACHE_SCHEMA: &str = "wgpu29-v1";
 #[derive(Clone)]
 pub(crate) struct PersistentGpuPipelineCache {
     cache: wgpu::PipelineCache,
+    #[cfg(target_os = "android")]
     path: Arc<PathBuf>,
 }
 
@@ -27,6 +31,7 @@ impl PersistentGpuPipelineCache {
     /// cache otherwise. `pipeline_cache_key` is intentionally used as the
     /// filename because wgpu defines it as the compatibility key for persisted
     /// cache data.
+    #[cfg(target_os = "android")]
     pub(crate) fn load_or_create(
         device: &wgpu::Device,
         adapter_info: &wgpu::AdapterInfo,
@@ -80,6 +85,7 @@ impl PersistentGpuPipelineCache {
         &self.cache
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn path(&self) -> &Path {
         self.path.as_path()
     }
@@ -87,6 +93,7 @@ impl PersistentGpuPipelineCache {
     /// Persists the current driver cache atomically. A temporary sibling file
     /// prevents a process kill during write from replacing a known-good cache
     /// with a partial blob.
+    #[cfg(target_os = "android")]
     pub(crate) fn persist(&self) -> Result<usize> {
         let Some(data) = self.cache.get_data() else {
             return Ok(0);

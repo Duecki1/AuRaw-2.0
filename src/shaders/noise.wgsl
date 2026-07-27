@@ -28,9 +28,9 @@ fn nr_from_signal_opponents(signal: f32, opponents: vec2<f32>) -> vec3<f32> {
     return vec3<f32>(g + opponents.x, g, g + opponents.y);
 }
 
-fn nr_rgb_variance(rgb: vec3<f32>) -> vec3<f32> {
+fn nr_rgb_variance(signal_rgb: vec3<f32>) -> vec3<f32> {
     return max(
-        params.noise_read.rgb + params.noise_shot.rgb * max(rgb, vec3<f32>(0.0)),
+        params.noise_read.rgb + params.noise_shot.rgb * max(signal_rgb, vec3<f32>(0.0)),
         vec3<f32>(1e-10),
     );
 }

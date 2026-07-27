@@ -399,7 +399,7 @@ fn delta_e76_srgb(a: [f32; 3], b: [f32; 3]) -> f32 {
         let xyz = [
             0.4124564 * linear[0] + 0.3575761 * linear[1] + 0.1804375 * linear[2],
             0.2126729 * linear[0] + 0.7151522 * linear[1] + 0.0721750 * linear[2],
-            0.0193339 * linear[0] + 0.1191920 * linear[1] + 0.9503041 * linear[2],
+            0.0193339 * linear[0] + 0.119_192 * linear[1] + 0.9503041 * linear[2],
         ];
         let f = |value: f32| {
             if value > 216.0 / 24389.0 {

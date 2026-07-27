@@ -357,7 +357,7 @@ impl GeometryTransform {
         let height = ((value.crop[3] - value.crop[1]) * source_height.max(1) as f32)
             .round()
             .max(1.0) as u32;
-        if value.quarter_turns % 2 == 0 {
+        if value.quarter_turns.is_multiple_of(2) {
             (width, height)
         } else {
             (height, width)
@@ -523,6 +523,7 @@ pub(crate) struct GeometryInverseMap<'a> {
 }
 
 impl<'a> GeometryInverseMap<'a> {
+    #[cfg(test)]
     pub(crate) fn new(
         geometry: GeometryTransform,
         source_width: u32,
@@ -676,8 +677,10 @@ impl<'a> GeometryInverseMap<'a> {
 }
 
 fn sanitized_crop(crop: [f32; 4]) -> [f32; 4] {
-    let mut geometry = GeometryTransform::default();
-    geometry.crop = crop;
+    let geometry = GeometryTransform {
+        crop,
+        ..Default::default()
+    };
     geometry.sanitized().crop
 }
 
@@ -838,8 +841,7 @@ pub fn transform_thumbnail_geometry_with_lens(
                 source_x,
                 source_y,
             );
-            let index =
-                ((output_y as usize * output_width as usize + output_x as usize) * 4) as usize;
+            let index = (output_y as usize * output_width as usize + output_x as usize) * 4;
             rgba[index..index + 4].copy_from_slice(&pixel);
         }
     }
@@ -882,10 +884,10 @@ fn sample_thumbnail_rgba_bilinear(
             .unwrap_or(if channel == 3 { 255 } else { 0 }) as f32
     };
     let mut result = [0u8; 4];
-    for channel in 0..4 {
+    for (channel, value) in result.iter_mut().enumerate() {
         let top = load(x0, y0, channel) * (1.0 - tx) + load(x1, y0, channel) * tx;
         let bottom = load(x0, y1, channel) * (1.0 - tx) + load(x1, y1, channel) * tx;
-        result[channel] = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;
+        *value = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;
     }
     result
 }

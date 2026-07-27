@@ -46,10 +46,8 @@ fn apply_resolved_default_exposure(
     camera_profile: &mut CameraProfile,
     baseline_exposure: Option<f32>,
 ) {
-    camera_profile.default_exposure_ev = resolve_default_exposure_ev(
-        baseline_exposure,
-        camera_profile.profile_exposure_offset_ev,
-    );
+    camera_profile.default_exposure_ev =
+        resolve_default_exposure_ev(baseline_exposure, camera_profile.profile_exposure_offset_ev);
 }
 
 #[cfg(target_os = "android")]

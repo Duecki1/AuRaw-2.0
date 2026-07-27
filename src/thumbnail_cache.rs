@@ -47,6 +47,11 @@ fn accepted_thumbnail_layout(width: u32, height: u32) -> Result<(u64, u64, u64),
     if width == 0 || height == 0 {
         return Err("thumbnail dimensions must be non-zero".to_owned());
     }
+    if width > MAX_CACHED_THUMBNAIL_EDGE || height > MAX_CACHED_THUMBNAIL_EDGE {
+        return Err(format!(
+            "thumbnail dimensions {width}x{height} are outside the cache safety limit"
+        ));
+    }
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .ok_or_else(|| "thumbnail pixel count overflow".to_owned())?;
@@ -61,11 +66,6 @@ fn accepted_thumbnail_layout(width: u32, height: u32) -> Result<(u64, u64, u64),
     let decoded_bytes = row_bytes
         .checked_mul(u64::from(height))
         .ok_or_else(|| "thumbnail decoded byte count overflow".to_owned())?;
-    if width > MAX_CACHED_THUMBNAIL_EDGE || height > MAX_CACHED_THUMBNAIL_EDGE {
-        return Err(format!(
-            "thumbnail dimensions {width}x{height} are outside the cache safety limit"
-        ));
-    }
     if decoded_bytes > MAX_CACHED_THUMBNAIL_DECODE_BYTES {
         return Err(format!(
             "thumbnail {width}x{height} requires {decoded_bytes} decoded bytes, above the {} byte cache limit",
@@ -306,8 +306,7 @@ pub(crate) fn save_desktop_raw_thumbnail(
 
 #[cfg(not(target_os = "android"))]
 fn migrate_legacy_desktop_raw_thumbnail(raw_path: &Path) -> Result<(), String> {
-    let legacy_cache =
-        legacy_sibling_cache_path_for_raw(raw_path, RAW_THUMBNAIL_SUFFIX);
+    let legacy_cache = legacy_sibling_cache_path_for_raw(raw_path, RAW_THUMBNAIL_SUFFIX);
     let legacy_fingerprint =
         legacy_sibling_cache_path_for_raw(raw_path, RAW_THUMBNAIL_FINGERPRINT_SUFFIX);
     if !legacy_cache.is_file() || !legacy_fingerprint.is_file() {
@@ -533,10 +532,9 @@ mod tests {
     #[test]
     fn oversized_png_dimensions_are_rejected_before_decode() {
         const OVERSIZED_PNG: &[u8] = &[
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 1, 134,
-            160, 0, 1, 134, 160, 8, 6, 0, 0, 0, 168, 82, 11, 200, 0, 0, 0, 8, 73, 68,
-            65, 84, 120, 156, 3, 0, 0, 0, 0, 1, 72, 6, 137, 210, 0, 0, 0, 0, 73,
-            69, 78, 68, 174, 66, 96, 130,
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 1, 134, 160, 0, 1,
+            134, 160, 8, 6, 0, 0, 0, 168, 82, 11, 200, 0, 0, 0, 8, 73, 68, 65, 84, 120, 156, 3, 0,
+            0, 0, 0, 1, 72, 6, 137, 210, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
         ];
         let path = temporary_test_path("oversized.png");
         fs::write(&path, OVERSIZED_PNG).unwrap();
@@ -578,7 +576,9 @@ mod tests {
             ],
         };
         save_png(&path, &thumbnail).unwrap();
-        let loaded = load_png(&path, 512).unwrap().expect("normal cache should load");
+        let loaded = load_png(&path, 512)
+            .unwrap()
+            .expect("normal cache should load");
         assert_eq!(loaded.width, thumbnail.width);
         assert_eq!(loaded.height, thumbnail.height);
         assert_eq!(loaded.rgba, thumbnail.rgba);

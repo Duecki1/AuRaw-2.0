@@ -44,9 +44,9 @@ pub fn parse_lensfun_version(value: &str) -> Result<LensfunVersion, String> {
         parse_component(components.next(), "micro")?,
     );
     for component in components {
-        let extra = component.parse::<u32>().map_err(|_| {
-            format!("Lensfun version {value:?} has an invalid trailing component")
-        })?;
+        let extra = component
+            .parse::<u32>()
+            .map_err(|_| format!("Lensfun version {value:?} has an invalid trailing component"))?;
         if extra != 0 {
             return Err(format!(
                 "Lensfun version {value:?} has an unsupported non-zero trailing component"
@@ -63,18 +63,16 @@ pub fn parse_lensfun_header_version(contents: &str) -> Result<LensfunVersion, St
             .find_map(|line| {
                 let mut tokens = line.split_whitespace();
                 match (tokens.next(), tokens.next(), tokens.next()) {
-                    (Some("#define"), Some(found), Some(value)) if found == name => {
-                        Some(
-                            value
-                                .trim_matches(|character| character == '(' || character == ')')
-                                .parse::<u32>()
-                                .map_err(|_| {
-                                    format!(
-                                        "Lensfun header has an invalid {name} definition: {value:?}"
-                                    )
-                                }),
-                        )
-                    }
+                    (Some("#define"), Some(found), Some(value)) if found == name => Some(
+                        value
+                            .trim_matches(|character| character == '(' || character == ')')
+                            .parse::<u32>()
+                            .map_err(|_| {
+                                format!(
+                                    "Lensfun header has an invalid {name} definition: {value:?}"
+                                )
+                            }),
+                    ),
                     _ => None,
                 }
             })

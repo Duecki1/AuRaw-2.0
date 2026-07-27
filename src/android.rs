@@ -396,10 +396,7 @@ pub fn load_library_thumbnail(
     Ok(thumbnail)
 }
 
-pub fn load_library_display_dimensions(
-    app: &AndroidApp,
-    uri: &str,
-) -> Result<[u32; 2], String> {
+pub fn load_library_display_dimensions(app: &AndroidApp, uri: &str) -> Result<[u32; 2], String> {
     let uri_string = uri.to_owned();
     let fd = with_activity(app, |env, activity| {
         let uri = env.new_string(&uri_string)?;
@@ -420,8 +417,8 @@ pub fn load_library_display_dimensions(
     // transferred sole ownership to Rust. `File` closes it exactly once.
     let descriptor = unsafe { File::from_raw_fd(fd) };
     let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
-    let result = crate::pipeline::load_raw_display_dimensions(&path)
-        .map_err(|error| format!("{error:#}"));
+    let result =
+        crate::pipeline::load_raw_display_dimensions(&path).map_err(|error| format!("{error:#}"));
     drop(descriptor);
     result
 }
@@ -658,29 +655,6 @@ pub fn open_library_document(
     .map_err(|error| format!("could not open Android RAW library item: {error:#}"))
 }
 
-pub fn remove_raw_sidecar(
-    app: &AndroidApp,
-    raw_uri: &str,
-    display_name: &str,
-) -> Result<(), String> {
-    let raw_uri_owned = raw_uri.to_owned();
-    let display_name_owned = display_name.to_owned();
-    with_activity(app, |env, activity| {
-        let raw_uri = env.new_string(&raw_uri_owned)?;
-        let display_name = env.new_string(&display_name_owned)?;
-        env.call_method(
-            activity,
-            jni::jni_str!("removeRawSidecar"),
-            jni::jni_sig!((JString, JString) -> void),
-            &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
-        )?;
-        Ok(())
-    })
-    .map_err(|error| format!("could not reset Android RAW adjustments: {error:#}"))?;
-    clear_developed_thumbnail_cache(app, raw_uri);
-    Ok(())
-}
-
 pub fn duplicate_library_document(
     app: &AndroidApp,
     raw_uri: &str,
@@ -883,7 +857,9 @@ pub fn prepare_direct_export(
         let string = env.cast_local::<JString>(object)?;
         Ok(string.to_string())
     })
-    .map_err(|error| format!("could not create Android MediaStore export destination: {error:#}"))?;
+    .map_err(|error| {
+        format!("could not create Android MediaStore export destination: {error:#}")
+    })?;
     if encoded.is_empty() {
         return Ok(None);
     }
@@ -946,7 +922,12 @@ pub fn finalize_direct_export(app: &AndroidApp, path: &Path) -> Result<String, S
         .remove(path)
         .ok_or_else(|| "Android direct-export destination is no longer available".to_owned())?;
     // Close the detached fd before publishing the MediaStore row.
-    let DirectExportTarget { file, uri, location, .. } = target;
+    let DirectExportTarget {
+        file,
+        uri,
+        location,
+        ..
+    } = target;
     drop(file);
     if let Err(error) = finish_pending_export(app, &uri, true) {
         let _ = finish_pending_export(app, &uri, false);
@@ -956,7 +937,10 @@ pub fn finalize_direct_export(app: &AndroidApp, path: &Path) -> Result<String, S
 }
 
 pub fn cancel_direct_export(app: &AndroidApp, path: &Path) {
-    let target = direct_exports().lock().ok().and_then(|mut targets| targets.remove(path));
+    let target = direct_exports()
+        .lock()
+        .ok()
+        .and_then(|mut targets| targets.remove(path));
     if let Some(target) = target {
         let DirectExportTarget { file, uri, .. } = target;
         drop(file);
@@ -969,7 +953,12 @@ pub fn cancel_direct_export(app: &AndroidApp, path: &Path) {
 pub fn cancel_all_direct_exports(app: &AndroidApp) {
     let targets = direct_exports()
         .lock()
-        .map(|mut targets| targets.drain().map(|(_, target)| target).collect::<Vec<_>>())
+        .map(|mut targets| {
+            targets
+                .drain()
+                .map(|(_, target)| target)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     for target in targets {
         let DirectExportTarget { file, uri, .. } = target;
@@ -987,7 +976,10 @@ fn finish_pending_export(app: &AndroidApp, uri: &str, success: bool) -> Result<(
             activity,
             jni::jni_str!("finishPendingExport"),
             jni::jni_sig!((JString, i32) -> void),
-            &[JValue::Object(&uri), JValue::Int(if success { 1 } else { 0 })],
+            &[
+                JValue::Object(&uri),
+                JValue::Int(if success { 1 } else { 0 }),
+            ],
         )?;
         Ok(())
     })
@@ -1027,14 +1019,6 @@ pub fn publish_image(
     .map_err(|error| format!("could not publish Android image: {error:#}"))
 }
 
-pub fn publish_png(
-    app: &AndroidApp,
-    path: &std::path::Path,
-    display_name: &str,
-) -> Result<(), String> {
-    publish_image(app, path, display_name, "image/png")
-}
-
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnBackRequested<'local>(
     _unowned_env: EnvUnowned<'local>,
@@ -1047,7 +1031,6 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnBackRequested<
     request_repaint();
     true
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnSystemInsetsChanged<'local>(
@@ -1106,7 +1089,6 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePicked<'lo
             "AuRawActivity.nativeOnFilePicked".to_owned()
         });
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePickedFd<'local>(

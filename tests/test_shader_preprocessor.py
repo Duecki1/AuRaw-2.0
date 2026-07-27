@@ -2,6 +2,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = (ROOT / "build.rs").read_text(encoding="utf-8")
+PREPROCESSOR = (ROOT / "build_support/shader_preprocessor.rs").read_text(encoding="utf-8")
 GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
 BAYER = (ROOT / "src/shaders/pass4.wgsl").read_text(encoding="utf-8")
 XTRANS = (ROOT / "src/shaders/xtrans_pass7.wgsl").read_text(encoding="utf-8")
@@ -32,11 +33,13 @@ def test_finish_templates_supply_cfa_specific_reference_adapters() -> None:
 
 
 def test_build_script_expands_templates_into_out_dir() -> None:
-    assert 'const SHADER_INCLUDE_DIRECTIVE: &str = "// @include ";' in BUILD
-    assert "fn generate_shader_sources()" in BUILD
-    assert "fn preprocess_shader(" in BUILD
-    assert '("pass4.wgsl", "pass4.generated.wgsl")' in BUILD
-    assert '("xtrans_pass7.wgsl", "xtrans_pass7.generated.wgsl")' in BUILD
+    assert '#[path = "build_support/shader_preprocessor.rs"]' in BUILD
+    assert "shader_preprocessor::generate_shader_sources" in BUILD
+    assert 'pub const INCLUDE_DIRECTIVE: &str = "// @include ";' in PREPROCESSOR
+    assert "pub fn generate_shader_sources(" in PREPROCESSOR
+    assert "pub fn preprocess_shader(" in PREPROCESSOR
+    assert '("pass4.wgsl", "pass4.generated.wgsl")' in PREPROCESSOR
+    assert '("xtrans_pass7.wgsl", "xtrans_pass7.generated.wgsl")' in PREPROCESSOR
     assert '"src/shaders/noise_ca_finish.wgsl"' in BUILD
     assert 'env!("OUT_DIR"), "/pass4.generated.wgsl"' in GPU
     assert 'env!("OUT_DIR"), "/xtrans_pass7.generated.wgsl"' in GPU
