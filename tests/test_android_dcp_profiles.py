@@ -3,6 +3,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID_RS = (ROOT / "src/android.rs").read_text()
 ACTIVITY = (ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java").read_text()
+PROFILE_IMPORTER = (ROOT / "android/app/src/main/java/de/duecki/auraw/ProfileImporter.java").read_text()
+ANDROID_JAVA = ACTIVITY + "\n" + PROFILE_IMPORTER
 LIFECYCLE = (ROOT / "src/app/lifecycle.rs").read_text()
 SETTINGS_UI = (ROOT / "src/ui/settings.rs").read_text()
 SIDEBAR = (ROOT / "src/ui/sidebar/navigation.rs").read_text()
@@ -10,32 +12,32 @@ PERFORMANCE = (ROOT / "src/performance_settings.rs").read_text()
 
 
 def test_android_uses_tree_picker_and_persistent_private_dcp_mirror() -> None:
-    assert "Intent.ACTION_OPEN_DOCUMENT_TREE" in ACTIVITY
-    assert "Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION" in ACTIVITY
-    assert "takePersistableUriPermission" in ACTIVITY
-    assert 'name.toLowerCase(Locale.ROOT).endsWith(".dcp")' in ACTIVITY
-    assert "copyCameraProfileTree" in ACTIVITY
-    assert 'getFilesDir(),' in ACTIVITY
-    assert '"camera-profiles-"' in ACTIVITY
-    assert "MAX_DCP_FILES" in ACTIVITY
-    assert "MAX_DCP_FILE_BYTES" in ACTIVITY
-    assert "MAX_DCP_TREE_DEPTH" in ACTIVITY
+    assert "Intent.ACTION_OPEN_DOCUMENT_TREE" in PROFILE_IMPORTER
+    assert "Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION" in PROFILE_IMPORTER
+    assert "takePersistableUriPermission" in PROFILE_IMPORTER
+    assert 'name.toLowerCase(Locale.ROOT).endsWith(".dcp")' in PROFILE_IMPORTER
+    assert "copyCameraProfileTree" in PROFILE_IMPORTER
+    assert 'getFilesDir(),' in PROFILE_IMPORTER
+    assert '"camera-profiles-"' in PROFILE_IMPORTER
+    assert "MAX_DCP_FILES" in PROFILE_IMPORTER
+    assert "MAX_DCP_FILE_BYTES" in PROFILE_IMPORTER
+    assert "MAX_DCP_TREE_DEPTH" in PROFILE_IMPORTER
 
 
 def test_android_releases_only_superseded_app_private_dcp_mirrors() -> None:
     assert "removeCameraProfileMirror" in ACTIVITY
     assert "remove_camera_profile_mirror" in ANDROID_RS
-    assert "CAMERA_PROFILE_MIRROR_PREFIX" in ACTIVITY
-    assert "getFilesDir().getCanonicalFile()" in ACTIVITY
-    requested = ACTIVITY.index("File requestedMirror = new File(mirrorPath);")
-    symlink_check = ACTIVITY.index(
+    assert "CAMERA_PROFILE_MIRROR_PREFIX" in PROFILE_IMPORTER
+    assert "getFilesDir().getCanonicalFile()" in PROFILE_IMPORTER
+    requested = PROFILE_IMPORTER.index("File requestedMirror = new File(mirrorPath);")
+    symlink_check = PROFILE_IMPORTER.index(
         "Files.isSymbolicLink(requestedMirror.toPath())", requested
     )
-    canonicalize = ACTIVITY.index("requestedMirror.getCanonicalFile()", requested)
+    canonicalize = PROFILE_IMPORTER.index("requestedMirror.getCanonicalFile()", requested)
     assert requested < symlink_check < canonicalize
-    assert "filesDirectory.equals(mirror.getParentFile())" in ACTIVITY
-    assert "isCameraProfileMirrorName" in ACTIVITY
-    assert "Files.isSymbolicLink" in ACTIVITY
+    assert "filesDirectory.equals(mirror.getParentFile())" in PROFILE_IMPORTER
+    assert "isCameraProfileMirrorName" in PROFILE_IMPORTER
+    assert "Files.isSymbolicLink" in PROFILE_IMPORTER
 
     clear_start = LIFECYCLE.index("pub(crate) fn clear_camera_profile_folder")
     clear_end = LIFECYCLE.index("auto_detect_camera_profile_folder", clear_start)
@@ -55,9 +57,9 @@ def test_android_releases_only_superseded_app_private_dcp_mirrors() -> None:
 def test_android_persistable_permission_uses_only_grant_flags() -> None:
     call = (
         "takePersistableUriPermission(\n"
-        "                            treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)"
+        "                        treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)"
     )
-    assert call in ACTIVITY
+    assert call in PROFILE_IMPORTER
 
 
 def test_android_folder_picker_is_bridged_back_to_rust_settings() -> None:
@@ -103,7 +105,7 @@ def test_android_folder_import_updates_live_ui_without_restart() -> None:
     assert "if self.picker_pending" in eframe_impl
     assert "request_repaint_after(Duration::from_millis(120))" in eframe_impl
     # Deliver the terminal JNI callback on Android's UI thread after import.
-    assert "runOnUiThread(() -> nativeOnCameraProfileFolderPicked" in ACTIVITY
+    assert "activity.runOnUiThread(() -> callbacks.onFolderPicked" in PROFILE_IMPORTER
 
 
 def test_android_profile_picker_buttons_reflect_pending_import_state() -> None:
