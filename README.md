@@ -14,7 +14,7 @@ as part of AuRaw.
 
 ## Platform support
 
-- **Linux (recommended):** primary desktop development and AppImage packaging target.
+- **Linux (recommended):** primary desktop development target; the Gitea Actions workflow builds the x86_64 AppImage.
 - **Android (recommended):** arm64 application build; device GPU and camera compatibility vary.
 
 - **Windows (supported):** x86_64 GNU build with LibRaw, produced by the Windows workflow.

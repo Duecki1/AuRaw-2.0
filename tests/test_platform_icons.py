@@ -36,3 +36,13 @@ def test_desktop_raster_assets_have_release_icon_dimensions() -> None:
     reserved, image_type, image_count = struct.unpack("<HHH", ico[:6])
     assert (reserved, image_type) == (0, 1)
     assert image_count >= 6
+
+
+def test_gitea_appimage_uses_the_shared_android_matching_icon() -> None:
+    workflow = (ROOT / ".gitea/workflows/build.yml").read_text(encoding="utf-8")
+
+    assert "packaging/icons/auraw-256.png" in workflow
+    assert "appimage-packaging/auraw.png" in workflow
+    assert 'cmp packaging/icons/auraw-256.png "$APPIMAGE_ICON"' in workflow
+    assert "r, g, b, a = 232, 126, 42, 255" not in workflow
+    assert "rm -rf AppDir dist packaging squashfs-root" not in workflow
