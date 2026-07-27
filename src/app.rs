@@ -17,7 +17,8 @@ use crate::pipeline::{
     ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{
-    AdjustmentCopySettings, EditState as SidecarEditState, LensEditState as SidecarLensEditState,
+    AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
+    LensEditState as SidecarLensEditState,
 };
 use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::layout::ScreenLayout;
@@ -444,6 +445,35 @@ struct LibraryAdjustmentClipboard {
     source_label: String,
 }
 
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Debug)]
+struct LibraryAiMaskRefreshJob {
+    source: PathBuf,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Debug)]
+struct LibraryAiMaskRefreshJob {
+    uri: String,
+    display_name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibraryAiMaskRefreshPhase {
+    Loading,
+    Updating,
+}
+
+#[derive(Debug)]
+struct LibraryAiMaskRefreshState {
+    pending: VecDeque<LibraryAiMaskRefreshJob>,
+    current: Option<LibraryAiMaskRefreshJob>,
+    phase: LibraryAiMaskRefreshPhase,
+    total: usize,
+    completed: usize,
+    failures: Vec<String>,
+}
+
 #[derive(Debug)]
 struct LibraryBatchExportState {
     pending: VecDeque<LibraryBatchExportJob>,
@@ -592,6 +622,7 @@ pub struct AurawApp {
     export_receiver: Option<mpsc::Receiver<ExportEvent>>,
     export_progress: Option<(usize, usize)>,
     library_batch_export: Option<LibraryBatchExportState>,
+    library_ai_mask_refresh: Option<LibraryAiMaskRefreshState>,
     export_publish_pending: bool,
     image_status: String,
     current_label: Option<String>,

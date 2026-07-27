@@ -209,7 +209,7 @@ impl Settings {
             let mut changed = false;
             changed |= ui
                 .checkbox(&mut settings.adjustments, "Adjustments")
-                .on_hover_text("Global light, color, tone curve, effects, color mixer, and RAW adjustment values.")
+                .on_hover_text("Global light, color, tone curve, effects, color mixer, RAW adjustment values, crop/geometry, and the per-image camera profile selection.")
                 .changed();
             changed |= ui
                 .checkbox(&mut settings.masks, "Masks")

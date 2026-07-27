@@ -2,8 +2,8 @@ use crate::file_ops::{replace_file, sync_parent_directory};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
-    ExposureParams, GeometryTransform, InpaintStroke, MaskGeometry, MaskKind, MaskStack, CURRENT_PROCESS_VERSION,
-    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    ExposureParams, GeometryTransform, InpaintStroke, MaskGeometry, MaskKind, MaskStack,
+    CURRENT_PROCESS_VERSION, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -77,6 +77,13 @@ pub struct AdjustmentCopySettings {
     pub lens_correction: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdjustmentPasteMode {
+    #[default]
+    Merge,
+    Replace,
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -124,19 +131,32 @@ pub fn default_edit_state() -> EditState {
 
 fn masks_contain_content_aware_components(masks: &MaskStack) -> bool {
     masks.masks.iter().any(|mask| {
-        mask.components.iter().any(|component| {
-            matches!(
-                component.kind,
-                MaskKind::Subject
-                    | MaskKind::Background
-                    | MaskKind::Object
-                    | MaskKind::Landscape
-                    | MaskKind::LuminanceRange
-                    | MaskKind::ColorRange
-                    | MaskKind::DepthRange
-            )
-        })
+        mask.components
+            .iter()
+            .any(|component| match (component.kind, &component.geometry) {
+                (
+                    MaskKind::Subject | MaskKind::Background,
+                    MaskGeometry::Ai { mask: Some(_), .. },
+                ) => true,
+                (MaskKind::Object, MaskGeometry::Object { mask: Some(_), .. }) => true,
+                (MaskKind::LuminanceRange, MaskGeometry::LuminanceRange { .. }) => true,
+                (
+                    MaskKind::ColorRange,
+                    MaskGeometry::ColorRange { sampled: true, .. },
+                ) => true,
+                _ => false,
+            })
     })
+}
+
+pub fn edit_state_has_adjustments(edits: &EditState) -> bool {
+    let default = default_edit_state();
+    edits.exposure != default.exposure
+        || edits.geometry != default.geometry
+        || edits.camera_profile != default.camera_profile
+        || edits.masks != default.masks
+        || edits.inpainting != default.inpainting
+        || edits.lens != default.lens
 }
 
 /// Merge a copied edit snapshot into an existing destination according to the
@@ -147,10 +167,37 @@ pub fn apply_copied_adjustments(
     source: &EditState,
     settings: AdjustmentCopySettings,
 ) {
+    apply_copied_adjustments_with_mode(
+        destination,
+        source,
+        settings,
+        AdjustmentPasteMode::Merge,
+    );
+}
+
+/// Applies copied edits using an explicit conflict policy.
+///
+/// Merge preserves destination categories that were not enabled when the copy
+/// was made. Replace first resets the destination to a clean edit state, then
+/// installs the enabled copied categories.
+pub fn apply_copied_adjustments_with_mode(
+    destination: &mut EditState,
+    source: &EditState,
+    settings: AdjustmentCopySettings,
+    mode: AdjustmentPasteMode,
+) {
+    if mode == AdjustmentPasteMode::Replace {
+        *destination = default_edit_state();
+    }
     if settings.adjustments {
+        let camera_profile_changed = destination.camera_profile != source.camera_profile;
         destination.exposure = source.exposure;
         destination.exposure.migrate_to_current_process();
         destination.geometry = source.geometry;
+        destination.camera_profile = source.camera_profile.clone();
+        if camera_profile_changed && masks_contain_content_aware_components(&destination.masks) {
+            destination.ai_masks_need_update = true;
+        }
     }
     if settings.masks {
         destination.masks = Arc::clone(&source.masks);
@@ -158,14 +205,16 @@ pub fn apply_copied_adjustments(
             masks_contain_content_aware_components(&destination.masks);
     }
     if settings.inpainting {
+        let inpainting_changed = destination.inpainting != source.inpainting;
         destination.inpainting = Arc::clone(&source.inpainting);
-        if masks_contain_content_aware_components(&destination.masks) {
+        if inpainting_changed && masks_contain_content_aware_components(&destination.masks) {
             destination.ai_masks_need_update = true;
         }
     }
     if settings.lens_correction {
+        let lens_changed = destination.lens != source.lens;
         destination.lens = source.lens.clone();
-        if masks_contain_content_aware_components(&destination.masks) {
+        if lens_changed && masks_contain_content_aware_components(&destination.masks) {
             destination.ai_masks_need_update = true;
         }
     }
@@ -1527,6 +1576,13 @@ mod tests {
         source.lens.enabled = false;
         let mut source_masks = MaskStack::default();
         source_masks.add_mask(MaskKind::Subject);
+        if let MaskGeometry::Ai { mask, .. } =
+            &mut source_masks.masks[0].components[0].geometry
+        {
+            *mask = Some(
+                crate::pipeline::MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap(),
+            );
+        }
         source.masks = Arc::new(source_masks);
 
         let mut destination = sample_edits();
@@ -1550,6 +1606,43 @@ mod tests {
         assert_eq!(destination.masks.masks.len(), 1);
         assert_eq!(destination.masks.masks[0].components[0].kind, MaskKind::Subject);
         assert!(destination.ai_masks_need_update);
+    }
+
+    #[test]
+    fn copied_adjustments_include_camera_profile_and_replace_clears_other_categories() {
+        let mut source = sample_edits();
+        source.camera_profile = Some(PathBuf::from("Adobe/Camera Standard.dcp"));
+        source.exposure.dehaze = 48.0;
+
+        let mut destination = sample_edits();
+
+        apply_copied_adjustments_with_mode(
+            &mut destination,
+            &source,
+            AdjustmentCopySettings {
+                adjustments: true,
+                masks: false,
+                inpainting: false,
+                lens_correction: false,
+            },
+            AdjustmentPasteMode::Replace,
+        );
+
+        assert_eq!(destination.exposure.dehaze, 48.0);
+        assert_eq!(
+            destination.camera_profile,
+            Some(PathBuf::from("Adobe/Camera Standard.dcp"))
+        );
+        assert!(destination.masks.masks.is_empty());
+        assert!(destination.inpainting.is_empty());
+        assert_eq!(destination.lens, LensEditState::default());
+    }
+
+    #[test]
+    fn stale_ai_mask_metadata_alone_is_not_an_edit_conflict() {
+        let mut edits = default_edit_state();
+        edits.ai_masks_need_update = true;
+        assert!(!edit_state_has_adjustments(&edits));
     }
 
     #[test]

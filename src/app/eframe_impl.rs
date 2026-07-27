@@ -49,6 +49,7 @@ impl eframe::App for AurawApp {
         self.poll_export_worker(frame);
         self.poll_subject_worker();
         self.poll_object_worker();
+        self.poll_library_ai_mask_refresh(frame);
         self.poll_inpaint_worker();
         self.handle_edit_history_shortcuts(ui.ctx());
         self.handle_sidecar_shortcut(ui.ctx());
