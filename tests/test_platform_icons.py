@@ -6,6 +6,7 @@ import struct
 
 ROOT = Path(__file__).resolve().parents[1]
 ICON_DIR = ROOT / "packaging" / "icons"
+APP_ID = "de.duecki.auraw"
 
 
 def png_dimensions(path: Path) -> tuple[int, int]:
@@ -38,11 +39,59 @@ def test_desktop_raster_assets_have_release_icon_dimensions() -> None:
     assert image_count >= 6
 
 
-def test_gitea_appimage_uses_the_shared_android_matching_icon() -> None:
+def test_android_declares_standard_and_round_launcher_icons() -> None:
+    manifest = (ROOT / "android/app/src/main/AndroidManifest.xml").read_text(
+        encoding="utf-8"
+    )
+    standard = ROOT / "android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml"
+    rounded = ROOT / "android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml"
+
+    assert 'android:icon="@mipmap/ic_launcher"' in manifest
+    assert 'android:roundIcon="@mipmap/ic_launcher_round"' in manifest
+    assert standard.is_file()
+    assert rounded.is_file()
+    assert "@drawable/ic_launcher_foreground" in rounded.read_text(encoding="utf-8")
+
+
+def test_desktop_window_embeds_icon_and_uses_packaging_app_id() -> None:
+    source = (ROOT / "src/lib.rs").read_text(encoding="utf-8")
+    desktop = (ROOT / f"packaging/linux/{APP_ID}.desktop").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'include_bytes!("../packaging/icons/auraw-256.png")' in source
+    assert ".with_icon(desktop_icon())" in source
+    assert f'.with_app_id("{APP_ID}")' in source
+    assert f"Icon={APP_ID}" in desktop
+    assert f"StartupWMClass={APP_ID}" in desktop
+
+
+def test_gitea_appimage_packages_and_verifies_the_shared_icon() -> None:
     workflow = (ROOT / ".gitea/workflows/build.yml").read_text(encoding="utf-8")
 
-    assert "packaging/icons/auraw-256.png" in workflow
-    assert "appimage-packaging/auraw.png" in workflow
-    assert 'cmp packaging/icons/auraw-256.png "$APPIMAGE_ICON"' in workflow
+    assert f"APP_ID={APP_ID}" in workflow
+    assert 'DESKTOP_FILE="$PWD/packaging/linux/$APP_ID.desktop"' in workflow
+    assert 'APPIMAGE_ICON="$PWD/appimage-packaging/$APP_ID.png"' in workflow
+    assert 'ln -s "$APP_ID.png" AppDir/.DirIcon' in workflow
+    assert 'test -L squashfs-root/.DirIcon' in workflow
+    assert 'cmp packaging/icons/auraw-256.png "squashfs-root/$APP_ID.png"' in workflow
+    assert "usr/share/icons/hicolor/256x256/apps/$APP_ID.png" in workflow
+    assert "usr/share/applications/$APP_ID.desktop" in workflow
     assert "r, g, b, a = 232, 126, 42, 255" not in workflow
-    assert "rm -rf AppDir dist packaging squashfs-root" not in workflow
+
+
+def test_github_release_builds_embed_the_same_icon() -> None:
+    macos = (ROOT / ".github/workflows/build-macos.yml").read_text(encoding="utf-8")
+    windows = (ROOT / ".github/workflows/build-windows.yml").read_text(encoding="utf-8")
+    build = (ROOT / "build.rs").read_text(encoding="utf-8")
+    resource = (ROOT / "packaging/windows/auraw.rc").read_text(encoding="utf-8")
+
+    assert 'icon_source="packaging/icons/auraw-1024.png"' in macos
+    assert "CFBundleIconFile" in macos and "AuRaw.icns" in macos
+    assert f"<string>{APP_ID}</string>" in macos
+    assert 'cmp "$icon_source" "$verify_iconset/icon_512x512@2x.png"' in macos
+
+    assert "embed_windows_application_icon();" in build
+    assert 'Command::new("windres")' in build
+    assert '"../icons/auraw.ico"' in resource
+    assert "objdump" in windows and r"grep -q '\.rsrc'" in windows

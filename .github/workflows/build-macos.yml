@@ -124,6 +124,10 @@ jobs:
           iconutil -c icns "$iconset" -o "$contents/Resources/AuRaw.icns"
           rm -rf "$iconset"
           test -s "$contents/Resources/AuRaw.icns"
+          verify_iconset="$(mktemp -d)/AuRaw.iconset"
+          iconutil -c iconset "$contents/Resources/AuRaw.icns" -o "$verify_iconset"
+          cmp "$icon_source" "$verify_iconset/icon_512x512@2x.png"
+          rm -rf "$(dirname "$verify_iconset")"
 
           lensfun_db="$(find "$(brew --prefix lensfun)/share/lensfun" -type f -name '*.xml' -print | head -n 1)"
           test -n "$lensfun_db"

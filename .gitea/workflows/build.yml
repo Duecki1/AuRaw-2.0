@@ -168,21 +168,25 @@ jobs:
           cp -a "$LENSFUN_DB"/. AppDir/usr/share/auraw/lensfun/
           test -n "$(find AppDir/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
 
-          cat > appimage-packaging/auraw.desktop <<'DESKTOP'
-          [Desktop Entry]
-          Type=Application
-          Name=AuRaw
-          Comment=GPU-first RAW image editor
-          Exec=auraw
-          Icon=auraw
-          Categories=Graphics;Photography;
-          Terminal=false
-          DESKTOP
+          APP_ID=de.duecki.auraw
+          DESKTOP_FILE="$PWD/packaging/linux/$APP_ID.desktop"
+          APPIMAGE_ICON="$PWD/appimage-packaging/$APP_ID.png"
+          test -s "$DESKTOP_FILE"
+          grep -qx "Icon=$APP_ID" "$DESKTOP_FILE"
+          grep -qx "StartupWMClass=$APP_ID" "$DESKTOP_FILE"
 
-          # Keep Linux packaging on the same checked-in artwork used to derive
-          # the Android launcher icon, Windows executable icon, and macOS ICNS.
-          install -m 0644 packaging/icons/auraw-256.png appimage-packaging/auraw.png
-          test -s appimage-packaging/auraw.png
+          # Keep Linux packaging on the same checked-in artwork used by the
+          # Android launcher, Windows executable, macOS bundle, and app window.
+          install -m 0644 packaging/icons/auraw-256.png "$APPIMAGE_ICON"
+          install -m 0644 "$DESKTOP_FILE" "AppDir/$APP_ID.desktop"
+          install -Dm 0644 "$DESKTOP_FILE" \
+            "AppDir/usr/share/applications/$APP_ID.desktop"
+          install -m 0644 "$APPIMAGE_ICON" "AppDir/$APP_ID.png"
+          install -Dm 0644 "$APPIMAGE_ICON" \
+            "AppDir/usr/share/icons/hicolor/256x256/apps/$APP_ID.png"
+          ln -s "$APP_ID.png" AppDir/.DirIcon
+          test -s "$APPIMAGE_ICON"
+          test -L AppDir/.DirIcon
 
           # Digest from the successful upstream release build artifact.
           LINUXDEPLOY_SHA256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
@@ -198,8 +202,8 @@ jobs:
             --executable "$PWD/target/release/auraw" \
             --library "$LIBRAW_SO" \
             --library "$LENSFUN_SO" \
-            --desktop-file "$PWD/appimage-packaging/auraw.desktop" \
-            --icon-file "$PWD/appimage-packaging/auraw.png" \
+            --desktop-file "$DESKTOP_FILE" \
+            --icon-file "$APPIMAGE_ICON" \
             --output appimage
 
           test -n "$(find AppDir -name 'libraw*.so*' -print -quit)"
@@ -215,9 +219,16 @@ jobs:
           test -n "$(find squashfs-root -name 'libraw*.so*' -print -quit)"
           test -n "$(find squashfs-root -name 'liblensfun*.so*' -print -quit)"
           test -n "$(find squashfs-root/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
-          APPIMAGE_ICON="$(find squashfs-root -type f -name 'auraw.png' -print -quit)"
-          test -n "$APPIMAGE_ICON"
-          cmp packaging/icons/auraw-256.png "$APPIMAGE_ICON"
+          test -L squashfs-root/.DirIcon
+          test "$(readlink squashfs-root/.DirIcon)" = "$APP_ID.png"
+          cmp packaging/icons/auraw-256.png "squashfs-root/$APP_ID.png"
+          cmp packaging/icons/auraw-256.png \
+            "squashfs-root/usr/share/icons/hicolor/256x256/apps/$APP_ID.png"
+          test -f "squashfs-root/usr/share/applications/$APP_ID.desktop"
+          grep -qx "Icon=$APP_ID" \
+            "squashfs-root/usr/share/applications/$APP_ID.desktop"
+          grep -qx "StartupWMClass=$APP_ID" \
+            "squashfs-root/usr/share/applications/$APP_ID.desktop"
           rm -rf squashfs-root
 
           sha256sum "dist/$LDAI_OUTPUT" > "dist/$LDAI_OUTPUT.sha256"
@@ -423,6 +434,11 @@ jobs:
           unzip -tq "$APK" 'lib/arm64-v8a/libauraw.so'
           unzip -tq "$APK" 'lib/arm64-v8a/libc++_shared.so'
           unzip -tq "$APK" 'assets/lensfun/version_1/*.xml'
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" \
+            | tee /tmp/auraw-apk-badging.txt
+          grep -q "application-icon-" /tmp/auraw-apk-badging.txt
+          grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' \
+            android/app/src/main/AndroidManifest.xml
           sh scripts/verify-android-16kb.sh "$APK"
           mkdir -p dist
           cp "$APK" dist/AuRaw-debug-arm64-v8a.apk
