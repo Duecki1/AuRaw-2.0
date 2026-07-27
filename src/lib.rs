@@ -92,13 +92,32 @@ pub fn run_onnx_runtime_probe_cli(args: &[String]) -> Option<i32> {
 }
 
 #[cfg(not(target_os = "android"))]
+fn desktop_icon() -> std::sync::Arc<eframe::egui::IconData> {
+    static ICON: std::sync::OnceLock<std::sync::Arc<eframe::egui::IconData>> =
+        std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        let image = image::load_from_memory(include_bytes!("../packaging/icons/auraw-256.png"))
+            .expect("embedded desktop icon must be a valid PNG")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        std::sync::Arc::new(eframe::egui::IconData {
+            rgba: image.into_raw(),
+            width,
+            height,
+        })
+    })
+    .clone()
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn run_desktop() -> eframe::Result {
     env_logger::init();
 
     let mut options = native_options();
     options.viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 720.0])
-        .with_min_inner_size([480.0, 480.0]);
+        .with_min_inner_size([480.0, 480.0])
+        .with_icon(desktop_icon());
 
     eframe::run_native(
         "AuRaw",

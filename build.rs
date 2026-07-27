@@ -9,6 +9,7 @@ mod shader_preprocessor;
 fn main() {
     configure_source_revision();
     generate_shader_sources();
+    embed_windows_application_icon();
 
     for shader in [
         "src/shaders/common.wgsl",
@@ -64,6 +65,44 @@ fn main() {
         configure_desktop_libraw();
         configure_desktop_lensfun();
     }
+}
+
+fn embed_windows_application_icon() {
+    println!("cargo:rerun-if-changed=packaging/icons/auraw.ico");
+    println!("cargo:rerun-if-changed=packaging/windows/auraw.rc");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("gnu") {
+        panic!("AuRaw's Windows icon embedding currently supports the packaged GNU target");
+    }
+
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR")
+            .unwrap_or_else(|error| panic!("Cargo did not set CARGO_MANIFEST_DIR: {error}")),
+    );
+    let resource_dir = manifest_dir.join("packaging/windows");
+    let output = PathBuf::from(
+        std::env::var("OUT_DIR")
+            .unwrap_or_else(|error| panic!("Cargo did not set OUT_DIR: {error}")),
+    )
+    .join("auraw-icon.o");
+    let status = Command::new("windres")
+        .current_dir(&resource_dir)
+        .args(["--input", "auraw.rc", "--output-format", "coff", "--output"])
+        .arg(&output)
+        .status()
+        .unwrap_or_else(|error| {
+            panic!(
+                "could not start windres to embed {}: {error}",
+                resource_dir.join("auraw.rc").display()
+            )
+        });
+    assert!(
+        status.success(),
+        "windres failed while embedding the AuRaw icon"
+    );
+    println!("cargo:rustc-link-arg-bin=auraw={}", output.display());
 }
 
 fn generate_shader_sources() {

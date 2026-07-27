@@ -114,6 +114,7 @@ jobs:
 
           release_dir="target/x86_64-pc-windows-gnu/release"
           test -f "$release_dir/auraw.exe"
+          x86_64-w64-mingw32-objdump -h "$release_dir/auraw.exe" | grep -q '\.rsrc'
           test "$(git rev-parse --verify HEAD)" = "$revision"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 

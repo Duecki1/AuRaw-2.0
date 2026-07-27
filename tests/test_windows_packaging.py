@@ -23,3 +23,15 @@ def test_windows_artifact_includes_hash_manifest():
     text = WORKFLOW.read_text(encoding="utf-8")
     assert 'SHA256SUMS.txt' in text
     assert 'sha256sum auraw.exe' in text
+
+
+def test_windows_executable_embeds_the_shared_application_icon():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    build = (ROOT / "build.rs").read_text(encoding="utf-8")
+    resource = (ROOT / "packaging" / "windows" / "auraw.rc").read_text(encoding="utf-8")
+
+    assert "embed_windows_application_icon();" in build
+    assert 'Command::new("windres")' in build
+    assert "cargo:rustc-link-arg-bin=auraw=" in build
+    assert '"../icons/auraw.ico"' in resource
+    assert "objdump" in text and r"grep -q '\.rsrc'" in text
