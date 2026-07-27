@@ -113,6 +113,34 @@ enum LibrarySource {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TouchThumbnailAction {
+    Open,
+    SelectionChanged { back_navigation_active: bool },
+}
+
+fn desktop_selection_toggle_label(selection_mode: bool) -> &'static str {
+    if selection_mode {
+        "Cancel"
+    } else {
+        "Select"
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+const ANDROID_LIBRARY_IMPORT_FAB_EDGE: f32 = 56.0;
+
+#[cfg(any(target_os = "android", test))]
+fn android_library_import_fab_rect(bounds: egui::Rect) -> egui::Rect {
+    let size = egui::vec2(ANDROID_LIBRARY_IMPORT_FAB_EDGE, ANDROID_LIBRARY_IMPORT_FAB_EDGE);
+    egui::Rect::from_min_size(bounds.right_bottom() - size, size)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_library_import_icon() -> &'static str {
+    egui_phosphor::regular::PLUS
+}
+
 #[derive(Clone, Debug)]
 struct LibraryFileInfo {
     source: LibrarySource,
@@ -374,6 +402,35 @@ impl LibraryState {
     pub(crate) fn clear_selection(&mut self) {
         self.selected_sources.clear();
         self.selection_mode = false;
+    }
+
+    fn handle_touch_thumbnail_activation(
+        &mut self,
+        source: &LibrarySource,
+        secondary_clicked: bool,
+    ) -> TouchThumbnailAction {
+        if secondary_clicked {
+            self.begin_selection();
+            self.selected_sources.insert(source.clone());
+            return TouchThumbnailAction::SelectionChanged {
+                back_navigation_active: true,
+            };
+        }
+
+        if !self.selection_mode() {
+            return TouchThumbnailAction::Open;
+        }
+
+        if !self.selected_sources.remove(source) {
+            self.selected_sources.insert(source.clone());
+        }
+        if self.selected_sources.is_empty() {
+            self.clear_selection();
+        }
+
+        TouchThumbnailAction::SelectionChanged {
+            back_navigation_active: self.selection_mode(),
+        }
     }
 
     #[cfg(not(target_os = "android"))]
@@ -2264,11 +2321,7 @@ impl Library {
 
                 #[cfg(not(target_os = "android"))]
                 if ui
-                    .button(if desktop_selection_mode {
-                        "Cancel"
-                    } else {
-                        "Select"
-                    })
+                    .button(desktop_selection_toggle_label(desktop_selection_mode))
                     .clicked()
                 {
                     if desktop_selection_mode {
@@ -2398,22 +2451,21 @@ impl Library {
                         {
                             // egui maps a touch long-press to a secondary click. Enter
                             // selection mode instead of opening a per-thumbnail menu.
-                            if response.secondary_clicked() {
-                                app.library.begin_selection();
-                                app.library.selected_sources.insert(source.clone());
-                                crate::android::set_back_navigation_active(true);
-                            } else if response.clicked() {
-                                if !app.library.selection_mode() {
-                                    open_source = Some((source.clone(), name.clone()));
-                                } else if !app.library.selected_sources.remove(&source) {
-                                    app.library.selected_sources.insert(source.clone());
-                                }
-
-                                if app.library.selection_mode()
-                                    && app.library.selected_sources.is_empty()
-                                {
-                                    app.library.clear_selection();
-                                    crate::android::set_back_navigation_active(false);
+                            if response.secondary_clicked() || response.clicked() {
+                                match app.library.handle_touch_thumbnail_activation(
+                                    &source,
+                                    response.secondary_clicked(),
+                                ) {
+                                    TouchThumbnailAction::Open => {
+                                        open_source = Some((source.clone(), name.clone()));
+                                    }
+                                    TouchThumbnailAction::SelectionChanged {
+                                        back_navigation_active,
+                                    } => {
+                                        crate::android::set_back_navigation_active(
+                                            back_navigation_active,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -3476,13 +3528,12 @@ impl Library {
         #[cfg(target_os = "android")]
         if !app.library.has_selection() {
             let bounds = ui.max_rect().shrink(16.0);
-            let size = egui::vec2(56.0, 56.0);
-            let rect = egui::Rect::from_min_size(bounds.right_bottom() - size, size);
+            let rect = android_library_import_fab_rect(bounds);
             let response = ui.put(
                 rect,
-                egui::Button::new(egui::RichText::new(egui_phosphor::regular::PLUS).size(26.0))
-                    .min_size(size)
-                    .corner_radius(28)
+                egui::Button::new(egui::RichText::new(android_library_import_icon()).size(26.0))
+                    .min_size(rect.size())
+                    .corner_radius(ANDROID_LIBRARY_IMPORT_FAB_EDGE * 0.5)
                     .fill(ui.visuals().selection.bg_fill),
             );
             if response.clicked() {
@@ -3965,14 +4016,16 @@ fn elide_middle(value: &str, maximum_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
+    #[cfg(not(target_os = "android"))]
     use super::LibrarySource;
     use super::{
-        balanced_justified_row_ranges, duplicate_raw_and_sidecar, elide_middle, format_file_size,
-        import_raw_into_folder, justified_thumbnail_layout, loaded_library_thumbnail,
-        make_resident_thumbnail, new_library_entry, run_thumbnail_workers, scan_folder,
-        scan_folder_with_limit, LibraryFileInfo, LibraryState, LoadedLibraryThumbnail,
-        RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker,
+        android_library_import_fab_rect, android_library_import_icon,
+        balanced_justified_row_ranges, desktop_selection_toggle_label, duplicate_raw_and_sidecar,
+        elide_middle, format_file_size, import_raw_into_folder, justified_thumbnail_layout,
+        loaded_library_thumbnail, make_resident_thumbnail, new_library_entry,
+        run_thumbnail_workers, scan_folder, scan_folder_with_limit, LibraryFileInfo, LibraryState,
+        LoadedLibraryThumbnail, RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker,
+        TouchThumbnailAction, ANDROID_LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     #[cfg(unix)]
@@ -3981,7 +4034,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc, RwLock};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn middle_elision_preserves_both_ends() {
@@ -3994,6 +4047,63 @@ mod tests {
         assert_eq!(format_file_size(500), "500 B");
         assert_eq!(format_file_size(1024), "1.0 KiB");
         assert_eq!(format_file_size(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    #[test]
+    fn desktop_selection_toggle_label_matches_the_next_action() {
+        assert_eq!(desktop_selection_toggle_label(false), "Select");
+        assert_eq!(desktop_selection_toggle_label(true), "Cancel");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn touch_thumbnail_activation_enters_toggles_and_exits_selection() {
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+        let source = LibrarySource::File(PathBuf::from("selection.dng"));
+
+        let action = library.handle_touch_thumbnail_activation(&source, true);
+        assert_eq!(
+            action,
+            TouchThumbnailAction::SelectionChanged {
+                back_navigation_active: true
+            }
+        );
+        assert!(library.selection_mode());
+        assert!(library.selected_sources.contains(&source));
+
+        let action = library.handle_touch_thumbnail_activation(&source, false);
+        assert_eq!(
+            action,
+            TouchThumbnailAction::SelectionChanged {
+                back_navigation_active: false
+            }
+        );
+        assert!(!library.selection_mode());
+        assert!(library.selected_sources.is_empty());
+
+        assert_eq!(
+            library.handle_touch_thumbnail_activation(&source, false),
+            TouchThumbnailAction::Open
+        );
+    }
+
+    #[test]
+    fn android_import_fab_is_square_bottom_right_and_uses_plus_icon() {
+        let bounds = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(10.0, 20.0),
+            eframe::egui::vec2(300.0, 400.0),
+        );
+        let rect = android_library_import_fab_rect(bounds);
+        assert_eq!(
+            rect.size(),
+            eframe::egui::vec2(
+                ANDROID_LIBRARY_IMPORT_FAB_EDGE,
+                ANDROID_LIBRARY_IMPORT_FAB_EDGE
+            )
+        );
+        assert_eq!(rect.right_bottom(), bounds.right_bottom());
+        assert_eq!(android_library_import_icon(), egui_phosphor::regular::PLUS);
     }
 
     #[test]
@@ -4036,6 +4146,27 @@ mod tests {
 
         assert_eq!(before, after);
         assert_eq!(before_height, after_height);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn opening_a_library_folder_records_it_before_async_scanning() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-open-folder-{}-{nonce}",
+            std::process::id()
+        ));
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+
+        // The path deliberately does not exist: the asynchronous scanner may
+        // fail later, but the user's chosen location must be visible immediately.
+        library.open_folder(root.clone(), &context);
+
+        assert_eq!(library.folder(), Some(root.as_path()));
     }
 
     #[cfg(not(target_os = "android"))]

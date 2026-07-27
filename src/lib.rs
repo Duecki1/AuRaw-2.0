@@ -12,6 +12,10 @@ pub mod sidecar;
 mod thumbnail_cache;
 mod ui;
 
+#[cfg(test)]
+#[path = "../build_support/shader_preprocessor.rs"]
+mod shader_preprocessor;
+
 pub use app::AurawApp;
 
 /// Git revision embedded by `build.rs` for traceable binaries.

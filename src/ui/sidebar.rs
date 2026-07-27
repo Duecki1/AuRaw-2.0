@@ -79,3 +79,53 @@ include!("sidebar/inpainting.rs");
 include!("sidebar/export.rs");
 include!("sidebar/develop.rs");
 include!("sidebar/crop.rs");
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        mask_component_badge, mask_creation_icon, MaskCardSize, MaskCombineMode,
+        MaskStripOrientation,
+    };
+
+    #[test]
+    fn mask_badges_match_base_and_combine_semantics() {
+        assert_eq!(mask_component_badge(0, MaskCombineMode::Subtract), "BASE");
+        assert_eq!(
+            mask_component_badge(1, MaskCombineMode::Add),
+            egui_phosphor::regular::PLUS
+        );
+        assert_eq!(
+            mask_component_badge(1, MaskCombineMode::Subtract),
+            egui_phosphor::regular::MINUS
+        );
+        assert_eq!(
+            mask_component_badge(1, MaskCombineMode::Intersect),
+            egui_phosphor::regular::INTERSECT
+        );
+    }
+
+    #[test]
+    fn mask_creation_controls_use_a_compact_plus_icon() {
+        assert_eq!(mask_creation_icon(), egui_phosphor::regular::PLUS);
+    }
+
+    #[test]
+    fn mask_creation_controls_are_thin_along_the_strip_axis() {
+        assert_eq!(
+            MaskCardSize::Group.create_button_size(MaskStripOrientation::Horizontal),
+            eframe::egui::vec2(26.0, 72.0)
+        );
+        assert_eq!(
+            MaskCardSize::Submask.create_button_size(MaskStripOrientation::Horizontal),
+            eframe::egui::vec2(26.0, 62.0)
+        );
+        assert_eq!(
+            MaskCardSize::Group.create_button_size(MaskStripOrientation::Vertical),
+            eframe::egui::vec2(68.0, 26.0)
+        );
+        assert_eq!(
+            MaskCardSize::Submask.create_button_size(MaskStripOrientation::Vertical),
+            eframe::egui::vec2(56.0, 26.0)
+        );
+    }
+}

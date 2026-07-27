@@ -61,6 +61,11 @@ fn prewarm_dcp_profile_folder(folder: Option<std::path::PathBuf>) {
         });
 }
 
+#[cfg(any(target_os = "android", test))]
+fn gpu_preview_prewarm_cfa_kind() -> crate::pipeline::CfaKind {
+    crate::pipeline::CfaKind::Bayer
+}
+
 #[cfg(target_os = "android")]
 fn spawn_gpu_preview_prewarm(
     cc: &eframe::CreationContext<'_>,
@@ -126,7 +131,7 @@ fn spawn_gpu_preview_prewarm(
             let result = RawGpuPipeline::prewarm_preview_template_with_cache(
                 &device,
                 &queue,
-                crate::pipeline::CfaKind::Bayer,
+                gpu_preview_prewarm_cfa_kind(),
                 persistent_cache,
             )
             .map_err(|error| format!("GPU preview prewarm failed: {error:#}"));
@@ -2397,5 +2402,16 @@ impl AurawApp {
                 self.on_library_batch_load_finished(false, frame);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_invariant_tests {
+    use super::gpu_preview_prewarm_cfa_kind;
+    use crate::pipeline::CfaKind;
+
+    #[test]
+    fn preview_prewarm_uses_the_bayer_template_explicitly() {
+        assert_eq!(gpu_preview_prewarm_cfa_kind(), CfaKind::Bayer);
     }
 }

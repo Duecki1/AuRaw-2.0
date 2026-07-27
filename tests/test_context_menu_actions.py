@@ -62,11 +62,8 @@ def test_mask_groups_have_serialized_final_inversion() -> None:
 
 
 
-def test_desktop_library_select_mode_uses_existing_context_menu_for_bulk_actions() -> None:
-    assert 'if desktop_selection_mode { "Cancel" } else { "Select" }' in LIBRARY
-    assert 'app.library.begin_selection()' in LIBRARY
-    assert 'if app.library.selection_mode() {' in LIBRARY
-    assert 'selected_sources.remove(&source)' in LIBRARY
+def test_desktop_library_selection_context_menu_offers_bulk_actions() -> None:
+    # Selection state transitions and labels are native LibraryState tests.
     assert 'response.context_menu(|ui|' in LIBRARY
     assert 'Duplicate selected (RAW + sidecars)' in LIBRARY
     assert 'Reset adjustments for selected' in LIBRARY
@@ -75,20 +72,13 @@ def test_desktop_library_select_mode_uses_existing_context_menu_for_bulk_actions
     assert 'LibraryCardAction::ResetAdjustments(' in LIBRARY
     assert 'LibraryCardAction::Delete(context_paths.clone())' in LIBRARY
 
-def test_android_thumbnail_long_press_enters_multi_selection_without_opening_photo() -> None:
+def test_android_library_bulk_actions_keep_the_jni_bridge_contract() -> None:
     android_bridge = (ROOT / "src/android.rs").read_text(encoding="utf-8")
     android_activity = (
         ROOT / "android/app/src/main/java/de/duecki/auraw/AuRawActivity.java"
     ).read_text(encoding="utf-8")
 
-    assert "response.secondary_clicked()" in LIBRARY
-    assert "selected_sources.insert(source.clone())" in LIBRARY
-    assert "app.library.selection_mode() && app.library.selected_sources.is_empty()" in LIBRARY
-    assert "selected_sources.remove(&source)" in LIBRARY
-    assert '"{} selected"' in LIBRARY
-    assert 'ui.button("Cancel")' in LIBRARY
-    assert "set_back_navigation_active(true)" in LIBRARY
-    assert 'let LibrarySource::Android {' in LIBRARY
+    # Touch-selection state transitions are exercised by native LibraryState tests.
     assert '"Export selected…"' in LIBRARY
     assert '"Duplicate selected (RAW + sidecars)"' in LIBRARY
     assert "reset_android_library_adjustments" in LIBRARY
@@ -105,12 +95,9 @@ def test_android_thumbnail_long_press_enters_multi_selection_without_opening_pho
 
 def test_android_library_uses_one_shared_selection_overflow_instead_of_card_menus() -> None:
     ui = (ROOT / "src/ui/mod.rs").read_text(encoding="utf-8")
+    # Button geometry is covered by native egui Rect invariants.
     assert 'fn android_overflow_menu' in ui
-    assert 'painter.circle_filled(' in ui
-    assert 'ui.interact(button_rect, id, Sense::click())' in ui
     assert 'Popup::menu(&response).show(add_contents)' in ui
-    assert 'Do not use `Ui::menu_button` here' in ui
-    assert 'RichText::new("⋮")' not in ui
     assert 'android-library-selection-overflow' in LIBRARY
     assert 'android_selection_menu(' in LIBRARY
     assert 'android-library-card-overflow' not in LIBRARY
@@ -119,21 +106,11 @@ def test_android_library_uses_one_shared_selection_overflow_instead_of_card_menu
     assert 'Delete selected' in LIBRARY
 
 
-def test_android_library_import_fab_draws_centered_plus_geometry() -> None:
-    assert 'egui::Button::new("")' in LIBRARY
-    assert 'let center = response.rect.center();' in LIBRARY
-    assert 'center.x - half' in LIBRARY
-    assert 'center.y - half' in LIBRARY
-    assert 'RichText::new("+")' not in LIBRARY
-
-
 def test_android_mask_cards_have_visible_overflow_menu_buttons() -> None:
     assert 'android-mask-group-overflow' in MASK_UI
     assert 'android-submask-overflow' in MASK_UI
     assert MASK_UI.count('crate::ui::android_overflow_menu(') >= 2
     assert MASK_UI.count('&& !overflow_clicked') >= 2
-    assert 'response.rect,\n                            menu_id,\n                            22.0,' in MASK_UI
-    assert 'response.rect,\n                                    menu_id,\n                                    20.0,' in MASK_UI
 
 
 def test_desktop_library_export_context_menu_supports_single_and_batch_destinations() -> None:
