@@ -226,6 +226,20 @@ struct LibraryAiMaskRefreshPrompt {
     paths: Vec<PathBuf>,
 }
 
+#[cfg(not(target_os = "android"))]
+struct RawImportResult {
+    imported: Vec<PathBuf>,
+    already_present: usize,
+    ignored: usize,
+    failures: Vec<String>,
+}
+
+#[cfg(not(target_os = "android"))]
+enum RawImportOutcome {
+    Imported(PathBuf),
+    AlreadyPresent,
+}
+
 #[cfg(target_os = "android")]
 #[derive(Clone)]
 struct LibraryAiMaskRefreshPrompt {
@@ -255,6 +269,8 @@ pub(crate) struct LibraryState {
     selection_mode: bool,
     #[cfg(not(target_os = "android"))]
     file_action_receiver: Option<mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
+    #[cfg(not(target_os = "android"))]
+    raw_import_receiver: Option<mpsc::Receiver<RawImportResult>>,
     export_dialog: Option<LibraryExportDialog>,
     adjustment_paste_dialog: Option<LibraryAdjustmentPasteDialog>,
     ai_mask_refresh_prompt: Option<LibraryAiMaskRefreshPrompt>,
@@ -288,6 +304,7 @@ impl LibraryState {
             selected_sources: HashSet::new(),
             selection_mode: false,
             file_action_receiver: None,
+            raw_import_receiver: None,
             export_dialog: None,
             adjustment_paste_dialog: None,
             ai_mask_refresh_prompt: None,
@@ -424,12 +441,12 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     fn file_action_in_progress(&self) -> bool {
-        self.file_action_receiver.is_some()
+        self.file_action_receiver.is_some() || self.raw_import_receiver.is_some()
     }
 
     #[cfg(not(target_os = "android"))]
     fn duplicate_raws_with_sidecars(&mut self, raw_paths: Vec<PathBuf>, context: &egui::Context) {
-        if self.file_action_receiver.is_some() {
+        if self.file_action_in_progress() {
             self.status = "Another library file action is still running.".to_owned();
             return;
         }
@@ -472,6 +489,74 @@ impl LibraryState {
         if let Err(error) = spawn {
             self.file_action_receiver = None;
             self.status = format!("Could not start duplicate operation: {error}");
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn import_dropped_raws(
+        &mut self,
+        source_paths: Vec<PathBuf>,
+        context: &egui::Context,
+    ) {
+        if self.file_action_in_progress() {
+            self.status = "Another library file action is still running.".to_owned();
+            return;
+        }
+        let Some(folder) = self.folder.clone() else {
+            self.status = "Open a library folder before dropping RAW files.".to_owned();
+            return;
+        };
+        if source_paths.is_empty() {
+            return;
+        }
+
+        let item_count = source_paths.len();
+        let (sender, receiver) = mpsc::channel();
+        self.raw_import_receiver = Some(receiver);
+        self.status = format!(
+            "Importing {item_count} dropped {} into {}…",
+            if item_count == 1 { "item" } else { "items" },
+            folder.display()
+        );
+        let repaint = context.clone();
+        let spawn = std::thread::Builder::new()
+            .name("auraw-library-drop-import".to_owned())
+            .spawn(move || {
+                let mut imported = Vec::new();
+                let mut already_present = 0usize;
+                let mut ignored = 0usize;
+                let mut failures = Vec::new();
+                let mut seen_sources = HashSet::new();
+
+                for source in source_paths {
+                    let source_key = fs::canonicalize(&source).unwrap_or_else(|_| source.clone());
+                    if !seen_sources.insert(source_key) {
+                        ignored += 1;
+                        continue;
+                    }
+                    if !source.is_file() || !is_supported_raw_path(&source) {
+                        ignored += 1;
+                        continue;
+                    }
+
+                    match import_raw_into_folder(&source, &folder) {
+                        Ok(RawImportOutcome::Imported(destination)) => imported.push(destination),
+                        Ok(RawImportOutcome::AlreadyPresent) => already_present += 1,
+                        Err(error) => failures.push(error),
+                    }
+                }
+
+                let _ = sender.send(RawImportResult {
+                    imported,
+                    already_present,
+                    ignored,
+                    failures,
+                });
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.raw_import_receiver = None;
+            self.status = format!("Could not start RAW import: {error}");
         }
     }
 
@@ -629,9 +714,33 @@ impl LibraryState {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn poll_dropped_raw_import(&mut self, context: &egui::Context) {
+        let imported = self
+            .raw_import_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match imported {
+            Some(Ok(result)) => {
+                self.raw_import_receiver = None;
+                if !result.imported.is_empty() {
+                    self.refresh(context);
+                }
+                self.status = raw_import_status(&result);
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.raw_import_receiver = None;
+                self.status = "The dropped RAW import stopped unexpectedly.".to_owned();
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+    }
+
     fn poll(&mut self, context: &egui::Context) {
         #[cfg(not(target_os = "android"))]
         {
+            self.poll_dropped_raw_import(context);
+
             let completed = self
                 .file_action_receiver
                 .as_ref()
@@ -1820,6 +1929,117 @@ fn copy_file_create_new(source: &Path, destination: &Path) -> io::Result<()> {
         let _ = fs::set_permissions(destination, metadata.permissions());
     }
     result.map(|_| ())
+}
+
+#[cfg(not(target_os = "android"))]
+fn import_raw_into_folder(source: &Path, folder: &Path) -> Result<RawImportOutcome, String> {
+    let original_name = source
+        .file_name()
+        .map(OsString::from)
+        .ok_or_else(|| format!("{} has no file name", source.display()))?;
+    let stem = source
+        .file_stem()
+        .map(OsString::from)
+        .unwrap_or_else(|| original_name.clone());
+    let extension = source.extension().map(OsString::from);
+
+    for number in 0..=10_000usize {
+        let file_name = if number == 0 {
+            original_name.clone()
+        } else {
+            let mut file_name = stem.clone();
+            file_name.push(format!(" ({number})"));
+            if let Some(extension) = &extension {
+                file_name.push(".");
+                file_name.push(extension);
+            }
+            file_name
+        };
+        let destination = folder.join(file_name);
+
+        if destination.exists() {
+            if same_existing_file(source, &destination) {
+                return Ok(RawImportOutcome::AlreadyPresent);
+            }
+            continue;
+        }
+
+        match copy_file_create_new(source, &destination) {
+            Ok(()) => {
+                if let Err(error) = crate::file_ops::sync_parent_directory(folder) {
+                    log::warn!(
+                        "could not sync RAW import folder {} after copying {}: {error}",
+                        folder.display(),
+                        destination.display()
+                    );
+                }
+                return Ok(RawImportOutcome::Imported(destination));
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not import {} into {}: {error}",
+                    source.display(),
+                    folder.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "Could not find an unused name for {} in {}",
+        source.display(),
+        folder.display()
+    ))
+}
+
+#[cfg(not(target_os = "android"))]
+fn same_existing_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn raw_import_status(result: &RawImportResult) -> String {
+    let mut parts = Vec::new();
+    if !result.imported.is_empty() {
+        parts.push(format!(
+            "Imported {} RAW {}",
+            result.imported.len(),
+            if result.imported.len() == 1 {
+                "file"
+            } else {
+                "files"
+            }
+        ));
+    }
+    if result.already_present > 0 {
+        parts.push(format!(
+            "{} already in this folder",
+            result.already_present
+        ));
+    }
+    if result.ignored > 0 {
+        parts.push(format!(
+            "ignored {} unsupported or inaccessible {}",
+            result.ignored,
+            if result.ignored == 1 { "item" } else { "items" }
+        ));
+    }
+    if !result.failures.is_empty() {
+        parts.push(format!("{} failed", result.failures.len()));
+        parts.push(result.failures.join(" · "));
+    }
+    if parts.is_empty() {
+        "No RAW files were imported.".to_owned()
+    } else {
+        format!("{}.", parts.join("; "))
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -3749,10 +3969,10 @@ mod tests {
     use super::LibrarySource;
     use super::{
         balanced_justified_row_ranges, duplicate_raw_and_sidecar, elide_middle, format_file_size,
-        justified_thumbnail_layout, loaded_library_thumbnail, make_resident_thumbnail,
-        new_library_entry, run_thumbnail_workers, scan_folder, scan_folder_with_limit,
-        LibraryFileInfo, LibraryState, LoadedLibraryThumbnail, ScanEvent, ThumbnailRequest,
-        ThumbnailWorker,
+        import_raw_into_folder, justified_thumbnail_layout, loaded_library_thumbnail,
+        make_resident_thumbnail, new_library_entry, run_thumbnail_workers, scan_folder,
+        scan_folder_with_limit, LibraryFileInfo, LibraryState, LoadedLibraryThumbnail,
+        RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker,
     };
     use crate::pipeline::RawThumbnail;
     #[cfg(unix)]
@@ -3992,6 +4212,67 @@ mod tests {
             fs::read(crate::sidecar::sidecar_path_for_raw(&first)).unwrap(),
             b"sidecar-bytes"
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dropped_raw_import_preserves_the_name_and_never_overwrites() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-import-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_folder = root.join("source");
+        let library_folder = root.join("library");
+        fs::create_dir_all(&source_folder).unwrap();
+        fs::create_dir_all(&library_folder).unwrap();
+        let source = source_folder.join("photo.CR3");
+        fs::write(&source, b"new-raw").unwrap();
+
+        let first = import_raw_into_folder(&source, &library_folder).unwrap();
+        let first_path = match first {
+            RawImportOutcome::Imported(path) => path,
+            RawImportOutcome::AlreadyPresent => panic!("external source was not imported"),
+        };
+        assert_eq!(first_path.file_name().unwrap(), "photo.CR3");
+        assert_eq!(fs::read(&first_path).unwrap(), b"new-raw");
+
+        fs::write(&source, b"newer-raw").unwrap();
+        let second = import_raw_into_folder(&source, &library_folder).unwrap();
+        let second_path = match second {
+            RawImportOutcome::Imported(path) => path,
+            RawImportOutcome::AlreadyPresent => panic!("changed external source was not imported"),
+        };
+        assert_eq!(second_path.file_name().unwrap(), "photo (1).CR3");
+        assert_eq!(fs::read(&first_path).unwrap(), b"new-raw");
+        assert_eq!(fs::read(&second_path).unwrap(), b"newer-raw");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_raw_already_in_the_library_is_a_noop() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-import-noop-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let raw = root.join("photo.DNG");
+        fs::write(&raw, b"raw").unwrap();
+
+        assert!(matches!(
+            import_raw_into_folder(&raw, &root).unwrap(),
+            RawImportOutcome::AlreadyPresent
+        ));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
 
         fs::remove_dir_all(root).unwrap();
     }

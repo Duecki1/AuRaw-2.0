@@ -203,7 +203,7 @@ const SHADER_BAYER_RCD_P4: &str = concat!(
     "\n",
     include_str!("../shaders/noise.wgsl"),
     "\n",
-    include_str!("../shaders/pass4.wgsl")
+    include_str!(concat!(env!("OUT_DIR"), "/pass4.generated.wgsl"))
 );
 
 const SHADER_DUAL_DEMOSAIC: &str = concat!(
@@ -283,7 +283,7 @@ const SHADER_XTRANS_P7: &str = concat!(
     "\n",
     include_str!("../shaders/noise.wgsl"),
     "\n",
-    include_str!("../shaders/xtrans_pass7.wgsl")
+    include_str!(concat!(env!("OUT_DIR"), "/xtrans_pass7.generated.wgsl"))
 );
 
 const SHADER_TONE_ANALYSIS: &str = concat!(

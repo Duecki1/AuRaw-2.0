@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -6,12 +7,14 @@ mod lensfun_version;
 
 fn main() {
     configure_source_revision();
+    generate_shader_sources();
 
     for shader in [
         "src/shaders/common.wgsl",
         "src/shaders/profile.wgsl",
         "src/shaders/raw_sampling.wgsl",
         "src/shaders/noise.wgsl",
+        "src/shaders/noise_ca_finish.wgsl",
         "src/shaders/color.wgsl",
         "src/shaders/highlights.wgsl",
         "src/shaders/highlight_lch_pass.wgsl",
@@ -58,6 +61,82 @@ fn main() {
         configure_desktop_libraw();
         configure_desktop_lensfun();
     }
+}
+
+const SHADER_INCLUDE_DIRECTIVE: &str = "// @include ";
+
+fn generate_shader_sources() {
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR")
+            .unwrap_or_else(|error| panic!("Cargo did not set CARGO_MANIFEST_DIR: {error}")),
+    );
+    let shader_dir = manifest_dir.join("src/shaders");
+    let output_dir = PathBuf::from(
+        std::env::var("OUT_DIR")
+            .unwrap_or_else(|error| panic!("Cargo did not set OUT_DIR: {error}")),
+    );
+
+    for (template, output) in [
+        ("pass4.wgsl", "pass4.generated.wgsl"),
+        ("xtrans_pass7.wgsl", "xtrans_pass7.generated.wgsl"),
+    ] {
+        let template_path = shader_dir.join(template);
+        let generated = preprocess_shader(&template_path);
+        let output_path = output_dir.join(output);
+        fs::write(&output_path, generated)
+            .unwrap_or_else(|error| panic!("could not write {}: {error}", output_path.display()));
+    }
+}
+
+fn preprocess_shader(path: &Path) -> String {
+    let source = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+    let shader_dir = path
+        .parent()
+        .unwrap_or_else(|| panic!("shader template {} has no parent directory", path.display()));
+    let mut generated = String::with_capacity(source.len());
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(argument) = trimmed.strip_prefix(SHADER_INCLUDE_DIRECTIVE) {
+            let include = argument
+                .trim()
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} has an invalid shader include directive: {trimmed}",
+                        path.display()
+                    )
+                });
+            if include.is_empty()
+                || include.contains('\\')
+                || Path::new(include).file_name().and_then(|name| name.to_str()) != Some(include)
+            {
+                panic!(
+                    "{} includes an invalid shader fragment path: {include:?}",
+                    path.display()
+                );
+            }
+            let include_path = shader_dir.join(include);
+            let fragment = fs::read_to_string(&include_path).unwrap_or_else(|error| {
+                panic!("could not read {}: {error}", include_path.display())
+            });
+            generated.push_str("// BEGIN generated include: ");
+            generated.push_str(include);
+            generated.push('\n');
+            generated.push_str(&fragment);
+            if !fragment.ends_with('\n') {
+                generated.push('\n');
+            }
+            generated.push_str("// END generated include\n");
+        } else {
+            generated.push_str(line);
+            generated.push('\n');
+        }
+    }
+
+    generated
 }
 
 fn allow_no_libraw() -> bool {

@@ -1,6 +1,27 @@
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(not(target_os = "android"))]
+        let raw_drop_hovered = ui
+            .ctx()
+            .input(|input| !input.raw.hovered_files.is_empty());
+        #[cfg(not(target_os = "android"))]
+        {
+            let dropped_paths = ui.ctx().input(|input| {
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect::<Vec<_>>()
+            });
+            if !dropped_paths.is_empty() {
+                self.library
+                    .import_dropped_raws(dropped_paths, ui.ctx());
+            }
+            self.library.poll_dropped_raw_import(ui.ctx());
+        }
+
+        #[cfg(not(target_os = "android"))]
         self.poll_desktop_picker(frame);
         #[cfg(target_os = "android")]
         {
@@ -191,6 +212,10 @@ impl eframe::App for AurawApp {
             // so keep a tiny polling heartbeat until the terminal result arrives.
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
+        #[cfg(not(target_os = "android"))]
+        if raw_drop_hovered {
+            show_raw_drop_overlay(ui, self.library.folder());
+        }
         self.show_subject_dialogs(ui.ctx());
         self.show_inpainting_dialogs(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
@@ -208,4 +233,36 @@ impl eframe::App for AurawApp {
     fn on_exit(&mut self) {
         self.flush_sidecar_on_exit();
     }
+}
+
+#[cfg(not(target_os = "android"))]
+fn show_raw_drop_overlay(ui: &egui::Ui, folder: Option<&std::path::Path>) {
+    let rect = ui.max_rect().shrink(18.0);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("auraw-raw-drop-overlay"),
+    ));
+    painter.rect_filled(rect, 12.0, egui::Color32::from_black_alpha(210));
+    painter.rect_stroke(
+        rect,
+        12.0,
+        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+        egui::StrokeKind::Inside,
+    );
+    let message = folder.map_or_else(
+        || "Open a library folder before dropping RAW files".to_owned(),
+        |folder| {
+            format!(
+                "Drop RAW files to import them into\n{}",
+                folder.display()
+            )
+        },
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        message,
+        egui::FontId::proportional(18.0),
+        egui::Color32::WHITE,
+    );
 }
