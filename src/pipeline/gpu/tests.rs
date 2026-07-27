@@ -11,6 +11,84 @@ use super::{
 };
 use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
 
+fn shader_module(name: &str, source: &str) -> naga::Module {
+    naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("{name} did not parse: {error}"))
+}
+
+fn append_direct_call_names(
+    module: &naga::Module,
+    block: &naga::Block,
+    calls: &mut Vec<String>,
+) {
+    for statement in block {
+        match statement {
+            naga::Statement::Block(block) => append_direct_call_names(module, block, calls),
+            naga::Statement::If { accept, reject, .. } => {
+                append_direct_call_names(module, accept, calls);
+                append_direct_call_names(module, reject, calls);
+            }
+            naga::Statement::Switch { cases, .. } => {
+                for case in cases {
+                    append_direct_call_names(module, &case.body, calls);
+                }
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => {
+                append_direct_call_names(module, body, calls);
+                append_direct_call_names(module, continuing, calls);
+            }
+            naga::Statement::Call { function, .. } => {
+                calls.push(
+                    module.functions[*function]
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("<anonymous {:?}>", function)),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn entry_point_call_names(module: &naga::Module, entry_point: &str) -> Vec<String> {
+    let entry = module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == entry_point)
+        .unwrap_or_else(|| panic!("missing WGSL entry point {entry_point}"));
+    let mut calls = Vec::new();
+    append_direct_call_names(module, &entry.function.body, &mut calls);
+    calls
+}
+
+fn function_call_names(module: &naga::Module, function_name: &str) -> Vec<String> {
+    let (_, function) = module
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_deref() == Some(function_name))
+        .unwrap_or_else(|| panic!("missing WGSL function {function_name}"));
+    let mut calls = Vec::new();
+    append_direct_call_names(module, &function.body, &mut calls);
+    calls
+}
+
+fn function_name_count(module: &naga::Module, function_name: &str) -> usize {
+    module
+        .functions
+        .iter()
+        .filter(|(_, function)| function.name.as_deref() == Some(function_name))
+        .count()
+}
+
+fn call_position(calls: &[String], name: &str) -> usize {
+    calls
+        .iter()
+        .position(|call| call == name)
+        .unwrap_or_else(|| panic!("missing WGSL call to {name}; calls were {calls:?}"))
+}
+
 #[test]
 fn overlapping_soft_inpaint_patches_compose_in_stroke_order() {
     use half::f16;
@@ -42,6 +120,86 @@ fn overlapping_soft_inpaint_patches_compose_in_stroke_order() {
     for channel in 0..3 {
         assert!((unchanged[channel] - same_rgb[channel]).abs() < 1e-3);
     }
+}
+
+#[test]
+fn scene_graph_preserves_native_call_order_and_stage_ownership() {
+    let module = shader_module("Lightroom adjustments", SHADER_ADJUSTMENTS);
+
+    let prepare_calls = entry_point_call_names(&module, "prepare_scene_node");
+    assert!(
+        call_position(&prepare_calls, "apply_camera_characterization")
+            < call_position(&prepare_calls, "apply_exposure")
+    );
+    assert!(
+        call_position(&prepare_calls, "apply_exposure")
+            < call_position(&prepare_calls, "apply_local_exposure_nodes")
+    );
+    assert!(
+        call_position(&prepare_calls, "uses_explicit_scene_display_domains")
+            < call_position(&prepare_calls, "apply_optional_profile_look")
+    );
+
+    let tone_calls = entry_point_call_names(&module, "apply_scene_tone_node");
+    assert!(
+        call_position(&tone_calls, "apply_capture_sharpening")
+            < call_position(&tone_calls, "apply_profile_view_tone")
+    );
+    assert!(
+        call_position(&tone_calls, "apply_profile_view_tone")
+            < call_position(&tone_calls, "apply_lightroom_tone")
+    );
+
+    let local_calls = entry_point_call_names(&module, "apply_local_scene_tone_node");
+    assert!(local_calls
+        .iter()
+        .any(|call| call == "apply_local_scene_tone_nodes"));
+
+    let effects_calls = entry_point_call_names(&module, "apply_scene_effects_node");
+    assert!(!effects_calls
+        .iter()
+        .any(|call| call == "apply_capture_sharpening"));
+
+    let view_calls = function_call_names(&module, "apply_explicit_view_node");
+    let look = call_position(&view_calls, "apply_optional_profile_look");
+    assert!(look < call_position(&view_calls, "apply_dcp_view_transform"));
+    assert!(look < call_position(&view_calls, "apply_sigmoid_view_transform"));
+}
+
+#[test]
+fn generated_finish_shaders_define_each_shared_routine_once() {
+    for (name, source) in [
+        ("Bayer finish", SHADER_BAYER_RCD_P4),
+        ("X-Trans finish", SHADER_XTRANS_P7),
+    ] {
+        let module = shader_module(name, source);
+        for routine in [
+            "finish_warped_pos",
+            "finish_reference_bilinear",
+            "finish_apply_ca",
+            "finish_apply_legacy_chroma_denoise",
+            "finish_apply_sensor_denoise",
+        ] {
+            assert_eq!(
+                function_name_count(&module, routine),
+                1,
+                "{name} must contain exactly one {routine} definition"
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_finish_shaders_keep_cfa_specific_reference_adapters() {
+    let bayer = shader_module("Bayer finish", SHADER_BAYER_RCD_P4);
+    let bayer_calls = function_call_names(&bayer, "finish_reference_at");
+    assert!(bayer_calls.iter().any(|call| call == "clamp_pos"));
+    assert!(bayer_calls.iter().any(|call| call == "rcd_reference_at"));
+    assert!(!bayer_calls.iter().any(|call| call == "xt_high"));
+
+    let xtrans = shader_module("X-Trans finish", SHADER_XTRANS_P7);
+    let xtrans_calls = function_call_names(&xtrans, "finish_reference_at");
+    assert_eq!(xtrans_calls, vec!["xt_high".to_owned()]);
 }
 
 #[test]
@@ -569,41 +727,7 @@ fn adjustments_shader_contains_lightroom_style_controls() {
 }
 
 #[test]
-fn explicit_graph_keeps_profile_look_and_tone_after_scene_edits() {
-    let prepare_start = SHADER_ADJUSTMENTS.find("fn prepare_scene_node").unwrap();
-    let tone_start = SHADER_ADJUSTMENTS.find("fn apply_scene_tone_node").unwrap();
-    let effects_start = SHADER_ADJUSTMENTS
-        .find("fn apply_scene_effects_node")
-        .unwrap();
-    let view_start = SHADER_ADJUSTMENTS
-        .find("fn apply_explicit_view_node")
-        .unwrap();
-    let prepare = &SHADER_ADJUSTMENTS[prepare_start..tone_start];
-    let tone = &SHADER_ADJUSTMENTS[tone_start..effects_start];
-    let view = &SHADER_ADJUSTMENTS[view_start..];
-
-    let characterization = prepare
-        .find("var rgb = apply_camera_characterization(scene_working_at(pos))")
-        .unwrap();
-    let profile_exposure = prepare.find("let profile_exposure_ev").unwrap();
-    let exposure = prepare.find("rgb = apply_exposure(rgb)").unwrap();
-    assert!(characterization < profile_exposure && profile_exposure < exposure);
-    assert!(prepare.contains("if !uses_explicit_scene_display_domains()"));
-
-    let sharpen = tone
-        .find("rgb = apply_capture_sharpening(pos, rgb)")
-        .unwrap();
-    let adaptive_tone = tone.find("rgb = apply_lightroom_tone(rgb, pos)").unwrap();
-    let contrast = tone.find("rgb = apply_basic_contrast_value").unwrap();
-    assert!(sharpen < adaptive_tone && adaptive_tone < contrast);
-    assert!(tone.contains("if !uses_explicit_scene_display_domains()"));
-
-    let look = view.find("apply_optional_profile_look(scene_rgb)").unwrap();
-    let profile_tone = view.find("apply_dcp_view_transform(view_input)").unwrap();
-    let sigmoid = view
-        .find("apply_sigmoid_view_transform(view_input)")
-        .unwrap();
-    assert!(look < profile_tone && look < sigmoid);
+fn profile_tables_preserve_value_channel_and_maximum_lookup() {
     assert!(SHADER_ADJUSTMENTS.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
     assert!(SHADER_ADJUSTMENTS.contains("return profile_data[offset + maximum].x"));
 }

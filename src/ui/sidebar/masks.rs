@@ -1,3 +1,19 @@
+fn mask_component_badge(component_index: usize, combine: MaskCombineMode) -> &'static str {
+    if component_index == 0 {
+        "BASE"
+    } else {
+        match combine {
+            MaskCombineMode::Add => egui_phosphor::regular::PLUS,
+            MaskCombineMode::Subtract => egui_phosphor::regular::MINUS,
+            MaskCombineMode::Intersect => egui_phosphor::regular::INTERSECT,
+        }
+    }
+}
+
+fn mask_creation_icon() -> &'static str {
+    egui_phosphor::regular::PLUS
+}
+
 #[derive(Clone, Debug)]
 enum MaskRenameTarget {
     Group(usize),
@@ -250,15 +266,8 @@ impl Sidebar {
                             let component = &app.masks.masks[index].components[component_index];
                             let component_name = component.name.clone();
                             let component_enabled = component.enabled;
-                            let component_badge = if component_index == 0 {
-                                "BASE"
-                            } else {
-                                match component.combine {
-                                    MaskCombineMode::Add => egui_phosphor::regular::PLUS,
-                                    MaskCombineMode::Subtract => egui_phosphor::regular::MINUS,
-                                    MaskCombineMode::Intersect => egui_phosphor::regular::INTERSECT,
-                                }
-                            };
+                            let component_badge =
+                                mask_component_badge(component_index, component.combine);
                             let source_is_dragging = submask_drag.as_ref().is_some_and(|drag| {
                                 drag.source_mask == index
                                     && drag.source_component == component_index
@@ -1071,7 +1080,7 @@ impl Sidebar {
             |ui| {
                 ui.spacing_mut().interact_size = size;
                 ui.menu_button(
-                    egui::RichText::new(egui_phosphor::regular::PLUS)
+                    egui::RichText::new(mask_creation_icon())
                         .size(20.0)
                         .strong(),
                     |ui| {
@@ -1099,7 +1108,7 @@ impl Sidebar {
             |ui| {
                 ui.spacing_mut().interact_size = size;
                 ui.menu_button(
-                    egui::RichText::new(egui_phosphor::regular::PLUS)
+                    egui::RichText::new(mask_creation_icon())
                         .size(18.0)
                         .strong(),
                     |ui| {

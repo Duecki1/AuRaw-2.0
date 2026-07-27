@@ -40,24 +40,8 @@ def test_capture_sharpening_is_edge_aware_luminance_preserving_and_scale_aware()
     assert "capture_local_ev_bounds" in CAPTURE_DETAIL
     assert "capture_impulse_coherence" in CAPTURE_DETAIL
     assert "return max(rgb * exp2(sharpen_ev)" in CAPTURE_DETAIL
-    assert "fn apply_scene_tone_node" in ADJUSTMENTS
-    sharpen_stage = ADJUSTMENTS[
-        ADJUSTMENTS.index("fn apply_scene_tone_node") :
-        ADJUSTMENTS.index("fn apply_local_scene_tone_node")
-    ]
-    sharpen = sharpen_stage.index("rgb = apply_capture_sharpening(pos, rgb);")
-    profile_tone = sharpen_stage.index("rgb = apply_profile_view_tone(rgb);")
-    adaptive_tone = sharpen_stage.index("rgb = apply_lightroom_tone(rgb, pos);")
-    assert sharpen < profile_tone < adaptive_tone
-    local_tone_stage = ADJUSTMENTS[
-        ADJUSTMENTS.index("fn apply_local_scene_tone_node") :
-        ADJUSTMENTS.index("fn apply_scene_effects_node")
-    ]
-    assert "rgb = apply_local_scene_tone_nodes(pos, rgb);" in local_tone_stage
-    assert "rgb = apply_capture_sharpening(pos, rgb);" not in ADJUSTMENTS[
-        ADJUSTMENTS.index("fn apply_scene_effects_node") :
-        ADJUSTMENTS.index("fn prepare_glow_source")
-    ]
+    # Stage ordering is checked from Naga's WGSL call graph in
+    # src/pipeline/gpu/tests.rs rather than by slicing source text.
     assert "exposure.sharpen_amount.abs() > 1e-6" in PROCESSING
     optional_gate = GPU[
         GPU.index("fn needs_intermediate_adjustment_passes") : GPU.index("struct Pass")

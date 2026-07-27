@@ -7,6 +7,23 @@ pub mod settings;
 pub mod sidebar;
 pub mod top_bar;
 
+#[cfg(any(target_os = "android", test))]
+const ANDROID_OVERFLOW_INSET: f32 = 5.0;
+
+#[cfg(any(target_os = "android", test))]
+fn android_overflow_button_rect(
+    anchor_rect: eframe::egui::Rect,
+    edge: f32,
+) -> eframe::egui::Rect {
+    eframe::egui::Rect::from_min_size(
+        eframe::egui::pos2(
+            anchor_rect.right() - edge - ANDROID_OVERFLOW_INSET,
+            anchor_rect.top() + ANDROID_OVERFLOW_INSET,
+        ),
+        eframe::egui::vec2(edge, edge),
+    )
+}
+
 #[cfg(target_os = "android")]
 pub(crate) fn android_overflow_menu<R>(
     ui: &mut eframe::egui::Ui,
@@ -17,17 +34,8 @@ pub(crate) fn android_overflow_menu<R>(
 ) -> eframe::egui::Response {
     use eframe::egui::{self, Popup};
 
-    const INSET: f32 = 5.0;
-    let button_rect = egui::Rect::from_min_size(
-        egui::pos2(
-            anchor_rect.right() - edge - INSET,
-            anchor_rect.top() + INSET,
-        ),
-        egui::vec2(edge, edge),
-    );
-
     let response = ui.put(
-        button_rect,
+        android_overflow_button_rect(anchor_rect, edge),
         egui::Button::new(
             egui::RichText::new(egui_phosphor::regular::DOTS_THREE_VERTICAL).size(edge * 0.52),
         )
@@ -51,4 +59,22 @@ pub(crate) fn mask_component_color(index: usize) -> eframe::egui::Color32 {
         Color32::from_rgb(180, 205, 88),
     ];
     COLORS[index % COLORS.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{android_overflow_button_rect, ANDROID_OVERFLOW_INSET};
+    use eframe::egui;
+
+    #[test]
+    fn android_overflow_button_stays_inside_the_card_anchor() {
+        let anchor = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(120.0, 80.0));
+        let button = android_overflow_button_rect(anchor, 22.0);
+
+        assert_eq!(button.size(), egui::vec2(22.0, 22.0));
+        assert_eq!(button.right(), anchor.right() - ANDROID_OVERFLOW_INSET);
+        assert_eq!(button.top(), anchor.top() + ANDROID_OVERFLOW_INSET);
+        assert!(anchor.contains(button.min));
+        assert!(anchor.contains(button.max));
+    }
 }

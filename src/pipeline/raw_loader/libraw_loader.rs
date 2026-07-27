@@ -41,6 +41,17 @@ fn resolve_default_exposure_ev(baseline_exposure: Option<f32>, profile_offset_ev
     // renderer-only exposure constant. Keep pathological metadata bounded.
     (baseline + profile_offset_ev).clamp(-5.0, 5.0)
 }
+
+fn apply_resolved_default_exposure(
+    camera_profile: &mut CameraProfile,
+    baseline_exposure: Option<f32>,
+) {
+    camera_profile.default_exposure_ev = resolve_default_exposure_ev(
+        baseline_exposure,
+        camera_profile.profile_exposure_offset_ev,
+    );
+}
+
 #[cfg(target_os = "android")]
 const MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
@@ -1297,8 +1308,7 @@ unsafe fn loaded_raw_from_context(
         .map(|profile| CameraProfile::from_dcp(profile, profile_weight))
         .unwrap_or_default();
     let baseline_exposure = valid_baseline_exposure(color.dng_levels.baseline_exposure);
-    camera_profile.default_exposure_ev =
-        resolve_default_exposure_ev(baseline_exposure, camera_profile.profile_exposure_offset_ev);
+    apply_resolved_default_exposure(&mut camera_profile, baseline_exposure);
     if !color.profile.is_null() && color.profile_length > 0 {
         let length = usize::try_from(color.profile_length).unwrap_or(0);
         if length <= 16 * 1024 * 1024 {
@@ -2914,12 +2924,13 @@ fn check_libraw(err: i32, action: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjusted_camera_transform, black_levels, cam_to_working, canonical_cfa_map,
-        canonicalize_f32x4, cfa_kind_from_filters, effective_black_level, identity_4x4,
-        load_raw_thumbnail, matching_thumbnail_orientation, oriented_source_pos,
+        adjusted_camera_transform, apply_resolved_default_exposure, black_levels, cam_to_working,
+        canonical_cfa_map, canonicalize_f32x4, cfa_kind_from_filters, effective_black_level,
+        identity_4x4, load_raw_thumbnail, matching_thumbnail_orientation, oriented_source_pos,
         resolve_default_exposure_ev, valid_baseline_exposure, validate_embedded_thumbnail_metadata,
-        white_balance, white_levels, CameraColorModel, CameraWhiteBalanceModel, CfaKind,
-        DngColorEndpoint, MAX_EMBEDDED_THUMBNAIL_BYTES, MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
+        white_balance, white_levels, CameraColorModel, CameraProfile, CameraWhiteBalanceModel,
+        CfaKind, DngColorEndpoint, MAX_EMBEDDED_THUMBNAIL_BYTES,
+        MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
     };
 
     const RGBG: [u8; 4] = *b"RGBG";
@@ -2940,6 +2951,22 @@ mod tests {
                 .abs()
                 < 1e-6
         );
+    }
+
+    #[test]
+    fn resolved_default_exposure_updates_the_profile_without_accumulating() {
+        let mut profile = CameraProfile {
+            profile_exposure_offset_ev: 0.2,
+            ..CameraProfile::default()
+        };
+
+        apply_resolved_default_exposure(&mut profile, Some(-0.35));
+        assert!((profile.default_exposure_ev + 0.15).abs() < 1e-6);
+
+        // Re-resolving the same metadata replaces the value; it does not add
+        // the profile offset a second time.
+        apply_resolved_default_exposure(&mut profile, Some(-0.35));
+        assert!((profile.default_exposure_ev + 0.15).abs() < 1e-6);
     }
 
     #[test]

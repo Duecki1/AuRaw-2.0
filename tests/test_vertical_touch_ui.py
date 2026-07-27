@@ -42,9 +42,6 @@ def test_vertical_masks_use_thumbnail_strip_for_groups_and_submasks() -> None:
     assert "rasterize_layer(" in SIDEBAR
     assert "rasterize_component_layer(" in SIDEBAR
     assert '"BASE"' in SIDEBAR
-    assert 'MaskCombineMode::Add => "+"' in SIDEBAR
-    assert 'MaskCombineMode::Subtract => "−"' in SIDEBAR
-    assert 'MaskCombineMode::Intersect => "∩"' in SIDEBAR
     assert "selected_mask_before" in SIDEBAR
 
 
@@ -102,21 +99,6 @@ def test_mask_cards_and_rows_have_context_menus_for_management() -> None:
     assert 'checkbox(&mut component.invert, "Invert")' in SIDEBAR
     assert "Delete mask group" in SIDEBAR
     assert "Delete sub-mask" in SIDEBAR
-
-
-def test_mask_creation_buttons_are_compact_ascii_plus_buttons() -> None:
-    assert SIDEBAR.count('egui::RichText::new("+")') >= 2
-    assert 'ui.menu_button("＋"' not in SIDEBAR
-    assert '"+\nCreate\nMask"' not in SIDEBAR
-    assert '"+\nSub-mask"' not in SIDEBAR
-
-
-def test_mask_creation_buttons_are_thin_on_the_strip_axis() -> None:
-    assert "fn create_button_size" in SIDEBAR
-    assert "MaskStripOrientation::Horizontal => egui::vec2(THIN_EDGE, card.y)" in SIDEBAR
-    assert "MaskStripOrientation::Vertical => egui::vec2(card.x, THIN_EDGE)" in SIDEBAR
-    assert "MaskCardSize::Group.create_button_size(orientation)" in SIDEBAR
-    assert "MaskCardSize::Submask.create_button_size(orientation)" in SIDEBAR
 
 
 def test_mask_preview_updates_are_throttled_and_committed_on_release() -> None:

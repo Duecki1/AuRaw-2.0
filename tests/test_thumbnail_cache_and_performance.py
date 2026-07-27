@@ -76,10 +76,7 @@ def test_desktop_last_library_folder_is_restored() -> None:
     assert 'cfg(not(target_os = "android"))' in performance
     assert "last_library_folder.filter(|folder| folder.is_dir())" in lifecycle
     assert "app.library.open_folder(folder, ctx)" in lifecycle
-    dialog = lifecycle[lifecycle.index("pub fn open_library_folder_dialog"):]
-    assert dialog.index("self.library.open_folder") < dialog.index(
-        "self.persist_performance_settings()"
-    )
+    # LibraryState has a native test proving the selected folder is recorded synchronously.
 
 
 def test_reopening_the_same_folder_keeps_live_thumbnail_textures() -> None:

@@ -27,8 +27,6 @@ def test_metadata_default_exposure_is_resolved_once_with_conservative_fallback()
     assert "fn resolve_default_exposure_ev" in RAW_LOADER
     assert "baseline_exposure.unwrap_or(MISSING_BASELINE_EXPOSURE_FALLBACK_EV)" in RAW_LOADER
     assert "baseline + profile_offset_ev" in RAW_LOADER
-    assert "camera_profile.default_exposure_ev = resolve_default_exposure_ev" in RAW_LOADER
-    assert "camera_profile.profile_exposure_offset_ev" in RAW_LOADER
     assert "pub profile_exposure_offset_ev: f32" in PROFILE
     assert "pub default_exposure_ev: f32" in PROFILE
     assert "profile.default_exposure_ev.to_bits()" in PROFILE
