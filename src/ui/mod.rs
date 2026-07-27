@@ -7,6 +7,24 @@ pub mod settings;
 pub mod sidebar;
 pub mod top_bar;
 
+/// Keep desktop dialogs compact while constraining them to the usable viewport.
+/// Compact portrait screens additionally enable vertical scrolling so long
+/// model-download text remains reachable without extending below system bars.
+pub(crate) fn responsive_popup<'a>(
+    window: eframe::egui::Window<'a>,
+    ctx: &eframe::egui::Context,
+    preferred_width: f32,
+) -> eframe::egui::Window<'a> {
+    let available = ctx.content_rect().size() - eframe::egui::vec2(24.0, 24.0);
+    let available = eframe::egui::vec2(available.x.max(1.0), available.y.max(1.0));
+    let compact_portrait = available.x < 560.0 && available.y > available.x;
+    window
+        .default_width(preferred_width.min(available.x))
+        .max_width(available.x)
+        .max_height(available.y)
+        .vscroll(compact_portrait)
+}
+
 #[cfg(any(target_os = "android", test))]
 const ANDROID_OVERFLOW_INSET: f32 = 5.0;
 

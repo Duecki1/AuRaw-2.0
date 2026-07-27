@@ -209,7 +209,7 @@ impl Settings {
             let mut changed = false;
             changed |= ui
                 .checkbox(&mut settings.adjustments, "Adjustments")
-                .on_hover_text("Global light, color, tone curve, effects, color mixer, and RAW adjustment values.")
+                .on_hover_text("Global light, color, white-balance temperature/tint, tone curve, effects, color mixer, and RAW adjustment values.")
                 .changed();
             changed |= ui
                 .checkbox(&mut settings.geometry, "Geometry")
@@ -221,11 +221,11 @@ impl Settings {
                 .changed();
             changed |= ui
                 .checkbox(&mut settings.masks, "Normal masks")
-                .on_hover_text("Mask groups made only from brush, radial-gradient, and linear-gradient components, including their local adjustments.")
+                .on_hover_text("Brush, radial-gradient, and linear-gradient mask components, including their local adjustments. Mixed mask groups are split so disabling this never copies their manual components.")
                 .changed();
             changed |= ui
                 .checkbox(&mut settings.ai_masks, "AI masks")
-                .on_hover_text("Mask groups containing subject, background, object, luminance-range, or color-range components, including any manual refinements. Generated/source-dependent results are marked for regeneration on the destination image.")
+                .on_hover_text("Subject, background, object, luminance-range, and color-range components. Generated/source-dependent results are marked for regeneration on the destination image.")
                 .changed();
             changed |= ui
                 .checkbox(&mut settings.inpainting, "Inpainting")

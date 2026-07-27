@@ -54,6 +54,13 @@ def test_uncached_edited_library_cards_render_raw_plus_sidecar_before_fallbacks(
     assert "save_developed_thumbnail_cache" in LIBRARY
 
 
+def test_invalid_sidecar_falls_back_to_the_normal_raw_thumbnail() -> None:
+    render = LIBRARY[LIBRARY.index("fn render_uncached_developed_thumbnail") :]
+    render = render[: render.index("fn load_desktop_library_thumbnail")]
+    assert "Err(crate::sidecar::SidecarError::Invalid(error))" in render
+    assert "return Ok(None);" in render
+
+
 def test_library_sort_dropdown_supports_date_name_and_size_orders() -> None:
     assert 'ComboBox::from_id_salt("library-sort-order")' in LIBRARY
     for label in (

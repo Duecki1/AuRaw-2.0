@@ -851,14 +851,14 @@ impl Sidebar {
         };
         let mut save = false;
         let mut cancel = false;
-        egui::Window::new(title)
+        crate::ui::responsive_popup(egui::Window::new(title), ctx, 360.0)
             .id(egui::Id::new("mask-rename-dialog-window"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 let response = ui.add_sized(
-                    [280.0, ui.spacing().interact_size.y],
+                    [ui.available_width(), ui.spacing().interact_size.y],
                     egui::TextEdit::singleline(&mut dialog.name),
                 );
                 if dialog.request_focus {
