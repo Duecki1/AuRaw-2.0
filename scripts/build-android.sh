@@ -104,6 +104,7 @@ export CARGO_TARGET_DIR="$ROOT/target"
 unset CARGO_BUILD_TARGET CARGO_ENCODED_RUSTFLAGS RUSTFLAGS RUSTDOCFLAGS
 
 sh "$ROOT/scripts/build-android-libraw.sh" "$ABI"
+sh "$ROOT/scripts/build-android-lensfun.sh" "$ABI"
 
 case "$PROFILE" in
     release) CARGO_PROFILE=--release ;;
@@ -115,6 +116,7 @@ case "$PROFILE" in
 esac
 
 export AURAW_LIBRAW_ROOT="$ROOT/android/native/libraw/$ABI"
+export AURAW_LENSFUN_ROOT="$ROOT/android/native/lensfun/$ABI"
 rm -rf "$ROOT/android/app/src/main/jniLibs/$ABI"
 # shellcheck disable=SC2086
 cargo ndk -t "$ABI" -o "$ROOT/android/app/src/main/jniLibs" \
@@ -125,6 +127,7 @@ test -f "$CXX_RUNTIME"
 cp "$CXX_RUNTIME" "$ROOT/android/app/src/main/jniLibs/$ABI/libc++_shared.so"
 test -f "$ROOT/android/app/src/main/jniLibs/$ABI/libauraw.so"
 test -f "$ROOT/android/app/src/main/jniLibs/$ABI/libc++_shared.so"
+test -n "$(find "$AURAW_LENSFUN_ROOT/apk-assets/lensfun" -type f -name '*.xml' -print -quit)"
 
 if [ "$PROFILE" = release ]; then
     if ! FINAL_REVISION=$(sh "$ROOT/scripts/verify-source-revision.sh") \
@@ -135,4 +138,4 @@ if [ "$PROFILE" = release ]; then
     fi
 fi
 
-echo "Rust and LibRaw Android libraries are ready for Gradle ($ABI, $PROFILE)."
+echo "Rust, LibRaw, and Lensfun Android libraries are ready for Gradle ($ABI, $PROFILE)."

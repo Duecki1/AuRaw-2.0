@@ -95,6 +95,13 @@ Lens correction uses the Lensfun library and its camera/lens profile database.
 The Lensfun libraries are licensed under the GNU Lesser General Public License,
 version 3. Lensfun's bundled applications are licensed under GPL-3.0, and the
 profile database is licensed under Creative Commons Attribution-ShareAlike 3.0.
-Packaged AuRaw builds may redistribute the Lensfun shared library and database;
+Packaged AuRaw builds may redistribute the Lensfun shared or static library and database;
 the corresponding license texts and source information remain available from
 the Lensfun project.
+
+## Android Lensfun dependencies
+
+Android Lensfun builds include GLib (LGPL-2.1-or-later), PCRE2 (BSD-3-Clause),
+libffi (MIT), and zlib (zlib license) as static dependencies of the native
+AuRaw library. Their source releases and licenses remain available from their
+respective upstream projects.

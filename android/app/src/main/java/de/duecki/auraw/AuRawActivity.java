@@ -14,6 +14,9 @@ import android.widget.Toast;
 import android.window.OnBackInvokedDispatcher;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 
 /** Thin Android/JNI bridge. Stateful storage work lives in focused delegates. */
 public final class AuRawActivity extends NativeActivity {
@@ -189,6 +192,42 @@ public final class AuRawActivity extends NativeActivity {
 
     public String gpuPipelineCacheDir() {
         return new File(getCacheDir(), "gpu-pipeline-cache").getAbsolutePath();
+    }
+
+    /** Materializes the bundled Lensfun XML files because its native API requires paths. */
+    public String lensfunDatabaseDir() throws IOException {
+        File destination = new File(getFilesDir(), "lensfun");
+        copyAssetTree("lensfun", destination);
+        return destination.getAbsolutePath();
+    }
+
+    private void copyAssetTree(String assetPath, File destination) throws IOException {
+        String[] children = getAssets().list(assetPath);
+        if (children != null && children.length > 0) {
+            if (!destination.isDirectory() && !destination.mkdirs()) {
+                throw new IOException("Could not create Lensfun directory " + destination);
+            }
+            for (String child : children) {
+                copyAssetTree(assetPath + "/" + child, new File(destination, child));
+            }
+            return;
+        }
+
+        File parent = destination.getParentFile();
+        if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+            throw new IOException("Could not create Lensfun directory for " + destination);
+        }
+        try (InputStream input = getAssets().open(assetPath);
+                FileOutputStream output = new FileOutputStream(destination, false)) {
+            byte[] buffer = new byte[32 * 1024];
+            int count;
+            while ((count = input.read(buffer)) >= 0) {
+                if (count > 0) {
+                    output.write(buffer, 0, count);
+                }
+            }
+            output.getFD().sync();
+        }
     }
 
     public String rawLibraryLocation() { return storageManager.rawLibraryLocation(); }

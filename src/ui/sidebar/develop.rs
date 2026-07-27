@@ -20,10 +20,11 @@ impl Sidebar {
                     .color(ui.visuals().weak_text_color()),
             );
 
+            let lens_correction_busy = app.lens_correction_busy();
             let state = &mut app.lens_correction;
             let has_selection = state.selected_lens().is_some();
             let enabled_response = ui.add_enabled(
-                state.catalog.available && has_selection,
+                state.catalog.available && has_selection && !lens_correction_busy,
                 egui::Checkbox::new(&mut state.enabled, "Enabled"),
             );
             if enabled_response.changed() {
@@ -66,7 +67,9 @@ impl Sidebar {
             ui.add_space(4.0);
             let makers = state.makers();
             let previous_maker = state.selected_maker.clone();
-            ui.add_enabled_ui(state.catalog.available && !makers.is_empty(), |ui| {
+            ui.add_enabled_ui(
+                state.catalog.available && !makers.is_empty() && !lens_correction_busy,
+                |ui| {
                 ui.label("Brand");
                 egui::ComboBox::from_id_salt("lens-correction-brand")
                     .selected_text(if state.selected_maker.is_empty() {
@@ -88,7 +91,8 @@ impl Sidebar {
                             );
                         }
                     });
-            });
+                },
+            );
             let mut selection_changed = state.selected_maker != previous_maker;
             if selection_changed {
                 let first_model = state
@@ -101,7 +105,9 @@ impl Sidebar {
 
             let models = state.models_for_maker(&state.selected_maker);
             let previous_model = state.selected_model.clone();
-            ui.add_enabled_ui(state.catalog.available && !models.is_empty(), |ui| {
+            ui.add_enabled_ui(
+                state.catalog.available && !models.is_empty() && !lens_correction_busy,
+                |ui| {
                 ui.label("Lens");
                 egui::ComboBox::from_id_salt("lens-correction-model")
                     .selected_text(if state.selected_model.is_empty() {
@@ -115,7 +121,8 @@ impl Sidebar {
                             ui.selectable_value(&mut state.selected_model, model.clone(), model);
                         }
                     });
-            });
+                },
+            );
             selection_changed |= state.selected_model != previous_model;
             if selection_changed {
                 state.applied = false;

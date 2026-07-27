@@ -47,6 +47,7 @@ fn main() {
         "PKG_CONFIG_PATH",
         "LIBRAW_NO_PKG_CONFIG",
         "AURAW_LIBRAW_ROOT",
+        "AURAW_LENSFUN_ROOT",
         "AURAW_ALLOW_NO_LIBRAW",
         "BINDGEN_EXTRA_CLANG_ARGS",
     ] {
@@ -58,6 +59,7 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "android" {
         configure_android_libraw();
+        configure_android_lensfun();
     } else {
         configure_desktop_libraw();
         configure_desktop_lensfun();
@@ -201,6 +203,54 @@ fn configure_android_libraw() {
     println!("cargo:rustc-link-lib=android");
 
     generate_bindings(&header, &[root.join("include")]);
+}
+
+fn configure_android_lensfun() {
+    let target = std::env::var("TARGET").expect("Cargo did not set TARGET");
+    let abi =
+        android_abi(&target).unwrap_or_else(|| panic!("unsupported Android target: {target}"));
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let root = std::env::var_os("AURAW_LENSFUN_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("android/native/lensfun").join(abi));
+    let header = root.join("include/lensfun/lensfun.h");
+    let library = root.join("lib/liblensfun.a");
+
+    if !header.is_file() || !library.is_file() {
+        panic!(
+            "Android Lensfun is not built at {}. Run `scripts/build-android-lensfun.sh {abi}` first, or use `scripts/build-android.sh {abi}` to build the complete APK native library.",
+            root.display()
+        );
+    }
+
+    println!(
+        "cargo:rustc-link-search=native={}",
+        root.join("lib").display()
+    );
+    for library in [
+        "lensfun",
+        "glib-2.0",
+        "pcre2-8",
+        "ffi",
+        "z",
+        "intl",
+        "iconv",
+        "charset",
+    ] {
+        println!("cargo:rustc-link-lib=static={library}");
+    }
+
+    let header_source = std::fs::read_to_string(&header)
+        .unwrap_or_else(|error| panic!("could not read {}: {error}", header.display()));
+    let version = lensfun_version::parse_lensfun_header_version(&header_source)
+        .and_then(|version| {
+            lensfun_version::validate_supported_lensfun_version(&version.to_string())?;
+            Ok(version)
+        })
+        .unwrap_or_else(|error| panic!("{}: {error}", header.display()));
+    generate_lensfun_bindings(&header, &[root.join("include")]);
+    println!("cargo:rustc-env=AURAW_LENSFUN_BUILD_VERSION={version}");
+    println!("cargo:rustc-cfg=lensfun_available");
 }
 
 fn configure_desktop_lensfun() {

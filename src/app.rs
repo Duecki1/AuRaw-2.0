@@ -317,6 +317,21 @@ enum LoadEvent {
     Finished(Result<LoadedPreview, String>),
 }
 
+#[cfg(target_os = "android")]
+struct PreparedLensCorrection {
+    full_raw: Arc<LoadedRaw>,
+    preview_raw: Arc<LoadedRaw>,
+    applied_label: Option<String>,
+    selection: Option<LensfunLens>,
+    preview_quality: PreviewQuality,
+}
+
+#[cfg(target_os = "android")]
+struct LensCorrectionEvent {
+    generation: u64,
+    result: Result<PreparedLensCorrection, String>,
+}
+
 #[derive(Clone)]
 struct SidecarSaveRequest {
     target: crate::sidecar::SidecarTarget,
@@ -622,6 +637,15 @@ pub struct AurawApp {
     target_exposure: ExposureParams,
     pending_stage: Option<ProcessingStage>,
     lens_correction_dirty: bool,
+    #[cfg(target_os = "android")]
+    lens_correction_generation: u64,
+    #[cfg(target_os = "android")]
+    lens_correction_receiver: Option<mpsc::Receiver<LensCorrectionEvent>>,
+    #[cfg(target_os = "android")]
+    lens_original_preview_cache: Option<(PreviewQuality, Arc<LoadedRaw>)>,
+    #[cfg(target_os = "android")]
+    lens_corrected_preview_cache:
+        Option<(LensfunLens, PreviewQuality, Arc<LoadedRaw>, Arc<LoadedRaw>)>,
     load_receiver: Option<mpsc::Receiver<LoadEvent>>,
     loading_label: Option<String>,
     export_receiver: Option<mpsc::Receiver<ExportEvent>>,

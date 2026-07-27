@@ -9,7 +9,7 @@ the application entry point and the system file-picker bridge.
 - Rust with the Android target for the device (normally
   `aarch64-linux-android`)
 - Android SDK 35 and Android NDK 28.2.13676358
-- Android SDK CMake 3.22.1 (with its bundled Ninja), a JDK, host `libclang`, and Gradle 8.11.1 or newer in the Gradle 8 series (CI uses 8.11.1)
+- Android SDK CMake 3.22.1 (with its bundled Ninja), a JDK, host `libclang`, and Gradle 8.11.1 or newer in the Gradle 8 series (CI uses 8.11.1). The first Lensfun build automatically bootstraps a pinned Meson build tool in `android/native/tools/`.
 - `cargo-ndk` 4.1.2 (`cargo install cargo-ndk --version 4.1.2 --locked`)
 
 Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
@@ -61,19 +61,22 @@ runs Build Tools 35.0.0 `zipalign -c -P 16 -v 4`. CI runs the same check on the
 arm64 debug APK. Runtime testing should also be performed on a 16 KB Android 15
 or newer device/emulator (`adb shell getconf PAGE_SIZE` must report `16384`).
 
-To build only the native LibRaw and Rust library without packaging an APK:
+To build only the native LibRaw, Lensfun, and Rust libraries without packaging an APK:
 
 ```sh
 ./scripts/build-android.sh arm64-v8a release
 ```
 
-The first native build downloads LibRaw 0.22.1 and its official companion
-CMake files by immutable commit ID, then cross-compiles a static library with
-the pinned NDK. Generated sources, libraries, and APKs are ignored by Git. The native build
+The first native build downloads LibRaw 0.22.1 and Lensfun 0.3.4, then
+cross-compiles static libraries with the pinned NDK. Lensfun's profile XML
+database is staged as APK assets and copied to app-private storage on first
+launch, because Lensfun loads its database from filesystem paths. Generated
+sources, libraries, and APKs are ignored by Git. The native build
 also copies `libc++_shared.so` from the pinned NDK instead of storing it in the
 repository. No LibRaw installation on the Linux host is required. LibRaw is
 cached for development builds until its version, ABI, API level, or NDK
 revision changes; set `AURAW_REBUILD_LIBRAW=1` to force a clean native rebuild.
+Set `AURAW_REBUILD_LENSFUN=1` to rebuild the cached Lensfun and GLib libraries.
 Release builds always discard the ignored native cache and rebuild it from the
 pinned source revisions.
 

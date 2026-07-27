@@ -410,6 +410,14 @@ impl AurawApp {
             target_exposure: exposure,
             pending_stage: None,
             lens_correction_dirty: false,
+            #[cfg(target_os = "android")]
+            lens_correction_generation: 0,
+            #[cfg(target_os = "android")]
+            lens_correction_receiver: None,
+            #[cfg(target_os = "android")]
+            lens_original_preview_cache: None,
+            #[cfg(target_os = "android")]
+            lens_corrected_preview_cache: None,
             load_receiver: None,
             loading_label: None,
             export_receiver: None,
@@ -492,6 +500,18 @@ impl AurawApp {
         let gpu_pipeline_cache_root = crate::android::gpu_pipeline_cache_dir(&android_app)
             .map_err(|error| log::warn!("{error}"))
             .ok();
+        if std::env::var_os("AURAW_LENSFUN_DB").is_none() {
+            match crate::android::lensfun_database_dir(&android_app) {
+                Ok(path) => {
+                    std::env::set_var("AURAW_LENSFUN_DB", &path);
+                    crate::diagnostics::record(format!(
+                        "bundled Lensfun database materialized at {}",
+                        path.display()
+                    ));
+                }
+                Err(error) => log::warn!("{error}"),
+            }
+        }
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
         let gpu_preview_prewarm_receiver = spawn_gpu_preview_prewarm(cc, gpu_pipeline_cache_root);
@@ -620,6 +640,10 @@ impl AurawApp {
             target_exposure: exposure,
             pending_stage: None,
             lens_correction_dirty: false,
+            lens_correction_generation: 0,
+            lens_correction_receiver: None,
+            lens_original_preview_cache: None,
+            lens_corrected_preview_cache: None,
             load_receiver: None,
             loading_label: None,
             export_receiver: None,
@@ -1580,6 +1604,13 @@ impl AurawApp {
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.lens_correction = LensCorrectionState::default();
         self.lens_correction_dirty = false;
+        #[cfg(target_os = "android")]
+        {
+            self.lens_correction_generation = self.lens_correction_generation.wrapping_add(1);
+            self.lens_correction_receiver = None;
+            self.lens_original_preview_cache = None;
+            self.lens_corrected_preview_cache = None;
+        }
         self.reset_edit_history();
         let fd_backed_source = raw_fd_guard.is_some();
         let source_path = (!delete_after_decode && !fd_backed_source).then_some(path.clone());
@@ -2379,6 +2410,32 @@ impl AurawApp {
                 self.dirty_mask_layers.fill(false);
                 self.lens_correction = loaded.lens_correction;
                 self.lens_correction_dirty = false;
+                #[cfg(target_os = "android")]
+                {
+                    self.lens_correction_generation =
+                        self.lens_correction_generation.wrapping_add(1);
+                    self.lens_correction_receiver = None;
+                    if self.lens_correction.applied {
+                        self.lens_corrected_preview_cache =
+                            self.lens_correction.selected_lens().map(|selection| {
+                                (
+                                    selection,
+                                    self.preview_quality,
+                                    Arc::clone(self.loaded_raw.as_ref().expect("loaded RAW set")),
+                                    Arc::clone(
+                                        self.preview_raw.as_ref().expect("preview RAW set"),
+                                    ),
+                                )
+                            });
+                        self.lens_original_preview_cache = None;
+                    } else {
+                        self.lens_original_preview_cache = self
+                            .preview_raw
+                            .as_ref()
+                            .map(|raw| (self.preview_quality, Arc::clone(raw)));
+                        self.lens_corrected_preview_cache = None;
+                    }
+                }
                 self.target_exposure = loaded.rendered_exposure;
                 self.pending_stage = None;
                 self.notice = loaded.sidecar_warning;
