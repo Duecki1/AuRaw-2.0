@@ -163,12 +163,12 @@ jobs:
           LENSFUN_DB="$(find /usr/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
           test -n "$LENSFUN_DB"
 
-          rm -rf AppDir dist packaging squashfs-root
-          mkdir -p dist packaging AppDir/usr/share/auraw/lensfun
+          rm -rf AppDir dist appimage-packaging squashfs-root
+          mkdir -p dist appimage-packaging AppDir/usr/share/auraw/lensfun
           cp -a "$LENSFUN_DB"/. AppDir/usr/share/auraw/lensfun/
           test -n "$(find AppDir/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
 
-          cat > packaging/auraw.desktop <<'DESKTOP'
+          cat > appimage-packaging/auraw.desktop <<'DESKTOP'
           [Desktop Entry]
           Type=Application
           Name=AuRaw
@@ -179,43 +179,10 @@ jobs:
           Terminal=false
           DESKTOP
 
-          python3 - <<'PY'
-          import struct
-          import zlib
-
-          width = height = 256
-          pixels = []
-          for y in range(height):
-              row = bytearray()
-              for x in range(width):
-                  r, g, b, a = 232, 126, 42, 255
-                  if 52 <= x <= 204 and 44 <= y <= 212:
-                      left = abs(x - 93) <= max(5, (y - 55) // 7)
-                      right = abs(x - 163) <= max(5, (y - 55) // 7)
-                      cross = 91 <= y <= 111 and 92 <= x <= 165
-                      if left or right or cross:
-                          r, g, b = 37, 42, 48
-                  dx, dy = x - 128, y - 165
-                  if 24 * 24 <= dx * dx + dy * dy <= 37 * 37:
-                      r, g, b = 37, 42, 48
-                  row.extend((r, g, b, a))
-              pixels.append(b"\x00" + bytes(row))
-
-          def chunk(kind, data):
-              return (
-                  struct.pack(">I", len(data))
-                  + kind
-                  + data
-                  + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-              )
-
-          png = b"\x89PNG\r\n\x1a\n"
-          png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
-          png += chunk(b"IDAT", zlib.compress(b"".join(pixels), 9))
-          png += chunk(b"IEND", b"")
-          with open("packaging/auraw.png", "wb") as handle:
-              handle.write(png)
-          PY
+          # Keep Linux packaging on the same checked-in artwork used to derive
+          # the Android launcher icon, Windows executable icon, and macOS ICNS.
+          install -m 0644 packaging/icons/auraw-256.png appimage-packaging/auraw.png
+          test -s appimage-packaging/auraw.png
 
           # Digest from the successful upstream release build artifact.
           LINUXDEPLOY_SHA256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
@@ -231,8 +198,8 @@ jobs:
             --executable "$PWD/target/release/auraw" \
             --library "$LIBRAW_SO" \
             --library "$LENSFUN_SO" \
-            --desktop-file "$PWD/packaging/auraw.desktop" \
-            --icon-file "$PWD/packaging/auraw.png" \
+            --desktop-file "$PWD/appimage-packaging/auraw.desktop" \
+            --icon-file "$PWD/appimage-packaging/auraw.png" \
             --output appimage
 
           test -n "$(find AppDir -name 'libraw*.so*' -print -quit)"
@@ -248,6 +215,9 @@ jobs:
           test -n "$(find squashfs-root -name 'libraw*.so*' -print -quit)"
           test -n "$(find squashfs-root -name 'liblensfun*.so*' -print -quit)"
           test -n "$(find squashfs-root/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
+          APPIMAGE_ICON="$(find squashfs-root -type f -name 'auraw.png' -print -quit)"
+          test -n "$APPIMAGE_ICON"
+          cmp packaging/icons/auraw-256.png "$APPIMAGE_ICON"
           rm -rf squashfs-root
 
           sha256sum "dist/$LDAI_OUTPUT" > "dist/$LDAI_OUTPUT.sha256"
