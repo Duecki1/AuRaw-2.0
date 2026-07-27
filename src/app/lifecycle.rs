@@ -410,6 +410,7 @@ impl AurawApp {
             export_receiver: None,
             export_progress: None,
             library_batch_export: None,
+            library_ai_mask_refresh: None,
             export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
             current_label: None,
@@ -619,6 +620,7 @@ impl AurawApp {
             export_receiver: None,
             export_progress: None,
             library_batch_export: None,
+            library_ai_mask_refresh: None,
             export_publish_pending: false,
             image_status: "Open a RAW file to get started.".to_owned(),
             current_label: None,
@@ -2163,7 +2165,13 @@ impl AurawApp {
             match result {
                 crate::android::PickerResult::Picked(document) => {
                     self.library.refresh(&self.egui_ctx);
-                    self.active_tab = if self.library_batch_export.is_some() {
+                    let keep_library_for_profile_reload =
+                        self.pending_android_profile_reload.is_some()
+                            && self.active_tab == AppTab::Library;
+                    self.active_tab = if self.library_batch_export.is_some()
+                        || self.library_ai_mask_refresh.is_some()
+                        || keep_library_for_profile_reload
+                    {
                         AppTab::Library
                     } else {
                         AppTab::Develop
@@ -2226,11 +2234,20 @@ impl AurawApp {
                 }
                 crate::android::PickerResult::Cancelled => {
                     self.pending_android_profile_reload = None;
-                    self.notice = Some("No RAW files selected.".to_owned());
+                    if self.library_ai_mask_refresh.is_some() {
+                        self.complete_android_library_ai_mask_open_failure(
+                            "RAW open was canceled".to_owned(),
+                            frame,
+                        );
+                    } else {
+                        self.notice = Some("No RAW files selected.".to_owned());
+                    }
                 }
                 crate::android::PickerResult::Failed(error) => {
                     let was_profile_reload = self.pending_android_profile_reload.take().is_some();
-                    if self.library_batch_export.is_some() && !was_profile_reload {
+                    if self.library_ai_mask_refresh.is_some() && !was_profile_reload {
+                        self.complete_android_library_ai_mask_open_failure(error, frame);
+                    } else if self.library_batch_export.is_some() && !was_profile_reload {
                         self.complete_android_library_batch_export_item(Err(error));
                     } else {
                         self.notice = Some(if was_profile_reload {
@@ -2255,6 +2272,8 @@ impl AurawApp {
                 self.load_receiver = None;
                 self.loading_label = None;
                 self.notice = Some("RAW decode worker stopped unexpectedly.".to_owned());
+                self.on_library_ai_mask_refresh_load_finished(false, frame);
+                self.on_library_batch_load_finished(false, frame);
                 None
             }
             Some(Err(mpsc::TryRecvError::Empty)) | None => None,
@@ -2270,6 +2289,8 @@ impl AurawApp {
             Ok(mut loaded) => {
                 let Some(render_state) = frame.wgpu_render_state() else {
                     self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+                    self.on_library_ai_mask_refresh_load_finished(false, frame);
+                    self.on_library_batch_load_finished(false, frame);
                     return;
                 };
                 let mut renderer = render_state.renderer.write();
@@ -2366,11 +2387,13 @@ impl AurawApp {
                     loaded.sidecar_needs_rewrite,
                 );
                 log::info!("loaded RAW preview for {}", loaded.label);
+                self.on_library_ai_mask_refresh_load_finished(true, frame);
                 self.on_library_batch_load_finished(true, frame);
             }
             Err(error) => {
                 self.notice = Some(format!("Failed to decode or render RAW: {error}"));
                 log::error!("RAW load failed: {error}");
+                self.on_library_ai_mask_refresh_load_finished(false, frame);
                 self.on_library_batch_load_finished(false, frame);
             }
         }

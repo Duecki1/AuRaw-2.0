@@ -223,12 +223,13 @@ impl AurawApp {
     }
 
     pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
-        let has_masks = !self.masks.masks.is_empty();
+        let (has_subject, object_targets) = self.generated_ai_mask_targets();
+        let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
         // Manual/geometric masks remain intact and are immediately reused.
-        // Source-dependent masks can then be regenerated explicitly from the
-        // newly corrected (or uncorrected) image geometry.
-        self.ai_masks_need_update = has_masks;
+        // Only source-dependent masks need regeneration against the newly
+        // corrected (or uncorrected) image geometry.
+        self.ai_masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
     }
 
     #[cfg(not(target_os = "android"))]

@@ -206,6 +206,32 @@ struct LibraryExportDialog {
     format: ExportFormat,
 }
 
+#[cfg(not(target_os = "android"))]
+#[derive(Clone)]
+struct LibraryAdjustmentPasteDialog {
+    paths: Vec<PathBuf>,
+    edited_count: usize,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone)]
+struct LibraryAdjustmentPasteDialog {
+    targets: Vec<(String, String)>,
+    edited_count: usize,
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Clone)]
+struct LibraryAiMaskRefreshPrompt {
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone)]
+struct LibraryAiMaskRefreshPrompt {
+    targets: Vec<(String, String)>,
+}
+
 pub(crate) struct LibraryState {
     location: Option<String>,
     #[cfg(not(target_os = "android"))]
@@ -230,6 +256,8 @@ pub(crate) struct LibraryState {
     #[cfg(not(target_os = "android"))]
     file_action_receiver: Option<mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
     export_dialog: Option<LibraryExportDialog>,
+    adjustment_paste_dialog: Option<LibraryAdjustmentPasteDialog>,
+    ai_mask_refresh_prompt: Option<LibraryAiMaskRefreshPrompt>,
 }
 
 impl LibraryState {
@@ -261,6 +289,8 @@ impl LibraryState {
             selection_mode: false,
             file_action_receiver: None,
             export_dialog: None,
+            adjustment_paste_dialog: None,
+            ai_mask_refresh_prompt: None,
         }
     }
 
@@ -301,6 +331,8 @@ impl LibraryState {
             selected_sources: HashSet::new(),
             selection_mode: false,
             export_dialog: None,
+            adjustment_paste_dialog: None,
+            ai_mask_refresh_prompt: None,
         };
         state.refresh(context);
         state
@@ -1608,6 +1640,7 @@ enum LibraryCardAction {
 fn android_selection_menu(
     ui: &mut Ui,
     selected: &[(LibrarySource, String)],
+    action_enabled: bool,
     can_paste_adjustments: bool,
     library_action: &mut Option<LibraryCardAction>,
 ) {
@@ -1629,12 +1662,19 @@ fn android_selection_menu(
     } else {
         "Export…"
     };
-    if ui.button(export_label).clicked() {
+    if ui
+        .add_enabled(action_enabled, egui::Button::new(export_label))
+        .clicked()
+    {
         *library_action = Some(LibraryCardAction::Export(targets()));
         ui.close();
     }
     ui.separator();
-    if selected_count == 1 && ui.button("Copy adjustments").clicked() {
+    if selected_count == 1
+        && ui
+            .add_enabled(action_enabled, egui::Button::new("Copy adjustments"))
+            .clicked()
+    {
         if let Some((source, _)) = selected.first() {
             let LibrarySource::Android {
                 uri, display_name, ..
@@ -1652,7 +1692,10 @@ fn android_selection_menu(
         "Paste adjustments"
     };
     if ui
-        .add_enabled(can_paste_adjustments, egui::Button::new(paste_label))
+        .add_enabled(
+            action_enabled && can_paste_adjustments,
+            egui::Button::new(paste_label),
+        )
         .on_disabled_hover_text("Copy adjustments from an image first")
         .clicked()
     {
@@ -1665,7 +1708,10 @@ fn android_selection_menu(
     } else {
         "Duplicate (RAW + sidecar)"
     };
-    if ui.button(duplicate_label).clicked() {
+    if ui
+        .add_enabled(action_enabled, egui::Button::new(duplicate_label))
+        .clicked()
+    {
         *library_action = Some(LibraryCardAction::Duplicate(targets()));
         ui.close();
     }
@@ -1675,10 +1721,13 @@ fn android_selection_menu(
         "Reset all adjustments"
     };
     if ui
-        .button(format!(
-            "{}  {reset_label}",
-            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
-        ))
+        .add_enabled(
+            action_enabled,
+            egui::Button::new(format!(
+                "{}  {reset_label}",
+                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+            )),
+        )
         .clicked()
     {
         *library_action = Some(LibraryCardAction::ResetAdjustments(targets()));
@@ -1690,7 +1739,10 @@ fn android_selection_menu(
     } else {
         "Delete"
     };
-    if ui.button(delete_label).clicked() {
+    if ui
+        .add_enabled(action_enabled, egui::Button::new(delete_label))
+        .clicked()
+    {
         *library_action = Some(LibraryCardAction::Delete(targets()));
         ui.close();
     }
@@ -1849,6 +1901,69 @@ fn library_export_jobs(paths: &[PathBuf], format: ExportFormat) -> Option<Vec<(P
     )
 }
 
+#[cfg(not(target_os = "android"))]
+fn apply_library_adjustment_paste(
+    app: &mut AurawApp,
+    paths: Vec<PathBuf>,
+    mode: crate::sidecar::AdjustmentPasteMode,
+    context: &egui::Context,
+    frame: &eframe::Frame,
+) {
+    let total = paths.len();
+    let (completed, ai_refresh, failures) =
+        app.paste_library_adjustments_to_paths(&paths, mode, frame);
+    app.library.clear_selection();
+    app.library.refresh(context);
+    app.library.status = if failures.is_empty() {
+        format!(
+            "Pasted adjustments to {} selected {}",
+            completed.len(),
+            if completed.len() == 1 { "image" } else { "images" }
+        )
+    } else {
+        format!(
+            "Pasted adjustments to {} of {total} selected images. {}",
+            completed.len(),
+            failures.join(" · ")
+        )
+    };
+    app.library.ai_mask_refresh_prompt = (!ai_refresh.is_empty())
+        .then_some(LibraryAiMaskRefreshPrompt { paths: ai_refresh });
+}
+
+#[cfg(target_os = "android")]
+fn apply_library_adjustment_paste(
+    app: &mut AurawApp,
+    targets: Vec<(String, String)>,
+    mode: crate::sidecar::AdjustmentPasteMode,
+    context: &egui::Context,
+    frame: &eframe::Frame,
+) {
+    let total = targets.len();
+    let (completed, ai_refresh, failures) =
+        app.paste_library_adjustments_to_android(&targets, mode, frame);
+    app.library.clear_selection();
+    crate::android::set_back_navigation_active(false);
+    app.library.refresh(context);
+    app.library.status = if failures.is_empty() {
+        format!(
+            "Pasted adjustments to {} selected {}",
+            completed.len(),
+            if completed.len() == 1 { "image" } else { "images" }
+        )
+    } else {
+        format!(
+            "Pasted adjustments to {} of {total} selected images. {}",
+            completed.len(),
+            failures.join(" · ")
+        )
+    };
+    app.library.ai_mask_refresh_prompt = (!ai_refresh.is_empty())
+        .then_some(LibraryAiMaskRefreshPrompt {
+            targets: ai_refresh,
+        });
+}
+
 pub struct Library;
 
 impl Library {
@@ -1883,10 +1998,13 @@ impl Library {
                     let anchor = ui.allocate_response(egui::vec2(48.0, 42.0), Sense::hover());
                     let menu_id = ui.make_persistent_id("android-library-selection-overflow");
                     crate::ui::android_overflow_menu(ui, anchor.rect, menu_id, 36.0, |ui| {
+                        let action_enabled = app.library_batch_export_progress().is_none()
+                            && app.library_ai_mask_refresh_status().is_none();
                         android_selection_menu(
                             ui,
                             &selected_android_items,
-                            app.has_copied_adjustments(),
+                            action_enabled,
+                            action_enabled && app.has_copied_adjustments(),
                             &mut library_action,
                         );
                     });
@@ -2125,6 +2243,7 @@ impl Library {
                             let selected_count = context_paths.len();
                             let action_enabled = !app.library.file_action_in_progress()
                                 && app.library_batch_export_progress().is_none()
+                                && app.library_ai_mask_refresh_status().is_none()
                                 && !context_paths.is_empty();
                             let can_paste_adjustments =
                                 action_enabled && app.has_copied_adjustments();
@@ -2251,21 +2370,30 @@ impl Library {
                     app.library.status = status;
                 }
                 LibraryCardAction::PasteAdjustments(paths) => {
-                    let total = paths.len();
-                    let (completed, failures) = app.paste_library_adjustments_to_paths(&paths);
-                    app.library.clear_selection();
-                    app.library.refresh(ui.ctx());
-                    app.library.status = if failures.is_empty() {
-                        format!(
-                            "Pasted adjustments to {completed} selected {}",
-                            if completed == 1 { "image" } else { "images" }
-                        )
+                    let (edited_count, failures) =
+                        app.library_adjustment_edit_count_paths(&paths);
+                    if failures.is_empty() {
+                        if edited_count > 0 {
+                            app.library.adjustment_paste_dialog =
+                                Some(LibraryAdjustmentPasteDialog {
+                                    paths,
+                                    edited_count,
+                                });
+                        } else {
+                            apply_library_adjustment_paste(
+                                app,
+                                paths,
+                                crate::sidecar::AdjustmentPasteMode::Merge,
+                                ui.ctx(),
+                                frame,
+                            );
+                        }
                     } else {
-                        format!(
-                            "Pasted adjustments to {completed} of {total} selected images. {}",
+                        app.library.status = format!(
+                            "Could not inspect selected adjustments. {}",
                             failures.join(" · ")
-                        )
-                    };
+                        );
+                    }
                 }
                 LibraryCardAction::Duplicate(paths) => {
                     app.library.clear_selection();
@@ -2386,22 +2514,30 @@ impl Library {
                     app.library.status = status;
                 }
                 LibraryCardAction::PasteAdjustments(targets) => {
-                    let total = targets.len();
-                    let (completed, failures) = app.paste_library_adjustments_to_android(&targets);
-                    app.library.clear_selection();
-                    crate::android::set_back_navigation_active(false);
-                    app.library.refresh(ui.ctx());
-                    app.library.status = if failures.is_empty() {
-                        format!(
-                            "Pasted adjustments to {completed} selected {}",
-                            if completed == 1 { "image" } else { "images" }
-                        )
+                    let (edited_count, failures) =
+                        app.library_adjustment_edit_count_android(&targets);
+                    if failures.is_empty() {
+                        if edited_count > 0 {
+                            app.library.adjustment_paste_dialog =
+                                Some(LibraryAdjustmentPasteDialog {
+                                    targets,
+                                    edited_count,
+                                });
+                        } else {
+                            apply_library_adjustment_paste(
+                                app,
+                                targets,
+                                crate::sidecar::AdjustmentPasteMode::Merge,
+                                ui.ctx(),
+                                frame,
+                            );
+                        }
                     } else {
-                        format!(
-                            "Pasted adjustments to {completed} of {total} selected images. {}",
+                        app.library.status = format!(
+                            "Could not inspect selected adjustments. {}",
                             failures.join(" · ")
-                        )
-                    };
+                        );
+                    }
                 }
                 LibraryCardAction::Duplicate(targets) => {
                     let total = targets.len();
@@ -2478,6 +2614,279 @@ impl Library {
                         )
                     };
                 }
+            }
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut paste_action = 0u8;
+            if let Some(dialog) = app.library.adjustment_paste_dialog.as_ref() {
+                let target_count = dialog.paths.len();
+                egui::Window::new("Paste adjustments")
+                    .id(egui::Id::new("library-adjustment-paste-conflict-dialog"))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        ui.set_max_width(480.0);
+                        ui.label(format!(
+                            "{} of the {} selected {} already contain edits.",
+                            dialog.edited_count,
+                            target_count,
+                            if target_count == 1 { "image" } else { "images" }
+                        ));
+                        ui.add_space(4.0);
+                        ui.label(
+                            "Merge overwrites only the copied categories and preserves every unchecked category already on the destination.",
+                        );
+                        ui.label(
+                            "Replace clears the destination edit state first, then applies the categories stored in the adjustment clipboard.",
+                        );
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                paste_action = 1;
+                            }
+                            if ui.button("Merge").clicked() {
+                                paste_action = 2;
+                            }
+                            if ui.button("Replace").clicked() {
+                                paste_action = 3;
+                            }
+                        });
+                    });
+            }
+            if paste_action != 0 {
+                if let Some(dialog) = app.library.adjustment_paste_dialog.take() {
+                    match paste_action {
+                        2 => apply_library_adjustment_paste(
+                            app,
+                            dialog.paths,
+                            crate::sidecar::AdjustmentPasteMode::Merge,
+                            ui.ctx(),
+                            frame,
+                        ),
+                        3 => apply_library_adjustment_paste(
+                            app,
+                            dialog.paths,
+                            crate::sidecar::AdjustmentPasteMode::Replace,
+                            ui.ctx(),
+                            frame,
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+
+            let mut refresh_action = 0u8;
+            let can_regenerate = app.can_start_library_ai_mask_refresh();
+            if let Some(prompt) = app.library.ai_mask_refresh_prompt.as_ref() {
+                let target_count = prompt.paths.len();
+                egui::Window::new("Regenerate AI masks?")
+                    .id(egui::Id::new("library-ai-mask-refresh-prompt"))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        ui.set_max_width(460.0);
+                        ui.label(format!(
+                            "{} pasted {} contain content-aware masks that belong to the source image.",
+                            target_count,
+                            if target_count == 1 { "image" } else { "images" }
+                        ));
+                        ui.label(
+                            "Regenerate them now for each destination image? Mask groups, settings, object strokes, and local adjustments are preserved.",
+                        );
+                        if !can_regenerate {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Waiting for the pasted camera profile to finish loading…",
+                                )
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                            );
+                        }
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Not now").clicked() {
+                                refresh_action = 1;
+                            }
+                            if ui
+                                .add_enabled(can_regenerate, egui::Button::new("Regenerate"))
+                                .clicked()
+                            {
+                                refresh_action = 2;
+                            }
+                        });
+                    });
+            }
+            if refresh_action != 0 {
+                if let Some(prompt) = app.library.ai_mask_refresh_prompt.take() {
+                    if refresh_action == 2 {
+                        app.start_library_ai_mask_refresh_paths(prompt.paths, frame);
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let mut paste_action = 0u8;
+            if let Some(dialog) = app.library.adjustment_paste_dialog.as_ref() {
+                let target_count = dialog.targets.len();
+                egui::Window::new("Paste adjustments")
+                    .id(egui::Id::new(
+                        "android-library-adjustment-paste-conflict-dialog",
+                    ))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        ui.set_max_width(480.0);
+                        ui.label(format!(
+                            "{} of the {} selected {} already contain edits.",
+                            dialog.edited_count,
+                            target_count,
+                            if target_count == 1 { "image" } else { "images" }
+                        ));
+                        ui.add_space(4.0);
+                        ui.label(
+                            "Merge overwrites only the copied categories and preserves every unchecked category already on the destination.",
+                        );
+                        ui.label(
+                            "Replace clears the destination edit state first, then applies the categories stored in the adjustment clipboard.",
+                        );
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                paste_action = 1;
+                            }
+                            if ui.button("Merge").clicked() {
+                                paste_action = 2;
+                            }
+                            if ui.button("Replace").clicked() {
+                                paste_action = 3;
+                            }
+                        });
+                    });
+            }
+            if paste_action != 0 {
+                if let Some(dialog) = app.library.adjustment_paste_dialog.take() {
+                    match paste_action {
+                        2 => apply_library_adjustment_paste(
+                            app,
+                            dialog.targets,
+                            crate::sidecar::AdjustmentPasteMode::Merge,
+                            ui.ctx(),
+                            frame,
+                        ),
+                        3 => apply_library_adjustment_paste(
+                            app,
+                            dialog.targets,
+                            crate::sidecar::AdjustmentPasteMode::Replace,
+                            ui.ctx(),
+                            frame,
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+
+            let mut refresh_action = 0u8;
+            let can_regenerate = app.can_start_library_ai_mask_refresh();
+            if let Some(prompt) = app.library.ai_mask_refresh_prompt.as_ref() {
+                let target_count = prompt.targets.len();
+                egui::Window::new("Regenerate AI masks?")
+                    .id(egui::Id::new("android-library-ai-mask-refresh-prompt"))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        ui.set_max_width(460.0);
+                        ui.label(format!(
+                            "{} pasted {} contain content-aware masks that belong to the source image.",
+                            target_count,
+                            if target_count == 1 { "image" } else { "images" }
+                        ));
+                        ui.label(
+                            "Regenerate them now for each destination image? Mask groups, settings, object strokes, and local adjustments are preserved.",
+                        );
+                        if !can_regenerate {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Waiting for the pasted camera profile to finish loading…",
+                                )
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                            );
+                        }
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Not now").clicked() {
+                                refresh_action = 1;
+                            }
+                            if ui
+                                .add_enabled(can_regenerate, egui::Button::new("Regenerate"))
+                                .clicked()
+                            {
+                                refresh_action = 2;
+                            }
+                        });
+                    });
+            }
+            if refresh_action != 0 {
+                if let Some(prompt) = app.library.ai_mask_refresh_prompt.take() {
+                    if refresh_action == 2 {
+                        app.start_library_ai_mask_refresh_android(prompt.targets, frame);
+                    }
+                }
+            }
+        }
+
+        if let Some((completed, total, failed, current_name)) =
+            app.library_ai_mask_refresh_status()
+        {
+            if total > 1 {
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    (completed as f32 / total as f32).clamp(0.0, 1.0)
+                };
+                egui::Window::new("Regenerating AI masks")
+                    .id(egui::Id::new("library-ai-mask-refresh-progress"))
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(360.0)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{completed} / {total} processed"))
+                                .strong(),
+                        );
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::ProgressBar::new(fraction)
+                                .show_percentage()
+                                .animate(completed < total),
+                        );
+                        if let Some(name) = current_name.as_deref() {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(format!("Refreshing {name}…"));
+                            });
+                        }
+                        if failed > 0 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{failed} {} failed",
+                                    if failed == 1 { "image" } else { "images" }
+                                ))
+                                .small()
+                                .color(ui.visuals().warn_fg_color),
+                            );
+                        }
+                    });
             }
         }
 
