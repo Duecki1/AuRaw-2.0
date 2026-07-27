@@ -1304,9 +1304,7 @@ impl Sidebar {
         if request_object {
             app.request_object_mask(mask_index, component_index);
         }
-        if geometry_changed {
-            app.mark_mask_geometry_dirty(mask_index);
-        }
+        Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if adjustments_changed {
             app.mark_mask_adjustments_dirty();
         }
@@ -1404,11 +1402,22 @@ impl Sidebar {
         if request_object {
             app.request_object_mask(mask_index, component_index);
         }
-        if geometry_changed {
-            app.mark_mask_geometry_dirty(mask_index);
-        }
+        Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if adjustments_changed {
             app.mark_mask_adjustments_dirty();
+        }
+    }
+
+    fn apply_mask_geometry_change(ui: &Ui, app: &mut AurawApp, mask_index: usize, changed: bool) {
+        if changed && ui.input(|input| input.pointer.primary_down()) {
+            app.note_mask_geometry_interaction(mask_index);
+        } else if changed {
+            app.finish_mask_geometry_interaction();
+            app.mark_mask_geometry_dirty(mask_index);
+        } else if !ui.input(|input| input.pointer.primary_down()) {
+            // The last value of a drag may arrive in the frame after its final
+            // movement. Commit it as soon as the pointer is released.
+            app.finish_mask_geometry_interaction();
         }
     }
 
@@ -1539,10 +1548,10 @@ impl Sidebar {
                         ui,
                         "Grow",
                         grow,
-                        0.0..=1.0,
+                        -1.0..=1.0,
                         2,
                         0.01,
-                        Some("Expands the AI mask beyond its detected boundary."),
+                        Some("Positive values expand the mask; negative values shrink it inward."),
                     );
                     geometry_changed |= adjustment_slider(
                         ui,
@@ -1583,10 +1592,10 @@ impl Sidebar {
                         ui,
                         "Grow",
                         grow,
-                        0.0..=1.0,
+                        -1.0..=1.0,
                         2,
                         0.01,
-                        Some("Expands the final object mask beyond its detected boundary."),
+                        Some("Positive values expand the mask; negative values shrink it inward."),
                     );
                     geometry_changed |= adjustment_slider(
                         ui,

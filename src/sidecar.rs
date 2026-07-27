@@ -1089,7 +1089,7 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                     feather,
                 } => {
                     finite("AI mask settings", &[*grow, *feather])?;
-                    bounded("AI mask grow", *grow, 0.0, 1.0)?;
+                    bounded("AI mask grow", *grow, -1.0, 1.0)?;
                     bounded("AI mask feather", *feather, 0.0, 1.0)?;
                     if let Some(image) = mask {
                         validate_image(image.width, image.height, image.pixels.len(), 1)?;
@@ -1108,7 +1108,7 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                         "object mask settings",
                         &[*grow, *feather, *brush_size, *edge_refine],
                     )?;
-                    bounded("object mask grow", *grow, 0.0, 1.0)?;
+                    bounded("object mask grow", *grow, -1.0, 1.0)?;
                     bounded("object mask feather", *feather, 0.0, 1.0)?;
                     bounded("object brush size", *brush_size, 0.0, 16.0)?;
                     bounded("object edge refine", *edge_refine, 0.0, 1.0)?;

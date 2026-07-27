@@ -1350,11 +1350,10 @@ fn rasterize_component(
             } else {
                 *grow
             };
-            grow_probability_mask(&mut coverage, width, height, grow);
+            shape_probability_mask(&mut coverage, width, height, grow, *feather);
             // Feather the subject boundary once, then complement it for Not
             // Subject. This keeps the two AI masks exact opposites at every
             // feather value instead of separately blurring an inverted map.
-            feather_probability_mask(&mut coverage, width, height, *feather);
             if component.kind == MaskKind::Background {
                 coverage
                     .par_iter_mut()
@@ -1369,8 +1368,7 @@ fn rasterize_component(
             ..
         } => {
             let mut coverage = rasterize_mask_image(width, height, mask);
-            grow_probability_mask(&mut coverage, width, height, *grow);
-            feather_probability_mask(&mut coverage, width, height, *feather);
+            shape_probability_mask(&mut coverage, width, height, *grow, *feather);
             coverage
         }
         MaskGeometry::Object {
@@ -1479,20 +1477,17 @@ fn chamfer_distance(binary: &[u8], width: usize, height: usize, target: u8) -> V
     distance
 }
 
-fn feather_probability_mask(mask: &mut [f32], width: u32, height: u32, feather: f32) {
+fn shape_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32, feather: f32) {
     if width == 0 || height == 0 || mask.is_empty() {
         return;
     }
+
+    let grow = grow.clamp(-1.0, 1.0);
     let feather = feather.clamp(0.0, 1.0);
-    if feather <= 1e-5 {
+    if grow.abs() <= 1e-5 && feather <= 1e-5 {
         return;
     }
 
-    // Feather is an image-relative boundary width, so thumbnails, the preview
-    // overlay, the 2048px mask atlas, and export all show the same shape. The old
-    // fixed 32-texel box blur changed apparent feathering with every resolution
-    // and washed probability across the entire subject.
-    let radius = (feather.powf(1.30) * width.min(height) as f32 * 0.045).max(0.75);
     let width = width as usize;
     let height = height as usize;
     let binary = mask
@@ -1501,39 +1496,22 @@ fn feather_probability_mask(mask: &mut [f32], width: u32, height: u32, feather: 
         .collect::<Vec<_>>();
     let distance_to_inside = chamfer_distance(&binary, width, height, 1);
     let distance_to_outside = chamfer_distance(&binary, width, height, 0);
+    let edge = width.min(height) as f32;
+    let grow_radius = grow * edge * 0.05;
+    // Feather is an image-relative boundary width, so thumbnails, the preview
+    // overlay, the mask atlas, and export all show the same shape.
+    let feather_radius = (feather.powf(1.30) * edge * 0.045).max(0.75);
 
     mask.par_iter_mut().enumerate().for_each(|(index, value)| {
         let confidence_offset = (*value - 0.5) * 1.5;
-        let signed_distance =
-            distance_to_outside[index] - distance_to_inside[index] + confidence_offset;
-        *value = smoothstep(-radius, radius, signed_distance);
-    });
-}
-
-fn grow_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32) {
-    if width == 0 || height == 0 || mask.is_empty() {
-        return;
-    }
-    let grow = grow.clamp(-1.0, 1.0);
-    if grow.abs() <= 1e-5 {
-        return;
-    }
-
-    let width_usize = width as usize;
-    let height_usize = height as usize;
-    let binary = mask
-        .iter()
-        .map(|value| u8::from(*value >= 0.5))
-        .collect::<Vec<_>>();
-    let distance_to_inside = chamfer_distance(&binary, width_usize, height_usize, 1);
-    let distance_to_outside = chamfer_distance(&binary, width_usize, height_usize, 0);
-    let radius = grow * width.min(height) as f32 * 0.05;
-
-    mask.par_iter_mut().enumerate().for_each(|(index, value)| {
-        let confidence_offset = (*value - 0.5) * 1.5;
-        let signed_distance =
-            distance_to_outside[index] - distance_to_inside[index] + confidence_offset + radius;
-        *value = smoothstep(-0.75, 0.75, signed_distance);
+        let signed_distance = distance_to_outside[index] - distance_to_inside[index]
+            + confidence_offset
+            + grow_radius;
+        *value = if feather <= 1e-5 {
+            smoothstep(-0.75, 0.75, signed_distance)
+        } else {
+            smoothstep(-feather_radius, feather_radius, signed_distance)
+        };
     });
 }
 
@@ -2267,9 +2245,36 @@ mod tests {
             }
         }
         let original_covered = coverage.iter().filter(|value| **value >= 0.5).count();
-        grow_probability_mask(&mut coverage, 64, 64, 0.5);
+        shape_probability_mask(&mut coverage, 64, 64, 0.5, 0.0);
         let grown_covered = coverage.iter().filter(|value| **value >= 0.5).count();
         assert!(grown_covered > original_covered);
+    }
+
+    #[test]
+    fn negative_grow_contracts_ai_mask_coverage() {
+        let mut coverage = vec![0.0; 64 * 64];
+        for y in 20..44 {
+            for x in 20..44 {
+                coverage[y * 64 + x] = 1.0;
+            }
+        }
+        let original_covered = coverage.iter().filter(|value| **value >= 0.5).count();
+        shape_probability_mask(&mut coverage, 64, 64, -0.5, 0.0);
+        let contracted_covered = coverage.iter().filter(|value| **value >= 0.5).count();
+        assert!(contracted_covered < original_covered);
+    }
+
+    #[test]
+    fn feather_preserves_a_soft_transition_after_growing() {
+        let mut coverage = vec![0.0; 64 * 64];
+        for y in 20..44 {
+            for x in 20..44 {
+                coverage[y * 64 + x] = 1.0;
+            }
+        }
+
+        shape_probability_mask(&mut coverage, 64, 64, 0.3, 0.7);
+        assert!(coverage.iter().any(|value| *value > 0.0 && *value < 1.0));
     }
 
     #[test]
