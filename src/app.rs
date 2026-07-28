@@ -620,6 +620,11 @@ pub struct AurawApp {
     pub loaded_raw: Option<Arc<LoadedRaw>>,
     pub preview_raw: Option<Arc<LoadedRaw>>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
+    // Native preview texture IDs cannot be freed during `App::ui`: egui may
+    // already have emitted meshes that reference them for the current frame.
+    // Retire them now and remove them from the renderer at the start of the
+    // next frame, before any new paint meshes are built.
+    retired_egui_textures: Vec<egui::TextureId>,
     #[cfg(target_os = "android")]
     gpu_preview_prewarm_receiver: Option<mpsc::Receiver<Result<RawGpuPipeline, String>>>,
     pub(crate) preview_quality: PreviewQuality,
@@ -878,16 +883,37 @@ impl AurawApp {
         crate::android::set_back_navigation_active(tab != AppTab::Library);
     }
 
+    fn retire_egui_texture(&mut self, texture_id: egui::TextureId) {
+        if !self.retired_egui_textures.contains(&texture_id) {
+            self.retired_egui_textures.push(texture_id);
+        }
+        self.egui_ctx.request_repaint();
+    }
+
+    fn release_retired_egui_textures(&mut self, frame: &eframe::Frame) {
+        if self.retired_egui_textures.is_empty() {
+            return;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let retired = std::mem::take(&mut self.retired_egui_textures);
+        let mut renderer = render_state.renderer.write();
+        for texture_id in retired {
+            renderer.free_texture(&texture_id);
+        }
+    }
+
     fn take_preview_pipeline_and_release_textures(
         &mut self,
-        renderer: &mut eframe::egui_wgpu::Renderer,
+        _renderer: &mut eframe::egui_wgpu::Renderer,
     ) -> Option<RawGpuPipeline> {
         let pipeline = self.gpu_pipeline.take();
         if let Some(texture_id) = pipeline
             .as_ref()
             .and_then(|pipeline| pipeline.egui_texture_id)
         {
-            renderer.free_texture(&texture_id);
+            self.retire_egui_texture(texture_id);
         }
         for texture_id in [
             self.preview_detail
@@ -900,7 +926,7 @@ impl AurawApp {
         .into_iter()
         .flatten()
         {
-            renderer.free_texture(&texture_id);
+            self.retire_egui_texture(texture_id);
         }
         pipeline
     }
