@@ -29,11 +29,16 @@ use crate::ui::sidebar::Sidebar;
 use crate::ui::top_bar::TopBar;
 use eframe::{egui, wgpu};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
+mod background_tasks;
+use background_tasks::{
+    BackgroundTaskManager, CancelTaskResult, TaskId, TaskKind, TaskProgress, TaskProgressValue,
+    TaskSnapshot, TaskStatus,
+};
 mod edit_history;
 use edit_history::EditHistory;
 
@@ -317,7 +322,6 @@ enum LoadEvent {
     Finished(Result<LoadedPreview, String>),
 }
 
-#[cfg(target_os = "android")]
 struct PreparedLensCorrection {
     full_raw: Arc<LoadedRaw>,
     preview_raw: Arc<LoadedRaw>,
@@ -326,10 +330,19 @@ struct PreparedLensCorrection {
     preview_quality: PreviewQuality,
 }
 
-#[cfg(target_os = "android")]
-struct LensCorrectionEvent {
-    generation: u64,
-    result: Result<PreparedLensCorrection, String>,
+enum LensCorrectionEvent {
+    Progress {
+        task_id: TaskId,
+        document_id: u64,
+        generation: u64,
+        phase: String,
+    },
+    Finished {
+        task_id: TaskId,
+        document_id: u64,
+        generation: u64,
+        result: Result<PreparedLensCorrection, String>,
+    },
 }
 
 #[derive(Clone)]
@@ -492,6 +505,7 @@ struct LibraryAiMaskRefreshState {
     mask_total: usize,
     mask_completed: usize,
     failures: Vec<String>,
+    cancel_requested: bool,
 }
 
 #[derive(Debug)]
@@ -504,6 +518,100 @@ struct LibraryBatchExportState {
     cancel_requested: bool,
     format: ExportFormat,
     settings: ExportSettings,
+}
+
+#[cfg(not(target_os = "android"))]
+enum LibraryBatchExportEvent {
+    Started {
+        job: LibraryBatchExportJob,
+        completed: usize,
+        total: usize,
+    },
+    Progress {
+        completed: usize,
+        total: usize,
+        completed_tiles: usize,
+        total_tiles: usize,
+    },
+    ItemFinished {
+        completed: usize,
+        error: Option<String>,
+    },
+    Finished {
+        cancelled: bool,
+    },
+}
+
+struct ExportTaskRequest {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    raw: Arc<LoadedRaw>,
+    geometry: GeometryTransform,
+    exposure: ExposureParams,
+    masks: MaskStack,
+    inpaint: Option<InpaintLayer>,
+    path: PathBuf,
+    format: ExportFormat,
+    settings: ExportSettings,
+    metadata: ExportMetadata,
+    display_name: String,
+}
+
+struct LensCorrectionTaskRequest {
+    document_id: u64,
+    generation: u64,
+    original_raw: Arc<LoadedRaw>,
+    selection: Option<LensfunLens>,
+    preview_quality: PreviewQuality,
+    cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
+}
+
+struct SubjectMaskTaskRequest {
+    document_id: u64,
+    generation: u64,
+    source: MaskRgbImage,
+    model_path: PathBuf,
+    vitmatte_path: PathBuf,
+    runtime_path: Option<PathBuf>,
+    runtime_sha256: Option<String>,
+}
+
+struct ObjectMaskTaskRequest {
+    document_id: u64,
+    generation: u64,
+    target: (usize, usize),
+    encoder_path: PathBuf,
+    decoder_path: PathBuf,
+    vitmatte_path: PathBuf,
+    runtime_path: Option<PathBuf>,
+    runtime_sha256: Option<String>,
+    request: ObjectMaskRequest,
+}
+
+struct InpaintTaskRequest {
+    document_id: u64,
+    generation: u64,
+    model_path: PathBuf,
+    runtime_path: Option<PathBuf>,
+    runtime_sha256: Option<String>,
+    request: InpaintRequest,
+    dabs: Vec<BrushDab>,
+}
+
+enum BackgroundAction {
+    SingleExport(ExportTaskRequest),
+    LibraryBatchExport {
+        jobs: VecDeque<LibraryBatchExportJob>,
+        settings: ExportSettings,
+        format: ExportFormat,
+    },
+    LensCorrection(LensCorrectionTaskRequest),
+    SubjectMask(SubjectMaskTaskRequest),
+    ObjectMask(ObjectMaskTaskRequest),
+    Inpainting(InpaintTaskRequest),
+    LibraryAiMaskRefresh {
+        jobs: VecDeque<LibraryAiMaskRefreshJob>,
+    },
 }
 
 pub struct AurawApp {
@@ -634,13 +742,20 @@ pub struct AurawApp {
     developed_thumbnail_receiver: Option<mpsc::Receiver<DevelopedThumbnailEvent>>,
 
     egui_ctx: egui::Context,
+    background_tasks: BackgroundTaskManager,
+    background_actions: HashMap<TaskId, BackgroundAction>,
+    export_task_id: Option<TaskId>,
+    library_batch_export_task_id: Option<TaskId>,
+    library_ai_mask_refresh_task_id: Option<TaskId>,
+    subject_task_id: Option<TaskId>,
+    object_task_id: Option<TaskId>,
+    inpaint_task_id: Option<TaskId>,
     target_exposure: ExposureParams,
     pending_stage: Option<ProcessingStage>,
     lens_correction_dirty: bool,
-    #[cfg(target_os = "android")]
     lens_correction_generation: u64,
-    #[cfg(target_os = "android")]
     lens_correction_receiver: Option<mpsc::Receiver<LensCorrectionEvent>>,
+    lens_correction_task_id: Option<TaskId>,
     #[cfg(target_os = "android")]
     lens_original_preview_cache: Option<(PreviewQuality, Arc<LoadedRaw>)>,
     #[cfg(target_os = "android")]
@@ -650,6 +765,10 @@ pub struct AurawApp {
     loading_label: Option<String>,
     export_receiver: Option<mpsc::Receiver<ExportEvent>>,
     export_progress: Option<(usize, usize)>,
+    #[cfg(not(target_os = "android"))]
+    library_batch_export_receiver: Option<mpsc::Receiver<LibraryBatchExportEvent>>,
+    #[cfg(not(target_os = "android"))]
+    library_batch_export_tile_progress: Option<(usize, usize)>,
     library_batch_export: Option<LibraryBatchExportState>,
     library_ai_mask_refresh: Option<LibraryAiMaskRefreshState>,
     export_publish_pending: bool,
@@ -661,6 +780,9 @@ pub struct AurawApp {
     navigation_dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
     subject_consent_open: bool,
     subject_receiver: Option<mpsc::Receiver<SubjectMaskEvent>>,
+    subject_generation: u64,
+    subject_job_document_id: u64,
+    subject_job_generation: u64,
     subject_download_progress: Option<(&'static str, u64, u64)>,
     subject_inferencing: bool,
     object_consent_open: bool,
@@ -672,6 +794,7 @@ pub struct AurawApp {
     object_error_dialog: Option<String>,
     object_generation: u64,
     object_job_generation: u64,
+    object_job_document_id: u64,
     object_job_target: Option<(usize, usize)>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
 
@@ -693,6 +816,8 @@ pub struct AurawApp {
     inpaint_pending_source: Option<PreparedInpaintSource>,
     inpaint_active_dabs: Option<Vec<crate::pipeline::BrushDab>>,
     inpaint_revision: u64,
+    inpaint_job_document_id: u64,
+    inpaint_job_generation: u64,
     inpaint_consent_open: bool,
     inpaint_receiver: Option<mpsc::Receiver<InpaintEvent>>,
     inpaint_download_progress: Option<(u64, u64)>,
@@ -702,6 +827,12 @@ pub struct AurawApp {
     android_app: android_activity::AndroidApp,
     #[cfg(target_os = "android")]
     pub(crate) picker_pending: bool,
+    /// True while the Android SAF result and RAW decode belong to the batch
+    /// exporter rather than to an interactive Library open. The batch exporter
+    /// shares Android's document bridge, so completion must be routed by owner
+    /// instead of merely checking whether a batch happens to exist.
+    #[cfg(target_os = "android")]
+    android_batch_load_pending: bool,
     /// Label of the SAF tree currently being mirrored into app-private DCP storage.
     /// This is UI-only transient state and is never persisted as the active folder.
     #[cfg(target_os = "android")]
@@ -786,6 +917,7 @@ include!("app/inpainting.rs");
 include!("app/processing_export.rs");
 include!("app/library_adjustments.rs");
 include!("app/sidecar_persistence.rs");
+include!("app/background_task_runtime.rs");
 include!("app/eframe_impl.rs");
 
 #[cfg(test)]

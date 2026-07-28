@@ -26,6 +26,7 @@ public final class AuRawActivity extends NativeActivity {
     private StorageManager storageManager;
     private ProfileImporter profileImporter;
     private ExportPublisher exportPublisher;
+    private TaskNotificationController taskNotificationController;
 
     static {
         System.loadLibrary("auraw");
@@ -34,6 +35,10 @@ public final class AuRawActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // NativeActivity may start the Rust thread during creation. Install the
+        // notification bridge before the other delegates so early task updates
+        // cannot observe a partially initialized Activity.
+        taskNotificationController = new TaskNotificationController(this);
         storageManager = new StorageManager(this, new StorageManager.Callbacks() {
             @Override
             public void onFilePicked(
@@ -162,6 +167,35 @@ public final class AuRawActivity extends NativeActivity {
     /** Clears the SAF start location when no camera-profile folder is selected. */
     public void clearCameraProfileFolderPickerLocation() {
         profileImporter.clearFolderPickerLocation();
+    }
+
+    /** Mirrors the active Rust task into Android's notification shade. */
+    public void updateBackgroundTaskNotification(
+            String title,
+            String phase,
+            String detail,
+            int progressPercent,
+            int indeterminateFlag,
+            int queuedCount) {
+        TaskNotificationController controller = taskNotificationController;
+        if (controller == null) {
+            return;
+        }
+        controller.update(
+                title,
+                phase,
+                detail,
+                progressPercent,
+                indeterminateFlag != 0,
+                queuedCount);
+    }
+
+    /** Removes AuRaw's task-progress notification after the queue becomes idle. */
+    public void clearBackgroundTaskNotification() {
+        TaskNotificationController controller = taskNotificationController;
+        if (controller != null) {
+            controller.clear();
+        }
     }
 
     /** Copies text through Android's native clipboard service. */
@@ -295,6 +329,18 @@ public final class AuRawActivity extends NativeActivity {
     public void onRequestPermissionsResult(
             int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (taskNotificationController != null) {
+            taskNotificationController.onRequestPermissionsResult(
+                    requestCode, permissions, grantResults);
+        }
         exportPublisher.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (taskNotificationController != null) {
+            taskNotificationController.clear();
+        }
+        super.onDestroy();
     }
 }

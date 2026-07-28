@@ -33,8 +33,9 @@ def test_copy_setting_defaults_and_migration_are_explicit() -> None:
 
 
 def test_ai_mask_refresh_progress_is_visible_for_one_or_many_images() -> None:
-    progress = LIBRARY[LIBRARY.index('egui::Window::new("Regenerating AI masks")') - 350 :]
-    progress = progress[: progress.index('#[cfg(not(target_os = "android"))]')]
+    progress_start = LIBRARY.index('egui::Window::new("Regenerating AI masks")') - 350
+    progress_end = LIBRARY.index("if cancel {", progress_start)
+    progress = LIBRARY[progress_start:progress_end]
     assert "if total > 1" not in progress
     assert "egui::ProgressBar::new(fraction)" in progress
     assert 'format!("{completed} / {total} AI masks updated")' in progress

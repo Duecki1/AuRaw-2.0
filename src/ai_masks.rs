@@ -7,9 +7,20 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+fn ensure_ai_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
+    anyhow::ensure!(
+        !cancellation.load(Ordering::Acquire),
+        "background task cancelled"
+    );
+    Ok(())
+}
 
 pub const BIREFNET_MODEL_BYTES: u64 = 224_005_088;
 pub const BIREFNET_MODEL_URL: &str = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
@@ -93,6 +104,7 @@ pub fn spawn_subject_mask(
     width: u32,
     height: u32,
     rgba: Vec<u8>,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<SubjectMaskEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -101,14 +113,16 @@ pub fn spawn_subject_mask(
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
-                    ensure_model(&model_path, &worker_sender)?;
-                    ensure_vitmatte_model(&vitmatte_path, |downloaded, total| {
+                    ensure_ai_not_cancelled(&cancellation)?;
+                    ensure_model(&model_path, &worker_sender, &cancellation)?;
+                    ensure_vitmatte_model(&vitmatte_path, &cancellation, |downloaded, total| {
                         let _ = worker_sender.send(SubjectMaskEvent::DownloadProgress {
                             label: "ViTMatte edge-refinement model",
                             downloaded,
                             total,
                         });
                     })?;
+                    ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
                     infer_subject(
                         &model_path,
@@ -143,7 +157,11 @@ pub fn spawn_subject_mask(
     receiver
 }
 
-fn ensure_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Result<()> {
+fn ensure_model(
+    path: &Path,
+    events: &mpsc::Sender<SubjectMaskEvent>,
+    cancellation: &AtomicBool,
+) -> Result<()> {
     match verify_model(path) {
         Ok(()) => return Ok(()),
         Err(error) if path.exists() => {
@@ -156,7 +174,7 @@ fn ensure_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Result<
         }
         Err(_) => {}
     }
-    download_model(path, events)?;
+    download_model(path, events, cancellation)?;
     verify_model(path).context("verify published BiRefNet model")
 }
 
@@ -206,7 +224,11 @@ pub(crate) fn sha256_file_hex(path: &Path) -> Result<String> {
         .collect())
 }
 
-fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Result<()> {
+fn download_model(
+    path: &Path,
+    events: &mpsc::Sender<SubjectMaskEvent>,
+    cancellation: &AtomicBool,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create model cache {}", parent.display()))?;
@@ -244,6 +266,7 @@ fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Resul
         let mut hasher = Sha256Context::new(&SHA256);
         let mut buffer = [0u8; 256 * 1024];
         loop {
+            ensure_ai_not_cancelled(cancellation)?;
             let read = reader.read(&mut buffer).context("read BiRefNet download")?;
             if read == 0 {
                 break;
@@ -276,6 +299,7 @@ fn download_model(path: &Path, events: &mpsc::Sender<SubjectMaskEvent>) -> Resul
             digest == BIREFNET_MODEL_SHA256,
             "BiRefNet model SHA-256 mismatch (expected {BIREFNET_MODEL_SHA256_HEX})"
         );
+        ensure_ai_not_cancelled(cancellation)?;
         fs::rename(&temporary, path)
             .with_context(|| format!("publish BiRefNet model to {}", path.display()))?;
         Ok(())
@@ -890,7 +914,11 @@ fn restore_from_letterbox(
         .collect())
 }
 
-fn ensure_vitmatte_model<F>(path: &Path, mut progress: F) -> Result<()>
+fn ensure_vitmatte_model<F>(
+    path: &Path,
+    cancellation: &AtomicBool,
+    mut progress: F,
+) -> Result<()>
 where
     F: FnMut(u64, u64),
 {
@@ -906,7 +934,7 @@ where
         }
         Err(_) => {}
     }
-    download_vitmatte_model(path, &mut progress)?;
+    download_vitmatte_model(path, &mut progress, cancellation)?;
     verify_vitmatte_model(path).context("verify published ViTMatte ONNX model")
 }
 
@@ -927,7 +955,11 @@ fn verify_vitmatte_model(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn download_vitmatte_model<F>(path: &Path, progress: &mut F) -> Result<()>
+fn download_vitmatte_model<F>(
+    path: &Path,
+    progress: &mut F,
+    cancellation: &AtomicBool,
+) -> Result<()>
 where
     F: FnMut(u64, u64),
 {
@@ -953,6 +985,7 @@ where
         let mut last_error: Option<anyhow::Error> = None;
 
         for attempt in 0..MAX_ATTEMPTS {
+            ensure_ai_not_cancelled(cancellation)?;
             let mut downloaded = fs::metadata(&temporary)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
@@ -963,6 +996,7 @@ where
             if downloaded == VITMATTE_MODEL_BYTES
                 && sha256_file_hex(&temporary).ok().as_deref() == Some(VITMATTE_MODEL_SHA256_HEX)
             {
+                ensure_ai_not_cancelled(cancellation)?;
                 fs::rename(&temporary, path).with_context(|| {
                     format!("publish resumed ViTMatte model to {}", path.display())
                 })?;
@@ -1029,6 +1063,7 @@ where
             let mut transfer_error: Option<anyhow::Error> = None;
 
             loop {
+                ensure_ai_not_cancelled(cancellation)?;
                 let read = match reader.read(&mut buffer) {
                     Ok(read) => read,
                     Err(error) => {
@@ -1078,6 +1113,7 @@ where
 
             let actual = sha256_file_hex(&temporary).context("hash ViTMatte ONNX model")?;
             if actual == VITMATTE_MODEL_SHA256_HEX {
+                ensure_ai_not_cancelled(cancellation)?;
                 fs::rename(&temporary, path)
                     .with_context(|| format!("publish ViTMatte model to {}", path.display()))?;
                 return Ok(());
@@ -1543,6 +1579,7 @@ pub fn spawn_object_mask(
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
     request: ObjectMaskRequest,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ObjectMaskEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -1557,6 +1594,7 @@ pub fn spawn_object_mask(
                         SAM21_ENCODER_MODEL_URL,
                         SAM21_ENCODER_SHA256_HEX,
                         &worker_sender,
+                        &cancellation,
                     )?;
                     ensure_sam_model(
                         &decoder_path,
@@ -1564,14 +1602,16 @@ pub fn spawn_object_mask(
                         SAM21_DECODER_MODEL_URL,
                         SAM21_DECODER_SHA256_HEX,
                         &worker_sender,
+                        &cancellation,
                     )?;
-                    ensure_vitmatte_model(&vitmatte_path, |downloaded, total| {
+                    ensure_vitmatte_model(&vitmatte_path, &cancellation, |downloaded, total| {
                         let _ = worker_sender.send(ObjectMaskEvent::DownloadProgress {
                             label: "ViTMatte edge-refinement model",
                             downloaded,
                             total,
                         });
                     })?;
+                    ensure_ai_not_cancelled(&cancellation)?;
                     let decoder_only = request.cache.is_some();
                     let _ = worker_sender.send(ObjectMaskEvent::Inferencing { decoder_only });
                     infer_object_mask(
@@ -1612,6 +1652,7 @@ fn ensure_sam_model(
     url: &str,
     expected_sha256: &str,
     events: &mpsc::Sender<ObjectMaskEvent>,
+    cancellation: &AtomicBool,
 ) -> Result<()> {
     let max_bytes = sam_model_max_bytes(label);
     if verify_sha256_hex(path, expected_sha256, max_bytes).is_ok() {
@@ -1622,7 +1663,7 @@ fn ensure_sam_model(
         fs::remove_file(path)
             .with_context(|| format!("remove invalid model {}", path.display()))?;
     }
-    download_sam_model(path, label, url, expected_sha256, events)?;
+    download_sam_model(path, label, url, expected_sha256, events, cancellation)?;
     verify_sha256_hex(path, expected_sha256, max_bytes).with_context(|| format!("verify {label}"))
 }
 
@@ -1653,6 +1694,7 @@ fn download_sam_model(
     url: &str,
     expected_sha256: &str,
     events: &mpsc::Sender<ObjectMaskEvent>,
+    cancellation: &AtomicBool,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -1685,6 +1727,7 @@ fn download_sam_model(
         let mut last_error: Option<anyhow::Error> = None;
 
         for attempt in 0..MAX_ATTEMPTS {
+            ensure_ai_not_cancelled(cancellation)?;
             let mut downloaded = fs::metadata(&temporary)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
@@ -1696,6 +1739,7 @@ fn download_sam_model(
             if downloaded > 0
                 && sha256_file_hex(&temporary).ok().as_deref() == Some(expected_sha256)
             {
+                ensure_ai_not_cancelled(cancellation)?;
                 fs::rename(&temporary, path)
                     .with_context(|| format!("publish resumed {label} to {}", path.display()))?;
                 return Ok(());
@@ -1767,6 +1811,7 @@ fn download_sam_model(
             let mut transfer_error: Option<anyhow::Error> = None;
 
             loop {
+                ensure_ai_not_cancelled(cancellation)?;
                 let read = match reader.read(&mut buffer) {
                     Ok(read) => read,
                     Err(error) => {
@@ -1812,6 +1857,7 @@ fn download_sam_model(
             let actual =
                 sha256_file_hex(&temporary).with_context(|| format!("hash downloaded {label}"))?;
             if actual == expected_sha256 {
+                ensure_ai_not_cancelled(cancellation)?;
                 fs::rename(&temporary, path)
                     .with_context(|| format!("publish {label} to {}", path.display()))?;
                 return Ok(());

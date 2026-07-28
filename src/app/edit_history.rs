@@ -611,6 +611,7 @@ impl AurawApp {
         inpainting_changed: bool,
     ) {
         let lens_changed = !snapshot.lens.matches(&self.lens_correction);
+        self.cancel_document_bound_background_tasks();
 
         self.edit_history.set_restoring_snapshot(true);
         self.exposure = snapshot.exposure;
@@ -707,18 +708,23 @@ impl AurawApp {
                 subject || !objects.is_empty() || self.has_range_mask_targets();
         }
         self.subject_consent_open = false;
-        self.subject_receiver = None;
-        self.subject_download_progress = None;
-        self.subject_inferencing = false;
+        self.subject_generation = self.subject_generation.wrapping_add(1);
+        if self.subject_receiver.is_none() {
+            self.subject_task_id = None;
+            self.subject_download_progress = None;
+            self.subject_inferencing = false;
+        }
         self.object_consent_open = false;
         self.object_pending_target = None;
-        self.object_receiver = None;
-        self.object_download_progress = None;
-        self.object_inferencing = false;
-        self.object_decoder_only = false;
         self.object_generation = self.object_generation.wrapping_add(1);
-        self.object_job_generation = 0;
-        self.object_job_target = None;
+        if self.object_receiver.is_none() {
+            self.object_task_id = None;
+            self.object_download_progress = None;
+            self.object_inferencing = false;
+            self.object_decoder_only = false;
+            self.object_job_generation = 0;
+            self.object_job_target = None;
+        }
         self.object_cache = None;
     }
 }

@@ -178,3 +178,14 @@ Normal local commands such as `cargo run --release` may build uncommitted work.
 The reproducible Linux and Android release scripts still require a clean Git
 checkout, embed the full commit ID, and discard native output if the source
 changes while compilation is running.
+
+## Task-progress notifications
+
+On Android 13 and newer, AuRaw asks for notification permission when the first
+long-running operation starts. When allowed, one ongoing notification mirrors
+the active task's phase and progress. Android 8 through 12 do not require this
+runtime permission.
+
+This notification does not yet run the task in an Android foreground service.
+Keep AuRaw open in the foreground until the operation finishes; leaving or
+closing the app may suspend or stop the task.

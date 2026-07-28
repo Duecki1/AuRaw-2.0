@@ -2276,6 +2276,97 @@ fn apply_library_adjustment_paste(
         });
 }
 
+fn show_library_batch_export_progress(ui: &mut Ui, app: &mut AurawApp) {
+    let mut cancel = false;
+    #[cfg(not(target_os = "android"))]
+    let mut minimize = false;
+
+    if let Some((completed, total, failed, current_name, cancelling)) =
+        app.library_batch_export_status()
+    {
+        if app.library_batch_export_progress_open() {
+            let exported = completed.saturating_sub(failed);
+            let overall_fraction = app
+                .library_batch_export_overall_fraction()
+                .unwrap_or(0.0);
+
+            crate::ui::responsive_popup(
+                egui::Window::new("Exporting images"),
+                ui.ctx(),
+                420.0,
+            )
+            .id(egui::Id::new("library-batch-export-progress-dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{exported} / {total} exported")).strong(),
+                );
+                ui.add_space(6.0);
+                ui.add(
+                    egui::ProgressBar::new(overall_fraction)
+                        .show_percentage()
+                        .animate(!cancelling),
+                );
+                ui.add_space(6.0);
+
+                if let Some(name) = current_name.as_deref() {
+                    let phase = match app.library_batch_export_tile_progress() {
+                        Some((tiles_done, tiles_total))
+                            if tiles_total > 0 && tiles_done >= tiles_total =>
+                        {
+                            "Finalizing"
+                        }
+                        Some((_, tiles_total)) if tiles_total > 0 => "Exporting",
+                        _ => "Preparing",
+                    };
+                    ui.label(format!("{phase} {name}…"));
+                }
+                if failed > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{failed} {} failed",
+                            if failed == 1 { "image" } else { "images" }
+                        ))
+                        .small()
+                        .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                if cancelling {
+                    ui.label(
+                        egui::RichText::new("Cancelling after the current image finishes…")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    #[cfg(not(target_os = "android"))]
+                    if ui.button("Minimize").clicked() {
+                        minimize = true;
+                    }
+                    if ui
+                        .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    if minimize {
+        app.minimize_library_batch_export_progress();
+    }
+    if cancel {
+        app.cancel_library_batch_export();
+    }
+}
+
 pub struct Library;
 
 impl Library {
@@ -3147,48 +3238,69 @@ impl Library {
 
         if let Some((completed, total, failed, current_name)) = app.library_ai_mask_refresh_status()
         {
-            let fraction = if total == 0 {
-                0.0
-            } else {
-                (completed as f32 / total as f32).clamp(0.0, 1.0)
-            };
-            crate::ui::responsive_popup(
-                egui::Window::new("Regenerating AI masks"),
-                ui.ctx(),
-                360.0,
-            )
-            .id(egui::Id::new("library-ai-mask-refresh-progress"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ui.ctx(), |ui| {
-                ui.label(
-                    egui::RichText::new(format!("{completed} / {total} AI masks updated")).strong(),
-                );
-                ui.add_space(6.0);
-                ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .show_percentage()
-                        .animate(completed < total),
-                );
-                if let Some(name) = current_name.as_deref() {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(format!("Refreshing {name}…"));
-                    });
-                }
-                if failed > 0 {
+            if app.library_ai_mask_refresh_progress_open() {
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    (completed as f32 / total as f32).clamp(0.0, 1.0)
+                };
+                #[cfg(not(target_os = "android"))]
+                let mut minimize = false;
+                let mut cancel = false;
+                crate::ui::responsive_popup(
+                    egui::Window::new("Regenerating AI masks"),
+                    ui.ctx(),
+                    360.0,
+                )
+                .id(egui::Id::new("library-ai-mask-refresh-progress"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ui.ctx(), |ui| {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "{failed} {} failed",
-                            if failed == 1 { "image" } else { "images" }
-                        ))
-                        .small()
-                        .color(ui.visuals().warn_fg_color),
+                        egui::RichText::new(format!("{completed} / {total} AI masks updated"))
+                            .strong(),
                     );
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .show_percentage()
+                            .animate(completed < total),
+                    );
+                    if let Some(name) = current_name.as_deref() {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(format!("Refreshing {name}…"));
+                        });
+                    }
+                    if failed > 0 {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{failed} {} failed",
+                                if failed == 1 { "image" } else { "images" }
+                            ))
+                            .small()
+                            .color(ui.visuals().warn_fg_color),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            minimize = ui.button("Minimize").clicked();
+                        }
+                        cancel = ui.button("Cancel").clicked();
+                    });
+                });
+                #[cfg(not(target_os = "android"))]
+                if minimize {
+                    app.minimize_library_ai_mask_refresh_progress();
                 }
-            });
+                if cancel {
+                    app.cancel_library_ai_mask_refresh();
+                }
+            }
         }
 
         #[cfg(not(target_os = "android"))]
@@ -3295,91 +3407,7 @@ impl Library {
                 app.library.export_dialog = None;
             }
 
-            let mut cancel_batch_export = false;
-            if let Some((completed, total, failed, current_name, cancelling)) =
-                app.library_batch_export_status()
-            {
-                if total > 1 {
-                    let exported = completed.saturating_sub(failed);
-                    let current_fraction = if current_name.is_some() {
-                        app.export_progress_state()
-                            .and_then(|(tiles_done, tiles_total)| {
-                                (tiles_total > 0).then(|| {
-                                    (tiles_done as f32 / tiles_total as f32).clamp(0.0, 1.0)
-                                })
-                            })
-                            .unwrap_or(0.0)
-                    } else {
-                        0.0
-                    };
-                    let overall_fraction = if total == 0 {
-                        0.0
-                    } else {
-                        ((completed as f32 + current_fraction) / total as f32).clamp(0.0, 1.0)
-                    };
-
-                    crate::ui::responsive_popup(
-                        egui::Window::new("Exporting images"),
-                        ui.ctx(),
-                        420.0,
-                    )
-                    .id(egui::Id::new("library-batch-export-progress-dialog"))
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ui.ctx(), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{exported} / {total} exported")).strong(),
-                        );
-                        ui.add_space(6.0);
-                        ui.add(
-                            egui::ProgressBar::new(overall_fraction)
-                                .show_percentage()
-                                .animate(!cancelling),
-                        );
-                        ui.add_space(6.0);
-
-                        if let Some(name) = current_name.as_deref() {
-                            let preparing = app
-                                .export_progress_state()
-                                .is_none_or(|(_, tiles_total)| tiles_total == 0);
-                            ui.label(if preparing {
-                                format!("Preparing {name}…")
-                            } else {
-                                format!("Exporting {name}…")
-                            });
-                        }
-                        if failed > 0 {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{failed} {} failed",
-                                    if failed == 1 { "image" } else { "images" }
-                                ))
-                                .small()
-                                .color(ui.visuals().warn_fg_color),
-                            );
-                        }
-                        if cancelling {
-                            ui.label(
-                                egui::RichText::new("Cancelling after the current image finishes…")
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                        }
-
-                        ui.add_space(8.0);
-                        if ui
-                            .add_enabled(!cancelling, egui::Button::new("Cancel"))
-                            .clicked()
-                        {
-                            cancel_batch_export = true;
-                        }
-                    });
-                }
-            }
-            if cancel_batch_export {
-                app.cancel_library_batch_export();
-            }
+            show_library_batch_export_progress(ui, app);
         }
 
         #[cfg(target_os = "android")]
@@ -3476,91 +3504,7 @@ impl Library {
                 app.library.export_dialog = None;
             }
 
-            let mut cancel_batch_export = false;
-            if let Some((completed, total, failed, current_name, cancelling)) =
-                app.library_batch_export_status()
-            {
-                if total > 1 {
-                    let exported = completed.saturating_sub(failed);
-                    let current_fraction = if current_name.is_some() {
-                        app.export_progress_state()
-                            .and_then(|(tiles_done, tiles_total)| {
-                                (tiles_total > 0).then(|| {
-                                    (tiles_done as f32 / tiles_total as f32).clamp(0.0, 1.0)
-                                })
-                            })
-                            .unwrap_or(0.0)
-                    } else {
-                        0.0
-                    };
-                    let overall_fraction = if total == 0 {
-                        0.0
-                    } else {
-                        ((completed as f32 + current_fraction) / total as f32).clamp(0.0, 1.0)
-                    };
-
-                    crate::ui::responsive_popup(
-                        egui::Window::new("Exporting images"),
-                        ui.ctx(),
-                        420.0,
-                    )
-                    .id(egui::Id::new(
-                        "android-library-batch-export-progress-dialog",
-                    ))
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ui.ctx(), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{exported} / {total} exported")).strong(),
-                        );
-                        ui.add_space(6.0);
-                        ui.add(
-                            egui::ProgressBar::new(overall_fraction)
-                                .show_percentage()
-                                .animate(!cancelling),
-                        );
-                        ui.add_space(6.0);
-                        if let Some(name) = current_name.as_deref() {
-                            let preparing = app
-                                .export_progress_state()
-                                .is_none_or(|(_, tiles_total)| tiles_total == 0);
-                            ui.label(if preparing {
-                                format!("Preparing {name}…")
-                            } else {
-                                format!("Exporting {name}…")
-                            });
-                        }
-                        if failed > 0 {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{failed} {} failed",
-                                    if failed == 1 { "image" } else { "images" }
-                                ))
-                                .small()
-                                .color(ui.visuals().warn_fg_color),
-                            );
-                        }
-                        if cancelling {
-                            ui.label(
-                                egui::RichText::new("Cancelling after the current image finishes…")
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                        }
-                        ui.add_space(8.0);
-                        if ui
-                            .add_enabled(!cancelling, egui::Button::new("Cancel"))
-                            .clicked()
-                        {
-                            cancel_batch_export = true;
-                        }
-                    });
-                }
-            }
-            if cancel_batch_export {
-                app.cancel_library_batch_export();
-            }
+            show_library_batch_export_progress(ui, app);
         }
 
         #[cfg(target_os = "android")]
