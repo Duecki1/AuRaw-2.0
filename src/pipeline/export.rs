@@ -12,7 +12,10 @@ use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -276,6 +279,7 @@ pub fn spawn_tiled_png_export(
     tile_spec: TileSpec,
     settings: ExportSettings,
     metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -306,12 +310,13 @@ pub fn spawn_tiled_png_export(
                     settings.checked_output_dimensions(geometry_width, geometry_height)?;
                 let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
                 let color = resolve_export_color(&settings)?;
-                export_to_destination(&worker_path, |path| {
+                export_to_destination(&worker_path, &cancellation, |path| {
                     export_tiled_png(
                         ExportContext {
                             device: &device,
                             queue: &queue,
                             events: &worker_sender,
+                            cancellation: &cancellation,
                         },
                         ExportRequest {
                             raw: &raw,
@@ -373,6 +378,7 @@ pub fn spawn_tiled_jpeg_export(
     tile_spec: TileSpec,
     settings: ExportSettings,
     metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -401,12 +407,13 @@ pub fn spawn_tiled_jpeg_export(
                 let mut jpeg_settings = settings.clone();
                 jpeg_settings.bit_depth = ExportBitDepth::Eight;
                 let color = resolve_export_color(&jpeg_settings)?;
-                export_to_destination(&worker_path, |path| {
+                export_to_destination(&worker_path, &cancellation, |path| {
                     export_tiled_jpeg(
                         ExportContext {
                             device: &device,
                             queue: &queue,
                             events: &worker_sender,
+                            cancellation: &cancellation,
                         },
                         ExportRequest {
                             raw: &raw,
@@ -468,6 +475,7 @@ pub fn spawn_tiled_tiff_export(
     tile_spec: TileSpec,
     settings: ExportSettings,
     metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -484,12 +492,13 @@ pub fn spawn_tiled_tiff_export(
                     settings.checked_output_dimensions(geometry_width, geometry_height)?;
                 let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
                 let color = resolve_export_color(&settings)?;
-                export_to_destination(&worker_path, |path| {
+                export_to_destination(&worker_path, &cancellation, |path| {
                     export_tiled_tiff(
                         ExportContext {
                             device: &device,
                             queue: &queue,
                             events: &worker_sender,
+                            cancellation: &cancellation,
                         },
                         ExportRequest {
                             raw: &raw,
@@ -542,16 +551,26 @@ fn resolved_export_tile_spec(
     bounded_tile_spec(tile_spec, source_width)
 }
 
-fn export_to_destination<F>(destination: &Path, export: F) -> Result<()>
+fn export_to_destination<F>(
+    destination: &Path,
+    cancellation: &AtomicBool,
+    export: F,
+) -> Result<()>
 where
     F: FnOnce(&Path) -> Result<()>,
 {
+    ensure_export_not_cancelled(cancellation)?;
     if is_direct_export_destination(destination) {
-        return export(destination);
+        export(destination)?;
+        return ensure_export_not_cancelled(cancellation);
     }
 
     let temporary = temporary_export_path(destination)?;
     if let Err(error) = export(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = ensure_export_not_cancelled(cancellation) {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
@@ -562,11 +581,20 @@ where
     Ok(())
 }
 
+fn ensure_export_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
+    anyhow::ensure!(
+        !cancellation.load(Ordering::Acquire),
+        "export cancelled"
+    );
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct ExportContext<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     events: &'a mpsc::Sender<ExportEvent>,
+    cancellation: &'a AtomicBool,
 }
 
 #[derive(Clone, Copy)]
@@ -860,6 +888,7 @@ where
         device,
         queue,
         events,
+        cancellation,
     } = context;
     let ExportRequest {
         raw,
@@ -877,6 +906,7 @@ where
         color: _,
     } = request;
     let export_started = Instant::now();
+    ensure_export_not_cancelled(cancellation)?;
     validate_export_dimensions(output_width, output_height)?;
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
     crate::diagnostics::record(format!(
@@ -934,6 +964,7 @@ where
     let mut tone_scratch = first_raw.clone();
     tile_pipeline.begin_export_tone_analysis(queue, device);
     for (index, tile) in plan.tiles.iter().copied().enumerate() {
+        ensure_export_not_cancelled(cancellation)?;
         if index != 0 {
             extract_padded_tile_into(raw, tile, &mut tone_scratch);
         }
@@ -974,6 +1005,7 @@ where
     let mut tile_index = 0usize;
 
     while tile_index < plan.tiles.len() {
+        ensure_export_not_cancelled(cancellation)?;
         let band_y = plan.tiles[tile_index].core_y;
         let band_height = plan.tiles[tile_index].core_height;
         let band_start = tile_index;
@@ -992,6 +1024,7 @@ where
             .copied()
             .enumerate()
         {
+            ensure_export_not_cancelled(cancellation)?;
             let global_index = band_start + absolute_index;
             extract_padded_tile_into(raw, tile, &mut tile_scratch);
             tile_pipeline
@@ -1076,6 +1109,7 @@ where
 
         let source_row_values = checked_rgb_len(raw.width, 1)?;
         for local_y in 0..band_height {
+            ensure_export_not_cancelled(cancellation)?;
             let start = usize::try_from(local_y)
                 .ok()
                 .and_then(|row| row.checked_mul(source_row_values))
@@ -3427,11 +3461,13 @@ fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_heigh
 mod tests {
     use super::{
         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
-        encode_srgb_row_with_format, publish_completed_export, stitch_linear_tile_into_band,
-        validate_export_dimensions, ExportMetadata, ExportResizeMode, ExportRowFormat,
+        encode_srgb_row_with_format, export_to_destination, publish_completed_export,
+        stitch_linear_tile_into_band, validate_export_dimensions, ExportMetadata,
+        ExportResizeMode, ExportRowFormat,
         ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
     };
     use crate::pipeline::{ExportTile, GeometryTransform, IccOutputTransform};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -3700,6 +3736,32 @@ mod tests {
         assert_eq!(encoded.len(), 4);
         assert_eq!(encoded[3], 255);
         assert!(encode_srgb_row(&[f32::NAN, 0.0, 0.0], &transform).is_err());
+    }
+
+    #[test]
+    fn cancelled_export_removes_temporary_output_before_publication() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "auraw-export-cancel-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("photo.png");
+        let cancellation = AtomicBool::new(false);
+
+        let result = export_to_destination(&destination, &cancellation, |temporary| {
+            std::fs::write(temporary, b"complete but not published")?;
+            cancellation.store(true, Ordering::Release);
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert!(!destination.exists());
+        assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

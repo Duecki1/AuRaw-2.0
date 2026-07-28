@@ -1,6 +1,8 @@
 impl AurawApp {
     pub(crate) fn inpaint_busy(&self) -> bool {
-        self.inpaint_receiver.is_some() || self.inpaint_consent_open
+        self.inpaint_task_id.is_some()
+            || self.inpaint_receiver.is_some()
+            || self.inpaint_consent_open
     }
 
     pub(crate) fn inpaint_progress(&self) -> Option<(u64, u64)> {
@@ -37,6 +39,13 @@ impl AurawApp {
     }
 
     pub(crate) fn reset_inpainting_state(&mut self) {
+        // A native inference call may only notice cancellation between phases. Keep its
+        // receiver connected until the terminal event arrives, while invalidating its
+        // document generation so the result can never be installed into the new image.
+        if let Some(task_id) = self.inpaint_task_id {
+            self.cancel_background_task(task_id);
+        }
+        let worker_still_running = self.inpaint_receiver.is_some();
         self.inpaint_stroke.clear();
         self.inpaint_strokes.clear();
         self.last_inpaint_brush_point = None;
@@ -51,12 +60,15 @@ impl AurawApp {
         self.inpaint_focus_texture_key = None;
         self.inpaint_source_cache = None;
         self.inpaint_pending_source = None;
-        self.inpaint_active_dabs = None;
-        self.inpaint_revision = 0;
+        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.inpaint_consent_open = false;
-        self.inpaint_receiver = None;
-        self.inpaint_download_progress = None;
-        self.inpaint_inferencing = false;
+        if !worker_still_running {
+            self.inpaint_task_id = None;
+            self.inpaint_receiver = None;
+            self.inpaint_active_dabs = None;
+            self.inpaint_download_progress = None;
+            self.inpaint_inferencing = false;
+        }
         self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
     }
 
@@ -184,7 +196,7 @@ impl AurawApp {
     }
 
     fn start_inpaint_worker(&mut self, model_path: PathBuf) {
-        if self.inpaint_receiver.is_some() {
+        if self.inpaint_task_id.is_some() || self.inpaint_receiver.is_some() {
             return;
         }
         let Some(source) = self.inpaint_pending_source.take() else {
@@ -195,12 +207,9 @@ impl AurawApp {
             return;
         }
         let dabs = std::mem::take(&mut self.inpaint_stroke);
-        self.inpaint_active_dabs = Some(dabs.clone());
         self.last_inpaint_brush_point = None;
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
-        self.inpaint_download_progress = None;
-        self.inpaint_inferencing = model_path.exists();
         #[cfg(not(target_os = "android"))]
         let runtime_path = self.onnx_runtime_path.clone();
         #[cfg(not(target_os = "android"))]
@@ -209,72 +218,186 @@ impl AurawApp {
         let runtime_path = None;
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
-        self.inpaint_receiver = Some(spawn_inpaint(
+        let generation = self.inpaint_revision;
+        let request = InpaintTaskRequest {
+            document_id: self.sidecar_generation,
+            generation,
             model_path,
             runtime_path,
             runtime_sha256,
-            InpaintRequest { source, dabs },
-        ));
+            request: InpaintRequest {
+                source,
+                dabs: dabs.clone(),
+            },
+            dabs,
+        };
+        let needs_download = !request.model_path.exists();
+        if needs_download {
+            let task_id = self.enqueue_background_action(
+                TaskKind::Inpainting {
+                    document_id: request.document_id,
+                    generation,
+                },
+                "Downloading inpainting model",
+                TaskProgress::indeterminate("Waiting for earlier background work…"),
+                true,
+                BackgroundAction::Inpainting(request),
+            );
+            self.inpaint_task_id = Some(task_id);
+        } else {
+            let task_id = self.background_tasks.start_nonblocking(
+                TaskKind::Inpainting {
+                    document_id: request.document_id,
+                    generation,
+                },
+                "Erasing selection",
+                TaskProgress::indeterminate("Running local LaMa inpainting…"),
+                true,
+            );
+            self.start_inpaint_task(task_id, request);
+        }
         self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn poll_inpaint_worker(&mut self) {
-        let mut finished = None;
+        let Some(task_id) = self.inpaint_task_id else {
+            return;
+        };
+        let mut events = Vec::new();
+        let mut disconnected = false;
         if let Some(receiver) = &self.inpaint_receiver {
-            while let Ok(event) = receiver.try_recv() {
-                match event {
-                    InpaintEvent::DownloadProgress { downloaded, total } => {
-                        self.inpaint_download_progress = Some((downloaded, total));
-                        self.inpaint_inferencing = false;
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let finished = matches!(event, InpaintEvent::Finished(_));
+                        events.push(event);
+                        if finished {
+                            break;
+                        }
                     }
-                    InpaintEvent::Inferencing => {
-                        self.inpaint_download_progress = None;
-                        self.inpaint_inferencing = true;
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
                     }
-                    InpaintEvent::Finished(result) => finished = Some(result),
                 }
             }
         }
-        if let Some(result) = finished {
-            self.inpaint_receiver = None;
-            self.inpaint_download_progress = None;
-            self.inpaint_inferencing = false;
-            match result {
-                Ok(result) => {
-                    let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
-                    if let Some(stroke) = InpaintStroke::from_result(dabs, result) {
-                        match crate::sidecar::preflight_inpaint_addition(
-                            &self.masks,
-                            &self.inpaint_strokes,
-                            &stroke,
-                        ) {
-                            Ok(()) => {
-                                self.inpaint_strokes.push(stroke);
-                                self.note_inpainting_edit_changed();
-                                self.rebuild_inpaint_layer();
-                                self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
-                                self.note_inpainting_changed_for_ai_masks();
-                                self.queue_preview_processing(ProcessingStage::Tone);
-                                self.notice = Some("Erase complete.".to_owned());
-                            }
-                            Err(error) => {
-                                self.notice = Some(format!(
-                                    "Erase result was not applied because the edit cannot fit in the platform sidecar: {error}. Delete an existing mask or erase result and try again."
-                                ));
+
+        let mut finished = None;
+        for event in events {
+            match event {
+                InpaintEvent::DownloadProgress { downloaded, total } => {
+                    self.inpaint_download_progress = Some((downloaded, total));
+                    self.inpaint_inferencing = false;
+                    self.background_tasks.set_global_visible(task_id, true);
+                    self.background_tasks
+                        .rename(task_id, "Downloading inpainting model");
+                    self.update_background_progress(
+                        Some(task_id),
+                        TaskProgress::units(
+                            downloaded,
+                            total,
+                            Some("bytes".to_owned()),
+                            "Downloading inpainting model",
+                        )
+                        .with_detail(format!(
+                            "{:.1} / {:.1} MB",
+                            downloaded as f64 / 1_000_000.0,
+                            total as f64 / 1_000_000.0
+                        )),
+                    );
+                }
+                InpaintEvent::Inferencing => {
+                    self.inpaint_download_progress = None;
+                    self.inpaint_inferencing = true;
+                    self.background_tasks.set_global_visible(task_id, false);
+                    self.background_tasks.release_current(task_id);
+                    self.update_background_progress(
+                        Some(task_id),
+                        TaskProgress::indeterminate("Running local LaMa inpainting…"),
+                    );
+                }
+                InpaintEvent::Finished(result) => finished = Some(result),
+            }
+        }
+        if finished.is_none() && disconnected {
+            finished = Some(Err("The inpainting worker stopped unexpectedly.".to_owned()));
+        }
+        let Some(result) = finished else {
+            return;
+        };
+
+        let cancelled = self.background_task_cancelled(task_id);
+        let stale = self.inpaint_job_document_id != self.sidecar_generation
+            || self.inpaint_job_generation != self.inpaint_revision;
+        let failed_during_inference = self.inpaint_inferencing;
+        self.inpaint_receiver = None;
+        self.inpaint_task_id = None;
+        self.inpaint_download_progress = None;
+        self.inpaint_inferencing = false;
+
+        if cancelled || stale {
+            self.inpaint_active_dabs = None;
+            self.finish_background_task(task_id);
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        match result {
+            Ok(result) => {
+                let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
+                if let Some(stroke) = InpaintStroke::from_result(dabs, result) {
+                    match crate::sidecar::preflight_inpaint_addition(
+                        &self.masks,
+                        &self.inpaint_strokes,
+                        &stroke,
+                    ) {
+                        Ok(()) => {
+                            self.inpaint_strokes.push(stroke);
+                            self.note_inpainting_edit_changed();
+                            self.rebuild_inpaint_layer();
+                            self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+                            self.note_inpainting_changed_for_ai_masks();
+                            self.queue_preview_processing(ProcessingStage::Tone);
+                            self.notice = Some("Erase complete.".to_owned());
+                            self.finish_background_task(task_id);
+                        }
+                        Err(error) => {
+                            let message = format!(
+                                "Erase result was not applied because the edit cannot fit in the platform sidecar: {error}. Delete an existing mask or erase result and try again."
+                            );
+                            self.notice = Some(message.clone());
+                            if failed_during_inference {
+                                self.finish_background_task(task_id);
+                            } else {
+                                self.fail_background_task(task_id, message);
                             }
                         }
+                    }
+                } else {
+                    let message = "Inpainting returned an empty result.".to_owned();
+                    self.notice = Some(message.clone());
+                    if failed_during_inference {
+                        self.finish_background_task(task_id);
                     } else {
-                        self.notice = Some("Inpainting returned an empty result.".to_owned());
+                        self.fail_background_task(task_id, message);
                     }
                 }
-                Err(error) => {
-                    log::error!("Inpainting failed: {error}");
-                    self.inpaint_active_dabs = None;
-                    self.notice = Some(format!("Inpainting failed: {error}"));
+            }
+            Err(error) => {
+                log::error!("Inpainting failed: {error}");
+                self.inpaint_active_dabs = None;
+                let message = format!("Inpainting failed: {error}");
+                self.notice = Some(message.clone());
+                if failed_during_inference {
+                    self.finish_background_task(task_id);
+                } else {
+                    self.fail_background_task(task_id, message);
                 }
             }
-            self.egui_ctx.request_repaint();
         }
+        self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn delete_inpaint_stroke(&mut self, index: usize) {
@@ -381,7 +504,14 @@ impl AurawApp {
                     });
                 });
         }
-        if self.inpaint_receiver.is_some() {
+        if self.inpaint_receiver.is_some()
+            && self
+                .inpaint_task_id
+                .is_some_and(|id| self.background_task_details_open(id))
+        {
+            #[cfg(not(target_os = "android"))]
+            let mut minimize = false;
+            let mut cancel = false;
             crate::ui::responsive_popup(egui::Window::new("Erasing selection"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(false)
@@ -407,7 +537,24 @@ impl AurawApp {
                     } else {
                         ui.spinner();
                     }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            minimize = ui.button("Minimize").clicked();
+                        }
+                        cancel = ui.button("Cancel").clicked();
+                    });
                 });
+            if let Some(task_id) = self.inpaint_task_id {
+                #[cfg(not(target_os = "android"))]
+                if minimize {
+                    self.set_background_task_details_open(task_id, false);
+                }
+                if cancel {
+                    self.cancel_background_task(task_id);
+                }
+            }
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }

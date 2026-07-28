@@ -152,6 +152,8 @@ impl AurawApp {
 
     pub(crate) fn ai_mask_update_busy(&self) -> bool {
         self.ai_mask_update_active
+            || self.subject_task_id.is_some()
+            || self.object_task_id.is_some()
             || self.subject_receiver.is_some()
             || self.object_receiver.is_some()
             || self.subject_consent_open
@@ -236,6 +238,7 @@ impl AurawApp {
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
         self.object_cache = None;
+        self.subject_generation = self.subject_generation.wrapping_add(1);
         self.object_generation = self.object_generation.wrapping_add(1);
         self.object_pending_target = None;
         self.ai_mask_update_active = false;
@@ -544,7 +547,7 @@ impl AurawApp {
     }
 
     fn start_subject_worker(&mut self, model_path: PathBuf) {
-        if self.subject_receiver.is_some() {
+        if self.subject_task_id.is_some() || self.subject_receiver.is_some() {
             return;
         }
         let Some(source) = self.mask_source_cache.clone() else {
@@ -552,9 +555,7 @@ impl AurawApp {
                 Some("The preview could not be prepared for subject selection.".to_owned());
             return;
         };
-        self.subject_download_progress = None;
         let vitmatte_path = self.vitmatte_model_path();
-        self.subject_inferencing = model_path.exists() && vitmatte_path.exists();
         #[cfg(not(target_os = "android"))]
         let runtime_path = self.onnx_runtime_path.clone();
         #[cfg(not(target_os = "android"))]
@@ -563,15 +564,50 @@ impl AurawApp {
         let runtime_path = None;
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
-        self.subject_receiver = Some(spawn_subject_mask(
+
+        self.subject_generation = self.subject_generation.wrapping_add(1);
+        let generation = self.subject_generation;
+        let request = SubjectMaskTaskRequest {
+            document_id: self.sidecar_generation,
+            generation,
+            source,
             model_path,
             vitmatte_path,
             runtime_path,
             runtime_sha256,
-            source.width,
-            source.height,
-            source.rgba.to_vec(),
-        ));
+        };
+
+        if let Some(task_id) = self.library_ai_mask_refresh_task_id.filter(|task_id| {
+            self.background_tasks.current_id() == Some(*task_id) && self.ai_mask_update_active
+        }) {
+            self.start_subject_mask_task(task_id, request);
+        } else {
+            let needs_download = !request.model_path.exists() || !request.vitmatte_path.exists();
+            if needs_download {
+                let task_id = self.enqueue_background_action(
+                    TaskKind::SubjectMask {
+                        document_id: request.document_id,
+                        generation,
+                    },
+                    "Downloading subject-mask model",
+                    TaskProgress::indeterminate("Waiting for earlier background work…"),
+                    true,
+                    BackgroundAction::SubjectMask(request),
+                );
+                self.subject_task_id = Some(task_id);
+            } else {
+                let task_id = self.background_tasks.start_nonblocking(
+                    TaskKind::SubjectMask {
+                        document_id: request.document_id,
+                        generation,
+                    },
+                    "Generating subject mask",
+                    TaskProgress::indeterminate("Running local subject-mask inference…"),
+                    true,
+                );
+                self.start_subject_mask_task(task_id, request);
+            }
+        }
         self.egui_ctx.request_repaint();
     }
 
@@ -593,55 +629,137 @@ impl AurawApp {
     }
 
     fn poll_subject_worker(&mut self) {
-        let mut finished = None;
+        let Some(task_id) = self.subject_task_id else {
+            return;
+        };
+        let mut events = Vec::new();
+        let mut disconnected = false;
         if let Some(receiver) = &self.subject_receiver {
-            while let Ok(event) = receiver.try_recv() {
-                match event {
-                    SubjectMaskEvent::DownloadProgress {
-                        label,
-                        downloaded,
-                        total,
-                    } => {
-                        self.subject_download_progress = Some((label, downloaded, total));
-                        self.subject_inferencing = false;
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let finished = matches!(event, SubjectMaskEvent::Finished(_));
+                        events.push(event);
+                        if finished {
+                            break;
+                        }
                     }
-                    SubjectMaskEvent::Inferencing => {
-                        self.subject_download_progress = None;
-                        self.subject_inferencing = true;
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
                     }
-                    SubjectMaskEvent::Finished(result) => finished = Some(result),
                 }
             }
         }
-        if let Some(result) = finished {
-            let updating_all =
-                self.ai_mask_update_active && self.ai_mask_update_subject_pending;
-            self.subject_receiver = None;
-            self.subject_download_progress = None;
-            self.subject_inferencing = false;
-            let succeeded = match result {
+
+        let mut finished = None;
+        for event in events {
+            match event {
+                SubjectMaskEvent::DownloadProgress {
+                    label,
+                    downloaded,
+                    total,
+                } => {
+                    self.subject_download_progress = Some((label, downloaded, total));
+                    self.subject_inferencing = false;
+                    self.background_tasks.set_global_visible(task_id, true);
+                    self.background_tasks
+                        .rename(task_id, "Downloading subject-mask model");
+                    let progress = TaskProgress::units(
+                        downloaded,
+                        total,
+                        Some("bytes".to_owned()),
+                        format!("Downloading {label}"),
+                    )
+                    .with_detail(format!(
+                        "{:.1} / {:.1} MB",
+                        downloaded as f64 / 1_000_000.0,
+                        total as f64 / 1_000_000.0
+                    ));
+                    self.update_background_progress(Some(task_id), progress);
+                }
+                SubjectMaskEvent::Inferencing => {
+                    self.subject_download_progress = None;
+                    self.subject_inferencing = true;
+                    self.background_tasks.set_global_visible(task_id, false);
+                    if matches!(
+                        self.background_tasks.snapshot(task_id).map(|task| task.kind),
+                        Some(TaskKind::SubjectMask { .. })
+                    ) {
+                        self.background_tasks.release_current(task_id);
+                    }
+                    self.update_background_progress(
+                        Some(task_id),
+                        TaskProgress::indeterminate("Running local subject-mask inference…"),
+                    );
+                }
+                SubjectMaskEvent::Finished(result) => finished = Some(result),
+            }
+        }
+        if finished.is_none() && disconnected {
+            finished = Some(Err("The subject-mask worker stopped unexpectedly.".to_owned()));
+        }
+        let Some(result) = finished else {
+            return;
+        };
+
+        let updating_all = self.ai_mask_update_active && self.ai_mask_update_subject_pending;
+        let library_task = self.library_ai_mask_refresh_task_id == Some(task_id);
+        let cancelled = self.background_task_cancelled(task_id);
+        let stale = self.subject_job_document_id != self.sidecar_generation
+            || self.subject_job_generation != self.subject_generation;
+        let failed_during_inference = self.subject_inferencing;
+        self.subject_receiver = None;
+        self.subject_task_id = None;
+        self.subject_download_progress = None;
+        self.subject_inferencing = false;
+
+        let mut succeeded = false;
+        let mut error_message = None;
+        if !cancelled && !stale {
+            match result {
                 Ok(result) => {
                     if let Some(mask) = MaskImage::new(result.width, result.height, result.mask) {
                         self.apply_subject_mask(mask);
-                        true
+                        succeeded = true;
                     } else {
-                        self.notice = Some(
-                            "Subject selection returned an invalid mask image.".to_owned(),
-                        );
-                        false
+                        error_message =
+                            Some("Subject selection returned an invalid mask image.".to_owned());
                     }
                 }
                 Err(error) => {
-                    self.notice = Some(format!("Subject selection failed: {error}"));
-                    false
+                    error_message = Some(format!("Subject selection failed: {error}"));
                 }
-            };
-            if updating_all {
-                self.ai_mask_update_subject_pending = false;
-                self.ai_mask_update_failed |= !succeeded;
-                self.continue_ai_mask_update();
             }
         }
+
+        if library_task {
+            if cancelled {
+                self.cancel_ai_mask_update();
+            } else if updating_all {
+                self.ai_mask_update_subject_pending = false;
+                self.ai_mask_update_failed |= !succeeded;
+                if let Some(message) = error_message.clone() {
+                    self.notice = Some(message);
+                }
+                self.continue_ai_mask_update();
+            }
+        } else if cancelled || stale {
+            self.finish_background_task(task_id);
+        } else if succeeded {
+            self.finish_background_task(task_id);
+        } else {
+            let message = error_message
+                .unwrap_or_else(|| "Subject selection did not produce a mask.".to_owned());
+            self.notice = Some(message.clone());
+            if failed_during_inference {
+                self.finish_background_task(task_id);
+            } else {
+                self.fail_background_task(task_id, message);
+            }
+        }
+        self.egui_ctx.request_repaint();
     }
 
     /// A completed object mask is intentionally immutable from the canvas.
@@ -742,13 +860,27 @@ impl AurawApp {
         encoder_path: PathBuf,
         decoder_path: PathBuf,
     ) {
-        if self.object_receiver.is_some() {
-            // Preserve the newest user intent; it will be submitted after the
-            // current generation finishes rather than racing two ORT sessions.
+        let library_task = self.library_ai_mask_refresh_task_id.filter(|task_id| {
+            self.background_tasks.current_id() == Some(*task_id) && self.ai_mask_update_active
+        });
+        if library_task.is_none() {
+            if let Some(existing) = self.object_task_id {
+                self.cancel_background_task(existing);
+                if self.object_receiver.is_some() {
+                    // Native inference may only stop between phases. Keep the
+                    // receiver paired with its stable task ID and retain only
+                    // the newest requested target for the follow-up run.
+                    self.object_pending_target = Some((mask_index, component_index));
+                    self.object_generation = self.object_generation.wrapping_add(1);
+                    return;
+                }
+            }
+        } else if self.object_receiver.is_some() {
             self.object_pending_target = Some((mask_index, component_index));
             self.object_generation = self.object_generation.wrapping_add(1);
             return;
         }
+
         let Some(source) = self.mask_source_cache.clone() else {
             self.notice =
                 Some("The original image source is unavailable for object selection.".to_owned());
@@ -791,7 +923,7 @@ impl AurawApp {
             .as_ref()
             .filter(|(target, _)| *target == (mask_index, component_index))
             .map(|(_, cache)| cache.clone());
-        let request = ObjectMaskRequest {
+        let object_request = ObjectMaskRequest {
             source_width: source.width,
             source_height: source.height,
             source_rgba: source.rgba.to_vec(),
@@ -801,12 +933,8 @@ impl AurawApp {
             cache,
         };
         self.object_generation = self.object_generation.wrapping_add(1);
-        self.object_job_generation = self.object_generation;
-        self.object_job_target = Some((mask_index, component_index));
+        let generation = self.object_generation;
         self.object_pending_target = None;
-        self.object_download_progress = None;
-        self.object_inferencing = encoder_path.exists() && decoder_path.exists();
-        self.object_decoder_only = request.cache.is_some();
         #[cfg(not(target_os = "android"))]
         let runtime_path = self.onnx_runtime_path.clone();
         #[cfg(not(target_os = "android"))]
@@ -815,50 +943,154 @@ impl AurawApp {
         let runtime_path = None;
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
-        self.object_receiver = Some(spawn_object_mask(
+        let request = ObjectMaskTaskRequest {
+            document_id: self.sidecar_generation,
+            generation,
+            target: (mask_index, component_index),
             encoder_path,
             decoder_path,
-            self.vitmatte_model_path(),
+            vitmatte_path: self.vitmatte_model_path(),
             runtime_path,
             runtime_sha256,
-            request,
-        ));
+            request: object_request,
+        };
+
+        if let Some(task_id) = library_task {
+            self.start_object_mask_task(task_id, request);
+        } else {
+            let needs_download = !request.encoder_path.exists()
+                || !request.decoder_path.exists()
+                || !request.vitmatte_path.exists();
+            if needs_download {
+                let task_id = self.enqueue_background_action(
+                    TaskKind::ObjectMask {
+                        document_id: request.document_id,
+                        generation,
+                    },
+                    "Downloading object-mask model",
+                    TaskProgress::indeterminate("Waiting for earlier background work…"),
+                    true,
+                    BackgroundAction::ObjectMask(request),
+                );
+                self.object_task_id = Some(task_id);
+            } else {
+                let task_id = self.background_tasks.start_nonblocking(
+                    TaskKind::ObjectMask {
+                        document_id: request.document_id,
+                        generation,
+                    },
+                    "Generating object mask",
+                    TaskProgress::indeterminate(
+                        "Encoding the image and generating the object mask…",
+                    ),
+                    true,
+                );
+                self.start_object_mask_task(task_id, request);
+            }
+        }
         self.egui_ctx.request_repaint();
     }
 
     fn poll_object_worker(&mut self) {
-        let mut finished = None;
+        let Some(task_id) = self.object_task_id else {
+            return;
+        };
+        let mut events = Vec::new();
+        let mut disconnected = false;
         if let Some(receiver) = &self.object_receiver {
-            while let Ok(event) = receiver.try_recv() {
-                match event {
-                    ObjectMaskEvent::DownloadProgress {
-                        label,
-                        downloaded,
-                        total,
-                    } => {
-                        self.object_download_progress = Some((label, downloaded, total));
-                        self.object_inferencing = false;
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let finished = matches!(event, ObjectMaskEvent::Finished(_));
+                        events.push(event);
+                        if finished {
+                            break;
+                        }
                     }
-                    ObjectMaskEvent::Inferencing { decoder_only } => {
-                        self.object_download_progress = None;
-                        self.object_inferencing = true;
-                        self.object_decoder_only = decoder_only;
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
                     }
-                    ObjectMaskEvent::Finished(result) => finished = Some(result),
                 }
             }
+        }
+
+        let mut finished = None;
+        for event in events {
+            match event {
+                ObjectMaskEvent::DownloadProgress {
+                    label,
+                    downloaded,
+                    total,
+                } => {
+                    self.object_download_progress = Some((label, downloaded, total));
+                    self.object_inferencing = false;
+                    self.background_tasks.set_global_visible(task_id, true);
+                    self.background_tasks
+                        .rename(task_id, "Downloading object-mask model");
+                    self.update_background_progress(
+                        Some(task_id),
+                        TaskProgress::units(
+                            downloaded,
+                            total,
+                            Some("bytes".to_owned()),
+                            format!("Downloading {label}"),
+                        )
+                        .with_detail(format!(
+                            "{:.1} / {:.1} MB",
+                            downloaded as f64 / 1_000_000.0,
+                            total as f64 / 1_000_000.0
+                        )),
+                    );
+                }
+                ObjectMaskEvent::Inferencing { decoder_only } => {
+                    self.object_download_progress = None;
+                    self.object_inferencing = true;
+                    self.object_decoder_only = decoder_only;
+                    self.background_tasks.set_global_visible(task_id, false);
+                    if matches!(
+                        self.background_tasks.snapshot(task_id).map(|task| task.kind),
+                        Some(TaskKind::ObjectMask { .. })
+                    ) {
+                        self.background_tasks.release_current(task_id);
+                    }
+                    self.update_background_progress(
+                        Some(task_id),
+                        TaskProgress::indeterminate(if decoder_only {
+                            "Updating the object mask…"
+                        } else {
+                            "Encoding the image and generating the object mask…"
+                        }),
+                    );
+                }
+                ObjectMaskEvent::Finished(result) => finished = Some(result),
+            }
+        }
+        if finished.is_none() && disconnected {
+            finished = Some(Err("The object-mask worker stopped unexpectedly.".to_owned()));
         }
         let Some(result) = finished else {
             return;
         };
-        self.object_receiver = None;
-        self.object_download_progress = None;
-        self.object_inferencing = false;
+
         let target = self.object_job_target.take();
         let generation = self.object_job_generation;
+        let document_id = self.object_job_document_id;
         let updating_all = self.ai_mask_update_active && target.is_some();
+        let library_task = self.library_ai_mask_refresh_task_id == Some(task_id);
+        let cancelled = self.background_task_cancelled(task_id);
+        let stale = generation != self.object_generation
+            || document_id != self.sidecar_generation;
+        let failed_during_inference = self.object_inferencing;
+        self.object_receiver = None;
+        self.object_task_id = None;
+        self.object_download_progress = None;
+        self.object_inferencing = false;
+
         let mut succeeded = false;
-        if generation == self.object_generation {
+        let mut error_message = None;
+        if !cancelled && !stale {
             match (target, result) {
                 (Some((mask_index, component_index)), Ok(result)) => {
                     let crate::ai_masks::ObjectMaskResult {
@@ -894,28 +1126,53 @@ impl AurawApp {
                         self.blink_selected_component();
                         succeeded = true;
                     } else {
-                        self.notice =
+                        error_message =
                             Some("Object selection returned an invalid mask image.".to_owned());
                     }
                 }
                 (_, Ok(_)) => {}
                 (_, Err(error)) => {
-                    let message = format!("Object selection failed: {error}");
-                    self.notice = Some(message.clone());
-                    self.object_error_dialog = Some(message);
+                    error_message = Some(format!("Object selection failed: {error}"));
                 }
             }
         }
-        if let Some((mask_index, component_index)) = self.object_pending_target.take() {
-            let (encoder, decoder) = self.sam21_model_paths();
-            self.start_object_worker(mask_index, component_index, encoder, decoder);
-        } else if updating_all {
-            self.ai_mask_update_failed |= !succeeded;
-            if !succeeded {
-                self.ai_mask_update_object_queue.clear();
+
+        if library_task {
+            if cancelled {
+                self.cancel_ai_mask_update();
+            } else if let Some((mask_index, component_index)) = self.object_pending_target.take() {
+                let (encoder, decoder) = self.sam21_model_paths();
+                self.start_object_worker(mask_index, component_index, encoder, decoder);
+            } else if updating_all {
+                self.ai_mask_update_failed |= !succeeded;
+                if !succeeded {
+                    self.ai_mask_update_object_queue.clear();
+                }
+                if let Some(message) = error_message.clone() {
+                    self.notice = Some(message);
+                }
+                self.continue_ai_mask_update();
             }
-            self.continue_ai_mask_update();
+        } else if cancelled || stale {
+            self.finish_background_task(task_id);
+            if let Some((mask_index, component_index)) = self.object_pending_target.take() {
+                let (encoder, decoder) = self.sam21_model_paths();
+                self.start_object_worker(mask_index, component_index, encoder, decoder);
+            }
+        } else if succeeded {
+            self.finish_background_task(task_id);
+        } else {
+            let message = error_message
+                .unwrap_or_else(|| "Object selection did not produce a mask.".to_owned());
+            self.notice = Some(message.clone());
+            if failed_during_inference {
+                self.object_error_dialog = Some(message);
+                self.finish_background_task(task_id);
+            } else {
+                self.fail_background_task(task_id, message);
+            }
         }
+        self.egui_ctx.request_repaint();
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1181,7 +1438,14 @@ impl AurawApp {
         // The Library batch progress is the operation-level dialog. Do not
         // cover it with a second worker-level window while refreshing pasted
         // masks; the batch dialog stays visible for the entire operation.
-        if self.subject_receiver.is_some() && !library_batch_refreshing {
+        if self.subject_receiver.is_some() && !library_batch_refreshing
+            && self
+                .subject_task_id
+                .is_some_and(|id| self.background_task_details_open(id))
+        {
+            #[cfg(not(target_os = "android"))]
+            let mut minimize = false;
+            let mut cancel = false;
             crate::ui::responsive_popup(egui::Window::new("Preparing subject mask"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(false)
@@ -1207,7 +1471,24 @@ impl AurawApp {
                     } else {
                         ui.spinner();
                     }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            minimize = ui.button("Minimize").clicked();
+                        }
+                        cancel = ui.button("Cancel").clicked();
+                    });
                 });
+            if let Some(task_id) = self.subject_task_id {
+                #[cfg(not(target_os = "android"))]
+                if minimize {
+                    self.set_background_task_details_open(task_id, false);
+                }
+                if cancel {
+                    self.cancel_background_task(task_id);
+                }
+            }
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
@@ -1267,7 +1548,14 @@ impl AurawApp {
                     });
                 });
         }
-        if self.object_receiver.is_some() && !library_batch_refreshing {
+        if self.object_receiver.is_some() && !library_batch_refreshing
+            && self
+                .object_task_id
+                .is_some_and(|id| self.background_task_details_open(id))
+        {
+            #[cfg(not(target_os = "android"))]
+            let mut minimize = false;
+            let mut cancel = false;
             crate::ui::responsive_popup(egui::Window::new("Preparing object mask"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(false)
@@ -1297,7 +1585,24 @@ impl AurawApp {
                     } else {
                         ui.spinner();
                     }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            minimize = ui.button("Minimize").clicked();
+                        }
+                        cancel = ui.button("Cancel").clicked();
+                    });
                 });
+            if let Some(task_id) = self.object_task_id {
+                #[cfg(not(target_os = "android"))]
+                if minimize {
+                    self.set_background_task_details_open(task_id, false);
+                }
+                if cancel {
+                    self.cancel_background_task(task_id);
+                }
+            }
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
