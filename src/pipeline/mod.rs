@@ -33,11 +33,17 @@ pub use export::{
     ExportColorProfile, ExportEvent, ExportFormat, ExportMetadata, ExportResizeMode,
     ExportSettings, MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
+pub(crate) use export::{
+    spawn_tiled_jpeg_export_with_program_prewarm,
+    spawn_tiled_png_export_with_program_prewarm,
+    spawn_tiled_tiff_export_with_program_prewarm,
+};
 pub use geometry::{
     transform_thumbnail_geometry, transform_thumbnail_geometry_with_lens, CropAspectRatio,
     GeometryTransform, LensGeometryMap,
 };
 pub use gpu::{GpuOutputSnapshot, GpuParams, ProcessingQuality, RawGpuPipeline};
+pub(crate) use gpu::{GpuProgramPrewarm, RawGpuProgramTemplate};
 #[cfg(target_os = "android")]
 pub(crate) use gpu_cache::PersistentGpuPipelineCache;
 pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};

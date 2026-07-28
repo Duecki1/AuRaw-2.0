@@ -10,12 +10,16 @@ use crate::inpainting::{
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_jpeg_export, spawn_tiled_png_export, spawn_tiled_tiff_export, BrushDab, BrushMode,
-    CameraProfileMode, ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams,
-    GeometryTransform, GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog, LensfunLens,
+    spawn_tiled_jpeg_export_with_program_prewarm,
+    spawn_tiled_png_export_with_program_prewarm,
+    spawn_tiled_tiff_export_with_program_prewarm, BrushDab, BrushMode, CameraProfileMode,
+    ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
+    GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog, LensfunLens,
     LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality,
     ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
+#[cfg(target_os = "android")]
+use crate::pipeline::GpuProgramPrewarm;
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
     LensEditState as SidecarLensEditState,
@@ -555,6 +559,8 @@ struct ExportTaskRequest {
     settings: ExportSettings,
     metadata: ExportMetadata,
     display_name: String,
+    #[cfg(target_os = "android")]
+    gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
 
 struct LensCorrectionTaskRequest {
@@ -627,6 +633,8 @@ pub struct AurawApp {
     retired_egui_textures: Vec<egui::TextureId>,
     #[cfg(target_os = "android")]
     gpu_preview_prewarm_receiver: Option<mpsc::Receiver<Result<RawGpuPipeline, String>>>,
+    #[cfg(target_os = "android")]
+    gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
     pub(crate) preview_quality: PreviewQuality,
     pub(crate) preview_zoom: f32,
     pub(crate) preview_center: [f32; 2],
