@@ -155,9 +155,13 @@ fn spawn_export_request(
         settings,
         metadata,
         display_name: _,
+        #[cfg(target_os = "android")]
+        gpu_export_prewarm,
     } = request;
+    #[cfg(not(target_os = "android"))]
+    let gpu_export_prewarm = None;
     match format {
-        ExportFormat::Png => spawn_tiled_png_export(
+        ExportFormat::Png => spawn_tiled_png_export_with_program_prewarm(
             device,
             queue,
             raw,
@@ -170,8 +174,9 @@ fn spawn_export_request(
             settings,
             metadata,
             cancellation,
+            gpu_export_prewarm,
         ),
-        ExportFormat::Jpeg => spawn_tiled_jpeg_export(
+        ExportFormat::Jpeg => spawn_tiled_jpeg_export_with_program_prewarm(
             device,
             queue,
             raw,
@@ -184,8 +189,9 @@ fn spawn_export_request(
             settings,
             metadata,
             cancellation,
+            gpu_export_prewarm,
         ),
-        ExportFormat::Tiff => spawn_tiled_tiff_export(
+        ExportFormat::Tiff => spawn_tiled_tiff_export_with_program_prewarm(
             device,
             queue,
             raw,
@@ -198,6 +204,7 @@ fn spawn_export_request(
             settings,
             metadata,
             cancellation,
+            gpu_export_prewarm,
         ),
     }
 }
@@ -2312,6 +2319,8 @@ impl AurawApp {
             format,
             settings: self.export_settings.clone(),
             display_name,
+            #[cfg(target_os = "android")]
+            gpu_export_prewarm: self.gpu_export_prewarm.as_ref().map(Arc::clone),
         })
     }
 

@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu, wgpu};
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use wgpu::util::DeviceExt;
 
 mod readback;
@@ -1332,6 +1332,61 @@ struct Pass {
     workgroups: [u32; 3],
 }
 
+pub(crate) struct RawGpuProgramTemplate {
+    cfa_kind: CfaKind,
+    processing_quality: ProcessingQuality,
+    pipelines: Vec<wgpu::ComputePipeline>,
+    pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
+}
+
+/// Shared completion state for Android's startup export-program prewarm.
+/// Export workers can wait on this without blocking the UI thread, then reuse
+/// the same immutable compute-pipeline handles for every subsequent export.
+pub(crate) struct GpuProgramPrewarm {
+    result: Mutex<Option<std::result::Result<Arc<RawGpuProgramTemplate>, String>>>,
+    ready: Condvar,
+}
+
+impl GpuProgramPrewarm {
+    pub(crate) fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn publish(
+        &self,
+        result: std::result::Result<RawGpuProgramTemplate, String>,
+    ) {
+        let Ok(mut slot) = self.result.lock() else {
+            return;
+        };
+        if slot.is_none() {
+            *slot = Some(result.map(Arc::new));
+            self.ready.notify_all();
+        }
+    }
+
+    pub(crate) fn wait(
+        &self,
+    ) -> std::result::Result<Arc<RawGpuProgramTemplate>, String> {
+        let mut slot = self
+            .result
+            .lock()
+            .map_err(|_| "GPU export prewarm state was poisoned".to_owned())?;
+        while slot.is_none() {
+            slot = self
+                .ready
+                .wait(slot)
+                .map_err(|_| "GPU export prewarm state was poisoned".to_owned())?;
+        }
+        slot.as_ref()
+            .expect("GPU export prewarm result is present")
+            .clone()
+    }
+}
+
 pub struct RawGpuPipeline {
     pub egui_texture_id: Option<egui::TextureId>,
     pub width: u32,
@@ -1438,6 +1493,32 @@ impl GpuOutputSnapshot {
 }
 
 impl RawGpuPipeline {
+    fn program_template(&self) -> RawGpuProgramTemplate {
+        RawGpuProgramTemplate {
+            cfa_kind: self.cfa_kind,
+            processing_quality: self.processing_quality,
+            pipelines: self
+                .passes
+                .iter()
+                .map(|pass| pass.pipeline.clone())
+                .collect(),
+            pipeline_cache: self.pipeline_cache.clone(),
+        }
+    }
+
+    fn into_program_template(self) -> RawGpuProgramTemplate {
+        RawGpuProgramTemplate {
+            cfa_kind: self.cfa_kind,
+            processing_quality: self.processing_quality,
+            pipelines: self
+                .passes
+                .into_iter()
+                .map(|pass| pass.pipeline)
+                .collect(),
+            pipeline_cache: self.pipeline_cache,
+        }
+    }
+
     /// Compiles the complete interactive preview compute program set against a
     /// tiny synthetic RAW. The returned pipeline is only a program template:
     /// later real RAWs allocate their own textures/bind groups while cloning
@@ -1456,6 +1537,45 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         cfa_kind: CfaKind,
         pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
+    ) -> Result<Self> {
+        Self::prewarm_template_with_quality_and_cache(
+            device,
+            queue,
+            cfa_kind,
+            ProcessingQuality::Preview,
+            pipeline_cache,
+            None,
+        )
+    }
+
+    /// Compiles the complete full-quality export compute program set against a
+    /// tiny synthetic RAW. The returned pipeline is retained only as a program
+    /// template, allowing tiled export to clone already-compiled pipeline
+    /// handles while allocating its own image-sized resources and mask atlas.
+    pub(crate) fn prewarm_export_program_template_with_cache(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cfa_kind: CfaKind,
+        pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
+    ) -> Result<RawGpuProgramTemplate> {
+        Self::prewarm_template_with_quality_and_cache(
+            device,
+            queue,
+            cfa_kind,
+            ProcessingQuality::High,
+            pipeline_cache,
+            Some(64),
+        )
+        .map(Self::into_program_template)
+    }
+
+    fn prewarm_template_with_quality_and_cache(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cfa_kind: CfaKind,
+        quality: ProcessingQuality,
+        pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
+        mask_atlas_edge_override: Option<u32>,
     ) -> Result<Self> {
         const EDGE: u32 = 16;
         let pixels = (EDGE * EDGE) as usize;
@@ -1523,8 +1643,11 @@ impl RawGpuPipeline {
             pipeline_cache,
             &raw,
             &params,
-            ProcessingQuality::Preview,
-            None,
+            quality,
+            // When requested for the export template, keep the local-mask
+            // allocation small. Its textures are never rendered; only the
+            // compiled program handles are retained and reused later.
+            mask_atlas_edge_override,
         )
     }
 
@@ -1620,12 +1743,13 @@ impl RawGpuPipeline {
         quality: ProcessingQuality,
         template: &Self,
     ) -> Result<Self> {
+        let program_template = template.program_template();
         Self::new_internal(
             device,
             queue,
             None,
-            Some(template),
-            template.pipeline_cache.clone(),
+            Some(&program_template),
+            program_template.pipeline_cache.clone(),
             raw,
             params,
             quality,
@@ -1643,6 +1767,31 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
         template: &Self,
+        mask_edge: u32,
+    ) -> Result<Self> {
+        let program_template = template.program_template();
+        Self::new_internal(
+            device,
+            queue,
+            None,
+            Some(&program_template),
+            program_template.pipeline_cache.clone(),
+            raw,
+            params,
+            quality,
+            Some(mask_edge),
+        )
+    }
+
+    /// Allocates export-sized resources while cloning compute pipelines from a
+    /// lightweight startup-prewarmed program template.
+    pub(crate) fn new_headless_reusing_program_template_with_mask_edge(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+        template: &RawGpuProgramTemplate,
         mask_edge: u32,
     ) -> Result<Self> {
         Self::new_internal(
@@ -1663,7 +1812,7 @@ impl RawGpuPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: Option<&mut egui_wgpu::Renderer>,
-        program_template: Option<&Self>,
+        program_template: Option<&RawGpuProgramTemplate>,
         pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
         raw: &LoadedRaw,
         params: &GpuParams,
@@ -1674,7 +1823,7 @@ impl RawGpuPipeline {
         if let Some(template) = program_template {
             if template.cfa_kind != raw.cfa_kind
                 || template.processing_quality != quality
-                || template.passes.len() != expected_pass_count(raw.cfa_kind)
+                || template.pipelines.len() != expected_pass_count(raw.cfa_kind)
             {
                 return Err(anyhow!(
                     "cannot reuse GPU programs from an incompatible pipeline"
@@ -1952,9 +2101,7 @@ impl RawGpuPipeline {
         let adjustment_prepare_for_programs = tone_prepare_for_programs + 4;
         let reused_layout = |pass_index: usize| {
             program_template.map(|template| {
-                template.passes[pass_index]
-                    .pipeline
-                    .get_bind_group_layout(0)
+                template.pipelines[pass_index].get_bind_group_layout(0)
             })
         };
 
@@ -3296,7 +3443,7 @@ impl RawGpuPipeline {
             let program_index = next_program_index;
             next_program_index += 1;
             if let Some(template) = program_template {
-                return template.passes[program_index].pipeline.clone();
+                return template.pipelines[program_index].clone();
             }
             let shader = shader.expect("shader module exists without a program template");
             let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

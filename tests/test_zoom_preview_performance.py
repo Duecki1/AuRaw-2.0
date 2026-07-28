@@ -11,7 +11,7 @@ ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8"
 
 def test_zoom_detail_reuses_compiled_gpu_programs_and_existing_crop_pipeline() -> None:
     assert "new_headless_reusing_programs" in GPU
-    assert "template.passes[program_index].pipeline.clone()" in GPU
+    assert "template.pipelines[program_index].clone()" in GPU
     assert ".upload_raw_tile(&render_state.queue, &detail_raw)" in PROCESSING_EXPORT
 
 

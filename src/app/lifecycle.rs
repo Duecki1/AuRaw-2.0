@@ -81,13 +81,20 @@ fn gpu_preview_prewarm_cfa_kind() -> crate::pipeline::CfaKind {
 fn spawn_gpu_preview_prewarm(
     cc: &eframe::CreationContext<'_>,
     cache_root: Option<std::path::PathBuf>,
+    export_prewarm: Arc<crate::pipeline::GpuProgramPrewarm>,
 ) -> Option<mpsc::Receiver<Result<RawGpuPipeline, String>>> {
-    let render_state = cc.wgpu_render_state.as_ref()?;
+    let Some(render_state) = cc.wgpu_render_state.as_ref() else {
+        export_prewarm.publish(Err(
+            "eframe is not running with the wgpu backend".to_owned(),
+        ));
+        return None;
+    };
     let device = render_state.device.clone();
     let queue = render_state.queue.clone();
     let adapter_info = render_state.adapter.get_info();
     let repaint = cc.egui_ctx.clone();
     let (sender, receiver) = mpsc::channel();
+    let export_prewarm_for_thread = Arc::clone(&export_prewarm);
     let spawn_result = std::thread::Builder::new()
         .name("auraw-gpu-preview-prewarm".to_owned())
         .spawn(move || {
@@ -143,7 +150,7 @@ fn spawn_gpu_preview_prewarm(
                 &device,
                 &queue,
                 gpu_preview_prewarm_cfa_kind(),
-                persistent_cache,
+                persistent_cache.clone(),
             )
             .map_err(|error| format!("GPU preview prewarm failed: {error:#}"));
             match &result {
@@ -158,6 +165,24 @@ fn spawn_gpu_preview_prewarm(
             // intentionally done afterwards so a RAW open waiting on prewarm
             // never pays filesystem write latency.
             let _ = sender.send(result);
+            repaint.request_repaint();
+
+            let export_started = Instant::now();
+            let export_result = RawGpuPipeline::prewarm_export_program_template_with_cache(
+                &device,
+                &queue,
+                gpu_preview_prewarm_cfa_kind(),
+                persistent_cache,
+            )
+            .map_err(|error| format!("GPU export program prewarm failed: {error:#}"));
+            match &export_result {
+                Ok(_) => crate::diagnostics::record(format!(
+                    "GPU export program prewarm finished in {:.3}s",
+                    export_started.elapsed().as_secs_f64()
+                )),
+                Err(error) => crate::diagnostics::record(error),
+            }
+            export_prewarm_for_thread.publish(export_result);
             repaint.request_repaint();
 
             if let Some(cache) = cache_to_persist {
@@ -182,6 +207,9 @@ fn spawn_gpu_preview_prewarm(
     match spawn_result {
         Ok(_) => Some(receiver),
         Err(error) => {
+            export_prewarm.publish(Err(format!(
+                "GPU prewarm thread could not start: {error}"
+            )));
             crate::diagnostics::record(format!(
                 "GPU preview prewarm thread could not start: {error}"
             ));
@@ -543,7 +571,12 @@ impl AurawApp {
         }
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
-        let gpu_preview_prewarm_receiver = spawn_gpu_preview_prewarm(cc, gpu_pipeline_cache_root);
+        let gpu_export_prewarm = Arc::new(crate::pipeline::GpuProgramPrewarm::new());
+        let gpu_preview_prewarm_receiver = spawn_gpu_preview_prewarm(
+            cc,
+            gpu_pipeline_cache_root,
+            Arc::clone(&gpu_export_prewarm),
+        );
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -556,6 +589,7 @@ impl AurawApp {
             gpu_pipeline: None,
             retired_egui_textures: Vec::new(),
             gpu_preview_prewarm_receiver,
+            gpu_export_prewarm: Some(gpu_export_prewarm),
             preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],

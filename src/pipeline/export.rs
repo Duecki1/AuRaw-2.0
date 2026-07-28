@@ -1,9 +1,10 @@
 use super::geometry::GeometryInverseMap;
 use super::{
     export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
-    required_export_tile_halo, ExposureParams, GeometryTransform, GpuParams, IccOutputTransform,
-    InpaintLayer, LensGeometryMap, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline,
-    TilePlan, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
+    required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform, GpuParams,
+    GpuProgramPrewarm, IccOutputTransform, InpaintLayer, LensGeometryMap, LoadedRaw, MaskStack,
+    ProcessingQuality, RawGpuPipeline, RawGpuProgramTemplate, TilePlan, TileSpec, EXPORT_TILE_HALO,
+    MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
 use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
@@ -281,6 +282,39 @@ pub fn spawn_tiled_png_export(
     metadata: ExportMetadata,
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
+    spawn_tiled_png_export_with_program_prewarm(
+        device,
+        queue,
+        raw,
+        geometry,
+        exposure,
+        masks,
+        inpaint,
+        path,
+        tile_spec,
+        settings,
+        metadata,
+        cancellation,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_tiled_png_export_with_program_prewarm(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    raw: Arc<LoadedRaw>,
+    geometry: GeometryTransform,
+    exposure: ExposureParams,
+    masks: MaskStack,
+    inpaint: Option<InpaintLayer>,
+    path: PathBuf,
+    tile_spec: TileSpec,
+    settings: ExportSettings,
+    metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
+    program_prewarm: Option<Arc<GpuProgramPrewarm>>,
+) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
     let worker_path = path.clone();
@@ -302,6 +336,9 @@ pub fn spawn_tiled_png_export(
                 exposure.demosaic_mode,
                 exposure.highlight_method,
             ));
+            let program_template = (raw.cfa_kind == CfaKind::Bayer)
+                .then(|| await_export_program_template(program_prewarm.as_deref()))
+                .flatten();
             let result = (|| -> Result<()> {
                 let geometry = geometry.sanitized();
                 let (geometry_width, geometry_height) =
@@ -317,6 +354,7 @@ pub fn spawn_tiled_png_export(
                             queue: &queue,
                             events: &worker_sender,
                             cancellation: &cancellation,
+                            program_template: program_template.as_deref(),
                         },
                         ExportRequest {
                             raw: &raw,
@@ -380,6 +418,39 @@ pub fn spawn_tiled_jpeg_export(
     metadata: ExportMetadata,
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
+    spawn_tiled_jpeg_export_with_program_prewarm(
+        device,
+        queue,
+        raw,
+        geometry,
+        exposure,
+        masks,
+        inpaint,
+        path,
+        tile_spec,
+        settings,
+        metadata,
+        cancellation,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_tiled_jpeg_export_with_program_prewarm(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    raw: Arc<LoadedRaw>,
+    geometry: GeometryTransform,
+    exposure: ExposureParams,
+    masks: MaskStack,
+    inpaint: Option<InpaintLayer>,
+    path: PathBuf,
+    tile_spec: TileSpec,
+    settings: ExportSettings,
+    metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
+    program_prewarm: Option<Arc<GpuProgramPrewarm>>,
+) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
     let worker_path = path.clone();
@@ -397,6 +468,9 @@ pub fn spawn_tiled_jpeg_export(
                 tile_spec.core_edge,
                 tile_spec.halo,
             ));
+            let program_template = (raw.cfa_kind == CfaKind::Bayer)
+                .then(|| await_export_program_template(program_prewarm.as_deref()))
+                .flatten();
             let result = (|| -> Result<()> {
                 let geometry = geometry.sanitized();
                 let (geometry_width, geometry_height) =
@@ -414,6 +488,7 @@ pub fn spawn_tiled_jpeg_export(
                             queue: &queue,
                             events: &worker_sender,
                             cancellation: &cancellation,
+                            program_template: program_template.as_deref(),
                         },
                         ExportRequest {
                             raw: &raw,
@@ -477,6 +552,39 @@ pub fn spawn_tiled_tiff_export(
     metadata: ExportMetadata,
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
+    spawn_tiled_tiff_export_with_program_prewarm(
+        device,
+        queue,
+        raw,
+        geometry,
+        exposure,
+        masks,
+        inpaint,
+        path,
+        tile_spec,
+        settings,
+        metadata,
+        cancellation,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_tiled_tiff_export_with_program_prewarm(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    raw: Arc<LoadedRaw>,
+    geometry: GeometryTransform,
+    exposure: ExposureParams,
+    masks: MaskStack,
+    inpaint: Option<InpaintLayer>,
+    path: PathBuf,
+    tile_spec: TileSpec,
+    settings: ExportSettings,
+    metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
+    program_prewarm: Option<Arc<GpuProgramPrewarm>>,
+) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
     let worker_path = path.clone();
@@ -484,6 +592,9 @@ pub fn spawn_tiled_tiff_export(
     let spawn_result = std::thread::Builder::new()
         .name("auraw-tiled-tiff-export".to_owned())
         .spawn(move || {
+            let program_template = (raw.cfa_kind == CfaKind::Bayer)
+                .then(|| await_export_program_template(program_prewarm.as_deref()))
+                .flatten();
             let result = (|| -> Result<()> {
                 let geometry = geometry.sanitized();
                 let (geometry_width, geometry_height) =
@@ -499,6 +610,7 @@ pub fn spawn_tiled_tiff_export(
                             queue: &queue,
                             events: &worker_sender,
                             cancellation: &cancellation,
+                            program_template: program_template.as_deref(),
                         },
                         ExportRequest {
                             raw: &raw,
@@ -589,12 +701,35 @@ fn ensure_export_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
+fn await_export_program_template(
+    prewarm: Option<&GpuProgramPrewarm>,
+) -> Option<Arc<RawGpuProgramTemplate>> {
+    let prewarm = prewarm?;
+    let wait_started = Instant::now();
+    match prewarm.wait() {
+        Ok(template) => {
+            crate::diagnostics::record(format!(
+                "Full-quality export program prewarm available after {:.3}s wait",
+                wait_started.elapsed().as_secs_f64()
+            ));
+            Some(template)
+        }
+        Err(error) => {
+            crate::diagnostics::record(format!(
+                "Full-quality export program prewarm unavailable: {error}"
+            ));
+            None
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ExportContext<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     events: &'a mpsc::Sender<ExportEvent>,
     cancellation: &'a AtomicBool,
+    program_template: Option<&'a RawGpuProgramTemplate>,
 }
 
 #[derive(Clone, Copy)]
@@ -889,6 +1024,7 @@ where
         queue,
         events,
         cancellation,
+        program_template,
     } = context;
     let ExportRequest {
         raw,
@@ -940,15 +1076,48 @@ where
     } else {
         export_mask_atlas_edge(raw.width, raw.height)
     };
-    let tile_pipeline = RawGpuPipeline::new_headless_with_quality_and_mask_edge(
-        device,
-        queue,
-        &first_raw,
-        &first_params,
-        ProcessingQuality::High,
-        export_mask_edge,
-    )
-    .context("create reusable full-quality export pipeline")?;
+    let tile_pipeline = if let Some(template) = program_template {
+        match RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
+            device,
+            queue,
+            &first_raw,
+            &first_params,
+            ProcessingQuality::High,
+            template,
+            export_mask_edge,
+        ) {
+            Ok(pipeline) => {
+                crate::diagnostics::record(
+                    "Full-quality export reused startup-precompiled GPU programs",
+                );
+                pipeline
+            }
+            Err(reuse_error) => {
+                crate::diagnostics::record(format!(
+                    "Full-quality export program reuse unavailable ({reuse_error:#}); compiling programs"
+                ));
+                RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+                    device,
+                    queue,
+                    &first_raw,
+                    &first_params,
+                    ProcessingQuality::High,
+                    export_mask_edge,
+                )
+                .context("create reusable full-quality export pipeline")?
+            }
+        }
+    } else {
+        RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            device,
+            queue,
+            &first_raw,
+            &first_params,
+            ProcessingQuality::High,
+            export_mask_edge,
+        )
+        .context("create reusable full-quality export pipeline")?
+    };
     upload_mask_atlas(&tile_pipeline, queue, masks, raw.width, raw.height)?;
     crate::diagnostics::record(format!(
         "Full-quality export pipeline prepared in {:.3}s; padded_tile={}x{} mask_atlas={}x{} R16F",
