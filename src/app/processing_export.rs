@@ -1047,6 +1047,7 @@ impl AurawApp {
         } else {
             self.inpaint_layer.as_ref()
         };
+        let mut textures_to_retire = Vec::new();
 
         // The main preview is the durable interactive surface. Optional zoom
         // pipelines are caches: a failed cache upload must not make inpainting or
@@ -1094,7 +1095,7 @@ impl AurawApp {
             ));
             if let Some(old) = self.preview_navigation.take() {
                 if let Some(texture_id) = old.pipeline.egui_texture_id {
-                    self.retire_egui_texture(texture_id);
+                    textures_to_retire.push(texture_id);
                 }
             }
             self.navigation_pending_stage = Some(ProcessingStage::Output);
@@ -1123,7 +1124,7 @@ impl AurawApp {
             ));
             if let Some(old) = self.preview_detail.take() {
                 if let Some(texture_id) = old.pipeline.egui_texture_id {
-                    self.retire_egui_texture(texture_id);
+                    textures_to_retire.push(texture_id);
                 }
             }
             self.preview_motion_at = Some(Instant::now());
@@ -1160,6 +1161,9 @@ impl AurawApp {
             detail
                 .pipeline
                 .recompute(&render_state.queue, &render_state.device, &params);
+        }
+        for texture_id in textures_to_retire {
+            self.retire_egui_texture(texture_id);
         }
 
         // This marker is the transaction commit point.
