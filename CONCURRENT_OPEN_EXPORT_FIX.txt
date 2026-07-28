@@ -1,0 +1,20 @@
+Concurrent RAW-open/export fix
+==============================
+
+The Develop RAW-open worker no longer allocates a second GPU pipeline to build
+canonical range/object-mask source data. It temporarily renders the neutral
+source through the newly-created preview pipeline, reads it back, then uploads
+the real masks, restores the desktop display transform, and renders the edited
+preview.
+
+This prevents the GPU residency-budget failure seen when the same RAW is being
+exported while it is opened in Develop. The code path is shared by Android and
+desktop.
+
+Validation in the provided environment:
+- pytest -q: 389 passed
+- scripts/check-source-tree.py: passed
+- scripts/check-source-connectivity.py: passed
+
+Cargo/rustc/rustfmt/clippy were unavailable in the environment, so Rust build
+commands were not run.

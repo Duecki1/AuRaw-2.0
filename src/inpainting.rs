@@ -6,13 +6,24 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::pipeline::{
     rasterize_brush_dabs, rasterize_inpaint_dabs_binary, BrushDab, InpaintPatch,
 };
+
+fn ensure_inpaint_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
+    anyhow::ensure!(
+        !cancellation.load(Ordering::Acquire),
+        "background task cancelled"
+    );
+    Ok(())
+}
 
 pub const LAMA_MODEL_URL: &str =
     "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx";
@@ -162,6 +173,7 @@ pub fn spawn_inpaint(
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
     request: InpaintRequest,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<InpaintEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -170,7 +182,9 @@ pub fn spawn_inpaint(
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
-                    ensure_lama_model(&model_path, &worker_sender)?;
+                    ensure_inpaint_not_cancelled(&cancellation)?;
+                    ensure_lama_model(&model_path, &worker_sender, &cancellation)?;
+                    ensure_inpaint_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(InpaintEvent::Inferencing);
                     infer_lama(
                         &model_path,
@@ -202,7 +216,11 @@ pub fn spawn_inpaint(
     receiver
 }
 
-fn ensure_lama_model(path: &Path, events: &mpsc::Sender<InpaintEvent>) -> Result<()> {
+fn ensure_lama_model(
+    path: &Path,
+    events: &mpsc::Sender<InpaintEvent>,
+    cancellation: &AtomicBool,
+) -> Result<()> {
     // Hashing the 208 MB model on every released brush stroke caused a visible
     // pause before inference began. Keep the strong SHA-256 verification, but
     // only repeat it when the path/size/mtime identity changes.
@@ -221,7 +239,7 @@ fn ensure_lama_model(path: &Path, events: &mpsc::Sender<InpaintEvent>) -> Result
         fs::remove_file(path)
             .with_context(|| format!("remove invalid LaMa model {}", path.display()))?;
     }
-    download_lama_model(path, events)?;
+    download_lama_model(path, events, cancellation)?;
     verify_lama_model(path).context("verify published LaMa model")?;
     remember_lama_model_identity(path);
     Ok(())
@@ -286,7 +304,11 @@ fn verify_lama_model(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn download_lama_model(path: &Path, events: &mpsc::Sender<InpaintEvent>) -> Result<()> {
+fn download_lama_model(
+    path: &Path,
+    events: &mpsc::Sender<InpaintEvent>,
+    cancellation: &AtomicBool,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create model cache {}", parent.display()))?;
@@ -324,6 +346,7 @@ fn download_lama_model(path: &Path, events: &mpsc::Sender<InpaintEvent>) -> Resu
         let mut hasher = Sha256Context::new(&SHA256);
         let mut buffer = [0u8; 256 * 1024];
         loop {
+            ensure_inpaint_not_cancelled(cancellation)?;
             let read = reader.read(&mut buffer).context("read LaMa download")?;
             if read == 0 {
                 break;
@@ -354,6 +377,7 @@ fn download_lama_model(path: &Path, events: &mpsc::Sender<InpaintEvent>) -> Resu
             .try_into()
             .map_err(|_| anyhow::anyhow!("SHA-256 implementation returned the wrong length"))?;
         anyhow::ensure!(digest == LAMA_MODEL_SHA256, "LaMa model SHA-256 mismatch");
+        ensure_inpaint_not_cancelled(cancellation)?;
         fs::rename(&temporary, path)
             .with_context(|| format!("publish LaMa model to {}", path.display()))?;
         Ok(())

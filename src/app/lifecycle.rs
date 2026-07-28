@@ -418,13 +418,20 @@ impl AurawApp {
             developed_thumbnail_in_flight: None,
             developed_thumbnail_receiver: None,
             egui_ctx: ctx.clone(),
+            background_tasks: BackgroundTaskManager::default(),
+            background_actions: HashMap::new(),
+            export_task_id: None,
+            library_batch_export_task_id: None,
+            library_ai_mask_refresh_task_id: None,
+            subject_task_id: None,
+            object_task_id: None,
+            inpaint_task_id: None,
             target_exposure: exposure,
             pending_stage: None,
             lens_correction_dirty: false,
-            #[cfg(target_os = "android")]
             lens_correction_generation: 0,
-            #[cfg(target_os = "android")]
             lens_correction_receiver: None,
+            lens_correction_task_id: None,
             #[cfg(target_os = "android")]
             lens_original_preview_cache: None,
             #[cfg(target_os = "android")]
@@ -433,6 +440,10 @@ impl AurawApp {
             loading_label: None,
             export_receiver: None,
             export_progress: None,
+            #[cfg(not(target_os = "android"))]
+            library_batch_export_receiver: None,
+            #[cfg(not(target_os = "android"))]
+            library_batch_export_tile_progress: None,
             library_batch_export: None,
             library_ai_mask_refresh: None,
             export_publish_pending: false,
@@ -444,6 +455,9 @@ impl AurawApp {
             navigation_dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             subject_consent_open: false,
             subject_receiver: None,
+            subject_generation: 0,
+            subject_job_document_id: 0,
+            subject_job_generation: 0,
             subject_download_progress: None,
             subject_inferencing: false,
             object_consent_open: false,
@@ -455,6 +469,7 @@ impl AurawApp {
             object_error_dialog: None,
             object_generation: 0,
             object_job_generation: 0,
+            object_job_document_id: 0,
             object_job_target: None,
             object_cache: None,
             inpaint_brush_size: 0.055,
@@ -475,6 +490,8 @@ impl AurawApp {
             inpaint_pending_source: None,
             inpaint_active_dabs: None,
             inpaint_revision: 0,
+            inpaint_job_document_id: 0,
+            inpaint_job_generation: 0,
             inpaint_consent_open: false,
             inpaint_receiver: None,
             inpaint_download_progress: None,
@@ -648,17 +665,30 @@ impl AurawApp {
             developed_thumbnail_in_flight: None,
             developed_thumbnail_receiver: None,
             egui_ctx: cc.egui_ctx.clone(),
+            background_tasks: BackgroundTaskManager::default(),
+            background_actions: HashMap::new(),
+            export_task_id: None,
+            library_batch_export_task_id: None,
+            library_ai_mask_refresh_task_id: None,
+            subject_task_id: None,
+            object_task_id: None,
+            inpaint_task_id: None,
             target_exposure: exposure,
             pending_stage: None,
             lens_correction_dirty: false,
             lens_correction_generation: 0,
             lens_correction_receiver: None,
+            lens_correction_task_id: None,
             lens_original_preview_cache: None,
             lens_corrected_preview_cache: None,
             load_receiver: None,
             loading_label: None,
             export_receiver: None,
             export_progress: None,
+            #[cfg(not(target_os = "android"))]
+            library_batch_export_receiver: None,
+            #[cfg(not(target_os = "android"))]
+            library_batch_export_tile_progress: None,
             library_batch_export: None,
             library_ai_mask_refresh: None,
             export_publish_pending: false,
@@ -670,6 +700,9 @@ impl AurawApp {
             navigation_dirty_mask_layers: [false; MAX_LOCAL_MASKS],
             subject_consent_open: false,
             subject_receiver: None,
+            subject_generation: 0,
+            subject_job_document_id: 0,
+            subject_job_generation: 0,
             subject_download_progress: None,
             subject_inferencing: false,
             object_consent_open: false,
@@ -681,6 +714,7 @@ impl AurawApp {
             object_error_dialog: None,
             object_generation: 0,
             object_job_generation: 0,
+            object_job_document_id: 0,
             object_job_target: None,
             object_cache: None,
             inpaint_brush_size: 0.055,
@@ -701,12 +735,15 @@ impl AurawApp {
             inpaint_pending_source: None,
             inpaint_active_dabs: None,
             inpaint_revision: 0,
+            inpaint_job_document_id: 0,
+            inpaint_job_generation: 0,
             inpaint_consent_open: false,
             inpaint_receiver: None,
             inpaint_download_progress: None,
             inpaint_inferencing: false,
             android_app,
             picker_pending: false,
+            android_batch_load_pending: false,
             camera_profile_folder_importing_label: None,
             pending_android_profile_reload: None,
         }
@@ -899,12 +936,9 @@ impl AurawApp {
     ) {
         #[cfg(target_os = "android")]
         let _ = frame;
-        if self.load_receiver.is_some()
-            || self.export_receiver.is_some()
-            || self.export_publish_pending
-        {
+        if self.load_receiver.is_some() {
             self.notice = Some(
-                "Wait for the current RAW load/export to finish before changing camera profile."
+                "Wait for the current RAW load to finish before changing camera profile."
                     .to_owned(),
             );
             return;
@@ -998,6 +1032,14 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub fn open_file_dialog(&mut self, _frame: &eframe::Frame) {
+        if self.android_foreground_task_active() {
+            self.notice = Some(
+                "Wait for the current foreground operation to finish before opening another RAW."
+                    .to_owned(),
+            );
+            self.egui_ctx.request_repaint();
+            return;
+        }
         if self.picker_pending {
             return;
         }
@@ -1013,9 +1055,43 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub fn open_android_library_document(&mut self, uri: &str, display_name: &str) {
+        if self.android_foreground_task_active() {
+            self.notice = Some(format!(
+                "{display_name} cannot be opened while an export or another foreground operation is running. Wait for it to finish or cancel it first."
+            ));
+            self.egui_ctx.request_repaint();
+            return;
+        }
         if self.picker_pending {
             return;
         }
+
+        // Android batch export has already decoded its current item into the
+        // regular Develop document before the export worker is launched. If the
+        // user taps that exact item, reopening it would allocate a second preview
+        // pipeline beside the export pipeline and exceed the mobile GPU budget.
+        // The existing document is already the requested RAW, so just expose it.
+        let already_loaded = self.loaded_raw.is_some()
+            && self.preview_raw.is_some()
+            && self.gpu_pipeline.is_some()
+            && matches!(
+                self.sidecar_target.as_ref(),
+                Some(crate::sidecar::SidecarTarget::Android {
+                    raw_uri,
+                    display_name: current_name,
+                }) if raw_uri == uri && current_name == display_name
+            );
+        if already_loaded {
+            self.activate_tab(AppTab::Develop);
+            self.notice = None;
+            self.refresh_status();
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        // This is a user-owned picker result. Keep it distinct from the
+        // Android batch exporter's internal document-load result routing.
+        self.android_batch_load_pending = false;
         match crate::android::open_library_document(&self.android_app, uri, display_name) {
             Ok(()) => {
                 self.picker_pending = true;
@@ -1490,18 +1566,11 @@ impl AurawApp {
         edit_override: Option<SidecarEditState>,
         raw_fd_guard: Option<std::fs::File>,
     ) {
-        if self.load_receiver.is_some()
-            || self.export_receiver.is_some()
-            || self.export_publish_pending
-        {
+        if self.load_receiver.is_some() {
             if delete_after_decode && raw_fd_guard.is_none() {
                 remove_temporary_raw(&path);
             }
-            self.notice = Some(if self.load_receiver.is_some() {
-                "Wait for the current RAW to finish opening.".to_owned()
-            } else {
-                "Wait for the current export to finish before opening another RAW.".to_owned()
-            });
+            self.notice = Some("Wait for the current RAW to finish opening.".to_owned());
             return;
         }
         let Some(render_state) = frame.wgpu_render_state() else {
@@ -1546,12 +1615,18 @@ impl AurawApp {
             "RAW open requested: label=\"{label}\" cached={decode_was_cached} preview_quality={}",
             self.preview_quality.label()
         ));
+        // Image-bound workers may still be inside a native phase. Request
+        // cancellation before advancing the document identity, and keep their
+        // receivers alive so their terminal events can be drained safely.
+        self.cancel_document_bound_background_tasks();
         let sidecar_generation = self.begin_sidecar_open();
         // Reuse compiled GPU programs across RAW opens; release only the old textures.
         let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
             self.take_preview_pipeline_and_release_textures(&mut renderer)
         };
+        #[cfg(target_os = "android")]
+        let export_active_while_opening = self.export_receiver.is_some();
         #[cfg(target_os = "android")]
         let startup_gpu_prewarm_receiver = self.gpu_preview_prewarm_receiver.take();
         self.original_raw = None;
@@ -1598,18 +1673,23 @@ impl AurawApp {
         self.ai_mask_update_object_queue.clear();
         self.ai_mask_update_failed = false;
         self.subject_consent_open = false;
-        self.subject_receiver = None;
-        self.subject_download_progress = None;
-        self.subject_inferencing = false;
+        self.subject_generation = self.subject_generation.wrapping_add(1);
+        if self.subject_receiver.is_none() {
+            self.subject_task_id = None;
+            self.subject_download_progress = None;
+            self.subject_inferencing = false;
+        }
         self.object_consent_open = false;
         self.object_pending_target = None;
-        self.object_receiver = None;
-        self.object_download_progress = None;
-        self.object_inferencing = false;
-        self.object_decoder_only = false;
         self.object_generation = self.object_generation.wrapping_add(1);
-        self.object_job_generation = 0;
-        self.object_job_target = None;
+        if self.object_receiver.is_none() {
+            self.object_task_id = None;
+            self.object_download_progress = None;
+            self.object_inferencing = false;
+            self.object_decoder_only = false;
+            self.object_job_generation = 0;
+            self.object_job_target = None;
+        }
         self.object_cache = None;
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
@@ -1630,10 +1710,12 @@ impl AurawApp {
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.lens_correction = LensCorrectionState::default();
         self.lens_correction_dirty = false;
+        self.lens_correction_generation = self.lens_correction_generation.wrapping_add(1);
+        if self.lens_correction_receiver.is_none() {
+            self.lens_correction_task_id = None;
+        }
         #[cfg(target_os = "android")]
         {
-            self.lens_correction_generation = self.lens_correction_generation.wrapping_add(1);
-            self.lens_correction_receiver = None;
             self.lens_original_preview_cache = None;
             self.lens_corrected_preview_cache = None;
         }
@@ -1658,6 +1740,22 @@ impl AurawApp {
             .name("auraw-decode-preview".to_owned())
             .spawn(move || {
                 let open_started = Instant::now();
+                #[cfg(target_os = "android")]
+                let reusable_preview_pipeline = if export_active_while_opening {
+                    // A live tiled export already consumes most of Android's GPU
+                    // working-set allowance. Keeping the old preview solely as a
+                    // program template would retain its full resource reservation
+                    // and make the replacement preview fail admission. Drop it
+                    // before allocating the new preview; the persistent Vulkan
+                    // pipeline cache still avoids most driver compilation work.
+                    crate::diagnostics::record(
+                        "Released the previous Android preview before concurrent RAW open",
+                    );
+                    drop(reusable_preview_pipeline);
+                    None
+                } else {
+                    reusable_preview_pipeline
+                };
                 let sidecar_started = Instant::now();
                 let loaded_sidecar = load_sidecar_for_target(
                     &sidecar_target,
@@ -1987,89 +2085,62 @@ impl AurawApp {
                         "GPU preview pipeline created in {:.3}s",
                         pipeline_started.elapsed().as_secs_f64()
                     ));
-                    #[cfg(not(target_os = "android"))]
-                    pipeline
-                        .write_output_transform(&queue, &display_output_transform)
-                        .map_err(|error| format!("display ICC LUT upload failed: {error:#}"))?;
-                    // Program handles have been cloned into `pipeline`; release
-                    // the previous preview textures before any additional mask
-                    // source pipeline is allocated.
+                    // Program handles have been cloned into `pipeline`; release the old
+                    // preview textures before doing any readback from the new preview.
                     drop(reusable_preview_pipeline);
                     #[cfg(target_os = "android")]
                     drop(startup_gpu_prewarm_template);
 
+                    let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
+                    let inpaint_upload_started = Instant::now();
+                    pipeline
+                        .update_inpaint_layer(
+                            &queue,
+                            composed_inpaint.as_ref(),
+                            0,
+                            0,
+                            preview_raw.width,
+                            preview_raw.height,
+                        )
+                        .map_err(|error| format!("preview inpainting setup failed: {error:#}"))?;
+                    crate::diagnostics::record(format!(
+                        "Preview inpaint layer uploaded in {:.3}s",
+                        inpaint_upload_started.elapsed().as_secs_f64()
+                    ));
+
                     // Range and promptable-object source images are canonical RAW renditions,
-                    // not user edit data. Sidecars omit these large shared
-                    // caches and reconstruct one source on this decode worker.
+                    // not user edit data. Render that neutral source through the preview
+                    // pipeline itself instead of allocating a second full pipeline. Keeping
+                    // only one preview allocation is important when a tiled export is using
+                    // GPU resources at the same time.
                     let mut mask_source = None;
                     if needs_canonical_mask_source(&rendered_masks) {
                         let mask_source_started = Instant::now();
-                        let source_edge = if cfg!(target_os = "android") {
-                            1600
-                        } else {
-                            2048
-                        };
-                        let source_raw = if full_raw.width.max(full_raw.height) <= source_edge {
-                            Arc::clone(&full_raw)
-                        } else {
-                            Arc::new(build_proxy(
-                                &full_raw,
-                                ProxySpec {
-                                    max_edge: source_edge,
-                                },
-                            ))
-                        };
                         let reference_exposure = ExposureParams::scene_referred_default();
                         let reference_masks = MaskStack::default();
                         let reference_params =
-                            GpuParams::new(&reference_exposure, &reference_masks, &source_raw);
-                        let reference_pipeline = RawGpuPipeline::new_headless_reusing_programs(
-                            &device,
-                            &queue,
-                            &source_raw,
-                            &reference_params,
-                            ProcessingQuality::Preview,
-                            &pipeline,
-                        )
-                        .map_err(|error| {
-                            format!("range-mask source setup failed: {error:#}")
-                        })?;
-                        let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
-                        reference_pipeline
-                            .update_inpaint_layer(
-                                &queue,
-                                composed_inpaint.as_ref(),
-                                0,
-                                0,
-                                source_raw.width,
-                                source_raw.height,
-                            )
-                            .map_err(|error| {
-                                format!("range-mask inpainting setup failed: {error:#}")
-                            })?;
-                        reference_pipeline.recompute(&queue, &device, &reference_params);
-                        let rgba = reference_pipeline
+                            GpuParams::new(&reference_exposure, &reference_masks, &preview_raw);
+                        pipeline.recompute(&queue, &device, &reference_params);
+                        let rgba = pipeline
                             .read_output_region_blocking(
                                 &device,
                                 &queue,
                                 0,
                                 0,
-                                reference_pipeline.width,
-                                reference_pipeline.height,
+                                pipeline.width,
+                                pipeline.height,
                             )
                             .map_err(|error| {
                                 format!("range-mask source readback failed: {error:#}")
                             })?;
-                        let source = MaskRgbImage::new(
-                            reference_pipeline.width,
-                            reference_pipeline.height,
-                            rgba,
-                        )
-                        .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
+                        let source = MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
+                            .ok_or_else(|| {
+                                "range-mask source dimensions are invalid".to_owned()
+                            })?;
                         install_missing_range_sources(&mut rendered_masks, &source);
                         mask_source = Some(source);
                         crate::diagnostics::record(format!(
-                            "Canonical mask source reconstructed in {:.3}s",
+                            "Canonical mask source reconstructed with the preview pipeline in {:.3}s",
                             mask_source_started.elapsed().as_secs_f64()
                         ));
                     }
@@ -2088,22 +2159,10 @@ impl AurawApp {
                         "Preview masks rasterized/uploaded in {:.3}s",
                         mask_upload_started.elapsed().as_secs_f64()
                     ));
-                    let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
-                    let inpaint_upload_started = Instant::now();
+                    #[cfg(not(target_os = "android"))]
                     pipeline
-                        .update_inpaint_layer(
-                            &queue,
-                            composed_inpaint.as_ref(),
-                            0,
-                            0,
-                            preview_raw.width,
-                            preview_raw.height,
-                        )
-                        .map_err(|error| format!("preview inpainting setup failed: {error:#}"))?;
-                    crate::diagnostics::record(format!(
-                        "Preview inpaint layer uploaded in {:.3}s",
-                        inpaint_upload_started.elapsed().as_secs_f64()
-                    ));
+                        .write_output_transform(&queue, &display_output_transform)
+                        .map_err(|error| format!("display ICC LUT upload failed: {error:#}"))?;
                     let first_render_started = Instant::now();
                     pipeline.recompute(&queue, &device, &params);
                     crate::diagnostics::record(format!(
@@ -2227,10 +2286,11 @@ impl AurawApp {
             match result {
                 crate::android::PickerResult::Picked(document) => {
                     self.library.refresh(&self.egui_ctx);
+                    let batch_owned_open = self.android_batch_load_pending;
                     let keep_library_for_profile_reload =
                         self.pending_android_profile_reload.is_some()
                             && self.active_tab == AppTab::Library;
-                    self.active_tab = if self.library_batch_export.is_some()
+                    self.active_tab = if batch_owned_open
                         || self.library_ai_mask_refresh.is_some()
                         || keep_library_for_profile_reload
                     {
@@ -2296,7 +2356,12 @@ impl AurawApp {
                 }
                 crate::android::PickerResult::Cancelled => {
                     self.pending_android_profile_reload = None;
-                    if self.library_ai_mask_refresh.is_some() {
+                    if self.android_batch_load_pending {
+                        self.android_batch_load_pending = false;
+                        self.complete_android_library_batch_export_item(Err(
+                            "RAW open was canceled".to_owned(),
+                        ));
+                    } else if self.library_ai_mask_refresh.is_some() {
                         self.complete_android_library_ai_mask_open_failure(
                             "RAW open was canceled".to_owned(),
                             frame,
@@ -2307,10 +2372,11 @@ impl AurawApp {
                 }
                 crate::android::PickerResult::Failed(error) => {
                     let was_profile_reload = self.pending_android_profile_reload.take().is_some();
-                    if self.library_ai_mask_refresh.is_some() && !was_profile_reload {
-                        self.complete_android_library_ai_mask_open_failure(error, frame);
-                    } else if self.library_batch_export.is_some() && !was_profile_reload {
+                    if self.android_batch_load_pending && !was_profile_reload {
+                        self.android_batch_load_pending = false;
                         self.complete_android_library_batch_export_item(Err(error));
+                    } else if self.library_ai_mask_refresh.is_some() && !was_profile_reload {
+                        self.complete_android_library_ai_mask_open_failure(error, frame);
                     } else {
                         self.notice = Some(if was_profile_reload {
                             format!("Could not reload RAW for camera profile: {error}")
@@ -2335,6 +2401,11 @@ impl AurawApp {
                 self.loading_label = None;
                 self.notice = Some("RAW decode worker stopped unexpectedly.".to_owned());
                 self.on_library_ai_mask_refresh_load_finished(false, frame);
+                #[cfg(target_os = "android")]
+                if std::mem::take(&mut self.android_batch_load_pending) {
+                    self.on_library_batch_load_finished(false, frame);
+                }
+                #[cfg(not(target_os = "android"))]
                 self.on_library_batch_load_finished(false, frame);
                 None
             }
@@ -2346,12 +2417,19 @@ impl AurawApp {
 
         self.load_receiver = None;
         self.loading_label = None;
+        #[cfg(target_os = "android")]
+        let batch_owned_load = std::mem::take(&mut self.android_batch_load_pending);
 
         match result {
             Ok(mut loaded) => {
                 let Some(render_state) = frame.wgpu_render_state() else {
                     self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
                     self.on_library_ai_mask_refresh_load_finished(false, frame);
+                    #[cfg(target_os = "android")]
+                    if batch_owned_load {
+                        self.on_library_batch_load_finished(false, frame);
+                    }
+                    #[cfg(not(target_os = "android"))]
                     self.on_library_batch_load_finished(false, frame);
                     return;
                 };
@@ -2436,11 +2514,10 @@ impl AurawApp {
                 self.dirty_mask_layers.fill(false);
                 self.lens_correction = loaded.lens_correction;
                 self.lens_correction_dirty = false;
+                self.lens_correction_generation =
+                    self.lens_correction_generation.wrapping_add(1);
                 #[cfg(target_os = "android")]
                 {
-                    self.lens_correction_generation =
-                        self.lens_correction_generation.wrapping_add(1);
-                    self.lens_correction_receiver = None;
                     if self.lens_correction.applied {
                         self.lens_corrected_preview_cache =
                             self.lens_correction.selected_lens().map(|selection| {
@@ -2474,14 +2551,25 @@ impl AurawApp {
                     loaded.sidecar_generation,
                     loaded.sidecar_needs_rewrite,
                 );
+                self.cancel_stale_document_background_tasks();
                 log::info!("loaded RAW preview for {}", loaded.label);
                 self.on_library_ai_mask_refresh_load_finished(true, frame);
+                #[cfg(target_os = "android")]
+                if batch_owned_load {
+                    self.on_library_batch_load_finished(true, frame);
+                }
+                #[cfg(not(target_os = "android"))]
                 self.on_library_batch_load_finished(true, frame);
             }
             Err(error) => {
                 self.notice = Some(format!("Failed to decode or render RAW: {error}"));
                 log::error!("RAW load failed: {error}");
                 self.on_library_ai_mask_refresh_load_finished(false, frame);
+                #[cfg(target_os = "android")]
+                if batch_owned_load {
+                    self.on_library_batch_load_finished(false, frame);
+                }
+                #[cfg(not(target_os = "android"))]
                 self.on_library_batch_load_finished(false, frame);
             }
         }

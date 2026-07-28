@@ -12,7 +12,10 @@ use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -276,6 +279,7 @@ pub fn spawn_tiled_png_export(
     tile_spec: TileSpec,
     settings: ExportSettings,
     metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -312,6 +316,7 @@ pub fn spawn_tiled_png_export(
                             device: &device,
                             queue: &queue,
                             events: &worker_sender,
+                            cancellation: &cancellation,
                         },
                         ExportRequest {
                             raw: &raw,
@@ -373,6 +378,7 @@ pub fn spawn_tiled_jpeg_export(
     tile_spec: TileSpec,
     settings: ExportSettings,
     metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -407,6 +413,7 @@ pub fn spawn_tiled_jpeg_export(
                             device: &device,
                             queue: &queue,
                             events: &worker_sender,
+                            cancellation: &cancellation,
                         },
                         ExportRequest {
                             raw: &raw,
@@ -468,6 +475,7 @@ pub fn spawn_tiled_tiff_export(
     tile_spec: TileSpec,
     settings: ExportSettings,
     metadata: ExportMetadata,
+    cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
@@ -490,6 +498,7 @@ pub fn spawn_tiled_tiff_export(
                             device: &device,
                             queue: &queue,
                             events: &worker_sender,
+                            cancellation: &cancellation,
                         },
                         ExportRequest {
                             raw: &raw,
@@ -562,11 +571,20 @@ where
     Ok(())
 }
 
+fn ensure_export_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
+    anyhow::ensure!(
+        !cancellation.load(Ordering::Acquire),
+        "export cancelled"
+    );
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct ExportContext<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     events: &'a mpsc::Sender<ExportEvent>,
+    cancellation: &'a AtomicBool,
 }
 
 #[derive(Clone, Copy)]
@@ -860,6 +878,7 @@ where
         device,
         queue,
         events,
+        cancellation,
     } = context;
     let ExportRequest {
         raw,
@@ -877,6 +896,7 @@ where
         color: _,
     } = request;
     let export_started = Instant::now();
+    ensure_export_not_cancelled(cancellation)?;
     validate_export_dimensions(output_width, output_height)?;
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
     crate::diagnostics::record(format!(
@@ -934,6 +954,7 @@ where
     let mut tone_scratch = first_raw.clone();
     tile_pipeline.begin_export_tone_analysis(queue, device);
     for (index, tile) in plan.tiles.iter().copied().enumerate() {
+        ensure_export_not_cancelled(cancellation)?;
         if index != 0 {
             extract_padded_tile_into(raw, tile, &mut tone_scratch);
         }
@@ -974,6 +995,7 @@ where
     let mut tile_index = 0usize;
 
     while tile_index < plan.tiles.len() {
+        ensure_export_not_cancelled(cancellation)?;
         let band_y = plan.tiles[tile_index].core_y;
         let band_height = plan.tiles[tile_index].core_height;
         let band_start = tile_index;
@@ -992,6 +1014,7 @@ where
             .copied()
             .enumerate()
         {
+            ensure_export_not_cancelled(cancellation)?;
             let global_index = band_start + absolute_index;
             extract_padded_tile_into(raw, tile, &mut tile_scratch);
             tile_pipeline
@@ -1076,6 +1099,7 @@ where
 
         let source_row_values = checked_rgb_len(raw.width, 1)?;
         for local_y in 0..band_height {
+            ensure_export_not_cancelled(cancellation)?;
             let start = usize::try_from(local_y)
                 .ok()
                 .and_then(|row| row.checked_mul(source_row_values))

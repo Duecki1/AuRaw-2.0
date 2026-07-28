@@ -18,11 +18,14 @@ pub(crate) fn responsive_popup<'a>(
     let available = ctx.content_rect().size() - eframe::egui::vec2(24.0, 24.0);
     let available = eframe::egui::vec2(available.x.max(1.0), available.y.max(1.0));
     let compact_portrait = available.x < 560.0 && available.y > available.x;
-    window
+    let window = window
         .default_width(preferred_width.min(available.x))
         .max_width(available.x)
         .max_height(available.y)
-        .vscroll(compact_portrait)
+        .vscroll(compact_portrait);
+    #[cfg(target_os = "android")]
+    let window = window.order(eframe::egui::Order::Foreground);
+    window
 }
 
 #[cfg(any(target_os = "android", test))]

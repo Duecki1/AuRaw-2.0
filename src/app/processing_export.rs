@@ -1,3 +1,40 @@
+const BATCH_EXPORT_TILE_PHASE_WEIGHT: f32 = 0.90;
+const BATCH_EXPORT_MAX_INCOMPLETE_FRACTION: f32 = 0.99;
+
+fn batch_export_overall_fraction(
+    completed: usize,
+    total: usize,
+    has_current: bool,
+    tile_progress: Option<(usize, usize)>,
+) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    let completed = completed.min(total);
+    if completed == total {
+        return 1.0;
+    }
+
+    // Tile completion only covers rendering/readback. Encoding, metadata writing,
+    // publication, and final rename still have to finish before the image counts.
+    let current_fraction = if has_current {
+        tile_progress
+            .and_then(|(tiles_done, tiles_total)| {
+                (tiles_total > 0).then(|| {
+                    (tiles_done as f32 / tiles_total as f32).clamp(0.0, 1.0)
+                })
+            })
+            .unwrap_or(0.0)
+            * BATCH_EXPORT_TILE_PHASE_WEIGHT
+    } else {
+        0.0
+    };
+
+    ((completed as f32 + current_fraction) / total as f32)
+        .clamp(0.0, BATCH_EXPORT_MAX_INCOMPLETE_FRACTION)
+}
+
 fn aligned_detail_axis(
     min_uv: f32,
     max_uv: f32,
@@ -101,17 +138,392 @@ fn zoom_detail_idle_delay() -> Duration {
     Duration::from_millis(if cfg!(target_os = "android") { 220 } else { 140 })
 }
 
+#[cfg(not(target_os = "android"))]
+#[allow(clippy::too_many_arguments)]
+fn spawn_desktop_library_batch_export(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    jobs: VecDeque<LibraryBatchExportJob>,
+    format: ExportFormat,
+    settings: ExportSettings,
+    camera_profile_mode: CameraProfileMode,
+    camera_profile_folder: Option<PathBuf>,
+    last_camera_profile: Option<PathBuf>,
+    default_exposure: ExposureParams,
+    decode_gate: Arc<std::sync::RwLock<()>>,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
+    repaint: egui::Context,
+) -> mpsc::Receiver<LibraryBatchExportEvent> {
+    use std::sync::atomic::Ordering;
+
+    let (sender, receiver) = mpsc::channel();
+    let worker_sender = sender.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("auraw-library-batch-export".to_owned())
+        .spawn(move || {
+            let total = jobs.len();
+            let mut completed = 0usize;
+            for job in jobs {
+                if cancellation.load(Ordering::Acquire) {
+                    break;
+                }
+                let _ = worker_sender.send(LibraryBatchExportEvent::Started {
+                    job: job.clone(),
+                    completed,
+                    total,
+                });
+                repaint.request_repaint();
+
+                let request = prepare_desktop_library_export_request(
+                    &device,
+                    &queue,
+                    &job,
+                    format,
+                    &settings,
+                    camera_profile_mode,
+                    camera_profile_folder.as_deref(),
+                    last_camera_profile.as_deref(),
+                    default_exposure,
+                    &decode_gate,
+                    &cancellation,
+                );
+
+                if cancellation.load(Ordering::Acquire) {
+                    break;
+                }
+
+                let request = match request {
+                    Ok(request) => request,
+                    Err(error) => {
+                        completed += 1;
+                        let _ = worker_sender.send(LibraryBatchExportEvent::ItemFinished {
+                            completed,
+                            error: Some(error),
+                        });
+                        repaint.request_repaint();
+                        continue;
+                    }
+                };
+
+                let ExportTaskRequest {
+                    device,
+                    queue,
+                    raw,
+                    geometry,
+                    exposure,
+                    masks,
+                    inpaint,
+                    path,
+                    format,
+                    settings,
+                    metadata,
+                    display_name: _,
+                } = request;
+                let export_receiver = match format {
+                    ExportFormat::Png => spawn_tiled_png_export(
+                        device,
+                        queue,
+                        raw,
+                        geometry,
+                        exposure,
+                        masks,
+                        inpaint,
+                        path,
+                        TileSpec::default(),
+                        settings,
+                        metadata,
+                        Arc::clone(&cancellation),
+                    ),
+                    ExportFormat::Jpeg => spawn_tiled_jpeg_export(
+                        device,
+                        queue,
+                        raw,
+                        geometry,
+                        exposure,
+                        masks,
+                        inpaint,
+                        path,
+                        TileSpec::default(),
+                        settings,
+                        metadata,
+                        Arc::clone(&cancellation),
+                    ),
+                    ExportFormat::Tiff => spawn_tiled_tiff_export(
+                        device,
+                        queue,
+                        raw,
+                        geometry,
+                        exposure,
+                        masks,
+                        inpaint,
+                        path,
+                        TileSpec::default(),
+                        settings,
+                        metadata,
+                        Arc::clone(&cancellation),
+                    ),
+                };
+
+                let mut item_result = Err("export worker stopped unexpectedly".to_owned());
+                while let Ok(event) = export_receiver.recv() {
+                    match event {
+                        ExportEvent::Progress {
+                            completed_tiles,
+                            total_tiles,
+                        } => {
+                            let _ = worker_sender.send(LibraryBatchExportEvent::Progress {
+                                completed,
+                                total,
+                                completed_tiles,
+                                total_tiles,
+                            });
+                            repaint.request_repaint();
+                        }
+                        ExportEvent::Finished(result) => {
+                            item_result = result.map(|_| ());
+                            break;
+                        }
+                    }
+                }
+
+                let cancelled = cancellation.load(Ordering::Acquire);
+                if !cancelled || item_result.is_ok() {
+                    // A cancellation request can arrive just after the current
+                    // image was published. Count that image, but do not report a
+                    // cooperative cancellation result as an export failure.
+                    completed += 1;
+                    let error = (!cancelled)
+                        .then(|| item_result.err())
+                        .flatten()
+                        .map(|error| format!("{}: {error}", job.source.display()));
+                    let _ = worker_sender.send(LibraryBatchExportEvent::ItemFinished {
+                        completed,
+                        error,
+                    });
+                    repaint.request_repaint();
+                }
+                if cancelled {
+                    break;
+                }
+            }
+
+            let _ = worker_sender.send(LibraryBatchExportEvent::Finished {
+                cancelled: cancellation.load(Ordering::Acquire),
+            });
+            repaint.request_repaint();
+        });
+
+    if let Err(error) = spawn_result {
+        let _ = sender.send(LibraryBatchExportEvent::ItemFinished {
+            completed: 0,
+            error: Some(format!("could not start batch export worker: {error}")),
+        });
+        let _ = sender.send(LibraryBatchExportEvent::Finished { cancelled: false });
+    }
+    receiver
+}
+
+#[cfg(not(target_os = "android"))]
+#[allow(clippy::too_many_arguments)]
+fn prepare_desktop_library_export_request(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    job: &LibraryBatchExportJob,
+    format: ExportFormat,
+    settings: &ExportSettings,
+    camera_profile_mode: CameraProfileMode,
+    camera_profile_folder: Option<&std::path::Path>,
+    last_camera_profile: Option<&std::path::Path>,
+    default_exposure: ExposureParams,
+    decode_gate: &std::sync::RwLock<()>,
+    cancellation: &std::sync::atomic::AtomicBool,
+) -> Result<ExportTaskRequest, String> {
+    use std::sync::atomic::Ordering;
+
+    if cancellation.load(Ordering::Acquire) {
+        return Err("batch export cancelled".to_owned());
+    }
+
+    let (edits, requested_camera_profile) = match crate::sidecar::load_desktop(&job.source) {
+        Ok(Some(loaded)) => {
+            let requested = loaded
+                .edits
+                .camera_profile
+                .as_ref()
+                .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
+            (loaded.edits, requested)
+        }
+        Ok(None) => {
+            let mut edits = crate::sidecar::default_edit_state();
+            edits.exposure = default_exposure;
+            let requested = last_camera_profile
+                .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
+            (edits, requested)
+        }
+        Err(error) => {
+            log::warn!(
+                "ignoring invalid sidecar during batch export for {}: {error}",
+                job.source.display()
+            );
+            let mut edits = crate::sidecar::default_edit_state();
+            edits.exposure = default_exposure;
+            let requested = last_camera_profile
+                .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
+            (edits, requested)
+        }
+    };
+
+    let original_raw = {
+        let _decode_guard = decode_gate
+            .write()
+            .map_err(|_| "RAW decode gate was poisoned".to_owned())?;
+        load_raw_file_with_profile_selection(
+            &job.source,
+            camera_profile_mode,
+            camera_profile_folder,
+            requested_camera_profile.as_deref(),
+        )
+        .map(Arc::new)
+        .map_err(|error| {
+            format!("{}: RAW decode failed: {error:#}", job.source.display())
+        })?
+    };
+
+    if cancellation.load(Ordering::Acquire) {
+        return Err("batch export cancelled".to_owned());
+    }
+
+    let raw = if edits.lens.enabled {
+        let catalog = lensfun_catalog(&original_raw);
+        let selected = catalog
+            .lenses
+            .iter()
+            .find(|lens| lens.maker == edits.lens.maker && lens.model == edits.lens.model)
+            .cloned()
+            .or_else(|| {
+                (!edits.lens.maker.is_empty() || !edits.lens.model.is_empty()).then(|| {
+                    LensfunLens {
+                        maker: edits.lens.maker.clone(),
+                        model: edits.lens.model.clone(),
+                    }
+                })
+            })
+            .or(catalog.auto_match);
+        if let Some(selected) = selected {
+            Arc::new(apply_lensfun_correction(&original_raw, &selected).map_err(|error| {
+                format!(
+                    "{}: lens correction failed: {error:#}",
+                    job.source.display()
+                )
+            })?)
+        } else {
+            Arc::clone(&original_raw)
+        }
+    } else {
+        Arc::clone(&original_raw)
+    };
+
+    let mut masks = Arc::unwrap_or_clone(edits.masks);
+    let inpaint_strokes = Arc::unwrap_or_clone(edits.inpainting);
+    let inpaint = compose_inpaint_strokes(&inpaint_strokes);
+    if needs_canonical_mask_source(&masks) {
+        let source_raw = if raw.width.max(raw.height) <= 2048 {
+            Arc::clone(&raw)
+        } else {
+            Arc::new(build_proxy(&raw, ProxySpec { max_edge: 2048 }))
+        };
+        let neutral_exposure = ExposureParams::scene_referred_default();
+        let neutral_masks = MaskStack::default();
+        let neutral_params = GpuParams::new(&neutral_exposure, &neutral_masks, &source_raw);
+        let pipeline = RawGpuPipeline::new_headless_with_quality(
+            device,
+            queue,
+            &source_raw,
+            &neutral_params,
+            ProcessingQuality::Preview,
+        )
+        .map_err(|error| {
+            format!(
+                "{}: range-mask source setup failed: {error:#}",
+                job.source.display()
+            )
+        })?;
+        pipeline
+            .update_inpaint_layer(
+                queue,
+                inpaint.as_ref(),
+                0,
+                0,
+                source_raw.width,
+                source_raw.height,
+            )
+            .map_err(|error| {
+                format!(
+                    "{}: range-mask inpainting setup failed: {error:#}",
+                    job.source.display()
+                )
+            })?;
+        pipeline.recompute(queue, device, &neutral_params);
+        let rgba = pipeline
+            .read_output_region_blocking(
+                device,
+                queue,
+                0,
+                0,
+                source_raw.width,
+                source_raw.height,
+            )
+            .map_err(|error| {
+                format!(
+                    "{}: range-mask source readback failed: {error:#}",
+                    job.source.display()
+                )
+            })?;
+        let source = MaskRgbImage::new(source_raw.width, source_raw.height, rgba)
+            .ok_or_else(|| "range-mask source dimensions are invalid".to_owned())?;
+        install_missing_range_sources(&mut masks, &source);
+    }
+
+    if cancellation.load(Ordering::Acquire) {
+        return Err("batch export cancelled".to_owned());
+    }
+
+    let source_file_name = job
+        .source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned);
+    let display_name = job
+        .source
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("image")
+        .to_owned();
+    Ok(ExportTaskRequest {
+        device: device.clone(),
+        queue: queue.clone(),
+        metadata: ExportMetadata::from_raw(&raw, source_file_name),
+        raw,
+        geometry: edits.geometry.sanitized(),
+        exposure: edits.exposure,
+        masks,
+        inpaint,
+        path: job.destination.clone(),
+        format,
+        settings: settings.clone(),
+        display_name,
+    })
+}
+
 impl AurawApp {
     pub(crate) fn mark_lens_correction_dirty(&mut self) {
         self.note_edit_changed();
         if self.original_raw.is_some() {
             self.lens_correction_dirty = true;
-            #[cfg(target_os = "android")]
-            {
-                self.lens_correction_generation =
-                    self.lens_correction_generation.wrapping_add(1);
-            }
+            self.lens_correction_generation = self.lens_correction_generation.wrapping_add(1);
             self.notice = None;
+            self.egui_ctx.request_repaint();
         }
     }
 
@@ -119,176 +531,22 @@ impl AurawApp {
         #[cfg(target_os = "android")]
         self.apply_pending_lens_correction_android(frame);
         #[cfg(not(target_os = "android"))]
-        self.apply_pending_lens_correction_sync(frame);
-    }
-
-    pub(crate) fn lens_correction_busy(&self) -> bool {
-        #[cfg(target_os = "android")]
-        {
-            self.lens_correction_receiver.is_some()
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            false
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
-    fn apply_pending_lens_correction_sync(&mut self, frame: &eframe::Frame) {
-        if !self.lens_correction_dirty {
-            return;
-        }
-        self.lens_correction_dirty = false;
-
-        let Some(original_raw) = self.original_raw.as_ref().map(Arc::clone) else {
-            return;
-        };
-        let Some(render_state) = frame.wgpu_render_state() else {
-            self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
-            return;
-        };
-
-        let mut correction_notice = None;
-        let (full_raw, applied_label) = if self.lens_correction.enabled {
-            let Some(selection) = self.lens_correction.selected_lens() else {
-                self.lens_correction.enabled = false;
-                self.lens_correction.applied = false;
-                self.lens_correction.catalog.status =
-                    "Select a lens profile before enabling correction.".to_owned();
-                return;
-            };
-            match apply_lensfun_correction(&original_raw, &selection) {
-                Ok(corrected) => (Arc::new(corrected), Some(selection.label())),
-                Err(error) => {
-                    self.lens_correction.enabled = false;
-                    self.lens_correction.applied = false;
-                    self.lens_correction.catalog.status =
-                        format!("Could not apply {}: {error:#}", selection.label());
-                    correction_notice = Some(
-                        "Lens correction failed; restored the original RAW geometry.".to_owned(),
-                    );
-                    (Arc::clone(&original_raw), None)
-                }
-            }
-        } else {
-            (Arc::clone(&original_raw), None)
-        };
-
-        let preview_spec = ProxySpec {
-            max_edge: self.preview_quality.proxy_edge(),
-        };
-        let preview_raw = if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
-            Arc::clone(&full_raw)
-        } else {
-            Arc::new(build_proxy(&full_raw, preview_spec))
-        };
-        if let Some(restored_masks) = self.history_lens_restore_masks.take() {
-            self.masks = restored_masks;
-            self.rehydrate_restored_mask_state();
-        }
-        // Lens correction must never destroy local edits. Rebuild the GPU
-        // preview with the existing mask stack, then mark source-dependent
-        // masks as stale so the user can explicitly refresh them.
-        let preview_masks = self.masks.clone();
-        let params = GpuParams::new(&self.exposure, &preview_masks, &preview_raw)
-            .with_vignette_geometry(self.geometry);
-        let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
-            &render_state.device,
-            &render_state.queue,
-            &preview_raw,
-            &params,
-            ProcessingQuality::Preview,
-        ) {
-            Ok(pipeline) => pipeline,
-            Err(error) => {
-                self.notice = Some(format!(
-                    "Could not rebuild the corrected GPU preview: {error:#}"
-                ));
-                return;
-            }
-        };
-        #[cfg(not(target_os = "android"))]
-        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
-            self.notice = Some(
-                "Could not prepare the preview color profile. The previous complete preview remains available."
-                    .to_owned(),
-            );
-            crate::diagnostics::record(format!(
-                "preview pipeline display-profile install failed: {error:#}"
-            ));
-            return;
-        }
-        if let Err(error) = Self::upload_preview_masks(
-            &pipeline,
-            &render_state.queue,
-            &preview_masks,
-            &preview_raw,
-        ) {
-            self.notice = Some(error);
-            return;
-        }
-        if let Err(error) = pipeline.update_inpaint_layer(
-            &render_state.queue,
-            self.inpaint_layer.as_ref(),
-            0,
-            0,
-            preview_raw.width,
-            preview_raw.height,
-        ) {
-            self.notice = Some(format!(
-                "Could not rebuild lens-corrected preview inpainting: {error:#}"
-            ));
-            return;
-        }
-        pipeline.recompute(&render_state.queue, &render_state.device, &params);
-        // Inpainting now captures a full-resolution local RAW crop per stroke.
-        // Do not spend load/rebuild time generating an unused preview proxy source.
-        let inpaint_source = None;
-
-        let mut renderer = render_state.renderer.write();
-        self.take_preview_pipeline_and_release_textures(&mut renderer);
-        pipeline.register_egui_texture(&render_state.device, &mut renderer);
-        drop(renderer);
-
-        self.rehydrate_restored_mask_state();
-        self.note_lens_correction_changed_for_masks();
-        self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
-        self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
-        self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
-
-        self.loaded_raw = Some(full_raw);
-        self.preview_raw = Some(preview_raw);
-        self.gpu_pipeline = Some(pipeline);
-        self.inpaint_source_cache = inpaint_source;
-        self.preview_zoom = 1.0;
-        self.preview_center = [0.5, 0.5];
-        self.preview_visible_uv = PreviewUvRect {
-            min: [0.0, 0.0],
-            max: [1.0, 1.0],
-        };
-        self.preview_viewport_pixels = [1, 1];
-        self.preview_motion_at = None;
-        self.preview_touch_navigation_active = false;
-        self.preview_revision = self.preview_revision.wrapping_add(1);
-        self.preview_detail_pending_stage = None;
-        self.navigation_pending_stage = None;
-        self.preview_detail_urgent = false;
-        self.target_exposure = self.exposure;
-        self.pending_stage = None;
-        self.lens_correction.applied = applied_label.is_some();
-        if let Some(label) = applied_label {
-            self.lens_correction.catalog.status = format!("Applied {label}");
-        } else if correction_notice.is_none() {
-            self.lens_correction.catalog.status =
-                "Lens correction disabled; using the original RAW geometry.".to_owned();
-        }
-        self.notice = correction_notice;
+        self.apply_pending_lens_correction_desktop(frame);
     }
 
     #[cfg(target_os = "android")]
     fn apply_pending_lens_correction_android(&mut self, frame: &eframe::Frame) {
+        self.queue_pending_lens_correction(frame);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn apply_pending_lens_correction_desktop(&mut self, frame: &eframe::Frame) {
+        self.queue_pending_lens_correction(frame);
+    }
+
+    fn queue_pending_lens_correction(&mut self, frame: &eframe::Frame) {
         self.poll_lens_correction_worker(frame);
-        if self.lens_correction_receiver.is_some() || !self.lens_correction_dirty {
+        if !self.lens_correction_dirty {
             return;
         }
         self.lens_correction_dirty = false;
@@ -315,170 +573,347 @@ impl AurawApp {
         }
 
         let generation = self.lens_correction_generation;
-        let repaint = self.egui_ctx.clone();
-        let preview_quality = self.preview_quality;
-        let cached_raws = match selection.as_ref() {
-            Some(requested) => self
-                .lens_corrected_preview_cache
-                .as_ref()
-                .filter(|(cached, quality, _, _)| {
-                    cached == requested && *quality == preview_quality
-                })
-                .map(|(_, _, full_raw, preview_raw)| {
-                    (Arc::clone(full_raw), Arc::clone(preview_raw))
-                }),
-            None => self
-                .lens_original_preview_cache
-                .as_ref()
-                .filter(|(quality, _)| *quality == preview_quality)
-                .map(|(_, preview_raw)| (Arc::clone(&original_raw), Arc::clone(preview_raw))),
+        let document_id = self.sidecar_generation;
+        let name = selection
+            .as_ref()
+            .map(|lens| format!("Applying {}", lens.label()))
+            .unwrap_or_else(|| "Disabling lens correction".to_owned());
+        self.enqueue_lens_background_action(
+            LensCorrectionTaskRequest {
+                document_id,
+                generation,
+                original_raw,
+                selection,
+                preview_quality: self.preview_quality,
+            },
+            name,
+        );
+    }
+
+    fn start_lens_correction_task(&mut self, id: TaskId, request: LensCorrectionTaskRequest) {
+        let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
+            self.fail_background_task(id, "Lens correction lost its cancellation state.");
+            return;
         };
-        let status_label = selection
+        self.lens_correction_task_id = Some(id);
+        let status_label = request
+            .selection
             .as_ref()
             .map(LensfunLens::label)
             .unwrap_or_else(|| "original RAW geometry".to_owned());
-        self.lens_correction.catalog.status = if selection.is_some() {
+        self.lens_correction.catalog.status = if request.selection.is_some() {
             format!("Applying {status_label} in the background…")
         } else {
             "Disabling lens correction in the background…".to_owned()
         };
+        self.background_tasks.update_progress(
+            id,
+            TaskProgress::indeterminate(if request.selection.is_some() {
+                "Applying profile…"
+            } else {
+                "Restoring original RAW geometry…"
+            }),
+        );
 
+        let repaint = self.egui_ctx.clone();
         let (sender, receiver) = mpsc::channel();
+        let document_id = request.document_id;
+        let generation = request.generation;
         let spawn_result = std::thread::Builder::new()
             .name("auraw-lens-correction".to_owned())
             .spawn(move || {
-                let started = Instant::now();
+                use std::sync::atomic::Ordering;
                 let result = (|| -> Result<PreparedLensCorrection, String> {
-                    let applied_label = selection.as_ref().map(LensfunLens::label);
-                    let (full_raw, preview_raw) = if let Some(cached_raws) = cached_raws {
-                        cached_raws
-                    } else {
-                        let full_raw = if let Some(selection) = selection.as_ref() {
-                            let corrected = apply_lensfun_correction(&original_raw, selection)
-                                .map_err(|error| {
+                    if cancellation.load(Ordering::Acquire) {
+                        return Err("background task cancelled".to_owned());
+                    }
+                    let applied_label = request.selection.as_ref().map(LensfunLens::label);
+                    let original_raw = Arc::clone(&request.original_raw);
+                    let full_raw = if let Some(selection) = request.selection.as_ref() {
+                        Arc::new(
+                            apply_lensfun_correction(&original_raw, selection).map_err(
+                                |error| {
                                     format!("Could not apply {}: {error:#}", selection.label())
-                                })?;
-                            Arc::new(corrected)
-                        } else {
-                            Arc::clone(&original_raw)
-                        };
-                        let preview_spec = ProxySpec {
-                            max_edge: preview_quality.proxy_edge(),
-                        };
-                        let preview_raw =
-                            if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
-                                Arc::clone(&full_raw)
-                            } else {
-                                Arc::new(build_proxy(&full_raw, preview_spec))
-                            };
-                        (full_raw, preview_raw)
+                                },
+                            )?,
+                        )
+                    } else {
+                        original_raw
                     };
-
+                    if cancellation.load(Ordering::Acquire) {
+                        return Err("background task cancelled".to_owned());
+                    }
+                    let _ = sender.send(LensCorrectionEvent::Progress {
+                        task_id: id,
+                        document_id,
+                        generation,
+                        phase: "Building preview proxy…".to_owned(),
+                    });
+                    repaint.request_repaint();
+                    let preview_spec = ProxySpec {
+                        max_edge: request.preview_quality.proxy_edge(),
+                    };
+                    let preview_raw = if full_raw.width.max(full_raw.height) <= preview_spec.max_edge
+                    {
+                        Arc::clone(&full_raw)
+                    } else {
+                        Arc::new(build_proxy(&full_raw, preview_spec))
+                    };
+                    if cancellation.load(Ordering::Acquire) {
+                        return Err("background task cancelled".to_owned());
+                    }
                     Ok(PreparedLensCorrection {
                         full_raw,
                         preview_raw,
                         applied_label,
-                        selection,
-                        preview_quality,
+                        selection: request.selection,
+                        preview_quality: request.preview_quality,
                     })
                 })();
-                crate::diagnostics::record(format!(
-                    "Interactive lens correction worker finished in {:.3}s ({})",
-                    started.elapsed().as_secs_f64(),
-                    if result.is_ok() { "success" } else { "failure" }
-                ));
-                let _ = sender.send(LensCorrectionEvent { generation, result });
+                let _ = sender.send(LensCorrectionEvent::Finished {
+                    task_id: id,
+                    document_id,
+                    generation,
+                    result,
+                });
                 repaint.request_repaint();
             });
-
         match spawn_result {
             Ok(_) => {
                 self.lens_correction_receiver = Some(receiver);
                 self.egui_ctx.request_repaint_after(Duration::from_millis(50));
             }
             Err(error) => {
-                self.lens_correction.enabled = self.lens_correction.applied;
-                self.lens_correction.catalog.status =
-                    format!("Could not start lens correction: {error}");
-                self.notice = Some("Could not start the lens-correction worker.".to_owned());
+                self.lens_correction_task_id = None;
+                self.fail_background_task(id, format!("Could not start lens correction: {error}"));
             }
         }
     }
 
-    #[cfg(target_os = "android")]
+    pub(crate) fn lens_correction_busy(&self) -> bool {
+        self.lens_correction_receiver.is_some()
+            || self.background_task_snapshots().iter().any(|task| {
+                matches!(task.kind, TaskKind::LensCorrection { .. })
+                    && task.status != TaskStatus::Failed
+            })
+    }
+
     fn poll_lens_correction_worker(&mut self, frame: &eframe::Frame) {
-        let received = self
-            .lens_correction_receiver
-            .as_ref()
-            .map(mpsc::Receiver::try_recv);
-        let event = match received {
-            Some(Ok(event)) => Some(event),
-            Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                self.lens_correction_receiver = None;
-                self.lens_correction.enabled = self.lens_correction.applied;
-                self.lens_correction.catalog.status =
-                    "Lens-correction worker stopped unexpectedly.".to_owned();
-                self.notice = Some(self.lens_correction.catalog.status.clone());
-                None
+        let mut events = Vec::new();
+        let mut disconnected = false;
+        if let Some(receiver) = &self.lens_correction_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let finished = matches!(event, LensCorrectionEvent::Finished { .. });
+                        events.push(event);
+                        if finished {
+                            break;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
             }
-            Some(Err(mpsc::TryRecvError::Empty)) | None => None,
-        };
-        let Some(event) = event else {
+        }
+
+        let mut finished = None;
+        for event in events {
+            match event {
+                LensCorrectionEvent::Progress {
+                    task_id,
+                    document_id,
+                    generation,
+                    phase,
+                } => {
+                    if document_id == self.sidecar_generation
+                        && generation == self.lens_correction_generation
+                        && !self.background_task_cancelled(task_id)
+                    {
+                        self.update_background_progress(
+                            Some(task_id),
+                            TaskProgress::indeterminate(phase),
+                        );
+                    }
+                }
+                LensCorrectionEvent::Finished {
+                    task_id,
+                    document_id,
+                    generation,
+                    result,
+                } => finished = Some((task_id, document_id, generation, result)),
+            }
+        }
+
+        if finished.is_none() && disconnected {
+            self.lens_correction_receiver = None;
+            if let Some(id) = self.lens_correction_task_id.take() {
+                self.fail_background_task(id, "Lens-correction worker stopped unexpectedly.");
+            }
+            self.lens_correction.enabled = self.lens_correction.applied;
+            self.lens_correction.catalog.status =
+                "Lens-correction worker stopped unexpectedly.".to_owned();
+            self.notice = Some(self.lens_correction.catalog.status.clone());
+            return;
+        }
+        let Some((task_id, document_id, generation, result)) = finished else {
             return;
         };
         self.lens_correction_receiver = None;
+        if self.lens_correction_task_id == Some(task_id) {
+            self.lens_correction_task_id = None;
+        }
 
-        if event.generation != self.lens_correction_generation {
-            self.lens_correction_dirty = true;
+        let stale = document_id != self.sidecar_generation
+            || generation != self.lens_correction_generation
+            || self.background_task_cancelled(task_id);
+        if stale {
+            self.finish_background_task(task_id);
             return;
         }
 
-        let prepared = match event.result {
+        let prepared = match result {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.lens_correction.enabled = self.lens_correction.applied;
-                self.lens_correction.catalog.status = error;
-                self.notice =
-                    Some("Lens correction failed; restored the previous preview.".to_owned());
+                if self.background_task_cancelled(task_id) {
+                    self.finish_background_task(task_id);
+                } else {
+                    self.lens_correction.enabled = self.lens_correction.applied;
+                    self.lens_correction.catalog.status = error.clone();
+                    self.notice =
+                        Some("Lens correction failed; restored the previous preview.".to_owned());
+                    self.fail_background_task(task_id, error);
+                }
                 return;
             }
         };
+        self.update_background_progress(
+            Some(task_id),
+            TaskProgress::indeterminate("Preparing GPU preview…"),
+        );
+
         let Some(render_state) = frame.wgpu_render_state() else {
             self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+            self.fail_background_task(task_id, self.notice.clone().unwrap_or_default());
             return;
         };
 
-        let Some(pipeline) = self.gpu_pipeline.as_ref() else {
-            self.notice = Some("The preview pipeline is unavailable.".to_owned());
-            return;
-        };
-        if let Err(error) = pipeline.upload_raw_tile(&render_state.queue, &prepared.preview_raw) {
-            self.notice = Some(format!(
-                "Could not update the lens-corrected preview pixels: {error:#}"
-            ));
+        #[cfg(target_os = "android")]
+        {
+            let Some(pipeline) = self.gpu_pipeline.as_ref() else {
+                self.fail_background_task(task_id, "The preview pipeline is unavailable.");
+                return;
+            };
+            if let Err(error) =
+                pipeline.upload_raw_tile(&render_state.queue, &prepared.preview_raw)
+            {
+                self.notice = Some(format!(
+                    "Could not update the lens-corrected preview pixels: {error:#}"
+                ));
+                self.fail_background_task(task_id, self.notice.clone().unwrap_or_default());
+                return;
+            }
+            let params = GpuParams::new(&self.exposure, &self.masks, &prepared.preview_raw)
+                .with_vignette_geometry(self.geometry);
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            if let Some(selection) = prepared.selection.clone() {
+                self.lens_corrected_preview_cache = Some((
+                    selection,
+                    prepared.preview_quality,
+                    Arc::clone(&prepared.full_raw),
+                    Arc::clone(&prepared.preview_raw),
+                ));
+            } else {
+                self.lens_original_preview_cache = Some((
+                    prepared.preview_quality,
+                    Arc::clone(&prepared.preview_raw),
+                ));
+            }
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let preview_masks = self.masks.clone();
+            let params = GpuParams::new(&self.exposure, &preview_masks, &prepared.preview_raw)
+                .with_vignette_geometry(self.geometry);
+            let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
+                &render_state.device,
+                &render_state.queue,
+                &prepared.preview_raw,
+                &params,
+                ProcessingQuality::Preview,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    let message =
+                        format!("Could not rebuild the corrected GPU preview: {error:#}");
+                    self.notice = Some(message.clone());
+                    self.fail_background_task(task_id, message);
+                    return;
+                }
+            };
+            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+                let message = format!("Could not prepare the preview color profile: {error:#}");
+                self.notice = Some(message.clone());
+                self.fail_background_task(task_id, message);
+                return;
+            }
+            if let Err(error) = Self::upload_preview_masks(
+                &pipeline,
+                &render_state.queue,
+                &preview_masks,
+                &prepared.preview_raw,
+            ) {
+                self.notice = Some(error.clone());
+                self.fail_background_task(task_id, error);
+                return;
+            }
+            if let Err(error) = pipeline.update_inpaint_layer(
+                &render_state.queue,
+                self.inpaint_layer.as_ref(),
+                0,
+                0,
+                prepared.preview_raw.width,
+                prepared.preview_raw.height,
+            ) {
+                let message =
+                    format!("Could not rebuild lens-corrected preview inpainting: {error:#}");
+                self.notice = Some(message.clone());
+                self.fail_background_task(task_id, message);
+                return;
+            }
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+
+            if document_id != self.sidecar_generation
+                || generation != self.lens_correction_generation
+                || self.background_task_cancelled(task_id)
+            {
+                self.finish_background_task(task_id);
+                return;
+            }
+            let mut renderer = render_state.renderer.write();
+            self.take_preview_pipeline_and_release_textures(&mut renderer);
+            pipeline.register_egui_texture(&render_state.device, &mut renderer);
+            drop(renderer);
+            self.gpu_pipeline = Some(pipeline);
+        }
+
+        if document_id != self.sidecar_generation
+            || generation != self.lens_correction_generation
+            || self.background_task_cancelled(task_id)
+        {
+            self.finish_background_task(task_id);
             return;
         }
-        let params = GpuParams::new(&self.exposure, &self.masks, &prepared.preview_raw)
-            .with_vignette_geometry(self.geometry);
-        pipeline.recompute(&render_state.queue, &render_state.device, &params);
 
         self.rehydrate_restored_mask_state();
         self.note_lens_correction_changed_for_masks();
+        self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
-        if let Some(selection) = prepared.selection.clone() {
-            self.lens_corrected_preview_cache = Some((
-                selection,
-                prepared.preview_quality,
-                Arc::clone(&prepared.full_raw),
-                Arc::clone(&prepared.preview_raw),
-            ));
-        } else {
-            self.lens_original_preview_cache = Some((
-                prepared.preview_quality,
-                Arc::clone(&prepared.preview_raw),
-            ));
-        }
         self.loaded_raw = Some(prepared.full_raw);
         self.preview_raw = Some(prepared.preview_raw);
         self.inpaint_source_cache = None;
@@ -503,6 +938,7 @@ impl AurawApp {
             |label| format!("Applied {label}"),
         );
         self.notice = None;
+        self.finish_background_task(task_id);
         self.egui_ctx.request_repaint();
     }
 
@@ -1584,7 +2020,6 @@ impl AurawApp {
     pub(crate) fn can_export(&self) -> bool {
         self.loaded_raw.is_some()
             && self.preview_raw.is_some()
-            && self.export_receiver.is_none()
             && !self.export_publish_pending
             && self.load_receiver.is_none()
     }
@@ -1750,8 +2185,7 @@ impl AurawApp {
         ) {
             Ok(Some(path)) => {
                 let direct_path = path.clone();
-                self.start_export(path, frame, format);
-                if self.export_receiver.is_none() {
+                if self.start_export(path, frame, format).is_none() {
                     crate::android::cancel_direct_export(&self.android_app, &direct_path);
                 }
             }
@@ -1766,19 +2200,21 @@ impl AurawApp {
         }
     }
 
-    fn start_export(&mut self, path: PathBuf, frame: &eframe::Frame, format: ExportFormat) {
+    fn capture_export_task_request(
+        &mut self,
+        path: PathBuf,
+        frame: &eframe::Frame,
+        format: ExportFormat,
+    ) -> Option<ExportTaskRequest> {
         if !self.can_export() {
-            return;
+            return None;
         }
 
-        let Some(raw) = &self.loaded_raw else {
-            return;
-        };
+        let raw = self.loaded_raw.as_ref().map(Arc::clone)?;
         let Some(render_state) = frame.wgpu_render_state() else {
             self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
-            return;
+            return None;
         };
-
         let source_file_name = self
             .current_path
             .as_ref()
@@ -1786,51 +2222,46 @@ impl AurawApp {
             .and_then(|name| name.to_str())
             .map(str::to_owned)
             .or_else(|| self.current_label.clone());
-        let metadata = ExportMetadata::from_raw(raw, source_file_name);
-        let receiver = match format {
-            ExportFormat::Png => spawn_tiled_png_export(
-                render_state.device.clone(),
-                render_state.queue.clone(),
-                Arc::clone(raw),
-                self.geometry,
-                self.exposure,
-                self.masks.clone(),
-                self.inpaint_layer.clone(),
-                path,
-                TileSpec::default(),
-                self.export_settings.clone(),
-                metadata.clone(),
-            ),
-            ExportFormat::Jpeg => spawn_tiled_jpeg_export(
-                render_state.device.clone(),
-                render_state.queue.clone(),
-                Arc::clone(raw),
-                self.geometry,
-                self.exposure,
-                self.masks.clone(),
-                self.inpaint_layer.clone(),
-                path,
-                TileSpec::default(),
-                self.export_settings.clone(),
-                metadata.clone(),
-            ),
-            ExportFormat::Tiff => spawn_tiled_tiff_export(
-                render_state.device.clone(),
-                render_state.queue.clone(),
-                Arc::clone(raw),
-                self.geometry,
-                self.exposure,
-                self.masks.clone(),
-                self.inpaint_layer.clone(),
-                path,
-                TileSpec::default(),
-                self.export_settings.clone(),
-                metadata,
-            ),
-        };
-        self.export_receiver = Some(receiver);
-        self.export_progress = Some((0, 0));
-        self.notice = None;
+        let display_name = source_file_name
+            .as_deref()
+            .and_then(|name| std::path::Path::new(name).file_stem())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("image")
+            .to_owned();
+
+        Some(ExportTaskRequest {
+            device: render_state.device.clone(),
+            queue: render_state.queue.clone(),
+            metadata: ExportMetadata::from_raw(&raw, source_file_name),
+            raw,
+            geometry: self.geometry,
+            exposure: self.exposure,
+            masks: self.masks.clone(),
+            inpaint: self.inpaint_layer.clone(),
+            path,
+            format,
+            settings: self.export_settings.clone(),
+            display_name,
+        })
+    }
+
+    fn start_export(
+        &mut self,
+        path: PathBuf,
+        frame: &eframe::Frame,
+        format: ExportFormat,
+    ) -> Option<TaskId> {
+        let request = self.capture_export_task_request(path, frame, format)?;
+        let display_name = request.display_name.clone();
+        let task_id = self.enqueue_background_action(
+            TaskKind::SingleExport,
+            format!("Exporting {display_name}"),
+            TaskProgress::indeterminate("Waiting for earlier background work…"),
+            true,
+            BackgroundAction::SingleExport(request),
+        );
+        Some(task_id)
     }
 
     pub(crate) fn export_progress_state(&self) -> Option<(usize, usize)> {
@@ -1844,11 +2275,32 @@ impl AurawApp {
             .map(|batch| (batch.completed, batch.total))
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn library_batch_export_tile_progress(&self) -> Option<(usize, usize)> {
+        self.library_batch_export_tile_progress
+    }
+
+    pub(crate) fn library_batch_export_overall_fraction(&self) -> Option<f32> {
+        self.library_batch_export.as_ref().map(|batch| {
+            batch_export_overall_fraction(
+                batch.completed,
+                batch.total,
+                batch.current.is_some(),
+                self.library_batch_export_tile_progress(),
+            )
+        })
+    }
+
     #[cfg(target_os = "android")]
     pub(crate) fn library_batch_export_progress(&self) -> Option<(usize, usize)> {
         self.library_batch_export
             .as_ref()
             .map(|batch| (batch.completed, batch.total))
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn library_batch_export_tile_progress(&self) -> Option<(usize, usize)> {
+        self.export_progress
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1876,16 +2328,16 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn cancel_library_batch_export(&mut self) {
-        let finish_now = if let Some(batch) = self.library_batch_export.as_mut() {
+        if let Some(task_id) = self.library_batch_export_task_id {
+            if !self.background_task_cancelled(task_id) {
+                let _ = self.background_tasks.request_cancel(task_id);
+            }
+        }
+        if let Some(batch) = self.library_batch_export.as_mut() {
             batch.cancel_requested = true;
             batch.pending.clear();
-            batch.current.is_none()
-        } else {
-            false
-        };
-        if finish_now {
-            self.finish_library_batch_export();
         }
+        self.sync_library_batch_background_progress();
     }
 
     #[cfg(target_os = "android")]
@@ -1905,6 +2357,11 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn cancel_library_batch_export(&mut self) {
+        if let Some(task_id) = self.library_batch_export_task_id {
+            if !self.background_task_cancelled(task_id) {
+                let _ = self.background_tasks.request_cancel(task_id);
+            }
+        }
         let finish_now = if let Some(batch) = self.library_batch_export.as_mut() {
             batch.cancel_requested = true;
             batch.pending.clear();
@@ -1927,41 +2384,48 @@ impl AurawApp {
         if targets.is_empty() {
             return;
         }
-        if self.load_receiver.is_some()
-            || self.export_receiver.is_some()
-            || self.export_publish_pending
-            || self.library_batch_export.is_some()
-        {
-            self.notice = Some("Wait for the current load or export to finish.".to_owned());
-            return;
-        }
-
         let pending = targets
             .into_iter()
             .map(|(uri, display_name)| LibraryBatchExportJob { uri, display_name })
             .collect::<VecDeque<_>>();
         let total = pending.len();
-        self.export_settings = settings.clone();
-        self.library_batch_export = Some(LibraryBatchExportState {
-            pending,
-            current: None,
-            total,
-            completed: 0,
-            failures: Vec::new(),
-            cancel_requested: false,
-            format,
-            settings,
-        });
-        self.active_tab = AppTab::Library;
-        self.notice = Some(format!(
-            "Preparing to export {total} {}…",
-            if total == 1 { "image" } else { "images" }
-        ));
-        self.start_next_library_export();
+        self.enqueue_background_action(
+            TaskKind::LibraryBatchExport,
+            format!(
+                "Exporting {total} {}",
+                if total == 1 { "image" } else { "images" }
+            ),
+            TaskProgress::units(
+                0,
+                total as u64,
+                Some("images".to_owned()),
+                "Queued for batch export…",
+            ),
+            false,
+            BackgroundAction::LibraryBatchExport {
+                jobs: pending,
+                settings,
+                format,
+            },
+        );
     }
 
     #[cfg(target_os = "android")]
     fn start_next_library_export(&mut self) {
+        // Android's batch path must use the SAF document bridge. Once the user
+        // enters Develop, do not replace that interactive document with the next
+        // batch item. The current export may finish; remaining items resume when
+        // the user returns to Library.
+        if self.active_tab == AppTab::Develop {
+            if let Some(task_id) = self.library_batch_export_task_id {
+                self.update_background_progress(
+                    Some(task_id),
+                    TaskProgress::indeterminate("Paused while Develop is in use"),
+                );
+            }
+            return;
+        }
+
         loop {
             let next = {
                 let Some(batch) = self.library_batch_export.as_mut() else {
@@ -1991,6 +2455,7 @@ impl AurawApp {
                 &job.display_name,
             ) {
                 Ok(()) => {
+                    self.android_batch_load_pending = true;
                     self.picker_pending = true;
                     self.notice = None;
                     self.status = format!("Opening {}…", job.display_name);
@@ -1998,6 +2463,7 @@ impl AurawApp {
                     return;
                 }
                 Err(error) => {
+                    self.android_batch_load_pending = false;
                     if let Some(batch) = self.library_batch_export.as_mut() {
                         batch.failures.push(format!("{}: {error}", job.display_name));
                         batch.completed += 1;
@@ -2020,8 +2486,10 @@ impl AurawApp {
         if !success {
             let name = current.display_name.clone();
             if let Some(batch) = self.library_batch_export.as_mut() {
-                batch.failures.push(format!("{name}: RAW load failed"));
-                batch.completed += 1;
+                if !batch.cancel_requested {
+                    batch.failures.push(format!("{name}: RAW load failed"));
+                    batch.completed += 1;
+                }
                 batch.current = None;
             }
             self.start_next_library_export();
@@ -2074,9 +2542,28 @@ impl AurawApp {
         };
         let direct_path = crate::android::is_direct_export_path(&destination)
             .then(|| destination.clone());
-        self.start_export(destination, frame, format);
+        let started = if let Some(task_id) = self.library_batch_export_task_id {
+            if let Some(request) =
+                self.capture_export_task_request(destination, frame, format)
+            {
+                // The batch task already owns the global FIFO slot. Starting a
+                // nested SingleExport task here would queue it behind its own
+                // parent and show a second "waiting" dialog indefinitely.
+                self.start_export_task(task_id, request);
+                let started =
+                    self.export_task_id == Some(task_id) && self.export_receiver.is_some();
+                if started {
+                    self.sync_library_batch_background_progress();
+                }
+                started
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         self.active_tab = AppTab::Library;
-        if self.export_receiver.is_none() {
+        if !started {
             if let Some(path) = direct_path {
                 crate::android::cancel_direct_export(&self.android_app, &path);
             }
@@ -2094,17 +2581,45 @@ impl AurawApp {
                 .as_ref()
                 .map(|job| job.display_name.clone())
                 .unwrap_or_else(|| "image".to_owned());
-            if let Err(error) = result {
-                batch.failures.push(if error.starts_with(&name) {
-                    error
-                } else {
-                    format!("{name}: {error}")
-                });
+            match result {
+                Ok(()) => batch.completed += 1,
+                Err(error) if !batch.cancel_requested => {
+                    batch.failures.push(if error.starts_with(&name) {
+                        error
+                    } else {
+                        format!("{name}: {error}")
+                    });
+                    batch.completed += 1;
+                }
+                Err(_) => {}
             }
-            batch.completed += 1;
             batch.current = None;
         }
-        self.start_next_library_export();
+        let finished_or_cancelled = self.library_batch_export.as_ref().is_some_and(|batch| {
+            batch.cancel_requested || batch.pending.is_empty()
+        });
+        if finished_or_cancelled {
+            self.finish_library_batch_export();
+        } else {
+            self.start_next_library_export();
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn resume_android_library_batch_export_if_possible(&mut self) {
+        if self.active_tab == AppTab::Develop
+            || self.picker_pending
+            || self.load_receiver.is_some()
+            || self.export_receiver.is_some()
+        {
+            return;
+        }
+        let should_resume = self.library_batch_export.as_ref().is_some_and(|batch| {
+            !batch.cancel_requested && batch.current.is_none() && !batch.pending.is_empty()
+        });
+        if should_resume {
+            self.start_next_library_export();
+        }
     }
 
     #[cfg(target_os = "android")]
@@ -2113,7 +2628,9 @@ impl AurawApp {
             return;
         };
         let succeeded = batch.completed.saturating_sub(batch.failures.len());
-        self.active_tab = AppTab::Library;
+        // Preserve the tab chosen while the export was running. In particular,
+        // finishing a background export must not pull an Android user out of
+        // Develop after they opened the exported RAW.
         self.notice = if batch.cancel_requested {
             Some(format!(
                 "Batch export cancelled after {succeeded} of {} images exported.",
@@ -2131,6 +2648,14 @@ impl AurawApp {
                 batch.failures.join(" · ")
             ))
         };
+        self.export_task_id = None;
+        if let Some(id) = self.library_batch_export_task_id.take() {
+            if batch.cancel_requested || batch.failures.is_empty() {
+                self.finish_background_task(id);
+            } else {
+                self.fail_background_task(id, batch.failures.join(" · "));
+            }
+        }
     }
 
     #[cfg(not(target_os = "android"))]
@@ -2139,130 +2664,41 @@ impl AurawApp {
         jobs: Vec<(PathBuf, PathBuf)>,
         settings: ExportSettings,
         format: ExportFormat,
-        frame: &eframe::Frame,
+        _frame: &eframe::Frame,
     ) {
         if jobs.is_empty() {
             return;
         }
-        if self.load_receiver.is_some() || self.export_receiver.is_some() || self.library_batch_export.is_some() {
-            self.notice = Some("Wait for the current load or export to finish.".to_owned());
-            return;
-        }
-
         let pending = jobs
             .into_iter()
             .map(|(source, destination)| LibraryBatchExportJob { source, destination })
             .collect::<VecDeque<_>>();
         let total = pending.len();
-        self.export_settings = settings.clone();
-        self.library_batch_export = Some(LibraryBatchExportState {
-            pending,
-            current: None,
-            total,
-            completed: 0,
-            failures: Vec::new(),
-            cancel_requested: false,
-            format,
-            settings,
-        });
-        self.active_tab = AppTab::Library;
-        self.notice = Some(format!(
-            "Preparing to export {total} {}…",
-            if total == 1 { "image" } else { "images" }
-        ));
-        self.start_next_library_export(frame);
+        self.enqueue_background_action(
+            TaskKind::LibraryBatchExport,
+            format!(
+                "Exporting {total} {}",
+                if total == 1 { "image" } else { "images" }
+            ),
+            TaskProgress::units(
+                0,
+                total as u64,
+                Some("images".to_owned()),
+                "Waiting for earlier background work…",
+            ),
+            true,
+            BackgroundAction::LibraryBatchExport {
+                jobs: pending,
+                settings,
+                format,
+            },
+        );
     }
 
     #[cfg(not(target_os = "android"))]
-    fn start_next_library_export(&mut self, frame: &eframe::Frame) {
-        let next = {
-            let Some(batch) = self.library_batch_export.as_mut() else {
-                return;
-            };
-            if batch.current.is_some() {
-                return;
-            }
-            if batch.cancel_requested {
-                None
-            } else {
-                batch.pending.pop_front().map(|job| {
-                    batch.current = Some(job.clone());
-                    (job, batch.settings.clone())
-                })
-            }
-        };
-
-        let Some((job, settings)) = next else {
-            self.finish_library_batch_export();
-            return;
-        };
-        self.export_settings = settings.clone();
-        self.open_path(job.source, frame);
-        // Batch export is initiated from Library. Loading uses the normal RAW
-        // pipeline so sidecars, masks, inpainting, camera profiles and lens
-        // correction exactly match Develop, but the UI remains in Library.
-        self.active_tab = AppTab::Library;
-    }
-
-    #[cfg(not(target_os = "android"))]
-    fn on_library_batch_load_finished(&mut self, success: bool, frame: &eframe::Frame) {
-        let Some(batch) = self.library_batch_export.as_ref() else {
-            return;
-        };
-        let Some(current) = batch.current.as_ref() else {
-            return;
-        };
-
-        if !success {
-            let source = current.source.display().to_string();
-            if let Some(batch) = self.library_batch_export.as_mut() {
-                batch.failures.push(format!("{source}: RAW load failed"));
-                batch.completed += 1;
-                batch.current = None;
-            }
-            self.start_next_library_export(frame);
-            return;
-        }
-
-        let destination = current.destination.clone();
-        let format = batch.format;
-        let settings = batch.settings.clone();
-        self.export_settings = settings.clone();
-        self.start_export(destination, frame, format);
-        if self.export_receiver.is_none() {
-            if let Some(batch) = self.library_batch_export.as_mut() {
-                let source = batch
-                    .current
-                    .as_ref()
-                    .map(|job| job.source.display().to_string())
-                    .unwrap_or_else(|| "image".to_owned());
-                batch.failures.push(format!("{source}: could not start export"));
-                batch.completed += 1;
-                batch.current = None;
-            }
-            self.start_next_library_export(frame);
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
-    fn complete_library_batch_export_item(
-        &mut self,
-        result: Result<PathBuf, String>,
-        frame: &eframe::Frame,
-    ) {
-        if let Some(batch) = self.library_batch_export.as_mut() {
-            let source = batch
-                .current
-                .as_ref()
-                .map(|job| job.source.display().to_string())
-                .unwrap_or_else(|| "image".to_owned());
-            if let Err(error) = result {
-                batch.failures.push(format!("{source}: {error}"));
-            }
-            batch.completed += 1;
-            batch.current = None;
-        }
-        self.start_next_library_export(frame);
+    fn on_library_batch_load_finished(&mut self, _success: bool, _frame: &eframe::Frame) {
+        // Desktop batch export owns a separate decode/export worker and never
+        // consumes the document opened in Develop.
     }
 
     #[cfg(not(target_os = "android"))]
@@ -2270,15 +2706,19 @@ impl AurawApp {
         let Some(batch) = self.library_batch_export.take() else {
             return;
         };
+        self.library_batch_export_tile_progress = None;
         let succeeded = batch.completed.saturating_sub(batch.failures.len());
-        self.active_tab = AppTab::Library;
         self.notice = if batch.cancel_requested {
             let mut message = format!(
                 "Batch export cancelled after {succeeded} of {} images exported.",
                 batch.total
             );
             if !batch.failures.is_empty() {
-                message.push_str(&format!(" {} failed. {}", batch.failures.len(), batch.failures.join(" · ")));
+                message.push_str(&format!(
+                    " {} failed. {}",
+                    batch.failures.len(),
+                    batch.failures.join(" · ")
+                ));
             }
             Some(message)
         } else if batch.failures.is_empty() {
@@ -2293,6 +2733,14 @@ impl AurawApp {
                 batch.failures.join(" · ")
             ))
         };
+        self.export_task_id = None;
+        if let Some(id) = self.library_batch_export_task_id.take() {
+            if batch.cancel_requested || batch.failures.is_empty() {
+                self.finish_background_task(id);
+            } else {
+                self.fail_background_task(id, batch.failures.join(" · "));
+            }
+        }
     }
 
     #[cfg(target_os = "android")]
@@ -2314,12 +2762,98 @@ impl AurawApp {
             match result {
                 crate::android::ExportPublishResult::Published(location) => {
                     self.notice = Some(format!("Exported to {location}"));
+                    if let Some(id) = self.export_task_id.take() {
+                        self.finish_background_task(id);
+                    }
                 }
                 crate::android::ExportPublishResult::Failed(error) => {
                     self.notice = Some(format!("Export failed: {error}"));
+                    if let Some(id) = self.export_task_id.take() {
+                        self.fail_background_task(id, error.clone());
+                    }
                     log::error!("Android export publish failed: {error}");
                 }
             }
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn poll_library_batch_export_worker(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+        if let Some(receiver) = &self.library_batch_export_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut finished = false;
+        for event in events {
+            match event {
+                LibraryBatchExportEvent::Started {
+                    job,
+                    completed,
+                    total,
+                } => {
+                    if let Some(batch) = self.library_batch_export.as_mut() {
+                        batch.current = Some(job);
+                        batch.completed = completed;
+                        batch.total = total;
+                    }
+                    self.library_batch_export_tile_progress = Some((0, 0));
+                    self.sync_library_batch_background_progress();
+                }
+                LibraryBatchExportEvent::Progress {
+                    completed,
+                    total,
+                    completed_tiles,
+                    total_tiles,
+                } => {
+                    if let Some(batch) = self.library_batch_export.as_mut() {
+                        batch.completed = completed;
+                        batch.total = total;
+                    }
+                    self.library_batch_export_tile_progress = Some((completed_tiles, total_tiles));
+                    self.sync_library_batch_background_progress();
+                }
+                LibraryBatchExportEvent::ItemFinished { completed, error } => {
+                    if let Some(batch) = self.library_batch_export.as_mut() {
+                        batch.completed = completed;
+                        batch.current = None;
+                        if let Some(error) = error {
+                            batch.failures.push(error);
+                        }
+                    }
+                    self.library_batch_export_tile_progress = None;
+                    self.sync_library_batch_background_progress();
+                }
+                LibraryBatchExportEvent::Finished { cancelled } => {
+                    if let Some(batch) = self.library_batch_export.as_mut() {
+                        batch.cancel_requested |= cancelled;
+                    }
+                    finished = true;
+                }
+            }
+        }
+
+        if disconnected && !finished {
+            if let Some(batch) = self.library_batch_export.as_mut() {
+                batch.failures.push("Batch export worker stopped unexpectedly.".to_owned());
+            }
+            finished = true;
+        }
+
+        if finished {
+            self.library_batch_export_receiver = None;
+            self.library_batch_export_tile_progress = None;
+            self.finish_library_batch_export();
         }
     }
 
@@ -2340,8 +2874,6 @@ impl AurawApp {
         }
 
         let mut finished = false;
-        #[cfg(not(target_os = "android"))]
-        let mut batch_result: Option<Result<PathBuf, String>> = None;
         #[cfg(target_os = "android")]
         let mut android_batch_result: Option<Result<(), String>> = None;
         for event in events {
@@ -2349,22 +2881,37 @@ impl AurawApp {
                 ExportEvent::Progress {
                     completed_tiles,
                     total_tiles,
-                } => self.export_progress = Some((completed_tiles, total_tiles)),
+                } => {
+                    self.export_progress = Some((completed_tiles, total_tiles));
+                    if self.library_batch_export.is_some() {
+                        self.sync_library_batch_background_progress();
+                    } else if let Some(id) = self.export_task_id {
+                        let progress = if total_tiles == 0 {
+                            TaskProgress::indeterminate("Preparing tiled export…")
+                        } else {
+                            TaskProgress::fraction(
+                                completed_tiles as f32 / total_tiles as f32,
+                                format!("Rendering tile {completed_tiles}/{total_tiles}"),
+                            )
+                            .with_detail(format!("{completed_tiles}/{total_tiles} tiles"))
+                        };
+                        self.update_background_progress(Some(id), progress);
+                    }
+                },
                 ExportEvent::Finished(result) => {
                     finished = true;
                     self.export_progress = None;
-
-                    #[cfg(not(target_os = "android"))]
-                    if self.library_batch_export.is_some() {
-                        batch_result = Some(result);
-                        continue;
-                    }
 
                     match result {
                         Ok(path) => {
                             #[cfg(not(target_os = "android"))]
                             {
                                 self.notice = Some(format!("Exported {}", path.display()));
+                                if self.library_batch_export.is_none() {
+                                    if let Some(id) = self.export_task_id.take() {
+                                        self.finish_background_task(id);
+                                    }
+                                }
                             }
 
                             #[cfg(target_os = "android")]
@@ -2379,11 +2926,16 @@ impl AurawApp {
                                                 android_batch_result = Some(Ok(()));
                                             } else {
                                                 self.notice = Some(format!("Exported to {location}"));
+                                                if let Some(id) = self.export_task_id.take() {
+                                                    self.finish_background_task(id);
+                                                }
                                             }
                                         }
                                         Err(error) => {
                                             if self.library_batch_export.is_some() {
                                                 android_batch_result = Some(Err(error.clone()));
+                                            } else if let Some(id) = self.export_task_id.take() {
+                                                self.fail_background_task(id, error.clone());
                                             }
                                             self.notice = Some(format!("Export failed: {error}"));
                                             log::error!("Android direct export finalize failed: {error}");
@@ -2438,11 +2990,19 @@ impl AurawApp {
                                             self.export_publish_pending = true;
                                             self.notice =
                                                 Some("Saving to Pictures/AuRaw…".to_owned());
+                                            self.update_background_progress(
+                                                self.export_task_id,
+                                                TaskProgress::indeterminate(
+                                                    "Publishing to Pictures/AuRaw…",
+                                                ),
+                                            );
                                         }
                                         Err(error) => {
                                             let _ = std::fs::remove_file(&path);
                                             if self.library_batch_export.is_some() {
                                                 android_batch_result = Some(Err(error.clone()));
+                                            } else if let Some(id) = self.export_task_id.take() {
+                                                self.fail_background_task(id, error.clone());
                                             }
                                             self.notice = Some(format!("Export failed: {error}"));
                                         }
@@ -2451,15 +3011,40 @@ impl AurawApp {
                             }
                         }
                         Err(error) => {
+                            let was_cancelled = self.library_batch_export.is_none()
+                                && self
+                                    .export_task_id
+                                    .is_some_and(|id| self.background_task_cancelled(id));
                             #[cfg(target_os = "android")]
                             {
                                 crate::android::cancel_all_direct_exports(&self.android_app);
                                 if self.library_batch_export.is_some() {
                                     android_batch_result = Some(Err(error.clone()));
+                                } else if let Some(id) = self.export_task_id.take() {
+                                    if was_cancelled {
+                                        self.finish_background_task(id);
+                                    } else {
+                                        self.fail_background_task(id, error.clone());
+                                    }
                                 }
                             }
-                            self.notice = Some(format!("Export failed: {error}"));
-                            log::error!("export failed: {error}");
+                            #[cfg(not(target_os = "android"))]
+                            if self.library_batch_export.is_none() {
+                                if let Some(id) = self.export_task_id.take() {
+                                    if was_cancelled {
+                                        self.finish_background_task(id);
+                                    } else {
+                                        self.fail_background_task(id, error.clone());
+                                    }
+                                }
+                            }
+                            if was_cancelled {
+                                self.notice = Some("Export cancelled.".to_owned());
+                                log::info!("export cancelled");
+                            } else {
+                                self.notice = Some(format!("Export failed: {error}"));
+                                log::error!("export failed: {error}");
+                            }
                         }
                     }
                 }
@@ -2472,16 +3057,11 @@ impl AurawApp {
                 self.export_progress = None;
                 self.notice = Some("Export worker stopped unexpectedly.".to_owned());
             }
-        }
-
-        #[cfg(not(target_os = "android"))]
-        if let Some(result) = batch_result {
-            self.complete_library_batch_export_item(result, _frame);
-        } else if disconnected && self.library_batch_export.is_some() {
-            self.complete_library_batch_export_item(
-                Err("export worker stopped unexpectedly".to_owned()),
-                _frame,
-            );
+            if disconnected && self.library_batch_export.is_none() {
+                if let Some(id) = self.export_task_id.take() {
+                    self.fail_background_task(id, "Export worker stopped unexpectedly.");
+                }
+            }
         }
 
         #[cfg(target_os = "android")]
@@ -2559,3 +3139,34 @@ impl AurawApp {
         self.mark_pipeline_dirty();
     }
 }
+
+#[cfg(test)]
+mod batch_export_progress_tests {
+    use super::batch_export_overall_fraction;
+
+    #[test]
+    fn completed_images_do_not_reach_full_progress_early() {
+        let progress = batch_export_overall_fraction(2, 3, false, None);
+        assert!((progress - (2.0 / 3.0)).abs() < f32::EPSILON);
+        assert!(progress < 1.0);
+    }
+
+    #[test]
+    fn fully_rendered_current_image_reserves_finalization_progress() {
+        let progress = batch_export_overall_fraction(2, 3, true, Some((10, 10)));
+        assert!((progress - (2.9 / 3.0)).abs() < 0.000_01);
+        assert!(progress < 1.0);
+    }
+
+    #[test]
+    fn batch_reaches_one_only_after_every_image_is_finished() {
+        assert_eq!(batch_export_overall_fraction(3, 3, false, None), 1.0);
+    }
+
+    #[test]
+    fn stale_tile_progress_is_ignored_without_a_current_image() {
+        let progress = batch_export_overall_fraction(1, 3, false, Some((10, 10)));
+        assert!((progress - (1.0 / 3.0)).abs() < f32::EPSILON);
+    }
+}
+
