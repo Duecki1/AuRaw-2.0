@@ -307,6 +307,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            retired_egui_textures: Vec::new(),
             preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
@@ -553,6 +554,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            retired_egui_textures: Vec::new(),
             gpu_preview_prewarm_receiver,
             preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
@@ -1629,7 +1631,7 @@ impl AurawApp {
         // receivers alive so their terminal events can be drained safely.
         self.cancel_document_bound_background_tasks();
         let sidecar_generation = self.begin_sidecar_open();
-        // Reuse compiled GPU programs across RAW opens; release only the old textures.
+        // Reuse compiled GPU programs across RAW opens; retire the old texture IDs for next-frame cleanup.
         let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
             self.take_preview_pipeline_and_release_textures(&mut renderer)

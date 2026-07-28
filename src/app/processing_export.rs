@@ -1094,7 +1094,7 @@ impl AurawApp {
             ));
             if let Some(old) = self.preview_navigation.take() {
                 if let Some(texture_id) = old.pipeline.egui_texture_id {
-                    render_state.renderer.write().free_texture(&texture_id);
+                    self.retire_egui_texture(texture_id);
                 }
             }
             self.navigation_pending_stage = Some(ProcessingStage::Output);
@@ -1123,7 +1123,7 @@ impl AurawApp {
             ));
             if let Some(old) = self.preview_detail.take() {
                 if let Some(texture_id) = old.pipeline.egui_texture_id {
-                    render_state.renderer.write().free_texture(&texture_id);
+                    self.retire_egui_texture(texture_id);
                 }
             }
             self.preview_motion_at = Some(Instant::now());
@@ -1360,10 +1360,10 @@ impl AurawApp {
     fn advance_preview_detail(&mut self, frame: &eframe::Frame) {
         let idle_delay = zoom_detail_idle_delay();
         if self.preview_zoom <= DETAIL_ZOOM_START {
-            if let Some(render_state) = frame.wgpu_render_state() {
+            if frame.wgpu_render_state().is_some() {
                 if let Some(old) = self.preview_detail.take() {
                     if let Some(texture_id) = old.pipeline.egui_texture_id {
-                        render_state.renderer.write().free_texture(&texture_id);
+                        self.retire_egui_texture(texture_id);
                     }
                 }
             }
@@ -1669,7 +1669,7 @@ impl AurawApp {
         let mut renderer = render_state.renderer.write();
         if let Some(old) = self.preview_detail.take() {
             if let Some(texture_id) = old.pipeline.egui_texture_id {
-                renderer.free_texture(&texture_id);
+                self.retire_egui_texture(texture_id);
             }
         }
         pipeline.register_egui_texture(&render_state.device, &mut renderer);
@@ -1695,10 +1695,10 @@ impl AurawApp {
         let should_update = self.navigation_pending_stage.is_some();
         if !should_exist && !should_update {
             // Release the navigation proxy when fit view is stable.
-            if let Some(render_state) = frame.wgpu_render_state() {
+            if frame.wgpu_render_state().is_some() {
                 if let Some(old) = self.preview_navigation.take() {
                     if let Some(texture_id) = old.pipeline.egui_texture_id {
-                        render_state.renderer.write().free_texture(&texture_id);
+                        self.retire_egui_texture(texture_id);
                     }
                 }
             } else {
@@ -2245,10 +2245,10 @@ impl AurawApp {
         };
 
         // Mobile export and preview pipelines cannot coexist within AuRaw's
-        // conservative GPU residency budget on high-resolution RAWs. Free every
-        // preview texture while holding the renderer lock, then drop the GPU
-        // pipeline only after releasing that lock. Keeping the destructor out of
-        // the renderer critical section also avoids lock-order inversions.
+        // conservative GPU residency budget on high-resolution RAWs. Retire every
+        // preview texture for cleanup at the start of the next frame, then drop the
+        // GPU pipeline only after releasing the renderer lock. Keeping the destructor
+        // out of the renderer critical section also avoids lock-order inversions.
         let previous_pipeline = {
             let mut renderer = render_state.renderer.write();
             self.take_preview_pipeline_and_release_textures(&mut renderer)
