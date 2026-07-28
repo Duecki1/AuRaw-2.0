@@ -35,3 +35,13 @@ def test_windows_executable_embeds_the_shared_application_icon():
     assert "cargo:rustc-link-arg-bin=auraw=" in build
     assert '"../icons/auraw.ico"' in resource
     assert "objdump" in text and r"grep -q '\.rsrc'" in text
+
+
+def test_windows_executable_uses_gui_subsystem():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    main = (ROOT / "src" / "main.rs").read_text(encoding="utf-8")
+
+    assert '#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]' in main
+    assert 'objdump -p "$release_dir/auraw.exe"' in text
+    assert "Subsystem[[:space:]]+00000002" in text
+
