@@ -780,6 +780,7 @@ impl AurawApp {
             android_app,
             picker_pending: false,
             android_batch_load_pending: false,
+            pending_android_library_reset_reload: false,
             camera_profile_folder_importing_label: None,
             pending_android_profile_reload: None,
         }
@@ -1147,12 +1148,59 @@ impl AurawApp {
         }
     }
 
+    #[cfg(target_os = "android")]
+    pub(crate) fn reload_android_library_document_after_reset(
+        &mut self,
+        uri: &str,
+        display_name: &str,
+    ) {
+        if self.picker_pending {
+            self.notice = Some(format!(
+                "Could not reload {display_name} after resetting adjustments because another Android document operation is still pending."
+            ));
+            return;
+        }
+        // Establish ownership before invoking Java so even an unusually fast
+        // result cannot be mistaken for an interactive open.
+        self.android_batch_load_pending = false;
+        self.pending_android_library_reset_reload = true;
+        match crate::android::open_library_document(&self.android_app, uri, display_name) {
+            Ok(()) => {
+                self.picker_pending = true;
+                self.notice = None;
+                self.status = format!("Reloading {display_name} after reset…");
+            }
+            Err(error) => {
+                self.pending_android_library_reset_reload = false;
+                self.notice = Some(format!(
+                    "Could not reload {display_name} after resetting adjustments: {error}"
+                ));
+            }
+        }
+    }
+
     pub fn open_path(&mut self, path: PathBuf, frame: &eframe::Frame) {
         let label = path.display().to_string();
         self.active_tab = AppTab::Develop;
         let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
             raw_path: path.clone(),
         };
+        self.open_path_labeled(path, label, false, sidecar_target, frame, None);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn reload_desktop_library_document_after_reset(
+        &mut self,
+        path: PathBuf,
+        frame: &eframe::Frame,
+    ) {
+        let label = path.display().to_string();
+        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
+            raw_path: path.clone(),
+        };
+        // Reset All is a Library action. Reload the current document so its
+        // in-memory edit state matches the deleted sidecar, but do not navigate
+        // away from the Library merely because the reset target was current.
         self.open_path_labeled(path, label, false, sidecar_target, frame, None);
     }
 
@@ -2333,14 +2381,20 @@ impl AurawApp {
                     self.library.refresh(&self.egui_ctx);
                     let batch_owned_open = self.android_batch_load_pending;
                     let profile_reload_owned_open = self.pending_android_profile_reload.is_some();
+                    let reset_reload_owned_open =
+                        std::mem::take(&mut self.pending_android_library_reset_reload);
                     let library_refresh_owned_open = !batch_owned_open
                         && !profile_reload_owned_open
+                        && !reset_reload_owned_open
                         && self.library_ai_mask_refresh.is_some();
                     let keep_library_for_profile_reload =
                         profile_reload_owned_open && self.active_tab == AppTab::Library;
+                    let keep_library_for_reset =
+                        reset_reload_owned_open && self.active_tab == AppTab::Library;
                     self.active_tab = if batch_owned_open
                         || library_refresh_owned_open
                         || keep_library_for_profile_reload
+                        || keep_library_for_reset
                     {
                         AppTab::Library
                     } else {
@@ -2396,6 +2450,7 @@ impl AurawApp {
                     failed,
                     errors,
                 } => {
+                    self.pending_android_library_reset_reload = false;
                     self.active_tab = AppTab::Library;
                     self.library.refresh(&self.egui_ctx);
                     self.status = match (imported, failed) {
@@ -2421,6 +2476,8 @@ impl AurawApp {
                 }
                 crate::android::PickerResult::Cancelled => {
                     self.pending_android_profile_reload = None;
+                    let was_reset_reload =
+                        std::mem::take(&mut self.pending_android_library_reset_reload);
                     if self.android_batch_load_pending {
                         self.android_batch_load_pending = false;
                         self.complete_android_library_batch_export_item(Err(
@@ -2431,20 +2488,32 @@ impl AurawApp {
                             "RAW open was canceled".to_owned(),
                             frame,
                         );
+                    } else if was_reset_reload {
+                        self.notice = Some(
+                            "The RAW could not be reloaded after resetting adjustments. Reopen it from the Library before continuing in Develop."
+                                .to_owned(),
+                        );
                     } else {
                         self.notice = Some("No RAW files selected.".to_owned());
                     }
                 }
                 crate::android::PickerResult::Failed(error) => {
                     let was_profile_reload = self.pending_android_profile_reload.take().is_some();
-                    if self.android_batch_load_pending && !was_profile_reload {
+                    let was_reset_reload =
+                        std::mem::take(&mut self.pending_android_library_reset_reload);
+                    if self.android_batch_load_pending && !was_profile_reload && !was_reset_reload {
                         self.android_batch_load_pending = false;
                         self.complete_android_library_batch_export_item(Err(error));
-                    } else if self.library_ai_mask_refresh.is_some() && !was_profile_reload {
+                    } else if self.library_ai_mask_refresh.is_some()
+                        && !was_profile_reload
+                        && !was_reset_reload
+                    {
                         self.complete_android_library_ai_mask_open_failure(error, frame);
                     } else {
                         self.notice = Some(if was_profile_reload {
                             format!("Could not reload RAW for camera profile: {error}")
+                        } else if was_reset_reload {
+                            format!("Could not reload RAW after resetting adjustments: {error}")
                         } else {
                             format!("Could not import the selected file: {error}")
                         });

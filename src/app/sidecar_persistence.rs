@@ -254,8 +254,8 @@ impl AurawApp {
             raw_uri,
             display_name,
         );
-        if was_current {
-            self.open_android_library_document(raw_uri, display_name);
+        if was_current && result.is_ok() {
+            self.reload_android_library_document_after_reset(raw_uri, display_name);
         }
         result
     }
