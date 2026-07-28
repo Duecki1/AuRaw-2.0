@@ -1,5 +1,9 @@
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Flush IDs retired by the previous frame before this frame emits any
+        // meshes. Freeing them later in `ui` would invalidate texture references
+        // that egui has already recorded for the pending render pass.
+        self.release_retired_egui_textures(frame);
         #[cfg(not(target_os = "android"))]
         let raw_drop_hovered = ui
             .ctx()
