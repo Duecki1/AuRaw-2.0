@@ -667,6 +667,52 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
+    pub(crate) fn sync_android_task_notification(&self) {
+        let snapshots = self.global_background_task_snapshots();
+        let active = snapshots
+            .iter()
+            .find(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling))
+            .or_else(|| snapshots.iter().find(|task| task.status == TaskStatus::Queued));
+
+        let Some(task) = active else {
+            if let Err(error) =
+                crate::android::clear_background_task_notification(&self.android_app)
+            {
+                log::warn!("{error}");
+            }
+            return;
+        };
+
+        let (progress_percent, indeterminate) = match &task.progress.value {
+            TaskProgressValue::Indeterminate => (0, true),
+            TaskProgressValue::Fraction(fraction) => {
+                (((fraction.clamp(0.0, 1.0) * 100.0).round()) as i32, false)
+            }
+            TaskProgressValue::Units {
+                completed, total, ..
+            } => {
+                if *total == 0 {
+                    (0, true)
+                } else {
+                    let fraction = (*completed as f64 / *total as f64).clamp(0.0, 1.0);
+                    ((fraction * 100.0).round() as i32, false)
+                }
+            }
+        };
+        if let Err(error) = crate::android::update_background_task_notification(
+            &self.android_app,
+            &task.name,
+            &task.progress.phase,
+            task.progress.detail.as_deref(),
+            progress_percent,
+            indeterminate,
+            self.global_background_queued_count(),
+        ) {
+            log::warn!("{error}");
+        }
+    }
+
+    #[cfg(target_os = "android")]
     pub(crate) fn android_foreground_task_active(&self) -> bool {
         // Android intentionally treats every queued, running, cancelling, or
         // unacknowledged failed task as modal foreground work. This prevents a
