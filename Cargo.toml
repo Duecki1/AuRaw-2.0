@@ -20,7 +20,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 png = "0.18"
 memmap2 = "0.9"
 anyhow = "1.0"
-base64 = "0.22"
+base64 = "0.23"
 ureq = { version = "3.1", default-features = false, features = ["rustls"] }
 ring = "0.17.14"
 serde = { version = "1.0", features = ["derive", "rc"] }
