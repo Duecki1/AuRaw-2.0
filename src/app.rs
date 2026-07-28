@@ -846,6 +846,11 @@ pub struct AurawApp {
     /// instead of merely checking whether a batch happens to exist.
     #[cfg(target_os = "android")]
     android_batch_load_pending: bool,
+    /// True while an internal Android RAW reopen belongs to Reset All. The
+    /// document is reloaded so Develop cannot retain stale in-memory edits,
+    /// but the Library remains the active tab.
+    #[cfg(target_os = "android")]
+    pending_android_library_reset_reload: bool,
     /// Label of the SAF tree currently being mirrored into app-private DCP storage.
     /// This is UI-only transient state and is never persisted as the active folder.
     #[cfg(target_os = "android")]

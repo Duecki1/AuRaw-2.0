@@ -1025,6 +1025,47 @@ impl LibraryState {
         self.install_developed_thumbnail_at(index, thumbnail, context, revision);
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn invalidate_adjustment_thumbnail_for_path(&mut self, raw_path: &Path) {
+        let source = LibrarySource::File(raw_path.to_owned());
+        if let Some(index) = self.entry_indices.get(&source).copied() {
+            self.invalidate_adjustment_thumbnail_at(index);
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn invalidate_android_adjustment_thumbnail(&mut self, raw_uri: &str) {
+        if let Some(index) = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.info.source,
+                LibrarySource::Android { uri, .. } if uri == raw_uri
+            )
+        }) {
+            self.invalidate_adjustment_thumbnail_at(index);
+        }
+    }
+
+    fn invalidate_adjustment_thumbnail_at(&mut self, index: usize) {
+        let Some(entry) = self.entries.get_mut(index) else {
+            return;
+        };
+        if !entry.developed_thumbnail {
+            return;
+        }
+
+        // A reset removes the developed cache, so the next valid result is an
+        // unedited RAW thumbnail. Clear the developed marker immediately;
+        // otherwise poll_events treats that RAW result as a stale downgrade and
+        // can leave the card blank after its old texture is evicted.
+        entry.texture = None;
+        entry.resident_thumbnail = None;
+        entry.texture_is_resident = false;
+        entry.thumbnail_size = None;
+        entry.thumbnail_error = None;
+        entry.thumbnail_queued = false;
+        entry.developed_thumbnail = false;
+    }
+
     fn install_developed_thumbnail_at(
         &mut self,
         index: usize,
@@ -2811,6 +2852,7 @@ impl Library {
                     for path in &paths {
                         match crate::sidecar::reset_desktop_adjustments(path) {
                             Ok(reset) => {
+                                app.library.invalidate_adjustment_thumbnail_for_path(path);
                                 if reset {
                                     reset_count += 1;
                                 }
@@ -2833,7 +2875,7 @@ impl Library {
                         )
                     };
                     if let Some(path) = current_to_reopen {
-                        app.open_path(path, frame);
+                        app.reload_desktop_library_document_after_reset(path, frame);
                     }
                 }
                 LibraryCardAction::Delete(paths) => {
@@ -2965,10 +3007,11 @@ impl Library {
                     let total = targets.len();
                     let mut failures = Vec::new();
                     for (uri, display_name) in targets {
-                        if let Err(error) =
-                            app.reset_android_library_adjustments(&uri, &display_name)
-                        {
-                            failures.push(format!("{display_name}: {error}"));
+                        match app.reset_android_library_adjustments(&uri, &display_name) {
+                            Ok(()) => app
+                                .library
+                                .invalidate_android_adjustment_thumbnail(&uri),
+                            Err(error) => failures.push(format!("{display_name}: {error}")),
                         }
                     }
                     app.library.clear_selection();
@@ -4177,6 +4220,48 @@ mod tests {
         assert!(library.entries[0].texture.is_some());
         assert!(library.entries[0].texture_is_resident);
         assert!(!library.entries[0].thumbnail_queued);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn resetting_adjustments_allows_an_unedited_thumbnail_to_replace_the_developed_one() {
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+        let path = PathBuf::from("reset-preview.dng");
+        let info = LibraryFileInfo {
+            source: LibrarySource::File(path.clone()),
+            display_path: "reset-preview.dng".to_owned(),
+            name: "reset-preview.dng".to_owned(),
+            bytes: 1,
+            dimensions_hint: Some([6000, 4000]),
+            modified: None,
+        };
+        let mut entry = new_library_entry(info);
+        entry.texture = Some(context.load_texture(
+            "developed-before-reset",
+            eframe::egui::ColorImage::from_rgba_unmultiplied([1, 1], &[1, 2, 3, 255]),
+            eframe::egui::TextureOptions::LINEAR,
+        ));
+        entry.resident_thumbnail = Some(RawThumbnail {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2, 3, 255],
+        });
+        entry.thumbnail_size = Some([1, 1]);
+        entry.thumbnail_queued = true;
+        entry.developed_thumbnail = true;
+        library.entries.push(entry);
+        library.rebuild_entry_indices();
+
+        library.invalidate_adjustment_thumbnail_for_path(&path);
+
+        let entry = &library.entries[0];
+        assert!(entry.texture.is_none());
+        assert!(entry.resident_thumbnail.is_none());
+        assert!(entry.thumbnail_size.is_none());
+        assert!(!entry.thumbnail_queued);
+        assert!(!entry.developed_thumbnail);
+        assert_eq!(entry.layout_size, Some([6000, 4000]));
     }
 
     #[test]
