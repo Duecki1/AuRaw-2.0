@@ -35,6 +35,10 @@ public final class AuRawActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // NativeActivity may start the Rust thread during creation. Install the
+        // notification bridge before the other delegates so early task updates
+        // cannot observe a partially initialized Activity.
+        taskNotificationController = new TaskNotificationController(this);
         storageManager = new StorageManager(this, new StorageManager.Callbacks() {
             @Override
             public void onFilePicked(
@@ -69,7 +73,6 @@ public final class AuRawActivity extends NativeActivity {
             }
         });
         exportPublisher = new ExportPublisher(this, AuRawActivity::nativeOnExportPublished);
-        taskNotificationController = new TaskNotificationController(this);
 
         configureSystemBarsAndInsets();
         storageManager.scavengeTemporaryRawFiles();
@@ -174,7 +177,11 @@ public final class AuRawActivity extends NativeActivity {
             int progressPercent,
             int indeterminateFlag,
             int queuedCount) {
-        taskNotificationController.update(
+        TaskNotificationController controller = taskNotificationController;
+        if (controller == null) {
+            return;
+        }
+        controller.update(
                 title,
                 phase,
                 detail,
@@ -185,7 +192,10 @@ public final class AuRawActivity extends NativeActivity {
 
     /** Removes AuRaw's task-progress notification after the queue becomes idle. */
     public void clearBackgroundTaskNotification() {
-        taskNotificationController.clear();
+        TaskNotificationController controller = taskNotificationController;
+        if (controller != null) {
+            controller.clear();
+        }
     }
 
     /** Copies text through Android's native clipboard service. */
@@ -319,8 +329,10 @@ public final class AuRawActivity extends NativeActivity {
     public void onRequestPermissionsResult(
             int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        taskNotificationController.onRequestPermissionsResult(
-                requestCode, permissions, grantResults);
+        if (taskNotificationController != null) {
+            taskNotificationController.onRequestPermissionsResult(
+                    requestCode, permissions, grantResults);
+        }
         exportPublisher.onRequestPermissionsResult(requestCode, permissions, grantResults);
     }
 

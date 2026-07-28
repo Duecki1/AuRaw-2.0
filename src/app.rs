@@ -563,6 +563,7 @@ struct LensCorrectionTaskRequest {
     original_raw: Arc<LoadedRaw>,
     selection: Option<LensfunLens>,
     preview_quality: PreviewQuality,
+    cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
 }
 
 struct SubjectMaskTaskRequest {

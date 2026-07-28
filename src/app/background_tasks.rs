@@ -154,12 +154,14 @@ pub(crate) struct BackgroundTaskManager {
 }
 
 impl BackgroundTaskManager {
-    pub(crate) fn enqueue(
+    fn insert_task(
         &mut self,
         kind: TaskKind,
         name: impl Into<String>,
+        status: TaskStatus,
         initial_progress: TaskProgress,
         details_open: bool,
+        global_visible: bool,
     ) -> TaskId {
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let id = TaskId(self.next_id);
@@ -167,13 +169,31 @@ impl BackgroundTaskManager {
             id,
             kind,
             name: name.into(),
-            status: TaskStatus::Queued,
+            status,
             progress: initial_progress,
             error: None,
             details_open,
-            global_visible: true,
+            global_visible,
             cancellation: Arc::new(AtomicBool::new(false)),
         });
+        id
+    }
+
+    pub(crate) fn enqueue(
+        &mut self,
+        kind: TaskKind,
+        name: impl Into<String>,
+        initial_progress: TaskProgress,
+        details_open: bool,
+    ) -> TaskId {
+        let id = self.insert_task(
+            kind,
+            name,
+            TaskStatus::Queued,
+            initial_progress,
+            details_open,
+            true,
+        );
         self.queue.push_back(id);
         id
     }
@@ -188,20 +208,14 @@ impl BackgroundTaskManager {
         initial_progress: TaskProgress,
         details_open: bool,
     ) -> TaskId {
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        let id = TaskId(self.next_id);
-        self.tasks.push(BackgroundTask {
-            id,
+        self.insert_task(
             kind,
-            name: name.into(),
-            status: TaskStatus::Running,
-            progress: initial_progress,
-            error: None,
+            name,
+            TaskStatus::Running,
+            initial_progress,
             details_open,
-            global_visible: false,
-            cancellation: Arc::new(AtomicBool::new(false)),
-        });
-        id
+            false,
+        )
     }
 
     pub(crate) fn enqueue_coalesced_lens(
@@ -297,67 +311,88 @@ impl BackgroundTaskManager {
         self.current
     }
 
-    pub(crate) fn current_snapshot(&self) -> Option<TaskSnapshot> {
-        self.current.and_then(|id| self.snapshot(id))
+    fn active_task(&self, global_only: bool) -> Option<&BackgroundTask> {
+        self.current
+            .and_then(|id| self.task(id))
+            .filter(|task| !global_only || task.global_visible)
+            .or_else(|| {
+                self.tasks.iter().find(|task| {
+                    (!global_only || task.global_visible)
+                        && matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
+                        && !self.queue.contains(&task.id)
+                })
+            })
     }
 
     pub(crate) fn global_current_snapshot(&self) -> Option<TaskSnapshot> {
-        self.current
-            .and_then(|id| self.task(id))
-            .filter(|task| task.global_visible)
-            .map(Self::snapshot_from_task)
+        self.active_task(true).map(Self::snapshot_from_task)
+    }
+
+    pub(crate) fn global_primary_snapshot_and_waiting_count(
+        &self,
+    ) -> (Option<TaskSnapshot>, usize) {
+        let primary = self.active_task(true).or_else(|| {
+            self.queue.iter().find_map(|id| {
+                self.task(*id).filter(|task| {
+                    task.global_visible && task.status == TaskStatus::Queued
+                })
+            })
+        });
+        let displayed_queued = if primary.is_some_and(|task| task.status == TaskStatus::Queued) {
+            1
+        } else {
+            0
+        };
+        let waiting = self.global_queued_count().saturating_sub(displayed_queued);
+        (primary.map(Self::snapshot_from_task), waiting)
     }
 
     pub(crate) fn snapshot(&self, id: TaskId) -> Option<TaskSnapshot> {
         self.task(id).map(Self::snapshot_from_task)
     }
 
-    pub(crate) fn snapshots(&self) -> Vec<TaskSnapshot> {
+    fn ordered_snapshots(&self, global_only: bool) -> Vec<TaskSnapshot> {
         let mut snapshots = Vec::new();
-        if let Some(current) = self.current.and_then(|id| self.snapshot(id)) {
-            snapshots.push(current);
-        }
-        for id in &self.queue {
-            if let Some(snapshot) = self.snapshot(*id) {
-                snapshots.push(snapshot);
-            }
-        }
+        let active_id = self.active_task(global_only).map(|active| {
+            snapshots.push(Self::snapshot_from_task(active));
+            active.id
+        });
         snapshots.extend(
             self.tasks
                 .iter()
                 .filter(|task| {
-                    matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
-                        && self.current != Some(task.id)
+                    (!global_only || task.global_visible)
+                        && matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
+                        && Some(task.id) != active_id
                         && !self.queue.contains(&task.id)
                 })
                 .map(Self::snapshot_from_task),
         );
-        snapshots.extend(
-            self.tasks
-                .iter()
-                .filter(|task| task.status == TaskStatus::Failed)
-                .map(Self::snapshot_from_task),
-        );
-        snapshots
-    }
-
-    pub(crate) fn global_snapshots(&self) -> Vec<TaskSnapshot> {
-        let mut snapshots = Vec::new();
-        if let Some(current) = self.global_current_snapshot() {
-            snapshots.push(current);
-        }
         for id in &self.queue {
-            if let Some(task) = self.task(*id).filter(|task| task.global_visible) {
+            if let Some(task) = self
+                .task(*id)
+                .filter(|task| !global_only || task.global_visible)
+            {
                 snapshots.push(Self::snapshot_from_task(task));
             }
         }
         snapshots.extend(
             self.tasks
                 .iter()
-                .filter(|task| task.status == TaskStatus::Failed && task.global_visible)
+                .filter(|task| {
+                    task.status == TaskStatus::Failed && (!global_only || task.global_visible)
+                })
                 .map(Self::snapshot_from_task),
         );
         snapshots
+    }
+
+    pub(crate) fn snapshots(&self) -> Vec<TaskSnapshot> {
+        self.ordered_snapshots(false)
+    }
+
+    pub(crate) fn global_snapshots(&self) -> Vec<TaskSnapshot> {
+        self.ordered_snapshots(true)
     }
 
     pub(crate) fn queued_count(&self) -> usize {
@@ -390,12 +425,16 @@ impl BackgroundTaskManager {
     }
 
     pub(crate) fn has_global_visible_tasks(&self) -> bool {
-        self.global_current_snapshot().is_some()
-            || self.global_queued_count() > 0
-            || self
-                .tasks
-                .iter()
-                .any(|task| task.status == TaskStatus::Failed && task.global_visible)
+        self.tasks.iter().any(|task| {
+            task.global_visible
+                && matches!(
+                    task.status,
+                    TaskStatus::Queued
+                        | TaskStatus::Running
+                        | TaskStatus::Cancelling
+                        | TaskStatus::Failed
+                )
+        })
     }
 
     pub(crate) fn has_failures(&self) -> bool {
@@ -787,6 +826,40 @@ mod tests {
     }
 
     #[test]
+    fn detached_visible_task_remains_in_global_snapshots() {
+        let mut manager = BackgroundTaskManager::default();
+        let detached = queued(&mut manager, "detached");
+        assert_eq!(manager.start_next(), Some(detached));
+        assert!(manager.release_current(detached));
+        assert!(manager.has_global_visible_tasks());
+        assert_eq!(manager.global_current_snapshot().unwrap().id, detached);
+        assert_eq!(manager.global_snapshots().len(), 1);
+        assert_eq!(manager.global_snapshots()[0].id, detached);
+    }
+
+    #[test]
+    fn global_waiting_count_excludes_the_displayed_queued_task() {
+        let mut manager = BackgroundTaskManager::default();
+        let first = queued(&mut manager, "first");
+        let _second = queued(&mut manager, "second");
+        let (primary, waiting) = manager.global_primary_snapshot_and_waiting_count();
+        assert_eq!(primary.unwrap().id, first);
+        assert_eq!(waiting, 1);
+    }
+
+    #[test]
+    fn global_waiting_count_includes_all_tasks_after_the_running_task() {
+        let mut manager = BackgroundTaskManager::default();
+        let first = queued(&mut manager, "first");
+        let _second = queued(&mut manager, "second");
+        let _third = queued(&mut manager, "third");
+        assert_eq!(manager.start_next(), Some(first));
+        let (primary, waiting) = manager.global_primary_snapshot_and_waiting_count();
+        assert_eq!(primary.unwrap().id, first);
+        assert_eq!(waiting, 2);
+    }
+
+    #[test]
     fn hidden_tasks_are_excluded_from_global_task_ui() {
         let mut manager = BackgroundTaskManager::default();
         let hidden = queued(&mut manager, "hidden");
@@ -797,6 +870,9 @@ mod tests {
         assert!(manager.global_current_snapshot().is_none());
         assert_eq!(manager.global_snapshots().len(), 1);
         assert_eq!(manager.global_snapshots()[0].id, visible);
+        let (primary, waiting) = manager.global_primary_snapshot_and_waiting_count();
+        assert_eq!(primary.unwrap().id, visible);
+        assert_eq!(waiting, 0);
     }
 
 }

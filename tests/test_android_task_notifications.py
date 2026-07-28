@@ -45,8 +45,8 @@ def test_rust_task_snapshots_are_bridged_to_one_deduplicated_notification():
     assert 'fn sync_android_task_notification(&self)' in RUNTIME
     assert 'TaskProgressValue::Fraction' in RUNTIME
     assert 'TaskProgressValue::Units' in RUNTIME
-    assert 'self.global_background_task_snapshots()' in RUNTIME
-    assert 'self.global_background_queued_count()' in RUNTIME
+    assert 'global_primary_snapshot_and_waiting_count()' in RUNTIME
+    assert 'waiting_count' in RUNTIME
     assert 'self.sync_android_task_notification();' in EFRAME
 
 
@@ -61,3 +61,26 @@ def test_android_warns_that_current_tasks_are_not_background_services_yet():
     note = 'Keep AuRaw open in the foreground until the operation finishes. Leaving or closing the app may stop it.'
     assert note in EFRAME
     assert 'Keep AuRaw open in the foreground until this operation finishes. Leaving or closing the app may stop it.' in CONTROLLER
+
+
+def test_notification_bridge_tolerates_native_calls_before_controller_initialization():
+    update_start = ACTIVITY.index("public void updateBackgroundTaskNotification")
+    clear_start = ACTIVITY.index("public void clearBackgroundTaskNotification", update_start)
+    update = ACTIVITY[update_start:clear_start]
+    clear_end = ACTIVITY.index("/** Copies text", clear_start)
+    clear = ACTIVITY[clear_start:clear_end]
+    assert "TaskNotificationController controller = taskNotificationController;" in update
+    assert "if (controller == null)" in update
+    assert "controller.update(" in update
+    assert "TaskNotificationController controller = taskNotificationController;" in clear
+    assert "if (controller != null)" in clear
+    assert "controller.clear();" in clear
+
+
+def test_notification_controller_is_initialized_before_other_activity_delegates():
+    on_create = ACTIVITY[
+        ACTIVITY.index("protected void onCreate") : ACTIVITY.index(
+            "private void configureSystemBarsAndInsets"
+        )
+    ]
+    assert on_create.index("taskNotificationController = new TaskNotificationController(this);") < on_create.index("storageManager = new StorageManager")

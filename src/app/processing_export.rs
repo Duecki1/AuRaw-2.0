@@ -1,5 +1,5 @@
-const BATCH_EXPORT_TILE_PHASE_WEIGHT: f32 = 0.90;
-const BATCH_EXPORT_MAX_INCOMPLETE_FRACTION: f32 = 0.99;
+const EXPORT_TILE_PHASE_WEIGHT: f32 = 0.90;
+const EXPORT_MAX_INCOMPLETE_FRACTION: f32 = 0.99;
 
 fn batch_export_overall_fraction(
     completed: usize,
@@ -26,13 +26,13 @@ fn batch_export_overall_fraction(
                 })
             })
             .unwrap_or(0.0)
-            * BATCH_EXPORT_TILE_PHASE_WEIGHT
+            * EXPORT_TILE_PHASE_WEIGHT
     } else {
         0.0
     };
 
     ((completed as f32 + current_fraction) / total as f32)
-        .clamp(0.0, BATCH_EXPORT_MAX_INCOMPLETE_FRACTION)
+        .clamp(0.0, EXPORT_MAX_INCOMPLETE_FRACTION)
 }
 
 fn aligned_detail_axis(
@@ -138,6 +138,70 @@ fn zoom_detail_idle_delay() -> Duration {
     Duration::from_millis(if cfg!(target_os = "android") { 220 } else { 140 })
 }
 
+fn spawn_export_request(
+    request: ExportTaskRequest,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
+) -> mpsc::Receiver<ExportEvent> {
+    let ExportTaskRequest {
+        device,
+        queue,
+        raw,
+        geometry,
+        exposure,
+        masks,
+        inpaint,
+        path,
+        format,
+        settings,
+        metadata,
+        display_name: _,
+    } = request;
+    match format {
+        ExportFormat::Png => spawn_tiled_png_export(
+            device,
+            queue,
+            raw,
+            geometry,
+            exposure,
+            masks,
+            inpaint,
+            path,
+            TileSpec::default(),
+            settings,
+            metadata,
+            cancellation,
+        ),
+        ExportFormat::Jpeg => spawn_tiled_jpeg_export(
+            device,
+            queue,
+            raw,
+            geometry,
+            exposure,
+            masks,
+            inpaint,
+            path,
+            TileSpec::default(),
+            settings,
+            metadata,
+            cancellation,
+        ),
+        ExportFormat::Tiff => spawn_tiled_tiff_export(
+            device,
+            queue,
+            raw,
+            geometry,
+            exposure,
+            masks,
+            inpaint,
+            path,
+            TileSpec::default(),
+            settings,
+            metadata,
+            cancellation,
+        ),
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 #[allow(clippy::too_many_arguments)]
 fn spawn_desktop_library_batch_export(
@@ -205,64 +269,8 @@ fn spawn_desktop_library_batch_export(
                     }
                 };
 
-                let ExportTaskRequest {
-                    device,
-                    queue,
-                    raw,
-                    geometry,
-                    exposure,
-                    masks,
-                    inpaint,
-                    path,
-                    format,
-                    settings,
-                    metadata,
-                    display_name: _,
-                } = request;
-                let export_receiver = match format {
-                    ExportFormat::Png => spawn_tiled_png_export(
-                        device,
-                        queue,
-                        raw,
-                        geometry,
-                        exposure,
-                        masks,
-                        inpaint,
-                        path,
-                        TileSpec::default(),
-                        settings,
-                        metadata,
-                        Arc::clone(&cancellation),
-                    ),
-                    ExportFormat::Jpeg => spawn_tiled_jpeg_export(
-                        device,
-                        queue,
-                        raw,
-                        geometry,
-                        exposure,
-                        masks,
-                        inpaint,
-                        path,
-                        TileSpec::default(),
-                        settings,
-                        metadata,
-                        Arc::clone(&cancellation),
-                    ),
-                    ExportFormat::Tiff => spawn_tiled_tiff_export(
-                        device,
-                        queue,
-                        raw,
-                        geometry,
-                        exposure,
-                        masks,
-                        inpaint,
-                        path,
-                        TileSpec::default(),
-                        settings,
-                        metadata,
-                        Arc::clone(&cancellation),
-                    ),
-                };
+                let export_receiver =
+                    spawn_export_request(request, Arc::clone(&cancellation));
 
                 let mut item_result = Err("export worker stopped unexpectedly".to_owned());
                 while let Ok(event) = export_receiver.recv() {
@@ -528,19 +536,6 @@ impl AurawApp {
     }
 
     fn apply_pending_lens_correction(&mut self, frame: &eframe::Frame) {
-        #[cfg(target_os = "android")]
-        self.apply_pending_lens_correction_android(frame);
-        #[cfg(not(target_os = "android"))]
-        self.apply_pending_lens_correction_desktop(frame);
-    }
-
-    #[cfg(target_os = "android")]
-    fn apply_pending_lens_correction_android(&mut self, frame: &eframe::Frame) {
-        self.queue_pending_lens_correction(frame);
-    }
-
-    #[cfg(not(target_os = "android"))]
-    fn apply_pending_lens_correction_desktop(&mut self, frame: &eframe::Frame) {
         self.queue_pending_lens_correction(frame);
     }
 
@@ -572,6 +567,26 @@ impl AurawApp {
             self.rehydrate_restored_mask_state();
         }
 
+        #[cfg(target_os = "android")]
+        let cached_raws = match selection.as_ref() {
+            Some(requested) => self
+                .lens_corrected_preview_cache
+                .as_ref()
+                .filter(|(cached, quality, _, _)| {
+                    cached == requested && *quality == self.preview_quality
+                })
+                .map(|(_, _, full_raw, preview_raw)| {
+                    (Arc::clone(full_raw), Arc::clone(preview_raw))
+                }),
+            None => self
+                .lens_original_preview_cache
+                .as_ref()
+                .filter(|(quality, _)| *quality == self.preview_quality)
+                .map(|(_, preview_raw)| (Arc::clone(&original_raw), Arc::clone(preview_raw))),
+        };
+        #[cfg(not(target_os = "android"))]
+        let cached_raws = None;
+
         let generation = self.lens_correction_generation;
         let document_id = self.sidecar_generation;
         let name = selection
@@ -585,6 +600,7 @@ impl AurawApp {
                 original_raw,
                 selection,
                 preview_quality: self.preview_quality,
+                cached_raws,
             },
             name,
         );
@@ -628,36 +644,44 @@ impl AurawApp {
                         return Err("background task cancelled".to_owned());
                     }
                     let applied_label = request.selection.as_ref().map(LensfunLens::label);
-                    let original_raw = Arc::clone(&request.original_raw);
-                    let full_raw = if let Some(selection) = request.selection.as_ref() {
-                        Arc::new(
-                            apply_lensfun_correction(&original_raw, selection).map_err(
-                                |error| {
-                                    format!("Could not apply {}: {error:#}", selection.label())
-                                },
-                            )?,
-                        )
+                    let (full_raw, preview_raw) = if let Some(cached_raws) = request.cached_raws {
+                        cached_raws
                     } else {
-                        original_raw
-                    };
-                    if cancellation.load(Ordering::Acquire) {
-                        return Err("background task cancelled".to_owned());
-                    }
-                    let _ = sender.send(LensCorrectionEvent::Progress {
-                        task_id: id,
-                        document_id,
-                        generation,
-                        phase: "Building preview proxy…".to_owned(),
-                    });
-                    repaint.request_repaint();
-                    let preview_spec = ProxySpec {
-                        max_edge: request.preview_quality.proxy_edge(),
-                    };
-                    let preview_raw = if full_raw.width.max(full_raw.height) <= preview_spec.max_edge
-                    {
-                        Arc::clone(&full_raw)
-                    } else {
-                        Arc::new(build_proxy(&full_raw, preview_spec))
+                        let original_raw = Arc::clone(&request.original_raw);
+                        let full_raw = if let Some(selection) = request.selection.as_ref() {
+                            Arc::new(
+                                apply_lensfun_correction(&original_raw, selection).map_err(
+                                    |error| {
+                                        format!(
+                                            "Could not apply {}: {error:#}",
+                                            selection.label()
+                                        )
+                                    },
+                                )?,
+                            )
+                        } else {
+                            original_raw
+                        };
+                        if cancellation.load(Ordering::Acquire) {
+                            return Err("background task cancelled".to_owned());
+                        }
+                        let _ = sender.send(LensCorrectionEvent::Progress {
+                            task_id: id,
+                            document_id,
+                            generation,
+                            phase: "Building preview proxy…".to_owned(),
+                        });
+                        repaint.request_repaint();
+                        let preview_spec = ProxySpec {
+                            max_edge: request.preview_quality.proxy_edge(),
+                        };
+                        let preview_raw =
+                            if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
+                                Arc::clone(&full_raw)
+                            } else {
+                                Arc::new(build_proxy(&full_raw, preview_spec))
+                            };
+                        (full_raw, preview_raw)
                     };
                     if cancellation.load(Ordering::Acquire) {
                         return Err("background task cancelled".to_owned());
@@ -1199,6 +1223,16 @@ impl AurawApp {
             || self.load_receiver.is_some()
             || self.lens_correction_busy()
         {
+            return;
+        }
+        #[cfg(target_os = "android")]
+        if self.export_receiver.is_some()
+            || self.export_publish_pending
+            || self.library_batch_export.is_some()
+        {
+            // The preview was intentionally released so the full-quality export
+            // pipeline fits within the mobile GPU budget. Rebuild it only after
+            // the foreground export and any MediaStore publication have ended.
             return;
         }
         let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
@@ -2200,6 +2234,37 @@ impl AurawApp {
         }
     }
 
+    #[cfg(target_os = "android")]
+    fn suspend_android_preview_for_export(
+        &mut self,
+        frame: &eframe::Frame,
+        restore_after_export: bool,
+    ) -> Result<(), String> {
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return Err("eframe is not running with the wgpu backend.".to_owned());
+        };
+
+        // Mobile export and preview pipelines cannot coexist within AuRaw's
+        // conservative GPU residency budget on high-resolution RAWs. Free every
+        // preview texture while holding the renderer lock, then drop the GPU
+        // pipeline only after releasing that lock. Keeping the destructor out of
+        // the renderer critical section also avoids lock-order inversions.
+        let previous_pipeline = {
+            let mut renderer = render_state.renderer.write();
+            self.take_preview_pipeline_and_release_textures(&mut renderer)
+        };
+        drop(previous_pipeline);
+
+        self.pending_stage = None;
+        self.preview_detail_pending_stage = None;
+        self.navigation_pending_stage = None;
+        self.preview_detail_urgent = false;
+        if restore_after_export {
+            self.preview_quality_dirty = true;
+        }
+        Ok(())
+    }
+
     fn capture_export_task_request(
         &mut self,
         path: PathBuf,
@@ -2268,16 +2333,21 @@ impl AurawApp {
         self.export_progress
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn library_batch_export_progress(&self) -> Option<(usize, usize)> {
         self.library_batch_export
             .as_ref()
             .map(|batch| (batch.completed, batch.total))
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn library_batch_export_tile_progress(&self) -> Option<(usize, usize)> {
-        self.library_batch_export_tile_progress
+        #[cfg(not(target_os = "android"))]
+        {
+            self.library_batch_export_tile_progress
+        }
+        #[cfg(target_os = "android")]
+        {
+            self.export_progress
+        }
     }
 
     pub(crate) fn library_batch_export_overall_fraction(&self) -> Option<f32> {
@@ -2291,43 +2361,35 @@ impl AurawApp {
         })
     }
 
-    #[cfg(target_os = "android")]
-    pub(crate) fn library_batch_export_progress(&self) -> Option<(usize, usize)> {
-        self.library_batch_export
-            .as_ref()
-            .map(|batch| (batch.completed, batch.total))
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn library_batch_export_tile_progress(&self) -> Option<(usize, usize)> {
-        self.export_progress
-    }
-
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn library_batch_export_status(
         &self,
     ) -> Option<(usize, usize, usize, Option<String>, bool)> {
         self.library_batch_export.as_ref().map(|batch| {
-            let failed = batch.failures.len();
             let current = batch.current.as_ref().map(|job| {
-                job.source
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("image")
-                    .to_owned()
+                #[cfg(not(target_os = "android"))]
+                {
+                    job.source
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("image")
+                        .to_owned()
+                }
+                #[cfg(target_os = "android")]
+                {
+                    job.display_name.clone()
+                }
             });
             (
                 batch.completed,
                 batch.total,
-                failed,
+                batch.failures.len(),
                 current,
                 batch.cancel_requested,
             )
         })
     }
 
-    #[cfg(not(target_os = "android"))]
-    pub(crate) fn cancel_library_batch_export(&mut self) {
+    fn request_library_batch_export_cancellation(&mut self) -> bool {
         if let Some(task_id) = self.library_batch_export_task_id {
             if !self.background_task_cancelled(task_id) {
                 let _ = self.background_tasks.request_cancel(task_id);
@@ -2336,40 +2398,21 @@ impl AurawApp {
         if let Some(batch) = self.library_batch_export.as_mut() {
             batch.cancel_requested = true;
             batch.pending.clear();
+            batch.current.is_none()
+        } else {
+            false
         }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn cancel_library_batch_export(&mut self) {
+        self.request_library_batch_export_cancellation();
         self.sync_library_batch_background_progress();
     }
 
     #[cfg(target_os = "android")]
-    pub(crate) fn library_batch_export_status(
-        &self,
-    ) -> Option<(usize, usize, usize, Option<String>, bool)> {
-        self.library_batch_export.as_ref().map(|batch| {
-            (
-                batch.completed,
-                batch.total,
-                batch.failures.len(),
-                batch.current.as_ref().map(|job| job.display_name.clone()),
-                batch.cancel_requested,
-            )
-        })
-    }
-
-    #[cfg(target_os = "android")]
     pub(crate) fn cancel_library_batch_export(&mut self) {
-        if let Some(task_id) = self.library_batch_export_task_id {
-            if !self.background_task_cancelled(task_id) {
-                let _ = self.background_tasks.request_cancel(task_id);
-            }
-        }
-        let finish_now = if let Some(batch) = self.library_batch_export.as_mut() {
-            batch.cancel_requested = true;
-            batch.pending.clear();
-            batch.current.is_none()
-        } else {
-            false
-        };
-        if finish_now {
+        if self.request_library_batch_export_cancellation() {
             self.finish_library_batch_export();
         }
     }
@@ -2483,6 +2526,13 @@ impl AurawApp {
             return;
         };
 
+        if batch.cancel_requested {
+            self.complete_android_library_batch_export_item(Err(
+                "batch export cancelled".to_owned(),
+            ));
+            return;
+        }
+
         if !success {
             let name = current.display_name.clone();
             if let Some(batch) = self.library_batch_export.as_mut() {
@@ -2542,20 +2592,31 @@ impl AurawApp {
         };
         let direct_path = crate::android::is_direct_export_path(&destination)
             .then(|| destination.clone());
+        let mut start_error = None;
         let started = if let Some(task_id) = self.library_batch_export_task_id {
             if let Some(request) =
                 self.capture_export_task_request(destination, frame, format)
             {
                 // The batch task already owns the global FIFO slot. Starting a
                 // nested SingleExport task here would queue it behind its own
-                // parent and show a second "waiting" dialog indefinitely.
-                self.start_export_task(task_id, request);
-                let started =
-                    self.export_task_id == Some(task_id) && self.export_receiver.is_some();
-                if started {
-                    self.sync_library_batch_background_progress();
+                // parent and show a second "waiting" dialog indefinitely. The
+                // shared task starter also releases Android preview GPU resources
+                // before allocating the full-quality tiled export pipeline.
+                match self.start_export_task(task_id, request, frame) {
+                    Ok(()) => {
+                        let started = self.export_task_id == Some(task_id)
+                            && self.export_receiver.is_some();
+                        if started {
+                            self.sync_library_batch_background_progress();
+                        }
+                        started
+                    }
+                    Err(error) => {
+                        self.notice = Some(format!("Export failed: {error}"));
+                        start_error = Some(error);
+                        false
+                    }
                 }
-                started
             } else {
                 false
             }
@@ -2567,8 +2628,9 @@ impl AurawApp {
             if let Some(path) = direct_path {
                 crate::android::cancel_direct_export(&self.android_app, &path);
             }
+            let error = start_error.unwrap_or_else(|| "could not start export".to_owned());
             self.complete_android_library_batch_export_item(Err(format!(
-                "{display_name}: could not start export"
+                "{display_name}: {error}"
             )));
         }
     }
@@ -2622,32 +2684,48 @@ impl AurawApp {
         }
     }
 
-    #[cfg(target_os = "android")]
     fn finish_library_batch_export(&mut self) {
         let Some(batch) = self.library_batch_export.take() else {
             return;
         };
+        #[cfg(not(target_os = "android"))]
+        {
+            self.library_batch_export_tile_progress = None;
+        }
+
         let succeeded = batch.completed.saturating_sub(batch.failures.len());
-        // Preserve the tab chosen while the export was running. In particular,
-        // finishing a background export must not pull an Android user out of
-        // Develop after they opened the exported RAW.
-        self.notice = if batch.cancel_requested {
-            Some(format!(
+        let mut message = if batch.cancel_requested {
+            format!(
                 "Batch export cancelled after {succeeded} of {} images exported.",
                 batch.total
-            ))
+            )
         } else if batch.failures.is_empty() {
-            Some(format!(
-                "Exported {succeeded} {} to Pictures/AuRaw.",
-                if succeeded == 1 { "image" } else { "images" }
-            ))
+            if cfg!(target_os = "android") {
+                format!(
+                    "Exported {succeeded} {} to Pictures/AuRaw.",
+                    if succeeded == 1 { "image" } else { "images" }
+                )
+            } else {
+                format!(
+                    "Exported {succeeded} {}.",
+                    if succeeded == 1 { "image" } else { "images" }
+                )
+            }
         } else {
-            Some(format!(
+            format!(
                 "Exported {succeeded} of {} images. {}",
                 batch.total,
                 batch.failures.join(" · ")
-            ))
+            )
         };
+        if batch.cancel_requested && !batch.failures.is_empty() {
+            message.push_str(&format!(
+                " {} failed. {}",
+                batch.failures.len(),
+                batch.failures.join(" · ")
+            ));
+        }
+        self.notice = Some(message);
         self.export_task_id = None;
         if let Some(id) = self.library_batch_export_task_id.take() {
             if batch.cancel_requested || batch.failures.is_empty() {
@@ -2699,48 +2777,6 @@ impl AurawApp {
     fn on_library_batch_load_finished(&mut self, _success: bool, _frame: &eframe::Frame) {
         // Desktop batch export owns a separate decode/export worker and never
         // consumes the document opened in Develop.
-    }
-
-    #[cfg(not(target_os = "android"))]
-    fn finish_library_batch_export(&mut self) {
-        let Some(batch) = self.library_batch_export.take() else {
-            return;
-        };
-        self.library_batch_export_tile_progress = None;
-        let succeeded = batch.completed.saturating_sub(batch.failures.len());
-        self.notice = if batch.cancel_requested {
-            let mut message = format!(
-                "Batch export cancelled after {succeeded} of {} images exported.",
-                batch.total
-            );
-            if !batch.failures.is_empty() {
-                message.push_str(&format!(
-                    " {} failed. {}",
-                    batch.failures.len(),
-                    batch.failures.join(" · ")
-                ));
-            }
-            Some(message)
-        } else if batch.failures.is_empty() {
-            Some(format!(
-                "Exported {succeeded} {}.",
-                if succeeded == 1 { "image" } else { "images" }
-            ))
-        } else {
-            Some(format!(
-                "Exported {succeeded} of {} images. {}",
-                batch.total,
-                batch.failures.join(" · ")
-            ))
-        };
-        self.export_task_id = None;
-        if let Some(id) = self.library_batch_export_task_id.take() {
-            if batch.cancel_requested || batch.failures.is_empty() {
-                self.finish_background_task(id);
-            } else {
-                self.fail_background_task(id, batch.failures.join(" · "));
-            }
-        }
     }
 
     #[cfg(target_os = "android")]
@@ -2889,11 +2925,20 @@ impl AurawApp {
                         let progress = if total_tiles == 0 {
                             TaskProgress::indeterminate("Preparing tiled export…")
                         } else {
-                            TaskProgress::fraction(
-                                completed_tiles as f32 / total_tiles as f32,
-                                format!("Rendering tile {completed_tiles}/{total_tiles}"),
-                            )
-                            .with_detail(format!("{completed_tiles}/{total_tiles} tiles"))
+                            // Tile completion covers rendering/readback only. Keep
+                            // the final encoding, metadata, publication, and rename
+                            // phase below 100% until the worker reports Finished.
+                            let tile_fraction =
+                                (completed_tiles as f32 / total_tiles as f32).clamp(0.0, 1.0);
+                            let fraction = (tile_fraction * EXPORT_TILE_PHASE_WEIGHT)
+                                .min(EXPORT_MAX_INCOMPLETE_FRACTION);
+                            let phase = if completed_tiles >= total_tiles {
+                                "Finalizing export…".to_owned()
+                            } else {
+                                format!("Rendering tile {completed_tiles}/{total_tiles}")
+                            };
+                            TaskProgress::fraction(fraction, phase)
+                                .with_detail(format!("{completed_tiles}/{total_tiles} tiles"))
                         };
                         self.update_background_progress(Some(id), progress);
                     }
@@ -3169,4 +3214,3 @@ mod batch_export_progress_tests {
         assert!((progress - (1.0 / 3.0)).abs() < f32::EPSILON);
     }
 }
-
