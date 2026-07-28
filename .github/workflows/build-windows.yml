@@ -116,6 +116,9 @@ jobs:
           release_dir="target/x86_64-pc-windows-gnu/release"
           test -f "$release_dir/auraw.exe"
           objdump -h "$release_dir/auraw.exe" | grep -q '\.rsrc'
+          # A desktop GUI binary must use the Windows GUI subsystem; otherwise
+          # Windows opens an extra command-prompt window beside the application.
+          objdump -p "$release_dir/auraw.exe" | grep -Eq 'Subsystem[[:space:]]+00000002[[:space:]]+\(Windows GUI\)'
           test "$(git rev-parse --verify HEAD)" = "$revision"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
