@@ -82,6 +82,8 @@ impl eframe::App for AurawApp {
         self.poll_library_ai_mask_refresh(frame);
         self.poll_inpaint_worker();
         self.drive_background_tasks(frame);
+        #[cfg(target_os = "android")]
+        self.sync_android_task_notification();
         #[cfg(not(target_os = "android"))]
         {
             self.handle_edit_history_shortcuts(ui.ctx());
@@ -256,6 +258,12 @@ impl eframe::App for AurawApp {
     }
 
     fn on_exit(&mut self) {
+        #[cfg(target_os = "android")]
+        if let Err(error) =
+            crate::android::clear_background_task_notification(&self.android_app)
+        {
+            log::warn!("{error}");
+        }
         self.flush_sidecar_on_exit();
     }
 }
@@ -274,6 +282,13 @@ fn show_android_foreground_task_blocker(ctx: &egui::Context) {
                 ui.allocate_exact_size(content_rect.size(), egui::Sense::click_and_drag());
             ui.painter()
                 .rect_filled(rect, 0.0, egui::Color32::from_black_alpha(96));
+            ui.painter().text(
+                egui::pos2(rect.center().x, rect.bottom() - 24.0),
+                egui::Align2::CENTER_BOTTOM,
+                "Keep AuRaw open in the foreground until the operation finishes. Leaving or closing the app may stop it.",
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_white_alpha(210),
+            );
         });
 }
 

@@ -26,6 +26,7 @@ public final class AuRawActivity extends NativeActivity {
     private StorageManager storageManager;
     private ProfileImporter profileImporter;
     private ExportPublisher exportPublisher;
+    private TaskNotificationController taskNotificationController;
 
     static {
         System.loadLibrary("auraw");
@@ -68,6 +69,7 @@ public final class AuRawActivity extends NativeActivity {
             }
         });
         exportPublisher = new ExportPublisher(this, AuRawActivity::nativeOnExportPublished);
+        taskNotificationController = new TaskNotificationController(this);
 
         configureSystemBarsAndInsets();
         storageManager.scavengeTemporaryRawFiles();
@@ -162,6 +164,28 @@ public final class AuRawActivity extends NativeActivity {
     /** Clears the SAF start location when no camera-profile folder is selected. */
     public void clearCameraProfileFolderPickerLocation() {
         profileImporter.clearFolderPickerLocation();
+    }
+
+    /** Mirrors the active Rust task into Android's notification shade. */
+    public void updateBackgroundTaskNotification(
+            String title,
+            String phase,
+            String detail,
+            int progressPercent,
+            int indeterminateFlag,
+            int queuedCount) {
+        taskNotificationController.update(
+                title,
+                phase,
+                detail,
+                progressPercent,
+                indeterminateFlag != 0,
+                queuedCount);
+    }
+
+    /** Removes AuRaw's task-progress notification after the queue becomes idle. */
+    public void clearBackgroundTaskNotification() {
+        taskNotificationController.clear();
     }
 
     /** Copies text through Android's native clipboard service. */
@@ -295,6 +319,16 @@ public final class AuRawActivity extends NativeActivity {
     public void onRequestPermissionsResult(
             int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        taskNotificationController.onRequestPermissionsResult(
+                requestCode, permissions, grantResults);
         exportPublisher.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (taskNotificationController != null) {
+            taskNotificationController.clear();
+        }
+        super.onDestroy();
     }
 }
