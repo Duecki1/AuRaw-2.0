@@ -28,7 +28,11 @@ impl eframe::App for AurawApp {
             self.poll_android_picker(frame);
             self.poll_android_export_publish();
             if crate::android::take_back_request() {
-                if self.active_tab == AppTab::Library && self.library.has_selection() {
+                if self.android_foreground_task_active() {
+                    // Long-running Android operations are modal. Ignore system
+                    // Back until the foreground task completes or is cancelled.
+                    ui.ctx().request_repaint();
+                } else if self.active_tab == AppTab::Library && self.library.has_selection() {
                     self.library.clear_selection();
                     crate::android::set_back_navigation_active(false);
                 } else {
@@ -64,16 +68,35 @@ impl eframe::App for AurawApp {
             }
         }
 
+        self.drive_background_tasks(frame);
         self.poll_load_worker(frame);
         #[cfg(not(target_os = "android"))]
         self.sync_display_color_management(ui.ctx(), frame);
+        #[cfg(not(target_os = "android"))]
+        self.poll_library_batch_export_worker();
         self.poll_export_worker(frame);
+        #[cfg(target_os = "android")]
+        self.resume_android_library_batch_export_if_possible();
         self.poll_subject_worker();
         self.poll_object_worker();
         self.poll_library_ai_mask_refresh(frame);
         self.poll_inpaint_worker();
-        self.handle_edit_history_shortcuts(ui.ctx());
-        self.handle_sidecar_shortcut(ui.ctx());
+        self.drive_background_tasks(frame);
+        #[cfg(not(target_os = "android"))]
+        {
+            self.handle_edit_history_shortcuts(ui.ctx());
+            self.handle_sidecar_shortcut(ui.ctx());
+        }
+        #[cfg(target_os = "android")]
+        if !self.android_foreground_task_active() {
+            self.handle_edit_history_shortcuts(ui.ctx());
+            self.handle_sidecar_shortcut(ui.ctx());
+        }
+
+        #[cfg(target_os = "android")]
+        if self.android_foreground_task_active() {
+            show_android_foreground_task_blocker(ui.ctx());
+        }
 
         let viewport_size = ui.max_rect().size();
         let layout = ScreenLayout::from_size(viewport_size);
@@ -184,7 +207,8 @@ impl eframe::App for AurawApp {
         {
             ui.ctx().request_repaint();
         }
-        if self.export_receiver.is_some()
+        if self.has_background_tasks()
+            || self.export_receiver.is_some()
             || self.export_publish_pending
             || self.inpaint_receiver.is_some()
         {
@@ -218,6 +242,7 @@ impl eframe::App for AurawApp {
         }
         self.show_subject_dialogs(ui.ctx());
         self.show_inpainting_dialogs(ui.ctx());
+        self.show_background_task_detail_windows(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
         self.observe_edit_history(ui.ctx());
         self.schedule_sidecar_autosave(ui.ctx(), edit_interaction_active);
@@ -233,6 +258,23 @@ impl eframe::App for AurawApp {
     fn on_exit(&mut self) {
         self.flush_sidecar_on_exit();
     }
+}
+
+
+#[cfg(target_os = "android")]
+fn show_android_foreground_task_blocker(ctx: &egui::Context) {
+    let content_rect = ctx.content_rect();
+    egui::Area::new(egui::Id::new("android-foreground-task-input-blocker"))
+        .order(egui::Order::Middle)
+        .fixed_pos(content_rect.min)
+        .movable(false)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let (rect, _response) =
+                ui.allocate_exact_size(content_rect.size(), egui::Sense::click_and_drag());
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::from_black_alpha(96));
+        });
 }
 
 #[cfg(not(target_os = "android"))]

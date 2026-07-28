@@ -1,0 +1,522 @@
+diff -ruN '--exclude=IMPLEMENTATION_REPORT.md' '--exclude=BACKGROUND_TASKS_IMPLEMENTATION.patch' '--exclude=CHANGED_FILES.txt' '--exclude=*.pyc' /mnt/data/auraw_followup/AuRaw-2.0-background-queue-develop-isolation/src/app/background_tasks.rs /mnt/data/auraw_priority/src/app/background_tasks.rs
+--- /mnt/data/auraw_followup/AuRaw-2.0-background-queue-develop-isolation/src/app/background_tasks.rs	2026-07-28 13:46:26.000000000 +0000
++++ /mnt/data/auraw_priority/src/app/background_tasks.rs	2026-07-28 14:34:34.502644566 +0000
+@@ -178,6 +178,32 @@
+         id
+     }
+ 
++    /// Register an operation that should run immediately without occupying the
++    /// serialized background-work slot. This is used for latency-sensitive local
++    /// AI inference after all required model files are already present.
++    pub(crate) fn start_nonblocking(
++        &mut self,
++        kind: TaskKind,
++        name: impl Into<String>,
++        initial_progress: TaskProgress,
++        details_open: bool,
++    ) -> TaskId {
++        self.next_id = self.next_id.wrapping_add(1).max(1);
++        let id = TaskId(self.next_id);
++        self.tasks.push(BackgroundTask {
++            id,
++            kind,
++            name: name.into(),
++            status: TaskStatus::Running,
++            progress: initial_progress,
++            error: None,
++            details_open,
++            global_visible: false,
++            cancellation: Arc::new(AtomicBool::new(false)),
++        });
++        id
++    }
++
+     pub(crate) fn enqueue_coalesced_lens(
+         &mut self,
+         document_id: u64,
+@@ -250,6 +276,23 @@
+         None
+     }
+ 
++    /// Release the FIFO execution slot while keeping the task alive and
++    /// cancellable. The worker continues independently and must later call
++    /// `complete` or `fail` with the same stable task ID.
++    pub(crate) fn release_current(&mut self, id: TaskId) -> bool {
++        if self.current != Some(id) {
++            return false;
++        }
++        let running = self.task(id).is_some_and(|task| {
++            matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
++        });
++        if !running {
++            return false;
++        }
++        self.current = None;
++        true
++    }
++
+     pub(crate) fn current_id(&self) -> Option<TaskId> {
+         self.current
+     }
+@@ -282,6 +325,16 @@
+         snapshots.extend(
+             self.tasks
+                 .iter()
++                .filter(|task| {
++                    matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
++                        && self.current != Some(task.id)
++                        && !self.queue.contains(&task.id)
++                })
++                .map(Self::snapshot_from_task),
++        );
++        snapshots.extend(
++            self.tasks
++                .iter()
+                 .filter(|task| task.status == TaskStatus::Failed)
+                 .map(Self::snapshot_from_task),
+         );
+@@ -329,7 +382,11 @@
+     }
+ 
+     pub(crate) fn has_visible_tasks(&self) -> bool {
+-        self.current.is_some() || self.queued_count() > 0 || self.has_failures()
++        self.queued_count() > 0
++            || self.has_failures()
++            || self.tasks.iter().any(|task| {
++                matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
++            })
+     }
+ 
+     pub(crate) fn has_global_visible_tasks(&self) -> bool {
+@@ -357,9 +414,6 @@
+     }
+ 
+     pub(crate) fn update_progress(&mut self, id: TaskId, progress: TaskProgress) -> bool {
+-        if self.current != Some(id) {
+-            return false;
+-        }
+         let Some(task) = self.task_mut(id) else {
+             return false;
+         };
+@@ -377,11 +431,13 @@
+     }
+ 
+     pub(crate) fn rename(&mut self, id: TaskId, name: impl Into<String>) -> bool {
+-        let is_current = self.current == Some(id);
+         let Some(task) = self.task_mut(id) else {
+             return false;
+         };
+-        if task.status == TaskStatus::Failed || is_current {
++        if matches!(
++            task.status,
++            TaskStatus::Running | TaskStatus::Cancelling | TaskStatus::Failed
++        ) {
+             task.name = name.into();
+             true
+         } else {
+@@ -417,22 +473,32 @@
+     }
+ 
+     pub(crate) fn complete(&mut self, id: TaskId) -> bool {
+-        if self.current != Some(id) {
++        let terminal = self.task(id).is_some_and(|task| {
++            matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
++        });
++        if !terminal {
+             return false;
+         }
+-        self.current = None;
++        if self.current == Some(id) {
++            self.current = None;
++        }
+         self.remove_task(id);
+         true
+     }
+ 
+     pub(crate) fn fail(&mut self, id: TaskId, error: impl Into<String>) -> bool {
+-        if self.current != Some(id) {
++        let runnable = self.task(id).is_some_and(|task| {
++            matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
++        });
++        if !runnable {
+             return false;
+         }
+         let cancelling = self
+             .task(id)
+             .is_some_and(|task| task.status == TaskStatus::Cancelling);
+-        self.current = None;
++        if self.current == Some(id) {
++            self.current = None;
++        }
+         if cancelling {
+             self.remove_task(id);
+             return true;
+@@ -666,6 +732,61 @@
+         assert_eq!(manager.queued_count(), 2);
+     }
+     #[test]
++    fn nonblocking_task_does_not_occupy_fifo_slot() {
++        let mut manager = BackgroundTaskManager::default();
++        let export = queued(&mut manager, "export");
++        assert_eq!(manager.start_next(), Some(export));
++        let inference = manager.start_nonblocking(
++            TaskKind::SubjectMask {
++                document_id: 1,
++                generation: 1,
++            },
++            "subject inference",
++            TaskProgress::indeterminate("Inferencing"),
++            true,
++        );
++        assert_eq!(manager.current_id(), Some(export));
++        assert_eq!(manager.snapshot(inference).unwrap().status, TaskStatus::Running);
++        assert!(manager.update_progress(
++            inference,
++            TaskProgress::indeterminate("Still inferencing")
++        ));
++        assert!(manager.complete(inference));
++        assert_eq!(manager.current_id(), Some(export));
++    }
++
++    #[test]
++    fn released_download_allows_next_fifo_task_while_inference_continues() {
++        let mut manager = BackgroundTaskManager::default();
++        let download = queued(&mut manager, "download");
++        let export = queued(&mut manager, "export");
++        assert_eq!(manager.start_next(), Some(download));
++        assert!(manager.release_current(download));
++        assert_eq!(manager.start_next(), Some(export));
++        assert!(manager.update_progress(
++            download,
++            TaskProgress::indeterminate("Inferencing")
++        ));
++        assert_eq!(manager.snapshot(download).unwrap().status, TaskStatus::Running);
++        assert_eq!(manager.current_id(), Some(export));
++    }
++
++    #[test]
++    fn released_task_can_be_cancelled_cooperatively() {
++        let mut manager = BackgroundTaskManager::default();
++        let id = queued(&mut manager, "download");
++        assert_eq!(manager.start_next(), Some(id));
++        assert!(manager.release_current(id));
++        let token = manager.cancellation_token(id).unwrap();
++        assert_eq!(
++            manager.request_cancel(id),
++            CancelTaskResult::CancellationRequested
++        );
++        assert!(token.load(Ordering::Acquire));
++        assert_eq!(manager.snapshot(id).unwrap().status, TaskStatus::Cancelling);
++    }
++
++    #[test]
+     fn hidden_tasks_are_excluded_from_global_task_ui() {
+         let mut manager = BackgroundTaskManager::default();
+         let hidden = queued(&mut manager, "hidden");
+diff -ruN '--exclude=IMPLEMENTATION_REPORT.md' '--exclude=BACKGROUND_TASKS_IMPLEMENTATION.patch' '--exclude=CHANGED_FILES.txt' '--exclude=*.pyc' /mnt/data/auraw_followup/AuRaw-2.0-background-queue-develop-isolation/src/app/inpainting.rs /mnt/data/auraw_priority/src/app/inpainting.rs
+--- /mnt/data/auraw_followup/AuRaw-2.0-background-queue-develop-isolation/src/app/inpainting.rs	2026-07-28 13:48:57.000000000 +0000
++++ /mnt/data/auraw_priority/src/app/inpainting.rs	2026-07-28 14:28:34.222631682 +0000
+@@ -232,22 +232,30 @@
+             dabs,
+         };
+         let needs_download = !request.model_path.exists();
+-        let task_id = self.enqueue_background_action(
+-            TaskKind::Inpainting {
+-                document_id: request.document_id,
+-                generation,
+-            },
+-            if needs_download {
+-                "Downloading inpainting model"
+-            } else {
+-                "Erasing selection"
+-            },
+-            TaskProgress::indeterminate("Waiting for earlier background work…"),
+-            true,
+-            BackgroundAction::Inpainting(request),
+-        );
+-        self.background_tasks.set_global_visible(task_id, needs_download);
+-        self.inpaint_task_id = Some(task_id);
++        if needs_download {
++            let task_id = self.enqueue_background_action(
++                TaskKind::Inpainting {
++                    document_id: request.document_id,
++                    generation,
++                },
++                "Downloading inpainting model",
++                TaskProgress::indeterminate("Waiting for earlier background work…"),
++                true,
++                BackgroundAction::Inpainting(request),
++            );
++            self.inpaint_task_id = Some(task_id);
++        } else {
++            let task_id = self.background_tasks.start_nonblocking(
++                TaskKind::Inpainting {
++                    document_id: request.document_id,
++                    generation,
++                },
++                "Erasing selection",
++                TaskProgress::indeterminate("Running local LaMa inpainting…"),
++                true,
++            );
++            self.start_inpaint_task(task_id, request);
++        }
+         self.egui_ctx.request_repaint();
+     }
+ 
+@@ -304,6 +312,7 @@
+                     self.inpaint_download_progress = None;
+                     self.inpaint_inferencing = true;
+                     self.background_tasks.set_global_visible(task_id, false);
++                    self.background_tasks.release_current(task_id);
+                     self.update_background_progress(
+                         Some(task_id),
+                         TaskProgress::indeterminate("Running local LaMa inpainting…"),
+@@ -322,6 +331,7 @@
+         let cancelled = self.background_task_cancelled(task_id);
+         let stale = self.inpaint_job_document_id != self.sidecar_generation
+             || self.inpaint_job_generation != self.inpaint_revision;
++        let failed_during_inference = self.inpaint_inferencing;
+         self.inpaint_receiver = None;
+         self.inpaint_task_id = None;
+         self.inpaint_download_progress = None;
+@@ -358,13 +368,21 @@
+                                 "Erase result was not applied because the edit cannot fit in the platform sidecar: {error}. Delete an existing mask or erase result and try again."
+                             );
+                             self.notice = Some(message.clone());
+-                            self.fail_background_task(task_id, message);
++                            if failed_during_inference {
++                                self.finish_background_task(task_id);
++                            } else {
++                                self.fail_background_task(task_id, message);
++                            }
+                         }
+                     }
+                 } else {
+                     let message = "Inpainting returned an empty result.".to_owned();
+                     self.notice = Some(message.clone());
+-                    self.fail_background_task(task_id, message);
++                    if failed_during_inference {
++                        self.finish_background_task(task_id);
++                    } else {
++                        self.fail_background_task(task_id, message);
++                    }
+                 }
+             }
+             Err(error) => {
+@@ -372,7 +390,11 @@
+                 self.inpaint_active_dabs = None;
+                 let message = format!("Inpainting failed: {error}");
+                 self.notice = Some(message.clone());
+-                self.fail_background_task(task_id, message);
++                if failed_during_inference {
++                    self.finish_background_task(task_id);
++                } else {
++                    self.fail_background_task(task_id, message);
++                }
+             }
+         }
+         self.egui_ctx.request_repaint();
+diff -ruN '--exclude=IMPLEMENTATION_REPORT.md' '--exclude=BACKGROUND_TASKS_IMPLEMENTATION.patch' '--exclude=CHANGED_FILES.txt' '--exclude=*.pyc' /mnt/data/auraw_followup/AuRaw-2.0-background-queue-develop-isolation/src/app/masks_ai.rs /mnt/data/auraw_priority/src/app/masks_ai.rs
+--- /mnt/data/auraw_followup/AuRaw-2.0-background-queue-develop-isolation/src/app/masks_ai.rs	2026-07-28 13:48:56.000000000 +0000
++++ /mnt/data/auraw_priority/src/app/masks_ai.rs	2026-07-28 14:27:52.266630181 +0000
+@@ -583,22 +583,30 @@
+             self.start_subject_mask_task(task_id, request);
+         } else {
+             let needs_download = !request.model_path.exists() || !request.vitmatte_path.exists();
+-            let task_id = self.enqueue_background_action(
+-                TaskKind::SubjectMask {
+-                    document_id: request.document_id,
+-                    generation,
+-                },
+-                if needs_download {
+-                    "Downloading subject-mask model"
+-                } else {
+-                    "Generating subject mask"
+-                },
+-                TaskProgress::indeterminate("Waiting for earlier background work…"),
+-                true,
+-                BackgroundAction::SubjectMask(request),
+-            );
+-            self.background_tasks.set_global_visible(task_id, needs_download);
+-            self.subject_task_id = Some(task_id);
++            if needs_download {
++                let task_id = self.enqueue_background_action(
++                    TaskKind::SubjectMask {
++                        document_id: request.document_id,
++                        generation,
++                    },
++                    "Downloading subject-mask model",
++                    TaskProgress::indeterminate("Waiting for earlier background work…"),
++                    true,
++                    BackgroundAction::SubjectMask(request),
++                );
++                self.subject_task_id = Some(task_id);
++            } else {
++                let task_id = self.background_tasks.start_nonblocking(
++                    TaskKind::SubjectMask {
++                        document_id: request.document_id,
++                        generation,
++                    },
++                    "Generating subject mask",
++                    TaskProgress::indeterminate("Running local subject-mask inference…"),
++                    true,
++                );
++                self.start_subject_mask_task(task_id, request);
++            }
+         }
+         self.egui_ctx.request_repaint();
+     }
+@@ -675,6 +683,12 @@
+                     self.subject_download_progress = None;
+                     self.subject_inferencing = true;
+                     self.background_tasks.set_global_visible(task_id, false);
++                    if matches!(
++                        self.background_tasks.snapshot(task_id).map(|task| task.kind),
++                        Some(TaskKind::SubjectMask { .. })
++                    ) {
++                        self.background_tasks.release_current(task_id);
++                    }
+                     self.update_background_progress(
+                         Some(task_id),
+                         TaskProgress::indeterminate("Running local subject-mask inference…"),
+@@ -695,6 +709,7 @@
+         let cancelled = self.background_task_cancelled(task_id);
+         let stale = self.subject_job_document_id != self.sidecar_generation
+             || self.subject_job_generation != self.subject_generation;
++        let failed_during_inference = self.subject_inferencing;
+         self.subject_receiver = None;
+         self.subject_task_id = None;
+         self.subject_download_progress = None;
+@@ -738,7 +753,11 @@
+             let message = error_message
+                 .unwrap_or_else(|| "Subject selection did not produce a mask.".to_owned());
+             self.notice = Some(message.clone());
+-            self.fail_background_task(task_id, message);
++            if failed_during_inference {
++                self.finish_background_task(task_id);
++            } else {
++                self.fail_background_task(task_id, message);
++            }
+         }
+         self.egui_ctx.request_repaint();
+     }
+@@ -942,22 +961,32 @@
+             let needs_download = !request.encoder_path.exists()
+                 || !request.decoder_path.exists()
+                 || !request.vitmatte_path.exists();
+-            let task_id = self.enqueue_background_action(
+-                TaskKind::ObjectMask {
+-                    document_id: request.document_id,
+-                    generation,
+-                },
+-                if needs_download {
+-                    "Downloading object-mask model"
+-                } else {
+-                    "Generating object mask"
+-                },
+-                TaskProgress::indeterminate("Waiting for earlier background work…"),
+-                true,
+-                BackgroundAction::ObjectMask(request),
+-            );
+-            self.background_tasks.set_global_visible(task_id, needs_download);
+-            self.object_task_id = Some(task_id);
++            if needs_download {
++                let task_id = self.enqueue_background_action(
++                    TaskKind::ObjectMask {
++                        document_id: request.document_id,
++                        generation,
++                    },
++                    "Downloading object-mask model",
++                    TaskProgress::indeterminate("Waiting for earlier background work…"),
++                    true,
++                    BackgroundAction::ObjectMask(request),
++                );
++                self.object_task_id = Some(task_id);
++            } else {
++                let task_id = self.background_tasks.start_nonblocking(
++                    TaskKind::ObjectMask {
++                        document_id: request.document_id,
++                        generation,
++                    },
++                    "Generating object mask",
++                    TaskProgress::indeterminate(
++                        "Encoding the image and generating the object mask…",
++                    ),
++                    true,
++                );
++                self.start_object_mask_task(task_id, request);
++            }
+         }
+         self.egui_ctx.request_repaint();
+     }
+@@ -1020,6 +1049,12 @@
+                     self.object_inferencing = true;
+                     self.object_decoder_only = decoder_only;
+                     self.background_tasks.set_global_visible(task_id, false);
++                    if matches!(
++                        self.background_tasks.snapshot(task_id).map(|task| task.kind),
++                        Some(TaskKind::ObjectMask { .. })
++                    ) {
++                        self.background_tasks.release_current(task_id);
++                    }
+                     self.update_background_progress(
+                         Some(task_id),
+                         TaskProgress::indeterminate(if decoder_only {
+@@ -1047,6 +1082,7 @@
+         let cancelled = self.background_task_cancelled(task_id);
+         let stale = generation != self.object_generation
+             || document_id != self.sidecar_generation;
++        let failed_during_inference = self.object_inferencing;
+         self.object_receiver = None;
+         self.object_task_id = None;
+         self.object_download_progress = None;
+@@ -1130,7 +1166,11 @@
+                 .unwrap_or_else(|| "Object selection did not produce a mask.".to_owned());
+             self.notice = Some(message.clone());
+             self.object_error_dialog = Some(message.clone());
+-            self.fail_background_task(task_id, message);
++            if failed_during_inference {
++                self.finish_background_task(task_id);
++            } else {
++                self.fail_background_task(task_id, message);
++            }
+         }
+         self.egui_ctx.request_repaint();
+     }
+diff -ruN '--exclude=IMPLEMENTATION_REPORT.md' '--exclude=BACKGROUND_TASKS_IMPLEMENTATION.patch' '--exclude=CHANGED_FILES.txt' '--exclude=*.pyc' /mnt/data/auraw_followup/AuRaw-2.0-background-queue-develop-isolation/tests/test_background_export_isolation.py /mnt/data/auraw_priority/tests/test_background_export_isolation.py
+--- /mnt/data/auraw_followup/AuRaw-2.0-background-queue-develop-isolation/tests/test_background_export_isolation.py	2026-07-28 14:04:45.000000000 +0000
++++ /mnt/data/auraw_priority/tests/test_background_export_isolation.py	2026-07-28 14:31:25.026637790 +0000
+@@ -40,3 +40,33 @@
+     assert '"Downloading subject-mask model"' in MASKS
+     assert '"Downloading object-mask model"' in MASKS
+     assert '"Downloading inpainting model"' in INPAINT
++
++
++def test_local_ai_inference_starts_outside_the_fifo_background_slot():
++    assert "fn start_nonblocking" in TASKS
++    assert "fn release_current" in TASKS
++    assert "self.background_tasks.start_nonblocking(" in MASKS
++    assert "self.background_tasks.start_nonblocking(" in INPAINT
++    assert "self.background_tasks.release_current(task_id);" in MASKS
++    assert "self.background_tasks.release_current(task_id);" in INPAINT
++
++
++def test_ai_downloads_remain_fifo_tasks_but_inference_releases_the_slot():
++    subject_download = MASKS[MASKS.index('"Downloading subject-mask model"') - 300 : MASKS.index('"Downloading subject-mask model"') + 500]
++    object_download = MASKS[MASKS.index('"Downloading object-mask model"') - 300 : MASKS.index('"Downloading object-mask model"') + 500]
++    inpaint_download = INPAINT[INPAINT.index('"Downloading inpainting model"') - 300 : INPAINT.index('"Downloading inpainting model"') + 500]
++    assert "enqueue_background_action" in subject_download
++    assert "enqueue_background_action" in object_download
++    assert "enqueue_background_action" in inpaint_download
++    assert "Some(TaskKind::SubjectMask { .. })" in MASKS
++    assert "Some(TaskKind::ObjectMask { .. })" in MASKS
++
++
++def test_detached_ai_tasks_remain_cancellable_and_document_bound():
++    assert "released_task_can_be_cancelled_cooperatively" in TASKS
++    assert "nonblocking_task_does_not_occupy_fifo_slot" in TASKS
++    assert "released_download_allows_next_fifo_task_while_inference_continues" in TASKS
++    runtime = RUNTIME[RUNTIME.index("fn cancel_document_bound_background_tasks") :]
++    assert "TaskKind::SubjectMask" in runtime
++    assert "TaskKind::ObjectMask" in runtime
++    assert "TaskKind::Inpainting" in runtime
