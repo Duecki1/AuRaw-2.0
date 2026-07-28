@@ -509,6 +509,7 @@ impl AurawApp {
                 .inpaint_task_id
                 .is_some_and(|id| self.background_task_details_open(id))
         {
+            #[cfg(not(target_os = "android"))]
             let mut minimize = false;
             let mut cancel = false;
             crate::ui::responsive_popup(egui::Window::new("Erasing selection"), ctx, 420.0)
@@ -546,6 +547,7 @@ impl AurawApp {
                     });
                 });
             if let Some(task_id) = self.inpaint_task_id {
+                #[cfg(not(target_os = "android"))]
                 if minimize {
                     self.set_background_task_details_open(task_id, false);
                 }

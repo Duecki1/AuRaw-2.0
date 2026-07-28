@@ -103,6 +103,7 @@ struct TaskNotificationPayload {
 }
 
 struct TaskNotificationState {
+    activity_key: usize,
     payload: TaskNotificationPayload,
     posted_at: Instant,
 }
@@ -137,6 +138,12 @@ fn request_repaint() {
 pub fn install_context(context: &eframe::egui::Context) {
     if let Ok(mut installed) = EGUI_CONTEXT.lock() {
         *installed = Some(context.clone());
+    }
+    // A newly created NativeActivity owns a new Java notification controller.
+    // Do not let a deduplication record from the previous Activity suppress the
+    // first notification posted by this one.
+    if let Ok(mut notification) = TASK_NOTIFICATION_STATE.lock() {
+        *notification = None;
     }
 }
 
@@ -860,6 +867,7 @@ pub fn update_background_task_notification(
     indeterminate: bool,
     queued_count: usize,
 ) -> Result<(), String> {
+    let activity_key = app.activity_as_ptr() as usize;
     let payload = TaskNotificationPayload {
         title: title.to_owned(),
         phase: phase.to_owned(),
@@ -869,7 +877,9 @@ pub fn update_background_task_notification(
         queued_count: i32::try_from(queued_count).unwrap_or(i32::MAX),
     };
     if let Ok(current) = TASK_NOTIFICATION_STATE.lock() {
-        if let Some(current) = current.as_ref() {
+        if let Some(current) = current.as_ref().filter(|current| {
+            current.activity_key == activity_key
+        }) {
             if current.payload == payload {
                 return Ok(());
             }
@@ -908,6 +918,7 @@ pub fn update_background_task_notification(
 
     if let Ok(mut current) = TASK_NOTIFICATION_STATE.lock() {
         *current = Some(TaskNotificationState {
+            activity_key,
             payload,
             posted_at: Instant::now(),
         });

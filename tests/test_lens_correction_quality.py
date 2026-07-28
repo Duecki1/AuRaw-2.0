@@ -144,17 +144,16 @@ def test_lens_toggle_preserves_masks_and_requests_refresh() -> None:
     assert 'ui.button("Update masks")' in masks_ui
 
 
-def test_android_lens_toggle_prepares_the_preview_off_the_ui_thread() -> None:
+def test_lens_toggle_prepares_the_preview_off_the_ui_thread_on_all_platforms() -> None:
     processing_export = (ROOT / "src/app/processing_export.rs").read_text(encoding="utf-8")
-    android_worker = processing_export[
-        processing_export.index("fn apply_pending_lens_correction_android")
+    worker = processing_export[
+        processing_export.index("fn start_lens_correction_task")
         : processing_export.index("fn poll_lens_correction_worker")
     ]
-    assert '#[cfg(target_os = "android")]' in processing_export
-    assert '.name("auraw-lens-correction".to_owned())' in android_worker
-    assert ".spawn(move ||" in android_worker
-    assert "apply_lensfun_correction(&original_raw, selection)" in android_worker
-    assert "RawGpuPipeline::new_headless_with_quality(" not in android_worker
+    assert '.name("auraw-lens-correction".to_owned())' in worker
+    assert ".spawn(move ||" in worker
+    assert "apply_lensfun_correction(&original_raw, selection)" in worker
+    assert "RawGpuPipeline::new_headless_with_quality(" not in worker
     assert "pipeline.upload_raw_tile(" in processing_export
     assert "lens_correction_receiver.is_some()" in processing_export
     assert "!lens_correction_busy" in SIDEBAR

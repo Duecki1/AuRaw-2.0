@@ -88,6 +88,7 @@ jobs:
           export LIBCLANG_PATH="$(cygpath -w /mingw64/bin)"
 
           x86_64-w64-mingw32-gcc --version
+          objdump --version
           cargo --version
           rustc --version
           pkg-config --modversion libraw || pkg-config --modversion libraw_r
@@ -114,7 +115,7 @@ jobs:
 
           release_dir="target/x86_64-pc-windows-gnu/release"
           test -f "$release_dir/auraw.exe"
-          x86_64-w64-mingw32-objdump -h "$release_dir/auraw.exe" | grep -q '\.rsrc'
+          objdump -h "$release_dir/auraw.exe" | grep -q '\.rsrc'
           test "$(git rev-parse --verify HEAD)" = "$revision"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 

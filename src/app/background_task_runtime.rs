@@ -41,13 +41,24 @@ impl AurawApp {
             return;
         };
         let Some(action) = self.background_actions.remove(&id) else {
-            self.background_tasks
-                .fail(id, "The queued background action was unavailable.");
+            self.fail_background_task(id, "The queued background action was unavailable.");
             return;
         };
 
         match action {
-            BackgroundAction::SingleExport(request) => self.start_export_task(id, request),
+            BackgroundAction::SingleExport(request) => {
+                #[cfg(target_os = "android")]
+                let direct_path = crate::android::is_direct_export_path(&request.path)
+                    .then(|| request.path.clone());
+                if let Err(error) = self.start_export_task(id, request, frame) {
+                    #[cfg(target_os = "android")]
+                    if let Some(path) = direct_path {
+                        crate::android::cancel_direct_export(&self.android_app, &path);
+                    }
+                    self.notice = Some(format!("Export failed: {error}"));
+                    self.fail_background_task(id, error);
+                }
+            }
             BackgroundAction::LibraryBatchExport {
                 jobs,
                 settings,
@@ -65,75 +76,33 @@ impl AurawApp {
         }
     }
 
-    fn start_export_task(&mut self, id: TaskId, request: ExportTaskRequest) {
-        let ExportTaskRequest {
-            device,
-            queue,
-            raw,
-            geometry,
-            exposure,
-            masks,
-            inpaint,
-            path,
-            format,
-            settings,
-            metadata,
-            display_name: _,
-        } = request;
-        let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
-            self.fail_background_task(id, "The export cancellation token was unavailable.");
-            return;
-        };
-        let receiver = match format {
-            ExportFormat::Png => spawn_tiled_png_export(
-                device,
-                queue,
-                raw,
-                geometry,
-                exposure,
-                masks,
-                inpaint,
-                path,
-                TileSpec::default(),
-                settings,
-                metadata,
-                Arc::clone(&cancellation),
-            ),
-            ExportFormat::Jpeg => spawn_tiled_jpeg_export(
-                device,
-                queue,
-                raw,
-                geometry,
-                exposure,
-                masks,
-                inpaint,
-                path,
-                TileSpec::default(),
-                settings,
-                metadata,
-                Arc::clone(&cancellation),
-            ),
-            ExportFormat::Tiff => spawn_tiled_tiff_export(
-                device,
-                queue,
-                raw,
-                geometry,
-                exposure,
-                masks,
-                inpaint,
-                path,
-                TileSpec::default(),
-                settings,
-                metadata,
-                cancellation,
-            ),
-        };
+    fn start_export_task(
+        &mut self,
+        id: TaskId,
+        request: ExportTaskRequest,
+        frame: &eframe::Frame,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "android")]
+        {
+            let restore_preview = self.library_batch_export.is_none();
+            self.suspend_android_preview_for_export(frame, restore_preview)?;
+        }
+
+        #[cfg(not(target_os = "android"))]
+        let _ = frame;
+
+        let cancellation = self
+            .background_tasks
+            .cancellation_token(id)
+            .ok_or_else(|| "The export cancellation token was unavailable.".to_owned())?;
+        let receiver = spawn_export_request(request, cancellation);
         self.export_receiver = Some(receiver);
         self.export_progress = Some((0, 0));
         self.export_task_id = Some(id);
         self.notice = None;
         self.background_tasks
             .update_progress(id, TaskProgress::indeterminate("Preparing tiled export…"));
+        Ok(())
     }
 
     #[cfg(not(target_os = "android"))]
@@ -368,8 +337,7 @@ impl AurawApp {
         if !self.has_global_background_tasks() {
             return;
         }
-        let current = self.global_current_background_task();
-        let queued = self.global_background_queued_count();
+        let (current, queued) = self.global_primary_task_and_waiting_count();
         let compact = cfg!(target_os = "android") || ui.available_width() < 420.0;
         let response = ui
             .horizontal(|ui| {
@@ -482,16 +450,16 @@ impl AurawApp {
                 total,
                 unit,
             } => {
-                let fraction = if *total == 0 {
-                    0.0
+                if *total == 0 {
+                    egui::ProgressBar::new(0.0).animate(true)
                 } else {
-                    (*completed as f32 / *total as f32).clamp(0.0, 1.0)
-                };
-                let text = unit.as_deref().map_or_else(
-                    || format!("{completed}/{total}"),
-                    |unit| format!("{completed}/{total} {unit}"),
-                );
-                egui::ProgressBar::new(fraction).text(text)
+                    let fraction = (*completed as f32 / *total as f32).clamp(0.0, 1.0);
+                    let text = unit.as_deref().map_or_else(
+                        || format!("{completed}/{total}"),
+                        |unit| format!("{completed}/{total} {unit}"),
+                    );
+                    egui::ProgressBar::new(fraction).text(text)
+                }
             }
         }
     }
@@ -537,6 +505,7 @@ impl AurawApp {
                 TaskKind::Inpainting { .. } => "Erasing selection",
                 TaskKind::LibraryAiMaskRefresh => "Regenerating AI masks",
             };
+            #[cfg(not(target_os = "android"))]
             let mut minimize = false;
             let mut cancel = false;
             let mut dismiss = false;
@@ -581,6 +550,7 @@ impl AurawApp {
                         }
                     });
                 });
+            #[cfg(not(target_os = "android"))]
             if minimize {
                 self.set_background_task_details_open(task.id, false);
             }
@@ -598,6 +568,7 @@ impl AurawApp {
             .is_some_and(|id| self.background_task_details_open(id))
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn minimize_library_batch_export_progress(&mut self) {
         if let Some(id) = self.library_batch_export_task_id {
             self.set_background_task_details_open(id, false);
@@ -609,6 +580,7 @@ impl AurawApp {
             .is_some_and(|id| self.background_task_details_open(id))
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn minimize_library_ai_mask_refresh_progress(&mut self) {
         if let Some(id) = self.library_ai_mask_refresh_task_id {
             self.set_background_task_details_open(id, false);
@@ -629,20 +601,9 @@ impl AurawApp {
         self.background_tasks.global_snapshots()
     }
 
-    pub(crate) fn current_background_task(&self) -> Option<TaskSnapshot> {
-        self.background_tasks.current_snapshot()
-    }
-
-    pub(crate) fn global_current_background_task(&self) -> Option<TaskSnapshot> {
-        self.background_tasks.global_current_snapshot()
-    }
-
-    pub(crate) fn background_queued_count(&self) -> usize {
-        self.background_tasks.queued_count()
-    }
-
-    pub(crate) fn global_background_queued_count(&self) -> usize {
-        self.background_tasks.global_queued_count()
+    fn global_primary_task_and_waiting_count(&self) -> (Option<TaskSnapshot>, usize) {
+        self.background_tasks
+            .global_primary_snapshot_and_waiting_count()
     }
 
     pub(crate) fn has_background_tasks(&self) -> bool {
@@ -651,13 +612,9 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn sync_android_task_notification(&self) {
-        let snapshots = self.global_background_task_snapshots();
-        let active = snapshots
-            .iter()
-            .find(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling))
-            .or_else(|| snapshots.iter().find(|task| task.status == TaskStatus::Queued));
+        let (task, waiting_count) = self.global_primary_task_and_waiting_count();
 
-        let Some(task) = active else {
+        let Some(task) = task else {
             if let Err(error) =
                 crate::android::clear_background_task_notification(&self.android_app)
             {
@@ -689,7 +646,7 @@ impl AurawApp {
             task.progress.detail.as_deref(),
             progress_percent,
             indeterminate,
-            self.global_background_queued_count(),
+            waiting_count,
         ) {
             log::warn!("{error}");
         }
@@ -945,13 +902,14 @@ impl AurawApp {
             .background_task_snapshots()
             .into_iter()
             .filter(|task| {
-                matches!(
-                    task.kind,
-                    TaskKind::LensCorrection { .. }
-                        | TaskKind::SubjectMask { .. }
-                        | TaskKind::ObjectMask { .. }
-                        | TaskKind::Inpainting { .. }
-                )
+                task.status != TaskStatus::Failed
+                    && matches!(
+                        task.kind,
+                        TaskKind::LensCorrection { .. }
+                            | TaskKind::SubjectMask { .. }
+                            | TaskKind::ObjectMask { .. }
+                            | TaskKind::Inpainting { .. }
+                    )
             })
             .map(|task| task.id)
             .collect::<Vec<_>>();
@@ -965,12 +923,17 @@ impl AurawApp {
         let stale = self
             .background_task_snapshots()
             .into_iter()
-            .filter(|task| match task.kind {
-                TaskKind::LensCorrection { document_id, .. }
-                | TaskKind::SubjectMask { document_id, .. }
-                | TaskKind::ObjectMask { document_id, .. }
-                | TaskKind::Inpainting { document_id, .. } => document_id != current_document,
-                _ => false,
+            .filter(|task| {
+                task.status != TaskStatus::Failed
+                    && match task.kind {
+                        TaskKind::LensCorrection { document_id, .. }
+                        | TaskKind::SubjectMask { document_id, .. }
+                        | TaskKind::ObjectMask { document_id, .. }
+                        | TaskKind::Inpainting { document_id, .. } => {
+                            document_id != current_document
+                        }
+                        _ => false,
+                    }
             })
             .map(|task| task.id)
             .collect::<Vec<_>>();

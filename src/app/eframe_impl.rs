@@ -268,7 +268,6 @@ impl eframe::App for AurawApp {
     }
 }
 
-
 #[cfg(target_os = "android")]
 fn show_android_foreground_task_blocker(ctx: &egui::Context) {
     let content_rect = ctx.content_rect();

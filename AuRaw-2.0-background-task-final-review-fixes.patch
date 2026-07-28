@@ -1,0 +1,2631 @@
+diff --git a/ANDROID.md b/ANDROID.md
+index 27419f3..1590670 100644
+--- a/ANDROID.md
++++ b/ANDROID.md
+@@ -189,4 +189,3 @@ runtime permission.
+ This notification does not yet run the task in an Android foreground service.
+ Keep AuRaw open in the foreground until the operation finishes; leaving or
+ closing the app may suspend or stop the task.
+-
+diff --git a/CHANGED_FILES.txt b/CHANGED_FILES.txt
+index 6e86623..3271409 100644
+--- a/CHANGED_FILES.txt
++++ b/CHANGED_FILES.txt
+@@ -1,9 +1,15 @@
++ANDROID.md
++ANDROID_BACKGROUND_EXECUTION_RESEARCH.md
++IMPLEMENTATION_REPORT.md
++android/app/src/main/AndroidManifest.xml
++android/app/src/main/java/de/duecki/auraw/AuRawActivity.java
++android/app/src/main/java/de/duecki/auraw/TaskNotificationController.java
++android/app/src/main/res/drawable/ic_notification.xml
+ src/ai_masks.rs
+-src/inpainting.rs
+-src/pipeline/export.rs
++src/android.rs
+ src/app.rs
+-src/app/background_tasks.rs
+ src/app/background_task_runtime.rs
++src/app/background_tasks.rs
+ src/app/edit_history.rs
+ src/app/eframe_impl.rs
+ src/app/inpainting.rs
+@@ -11,18 +17,12 @@ src/app/library_adjustments.rs
+ src/app/lifecycle.rs
+ src/app/masks_ai.rs
+ src/app/processing_export.rs
++src/inpainting.rs
++src/pipeline/export.rs
+ src/ui/library.rs
+-src/ui/top_bar.rs
+-tests/test_background_export_isolation.py
+ src/ui/mod.rs
+-ANDROID_BACKGROUND_EXECUTION_RESEARCH.md
+-android/app/src/main/AndroidManifest.xml
+-android/app/src/main/java/de/duecki/auraw/AuRawActivity.java
+-android/app/src/main/java/de/duecki/auraw/TaskNotificationController.java
+-android/app/src/main/res/drawable/ic_notification.xml
+-src/android.rs
++src/ui/top_bar.rs
+ tests/test_android_task_notifications.py
+-ANDROID.md
+-IMPLEMENTATION_REPORT.md
+-VALIDATION_ANDROID_NOTIFICATIONS.txt
+-VALIDATION_PC_PROGRESS_ROLLBACK.txt
++tests/test_background_export_isolation.py
++tests/test_lens_correction_quality.py
++tests/test_library_copy_paste_settings.py
+diff --git a/IMPLEMENTATION_REPORT.md b/IMPLEMENTATION_REPORT.md
+index eaed6fb..7b3f1e3 100644
+--- a/IMPLEMENTATION_REPORT.md
++++ b/IMPLEMENTATION_REPORT.md
+@@ -1,332 +1,155 @@
+-# AuRaw 2.0 background-task queue implementation
+-
+-## Architecture
+-
+-The implementation adds a reusable `BackgroundTaskManager` in
+-`src/app/background_tasks.rs` and a task runtime/UI bridge in
+-`src/app/background_task_runtime.rs`.
+-
+-The manager owns stable task IDs, FIFO queue order, one active task, task labels,
+-progress, cooperative cancellation tokens, minimized/detail-window state, global
+-visibility, and retained failures. `BackgroundAction` contains typed requests
+-captured before work starts rather than UI closures borrowing mutable application
+-state.
+-
+-The main eframe loop starts at most one queued action at a time and automatically
+-advances after completion, cancellation, or failure. Existing worker channels
+-feed progress into the manager. The top bar renders a compact, right-aligned task
+-control and an anchored queue popup.
+-
+-Integrated operations:
+-
+-- Single-image export
+-- Library batch export as one queue task
+-- Lens correction and preview-proxy preparation
+-- Subject-mask model download and inference
+-- Object-mask model download and inference
+-- Inpainting model download and inference
+-- Library AI-mask refresh
+-
+-## Develop isolation for desktop batch export
+-
+-Desktop library batch export no longer opens each source RAW through the main
+-application document loader. It owns a separate worker that captures the batch
+-request and then, for each source in FIFO order:
+-
+-1. Loads the source sidecar.
+-2. Decodes the RAW through the shared LibRaw decode gate.
+-3. Applies the saved camera profile, geometry, lens correction, masks, and
+-   inpainting state.
+-4. Reconstructs missing canonical range-mask sources when required.
+-5. Runs the existing tiled PNG/JPEG/TIFF export worker.
+-6. Reports per-image and per-tile progress through a dedicated batch receiver.
+-
+-The worker never writes `current_path`, `loaded_raw`, `preview_raw`, `active_tab`,
+-or the Develop preview pipeline. Completing a JPEG therefore cannot switch the
+-user back to Library or replace the RAW currently open in Develop. Batch tile
+-progress is stored separately from single-image Develop export progress.
+-
+-Opening another RAW or changing the current camera profile is no longer blocked
+-merely because an export receiver or Android publication state exists. A new RAW
+-open can still wait for a currently executing native LibRaw decode because LibRaw
+-access is serialized by the existing shared decode gate; the UI remains
+-responsive and the batch worker does not consume the opened document.
+-
+-## AI task visibility
+-
+-The global top-bar task control shows AI work only while model files are being
+-downloaded:
+-
+-- `Downloading subject-mask model`
+-- `Downloading object-mask model`
+-- `Downloading inpainting model`
+-
+-When all required model files already exist, interactive subject-mask,
+-object-mask, and inpainting inference starts immediately as a non-blocking task.
+-It does not wait for an export, lens correction, or another FIFO background task
+-to finish. If a model must be downloaded first, the download remains a visible
+-FIFO task; as soon as the worker reports that inference is beginning, it hides
+-from the global control and releases the FIFO execution slot so the next queued
+-background action can start while local inference continues concurrently.
+-
+-The detached inference task retains the same stable task ID, cancellation token,
+-detail-window state, and document/generation safeguards. The operation-specific
+-progress window remains cancellable and can be minimized. Library AI-mask refresh
+-continues to use its existing serialized library workflow and is hidden from the
+-global control except while a missing model is being downloaded.
+-
+-## Cancellation and stale-result safeguards
+-
+-- Queued cancellation removes the stable task and typed request immediately.
+-- Running cancellation sets an atomic token and changes the shared status to
+-  `Cancelling…`.
+-- Export workers check cancellation between safe phases, tiles, and rows. Desktop
+-  batch cancellation does not start another source. If the current image was
+-  already published when cancellation arrived, it is counted as completed; a
+-  cooperative cancellation result is not recorded as a failure.
+-- Model downloads check cancellation while transferring and before publishing a
+-  temporary model file.
+-- Lens tasks carry document and lens-generation identities. New requests coalesce
+-  obsolete queued requests for the same document and cancel an older active
+-  generation.
+-- Subject, object, and inpainting tasks carry document/edit-generation identities.
+-  Results are validated before application and stale or cancelled results are
+-  discarded.
+-- Worker disconnection terminates the task instead of leaving a receiver attached
+-  indefinitely, allowing the next FIFO item to start.
+-- Native ONNX and Lensfun calls that cannot be interrupted internally stop at the
+-  next safe phase boundary; the UI communicates this during cancellation.
+-
+-## Changed files
+-
+-- `src/ai_masks.rs`
+-- `src/inpainting.rs`
+-- `src/pipeline/export.rs`
+-- `src/app.rs`
+-- `src/app/background_tasks.rs` (new)
+-- `src/app/background_task_runtime.rs` (new)
+-- `src/app/edit_history.rs`
+-- `src/app/eframe_impl.rs`
+-- `src/app/inpainting.rs`
+-- `src/app/library_adjustments.rs`
+-- `src/app/lifecycle.rs`
+-- `src/app/masks_ai.rs`
+-- `src/app/processing_export.rs`
+-- `src/ui/library.rs`
+-- `src/ui/top_bar.rs`
+-- `tests/test_background_export_isolation.py` (new)
+-
+-`BACKGROUND_TASKS_IMPLEMENTATION.patch` contains the complete source diff against
+-the uploaded AuRaw baseline. The separately supplied follow-up patch contains
+-only the Develop-isolation and AI-download-visibility changes relative to the
+-previous background-queue archive.
+-
+-## Validation performed in this environment
+-
+-Passed:
++# AuRaw 2.0 background-task implementation — final review
++
++## Scope
++
++This tree contains the complete global task-queue implementation and all later
++follow-up fixes. The final review compared the complete patch with the uploaded
++AuRaw baseline, traced task ownership and cancellation through the desktop and
++Android paths, checked the task-manager invariants, searched the modified source
++for duplicate helpers and dead wrappers, and reviewed the Java notification
++bridge and Android lifecycle integration.
++
++## Architecture retained
++
++- `src/app/background_tasks.rs` owns stable task IDs, FIFO order, one serialized
++  task slot, detached latency-sensitive AI inference, progress, cancellation,
++  detail-window state, global visibility, and acknowledged failures.
++- `src/app/background_task_runtime.rs` connects typed `BackgroundAction` requests
++  to existing workers and renders the top-bar control, queue popup, and shared
++  task-detail windows.
++- Desktop batch export captures and decodes each source independently of the
++  Develop document.
++- Android long operations are foreground-modal inside the Activity. The Android
++  notification mirrors progress but is not a foreground service; AuRaw must
++  remain open.
++- Subject/object-mask and inpainting inference bypass the serialized slot when
++  their models are already available. Only model downloads are globally visible.
++
++## Problems found and fixed during the final review
++
++### Queue and global UI
++
++- Consolidated duplicated task construction into one `insert_task` helper.
++- Consolidated snapshot ordering for full and globally visible task lists.
++- Fixed detached visible work disappearing from the global task list after it
++  released the FIFO slot.
++- Fixed `+N` so it counts only tasks waiting after the item displayed in the
++  compact control.
++- Removed unused task-runtime wrapper methods.
++- Routed an impossible/missing queued action through the normal failure helper so
++  the UI is repainted and the retained error is visible.
++- Unknown `completed/total` progress now renders as indeterminate instead of a
++  misleading static `0/0` bar.
++
++### Export and batch export
++
++- Removed duplicated PNG/JPEG/TIFF dispatch from the runtime and centralized it
++  in `spawn_export_request`.
++- Consolidated platform-independent batch finish, status, progress, tile, and
++  cancellation helpers.
++- Ensured Android batch export does not create a nested single-export task.
++- Ensured Android cancellation while a batch RAW is still opening cannot start
++  the export afterward.
++- Routed synchronous Android document-open failures back to the batch owner so
++  the batch cannot wait forever for a receiver that was never created.
++- Released the temporary Android Develop preview pipeline before starting tiled
++  export, avoiding simultaneous mobile preview/export residency.
++- Reserved final progress for encoding, metadata, publication, and rename; tile
++  completion alone no longer reports 100%.
++- Added a final cancellation check before publication and temporary-output
++  cleanup where the export path permits it.
++
++### Lens, masks, and inpainting
++
++- Consolidated desktop/Android lens queueing and worker preparation while
++  preserving Android cached-correction reuse.
++- Preserved stale document/generation checks before applying lens, mask, or
++  inpainting output.
++- Reused the newly created Develop preview pipeline to reconstruct missing range
++  sources instead of allocating a second preview pipeline during RAW open.
++- Replaced Android lens-cache `expect` calls with a safe tuple match; an
++  incomplete preview state can no longer panic during load finalization.
++- Corrected object-mask download/inference failure routing so one appropriate
++  error surface is used.
++- Kept failed task acknowledgments intact when the active document changes.
++
++### Android UI and notifications
++
++- Android progress dialogs remain non-minimizable and foreground-modal; desktop
++  retains minimization.
++- Guarded RAW open and camera-profile changes while Android foreground work owns
++  the limited GPU budget.
++- Moved `TaskNotificationController` initialization to the start of Activity
++  delegate setup and made JNI notification update/clear callbacks null-safe.
++- Reset notification deduplication state when a new NativeActivity is installed,
++  preventing a recreated Activity from suppressing its first progress update.
++- Kept the notification permission request contextual and the notification
++  update rate deduplicated/throttled.
++
++## Validation executed
+ 
+ ```text
+ pytest -q
+-389 passed
++417 passed
+ 
+ python scripts/check-source-tree.py
+ source tree contains only connected modules and tracked shader sources
+ 
+ python scripts/check-source-connectivity.py
+ source tree contains only connected modules and tracked shader sources
+-```
+-
+-The non-UI manager includes Rust unit tests for FIFO ordering, queue advancement,
+-queued removal, cooperative running cancellation, waiting count, stable-ID
+-progress updates, stale updates, lens-task coalescing, exclusion of hidden AI
+-inference tasks from the global control, immediate non-blocking inference, FIFO
+-slot release after model download, and cancellation of detached inference.
+-
+-Not executed here:
+-
+-```text
+-cargo fmt --check
+-cargo check
+-cargo test
+-cargo clippy --all-targets --all-features
+-```
+-
+-This container has no `cargo`, `rustc`, `rustfmt`, or `clippy-driver` executable.
+-The Rust build therefore could not start. No native-library failure involving
+-LibRaw, Lensfun, or ONNX Runtime was reached.
+-
+-## Remaining limitations
+-
+-- Android library batch export still uses the platform document-opening and
+-  publication workflow and can return to Library between items. The desktop
+-  isolation described above is not duplicated on Android.
+-- Library AI-mask refresh still uses AuRaw's existing document loader and can
+-  temporarily replace the loaded document while refreshing library items. Its
+-  generation/inference phases are hidden from the global top bar as requested.
+-- Interactive AI inference now runs concurrently with exports and other queued
+-  work rather than pausing those workers. Heavy concurrent CPU/GPU activity can
+-  still contend for hardware resources, but inference no longer waits for the
+-  FIFO queue. First-use model downloads remain serialized FIFO tasks.
+-- Batch-export progress now reserves 10% of each current image for encoding,
+-  metadata writing, publication, and final rename. A fully rendered tile set no
+-  longer advances the batch to 100%; completion reaches 100% only after every
+-  image reports `ItemFinished`. The UI reports `Finalizing <filename>` during
+-  the reserved final phase.
+-- Canonical AI-mask source capture still uses the existing UI-thread GPU readback
+-  preflight before the queued download/inference phase begins.
+-- LibRaw decode is serialized. Opening a RAW can wait for a batch RAW decode that
+-  is already inside LibRaw, although it no longer waits for JPEG rendering or
+-  publication and no batch result mutates Develop state.
+-- Lensfun and ONNX native calls are cooperatively cancellable only between safe
+-  phases, not from inside the native call.
+-- Rust formatting and compilation must be verified with the pinned Rust 1.92.0
+-  toolchain on a machine with the project's native build prerequisites.
+-
+-## Android batch-export dialog sequencing fix
+-
+-Android batch export now enqueues with its task-details window closed. The FIFO runner opens the shared details state only after the batch task has actually started and its operation-specific `Exporting images` window exists. This prevents the export-settings confirmation window and a generic `Waiting for earlier background work…` task window from being painted together during the enqueue frame. The queued phase is now `Queued for batch export…`; when execution begins it changes to `Preparing batch export…`.
+-
+ 
+-## Android nested batch-export task fix
++python -m compileall -q tests scripts regression
++passed
+ 
+-The remaining Android double-dialog was not an enqueue-frame paint race. The
+-batch task opened each selected RAW and then called the normal single-image
+-`start_export()` path. That created a second `SingleExport` task behind the
+-already-running `LibraryBatchExport` task. Because the batch task was waiting
+-for that child export before it could finish, the child could never acquire the
+-FIFO slot and its generic `Exporting image` window remained on top with
+-`Waiting for earlier background work…`.
++AndroidManifest.xml and ic_notification.xml XML parsing
++passed
+ 
+-Android batch items now capture the export request and start the tiled export
+-worker directly under the existing batch task ID. No nested global task is
+-created. The operation therefore has one `Exporting images` dialog, one
+-cancellation token, and one FIFO owner for the complete batch.
+-
+-## Concurrent RAW-open/export GPU-residency fix
+-
+-Opening a RAW with range or promptable-object masks previously allocated the
+-normal Develop preview pipeline and then a second full preview pipeline solely
+-to reconstruct the canonical neutral mask source. A tiled export of the same
+-RAW could already hold enough resident GPU resources that this temporary second
+-pipeline crossed the process budget. The RAW decode completed, but Develop then
+-failed with `range-mask source setup failed: GPU pipelines already reserve ...`.
+-
+-The open worker now renders the canonical neutral mask source through the newly
+-created Develop preview pipeline itself. It uploads the composed inpainting
+-layer once, renders and reads the neutral sRGB source with zero local masks,
+-installs the missing range sources, uploads the actual masks, restores the
+-configured desktop display transform, and renders the edited preview. No second
+-GPU pipeline or second mask atlas is allocated. The same path is compiled for
+-Android and desktop.
+-
+-A source regression test verifies that the canonical-source block does not
+-construct another `RawGpuPipeline`, uses `preview_raw`, and applies the desktop
+-display transform only after the neutral canonical readback.
+-
+-## Android foreground-task mode
+-
+-Android now treats every queued, running, cancelling, or unacknowledged failed
+-long-running task as foreground-modal work. A full-content input shield is
+-installed above Library/Develop while a task exists, and operation progress
+-windows are promoted to egui's foreground order so their progress and Cancel or
+-Dismiss controls remain interactive. The system Back action and edit/sidecar
+-shortcuts are ignored during the modal interval.
+-
+-Android RAW-picker entry points also reject programmatic or same-frame open
+-requests while foreground work is active. This is a second line of defense in
+-case an input was already in flight when the task began. As a result, tapping
+-the same RAW while a library export owns the mobile GPU cannot allocate a second
+-preview pipeline or abort the export. The user remains on the current screen
+-until the operation finishes or is cancelled.
+-
+-All `Minimize` controls are now compiled only for non-Android targets. Desktop
+-retains the global queue, background operation model, and minimizable detail
+-windows. Android retains FIFO execution and cancellation but does not allow the
+-progress window to be hidden or the rest of the application to be used during
+-active work. Interactive AI inference still bypasses the FIFO slot as previously
+-requested, but its Android progress window is modal until inference completes.
+-
+-## Validation for the Android foreground-task follow-up
+-
+-Executed in this environment:
+-
+-```text
+-python scripts/check-source-tree.py
+-python scripts/check-source-connectivity.py
+-pytest -q
+-```
+-
+-Results:
+-
+-```text
+-source tree contains only connected modules and tracked shader sources
+-source tree contains only connected modules and tracked shader sources
+-393 passed
++javac -Xlint:all TaskNotificationController.java against local Android API stubs
++passed
+ ```
+ 
+-The Rust toolchain is still absent from this container, so `cargo fmt --check`,
+-`cargo check`, `cargo test`, and Clippy could not be executed. This is an
+-environment limitation; no Rust or native-library build was started.
+-
+-## Desktop top-bar progress alignment rollback
+-
+-The experimental desktop-only minimum-height expansion for the global task
+-control was removed. It could cause the wrapped top bar to consume most of the
+-window height on desktop, pushing the application content down and placing the
+-task control near the bottom edge. The control now uses the original intrinsic
+-horizontal row sizing again. Android layout is unchanged.
+-
+-A source regression test verifies that the task control does not force the top
+-bar height or use a full-width centered row.
+-
+-## Android task-progress notifications
++Additional static review performed:
+ 
+-Android now mirrors the active globally visible AuRaw task into one low-importance
+-ongoing notification. The notification uses the same stable task snapshot as the in-app
+-progress window, including task name, phase, determinate or indeterminate progress, detail text,
+-and the number of globally visible queued tasks. Local AI inference remains
+-hidden, preserving the existing download-only AI visibility rule. Updates are deduplicated
+-and capped at four per second so tile-level progress remains live without
+-flooding Android's notification manager.
++- Full diff and review-only diff regenerated from the source trees.
++- Added-line scan for `unsafe`, production `unwrap`/`expect`, `panic!`, `todo!`,
++  and `unimplemented!`; remaining unwraps are confined to unit-test assertions.
++- Modified-source duplicate-function and repeated-block scans.
++- Added-function reference-count scan for dead wrappers.
++- Rust delimiter-balance scan across the source tree.
++- Unified-diff whitespace check after generated artifacts and caches were removed.
+ 
+-The app declares `POST_NOTIFICATIONS` and requests it contextually when the
+-first long-running operation starts on Android 13 or newer. AuRaw records a
+-completed allow/deny decision so a denial does not produce a permission prompt
+-on every later export. Dismissing the system dialog without choosing an option
+-allows a future task to ask again. Android 8 through 12 post through the same
+-low-importance notification channel without a runtime permission.
++## Rust build status
+ 
+-The notification is ongoing, reopens AuRaw when tapped, is cleared when the
+-queue becomes idle or the Activity exits, and contains an explicit warning that
+-AuRaw must remain open in the foreground. The Android modal input shield shows
+-the same warning.
+-
+-This is intentionally only a progress mirror. No foreground service,
+-WorkManager worker, UIDT job, or process-independent task engine was added, so
+-leaving or closing the app can still suspend or stop the operation. The larger
+-service architecture remains documented in
+-`ANDROID_BACKGROUND_EXECUTION_RESEARCH.md`.
+-
+-## Validation for the Android notification follow-up
+-
+-Executed in this environment:
++The environment contains no `cargo`, `rustc`, `rustfmt`, or `clippy-driver`.
++Therefore these required commands could not be executed here:
+ 
+ ```text
+-python scripts/check-source-tree.py
+-python scripts/check-source-connectivity.py
+-pytest -q
++cargo fmt --check
++cargo check
++cargo test
++cargo clippy --all-targets --all-features
+ ```
+ 
+-Results:
++This is an environment/toolchain limitation. The build did not reach LibRaw,
++Lensfun, ONNX Runtime, or other native dependency discovery.
+ 
+-```text
+-source tree contains only connected modules and tracked shader sources
+-source tree contains only connected modules and tracked shader sources
+-399 passed
+-```
++## Remaining limitations
+ 
+-The Android Java compilation task was also attempted with
+-`./gradlew -p android :app:compileDebugJavaWithJavac -PaurawBuildRust=false`,
+-but the Gradle wrapper could not download Gradle 8.11.1 because this container
+-has no outbound DNS/network access. The Rust toolchain remains absent, so Cargo,
+-rustfmt, Rust tests, and Clippy could not be run.
++- Android notifications are only a progress mirror, not a foreground service.
++  Leaving or closing AuRaw can suspend or terminate the operation.
++- Android batch export still uses the Activity document bridge and temporarily
++  loads each batch RAW into application document state. The modal UI prevents
++  concurrent user opens, but this is not the same document isolation used by the
++  desktop batch worker.
++- Library AI-mask refresh still uses the main document loader and can temporarily
++  replace the loaded document while processing library items.
++- Model readiness is initially inferred from file existence. A corrupt existing
++  model may be discovered only by the worker, at which point it can transition
++  into a repair download outside the ideal preclassified path. A verified model
++  readiness cache would be needed to remove that edge case without hashing large
++  model files on the UI thread.
++- Canonical AI-mask source capture retains its existing UI-thread GPU readback
++  preflight.
++- Lensfun and ONNX calls are cancellable between safe phases, not from inside the
++  native call.
++- Concurrent AI inference and export can still contend for CPU/GPU resources.
+diff --git a/android/app/src/main/java/de/duecki/auraw/AuRawActivity.java b/android/app/src/main/java/de/duecki/auraw/AuRawActivity.java
+index b0da97b..aabc28d 100644
+--- a/android/app/src/main/java/de/duecki/auraw/AuRawActivity.java
++++ b/android/app/src/main/java/de/duecki/auraw/AuRawActivity.java
+@@ -35,6 +35,10 @@ public final class AuRawActivity extends NativeActivity {
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
++        // NativeActivity may start the Rust thread during creation. Install the
++        // notification bridge before the other delegates so early task updates
++        // cannot observe a partially initialized Activity.
++        taskNotificationController = new TaskNotificationController(this);
+         storageManager = new StorageManager(this, new StorageManager.Callbacks() {
+             @Override
+             public void onFilePicked(
+@@ -69,7 +73,6 @@ public final class AuRawActivity extends NativeActivity {
+             }
+         });
+         exportPublisher = new ExportPublisher(this, AuRawActivity::nativeOnExportPublished);
+-        taskNotificationController = new TaskNotificationController(this);
+ 
+         configureSystemBarsAndInsets();
+         storageManager.scavengeTemporaryRawFiles();
+@@ -174,7 +177,11 @@ public final class AuRawActivity extends NativeActivity {
+             int progressPercent,
+             int indeterminateFlag,
+             int queuedCount) {
+-        taskNotificationController.update(
++        TaskNotificationController controller = taskNotificationController;
++        if (controller == null) {
++            return;
++        }
++        controller.update(
+                 title,
+                 phase,
+                 detail,
+@@ -185,7 +192,10 @@ public final class AuRawActivity extends NativeActivity {
+ 
+     /** Removes AuRaw's task-progress notification after the queue becomes idle. */
+     public void clearBackgroundTaskNotification() {
+-        taskNotificationController.clear();
++        TaskNotificationController controller = taskNotificationController;
++        if (controller != null) {
++            controller.clear();
++        }
+     }
+ 
+     /** Copies text through Android's native clipboard service. */
+@@ -319,8 +329,10 @@ public final class AuRawActivity extends NativeActivity {
+     public void onRequestPermissionsResult(
+             int requestCode, String[] permissions, int[] grantResults) {
+         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+-        taskNotificationController.onRequestPermissionsResult(
+-                requestCode, permissions, grantResults);
++        if (taskNotificationController != null) {
++            taskNotificationController.onRequestPermissionsResult(
++                    requestCode, permissions, grantResults);
++        }
+         exportPublisher.onRequestPermissionsResult(requestCode, permissions, grantResults);
+     }
+ 
+diff --git a/src/android.rs b/src/android.rs
+index 0f3fee7..718578e 100644
+--- a/src/android.rs
++++ b/src/android.rs
+@@ -103,6 +103,7 @@ struct TaskNotificationPayload {
+ }
+ 
+ struct TaskNotificationState {
++    activity_key: usize,
+     payload: TaskNotificationPayload,
+     posted_at: Instant,
+ }
+@@ -138,6 +139,12 @@ pub fn install_context(context: &eframe::egui::Context) {
+     if let Ok(mut installed) = EGUI_CONTEXT.lock() {
+         *installed = Some(context.clone());
+     }
++    // A newly created NativeActivity owns a new Java notification controller.
++    // Do not let a deduplication record from the previous Activity suppress the
++    // first notification posted by this one.
++    if let Ok(mut notification) = TASK_NOTIFICATION_STATE.lock() {
++        *notification = None;
++    }
+ }
+ 
+ pub fn set_back_navigation_active(active: bool) {
+@@ -860,6 +867,7 @@ pub fn update_background_task_notification(
+     indeterminate: bool,
+     queued_count: usize,
+ ) -> Result<(), String> {
++    let activity_key = app.activity_as_ptr() as usize;
+     let payload = TaskNotificationPayload {
+         title: title.to_owned(),
+         phase: phase.to_owned(),
+@@ -869,7 +877,9 @@ pub fn update_background_task_notification(
+         queued_count: i32::try_from(queued_count).unwrap_or(i32::MAX),
+     };
+     if let Ok(current) = TASK_NOTIFICATION_STATE.lock() {
+-        if let Some(current) = current.as_ref() {
++        if let Some(current) = current.as_ref().filter(|current| {
++            current.activity_key == activity_key
++        }) {
+             if current.payload == payload {
+                 return Ok(());
+             }
+@@ -908,6 +918,7 @@ pub fn update_background_task_notification(
+ 
+     if let Ok(mut current) = TASK_NOTIFICATION_STATE.lock() {
+         *current = Some(TaskNotificationState {
++            activity_key,
+             payload,
+             posted_at: Instant::now(),
+         });
+diff --git a/src/app/background_task_runtime.rs b/src/app/background_task_runtime.rs
+index 5cab6ac..c5548ac 100644
+--- a/src/app/background_task_runtime.rs
++++ b/src/app/background_task_runtime.rs
+@@ -41,8 +41,7 @@ impl AurawApp {
+             return;
+         };
+         let Some(action) = self.background_actions.remove(&id) else {
+-            self.background_tasks
+-                .fail(id, "The queued background action was unavailable.");
++            self.fail_background_task(id, "The queued background action was unavailable.");
+             return;
+         };
+ 
+@@ -66,68 +65,11 @@ impl AurawApp {
+     }
+ 
+     fn start_export_task(&mut self, id: TaskId, request: ExportTaskRequest) {
+-        let ExportTaskRequest {
+-            device,
+-            queue,
+-            raw,
+-            geometry,
+-            exposure,
+-            masks,
+-            inpaint,
+-            path,
+-            format,
+-            settings,
+-            metadata,
+-            display_name: _,
+-        } = request;
+         let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
+             self.fail_background_task(id, "The export cancellation token was unavailable.");
+             return;
+         };
+-        let receiver = match format {
+-            ExportFormat::Png => spawn_tiled_png_export(
+-                device,
+-                queue,
+-                raw,
+-                geometry,
+-                exposure,
+-                masks,
+-                inpaint,
+-                path,
+-                TileSpec::default(),
+-                settings,
+-                metadata,
+-                Arc::clone(&cancellation),
+-            ),
+-            ExportFormat::Jpeg => spawn_tiled_jpeg_export(
+-                device,
+-                queue,
+-                raw,
+-                geometry,
+-                exposure,
+-                masks,
+-                inpaint,
+-                path,
+-                TileSpec::default(),
+-                settings,
+-                metadata,
+-                Arc::clone(&cancellation),
+-            ),
+-            ExportFormat::Tiff => spawn_tiled_tiff_export(
+-                device,
+-                queue,
+-                raw,
+-                geometry,
+-                exposure,
+-                masks,
+-                inpaint,
+-                path,
+-                TileSpec::default(),
+-                settings,
+-                metadata,
+-                cancellation,
+-            ),
+-        };
++        let receiver = spawn_export_request(request, cancellation);
+         self.export_receiver = Some(receiver);
+         self.export_progress = Some((0, 0));
+         self.export_task_id = Some(id);
+@@ -368,8 +310,7 @@ impl AurawApp {
+         if !self.has_global_background_tasks() {
+             return;
+         }
+-        let current = self.global_current_background_task();
+-        let queued = self.global_background_queued_count();
++        let (current, queued) = self.global_primary_task_and_waiting_count();
+         let compact = cfg!(target_os = "android") || ui.available_width() < 420.0;
+         let response = ui
+             .horizontal(|ui| {
+@@ -482,16 +423,16 @@ impl AurawApp {
+                 total,
+                 unit,
+             } => {
+-                let fraction = if *total == 0 {
+-                    0.0
++                if *total == 0 {
++                    egui::ProgressBar::new(0.0).animate(true)
+                 } else {
+-                    (*completed as f32 / *total as f32).clamp(0.0, 1.0)
+-                };
+-                let text = unit.as_deref().map_or_else(
+-                    || format!("{completed}/{total}"),
+-                    |unit| format!("{completed}/{total} {unit}"),
+-                );
+-                egui::ProgressBar::new(fraction).text(text)
++                    let fraction = (*completed as f32 / *total as f32).clamp(0.0, 1.0);
++                    let text = unit.as_deref().map_or_else(
++                        || format!("{completed}/{total}"),
++                        |unit| format!("{completed}/{total} {unit}"),
++                    );
++                    egui::ProgressBar::new(fraction).text(text)
++                }
+             }
+         }
+     }
+@@ -537,6 +478,7 @@ impl AurawApp {
+                 TaskKind::Inpainting { .. } => "Erasing selection",
+                 TaskKind::LibraryAiMaskRefresh => "Regenerating AI masks",
+             };
++            #[cfg(not(target_os = "android"))]
+             let mut minimize = false;
+             let mut cancel = false;
+             let mut dismiss = false;
+@@ -581,6 +523,7 @@ impl AurawApp {
+                         }
+                     });
+                 });
++            #[cfg(not(target_os = "android"))]
+             if minimize {
+                 self.set_background_task_details_open(task.id, false);
+             }
+@@ -598,6 +541,7 @@ impl AurawApp {
+             .is_some_and(|id| self.background_task_details_open(id))
+     }
+ 
++    #[cfg(not(target_os = "android"))]
+     pub(crate) fn minimize_library_batch_export_progress(&mut self) {
+         if let Some(id) = self.library_batch_export_task_id {
+             self.set_background_task_details_open(id, false);
+@@ -609,6 +553,7 @@ impl AurawApp {
+             .is_some_and(|id| self.background_task_details_open(id))
+     }
+ 
++    #[cfg(not(target_os = "android"))]
+     pub(crate) fn minimize_library_ai_mask_refresh_progress(&mut self) {
+         if let Some(id) = self.library_ai_mask_refresh_task_id {
+             self.set_background_task_details_open(id, false);
+@@ -629,20 +574,9 @@ impl AurawApp {
+         self.background_tasks.global_snapshots()
+     }
+ 
+-    pub(crate) fn current_background_task(&self) -> Option<TaskSnapshot> {
+-        self.background_tasks.current_snapshot()
+-    }
+-
+-    pub(crate) fn global_current_background_task(&self) -> Option<TaskSnapshot> {
+-        self.background_tasks.global_current_snapshot()
+-    }
+-
+-    pub(crate) fn background_queued_count(&self) -> usize {
+-        self.background_tasks.queued_count()
+-    }
+-
+-    pub(crate) fn global_background_queued_count(&self) -> usize {
+-        self.background_tasks.global_queued_count()
++    fn global_primary_task_and_waiting_count(&self) -> (Option<TaskSnapshot>, usize) {
++        self.background_tasks
++            .global_primary_snapshot_and_waiting_count()
+     }
+ 
+     pub(crate) fn has_background_tasks(&self) -> bool {
+@@ -651,13 +585,9 @@ impl AurawApp {
+ 
+     #[cfg(target_os = "android")]
+     pub(crate) fn sync_android_task_notification(&self) {
+-        let snapshots = self.global_background_task_snapshots();
+-        let active = snapshots
+-            .iter()
+-            .find(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling))
+-            .or_else(|| snapshots.iter().find(|task| task.status == TaskStatus::Queued));
++        let (task, waiting_count) = self.global_primary_task_and_waiting_count();
+ 
+-        let Some(task) = active else {
++        let Some(task) = task else {
+             if let Err(error) =
+                 crate::android::clear_background_task_notification(&self.android_app)
+             {
+@@ -689,7 +619,7 @@ impl AurawApp {
+             task.progress.detail.as_deref(),
+             progress_percent,
+             indeterminate,
+-            self.global_background_queued_count(),
++            waiting_count,
+         ) {
+             log::warn!("{error}");
+         }
+@@ -945,13 +875,14 @@ impl AurawApp {
+             .background_task_snapshots()
+             .into_iter()
+             .filter(|task| {
+-                matches!(
+-                    task.kind,
+-                    TaskKind::LensCorrection { .. }
+-                        | TaskKind::SubjectMask { .. }
+-                        | TaskKind::ObjectMask { .. }
+-                        | TaskKind::Inpainting { .. }
+-                )
++                task.status != TaskStatus::Failed
++                    && matches!(
++                        task.kind,
++                        TaskKind::LensCorrection { .. }
++                            | TaskKind::SubjectMask { .. }
++                            | TaskKind::ObjectMask { .. }
++                            | TaskKind::Inpainting { .. }
++                    )
+             })
+             .map(|task| task.id)
+             .collect::<Vec<_>>();
+@@ -965,12 +896,17 @@ impl AurawApp {
+         let stale = self
+             .background_task_snapshots()
+             .into_iter()
+-            .filter(|task| match task.kind {
+-                TaskKind::LensCorrection { document_id, .. }
+-                | TaskKind::SubjectMask { document_id, .. }
+-                | TaskKind::ObjectMask { document_id, .. }
+-                | TaskKind::Inpainting { document_id, .. } => document_id != current_document,
+-                _ => false,
++            .filter(|task| {
++                task.status != TaskStatus::Failed
++                    && match task.kind {
++                        TaskKind::LensCorrection { document_id, .. }
++                        | TaskKind::SubjectMask { document_id, .. }
++                        | TaskKind::ObjectMask { document_id, .. }
++                        | TaskKind::Inpainting { document_id, .. } => {
++                            document_id != current_document
++                        }
++                        _ => false,
++                    }
+             })
+             .map(|task| task.id)
+             .collect::<Vec<_>>();
+diff --git a/src/app/background_tasks.rs b/src/app/background_tasks.rs
+index 5bd17e2..a5dd577 100644
+--- a/src/app/background_tasks.rs
++++ b/src/app/background_tasks.rs
+@@ -154,12 +154,14 @@ pub(crate) struct BackgroundTaskManager {
+ }
+ 
+ impl BackgroundTaskManager {
+-    pub(crate) fn enqueue(
++    fn insert_task(
+         &mut self,
+         kind: TaskKind,
+         name: impl Into<String>,
++        status: TaskStatus,
+         initial_progress: TaskProgress,
+         details_open: bool,
++        global_visible: bool,
+     ) -> TaskId {
+         self.next_id = self.next_id.wrapping_add(1).max(1);
+         let id = TaskId(self.next_id);
+@@ -167,13 +169,31 @@ impl BackgroundTaskManager {
+             id,
+             kind,
+             name: name.into(),
+-            status: TaskStatus::Queued,
++            status,
+             progress: initial_progress,
+             error: None,
+             details_open,
+-            global_visible: true,
++            global_visible,
+             cancellation: Arc::new(AtomicBool::new(false)),
+         });
++        id
++    }
++
++    pub(crate) fn enqueue(
++        &mut self,
++        kind: TaskKind,
++        name: impl Into<String>,
++        initial_progress: TaskProgress,
++        details_open: bool,
++    ) -> TaskId {
++        let id = self.insert_task(
++            kind,
++            name,
++            TaskStatus::Queued,
++            initial_progress,
++            details_open,
++            true,
++        );
+         self.queue.push_back(id);
+         id
+     }
+@@ -188,20 +208,14 @@ impl BackgroundTaskManager {
+         initial_progress: TaskProgress,
+         details_open: bool,
+     ) -> TaskId {
+-        self.next_id = self.next_id.wrapping_add(1).max(1);
+-        let id = TaskId(self.next_id);
+-        self.tasks.push(BackgroundTask {
+-            id,
++        self.insert_task(
+             kind,
+-            name: name.into(),
+-            status: TaskStatus::Running,
+-            progress: initial_progress,
+-            error: None,
++            name,
++            TaskStatus::Running,
++            initial_progress,
+             details_open,
+-            global_visible: false,
+-            cancellation: Arc::new(AtomicBool::new(false)),
+-        });
+-        id
++            false,
++        )
+     }
+ 
+     pub(crate) fn enqueue_coalesced_lens(
+@@ -297,69 +311,90 @@ impl BackgroundTaskManager {
+         self.current
+     }
+ 
+-    pub(crate) fn current_snapshot(&self) -> Option<TaskSnapshot> {
+-        self.current.and_then(|id| self.snapshot(id))
++    fn active_task(&self, global_only: bool) -> Option<&BackgroundTask> {
++        self.current
++            .and_then(|id| self.task(id))
++            .filter(|task| !global_only || task.global_visible)
++            .or_else(|| {
++                self.tasks.iter().find(|task| {
++                    (!global_only || task.global_visible)
++                        && matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
++                        && !self.queue.contains(&task.id)
++                })
++            })
+     }
+ 
+     pub(crate) fn global_current_snapshot(&self) -> Option<TaskSnapshot> {
+-        self.current
+-            .and_then(|id| self.task(id))
+-            .filter(|task| task.global_visible)
+-            .map(Self::snapshot_from_task)
++        self.active_task(true).map(Self::snapshot_from_task)
++    }
++
++    pub(crate) fn global_primary_snapshot_and_waiting_count(
++        &self,
++    ) -> (Option<TaskSnapshot>, usize) {
++        let primary = self.active_task(true).or_else(|| {
++            self.queue.iter().find_map(|id| {
++                self.task(*id).filter(|task| {
++                    task.global_visible && task.status == TaskStatus::Queued
++                })
++            })
++        });
++        let displayed_queued = if primary.is_some_and(|task| task.status == TaskStatus::Queued) {
++            1
++        } else {
++            0
++        };
++        let waiting = self.global_queued_count().saturating_sub(displayed_queued);
++        (primary.map(Self::snapshot_from_task), waiting)
+     }
+ 
+     pub(crate) fn snapshot(&self, id: TaskId) -> Option<TaskSnapshot> {
+         self.task(id).map(Self::snapshot_from_task)
+     }
+ 
+-    pub(crate) fn snapshots(&self) -> Vec<TaskSnapshot> {
++    fn ordered_snapshots(&self, global_only: bool) -> Vec<TaskSnapshot> {
+         let mut snapshots = Vec::new();
+-        if let Some(current) = self.current.and_then(|id| self.snapshot(id)) {
+-            snapshots.push(current);
+-        }
+-        for id in &self.queue {
+-            if let Some(snapshot) = self.snapshot(*id) {
+-                snapshots.push(snapshot);
+-            }
+-        }
++        let active_id = self.active_task(global_only).map(|active| {
++            snapshots.push(Self::snapshot_from_task(active));
++            active.id
++        });
+         snapshots.extend(
+             self.tasks
+                 .iter()
+                 .filter(|task| {
+-                    matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
+-                        && self.current != Some(task.id)
++                    (!global_only || task.global_visible)
++                        && matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
++                        && Some(task.id) != active_id
+                         && !self.queue.contains(&task.id)
+                 })
+                 .map(Self::snapshot_from_task),
+         );
+-        snapshots.extend(
+-            self.tasks
+-                .iter()
+-                .filter(|task| task.status == TaskStatus::Failed)
+-                .map(Self::snapshot_from_task),
+-        );
+-        snapshots
+-    }
+-
+-    pub(crate) fn global_snapshots(&self) -> Vec<TaskSnapshot> {
+-        let mut snapshots = Vec::new();
+-        if let Some(current) = self.global_current_snapshot() {
+-            snapshots.push(current);
+-        }
+         for id in &self.queue {
+-            if let Some(task) = self.task(*id).filter(|task| task.global_visible) {
++            if let Some(task) = self
++                .task(*id)
++                .filter(|task| !global_only || task.global_visible)
++            {
+                 snapshots.push(Self::snapshot_from_task(task));
+             }
+         }
+         snapshots.extend(
+             self.tasks
+                 .iter()
+-                .filter(|task| task.status == TaskStatus::Failed && task.global_visible)
++                .filter(|task| {
++                    task.status == TaskStatus::Failed && (!global_only || task.global_visible)
++                })
+                 .map(Self::snapshot_from_task),
+         );
+         snapshots
+     }
+ 
++    pub(crate) fn snapshots(&self) -> Vec<TaskSnapshot> {
++        self.ordered_snapshots(false)
++    }
++
++    pub(crate) fn global_snapshots(&self) -> Vec<TaskSnapshot> {
++        self.ordered_snapshots(true)
++    }
++
+     pub(crate) fn queued_count(&self) -> usize {
+         self.queue
+             .iter()
+@@ -390,12 +425,16 @@ impl BackgroundTaskManager {
+     }
+ 
+     pub(crate) fn has_global_visible_tasks(&self) -> bool {
+-        self.global_current_snapshot().is_some()
+-            || self.global_queued_count() > 0
+-            || self
+-                .tasks
+-                .iter()
+-                .any(|task| task.status == TaskStatus::Failed && task.global_visible)
++        self.tasks.iter().any(|task| {
++            task.global_visible
++                && matches!(
++                    task.status,
++                    TaskStatus::Queued
++                        | TaskStatus::Running
++                        | TaskStatus::Cancelling
++                        | TaskStatus::Failed
++                )
++        })
+     }
+ 
+     pub(crate) fn has_failures(&self) -> bool {
+@@ -786,6 +825,40 @@ mod tests {
+         assert_eq!(manager.snapshot(id).unwrap().status, TaskStatus::Cancelling);
+     }
+ 
++    #[test]
++    fn detached_visible_task_remains_in_global_snapshots() {
++        let mut manager = BackgroundTaskManager::default();
++        let detached = queued(&mut manager, "detached");
++        assert_eq!(manager.start_next(), Some(detached));
++        assert!(manager.release_current(detached));
++        assert!(manager.has_global_visible_tasks());
++        assert_eq!(manager.global_current_snapshot().unwrap().id, detached);
++        assert_eq!(manager.global_snapshots().len(), 1);
++        assert_eq!(manager.global_snapshots()[0].id, detached);
++    }
++
++    #[test]
++    fn global_waiting_count_excludes_the_displayed_queued_task() {
++        let mut manager = BackgroundTaskManager::default();
++        let first = queued(&mut manager, "first");
++        let _second = queued(&mut manager, "second");
++        let (primary, waiting) = manager.global_primary_snapshot_and_waiting_count();
++        assert_eq!(primary.unwrap().id, first);
++        assert_eq!(waiting, 1);
++    }
++
++    #[test]
++    fn global_waiting_count_includes_all_tasks_after_the_running_task() {
++        let mut manager = BackgroundTaskManager::default();
++        let first = queued(&mut manager, "first");
++        let _second = queued(&mut manager, "second");
++        let _third = queued(&mut manager, "third");
++        assert_eq!(manager.start_next(), Some(first));
++        let (primary, waiting) = manager.global_primary_snapshot_and_waiting_count();
++        assert_eq!(primary.unwrap().id, first);
++        assert_eq!(waiting, 2);
++    }
++
+     #[test]
+     fn hidden_tasks_are_excluded_from_global_task_ui() {
+         let mut manager = BackgroundTaskManager::default();
+@@ -797,6 +870,9 @@ mod tests {
+         assert!(manager.global_current_snapshot().is_none());
+         assert_eq!(manager.global_snapshots().len(), 1);
+         assert_eq!(manager.global_snapshots()[0].id, visible);
++        let (primary, waiting) = manager.global_primary_snapshot_and_waiting_count();
++        assert_eq!(primary.unwrap().id, visible);
++        assert_eq!(waiting, 0);
+     }
+ 
+ }
+diff --git a/src/app/eframe_impl.rs b/src/app/eframe_impl.rs
+index 357204c..9d5a5b6 100644
+--- a/src/app/eframe_impl.rs
++++ b/src/app/eframe_impl.rs
+@@ -268,7 +268,6 @@ impl eframe::App for AurawApp {
+     }
+ }
+ 
+-
+ #[cfg(target_os = "android")]
+ fn show_android_foreground_task_blocker(ctx: &egui::Context) {
+     let content_rect = ctx.content_rect();
+diff --git a/src/app/inpainting.rs b/src/app/inpainting.rs
+index 741ec07..3362027 100644
+--- a/src/app/inpainting.rs
++++ b/src/app/inpainting.rs
+@@ -509,6 +509,7 @@ impl AurawApp {
+                 .inpaint_task_id
+                 .is_some_and(|id| self.background_task_details_open(id))
+         {
++            #[cfg(not(target_os = "android"))]
+             let mut minimize = false;
+             let mut cancel = false;
+             crate::ui::responsive_popup(egui::Window::new("Erasing selection"), ctx, 420.0)
+@@ -546,6 +547,7 @@ impl AurawApp {
+                     });
+                 });
+             if let Some(task_id) = self.inpaint_task_id {
++                #[cfg(not(target_os = "android"))]
+                 if minimize {
+                     self.set_background_task_details_open(task_id, false);
+                 }
+diff --git a/src/app/lifecycle.rs b/src/app/lifecycle.rs
+index 7af686e..1819326 100644
+--- a/src/app/lifecycle.rs
++++ b/src/app/lifecycle.rs
+@@ -936,6 +936,15 @@ impl AurawApp {
+     ) {
+         #[cfg(target_os = "android")]
+         let _ = frame;
++        #[cfg(target_os = "android")]
++        if self.android_foreground_task_active() {
++            self.notice = Some(
++                "Wait for the current foreground operation to finish before changing camera profile."
++                    .to_owned(),
++            );
++            self.egui_ctx.request_repaint();
++            return;
++        }
+         if self.load_receiver.is_some() {
+             self.notice = Some(
+                 "Wait for the current RAW load to finish before changing camera profile."
+@@ -2287,11 +2296,14 @@ impl AurawApp {
+                 crate::android::PickerResult::Picked(document) => {
+                     self.library.refresh(&self.egui_ctx);
+                     let batch_owned_open = self.android_batch_load_pending;
++                    let profile_reload_owned_open = self.pending_android_profile_reload.is_some();
++                    let library_refresh_owned_open = !batch_owned_open
++                        && !profile_reload_owned_open
++                        && self.library_ai_mask_refresh.is_some();
+                     let keep_library_for_profile_reload =
+-                        self.pending_android_profile_reload.is_some()
+-                            && self.active_tab == AppTab::Library;
++                        profile_reload_owned_open && self.active_tab == AppTab::Library;
+                     self.active_tab = if batch_owned_open
+-                        || self.library_ai_mask_refresh.is_some()
++                        || library_refresh_owned_open
+                         || keep_library_for_profile_reload
+                     {
+                         AppTab::Library
+@@ -2325,6 +2337,23 @@ impl AurawApp {
+                             document.raw_fd_guard,
+                         );
+                     }
++
++                    // `open_path_labeled*` reports setup failures synchronously by
++                    // leaving `load_receiver` empty. Route that failure back to the
++                    // internal owner immediately; otherwise Android batch export or
++                    // library AI refresh would wait forever for a load event that can
++                    // never arrive.
++                    if self.load_receiver.is_none() {
++                        let error = self.notice.clone().unwrap_or_else(|| {
++                            "The RAW decode worker could not be started.".to_owned()
++                        });
++                        if batch_owned_open {
++                            self.android_batch_load_pending = false;
++                            self.complete_android_library_batch_export_item(Err(error));
++                        } else if library_refresh_owned_open {
++                            self.complete_android_library_ai_mask_open_failure(error, frame);
++                        }
++                    }
+                 }
+                 crate::android::PickerResult::BatchImported {
+                     imported,
+@@ -2519,17 +2548,19 @@ impl AurawApp {
+                 #[cfg(target_os = "android")]
+                 {
+                     if self.lens_correction.applied {
+-                        self.lens_corrected_preview_cache =
+-                            self.lens_correction.selected_lens().map(|selection| {
+-                                (
+-                                    selection,
+-                                    self.preview_quality,
+-                                    Arc::clone(self.loaded_raw.as_ref().expect("loaded RAW set")),
+-                                    Arc::clone(
+-                                        self.preview_raw.as_ref().expect("preview RAW set"),
+-                                    ),
+-                                )
+-                            });
++                        self.lens_corrected_preview_cache = match (
++                            self.lens_correction.selected_lens(),
++                            self.loaded_raw.as_ref(),
++                            self.preview_raw.as_ref(),
++                        ) {
++                            (Some(selection), Some(full_raw), Some(preview_raw)) => Some((
++                                selection,
++                                self.preview_quality,
++                                Arc::clone(full_raw),
++                                Arc::clone(preview_raw),
++                            )),
++                            _ => None,
++                        };
+                         self.lens_original_preview_cache = None;
+                     } else {
+                         self.lens_original_preview_cache = self
+diff --git a/src/app/masks_ai.rs b/src/app/masks_ai.rs
+index d7a8ddd..7d96b2a 100644
+--- a/src/app/masks_ai.rs
++++ b/src/app/masks_ai.rs
+@@ -1165,8 +1165,8 @@ impl AurawApp {
+             let message = error_message
+                 .unwrap_or_else(|| "Object selection did not produce a mask.".to_owned());
+             self.notice = Some(message.clone());
+-            self.object_error_dialog = Some(message.clone());
+             if failed_during_inference {
++                self.object_error_dialog = Some(message);
+                 self.finish_background_task(task_id);
+             } else {
+                 self.fail_background_task(task_id, message);
+@@ -1443,6 +1443,7 @@ impl AurawApp {
+                 .subject_task_id
+                 .is_some_and(|id| self.background_task_details_open(id))
+         {
++            #[cfg(not(target_os = "android"))]
+             let mut minimize = false;
+             let mut cancel = false;
+             crate::ui::responsive_popup(egui::Window::new("Preparing subject mask"), ctx, 420.0)
+@@ -1480,6 +1481,7 @@ impl AurawApp {
+                     });
+                 });
+             if let Some(task_id) = self.subject_task_id {
++                #[cfg(not(target_os = "android"))]
+                 if minimize {
+                     self.set_background_task_details_open(task_id, false);
+                 }
+@@ -1551,6 +1553,7 @@ impl AurawApp {
+                 .object_task_id
+                 .is_some_and(|id| self.background_task_details_open(id))
+         {
++            #[cfg(not(target_os = "android"))]
+             let mut minimize = false;
+             let mut cancel = false;
+             crate::ui::responsive_popup(egui::Window::new("Preparing object mask"), ctx, 420.0)
+@@ -1592,6 +1595,7 @@ impl AurawApp {
+                     });
+                 });
+             if let Some(task_id) = self.object_task_id {
++                #[cfg(not(target_os = "android"))]
+                 if minimize {
+                     self.set_background_task_details_open(task_id, false);
+                 }
+diff --git a/src/app/processing_export.rs b/src/app/processing_export.rs
+index 05f0fc7..5826d1c 100644
+--- a/src/app/processing_export.rs
++++ b/src/app/processing_export.rs
+@@ -1,5 +1,5 @@
+-const BATCH_EXPORT_TILE_PHASE_WEIGHT: f32 = 0.90;
+-const BATCH_EXPORT_MAX_INCOMPLETE_FRACTION: f32 = 0.99;
++const EXPORT_TILE_PHASE_WEIGHT: f32 = 0.90;
++const EXPORT_MAX_INCOMPLETE_FRACTION: f32 = 0.99;
+ 
+ fn batch_export_overall_fraction(
+     completed: usize,
+@@ -26,13 +26,13 @@ fn batch_export_overall_fraction(
+                 })
+             })
+             .unwrap_or(0.0)
+-            * BATCH_EXPORT_TILE_PHASE_WEIGHT
++            * EXPORT_TILE_PHASE_WEIGHT
+     } else {
+         0.0
+     };
+ 
+     ((completed as f32 + current_fraction) / total as f32)
+-        .clamp(0.0, BATCH_EXPORT_MAX_INCOMPLETE_FRACTION)
++        .clamp(0.0, EXPORT_MAX_INCOMPLETE_FRACTION)
+ }
+ 
+ fn aligned_detail_axis(
+@@ -138,6 +138,70 @@ fn zoom_detail_idle_delay() -> Duration {
+     Duration::from_millis(if cfg!(target_os = "android") { 220 } else { 140 })
+ }
+ 
++fn spawn_export_request(
++    request: ExportTaskRequest,
++    cancellation: Arc<std::sync::atomic::AtomicBool>,
++) -> mpsc::Receiver<ExportEvent> {
++    let ExportTaskRequest {
++        device,
++        queue,
++        raw,
++        geometry,
++        exposure,
++        masks,
++        inpaint,
++        path,
++        format,
++        settings,
++        metadata,
++        display_name: _,
++    } = request;
++    match format {
++        ExportFormat::Png => spawn_tiled_png_export(
++            device,
++            queue,
++            raw,
++            geometry,
++            exposure,
++            masks,
++            inpaint,
++            path,
++            TileSpec::default(),
++            settings,
++            metadata,
++            cancellation,
++        ),
++        ExportFormat::Jpeg => spawn_tiled_jpeg_export(
++            device,
++            queue,
++            raw,
++            geometry,
++            exposure,
++            masks,
++            inpaint,
++            path,
++            TileSpec::default(),
++            settings,
++            metadata,
++            cancellation,
++        ),
++        ExportFormat::Tiff => spawn_tiled_tiff_export(
++            device,
++            queue,
++            raw,
++            geometry,
++            exposure,
++            masks,
++            inpaint,
++            path,
++            TileSpec::default(),
++            settings,
++            metadata,
++            cancellation,
++        ),
++    }
++}
++
+ #[cfg(not(target_os = "android"))]
+ #[allow(clippy::too_many_arguments)]
+ fn spawn_desktop_library_batch_export(
+@@ -205,64 +269,8 @@ fn spawn_desktop_library_batch_export(
+                     }
+                 };
+ 
+-                let ExportTaskRequest {
+-                    device,
+-                    queue,
+-                    raw,
+-                    geometry,
+-                    exposure,
+-                    masks,
+-                    inpaint,
+-                    path,
+-                    format,
+-                    settings,
+-                    metadata,
+-                    display_name: _,
+-                } = request;
+-                let export_receiver = match format {
+-                    ExportFormat::Png => spawn_tiled_png_export(
+-                        device,
+-                        queue,
+-                        raw,
+-                        geometry,
+-                        exposure,
+-                        masks,
+-                        inpaint,
+-                        path,
+-                        TileSpec::default(),
+-                        settings,
+-                        metadata,
+-                        Arc::clone(&cancellation),
+-                    ),
+-                    ExportFormat::Jpeg => spawn_tiled_jpeg_export(
+-                        device,
+-                        queue,
+-                        raw,
+-                        geometry,
+-                        exposure,
+-                        masks,
+-                        inpaint,
+-                        path,
+-                        TileSpec::default(),
+-                        settings,
+-                        metadata,
+-                        Arc::clone(&cancellation),
+-                    ),
+-                    ExportFormat::Tiff => spawn_tiled_tiff_export(
+-                        device,
+-                        queue,
+-                        raw,
+-                        geometry,
+-                        exposure,
+-                        masks,
+-                        inpaint,
+-                        path,
+-                        TileSpec::default(),
+-                        settings,
+-                        metadata,
+-                        Arc::clone(&cancellation),
+-                    ),
+-                };
++                let export_receiver =
++                    spawn_export_request(request, Arc::clone(&cancellation));
+ 
+                 let mut item_result = Err("export worker stopped unexpectedly".to_owned());
+                 while let Ok(event) = export_receiver.recv() {
+@@ -528,19 +536,6 @@ impl AurawApp {
+     }
+ 
+     fn apply_pending_lens_correction(&mut self, frame: &eframe::Frame) {
+-        #[cfg(target_os = "android")]
+-        self.apply_pending_lens_correction_android(frame);
+-        #[cfg(not(target_os = "android"))]
+-        self.apply_pending_lens_correction_desktop(frame);
+-    }
+-
+-    #[cfg(target_os = "android")]
+-    fn apply_pending_lens_correction_android(&mut self, frame: &eframe::Frame) {
+-        self.queue_pending_lens_correction(frame);
+-    }
+-
+-    #[cfg(not(target_os = "android"))]
+-    fn apply_pending_lens_correction_desktop(&mut self, frame: &eframe::Frame) {
+         self.queue_pending_lens_correction(frame);
+     }
+ 
+@@ -572,6 +567,26 @@ impl AurawApp {
+             self.rehydrate_restored_mask_state();
+         }
+ 
++        #[cfg(target_os = "android")]
++        let cached_raws = match selection.as_ref() {
++            Some(requested) => self
++                .lens_corrected_preview_cache
++                .as_ref()
++                .filter(|(cached, quality, _, _)| {
++                    cached == requested && *quality == self.preview_quality
++                })
++                .map(|(_, _, full_raw, preview_raw)| {
++                    (Arc::clone(full_raw), Arc::clone(preview_raw))
++                }),
++            None => self
++                .lens_original_preview_cache
++                .as_ref()
++                .filter(|(quality, _)| *quality == self.preview_quality)
++                .map(|(_, preview_raw)| (Arc::clone(&original_raw), Arc::clone(preview_raw))),
++        };
++        #[cfg(not(target_os = "android"))]
++        let cached_raws = None;
++
+         let generation = self.lens_correction_generation;
+         let document_id = self.sidecar_generation;
+         let name = selection
+@@ -585,6 +600,7 @@ impl AurawApp {
+                 original_raw,
+                 selection,
+                 preview_quality: self.preview_quality,
++                cached_raws,
+             },
+             name,
+         );
+@@ -628,36 +644,44 @@ impl AurawApp {
+                         return Err("background task cancelled".to_owned());
+                     }
+                     let applied_label = request.selection.as_ref().map(LensfunLens::label);
+-                    let original_raw = Arc::clone(&request.original_raw);
+-                    let full_raw = if let Some(selection) = request.selection.as_ref() {
+-                        Arc::new(
+-                            apply_lensfun_correction(&original_raw, selection).map_err(
+-                                |error| {
+-                                    format!("Could not apply {}: {error:#}", selection.label())
+-                                },
+-                            )?,
+-                        )
++                    let (full_raw, preview_raw) = if let Some(cached_raws) = request.cached_raws {
++                        cached_raws
+                     } else {
+-                        original_raw
+-                    };
+-                    if cancellation.load(Ordering::Acquire) {
+-                        return Err("background task cancelled".to_owned());
+-                    }
+-                    let _ = sender.send(LensCorrectionEvent::Progress {
+-                        task_id: id,
+-                        document_id,
+-                        generation,
+-                        phase: "Building preview proxy…".to_owned(),
+-                    });
+-                    repaint.request_repaint();
+-                    let preview_spec = ProxySpec {
+-                        max_edge: request.preview_quality.proxy_edge(),
+-                    };
+-                    let preview_raw = if full_raw.width.max(full_raw.height) <= preview_spec.max_edge
+-                    {
+-                        Arc::clone(&full_raw)
+-                    } else {
+-                        Arc::new(build_proxy(&full_raw, preview_spec))
++                        let original_raw = Arc::clone(&request.original_raw);
++                        let full_raw = if let Some(selection) = request.selection.as_ref() {
++                            Arc::new(
++                                apply_lensfun_correction(&original_raw, selection).map_err(
++                                    |error| {
++                                        format!(
++                                            "Could not apply {}: {error:#}",
++                                            selection.label()
++                                        )
++                                    },
++                                )?,
++                            )
++                        } else {
++                            original_raw
++                        };
++                        if cancellation.load(Ordering::Acquire) {
++                            return Err("background task cancelled".to_owned());
++                        }
++                        let _ = sender.send(LensCorrectionEvent::Progress {
++                            task_id: id,
++                            document_id,
++                            generation,
++                            phase: "Building preview proxy…".to_owned(),
++                        });
++                        repaint.request_repaint();
++                        let preview_spec = ProxySpec {
++                            max_edge: request.preview_quality.proxy_edge(),
++                        };
++                        let preview_raw =
++                            if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
++                                Arc::clone(&full_raw)
++                            } else {
++                                Arc::new(build_proxy(&full_raw, preview_spec))
++                            };
++                        (full_raw, preview_raw)
+                     };
+                     if cancellation.load(Ordering::Acquire) {
+                         return Err("background task cancelled".to_owned());
+@@ -2268,16 +2292,21 @@ impl AurawApp {
+         self.export_progress
+     }
+ 
+-    #[cfg(not(target_os = "android"))]
+     pub(crate) fn library_batch_export_progress(&self) -> Option<(usize, usize)> {
+         self.library_batch_export
+             .as_ref()
+             .map(|batch| (batch.completed, batch.total))
+     }
+ 
+-    #[cfg(not(target_os = "android"))]
+     pub(crate) fn library_batch_export_tile_progress(&self) -> Option<(usize, usize)> {
+-        self.library_batch_export_tile_progress
++        #[cfg(not(target_os = "android"))]
++        {
++            self.library_batch_export_tile_progress
++        }
++        #[cfg(target_os = "android")]
++        {
++            self.export_progress
++        }
+     }
+ 
+     pub(crate) fn library_batch_export_overall_fraction(&self) -> Option<f32> {
+@@ -2291,43 +2320,35 @@ impl AurawApp {
+         })
+     }
+ 
+-    #[cfg(target_os = "android")]
+-    pub(crate) fn library_batch_export_progress(&self) -> Option<(usize, usize)> {
+-        self.library_batch_export
+-            .as_ref()
+-            .map(|batch| (batch.completed, batch.total))
+-    }
+-
+-    #[cfg(target_os = "android")]
+-    pub(crate) fn library_batch_export_tile_progress(&self) -> Option<(usize, usize)> {
+-        self.export_progress
+-    }
+-
+-    #[cfg(not(target_os = "android"))]
+     pub(crate) fn library_batch_export_status(
+         &self,
+     ) -> Option<(usize, usize, usize, Option<String>, bool)> {
+         self.library_batch_export.as_ref().map(|batch| {
+-            let failed = batch.failures.len();
+             let current = batch.current.as_ref().map(|job| {
+-                job.source
+-                    .file_name()
+-                    .and_then(|name| name.to_str())
+-                    .unwrap_or("image")
+-                    .to_owned()
++                #[cfg(not(target_os = "android"))]
++                {
++                    job.source
++                        .file_name()
++                        .and_then(|name| name.to_str())
++                        .unwrap_or("image")
++                        .to_owned()
++                }
++                #[cfg(target_os = "android")]
++                {
++                    job.display_name.clone()
++                }
+             });
+             (
+                 batch.completed,
+                 batch.total,
+-                failed,
++                batch.failures.len(),
+                 current,
+                 batch.cancel_requested,
+             )
+         })
+     }
+ 
+-    #[cfg(not(target_os = "android"))]
+-    pub(crate) fn cancel_library_batch_export(&mut self) {
++    fn request_library_batch_export_cancellation(&mut self) -> bool {
+         if let Some(task_id) = self.library_batch_export_task_id {
+             if !self.background_task_cancelled(task_id) {
+                 let _ = self.background_tasks.request_cancel(task_id);
+@@ -2336,40 +2357,21 @@ impl AurawApp {
+         if let Some(batch) = self.library_batch_export.as_mut() {
+             batch.cancel_requested = true;
+             batch.pending.clear();
++            batch.current.is_none()
++        } else {
++            false
+         }
+-        self.sync_library_batch_background_progress();
+     }
+ 
+-    #[cfg(target_os = "android")]
+-    pub(crate) fn library_batch_export_status(
+-        &self,
+-    ) -> Option<(usize, usize, usize, Option<String>, bool)> {
+-        self.library_batch_export.as_ref().map(|batch| {
+-            (
+-                batch.completed,
+-                batch.total,
+-                batch.failures.len(),
+-                batch.current.as_ref().map(|job| job.display_name.clone()),
+-                batch.cancel_requested,
+-            )
+-        })
++    #[cfg(not(target_os = "android"))]
++    pub(crate) fn cancel_library_batch_export(&mut self) {
++        self.request_library_batch_export_cancellation();
++        self.sync_library_batch_background_progress();
+     }
+ 
+     #[cfg(target_os = "android")]
+     pub(crate) fn cancel_library_batch_export(&mut self) {
+-        if let Some(task_id) = self.library_batch_export_task_id {
+-            if !self.background_task_cancelled(task_id) {
+-                let _ = self.background_tasks.request_cancel(task_id);
+-            }
+-        }
+-        let finish_now = if let Some(batch) = self.library_batch_export.as_mut() {
+-            batch.cancel_requested = true;
+-            batch.pending.clear();
+-            batch.current.is_none()
+-        } else {
+-            false
+-        };
+-        if finish_now {
++        if self.request_library_batch_export_cancellation() {
+             self.finish_library_batch_export();
+         }
+     }
+@@ -2483,6 +2485,13 @@ impl AurawApp {
+             return;
+         };
+ 
++        if batch.cancel_requested {
++            self.complete_android_library_batch_export_item(Err(
++                "batch export cancelled".to_owned(),
++            ));
++            return;
++        }
++
+         if !success {
+             let name = current.display_name.clone();
+             if let Some(batch) = self.library_batch_export.as_mut() {
+@@ -2546,6 +2555,16 @@ impl AurawApp {
+             if let Some(request) =
+                 self.capture_export_task_request(destination, frame, format)
+             {
++                // The batch item is fully captured now, and Android keeps the
++                // operation modal. Release the temporary Develop preview before
++                // the tiled export allocates its own GPU pipeline; retaining both
++                // can exceed the mobile residency budget even though the preview
++                // is not visible or interactive during the export.
++                if let Some(render_state) = frame.wgpu_render_state() {
++                    let mut renderer = render_state.renderer.write();
++                    drop(self.take_preview_pipeline_and_release_textures(&mut renderer));
++                }
++
+                 // The batch task already owns the global FIFO slot. Starting a
+                 // nested SingleExport task here would queue it behind its own
+                 // parent and show a second "waiting" dialog indefinitely.
+@@ -2622,32 +2641,48 @@ impl AurawApp {
+         }
+     }
+ 
+-    #[cfg(target_os = "android")]
+     fn finish_library_batch_export(&mut self) {
+         let Some(batch) = self.library_batch_export.take() else {
+             return;
+         };
++        #[cfg(not(target_os = "android"))]
++        {
++            self.library_batch_export_tile_progress = None;
++        }
++
+         let succeeded = batch.completed.saturating_sub(batch.failures.len());
+-        // Preserve the tab chosen while the export was running. In particular,
+-        // finishing a background export must not pull an Android user out of
+-        // Develop after they opened the exported RAW.
+-        self.notice = if batch.cancel_requested {
+-            Some(format!(
++        let mut message = if batch.cancel_requested {
++            format!(
+                 "Batch export cancelled after {succeeded} of {} images exported.",
+                 batch.total
+-            ))
++            )
+         } else if batch.failures.is_empty() {
+-            Some(format!(
+-                "Exported {succeeded} {} to Pictures/AuRaw.",
+-                if succeeded == 1 { "image" } else { "images" }
+-            ))
++            if cfg!(target_os = "android") {
++                format!(
++                    "Exported {succeeded} {} to Pictures/AuRaw.",
++                    if succeeded == 1 { "image" } else { "images" }
++                )
++            } else {
++                format!(
++                    "Exported {succeeded} {}.",
++                    if succeeded == 1 { "image" } else { "images" }
++                )
++            }
+         } else {
+-            Some(format!(
++            format!(
+                 "Exported {succeeded} of {} images. {}",
+                 batch.total,
+                 batch.failures.join(" · ")
+-            ))
++            )
+         };
++        if batch.cancel_requested && !batch.failures.is_empty() {
++            message.push_str(&format!(
++                " {} failed. {}",
++                batch.failures.len(),
++                batch.failures.join(" · ")
++            ));
++        }
++        self.notice = Some(message);
+         self.export_task_id = None;
+         if let Some(id) = self.library_batch_export_task_id.take() {
+             if batch.cancel_requested || batch.failures.is_empty() {
+@@ -2701,48 +2736,6 @@ impl AurawApp {
+         // consumes the document opened in Develop.
+     }
+ 
+-    #[cfg(not(target_os = "android"))]
+-    fn finish_library_batch_export(&mut self) {
+-        let Some(batch) = self.library_batch_export.take() else {
+-            return;
+-        };
+-        self.library_batch_export_tile_progress = None;
+-        let succeeded = batch.completed.saturating_sub(batch.failures.len());
+-        self.notice = if batch.cancel_requested {
+-            let mut message = format!(
+-                "Batch export cancelled after {succeeded} of {} images exported.",
+-                batch.total
+-            );
+-            if !batch.failures.is_empty() {
+-                message.push_str(&format!(
+-                    " {} failed. {}",
+-                    batch.failures.len(),
+-                    batch.failures.join(" · ")
+-                ));
+-            }
+-            Some(message)
+-        } else if batch.failures.is_empty() {
+-            Some(format!(
+-                "Exported {succeeded} {}.",
+-                if succeeded == 1 { "image" } else { "images" }
+-            ))
+-        } else {
+-            Some(format!(
+-                "Exported {succeeded} of {} images. {}",
+-                batch.total,
+-                batch.failures.join(" · ")
+-            ))
+-        };
+-        self.export_task_id = None;
+-        if let Some(id) = self.library_batch_export_task_id.take() {
+-            if batch.cancel_requested || batch.failures.is_empty() {
+-                self.finish_background_task(id);
+-            } else {
+-                self.fail_background_task(id, batch.failures.join(" · "));
+-            }
+-        }
+-    }
+-
+     #[cfg(target_os = "android")]
+     fn poll_android_export_publish(&mut self) {
+         while let Some(result) = crate::android::take_export_publish_result() {
+@@ -2889,11 +2882,20 @@ impl AurawApp {
+                         let progress = if total_tiles == 0 {
+                             TaskProgress::indeterminate("Preparing tiled export…")
+                         } else {
+-                            TaskProgress::fraction(
+-                                completed_tiles as f32 / total_tiles as f32,
+-                                format!("Rendering tile {completed_tiles}/{total_tiles}"),
+-                            )
+-                            .with_detail(format!("{completed_tiles}/{total_tiles} tiles"))
++                            // Tile completion covers rendering/readback only. Keep
++                            // the final encoding, metadata, publication, and rename
++                            // phase below 100% until the worker reports Finished.
++                            let tile_fraction =
++                                (completed_tiles as f32 / total_tiles as f32).clamp(0.0, 1.0);
++                            let fraction = (tile_fraction * EXPORT_TILE_PHASE_WEIGHT)
++                                .min(EXPORT_MAX_INCOMPLETE_FRACTION);
++                            let phase = if completed_tiles >= total_tiles {
++                                "Finalizing export…".to_owned()
++                            } else {
++                                format!("Rendering tile {completed_tiles}/{total_tiles}")
++                            };
++                            TaskProgress::fraction(fraction, phase)
++                                .with_detail(format!("{completed_tiles}/{total_tiles} tiles"))
+                         };
+                         self.update_background_progress(Some(id), progress);
+                     }
+@@ -3169,4 +3171,3 @@ mod batch_export_progress_tests {
+         assert!((progress - (1.0 / 3.0)).abs() < f32::EPSILON);
+     }
+ }
+-
+diff --git a/src/app.rs b/src/app.rs
+index 9c525a1..2454b3b 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -563,6 +563,7 @@ struct LensCorrectionTaskRequest {
+     original_raw: Arc<LoadedRaw>,
+     selection: Option<LensfunLens>,
+     preview_quality: PreviewQuality,
++    cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
+ }
+ 
+ struct SubjectMaskTaskRequest {
+diff --git a/src/pipeline/export.rs b/src/pipeline/export.rs
+index 1f4e524..3106f80 100644
+--- a/src/pipeline/export.rs
++++ b/src/pipeline/export.rs
+@@ -310,7 +310,7 @@ pub fn spawn_tiled_png_export(
+                     settings.checked_output_dimensions(geometry_width, geometry_height)?;
+                 let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
+                 let color = resolve_export_color(&settings)?;
+-                export_to_destination(&worker_path, |path| {
++                export_to_destination(&worker_path, &cancellation, |path| {
+                     export_tiled_png(
+                         ExportContext {
+                             device: &device,
+@@ -407,7 +407,7 @@ pub fn spawn_tiled_jpeg_export(
+                 let mut jpeg_settings = settings.clone();
+                 jpeg_settings.bit_depth = ExportBitDepth::Eight;
+                 let color = resolve_export_color(&jpeg_settings)?;
+-                export_to_destination(&worker_path, |path| {
++                export_to_destination(&worker_path, &cancellation, |path| {
+                     export_tiled_jpeg(
+                         ExportContext {
+                             device: &device,
+@@ -492,7 +492,7 @@ pub fn spawn_tiled_tiff_export(
+                     settings.checked_output_dimensions(geometry_width, geometry_height)?;
+                 let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
+                 let color = resolve_export_color(&settings)?;
+-                export_to_destination(&worker_path, |path| {
++                export_to_destination(&worker_path, &cancellation, |path| {
+                     export_tiled_tiff(
+                         ExportContext {
+                             device: &device,
+@@ -551,12 +551,18 @@ fn resolved_export_tile_spec(
+     bounded_tile_spec(tile_spec, source_width)
+ }
+ 
+-fn export_to_destination<F>(destination: &Path, export: F) -> Result<()>
++fn export_to_destination<F>(
++    destination: &Path,
++    cancellation: &AtomicBool,
++    export: F,
++) -> Result<()>
+ where
+     F: FnOnce(&Path) -> Result<()>,
+ {
++    ensure_export_not_cancelled(cancellation)?;
+     if is_direct_export_destination(destination) {
+-        return export(destination);
++        export(destination)?;
++        return ensure_export_not_cancelled(cancellation);
+     }
+ 
+     let temporary = temporary_export_path(destination)?;
+@@ -564,6 +570,10 @@ where
+         let _ = fs::remove_file(&temporary);
+         return Err(error);
+     }
++    if let Err(error) = ensure_export_not_cancelled(cancellation) {
++        let _ = fs::remove_file(&temporary);
++        return Err(error);
++    }
+     if let Err(error) = publish_completed_export(&temporary, destination) {
+         let _ = fs::remove_file(&temporary);
+         return Err(error);
+@@ -3451,11 +3461,13 @@ fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_heigh
+ mod tests {
+     use super::{
+         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
+-        encode_srgb_row_with_format, publish_completed_export, stitch_linear_tile_into_band,
+-        validate_export_dimensions, ExportMetadata, ExportResizeMode, ExportRowFormat,
++        encode_srgb_row_with_format, export_to_destination, publish_completed_export,
++        stitch_linear_tile_into_band, validate_export_dimensions, ExportMetadata,
++        ExportResizeMode, ExportRowFormat,
+         ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
+     };
+     use crate::pipeline::{ExportTile, GeometryTransform, IccOutputTransform};
++    use std::sync::atomic::{AtomicBool, Ordering};
+     use std::time::{SystemTime, UNIX_EPOCH};
+ 
+     #[test]
+@@ -3726,6 +3738,32 @@ mod tests {
+         assert!(encode_srgb_row(&[f32::NAN, 0.0, 0.0], &transform).is_err());
+     }
+ 
++    #[test]
++    fn cancelled_export_removes_temporary_output_before_publication() {
++        let nonce = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap()
++            .as_nanos();
++        let directory = std::env::temp_dir().join(format!(
++            "auraw-export-cancel-{}-{nonce}",
++            std::process::id()
++        ));
++        std::fs::create_dir_all(&directory).unwrap();
++        let destination = directory.join("photo.png");
++        let cancellation = AtomicBool::new(false);
++
++        let result = export_to_destination(&destination, &cancellation, |temporary| {
++            std::fs::write(temporary, b"complete but not published")?;
++            cancellation.store(true, Ordering::Release);
++            Ok(())
++        });
++
++        assert!(result.is_err());
++        assert!(!destination.exists());
++        assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++
+     #[test]
+     fn failed_export_publish_preserves_existing_destination() {
+         let nonce = SystemTime::now()
+diff --git a/src/ui/library.rs b/src/ui/library.rs
+index e10a63c..7b12f33 100644
+--- a/src/ui/library.rs
++++ b/src/ui/library.rs
+@@ -2276,6 +2276,97 @@ fn apply_library_adjustment_paste(
+         });
+ }
+ 
++fn show_library_batch_export_progress(ui: &mut Ui, app: &mut AurawApp) {
++    let mut cancel = false;
++    #[cfg(not(target_os = "android"))]
++    let mut minimize = false;
++
++    if let Some((completed, total, failed, current_name, cancelling)) =
++        app.library_batch_export_status()
++    {
++        if app.library_batch_export_progress_open() {
++            let exported = completed.saturating_sub(failed);
++            let overall_fraction = app
++                .library_batch_export_overall_fraction()
++                .unwrap_or(0.0);
++
++            crate::ui::responsive_popup(
++                egui::Window::new("Exporting images"),
++                ui.ctx(),
++                420.0,
++            )
++            .id(egui::Id::new("library-batch-export-progress-dialog"))
++            .collapsible(false)
++            .resizable(false)
++            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
++            .show(ui.ctx(), |ui| {
++                ui.label(
++                    egui::RichText::new(format!("{exported} / {total} exported")).strong(),
++                );
++                ui.add_space(6.0);
++                ui.add(
++                    egui::ProgressBar::new(overall_fraction)
++                        .show_percentage()
++                        .animate(!cancelling),
++                );
++                ui.add_space(6.0);
++
++                if let Some(name) = current_name.as_deref() {
++                    let phase = match app.library_batch_export_tile_progress() {
++                        Some((tiles_done, tiles_total))
++                            if tiles_total > 0 && tiles_done >= tiles_total =>
++                        {
++                            "Finalizing"
++                        }
++                        Some((_, tiles_total)) if tiles_total > 0 => "Exporting",
++                        _ => "Preparing",
++                    };
++                    ui.label(format!("{phase} {name}…"));
++                }
++                if failed > 0 {
++                    ui.label(
++                        egui::RichText::new(format!(
++                            "{failed} {} failed",
++                            if failed == 1 { "image" } else { "images" }
++                        ))
++                        .small()
++                        .color(ui.visuals().warn_fg_color),
++                    );
++                }
++                if cancelling {
++                    ui.label(
++                        egui::RichText::new("Cancelling after the current image finishes…")
++                            .small()
++                            .color(ui.visuals().weak_text_color()),
++                    );
++                }
++
++                ui.add_space(8.0);
++                ui.horizontal(|ui| {
++                    #[cfg(not(target_os = "android"))]
++                    if ui.button("Minimize").clicked() {
++                        minimize = true;
++                    }
++                    if ui
++                        .add_enabled(!cancelling, egui::Button::new("Cancel"))
++                        .clicked()
++                    {
++                        cancel = true;
++                    }
++                });
++            });
++        }
++    }
++
++    #[cfg(not(target_os = "android"))]
++    if minimize {
++        app.minimize_library_batch_export_progress();
++    }
++    if cancel {
++        app.cancel_library_batch_export();
++    }
++}
++
+ pub struct Library;
+ 
+ impl Library {
+@@ -3153,6 +3244,7 @@ impl Library {
+                 } else {
+                     (completed as f32 / total as f32).clamp(0.0, 1.0)
+                 };
++                #[cfg(not(target_os = "android"))]
+                 let mut minimize = false;
+                 let mut cancel = false;
+                 crate::ui::responsive_popup(
+@@ -3201,6 +3293,7 @@ impl Library {
+                         cancel = ui.button("Cancel").clicked();
+                     });
+                 });
++                #[cfg(not(target_os = "android"))]
+                 if minimize {
+                     app.minimize_library_ai_mask_refresh_progress();
+                 }
+@@ -3314,90 +3407,7 @@ impl Library {
+                 app.library.export_dialog = None;
+             }
+ 
+-            let mut cancel_batch_export = false;
+-            let mut minimize_batch_export = false;
+-            if let Some((completed, total, failed, current_name, cancelling)) =
+-                app.library_batch_export_status()
+-            {
+-                if app.library_batch_export_progress_open() {
+-                    let exported = completed.saturating_sub(failed);
+-                    let overall_fraction = app
+-                        .library_batch_export_overall_fraction()
+-                        .unwrap_or(0.0);
+-
+-                    crate::ui::responsive_popup(
+-                        egui::Window::new("Exporting images"),
+-                        ui.ctx(),
+-                        420.0,
+-                    )
+-                    .id(egui::Id::new("library-batch-export-progress-dialog"))
+-                    .collapsible(false)
+-                    .resizable(false)
+-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+-                    .show(ui.ctx(), |ui| {
+-                        ui.label(
+-                            egui::RichText::new(format!("{exported} / {total} exported")).strong(),
+-                        );
+-                        ui.add_space(6.0);
+-                        ui.add(
+-                            egui::ProgressBar::new(overall_fraction)
+-                                .show_percentage()
+-                                .animate(!cancelling),
+-                        );
+-                        ui.add_space(6.0);
+-
+-                        if let Some(name) = current_name.as_deref() {
+-                            let phase = match app.library_batch_export_tile_progress() {
+-                                Some((tiles_done, tiles_total))
+-                                    if tiles_total > 0 && tiles_done >= tiles_total =>
+-                                {
+-                                    "Finalizing"
+-                                }
+-                                Some((_, tiles_total)) if tiles_total > 0 => "Exporting",
+-                                _ => "Preparing",
+-                            };
+-                            ui.label(format!("{phase} {name}…"));
+-                        }
+-                        if failed > 0 {
+-                            ui.label(
+-                                egui::RichText::new(format!(
+-                                    "{failed} {} failed",
+-                                    if failed == 1 { "image" } else { "images" }
+-                                ))
+-                                .small()
+-                                .color(ui.visuals().warn_fg_color),
+-                            );
+-                        }
+-                        if cancelling {
+-                            ui.label(
+-                                egui::RichText::new("Cancelling after the current image finishes…")
+-                                    .small()
+-                                    .color(ui.visuals().weak_text_color()),
+-                            );
+-                        }
+-
+-                        ui.add_space(8.0);
+-                        ui.horizontal(|ui| {
+-                            #[cfg(not(target_os = "android"))]
+-                            if ui.button("Minimize").clicked() {
+-                                minimize_batch_export = true;
+-                            }
+-                            if ui
+-                                .add_enabled(!cancelling, egui::Button::new("Cancel"))
+-                                .clicked()
+-                            {
+-                                cancel_batch_export = true;
+-                            }
+-                        });
+-                    });
+-                }
+-            }
+-            if minimize_batch_export {
+-                app.minimize_library_batch_export_progress();
+-            }
+-            if cancel_batch_export {
+-                app.cancel_library_batch_export();
+-            }
++            show_library_batch_export_progress(ui, app);
+         }
+ 
+         #[cfg(target_os = "android")]
+@@ -3494,90 +3504,7 @@ impl Library {
+                 app.library.export_dialog = None;
+             }
+ 
+-            let mut cancel_batch_export = false;
+-            let mut minimize_batch_export = false;
+-            if let Some((completed, total, failed, current_name, cancelling)) =
+-                app.library_batch_export_status()
+-            {
+-                if app.library_batch_export_progress_open() {
+-                    let exported = completed.saturating_sub(failed);
+-                    let overall_fraction = app
+-                        .library_batch_export_overall_fraction()
+-                        .unwrap_or(0.0);
+-
+-                    crate::ui::responsive_popup(
+-                        egui::Window::new("Exporting images"),
+-                        ui.ctx(),
+-                        420.0,
+-                    )
+-                    .id(egui::Id::new(
+-                        "android-library-batch-export-progress-dialog",
+-                    ))
+-                    .collapsible(false)
+-                    .resizable(false)
+-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+-                    .show(ui.ctx(), |ui| {
+-                        ui.label(
+-                            egui::RichText::new(format!("{exported} / {total} exported")).strong(),
+-                        );
+-                        ui.add_space(6.0);
+-                        ui.add(
+-                            egui::ProgressBar::new(overall_fraction)
+-                                .show_percentage()
+-                                .animate(!cancelling),
+-                        );
+-                        ui.add_space(6.0);
+-                        if let Some(name) = current_name.as_deref() {
+-                            let phase = match app.library_batch_export_tile_progress() {
+-                                Some((tiles_done, tiles_total))
+-                                    if tiles_total > 0 && tiles_done >= tiles_total =>
+-                                {
+-                                    "Finalizing"
+-                                }
+-                                Some((_, tiles_total)) if tiles_total > 0 => "Exporting",
+-                                _ => "Preparing",
+-                            };
+-                            ui.label(format!("{phase} {name}…"));
+-                        }
+-                        if failed > 0 {
+-                            ui.label(
+-                                egui::RichText::new(format!(
+-                                    "{failed} {} failed",
+-                                    if failed == 1 { "image" } else { "images" }
+-                                ))
+-                                .small()
+-                                .color(ui.visuals().warn_fg_color),
+-                            );
+-                        }
+-                        if cancelling {
+-                            ui.label(
+-                                egui::RichText::new("Cancelling after the current image finishes…")
+-                                    .small()
+-                                    .color(ui.visuals().weak_text_color()),
+-                            );
+-                        }
+-                        ui.add_space(8.0);
+-                        ui.horizontal(|ui| {
+-                            #[cfg(not(target_os = "android"))]
+-                            if ui.button("Minimize").clicked() {
+-                                minimize_batch_export = true;
+-                            }
+-                            if ui
+-                                .add_enabled(!cancelling, egui::Button::new("Cancel"))
+-                                .clicked()
+-                            {
+-                                cancel_batch_export = true;
+-                            }
+-                        });
+-                    });
+-                }
+-            }
+-            if minimize_batch_export {
+-                app.minimize_library_batch_export_progress();
+-            }
+-            if cancel_batch_export {
+-                app.cancel_library_batch_export();
+-            }
++            show_library_batch_export_progress(ui, app);
+         }
+ 
+         #[cfg(target_os = "android")]
+diff --git a/tests/test_android_task_notifications.py b/tests/test_android_task_notifications.py
+index 9cce479..5c6a30a 100644
+--- a/tests/test_android_task_notifications.py
++++ b/tests/test_android_task_notifications.py
+@@ -45,8 +45,8 @@ def test_rust_task_snapshots_are_bridged_to_one_deduplicated_notification():
+     assert 'fn sync_android_task_notification(&self)' in RUNTIME
+     assert 'TaskProgressValue::Fraction' in RUNTIME
+     assert 'TaskProgressValue::Units' in RUNTIME
+-    assert 'self.global_background_task_snapshots()' in RUNTIME
+-    assert 'self.global_background_queued_count()' in RUNTIME
++    assert 'global_primary_snapshot_and_waiting_count()' in RUNTIME
++    assert 'waiting_count' in RUNTIME
+     assert 'self.sync_android_task_notification();' in EFRAME
+ 
+ 
+@@ -61,3 +61,26 @@ def test_android_warns_that_current_tasks_are_not_background_services_yet():
+     note = 'Keep AuRaw open in the foreground until the operation finishes. Leaving or closing the app may stop it.'
+     assert note in EFRAME
+     assert 'Keep AuRaw open in the foreground until this operation finishes. Leaving or closing the app may stop it.' in CONTROLLER
++
++
++def test_notification_bridge_tolerates_native_calls_before_controller_initialization():
++    update_start = ACTIVITY.index("public void updateBackgroundTaskNotification")
++    clear_start = ACTIVITY.index("public void clearBackgroundTaskNotification", update_start)
++    update = ACTIVITY[update_start:clear_start]
++    clear_end = ACTIVITY.index("/** Copies text", clear_start)
++    clear = ACTIVITY[clear_start:clear_end]
++    assert "TaskNotificationController controller = taskNotificationController;" in update
++    assert "if (controller == null)" in update
++    assert "controller.update(" in update
++    assert "TaskNotificationController controller = taskNotificationController;" in clear
++    assert "if (controller != null)" in clear
++    assert "controller.clear();" in clear
++
++
++def test_notification_controller_is_initialized_before_other_activity_delegates():
++    on_create = ACTIVITY[
++        ACTIVITY.index("protected void onCreate") : ACTIVITY.index(
++            "private void configureSystemBarsAndInsets"
++        )
++    ]
++    assert on_create.index("taskNotificationController = new TaskNotificationController(this);") < on_create.index("storageManager = new StorageManager")
+diff --git a/tests/test_background_export_isolation.py b/tests/test_background_export_isolation.py
+index b27b8bd..c694b75 100644
+--- a/tests/test_background_export_isolation.py
++++ b/tests/test_background_export_isolation.py
+@@ -11,6 +11,8 @@ UI_MOD = (ROOT / "src/ui/mod.rs").read_text(encoding="utf-8")
+ EFRAME = (ROOT / "src/app/eframe_impl.rs").read_text(encoding="utf-8")
+ LIBRARY_UI = (ROOT / "src/ui/library.rs").read_text(encoding="utf-8")
+ TOP_BAR = (ROOT / "src/ui/top_bar.rs").read_text(encoding="utf-8")
++PIPELINE_EXPORT = (ROOT / "src/pipeline/export.rs").read_text(encoding="utf-8")
++ANDROID = (ROOT / "src/android.rs").read_text(encoding="utf-8")
+ 
+ 
+ def test_opening_a_raw_is_not_blocked_by_export_receivers():
+@@ -24,13 +26,10 @@ def test_opening_a_raw_is_not_blocked_by_export_receivers():
+ 
+ def test_desktop_batch_export_owns_a_separate_worker_and_does_not_open_documents():
+     assert "fn spawn_desktop_library_batch_export" in EXPORT
+-    desktop_start = EXPORT[
+-        EXPORT.index("pub(crate) fn start_library_exports") : EXPORT.index(
+-            "fn finish_library_batch_export", EXPORT.index("pub(crate) fn start_library_exports")
+-        )
+-    ]
++    start = EXPORT.index("pub(crate) fn start_library_exports")
++    desktop_start = EXPORT[start : EXPORT.index("fn on_library_batch_load_finished", start)]
+     assert "self.open_path(job.source" not in desktop_start
+-    assert "Desktop batch export owns a separate decode/export worker" in desktop_start
++    assert "Desktop batch export owns a separate decode/export worker" in EXPORT
+     assert "self.active_tab = AppTab::Library" not in desktop_start
+     assert "library_batch_export_receiver" in RUNTIME
+     assert "library_batch_export_tile_progress" in EXPORT
+@@ -76,8 +75,8 @@ def test_detached_ai_tasks_remain_cancellable_and_document_bound():
+     assert "TaskKind::Inpainting" in runtime
+ 
+ def test_batch_export_progress_reserves_finalization_and_cannot_finish_early():
+-    assert "BATCH_EXPORT_TILE_PHASE_WEIGHT: f32 = 0.90" in EXPORT
+-    assert "BATCH_EXPORT_MAX_INCOMPLETE_FRACTION: f32 = 0.99" in EXPORT
++    assert "EXPORT_TILE_PHASE_WEIGHT: f32 = 0.90" in EXPORT
++    assert "EXPORT_MAX_INCOMPLETE_FRACTION: f32 = 0.99" in EXPORT
+     assert "fn batch_export_overall_fraction" in EXPORT
+     assert "library_batch_export_overall_fraction" in EXPORT
+     assert "batch_export_overall_fraction(" in RUNTIME
+@@ -187,3 +186,140 @@ def test_desktop_global_progress_control_does_not_force_top_bar_height():
+     assert 'available_size_before_wrap().y' not in control
+     assert 'ui.set_min_height(' not in control
+     assert '.horizontal_centered(|ui| {' not in control
++
++
++def test_single_export_progress_reserves_finalization_work():
++    worker = EXPORT[EXPORT.index("fn poll_export_worker") :]
++    assert "tile_fraction * EXPORT_TILE_PHASE_WEIGHT" in worker
++    assert '"Finalizing export…"' in worker
++    assert "EXPORT_MAX_INCOMPLETE_FRACTION" in worker
++
++
++def test_export_dispatch_is_shared_by_single_and_batch_workers():
++    assert EXPORT.count("fn spawn_export_request") == 1
++    assert "spawn_export_request(request, cancellation)" in RUNTIME
++    assert "spawn_export_request(request, Arc::clone(&cancellation))" in EXPORT
++
++
++def test_cancelled_completed_export_is_not_published():
++    start = PIPELINE_EXPORT.index("fn export_to_destination")
++    end = PIPELINE_EXPORT.index("fn ensure_export_not_cancelled", start)
++    publish = PIPELINE_EXPORT[start:end]
++    final_cancel = publish.rindex("ensure_export_not_cancelled")
++    publication = publish.index("publish_completed_export")
++    assert final_cancel < publication
++    assert "remove_file(&temporary)" in publish[final_cancel:publication]
++    assert "cancelled_export_removes_temporary_output_before_publication" in PIPELINE_EXPORT
++
++
++def test_android_batch_releases_preview_gpu_resources_before_export():
++    start = EXPORT.index("fn on_library_batch_load_finished")
++    end = EXPORT.index("fn complete_android_library_batch_export_item", start)
++    batch_item = EXPORT[start:end]
++    release = batch_item.index("take_preview_pipeline_and_release_textures")
++    start_export = batch_item.index("self.start_export_task(task_id, request)")
++    assert release < start_export
++
++
++def test_android_picker_synchronous_open_failures_are_routed_to_internal_owners():
++    picker_start = LIFECYCLE.index(
++        "while let Some(result) = crate::android::take_picker_result()"
++    )
++    picker = LIFECYCLE[picker_start:]
++    assert "if self.load_receiver.is_none()" in picker
++    failure = picker[picker.index("if self.load_receiver.is_none()") :]
++    assert "complete_android_library_batch_export_item(Err(error))" in failure
++    assert "complete_android_library_ai_mask_open_failure(error, frame)" in failure
++
++
++def test_document_changes_do_not_silently_dismiss_unacknowledged_failures():
++    for function_name in [
++        "fn cancel_document_bound_background_tasks",
++        "fn cancel_stale_document_background_tasks",
++    ]:
++        start = RUNTIME.index(function_name)
++        tail = RUNTIME[start:]
++        next_function = tail.find("\n    fn ", len(function_name))
++        body = tail if next_function < 0 else tail[:next_function]
++        assert "task.status != TaskStatus::Failed" in body
++
++
++def test_detached_global_tasks_and_waiting_badge_use_manager_state():
++    assert "fn global_primary_snapshot_and_waiting_count" in TASKS
++    assert "global_waiting_count_excludes_the_displayed_queued_task" in TASKS
++    assert "global_waiting_count_includes_all_tasks_after_the_running_task" in TASKS
++    assert "global_primary_snapshot_and_waiting_count()" in RUNTIME
++
++
++def test_android_notification_dedup_resets_for_new_activity():
++    assert "activity_key: usize" in ANDROID
++    assert "current.activity_key == activity_key" in ANDROID
++    install = ANDROID[
++        ANDROID.index("pub fn install_context") : ANDROID.index(
++            "pub fn set_back_navigation_active"
++        )
++    ]
++    assert "TASK_NOTIFICATION_STATE.lock()" in install
++    assert "*notification = None;" in install
++
++
++def test_lens_worker_reuses_android_cached_correction_when_available():
++    app_source = (ROOT / "src/app.rs").read_text(encoding="utf-8")
++    assert "cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>" in app_source
++    assert "if let Some(cached_raws) = request.cached_raws" in EXPORT
++    assert "lens_corrected_preview_cache" in EXPORT
++    assert "lens_original_preview_cache" in EXPORT
++
++
++def test_object_download_failure_uses_one_error_surface():
++    finished = MASKS[MASKS.index("fn poll_object_worker") :]
++    assert "if failed_during_inference" in finished
++    assert "self.object_error_dialog = Some(message);" in finished
++    assert "self.fail_background_task(task_id, message);" in finished
++
++
++def test_library_batch_progress_dialog_is_rendered_by_one_shared_helper():
++    assert LIBRARY_UI.count("fn show_library_batch_export_progress") == 1
++    assert LIBRARY_UI.count("show_library_batch_export_progress(ui, app);") == 2
++    assert LIBRARY_UI.count('egui::Window::new("Exporting images")') == 1
++
++
++def test_android_batch_cancellation_during_raw_load_never_starts_export():
++    start = EXPORT.index("fn on_library_batch_load_finished")
++    end = EXPORT.index("fn complete_android_library_batch_export_item", start)
++    handler = EXPORT[start:end]
++    cancellation = handler.index("if batch.cancel_requested")
++    capture = handler.index("capture_export_task_request")
++    assert cancellation < capture
++    assert '"batch export cancelled"' in handler[cancellation:capture]
++
++
++def test_batch_export_lifecycle_helpers_are_shared_across_platforms():
++    assert EXPORT.count("fn finish_library_batch_export(") == 1
++    assert EXPORT.count("fn library_batch_export_status(") == 1
++    assert EXPORT.count("fn library_batch_export_progress(") == 1
++    assert EXPORT.count("fn library_batch_export_tile_progress(") == 1
++    assert EXPORT.count("fn request_library_batch_export_cancellation(") == 1
++
++
++def test_android_lens_cache_setup_does_not_panic_on_missing_preview_state():
++    assert 'expect("loaded RAW set")' not in LIFECYCLE
++    assert 'expect("preview RAW set")' not in LIFECYCLE
++    assert 'self.lens_corrected_preview_cache = match (' in LIFECYCLE
++    assert '(Some(selection), Some(full_raw), Some(preview_raw))' in LIFECYCLE
++
++
++def test_missing_background_action_uses_repainting_failure_path():
++    start = RUNTIME.index("fn drive_background_tasks")
++    end = RUNTIME.index("fn start_export_task", start)
++    driver = RUNTIME[start:end]
++    assert 'self.fail_background_task(id, "The queued background action was unavailable.");' in driver
++    assert 'self.background_tasks\n                .fail(' not in driver
++
++
++def test_unknown_unit_total_uses_indeterminate_progress():
++    start = RUNTIME.index("fn background_task_progress_widget")
++    end = RUNTIME.index("pub(crate) fn show_background_task_detail_windows", start)
++    widget = RUNTIME[start:end]
++    assert "if *total == 0" in widget
++    assert "egui::ProgressBar::new(0.0).animate(true)" in widget
+diff --git a/tests/test_lens_correction_quality.py b/tests/test_lens_correction_quality.py
+index cc1d096..17ec844 100644
+--- a/tests/test_lens_correction_quality.py
++++ b/tests/test_lens_correction_quality.py
+@@ -144,17 +144,16 @@ def test_lens_toggle_preserves_masks_and_requests_refresh() -> None:
+     assert 'ui.button("Update masks")' in masks_ui
+ 
+ 
+-def test_android_lens_toggle_prepares_the_preview_off_the_ui_thread() -> None:
++def test_lens_toggle_prepares_the_preview_off_the_ui_thread_on_all_platforms() -> None:
+     processing_export = (ROOT / "src/app/processing_export.rs").read_text(encoding="utf-8")
+-    android_worker = processing_export[
+-        processing_export.index("fn apply_pending_lens_correction_android")
++    worker = processing_export[
++        processing_export.index("fn start_lens_correction_task")
+         : processing_export.index("fn poll_lens_correction_worker")
+     ]
+-    assert '#[cfg(target_os = "android")]' in processing_export
+-    assert '.name("auraw-lens-correction".to_owned())' in android_worker
+-    assert ".spawn(move ||" in android_worker
+-    assert "apply_lensfun_correction(&original_raw, selection)" in android_worker
+-    assert "RawGpuPipeline::new_headless_with_quality(" not in android_worker
++    assert '.name("auraw-lens-correction".to_owned())' in worker
++    assert ".spawn(move ||" in worker
++    assert "apply_lensfun_correction(&original_raw, selection)" in worker
++    assert "RawGpuPipeline::new_headless_with_quality(" not in worker
+     assert "pipeline.upload_raw_tile(" in processing_export
+     assert "lens_correction_receiver.is_some()" in processing_export
+     assert "!lens_correction_busy" in SIDEBAR
+diff --git a/tests/test_library_copy_paste_settings.py b/tests/test_library_copy_paste_settings.py
+index c23749e..9423b88 100644
+--- a/tests/test_library_copy_paste_settings.py
++++ b/tests/test_library_copy_paste_settings.py
+@@ -33,8 +33,9 @@ def test_copy_setting_defaults_and_migration_are_explicit() -> None:
+ 
+ 
+ def test_ai_mask_refresh_progress_is_visible_for_one_or_many_images() -> None:
+-    progress = LIBRARY[LIBRARY.index('egui::Window::new("Regenerating AI masks")') - 350 :]
+-    progress = progress[: progress.index('#[cfg(not(target_os = "android"))]')]
++    progress_start = LIBRARY.index('egui::Window::new("Regenerating AI masks")') - 350
++    progress_end = LIBRARY.index("if cancel {", progress_start)
++    progress = LIBRARY[progress_start:progress_end]
+     assert "if total > 1" not in progress
+     assert "egui::ProgressBar::new(fraction)" in progress
+     assert 'format!("{completed} / {total} AI masks updated")' in progress

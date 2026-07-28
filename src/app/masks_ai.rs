@@ -1165,8 +1165,8 @@ impl AurawApp {
             let message = error_message
                 .unwrap_or_else(|| "Object selection did not produce a mask.".to_owned());
             self.notice = Some(message.clone());
-            self.object_error_dialog = Some(message.clone());
             if failed_during_inference {
+                self.object_error_dialog = Some(message);
                 self.finish_background_task(task_id);
             } else {
                 self.fail_background_task(task_id, message);
@@ -1443,6 +1443,7 @@ impl AurawApp {
                 .subject_task_id
                 .is_some_and(|id| self.background_task_details_open(id))
         {
+            #[cfg(not(target_os = "android"))]
             let mut minimize = false;
             let mut cancel = false;
             crate::ui::responsive_popup(egui::Window::new("Preparing subject mask"), ctx, 420.0)
@@ -1480,6 +1481,7 @@ impl AurawApp {
                     });
                 });
             if let Some(task_id) = self.subject_task_id {
+                #[cfg(not(target_os = "android"))]
                 if minimize {
                     self.set_background_task_details_open(task_id, false);
                 }
@@ -1551,6 +1553,7 @@ impl AurawApp {
                 .object_task_id
                 .is_some_and(|id| self.background_task_details_open(id))
         {
+            #[cfg(not(target_os = "android"))]
             let mut minimize = false;
             let mut cancel = false;
             crate::ui::responsive_popup(egui::Window::new("Preparing object mask"), ctx, 420.0)
@@ -1592,6 +1595,7 @@ impl AurawApp {
                     });
                 });
             if let Some(task_id) = self.object_task_id {
+                #[cfg(not(target_os = "android"))]
                 if minimize {
                     self.set_background_task_details_open(task_id, false);
                 }

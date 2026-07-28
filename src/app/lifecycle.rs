@@ -936,6 +936,15 @@ impl AurawApp {
     ) {
         #[cfg(target_os = "android")]
         let _ = frame;
+        #[cfg(target_os = "android")]
+        if self.android_foreground_task_active() {
+            self.notice = Some(
+                "Wait for the current foreground operation to finish before changing camera profile."
+                    .to_owned(),
+            );
+            self.egui_ctx.request_repaint();
+            return;
+        }
         if self.load_receiver.is_some() {
             self.notice = Some(
                 "Wait for the current RAW load to finish before changing camera profile."
@@ -2287,11 +2296,14 @@ impl AurawApp {
                 crate::android::PickerResult::Picked(document) => {
                     self.library.refresh(&self.egui_ctx);
                     let batch_owned_open = self.android_batch_load_pending;
+                    let profile_reload_owned_open = self.pending_android_profile_reload.is_some();
+                    let library_refresh_owned_open = !batch_owned_open
+                        && !profile_reload_owned_open
+                        && self.library_ai_mask_refresh.is_some();
                     let keep_library_for_profile_reload =
-                        self.pending_android_profile_reload.is_some()
-                            && self.active_tab == AppTab::Library;
+                        profile_reload_owned_open && self.active_tab == AppTab::Library;
                     self.active_tab = if batch_owned_open
-                        || self.library_ai_mask_refresh.is_some()
+                        || library_refresh_owned_open
                         || keep_library_for_profile_reload
                     {
                         AppTab::Library
@@ -2324,6 +2336,23 @@ impl AurawApp {
                             frame,
                             document.raw_fd_guard,
                         );
+                    }
+
+                    // `open_path_labeled*` reports setup failures synchronously by
+                    // leaving `load_receiver` empty. Route that failure back to the
+                    // internal owner immediately; otherwise Android batch export or
+                    // library AI refresh would wait forever for a load event that can
+                    // never arrive.
+                    if self.load_receiver.is_none() {
+                        let error = self.notice.clone().unwrap_or_else(|| {
+                            "The RAW decode worker could not be started.".to_owned()
+                        });
+                        if batch_owned_open {
+                            self.android_batch_load_pending = false;
+                            self.complete_android_library_batch_export_item(Err(error));
+                        } else if library_refresh_owned_open {
+                            self.complete_android_library_ai_mask_open_failure(error, frame);
+                        }
                     }
                 }
                 crate::android::PickerResult::BatchImported {
@@ -2433,11 +2462,22 @@ impl AurawApp {
                     self.on_library_batch_load_finished(false, frame);
                     return;
                 };
-                let mut renderer = render_state.renderer.write();
-                self.take_preview_pipeline_and_release_textures(&mut renderer);
-                loaded
-                    .pipeline
-                    .register_egui_texture(&render_state.device, &mut renderer);
+                // Do not keep the renderer write lock alive while installing the
+                // decoded document or notifying internal batch owners. Android
+                // batch export immediately releases this temporary preview before
+                // starting its tiled worker; retaining this guard until the end of
+                // the match arm caused a recursive write-lock acquisition and the
+                // epaint 10-second deadlock panic.
+                let previous_pipeline = {
+                    let mut renderer = render_state.renderer.write();
+                    let previous =
+                        self.take_preview_pipeline_and_release_textures(&mut renderer);
+                    loaded
+                        .pipeline
+                        .register_egui_texture(&render_state.device, &mut renderer);
+                    previous
+                };
+                drop(previous_pipeline);
 
                 let full_width = loaded.full_raw.width;
                 let full_height = loaded.full_raw.height;
@@ -2519,17 +2559,19 @@ impl AurawApp {
                 #[cfg(target_os = "android")]
                 {
                     if self.lens_correction.applied {
-                        self.lens_corrected_preview_cache =
-                            self.lens_correction.selected_lens().map(|selection| {
-                                (
-                                    selection,
-                                    self.preview_quality,
-                                    Arc::clone(self.loaded_raw.as_ref().expect("loaded RAW set")),
-                                    Arc::clone(
-                                        self.preview_raw.as_ref().expect("preview RAW set"),
-                                    ),
-                                )
-                            });
+                        self.lens_corrected_preview_cache = match (
+                            self.lens_correction.selected_lens(),
+                            self.loaded_raw.as_ref(),
+                            self.preview_raw.as_ref(),
+                        ) {
+                            (Some(selection), Some(full_raw), Some(preview_raw)) => Some((
+                                selection,
+                                self.preview_quality,
+                                Arc::clone(full_raw),
+                                Arc::clone(preview_raw),
+                            )),
+                            _ => None,
+                        };
                         self.lens_original_preview_cache = None;
                     } else {
                         self.lens_original_preview_cache = self
