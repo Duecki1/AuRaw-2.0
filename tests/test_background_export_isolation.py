@@ -177,14 +177,13 @@ def test_android_back_and_edit_shortcuts_are_blocked_during_foreground_tasks():
     assert 'self.handle_sidecar_shortcut(ui.ctx());' in shortcut_block
 
 
-def test_desktop_global_progress_control_is_vertically_centered_without_taking_full_width():
+def test_desktop_global_progress_control_does_not_force_top_bar_height():
     start = RUNTIME.index("pub(crate) fn show_global_task_control")
     end = RUNTIME.index("fn background_task_progress_widget", start)
     control = RUNTIME[start:end]
 
-    assert 'let available_height = ui.available_size_before_wrap().y;' in control
-    assert 'if available_height.is_finite()' in control
-    assert 'ui.set_min_height(desktop_top_bar_height);' in control
     assert '.horizontal(|ui| {' in control
+    assert 'desktop_top_bar_height' not in control
+    assert 'available_size_before_wrap().y' not in control
+    assert 'ui.set_min_height(' not in control
     assert '.horizontal_centered(|ui| {' not in control
-    assert '#[cfg(not(target_os = "android"))]' in control

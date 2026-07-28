@@ -371,25 +371,8 @@ impl AurawApp {
         let current = self.global_current_background_task();
         let queued = self.global_background_queued_count();
         let compact = cfg!(target_os = "android") || ui.available_width() < 420.0;
-        // `Ui::horizontal` normally reserves only one interaction row. In a
-        // desktop top panel that makes this compact control hug the top edge
-        // whenever the rest of the wrapped top bar establishes a taller row.
-        // Expanding only the child row's height preserves its intrinsic width
-        // while the horizontal layout vertically centers all of its widgets.
-        #[cfg(not(target_os = "android"))]
-        let desktop_top_bar_height = {
-            let available_height = ui.available_size_before_wrap().y;
-            if available_height.is_finite() {
-                available_height.max(ui.spacing().interact_size.y)
-            } else {
-                ui.spacing().interact_size.y
-            }
-        };
-
         let response = ui
             .horizontal(|ui| {
-                #[cfg(not(target_os = "android"))]
-                ui.set_min_height(desktop_top_bar_height);
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if let Some(task) = current.as_ref() {
                     if compact {
