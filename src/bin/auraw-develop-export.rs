@@ -1,8 +1,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use auraw::pipeline::{
-    export_mask_atlas_edge, load_raw_file, load_raw_file_with_dcp, spawn_tiled_png_export,
-    ExportEvent, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform, MaskStack,
-    TileSpec,
+    crop_raw, export_mask_atlas_edge, load_raw_file, load_raw_file_with_dcp,
+    spawn_tiled_png_export, DenoiseQuality, ExportEvent, ExportMetadata, ExportSettings,
+    ExposureParams, GeometryTransform, MaskStack, TileSpec,
 };
 use eframe::wgpu;
 use std::env;
@@ -17,6 +17,8 @@ struct Args {
     suite_only: Vec<String>,
     skip_existing: bool,
     dcp: Option<PathBuf>,
+    crop: Option<[u32; 4]>,
+    report_detail_defaults: bool,
     adjustments: Vec<(String, f32)>,
 }
 
@@ -29,11 +31,32 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = parse_args()?;
-    let raw = match &args.dcp {
+    let mut raw = match &args.dcp {
         Some(profile) => load_raw_file_with_dcp(&args.input, profile),
         None => load_raw_file(&args.input),
     }
     .with_context(|| format!("load RAW {}", args.input.display()))?;
+    let adaptive_exposure = default_exposure_for_raw(&raw);
+    if args.report_detail_defaults {
+        eprintln!(
+            "ISO {:.0}; estimated shot={:?}, read={:?}, confidence={:.3}; adaptive Detail: luminance={:.1}, color={:.1}, detail={:.1}, quality={}, sharpen={:.0}/{:.2}/{:.0}/{:.0}",
+            raw.iso_speed(),
+            raw.noise_profile.shot,
+            raw.noise_profile.read,
+            raw.noise_profile.confidence,
+            adaptive_exposure.luminance_denoise,
+            adaptive_exposure.chroma_denoise * 100.0,
+            adaptive_exposure.denoise_detail,
+            adaptive_exposure.denoise_quality.label(),
+            adaptive_exposure.sharpen_amount,
+            adaptive_exposure.sharpen_radius,
+            adaptive_exposure.sharpen_detail,
+            adaptive_exposure.sharpen_masking,
+        );
+    }
+    if let Some([x, y, width, height]) = args.crop {
+        raw = crop_raw(&raw, x, y, width, height);
+    }
 
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -97,7 +120,7 @@ fn run() -> Result<()> {
                 println!("skipped existing {}", output.display());
                 continue;
             }
-            let mut exposure = ExposureParams::default();
+            let mut exposure = default_exposure_for_raw(&raw);
             if let Some((name, value)) = adjustment {
                 set_adjustment(&mut exposure, name, *value)?;
             }
@@ -115,7 +138,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let mut exposure = ExposureParams::default();
+    let mut exposure = default_exposure_for_raw(&raw);
     for (name, value) in &args.adjustments {
         set_adjustment(&mut exposure, name, *value)?;
     }
@@ -129,6 +152,12 @@ fn run() -> Result<()> {
         &metadata,
         adapter_info.backend,
     )
+}
+
+fn default_exposure_for_raw(raw: &auraw::pipeline::LoadedRaw) -> ExposureParams {
+    let mut exposure = ExposureParams::default();
+    raw.apply_adaptive_detail_defaults(&mut exposure);
+    exposure
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -230,7 +259,22 @@ fn set_adjustment(exposure: &mut ExposureParams, name: &str, value: f32) -> Resu
         "saturation" => exposure.saturation = value.clamp(-100.0, 100.0),
         "temperature" => exposure.temperature = value.clamp(-500.0, 500.0),
         "tint" => exposure.tint = value.clamp(-100.0, 100.0),
+        "luminance_denoise" => exposure.luminance_denoise = value.clamp(0.0, 100.0),
+        "color_denoise" => exposure.chroma_denoise = value.clamp(0.0, 100.0) / 100.0,
+        "denoise_detail" => exposure.denoise_detail = value.clamp(0.0, 100.0),
+        "denoise_quality" => {
+            exposure.denoise_quality = if value < 0.5 {
+                DenoiseQuality::Fast
+            } else if value < 1.5 {
+                DenoiseQuality::Balanced
+            } else {
+                DenoiseQuality::High
+            }
+        }
         "sharpen_amount" => exposure.sharpen_amount = value.clamp(0.0, 150.0),
+        "sharpen_radius" => exposure.sharpen_radius = value.clamp(0.5, 3.0),
+        "sharpen_detail" => exposure.sharpen_detail = value.clamp(0.0, 100.0),
+        "sharpen_masking" => exposure.sharpen_masking = value.clamp(0.0, 100.0),
         other => bail!("unsupported adjustment {other:?}"),
     }
     Ok(())
@@ -243,6 +287,8 @@ fn parse_args() -> Result<Args> {
     let mut suite_only = Vec::new();
     let mut skip_existing = false;
     let mut dcp = None;
+    let mut crop = None;
+    let mut report_detail_defaults = false;
     let mut adjustments = Vec::new();
     let mut values = env::args().skip(1);
     while let Some(argument) = values.next() {
@@ -255,6 +301,8 @@ fn parse_args() -> Result<Args> {
             "--only" => suite_only.push(next_value(&mut values, "--only")?),
             "--skip-existing" => skip_existing = true,
             "--dcp" => dcp = Some(PathBuf::from(next_value(&mut values, "--dcp")?)),
+            "--crop" => crop = Some(parse_crop(&next_value(&mut values, "--crop")?)?),
+            "--report-detail-defaults" => report_detail_defaults = true,
             "--adjust" => {
                 let assignment = next_value(&mut values, "--adjust")?;
                 let (name, value) = assignment
@@ -303,8 +351,27 @@ fn parse_args() -> Result<Args> {
         suite_only,
         skip_existing,
         dcp,
+        crop,
+        report_detail_defaults,
         adjustments,
     })
+}
+
+fn parse_crop(value: &str) -> Result<[u32; 4]> {
+    let values = value
+        .split(',')
+        .map(|part| {
+            part.parse::<u32>()
+                .with_context(|| format!("parse crop component in {value:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let crop: [u32; 4] = values
+        .try_into()
+        .map_err(|_| anyhow!("--crop expects X,Y,WIDTH,HEIGHT"))?;
+    if crop[2] == 0 || crop[3] == 0 {
+        bail!("--crop width and height must be non-zero");
+    }
+    Ok(crop)
 }
 
 fn next_value(values: &mut impl Iterator<Item = String>, option: &str) -> Result<String> {
@@ -318,12 +385,15 @@ fn print_help() {
         "Headless AuRaw Develop export\n\n",
         "Usage:\n",
         "  auraw-develop-export --input FILE --output FILE.png [--dcp PROFILE.dcp]\n",
+        "    [--crop X,Y,WIDTH,HEIGHT] [--report-detail-defaults]\n",
         "    [--adjust NAME=VALUE]...\n\n",
         "  auraw-develop-export --input FILE --suite-output DIRECTORY [--dcp PROFILE.dcp]\n",
         "    [--only ENDPOINT]... [--skip-existing]\n\n",
         "Supported adjustment names: exposure, contrast, highlights, shadows, whites,\n",
         "blacks, texture, clarity, dehaze, vibrance, saturation, temperature, tint,\n",
-        "and sharpen_amount. The suite exports isolated endpoints matching the standard\n",
+        "luminance_denoise, color_denoise, denoise_detail, denoise_quality (0/1/2),\n",
+        "sharpen_amount, sharpen_radius, sharpen_detail, and sharpen_masking. The suite\n",
+        "exports isolated endpoints matching the standard\n",
         "Lightroom comparison set. Lens correction is not applied by this tool."
     ));
 }

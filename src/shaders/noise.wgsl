@@ -14,6 +14,12 @@ const NR_DIRECTIONS: array<vec2<i32>, 8> = array<vec2<i32>, 8>(
     vec2<i32>( 1,  1), vec2<i32>(-1,  1),
     vec2<i32>( 1, -1), vec2<i32>(-1, -1),
 );
+const NR_KNIGHT_DIRECTIONS: array<vec2<i32>, 8> = array<vec2<i32>, 8>(
+    vec2<i32>( 1,  2), vec2<i32>(-1,  2),
+    vec2<i32>( 1, -2), vec2<i32>(-1, -2),
+    vec2<i32>( 2,  1), vec2<i32>(-2,  1),
+    vec2<i32>( 2, -1), vec2<i32>(-2, -1),
+);
 
 fn nr_signal(rgb: vec3<f32>) -> f32 {
     return dot(rgb, NR_SIGNAL_WEIGHTS);
@@ -49,9 +55,10 @@ fn nr_component_variance(rgb: vec3<f32>) -> vec2<f32> {
 }
 
 // Returns signal/opponent range weights after normalizing distances by the local
-// signal-dependent variance. This is the variance-stabilized NLMeans-like
-// part of the filter: equal-sigma differences receive comparable treatment in
-// shadows and highlights even though their absolute noise amplitudes differ.
+// signal-dependent variance. Chroma uses the signal edge as its primary guide:
+// using the noisy opponent difference to decide whether opponent samples are
+// allowed through makes false-color speckles protect themselves from filtering.
+// A signal guide still prevents color from crossing ordinary luminance edges.
 fn nr_range_weights(
     center_signal: f32,
     center_opponents: vec2<f32>,
@@ -65,38 +72,64 @@ fn nr_range_weights(
     // Detail raises selectivity. At 100, cross-edge pooling is rejected more
     // aggressively; at 0, flat noisy regions can pool a wider sigma range.
     let signal_sigma = mix(3.4, 1.7, detail);
-    let opponent_sigma = mix(5.0, 2.8, detail);
-
+    // Chroma needs a broader signal tolerance because a false-color speckle
+    // often carries a simultaneous signal error after demosaic. Real
+    // luminance edges remain many sensor sigmas farther away.
+    let opponent_signal_sigma = mix(10.0, 6.0, detail);
     let signal_delta = sample_signal - center_signal;
     let signal_variance = center_variance.x + sample_variance.x;
     let signal_distance = signal_delta * signal_delta
         / max(signal_variance * signal_sigma * signal_sigma, 1e-10);
+    let opponent_guide_distance = signal_delta * signal_delta
+        / max(signal_variance * opponent_signal_sigma * opponent_signal_sigma, 1e-10);
 
-    let opponent_delta = sample_opponents - center_opponents;
-    let opponent_variance = center_variance.y + sample_variance.y;
-    let opponent_distance = dot(opponent_delta, opponent_delta)
-        / max(opponent_variance * opponent_sigma * opponent_sigma, 1e-10);
-
-    return spatial * vec2<f32>(exp(-0.5 * signal_distance), exp(-0.5 * opponent_distance));
+    // Only reject a large, coherent color discontinuity. The deliberately wide
+    // noise-relative knee keeps ordinary false-color speckles from
+    // self-protecting while preventing wide-radius support from crossing a
+    // strongly isoluminant subject boundary.
+    let opponent_delta = length(sample_opponents - center_opponents);
+    let opponent_sigma = sqrt(max(center_variance.y + sample_variance.y, 1e-10));
+    let color_edge_gate = 1.0 - smoothstep(
+        0.16 + 4.0 * opponent_sigma,
+        0.32 + 8.0 * opponent_sigma,
+        opponent_delta,
+    );
+    let signal_weight = exp(-0.5 * signal_distance);
+    let opponent_weight = exp(-0.5 * opponent_guide_distance) * color_edge_gate;
+    return spatial * vec2<f32>(signal_weight, opponent_weight);
 }
 
 fn nr_scale_radius(scale_index: i32) -> i32 {
     if scale_index <= 0 { return 1; }
     if scale_index == 1 { return 2; }
-    return 4;
+    if scale_index == 2 { return 4; }
+    if scale_index == 3 { return 8; }
+    return 16;
 }
 
 fn nr_scale_count() -> i32 {
     let quality = params.noise_options.z;
     if quality < 0.5 { return 1; }
     if quality < 1.5 { return 2; }
-    return 3;
+    return 5;
 }
 
 fn nr_scale_spatial_weight(radius: i32, direction: vec2<i32>) -> f32 {
     let diagonal = select(1.0, 0.72, abs(direction.x) + abs(direction.y) == 2);
     let radius_weight = 1.0 / (1.0 + 0.55 * f32(radius * radius));
     return diagonal * radius_weight;
+}
+
+fn nr_offset_spatial_weight(offset: vec2<i32>) -> f32 {
+    let distance_squared = f32(offset.x * offset.x + offset.y * offset.y);
+    return 1.0 / (1.0 + 0.55 * distance_squared);
+}
+
+fn nr_chroma_spatial_boost(offset: vec2<i32>) -> f32 {
+    let distance_squared = f32(offset.x * offset.x + offset.y * offset.y);
+    // Chroma noise is spatially correlated by demosaic and therefore needs
+    // meaningful wide support. Luminance keeps the tighter base weights.
+    return 1.0 + 0.25 * distance_squared;
 }
 
 fn nr_finish(
@@ -111,14 +144,23 @@ fn nr_finish(
     let filtered_signal = signal_sum / max(signal_weight_sum, 1e-6);
     let filtered_opponents = opponent_sum / max(opponent_weight_sum, 1e-6);
 
-    let signal_strength = clamp(params.noise_options.x, 0.0, 1.0);
-    let chroma_strength = clamp(params.chroma_denoise, 0.0, 1.0);
+    let signal_strength = nr_perceptual_strength(params.noise_options.x, 3.2);
+    let chroma_strength = nr_perceptual_strength(params.chroma_denoise, 16.0);
     if signal_strength <= 1e-6 && chroma_strength <= 1e-6 { return center; }
 
     // Avoid turning weak/failed profile fits into generic blur. The fallback
     // remains usable, but a measured profile earns the full requested blend.
     let profile_trust = mix(0.72, 1.0, clamp(params.noise_options.w, 0.0, 1.0));
+    let chroma_trust = mix(0.97, 1.0, clamp(params.noise_options.w, 0.0, 1.0));
     let out_signal = mix(center_signal, filtered_signal, signal_strength * profile_trust);
-    let out_opponents = mix(center_opponents, filtered_opponents, chroma_strength * profile_trust);
+    let out_opponents = mix(center_opponents, filtered_opponents, chroma_strength * chroma_trust);
     return nr_from_signal_opponents(out_signal, out_opponents);
+}
+
+fn nr_perceptual_strength(requested: f32, response: f32) -> f32 {
+    let x = clamp(requested, 0.0, 1.0);
+    if x <= 1e-6 { return 0.0; }
+    // Normalized exponential response: low Lightroom-style values are useful,
+    // the transition is continuous, and 100 remains an exact full blend.
+    return (1.0 - exp(-response * x)) / (1.0 - exp(-response));
 }
