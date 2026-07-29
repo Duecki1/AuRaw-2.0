@@ -39,6 +39,11 @@ def test_capture_sharpening_is_edge_aware_luminance_preserving_and_scale_aware()
     assert "edge_mask = smoothstep" in CAPTURE_DETAIL
     assert "capture_local_ev_bounds" in CAPTURE_DETAIL
     assert "capture_impulse_coherence" in CAPTURE_DETAIL
+    assert "fn capture_noise_ev_sigma" in CAPTURE_DETAIL
+    assert "params.noise_read.rgb + params.noise_shot.rgb" in CAPTURE_DETAIL
+    assert "let edge_noise_relief = smoothstep" in CAPTURE_DETAIL
+    assert "let detail_threshold = max(fixed_threshold, sensor_threshold)" in CAPTURE_DETAIL
+    assert "let strength = amount * mix(4.20, 6.00, detail)" in CAPTURE_DETAIL
     assert "return max(rgb * exp2(sharpen_ev)" in CAPTURE_DETAIL
     # Stage ordering is checked from Naga's WGSL call graph in
     # src/pipeline/gpu/tests.rs rather than by slicing source text.

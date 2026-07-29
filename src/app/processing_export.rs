@@ -359,21 +359,27 @@ fn prepare_desktop_library_export_request(
         return Err("batch export cancelled".to_owned());
     }
 
-    let (edits, requested_camera_profile) = match crate::sidecar::load_desktop(&job.source) {
+    let (mut edits, requested_camera_profile, use_adaptive_detail_defaults) =
+        match crate::sidecar::load_desktop(&job.source) {
         Ok(Some(loaded)) => {
             let requested = loaded
                 .edits
                 .camera_profile
                 .as_ref()
                 .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
-            (loaded.edits, requested)
+            let use_adaptive = loaded.migrated
+                && loaded
+                    .edits
+                    .exposure
+                    .has_legacy_default_detail_settings();
+            (loaded.edits, requested, use_adaptive)
         }
         Ok(None) => {
             let mut edits = crate::sidecar::default_edit_state();
             edits.exposure = default_exposure;
             let requested = last_camera_profile
                 .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
-            (edits, requested)
+            (edits, requested, true)
         }
         Err(error) => {
             log::warn!(
@@ -384,7 +390,7 @@ fn prepare_desktop_library_export_request(
             edits.exposure = default_exposure;
             let requested = last_camera_profile
                 .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
-            (edits, requested)
+            (edits, requested, true)
         }
     };
 
@@ -403,6 +409,9 @@ fn prepare_desktop_library_export_request(
             format!("{}: RAW decode failed: {error:#}", job.source.display())
         })?
     };
+    if use_adaptive_detail_defaults {
+        original_raw.apply_adaptive_detail_defaults(&mut edits.exposure);
+    }
 
     if cancellation.load(Ordering::Acquire) {
         return Err("batch export cancelled".to_owned());
