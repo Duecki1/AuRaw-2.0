@@ -66,6 +66,23 @@ fn apply_texture_and_clarity_values(
         * (1.0 - 0.74 * smoothstep(0.9, 3.6, center_ev));
     let selected_clarity = soft_detail_threshold(clarity_band_ev, 0.0065);
     let halo_guard = creative_edge_guard(pos);
+    let percentiles = tone_percentiles();
+    let center_relative_ev = center_ev - log2(SCENE_MIDDLE_GREY);
+    let clarity_scene_gate = tone_smoothstep(
+        1.0,
+        2.5,
+        percentiles.p995 - percentiles.p005,
+    );
+    let clarity_tone_position = tone_smoothstep(
+        percentiles.p05 + 0.50,
+        percentiles.p50 - 0.10,
+        center_relative_ev,
+    );
+    let positive_clarity_tone = select(
+        0.0,
+        clarity * mix(-1.25, 0.36, clarity_tone_position) * clarity_scene_gate,
+        clarity > 0.0,
+    );
 
     // Positive texture is intentionally more conservative than the previous
     // implementation because final-size output sharpening now owns delivery
@@ -76,7 +93,7 @@ fn apply_texture_and_clarity_values(
         * mix(0.90, 1.10, abs(clarity));
     let texture_ev = texture * selected_texture * texture_strength * mix(0.72, 1.0, signal_gate);
     let clarity_ev = clarity * selected_clarity * clarity_strength * midtone_gate * halo_guard;
-    let delta_ev = clamp(texture_ev + clarity_ev, -0.95, 1.05);
+    let delta_ev = clamp(texture_ev + clarity_ev + positive_clarity_tone, -1.90, 1.20);
     // Scalar detail gain preserves RGB ratios. Keep already-nonnegative
     // camera-characterized Rec.2020 values exact; invoke the perceptual
     // projector only when the operation creates a negative component.

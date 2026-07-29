@@ -271,41 +271,56 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let haze_likelihood = clamp(veil * (0.52 + 0.48 * low_contrast), 0.0, 1.0);
 
     if amount > 0.0 {
-        // Dark-channel transmission recovery. Even relatively clear regions get
-        // a modest contrast response, while detected veil receives the stronger
-        // atmospheric-light subtraction expected from a real Dehaze control.
-        let transmission = clamp(
-            1.0 - amount * (0.20 + 0.70 * haze_likelihood),
-            0.22,
+        // Lightroom's +100 endpoint is aggressive in the toe but remains
+        // monotone through the midtones. The former transmission range
+        // (down to 0.22) subtracted 20-78% of A and drove broad, ordinary
+        // midtones to black. Keep physical veil subtraction near one percent
+        // of global ambient, then apply a measured ambient-relative tone mask:
+        // ~4 EV in the deepest visible shadows, ~1 EV in lower midtones, and
+        // almost no displacement at airlight.
+        let ambient_position = clamp(center_lum / max(airlight_luma, 1e-6), 0.0, 1.0);
+        let shaped_position = pow(ambient_position, 0.33);
+        let mid_position_hump = 0.30 * shaped_position * (1.0 - shaped_position);
+        let tone_mask = min(
             1.0,
+            1.0 - tone_smoothstep(0.0, 1.0, shaped_position) + mid_position_hump,
         );
+        let transmission = 1.0 - amount * mix(0.008, 0.012, haze_likelihood);
         let physical = (rgb - airlight * (1.0 - transmission)) / transmission;
-        let restored_lum = safe_luma(physical);
-        let luminance_gain = clamp(restored_lum / max(center_lum, 1e-6), 0.28, 4.5);
+        let physical_lum = safe_luma(physical);
+        let luminance_gain = clamp(physical_lum / max(center_lum, 1e-6), 0.0, 2.0);
         let hue_safe = rgb * luminance_gain;
-        var restored = mix(hue_safe, physical, 0.34 + 0.22 * haze_likelihood);
+        var restored = mix(hue_safe, physical, 0.30 + 0.16 * haze_likelihood);
+        restored = restored * exp2(-amount * 4.20 * tone_mask);
 
         let local_detail = clamp(center_ev - broad_ev, -1.2, 1.2);
-        restored = restored * exp2(amount * local_detail * 0.22);
+        restored = restored * exp2(amount * local_detail * 0.12);
         let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * restored);
         let chroma = length(lab.yz);
         let content_saturation = clamp(chroma / max(0.045 + 0.38 * lab.x, 0.06), 0.0, 1.0);
         let chroma_boost = 1.0
-            + amount * (0.10 + 0.30 * haze_likelihood)
-                * (1.0 - 0.38 * content_saturation);
-        restored = perceptual_gamut_compress_nonnegative_rec2020(
+            + amount * (1.30 + 1.00 * tone_mask)
+                * (1.0 - 0.10 * content_saturation);
+        return perceptual_gamut_compress_nonnegative_rec2020(
             SRGB_TO_REC2020 * oklab_to_linear_srgb(
                 vec3<f32>(lab.x, lab.yz * chroma_boost),
             ),
         );
-        return restored;
     }
 
+    // Negative Dehaze is a controlled move toward ambient. Lightroom protects
+    // absolute black, lifts the lower midtones more than AuRaw's old
+    // haze-likelihood inversion, and strongly reduces chroma in the veil.
+    // Increase the mix with normalized scene brightness: this avoids turning
+    // the darkest one percent into a grey pedestal while filling the broad
+    // lower-mid range.
     let haze = -amount;
-    let haze_mix = clamp(haze * (0.14 + 0.38 * (1.0 - haze_likelihood)), 0.0, 0.58);
+    let ambient_position = clamp(center_lum / max(airlight_luma, 1e-6), 0.0, 1.0);
+    let position_weight = pow(ambient_position, 0.35);
+    let haze_mix = clamp(haze * mix(0.115, 0.58, position_weight), 0.0, 0.62);
     let hazed = mix(rgb, airlight, haze_mix);
     let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * hazed);
-    let desaturation = 1.0 - haze * (0.12 + 0.20 * (1.0 - haze_likelihood));
+    let desaturation = 1.0 - haze * mix(0.76, 0.64, haze_likelihood);
     return perceptual_gamut_compress_nonnegative_rec2020(
         SRGB_TO_REC2020 * oklab_to_linear_srgb(
             vec3<f32>(lab.x, lab.yz * desaturation),

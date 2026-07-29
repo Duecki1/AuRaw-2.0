@@ -56,6 +56,8 @@ def test_texture_and_clarity_are_adjacent_scale_space_bands() -> None:
     assert "if abs(texture) < 1e-6 && abs(clarity) < 1e-6" in DETAIL_SCALE
     assert "texture_strength = select(1.55, 2.10" in DETAIL_SCALE
     assert "clarity_strength = select(1.90, 2.62" in DETAIL_SCALE
+    assert "percentiles.p995 - percentiles.p005" in DETAIL_SCALE
+    assert "clarity * mix(-1.25, 0.36, clarity_tone_position) * clarity_scene_gate" in DETAIL_SCALE
     assert "presence_step(1.65, 5)" in DETAIL_SCALE
     assert "presence_step(clarity_reference, 14)" in DETAIL_SCALE
 

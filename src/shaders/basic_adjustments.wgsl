@@ -100,7 +100,7 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
     // monochrome result instead of stopping at a weak partial desaturation.
     var saturation_factor = max(1.0 + saturation, 0.0);
     if saturation > 0.0 {
-        saturation_factor = exp2(saturation * 1.24);
+        saturation_factor = exp2(saturation * 0.95);
     }
 
     // Vibrance favours muted colours but still produces a visible change on an
@@ -120,7 +120,7 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
         vibrance_factor = exp2(boost * 1.38);
     } else {
         let reduction = (-vibrance)
-            * mix(0.30, 0.96, pow(content_saturation, 0.68));
+            * mix(0.90, 0.98, pow(content_saturation, 0.68));
         vibrance_factor = max(1.0 - reduction, 0.0);
     }
 
@@ -139,7 +139,7 @@ fn apply_saturation_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
     var factor = max(1.0 + saturation, 0.0);
     if saturation > 0.0 {
-        factor = exp2(saturation * 1.24);
+        factor = exp2(saturation * 0.95);
     }
     let adjusted = vec3<f32>(lab.x, lab.yz * factor);
     return perceptual_gamut_compress_nonnegative_rec2020(

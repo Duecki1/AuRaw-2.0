@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an analytical Process-17 Shadows/Blacks color-ramp report.
+"""Generate an analytical Process-18 Shadows/Blacks color-ramp report.
 
 This is a policy/reference model, not executed WGSL. It mirrors the scalar
 low-tone transfer functions and uses a luminance-preserving approximation for
@@ -63,7 +63,7 @@ DISPLAY_INPUTS = [
     1.0,
 ]
 SETTINGS = [-100, -75, -50, -25, 0, 25, 50, 75, 100]
-DEFAULT_PERCENTILES = (-8.0, -5.0, 0.0)
+DEFAULT_PERCENTILES = (-5.0, 0.0)
 COLOR_RATIOS = {
     "neutral": (1.0, 1.0, 1.0),
     "red": (1.0, 0.0, 0.0),
@@ -122,34 +122,25 @@ def shaped(v: float) -> float:
     return math.copysign(magnitude * (1.45 - 0.45 * magnitude), n) if magnitude else 0.0
 
 
-def shadow_bounds(p005: float, p05: float, p50: float) -> tuple[float, float, float]:
-    p005 = clamp(p005, -15.5, 11.0)
-    p05 = max(clamp(p05, -15.25, 11.25), p005 + 0.25)
-    p50 = max(clamp(p50, -15.0, 11.5), p05 + 0.5)
-    lower = clamp(min(p005 - 0.5, p05 - 2.5), -13.0, -6.0)
-    peak = max(clamp(p05 + 1.25, -6.0, -2.0), lower + 2.5)
-    upper = min(max(p50 + 0.5, peak + 3.5), 0.75)
-    upper = max(upper, peak + 2.5)
-    return lower, peak, upper
+def shadow_range(p05: float, p50: float) -> tuple[float, float]:
+    return p05 - 0.90, p50 + 1.35
 
 
-def shadow_mask(ev: float, bounds: tuple[float, float, float]) -> float:
-    lower, peak, upper = bounds
-    return smoothstep(lower, peak, ev) if ev <= peak else 1.0 - smoothstep(peak, upper, ev)
+def shadow_mask(ev: float, bounds: tuple[float, float]) -> float:
+    lower, upper = bounds
+    return 1.0 - smoothstep(lower, upper, ev)
 
 
 def shadows_scene(y: float, setting: float, percentiles=DEFAULT_PERCENTILES) -> tuple[float, float, float]:
     if y <= 0.0:
         return y, 0.0, 0.0
     ev = math.log2(y / SCENE_MIDDLE_GREY)
-    bounds = shadow_bounds(*percentiles)
+    bounds = shadow_range(*percentiles)
     weight = shadow_mask(ev, bounds)
     amount = shaped(setting)
-    lower, peak, upper = bounds
-    if amount >= 0.0:
-        strength = min(amount * 3.40, 0.64 * max(upper - peak, 0.25))
-    else:
-        strength = -min((-amount) * 3.00, 0.64 * max(peak - lower, 0.25))
+    lower, upper = bounds
+    limit = 0.64 * max(upper - lower, 0.25)
+    strength = math.copysign(min(abs(amount) * 2.20, limit), amount) if amount else 0.0
     delta_ev = strength * weight
     return y * 2.0**delta_ev, delta_ev, weight
 
@@ -169,14 +160,18 @@ def sigmoid(y: float) -> float:
 
 
 def blacks_display(y: float, setting: float) -> tuple[float, float, float]:
-    pivot = 0.15
-    if y <= 0.0 or y >= pivot or setting == 0.0:
+    if y <= 0.0 or setting == 0.0:
         return y, 0.0, 0.0
-    x = clamp(y / pivot, 0.0, 1.0)
-    weight = (1.0 - x) ** 2
     amount = shaped(setting)
-    endpoint = 2.60 if amount >= 0.0 else 3.10
-    delta_ev = amount * endpoint * weight
+    hdr_guard = 1.0 - smoothstep(0.35, 1.0, y)
+    if amount >= 0.0:
+        weight = (0.08 + 0.92 * 2.0 ** (-y / 0.035)) * hdr_guard
+        delta_ev = amount * 1.75 * weight
+    else:
+        deep = 1.0 - smoothstep(0.012, 0.030, y)
+        tail = 0.10 + 2.35 * 2.0 ** (-y / 0.070)
+        weight = (10.50 * deep + tail) * hdr_guard
+        delta_ev = -(-amount) * weight
     return y * 2.0**delta_ev, delta_ev, weight
 
 

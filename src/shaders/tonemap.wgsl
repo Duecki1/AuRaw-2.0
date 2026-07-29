@@ -68,6 +68,7 @@ fn tone_percentiles() -> TonePercentiles {
 
 const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16u;
 const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17u;
+const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18u;
 
 fn basic_low_tone_control(value: f32) -> f32 {
     let normalized = clamp(value / 100.0, -1.0, 1.0);
@@ -155,15 +156,31 @@ fn adaptive_tone_masks(
         percentiles.p50 + 1.35,
         low_ev,
     );
-    let highlight_mask = tone_smoothstep(
-        percentiles.p50 - 0.45,
-        percentiles.p95 + 0.60,
-        high_ev,
+    let highlight_mask = select(
+        tone_smoothstep(
+            percentiles.p50 - 0.45,
+            percentiles.p95 + 0.60,
+            high_ev,
+        ),
+        tone_smoothstep(
+            percentiles.p005 - 0.40,
+            percentiles.p50 - 0.30,
+            high_ev,
+        ),
+        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     );
-    let white_mask = tone_smoothstep(
-        percentiles.p95 - 0.30,
-        percentiles.p995 + 0.45,
-        high_ev,
+    let white_mask = select(
+        tone_smoothstep(
+            percentiles.p95 - 0.30,
+            percentiles.p995 + 0.45,
+            high_ev,
+        ),
+        tone_smoothstep(
+            percentiles.p05 - 0.10,
+            percentiles.p50 + 0.50,
+            high_ev,
+        ),
+        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     );
     return vec4<f32>(black_mask, shadow_mask, highlight_mask, white_mask);
 }
@@ -216,6 +233,56 @@ fn photographic_shadow_offset_ev(shadows: f32, mask: f32, bounds: vec3<f32>) -> 
     let requested = (-shadows) * 3.00;
     let monotone_limit = 0.64 * max(bounds.y - bounds.x, 0.25);
     return -min(requested, monotone_limit) * mask;
+}
+
+fn lightroom_shadow_offset_ev(
+    shadows: f32,
+    mask: f32,
+    percentiles: TonePercentiles,
+) -> f32 {
+    if abs(shadows) < 1e-7 || mask <= 0.0 {
+        return 0.0;
+    }
+
+    // Lightroom's Shadows endpoint is a low-pass range: the deepest visible
+    // detail receives full authority, then the response rolls continuously
+    // through lower midtones. The measured post-view +/-100 endpoints on the
+    // calibration RAW are about +3.2/-2.6 EV; a roughly 2 EV scene displacement
+    // reaches those endpoints after the default view transform. Cap that request by the
+    // complete transition width so 1 - smoothstep(...) remains strictly
+    // monotone even for an unusually compressed histogram.
+    let lower = percentiles.p05 - 0.90;
+    let upper = percentiles.p50 + 1.35;
+    let monotone_limit = 0.64 * max(upper - lower, 0.25);
+    let requested = abs(shadows) * 2.20;
+    return sign(shadows) * min(requested, monotone_limit) * mask;
+}
+
+fn lightroom_positive_whites_offset_ev(
+    whites: f32,
+    low_ev: f32,
+    percentiles: TonePercentiles,
+) -> f32 {
+    if whites <= 0.0 {
+        return 0.0;
+    }
+
+    // Lightroom Whites +100 is a broad hump rather than a highlights-only
+    // selector: it rises through the darkest decile, peaks in the lower
+    // midtones, then retains roughly one third of its authority in the top
+    // percent. This measured shape also remains monotone because the descending
+    // side is capped from its complete transition width.
+    let rise = tone_smoothstep(
+        percentiles.p005 - 0.35,
+        percentiles.p50 - 0.60,
+        low_ev,
+    );
+    let fall_start = percentiles.p50 - 0.80;
+    let fall_end = percentiles.p995 + 0.60;
+    let fall = 1.0 - 0.67 * tone_smoothstep(fall_start, fall_end, low_ev);
+    let mask = (0.20 + 0.80 * rise) * fall;
+    let monotone_limit = 0.90 * max(fall_end - fall_start, 0.25) / (1.5 * 0.67);
+    return min(whites * 2.35, monotone_limit) * mask;
 }
 
 fn signed_tone_range(value: f32, negative_ev: f32, positive_ev: f32) -> f32 {
@@ -322,14 +389,47 @@ fn apply_local_basic_tone_values_with_low_strength(
         return adjusted * exp2(clamp(offset_ev, -6.5, 6.5));
     }
 
-    // Process 17 Shadows is a bounded scene-EV zone remap. Its selector has an
-    // explicit black anchor and lower-midtone roll-off; authority is derived in
-    // EV then constrained by transition width so the transfer remains monotone.
-    let shadow_bounds = photographic_shadow_bounds(percentiles);
-    let shadow_mask = photographic_shadow_mask(low_ev, shadow_bounds);
-    let shadow_ev = photographic_shadow_offset_ev(shadows, shadow_mask, shadow_bounds);
-    let other_ev = signed_tone_range(highlights, 1.90, 1.15) * masks.z
-        + signed_tone_range(whites, 1.25, 1.40) * masks.w;
+    var shadow_ev = 0.0;
+    if params.process_info.x < LIGHTROOM_BASIC_MATCH_PROCESS_VERSION {
+        // Process 17 compatibility: a band-pass selector separated Shadows
+        // from absolute black. Process 18 replaces this with Lightroom's
+        // measured low-pass response.
+        let shadow_bounds = photographic_shadow_bounds(percentiles);
+        let shadow_mask = photographic_shadow_mask(low_ev, shadow_bounds);
+        shadow_ev = photographic_shadow_offset_ev(shadows, shadow_mask, shadow_bounds);
+    } else {
+        shadow_ev = lightroom_shadow_offset_ev(shadows, masks.y, percentiles);
+    }
+    let current_highlight_mask = select(
+        tone_smoothstep(
+            percentiles.p005 - 0.10,
+            percentiles.p50 + 0.40,
+            guide_ev,
+        ),
+        masks.z,
+        highlights >= 0.0,
+    );
+    let highlight_mask = select(
+        masks.z,
+        current_highlight_mask,
+        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+    );
+    let highlight_ev = select(
+        signed_tone_range(highlights, 1.90, 1.15),
+        signed_tone_range(highlights, 0.72, 0.60),
+        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+    ) * highlight_mask;
+    let negative_white_range = select(
+        1.25,
+        0.30,
+        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+    );
+    let white_ev = select(
+        signed_tone_range(whites, negative_white_range, 1.40) * masks.w,
+        lightroom_positive_whites_offset_ev(whites, low_ev, percentiles),
+        whites >= 0.0 && params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+    );
+    let other_ev = highlight_ev + white_ev;
     return rgb * exp2(clamp(shadow_ev + other_ev, -6.5, 6.5));
 }
 
@@ -371,28 +471,30 @@ fn apply_basic_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
 
     let luminance = safe_luma(rgb);
     let scene_ev = log2(luminance / SCENE_MIDDLE_GREY);
+    let contrast_pivot_ev = tone_percentiles().p50 - 0.45;
+    let relative_ev = scene_ev - contrast_pivot_ev;
 
     // Contrast is a protected S-curve in scene EV rather than a global EV
     // multiplier. Near middle grey the exponential responses are steep, so
     // the slider changes midtone slope decisively. Toward the ends they
-    // asymptotically cap the displacement: the toe cannot be driven down by
-    // more than ~0.85 EV and the shoulder cannot be driven up by more than
-    // ~1.0 EV at +100. This keeps deep texture and highlight separation alive
-    // while still making the centre of the histogram visibly punchier.
-    let toe_distance_ev = max(-scene_ev, 0.0);
-    let shoulder_distance_ev = max(scene_ev, 0.0);
+    // asymptotically cap the displacement. Isolated Lightroom endpoints need
+    // about -2.60/+1.35 EV at +100; the inverse endpoint is gentler on both
+    // sides to retain a strict monotonicity margin.
+    let toe_distance_ev = max(-relative_ev, 0.0);
+    let shoulder_distance_ev = max(relative_ev, 0.0);
     let toe_midtone_width_ev = 1.65;
     let shoulder_midtone_width_ev = 1.85;
     let toe_response = 1.0 - exp2(-toe_distance_ev / toe_midtone_width_ev);
     let shoulder_response = 1.0 - exp2(-shoulder_distance_ev / shoulder_midtone_width_ev);
-    let signed_protected_shape = shoulder_response * 1.00 - toe_response * 0.85;
+    let toe_endpoint = select(1.70, 2.60, amount >= 0.0);
+    let shoulder_endpoint = select(0.95, 1.35, amount >= 0.0);
+    let signed_protected_shape =
+        shoulder_response * shoulder_endpoint - toe_response * toe_endpoint;
 
-    // Negative contrast is deliberately gentler. Keeping its maximum response
-    // below the response widths preserves monotonicity through middle grey and
-    // avoids the flat/reversed tonal patches that an over-strong inverse S can
-    // create. Positive +100 remains the more assertive photographic endpoint.
-    let contrast_strength = select(0.72, 1.0, amount >= 0.0);
-    let adjusted_ev = scene_ev + amount * contrast_strength * signed_protected_shape;
+    // At -100 the minimum derivative is still positive on both sides of the
+    // pivot: 1 - 1.70*ln(2)/1.65 = 0.286 in the toe and
+    // 1 - 0.95*ln(2)/1.85 = 0.644 in the shoulder.
+    let adjusted_ev = scene_ev + amount * signed_protected_shape;
     let adjusted_luminance = SCENE_MIDDLE_GREY * exp2(adjusted_ev);
     return rgb * clamp(adjusted_luminance / luminance, 0.0, 64.0);
 }
@@ -755,7 +857,7 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
         return rgb;
     }
 
-    // Blacks is a display-endpoint/toe control in Process 17. Applying it after
+    // Blacks is a display-endpoint/toe control in Process 17+. Applying it after
     // the one selected view transform prevents DCP ProfileToneCurve or sigmoid
     // compression from erasing most of its scene-domain movement. The fixed
     // display-linear pivot also prevents low/high-key histogram statistics from
@@ -765,7 +867,36 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
     // Preserve signed/non-positive intermediates, but do not introduce a
     // positive epsilon branch: that branch made the toe discontinuous and
     // non-monotone immediately above black.
-    if luminance <= 0.0 || luminance >= pivot {
+    if luminance <= 0.0 {
+        return rgb;
+    }
+
+    if params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION {
+        let hdr_guard = 1.0 - tone_smoothstep(0.35, 1.0, luminance);
+        if hdr_guard <= 0.0 {
+            return rgb;
+        }
+        var offset_ev = 0.0;
+        if amount >= 0.0 {
+            // Positive Blacks is a long, smooth toe with a small upper-tone
+            // tail. Its maximum 1.75 EV and exponential scale retain an
+            // analytic monotonicity margin.
+            let weight = 0.08 + 0.92 * exp2(-luminance / 0.035);
+            offset_ev = amount * 1.75 * weight * hdr_guard;
+        } else {
+            // Lightroom -100 deliberately crushes the darkest 20%, then drops
+            // rapidly to a restrained tail. Keeping this as a negative offset
+            // whose magnitude decreases with luminance is monotone by
+            // construction.
+            let deep = 1.0 - tone_smoothstep(0.012, 0.030, luminance);
+            let tail = 0.10 + 2.35 * exp2(-luminance / 0.070);
+            offset_ev = -(-amount) * (10.50 * deep + tail) * hdr_guard;
+        }
+        let target_luminance = luminance * exp2(offset_ev);
+        return rgb * (target_luminance / luminance);
+    }
+
+    if luminance >= pivot {
         return rgb;
     }
     let x = clamp(luminance / pivot, 0.0, 1.0);
