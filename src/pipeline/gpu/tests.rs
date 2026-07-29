@@ -428,13 +428,16 @@ fn profile_highlight_shoulder_is_scene_adaptive_and_monotonic() {
 #[test]
 fn basic_contrast_has_protected_toe_midtones_and_shoulder() {
     fn contrast_ev(scene_ev: f32, amount: f32) -> f32 {
-        let toe_distance = (-scene_ev).max(0.0);
-        let shoulder_distance = scene_ev.max(0.0);
+        let pivot_ev = -0.45;
+        let relative_ev = scene_ev - pivot_ev;
+        let toe_distance = (-relative_ev).max(0.0);
+        let shoulder_distance = relative_ev.max(0.0);
         let toe_response = 1.0 - 2.0f32.powf(-toe_distance / 1.65);
         let shoulder_response = 1.0 - 2.0f32.powf(-shoulder_distance / 1.85);
-        let shape = shoulder_response - toe_response * 0.85;
-        let strength = if amount >= 0.0 { 1.0 } else { 0.72 };
-        scene_ev + amount.clamp(-1.0, 1.0) * strength * shape
+        let toe_endpoint = if amount >= 0.0 { 2.60 } else { 1.70 };
+        let shoulder_endpoint = if amount >= 0.0 { 1.35 } else { 0.95 };
+        let shape = shoulder_response * shoulder_endpoint - toe_response * toe_endpoint;
+        scene_ev + amount.clamp(-1.0, 1.0) * shape
     }
 
     for amount in [-1.0, 1.0] {
@@ -451,9 +454,9 @@ fn basic_contrast_has_protected_toe_midtones_and_shoulder() {
     // protects deep shadows and highlights from runaway EV multiplication.
     assert!(contrast_ev(-1.0, 1.0) < -1.25);
     assert!(contrast_ev(1.0, 1.0) > 1.25);
-    assert!(contrast_ev(-8.0, 1.0) > -9.0);
-    assert!(contrast_ev(8.0, 1.0) < 9.1);
-    assert_eq!(contrast_ev(0.0, 1.0), 0.0);
+    assert!(contrast_ev(-8.0, 1.0) > -10.7);
+    assert!(contrast_ev(8.0, 1.0) < 9.4);
+    assert_eq!(contrast_ev(-0.45, 1.0), -0.45);
 
     assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast_value"));
 }

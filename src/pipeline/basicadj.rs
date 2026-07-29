@@ -203,7 +203,13 @@ pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;
 /// ProfileToneCurve/sigmoid compression from consuming most of the black-point
 /// authority and keeps low-key/high-key pivots from degenerating.
 pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;
-pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
+/// Process 18 calibrates the basic-control endpoints against isolated Adobe
+/// Camera Raw/Lightroom exports. Shadows becomes a monotone low-pass tonal
+/// range instead of a band-pass zone (so the deepest visible detail receives
+/// full authority), and Dehaze uses a bounded ambient-relative transfer that
+/// cannot collapse broad midtone ranges to black.
+pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;
+pub const CURRENT_PROCESS_VERSION: u32 = LIGHTROOM_BASIC_MATCH_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.
