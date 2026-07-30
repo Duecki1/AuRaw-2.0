@@ -214,7 +214,12 @@ pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;
 /// sharpening also uses that sensor model as a noise threshold, so its Amount
 /// 40 default restores acutance without crispening high-ISO speckle.
 pub const ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION: u32 = 19;
-pub const CURRENT_PROCESS_VERSION: u32 = ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION;
+/// Process 20 replaces sparse-ring chroma averaging with a dense, staged
+/// camera-space wavelet shrinker. It decorrelates the two opponent axes,
+/// preserves the camera signal exactly, and removes demosaic-correlated colour
+/// clouds across six multiscale passes.
+pub const MULTISCALE_COLOR_DENOISE_PROCESS_VERSION: u32 = 20;
+pub const CURRENT_PROCESS_VERSION: u32 = MULTISCALE_COLOR_DENOISE_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.
