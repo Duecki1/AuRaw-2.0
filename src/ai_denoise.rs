@@ -111,6 +111,12 @@ pub fn spawn_rawnind_denoise(
                         CfaKind::Bayer => infer_bayer(
                             &model_dir.join("model_bayer.onnx"),
                             &raw,
+                            device
+                                .as_ref()
+                                .context("Bayer AI denoise requires AuRaw's wgpu device")?,
+                            queue
+                                .as_ref()
+                                .context("Bayer AI denoise requires AuRaw's wgpu queue")?,
                             &worker_sender,
                             &cancellation,
                         ),
@@ -433,6 +439,8 @@ fn run_model_tile(
 fn infer_bayer(
     model_path: &Path,
     raw: &LoadedRaw,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
     events: &mpsc::Sender<AiDenoiseEvent>,
     cancellation: &AtomicBool,
 ) -> Result<AiDenoisedImage> {
@@ -453,6 +461,16 @@ fn infer_bayer(
         .context("RawNIND Bayer output dimensions overflow")?;
     let mut stored = vec![0u16; output_elements];
     let mut session = create_bayer_session(model_path)?;
+    let mut neutral = ExposureParams::scene_referred_default();
+    neutral.ai_denoise_enabled = false;
+    neutral.luminance_denoise = 0.0;
+    neutral.chroma_denoise = 0.0;
+    neutral.ca_red = 0.0;
+    neutral.ca_blue = 0.0;
+    neutral.highlight_method = HighlightReconstructionMethod::Off;
+    neutral.highlight_reconstruction = 0.0;
+    let masks = MaskStack::default();
+    let mut demosaic_pipeline: Option<RawGpuPipeline> = None;
     for tile_y in 0..tiles_y {
         for tile_x in 0..tiles_x {
             ensure_not_cancelled(cancellation)?;
@@ -486,6 +504,23 @@ fn infer_bayer(
             let mut output = run_model_tile(&mut session, 4, input.clone(), TILE_EDGE * 2)?;
             match_gain_tile(&input, &mut output)?;
             let output_edge = TILE_EDGE * 2;
+            let remosaicked = remosaic_bayer_model_tile(raw, &output, output_edge)?;
+            let params = GpuParams::new(&neutral, &masks, &remosaicked);
+            if let Some(existing) = &demosaic_pipeline {
+                existing.upload_raw_tile(queue, &remosaicked)?;
+            } else {
+                demosaic_pipeline = Some(RawGpuPipeline::new_headless_with_quality(
+                    device,
+                    queue,
+                    &remosaicked,
+                    &params,
+                    ProcessingQuality::High,
+                )?);
+            }
+            let camera = demosaic_pipeline
+                .as_ref()
+                .context("Bayer remosaic pipeline was not created")?
+                .render_camera_scene_blocking(device, queue, &params)?;
             for row in 0..core_height * 2 {
                 let destination_y = origin_y as usize + core_y * 2 + row;
                 for column in 0..core_width * 2 {
@@ -493,7 +528,11 @@ fn infer_bayer(
                     let destination = (destination_y * raw.width as usize + destination_x) * 3;
                     let model_index = (OVERLAP * 2 + row) * output_edge + OVERLAP * 2 + column;
                     for channel in 0..3 {
-                        let value = output[channel * output_edge * output_edge + model_index];
+                        let value = camera[model_index * 3 + channel];
+                        anyhow::ensure!(
+                            value.is_finite() && value.abs() <= half::f16::MAX.to_f32(),
+                            "RawNIND Bayer remosaic/demosaic produced a divergent value"
+                        );
                         stored[destination + channel] = half::f16::from_f32(value).to_bits();
                     }
                 }
@@ -516,18 +555,96 @@ fn infer_bayer(
         packed_width * 2,
         packed_height * 2,
     );
-    for pixel in stored.chunks_exact_mut(3) {
-        for channel in 0..3 {
-            let value =
-                half::f16::from_bits(pixel[channel]).to_f32() * raw.wb_coeffs[channel].max(0.0);
-            anyhow::ensure!(
-                value.is_finite() && value.abs() <= half::f16::MAX.to_f32(),
-                "RawNIND Bayer gain matching overflowed"
-            );
-            pixel[channel] = half::f16::from_f32(value).to_bits();
+    AiDenoisedImage::new(raw.width, raw.height, stored)
+}
+
+/// RawNIND's Bayer graph produces three-channel camera RGB, but darktable's
+/// production path deliberately does not inject those channels directly into
+/// the scene. It selects the channel belonging to each CFA site, remosaics the
+/// result and runs the ordinary demosaic stage. Besides preserving the normal
+/// RAW pipeline contract, that step prevents small independent RGB edge
+/// offsets in the neural output from becoming visible colour fringes.
+fn remosaic_bayer_model_tile(
+    source: &LoadedRaw,
+    model_rgb: &[f32],
+    edge: usize,
+) -> Result<LoadedRaw> {
+    anyhow::ensure!(
+        edge == TILE_EDGE * 2,
+        "RawNIND remosaic received an unexpected model tensor"
+    );
+    let (raw_pixels, color_indices) = remosaic_bayer_pixels(model_rgb, edge)?;
+    Ok(LoadedRaw {
+        width: edge as u32,
+        height: edge as u32,
+        camera_make: source.camera_make.clone(),
+        camera_model: source.camera_model.clone(),
+        lens_make: source.lens_make.clone(),
+        lens_model: source.lens_model.clone(),
+        focal_length: source.focal_length,
+        aperture: source.aperture,
+        focus_distance: source.focus_distance,
+        capture_metadata: source.capture_metadata.clone(),
+        cfa_kind: CfaKind::Bayer,
+        raw_pixels,
+        color_indices: CompactPixelMap::compact_from_dense(
+            edge as u32,
+            edge as u32,
+            color_indices,
+            64,
+        ),
+        wb_coeffs: source.wb_coeffs,
+        cam_to_srgb: source.cam_to_srgb,
+        black_levels: [0.0; 4],
+        black_levels_per_pixel: CompactPixelMap::repeating(
+            edge as u32,
+            edge as u32,
+            1,
+            1,
+            vec![0.0],
+        ),
+        white_levels: [65_535.0; 4],
+        noise_profile: source.noise_profile,
+        camera_profile: source.camera_profile.clone(),
+        camera_profile_source: source.camera_profile_source.clone(),
+        available_camera_profiles: source.available_camera_profiles.clone(),
+        white_balance_model: source.white_balance_model.clone(),
+        lens_geometry: None,
+        ai_denoised: Arc::new(RwLock::new(None)),
+    })
+}
+
+fn remosaic_bayer_pixels(model_rgb: &[f32], edge: usize) -> Result<(Vec<u16>, Vec<u8>)> {
+    let plane = edge
+        .checked_mul(edge)
+        .context("RawNIND remosaic tile dimensions overflow")?;
+    anyhow::ensure!(
+        edge > 0 && model_rgb.len() == plane * 3,
+        "RawNIND remosaic received an unexpected model tensor"
+    );
+    let mut raw_pixels = vec![0u16; plane];
+    let mut color_indices = vec![0u8; plane];
+    for y in 0..edge {
+        for x in 0..edge {
+            let index = y * edge + x;
+            let channel = match (x & 1, y & 1) {
+                (0, 0) => 0,
+                (1, 0) => 1,
+                (0, 1) => 1,
+                _ => 2,
+            };
+            color_indices[index] = match (x & 1, y & 1) {
+                (0, 0) => 0,
+                (1, 0) => 1,
+                (0, 1) => 3,
+                _ => 2,
+            };
+            let value = model_rgb[channel * plane + index];
+            anyhow::ensure!(value.is_finite(), "RawNIND Bayer output is non-finite");
+            raw_pixels[index] = (value.clamp(0.0, 1.0) * 65_535.0).round() as u16;
         }
     }
-    AiDenoisedImage::new(raw.width, raw.height, stored)
+    Ok((raw_pixels, color_indices))
 }
 
 fn infer_linear(
@@ -854,9 +971,22 @@ fn inverse3(matrix: Matrix3) -> Option<Matrix3> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_bayer_session, inverse3, match_gain_tile, mul3, reflect_index, run_model_tile,
-        SRGB_TO_REC2020, TILE_EDGE,
+        create_bayer_session, inverse3, match_gain_tile, mul3, reflect_index,
+        remosaic_bayer_pixels, run_model_tile, SRGB_TO_REC2020, TILE_EDGE,
     };
+
+    fn test_wgpu_device() -> (eframe::wgpu::Device, eframe::wgpu::Queue) {
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = pollster::block_on(
+            instance.request_adapter(&eframe::wgpu::RequestAdapterOptions::default()),
+        )
+        .expect("a wgpu adapter is required for RawNIND integration tests");
+        pollster::block_on(adapter.request_device(&eframe::wgpu::DeviceDescriptor {
+            label: Some("RawNIND integration test"),
+            ..Default::default()
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn mirror_padding_matches_numpy_reflect_without_repeating_edges() {
@@ -874,6 +1004,19 @@ mod tests {
         for channel in 0..3 {
             assert!((round_trip[channel] - sample[channel]).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn bayer_remosaic_selects_only_the_channel_at_each_rggb_site() {
+        let model_rgb = [
+            0.1, 0.2, 0.3, 0.4, // R plane
+            0.5, 0.6, 0.7, 0.8, // G plane
+            0.9, 1.0, 0.4, 0.2, // B plane
+        ];
+        let (mosaic, cfa) = remosaic_bayer_pixels(&model_rgb, 2).unwrap();
+        let expected = [0.1f32, 0.6, 0.7, 0.2].map(|value| (value * 65_535.0).round() as u16);
+        assert_eq!(mosaic, expected);
+        assert_eq!(cfa, [0, 1, 3, 2]);
     }
 
     /// Opt-in contract check for the pinned published graph. CI does not carry
@@ -940,11 +1083,14 @@ mod tests {
         crate::ai_masks::initialize_runtime(Some(&runtime), Some(&sha)).unwrap();
         let raw = crate::pipeline::load_raw_file(&raw_path).unwrap();
         assert_eq!(raw.cfa_kind, crate::pipeline::CfaKind::Bayer);
+        let (device, queue) = test_wgpu_device();
         let (events, _receiver) = std::sync::mpsc::channel();
         let cancellation = std::sync::atomic::AtomicBool::new(false);
         let image = super::infer_bayer(
             &model_dir.join("model_bayer.onnx"),
             &raw,
+            &device,
+            &queue,
             &events,
             &cancellation,
         )
@@ -975,17 +1121,7 @@ mod tests {
         crate::ai_masks::initialize_runtime(Some(&runtime), Some(&sha)).unwrap();
         let raw = crate::pipeline::load_raw_file(&raw_path).unwrap();
         assert_eq!(raw.cfa_kind, crate::pipeline::CfaKind::XTrans);
-        let instance = eframe::wgpu::Instance::default();
-        let adapter = pollster::block_on(
-            instance.request_adapter(&eframe::wgpu::RequestAdapterOptions::default()),
-        )
-        .unwrap();
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&eframe::wgpu::DeviceDescriptor {
-                label: Some("RawNIND X-Trans integration test"),
-                ..Default::default()
-            }))
-            .unwrap();
+        let (device, queue) = test_wgpu_device();
         let (events, _receiver) = std::sync::mpsc::channel();
         let cancellation = std::sync::atomic::AtomicBool::new(false);
         let image = super::infer_linear(

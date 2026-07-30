@@ -85,6 +85,12 @@ impl AurawApp {
             return;
         };
         raw.clear_ai_denoised_image();
+        // Bayer follows darktable's remosaic-then-demosaic contract using one
+        // temporary high-quality GPU tile pipeline. Release optional zoom and
+        // navigation pipelines first so the fixed GPU resource budget remains
+        // available while the modal operation is running.
+        self.preview_detail = None;
+        self.preview_navigation = None;
         let cancellation = Arc::new(AtomicBool::new(false));
         let receiver = crate::ai_denoise::spawn_rawnind_denoise(
             self.rawnind_model_dir(),
