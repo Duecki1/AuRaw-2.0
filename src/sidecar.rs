@@ -197,6 +197,7 @@ fn masks_contain_content_aware_components(masks: &MaskStack) -> bool {
             .iter()
             .any(|component| match (component.kind, &component.geometry) {
                 (MaskKind::Subject | MaskKind::Background, MaskGeometry::Ai { .. }) => true,
+                (MaskKind::Landscape, MaskGeometry::Landscape { .. }) => true,
                 (MaskKind::Object, MaskGeometry::Object { strokes, .. }) => strokes
                     .iter()
                     .any(|stroke| stroke.positive && !stroke.points.is_empty()),
@@ -1034,6 +1035,19 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                         validate_image(image.width, image.height, image.pixels.len(), 1)?;
                     }
                 }
+                MaskGeometry::Landscape {
+                    mask,
+                    grow,
+                    feather,
+                    ..
+                } => {
+                    finite("landscape mask settings", &[*grow, *feather])?;
+                    bounded("landscape mask grow", *grow, -1.0, 1.0)?;
+                    bounded("landscape mask feather", *feather, 0.0, 1.0)?;
+                    if let Some(image) = mask {
+                        validate_image(image.width, image.height, image.pixels.len(), 1)?;
+                    }
+                }
                 MaskGeometry::Object {
                     mask,
                     grow,
@@ -1280,6 +1294,12 @@ fn estimate_sidecar_bytes<'a>(
                     &mut estimated,
                     base64_json_string_bytes(image.pixels.len())?,
                 )?,
+                MaskGeometry::Landscape {
+                    mask: Some(image), ..
+                } => checked_add(
+                    &mut estimated,
+                    base64_json_string_bytes(image.pixels.len())?,
+                )?,
                 MaskGeometry::Object { mask, strokes, .. } => {
                     if let Some(image) = mask {
                         checked_add(
@@ -1374,15 +1394,13 @@ fn geometry_matches_kind(kind: MaskKind, geometry: &MaskGeometry) -> bool {
                 MaskGeometry::Ai { .. }
             )
             | (MaskKind::Object, MaskGeometry::Object { .. })
+            | (MaskKind::Landscape, MaskGeometry::Landscape { .. })
             | (
                 MaskKind::LuminanceRange,
                 MaskGeometry::LuminanceRange { .. }
             )
             | (MaskKind::ColorRange, MaskGeometry::ColorRange { .. })
-            | (
-                MaskKind::Landscape | MaskKind::DepthRange,
-                MaskGeometry::Placeholder
-            )
+            | (MaskKind::DepthRange, MaskGeometry::Placeholder)
     )
 }
 

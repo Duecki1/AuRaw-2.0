@@ -68,6 +68,12 @@ Promptable Object selection uses the SAM 2.1 Hiera Tiny image encoder and mask d
 
 The object-mask implementation follows the public SAM 2.1 point-prompt interface used by AnyLabeling: normalized RGB encoder input, cached high-resolution/image embedding outputs, foreground/background point prompts, previous-mask logits, and candidate mask scores.
 
+## MaskFormer
+
+Landscape selection uses Meta AI Research's MaskFormer with a Swin-Base backbone trained on ADE20K. AuRaw downloads the quantized ONNX export from the immutable `9366a4a18164800bcb3e01eb3ddb82160173c1c7` revision of the `onnx-community/maskformer-swin-base-ade` Hugging Face repository only after explicit user consent. The file is pinned by its exact byte count and SHA-256 before publication to the local cache and on every cache hit.
+
+The upstream MaskFormer project is licensed under the Creative Commons Attribution-NonCommercial 4.0 International license. AuRaw displays the noncommercial-use restriction in the consent dialog; the optional model is not distributed with AuRaw. ADE20K category names and class grouping are used to construct the Sky, Vegetation, Architecture, Ground, Water, and Mountains masks.
+
 ## LaMa ONNX
 
 Local inpainting uses the `lama_fp32.onnx` model distributed by

@@ -236,6 +236,7 @@ fn needs_canonical_mask_source(masks: &MaskStack) -> bool {
                 MaskGeometry::LuminanceRange { source: None, .. }
                     | MaskGeometry::ColorRange { source: None, .. }
                     | MaskGeometry::Object { .. }
+                    | MaskGeometry::Landscape { .. }
             )
         })
     })
@@ -424,6 +425,7 @@ impl AurawApp {
             ai_mask_update_active: false,
             ai_mask_update_subject_pending: false,
             ai_mask_update_object_queue: VecDeque::new(),
+            ai_mask_update_landscape_queue: VecDeque::new(),
             ai_mask_update_failed: false,
             onnx_runtime_path,
             onnx_runtime_sha256,
@@ -454,6 +456,7 @@ impl AurawApp {
             library_ai_mask_refresh_task_id: None,
             subject_task_id: None,
             object_task_id: None,
+            landscape_task_id: None,
             inpaint_task_id: None,
             target_exposure: exposure,
             pending_stage: None,
@@ -501,6 +504,16 @@ impl AurawApp {
             object_job_document_id: 0,
             object_job_target: None,
             object_cache: None,
+            landscape_consent_open: false,
+            landscape_pending_target: None,
+            landscape_receiver: None,
+            landscape_download_progress: None,
+            landscape_inferencing: false,
+            landscape_generation: 0,
+            landscape_job_generation: 0,
+            landscape_job_document_id: 0,
+            landscape_job_target: None,
+            landscape_job_category: None,
             inpaint_brush_size: 0.055,
             inpaint_stroke: Vec::new(),
             inpaint_strokes: Vec::new(),
@@ -689,6 +702,7 @@ impl AurawApp {
             ai_mask_update_active: false,
             ai_mask_update_subject_pending: false,
             ai_mask_update_object_queue: VecDeque::new(),
+            ai_mask_update_landscape_queue: VecDeque::new(),
             ai_mask_update_failed: false,
             status: "Open a RAW file to get started.".to_owned(),
             expert_mode: false,
@@ -715,6 +729,7 @@ impl AurawApp {
             library_ai_mask_refresh_task_id: None,
             subject_task_id: None,
             object_task_id: None,
+            landscape_task_id: None,
             inpaint_task_id: None,
             target_exposure: exposure,
             pending_stage: None,
@@ -760,6 +775,16 @@ impl AurawApp {
             object_job_document_id: 0,
             object_job_target: None,
             object_cache: None,
+            landscape_consent_open: false,
+            landscape_pending_target: None,
+            landscape_receiver: None,
+            landscape_download_progress: None,
+            landscape_inferencing: false,
+            landscape_generation: 0,
+            landscape_job_generation: 0,
+            landscape_job_document_id: 0,
+            landscape_job_target: None,
+            landscape_job_category: None,
             inpaint_brush_size: 0.055,
             inpaint_stroke: Vec::new(),
             inpaint_strokes: Vec::new(),
@@ -1781,6 +1806,7 @@ impl AurawApp {
         self.ai_mask_update_active = false;
         self.ai_mask_update_subject_pending = false;
         self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_landscape_queue.clear();
         self.ai_mask_update_failed = false;
         self.subject_consent_open = false;
         self.subject_generation = self.subject_generation.wrapping_add(1);
@@ -1801,6 +1827,17 @@ impl AurawApp {
             self.object_job_target = None;
         }
         self.object_cache = None;
+        self.landscape_consent_open = false;
+        self.landscape_pending_target = None;
+        self.landscape_generation = self.landscape_generation.wrapping_add(1);
+        if self.landscape_receiver.is_none() {
+            self.landscape_task_id = None;
+            self.landscape_download_progress = None;
+            self.landscape_inferencing = false;
+            self.landscape_job_generation = 0;
+            self.landscape_job_target = None;
+            self.landscape_job_category = None;
+        }
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];

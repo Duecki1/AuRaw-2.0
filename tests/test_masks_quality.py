@@ -127,6 +127,23 @@ def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
     assert "*value = top + (bottom - top) * fy" in MASKS
 
 
+def test_landscape_masks_have_persisted_categories_and_explicit_generation() -> None:
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    assert "pub enum LandscapeCategory" in MASKS
+    for category in ("Sky", "Vegetation", "Architecture", "Ground", "Water", "Mountains"):
+        assert f"Self::{category}" in MASKS
+    assert "ade20k_class_ids" in MASKS
+    assert "MaskGeometry::Landscape" in SIDEBAR
+    assert 'ui.button("Generate Mask")' in SIDEBAR
+    assert "request_landscape_mask(frame, mask_index, component_index)" in SIDEBAR
+    assert "ADE20K_CLASS_COUNT: usize = 150" in ai
+    assert "run_landscape_session" in ai
+    assert "class_queries_logits" in ai
+    assert "masks_queries_logits" in ai
+    assert "MaskFormerInputLayout" in ai
+    assert "resize_probability_u8" in ai
+
+
 
 
 def test_ai_subject_edges_use_high_resolution_vitmatte_guidance() -> None:

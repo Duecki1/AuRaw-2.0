@@ -1238,6 +1238,7 @@ impl Sidebar {
         let mut adjustments_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
+        let mut request_landscape = false;
         let mut brush_mode = app.brush_mode;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
@@ -1253,6 +1254,7 @@ impl Sidebar {
                     &mut brush_mode,
                     &mut request_subject,
                     &mut request_object,
+                    &mut request_landscape,
                 );
             });
 
@@ -1304,6 +1306,9 @@ impl Sidebar {
         if request_object {
             app.request_object_mask(mask_index, component_index);
         }
+        if request_landscape {
+            app.request_landscape_mask(frame, mask_index, component_index);
+        }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if adjustments_changed {
             app.mark_mask_adjustments_dirty();
@@ -1338,6 +1343,7 @@ impl Sidebar {
         let mut adjustments_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
+        let mut request_landscape = false;
         let mut brush_mode = app.brush_mode;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
@@ -1353,6 +1359,7 @@ impl Sidebar {
                         &mut brush_mode,
                         &mut request_subject,
                         &mut request_object,
+                        &mut request_landscape,
                     );
                 }
                 section => {
@@ -1402,6 +1409,9 @@ impl Sidebar {
         if request_object {
             app.request_object_mask(mask_index, component_index);
         }
+        if request_landscape {
+            app.request_landscape_mask(frame, mask_index, component_index);
+        }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if adjustments_changed {
             app.mark_mask_adjustments_dirty();
@@ -1428,6 +1438,7 @@ impl Sidebar {
         brush_mode: &mut BrushMode,
         request_subject: &mut bool,
         request_object: &mut bool,
+        request_landscape: &mut bool,
     ) -> bool {
         let mut geometry_changed = adjustment_slider(
             ui,
@@ -1644,6 +1655,47 @@ impl Sidebar {
                         }
                     });
                     ui.small(format!("{} selection stroke(s)", strokes.len()));
+                }
+                MaskGeometry::Landscape {
+                    mask: generated_mask,
+                    category,
+                    grow,
+                    feather,
+                } => {
+                    ui.label("Choose a landscape element, then generate its semantic mask.");
+                    let before = *category;
+                    egui::ComboBox::from_id_salt("landscape-mask-category")
+                        .selected_text(category.label())
+                        .show_ui(ui, |ui| {
+                            for option in crate::pipeline::LandscapeCategory::ALL {
+                                ui.selectable_value(category, option, option.label());
+                            }
+                        });
+                    if before != *category {
+                        *generated_mask = None;
+                        geometry_changed = true;
+                    }
+                    if ui.button("Generate Mask").clicked() {
+                        *request_landscape = true;
+                    }
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Grow",
+                        grow,
+                        -1.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Positive values expand the mask; negative values shrink it inward."),
+                    );
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Feather",
+                        feather,
+                        0.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Softens the semantic boundary after generation."),
+                    );
                 }
                 MaskGeometry::LuminanceRange {
                     low,
@@ -1958,6 +2010,11 @@ impl Sidebar {
         match kind {
             MaskKind::Subject | MaskKind::Background => app.request_subject_mask(frame),
             MaskKind::Object => {
+                if let Err(error) = app.capture_mask_source(frame) {
+                    app.status = error;
+                }
+            }
+            MaskKind::Landscape => {
                 if let Err(error) = app.capture_mask_source(frame) {
                     app.status = error;
                 }

@@ -45,12 +45,29 @@ def test_downloaded_model_is_size_and_sha256_pinned() -> None:
     assert "VITMATTE_MODEL_SHA256_HEX" in AI
     assert "downloaded <= VITMATTE_MODEL_BYTES" in AI
     assert "verify_vitmatte_model(path)" in AI
+    assert "LANDSCAPE_MODEL_SHA256_HEX" in AI
+    assert "downloaded <= LANDSCAPE_MODEL_BYTES" in AI
+    assert "verify_landscape_model(path)" in AI
+    assert ".https_only(true)" in AI
+    assert "if !allow_download" in AI
+    assert "consent to its download again" in AI
 
 
 def test_desktop_requires_runtime_before_model_download() -> None:
     assert "validate_onnx_runtime_for_ai" in APP
     request = APP[APP.index("pub(crate) fn request_subject_mask"):APP.index("fn start_subject_worker")]
     assert request.index("validate_onnx_runtime_for_ai()") < request.index("subject_consent_open = true")
+    landscape = APP[
+        APP.index("pub(crate) fn request_landscape_mask"):
+        APP.index("fn start_landscape_worker")
+    ]
+    assert landscape.index("validate_onnx_runtime_for_ai()") < landscape.index(
+        "landscape_consent_open = true"
+    )
+    assert "landscape_model_is_verified" in landscape
+    consent = APP[APP.index("if self.landscape_consent_open"):]
+    assert '"Consent, download and continue"' in consent
+    assert "self.start_landscape_worker(" in consent
 
 
 def test_windows_runtime_is_isolated_and_uses_safe_cpu_fallback() -> None:

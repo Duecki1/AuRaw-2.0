@@ -1,7 +1,7 @@
 use crate::ai_masks::{
-    spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent,
-    ObjectMaskRequest, SubjectMaskEvent, BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE,
-    VITMATTE_MODEL_BYTES,
+    spawn_landscape_mask, spawn_object_mask, spawn_subject_mask, LandscapeMaskEvent,
+    ObjectInferenceCache, ObjectMaskEvent, ObjectMaskRequest, SubjectMaskEvent,
+    BIREFNET_MODEL_BYTES, LANDSCAPE_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
 use crate::inpainting::{
     inpaint_capture_rect, inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintRequest,
@@ -14,7 +14,7 @@ use crate::pipeline::{
     spawn_tiled_png_export_with_program_prewarm,
     spawn_tiled_tiff_export_with_program_prewarm, BrushDab, BrushMode, CameraProfileMode,
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
-    GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog, LensfunLens,
+    GpuParams, InpaintLayer, InpaintStroke, LandscapeCategory, LensfunCatalog, LensfunLens,
     LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality,
     ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
@@ -625,6 +625,18 @@ struct ObjectMaskTaskRequest {
     request: ObjectMaskRequest,
 }
 
+struct LandscapeMaskTaskRequest {
+    document_id: u64,
+    generation: u64,
+    target: (usize, usize),
+    source: MaskRgbImage,
+    model_path: PathBuf,
+    allow_download: bool,
+    runtime_path: Option<PathBuf>,
+    runtime_sha256: Option<String>,
+    category: LandscapeCategory,
+}
+
 struct InpaintTaskRequest {
     document_id: u64,
     generation: u64,
@@ -645,6 +657,7 @@ enum BackgroundAction {
     LensCorrection(LensCorrectionTaskRequest),
     SubjectMask(SubjectMaskTaskRequest),
     ObjectMask(ObjectMaskTaskRequest),
+    LandscapeMask(LandscapeMaskTaskRequest),
     Inpainting(InpaintTaskRequest),
     LibraryAiMaskRefresh {
         jobs: VecDeque<LibraryAiMaskRefreshJob>,
@@ -756,6 +769,7 @@ pub struct AurawApp {
     ai_mask_update_active: bool,
     ai_mask_update_subject_pending: bool,
     ai_mask_update_object_queue: VecDeque<(usize, usize)>,
+    ai_mask_update_landscape_queue: VecDeque<(usize, usize)>,
     ai_mask_update_failed: bool,
     #[cfg(not(target_os = "android"))]
     pub(crate) onnx_runtime_path: Option<PathBuf>,
@@ -793,6 +807,7 @@ pub struct AurawApp {
     library_ai_mask_refresh_task_id: Option<TaskId>,
     subject_task_id: Option<TaskId>,
     object_task_id: Option<TaskId>,
+    landscape_task_id: Option<TaskId>,
     inpaint_task_id: Option<TaskId>,
     target_exposure: ExposureParams,
     pending_stage: Option<ProcessingStage>,
@@ -841,6 +856,16 @@ pub struct AurawApp {
     object_job_document_id: u64,
     object_job_target: Option<(usize, usize)>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
+    landscape_consent_open: bool,
+    landscape_pending_target: Option<(usize, usize)>,
+    landscape_receiver: Option<mpsc::Receiver<LandscapeMaskEvent>>,
+    landscape_download_progress: Option<(u64, u64)>,
+    landscape_inferencing: bool,
+    landscape_generation: u64,
+    landscape_job_generation: u64,
+    landscape_job_document_id: u64,
+    landscape_job_target: Option<(usize, usize)>,
+    landscape_job_category: Option<LandscapeCategory>,
 
     pub(crate) inpaint_brush_size: f32,
     pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,

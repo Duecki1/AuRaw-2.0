@@ -711,11 +711,14 @@ impl AurawApp {
         self.ai_mask_update_active = false;
         self.ai_mask_update_subject_pending = false;
         self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_landscape_queue.clear();
         self.ai_mask_update_failed = false;
         if self.ai_masks_need_update {
-            let (subject, objects) = self.generated_ai_mask_targets();
-            self.ai_masks_need_update =
-                subject || !objects.is_empty() || self.has_range_mask_targets();
+            let (subject, objects, landscapes) = self.generated_ai_mask_targets();
+            self.ai_masks_need_update = subject
+                || !objects.is_empty()
+                || !landscapes.is_empty()
+                || self.has_range_mask_targets();
         }
         self.subject_consent_open = false;
         self.subject_generation = self.subject_generation.wrapping_add(1);
@@ -736,6 +739,17 @@ impl AurawApp {
             self.object_job_target = None;
         }
         self.object_cache = None;
+        self.landscape_consent_open = false;
+        self.landscape_pending_target = None;
+        self.landscape_generation = self.landscape_generation.wrapping_add(1);
+        if self.landscape_receiver.is_none() {
+            self.landscape_task_id = None;
+            self.landscape_download_progress = None;
+            self.landscape_inferencing = false;
+            self.landscape_job_generation = 0;
+            self.landscape_job_target = None;
+            self.landscape_job_category = None;
+        }
     }
 }
 
