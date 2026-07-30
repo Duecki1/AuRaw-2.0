@@ -60,13 +60,14 @@ def display_black_toe(luma: float, amount: float) -> float:
     return luma * 2.0**offset
 
 
-def test_process_20_is_the_single_runtime_renderer() -> None:
+def test_process_21_is_the_single_runtime_renderer() -> None:
     assert "pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;" in BASIC
     assert "pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;" in BASIC
     assert "pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;" in BASIC
     assert "pub const ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION: u32 = 19;" in BASIC
     assert "pub const MULTISCALE_COLOR_DENOISE_PROCESS_VERSION: u32 = 20;" in BASIC
-    assert "pub const CURRENT_PROCESS_VERSION: u32 = MULTISCALE_COLOR_DENOISE_PROCESS_VERSION;" in BASIC
+    assert "pub const EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 21;" in BASIC
+    assert "pub const CURRENT_PROCESS_VERSION: u32 = EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION;" in BASIC
     assert "const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16u;" in TONEMAP
     assert "const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17u;" in TONEMAP
     assert "const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18u;" in TONEMAP
