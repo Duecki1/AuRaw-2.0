@@ -3,11 +3,11 @@ use super::{
     explicit_render_graph_contracts_are_contiguous, highlight_final_read_slot,
     highlight_stage_slots, pack_local_point_curve, processing_work_format, render_graph_flags,
     shader_highlight_method, work_shader_source, HighlightWorkSlot, ProcessingQuality,
-    HIGHLIGHT_GUIDED_ENTRY_POINTS, RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY, SHADER_ADJUSTMENTS,
-    SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
-    SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS,
-    SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5,
-    SHADER_XTRANS_P6, SHADER_XTRANS_P7,
+    COLOR_DENOISE_ENTRY_POINTS, HIGHLIGHT_GUIDED_ENTRY_POINTS, RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY,
+    SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
+    SHADER_BAYER_RCD_P4, SHADER_COLOR_DENOISE, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS,
+    SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1, SHADER_XTRANS_P2,
+    SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5, SHADER_XTRANS_P6, SHADER_XTRANS_P7,
 };
 use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
 use eframe::wgpu;
@@ -215,6 +215,7 @@ fn compute_shaders_parse_and_validate() {
         ("X-Trans homogeneity", SHADER_XTRANS_P5),
         ("X-Trans accumulation", SHADER_XTRANS_P6),
         ("X-Trans finish", SHADER_XTRANS_P7),
+        ("multiscale color denoise", SHADER_COLOR_DENOISE),
         ("adaptive tone analysis", SHADER_TONE_ANALYSIS),
         ("regression scene export", SHADER_REGRESSION_SCENE),
         ("Lightroom adjustments", SHADER_ADJUSTMENTS),
@@ -253,6 +254,14 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
             "32-bit robust dual demosaic",
             work_shader_source(
                 SHADER_DUAL_DEMOSAIC,
+                processing_work_format(ProcessingQuality::High),
+            )
+            .expect("specialize high-quality shader"),
+        ),
+        (
+            "32-bit multiscale color denoise",
+            work_shader_source(
+                SHADER_COLOR_DENOISE,
                 processing_work_format(ProcessingQuality::High),
             )
             .expect("specialize high-quality shader"),
@@ -428,13 +437,16 @@ fn profile_highlight_shoulder_is_scene_adaptive_and_monotonic() {
 #[test]
 fn basic_contrast_has_protected_toe_midtones_and_shoulder() {
     fn contrast_ev(scene_ev: f32, amount: f32) -> f32 {
-        let toe_distance = (-scene_ev).max(0.0);
-        let shoulder_distance = scene_ev.max(0.0);
+        let pivot_ev = -0.45;
+        let relative_ev = scene_ev - pivot_ev;
+        let toe_distance = (-relative_ev).max(0.0);
+        let shoulder_distance = relative_ev.max(0.0);
         let toe_response = 1.0 - 2.0f32.powf(-toe_distance / 1.65);
         let shoulder_response = 1.0 - 2.0f32.powf(-shoulder_distance / 1.85);
-        let shape = shoulder_response - toe_response * 0.85;
-        let strength = if amount >= 0.0 { 1.0 } else { 0.72 };
-        scene_ev + amount.clamp(-1.0, 1.0) * strength * shape
+        let toe_endpoint = if amount >= 0.0 { 2.60 } else { 1.70 };
+        let shoulder_endpoint = if amount >= 0.0 { 1.35 } else { 0.95 };
+        let shape = shoulder_response * shoulder_endpoint - toe_response * toe_endpoint;
+        scene_ev + amount.clamp(-1.0, 1.0) * shape
     }
 
     for amount in [-1.0, 1.0] {
@@ -451,9 +463,9 @@ fn basic_contrast_has_protected_toe_midtones_and_shoulder() {
     // protects deep shadows and highlights from runaway EV multiplication.
     assert!(contrast_ev(-1.0, 1.0) < -1.25);
     assert!(contrast_ev(1.0, 1.0) > 1.25);
-    assert!(contrast_ev(-8.0, 1.0) > -9.0);
-    assert!(contrast_ev(8.0, 1.0) < 9.1);
-    assert_eq!(contrast_ev(0.0, 1.0), 0.0);
+    assert!(contrast_ev(-8.0, 1.0) > -10.7);
+    assert!(contrast_ev(8.0, 1.0) < 9.4);
+    assert_eq!(contrast_ev(-0.45, 1.0), -0.45);
 
     assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast_value"));
 }
@@ -525,6 +537,21 @@ fn demosaic_shaders_expose_every_dispatched_entry_point() {
                 .iter()
                 .any(|entry| entry.name == expected),
             "demosaic shader is missing entry point {expected}"
+        );
+    }
+}
+
+#[test]
+fn color_denoise_shader_exposes_every_dispatched_scale() {
+    let module = naga::front::wgsl::parse_str(SHADER_COLOR_DENOISE)
+        .expect("multiscale color-denoise shader did not parse");
+    for expected in COLOR_DENOISE_ENTRY_POINTS {
+        assert!(
+            module
+                .entry_points
+                .iter()
+                .any(|entry| entry.name == expected),
+            "color-denoise shader is missing entry point {expected}"
         );
     }
 }
@@ -1629,6 +1656,15 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
             .unwrap()
     };
 
+    let render_camera = |raw: &LoadedRaw, exposure: &ExposureParams| {
+        pipeline.upload_raw_tile(&queue, raw).unwrap();
+        let params = super::GpuParams::new(exposure, &masks, raw);
+        pipeline.recompute(&queue, &device, &params);
+        pipeline
+            .read_scene_texture_blocking(&device, &queue)
+            .unwrap()
+    };
+
     // Band-pass presence controls must be exact no-ops on a flat field. This
     // catches accidental global exposure offsets in Texture/Clarity.
     let flat_neutral = render(&flat, &neutral);
@@ -1648,6 +1684,123 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
     assert!(
         flat_max_delta <= 2e-5,
         "flat Texture/Clarity changed pixels by {flat_max_delta}"
+    );
+
+    // Profiled color denoise must reduce camera-space opponent noise
+    // monotonically without changing the green-weighted camera signal. A
+    // bright coherent color patch must survive even at Color 100.
+    let mut chroma_noise = fixture(WIDTH, HEIGHT, |_, _| 0.12);
+    chroma_noise.noise_profile = crate::pipeline::NoiseProfile {
+        shot: [0.0; 4],
+        read: [0.0001; 4],
+        confidence: 1.0,
+        green2_present: true,
+    };
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let index = (y * WIDTH + x) as usize;
+            let hash = x
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add(y.wrapping_mul(0x85eb_ca6b))
+                .wrapping_add((index as u32).rotate_left(13));
+            let unit = (hash & 0xffff) as f32 / 65_535.0;
+            let signal = 0.12 + 0.026 * (2.0 * unit - 1.0);
+            chroma_noise.raw_pixels[index] = (signal * 4095.0).round() as u16;
+        }
+    }
+    let color_exposure = |amount| ExposureParams {
+        chroma_denoise: amount,
+        luminance_denoise: 0.0,
+        denoise_detail: 50.0,
+        denoise_quality: crate::pipeline::DenoiseQuality::High,
+        sharpen_amount: 0.0,
+        ..neutral
+    };
+    let color_off = render_camera(&chroma_noise, &color_exposure(0.0));
+    let color_25 = render_camera(&chroma_noise, &color_exposure(0.25));
+    let color_100 = render_camera(&chroma_noise, &color_exposure(1.0));
+    let opponent_noise = |pixels: &[f32]| {
+        let mut sum = 0.0f64;
+        let mut count = 0u64;
+        for y in 32..HEIGHT - 32 {
+            for x in 32..WIDTH - 33 {
+                let left = ((y * WIDTH + x) * 3) as usize;
+                let right = left + 3;
+                let opponents = |index: usize| {
+                    let r = pixels[index];
+                    let g = pixels[index + 1];
+                    let b = pixels[index + 2];
+                    [0.5 * (r - b), 0.25 * r - 0.5 * g + 0.25 * b]
+                };
+                let a = opponents(left);
+                let b = opponents(right);
+                sum += f64::from((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2));
+                count += 1;
+            }
+        }
+        (sum / count as f64).sqrt() as f32
+    };
+    let off_noise = opponent_noise(&color_off);
+    let color_25_noise = opponent_noise(&color_25);
+    let color_100_noise = opponent_noise(&color_100);
+    assert!(
+        color_25_noise < 0.45 * off_noise,
+        "Color 25 did not remove enough opponent noise: {off_noise} -> {color_25_noise}"
+    );
+    assert!(
+        color_100_noise <= 1.02 * color_25_noise,
+        "Color 100 increased opponent noise: {color_25_noise} -> {color_100_noise}"
+    );
+    for (label, denoised) in [("Color 25", &color_25), ("Color 100", &color_100)] {
+        let maximum_signal_delta = color_off
+            .chunks_exact(3)
+            .zip(denoised.chunks_exact(3))
+            .map(|(before, after)| {
+                let signal = |pixel: &[f32]| 0.25 * pixel[0] + 0.5 * pixel[1] + 0.25 * pixel[2];
+                (signal(before) - signal(after)).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            maximum_signal_delta < 2e-5,
+            "{label} changed camera signal by {maximum_signal_delta}"
+        );
+    }
+
+    let mut colored_feature = chroma_noise.clone();
+    for y in 48..80 {
+        for x in 48..80 {
+            let index = (y * WIDTH + x) as usize;
+            let channel = match (x % 2, y % 2) {
+                (0, 0) => 0,
+                (1, 1) => 2,
+                _ => 1,
+            };
+            let signal = [0.65f32, 0.12, 0.04][channel];
+            colored_feature.raw_pixels[index] = (signal * 4095.0).round() as u16;
+        }
+    }
+    let feature_off = render_camera(&colored_feature, &color_exposure(0.0));
+    let feature_100 = render_camera(&colored_feature, &color_exposure(1.0));
+    let feature_chroma = |pixels: &[f32]| {
+        let mut sum = 0.0;
+        let mut count = 0u32;
+        for y in 56..72 {
+            for x in 56..72 {
+                let index = ((y * WIDTH + x) * 3) as usize;
+                let r = pixels[index];
+                let g = pixels[index + 1];
+                let b = pixels[index + 2];
+                sum += (0.5 * (r - b)).hypot(0.25 * r - 0.5 * g + 0.25 * b);
+                count += 1;
+            }
+        }
+        sum / count as f32
+    };
+    let feature_chroma_off = feature_chroma(&feature_off);
+    let feature_chroma_100 = feature_chroma(&feature_100);
+    assert!(
+        feature_chroma_100 >= 0.90 * feature_chroma_off,
+        "Color 100 desaturated a coherent color feature: {feature_chroma_off} -> {feature_chroma_100}"
     );
 
     // Real fine and medium detail must move visibly; source-string wiring

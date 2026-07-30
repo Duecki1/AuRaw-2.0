@@ -14,10 +14,12 @@ mod sigmoid;
 pub use basicadj::{
     temperature_kelvin_from_offset, temperature_offset_from_kelvin, ColorGradeWheel, ColorGrading,
     DemosaicMode, ExposureParams, HighlightReconstructionMethod, PointCurve,
-    BASIC_TONE_RESPONSE_PROCESS_VERSION, CURRENT_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT,
-    HIGHLIGHT_CONSENSUS_PROCESS_VERSION, HSL_HUE_LIMIT, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
-    LEGACY_SCENE_DISPLAY_PROCESS_VERSION, MAX_POINT_CURVE_POINTS, MAX_TEMPERATURE_KELVIN,
-    MIN_TEMPERATURE_KELVIN, PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION,
+    ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION, BASIC_TONE_RESPONSE_PROCESS_VERSION,
+    CURRENT_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT, HIGHLIGHT_CONSENSUS_PROCESS_VERSION,
+    HSL_HUE_LIMIT, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV, LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
+    LIGHTROOM_BASIC_MATCH_PROCESS_VERSION, MAX_POINT_CURVE_POINTS, MAX_TEMPERATURE_KELVIN,
+    MIN_TEMPERATURE_KELVIN, MULTISCALE_COLOR_DENOISE_PROCESS_VERSION,
+    PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION,
     SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION, SENSOR_DENOISE_PROCESS_VERSION,
 };
 #[cfg(not(target_os = "android"))]
@@ -54,7 +56,7 @@ pub use masks::{
     LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry, MaskImage, MaskKind,
     MaskRgbImage, MaskStack, ObjectStroke, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
-pub use noise::{DenoiseQuality, NoiseProfile};
+pub use noise::{AdaptiveDetailDefaults, DenoiseQuality, NoiseProfile};
 pub use processing::{
     affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile,
     extract_padded_tile_into, required_export_tile_halo, ExportTile, ProcessingStage, ProxySpec,

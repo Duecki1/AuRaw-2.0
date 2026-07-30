@@ -203,7 +203,23 @@ pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;
 /// ProfileToneCurve/sigmoid compression from consuming most of the black-point
 /// authority and keeps low-key/high-key pivots from degenerating.
 pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;
-pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;
+/// Process 18 calibrates the basic-control endpoints against isolated Adobe
+/// Camera Raw/Lightroom exports. Shadows becomes a monotone low-pass tonal
+/// range instead of a band-pass zone (so the deepest visible detail receives
+/// full authority), and Dehaze uses a bounded ambient-relative transfer that
+/// cannot collapse broad midtone ranges to black.
+pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;
+/// Process 19 calibrates the flat-field RAW-noise estimate and gives new or
+/// previously-default edits per-capture Detail starting values. Capture
+/// sharpening also uses that sensor model as a noise threshold, so its Amount
+/// 40 default restores acutance without crispening high-ISO speckle.
+pub const ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION: u32 = 19;
+/// Process 20 replaces sparse-ring chroma averaging with a dense, staged
+/// camera-space wavelet shrinker. It decorrelates the two opponent axes,
+/// preserves the camera signal exactly, and removes demosaic-correlated colour
+/// clouds across six multiscale passes.
+pub const MULTISCALE_COLOR_DENOISE_PROCESS_VERSION: u32 = 20;
+pub const CURRENT_PROCESS_VERSION: u32 = MULTISCALE_COLOR_DENOISE_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.
@@ -382,6 +398,20 @@ impl ExposureParams {
 
     pub fn scene_referred_default() -> Self {
         Self::default()
+    }
+
+    /// Detail settings used by process 18 and earlier before per-capture
+    /// defaults existed. This lets migration improve untouched defaults while
+    /// preserving any image where the photographer changed a Detail control.
+    pub(crate) fn has_legacy_default_detail_settings(&self) -> bool {
+        self.chroma_denoise == 0.0
+            && self.luminance_denoise == 0.0
+            && self.denoise_detail == default_denoise_detail()
+            && self.denoise_quality == DenoiseQuality::Balanced
+            && self.sharpen_amount == default_sharpen_amount()
+            && self.sharpen_radius == default_sharpen_radius()
+            && self.sharpen_detail == default_sharpen_detail()
+            && self.sharpen_masking == 0.0
     }
 }
 

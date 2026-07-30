@@ -23,12 +23,19 @@ def camera_opponent_inverse(values: tuple[float, float, float]) -> tuple[float, 
 
 
 def display_black_toe(y: float, amount: float) -> float:
-    if y <= 0.0 or y >= 0.15 or abs(amount) < 1e-7:
+    if y <= 0.0 or abs(amount) < 1e-7:
         return y
-    x = y / 0.15
-    toe = (1.0 - x) ** 2
-    endpoint = 2.60 if amount >= 0.0 else 3.10
-    return y * 2.0 ** (max(-1.0, min(1.0, amount)) * endpoint * toe)
+    amount = max(-1.0, min(1.0, amount))
+    guard_t = max(0.0, min(1.0, (y - 0.35) / 0.65))
+    hdr_guard = 1.0 - guard_t * guard_t * (3.0 - 2.0 * guard_t)
+    if amount >= 0.0:
+        offset = amount * 1.75 * (0.08 + 0.92 * 2.0 ** (-y / 0.035)) * hdr_guard
+    else:
+        deep_t = max(0.0, min(1.0, (y - 0.012) / 0.018))
+        deep = 1.0 - deep_t * deep_t * (3.0 - 2.0 * deep_t)
+        tail = 0.10 + 2.35 * 2.0 ** (-y / 0.070)
+        offset = -(-amount) * (10.50 * deep + tail) * hdr_guard
+    return y * 2.0**offset
 
 
 def test_camera_space_opponent_basis_is_exactly_reversible() -> None:
@@ -47,7 +54,7 @@ def test_black_toe_is_continuous_and_monotone_above_zero() -> None:
     for amount in (-1.0, -0.5, 0.5, 1.0):
         previous = 0.0
         for i in range(1, 100_001):
-            y = 0.15 * i / 100_000
+            y = i / 100_000
             mapped = display_black_toe(y, amount)
             assert mapped >= previous - 1e-12
             previous = mapped

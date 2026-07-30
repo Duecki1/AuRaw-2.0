@@ -1923,7 +1923,7 @@ impl AurawApp {
 
                 let result = (|| {
                     let (
-                        rendered_exposure,
+                        mut rendered_exposure,
                         mut rendered_masks,
                         inpaint_strokes,
                         saved_lens,
@@ -1931,6 +1931,7 @@ impl AurawApp {
                         mut sidecar_warning,
                         mut sidecar_needs_rewrite,
                         geometry,
+                        use_adaptive_detail_defaults,
                     ) = if let Some(edits) = edit_override {
                         (
                             edits.exposure,
@@ -1941,6 +1942,7 @@ impl AurawApp {
                             None,
                             true,
                             edits.geometry.sanitized(),
+                            false,
                         )
                     } else {
                         match loaded_sidecar {
@@ -1949,6 +1951,11 @@ impl AurawApp {
                                     "Loaded edits were migrated to the current processing version."
                                         .to_owned()
                                 });
+                                let use_adaptive_detail_defaults = loaded.migrated
+                                    && loaded
+                                        .edits
+                                        .exposure
+                                        .has_legacy_default_detail_settings();
                                 (
                                     loaded.edits.exposure,
                                     Arc::unwrap_or_clone(loaded.edits.masks),
@@ -1958,6 +1965,7 @@ impl AurawApp {
                                     warning,
                                     loaded.migrated,
                                     loaded.edits.geometry.sanitized(),
+                                    use_adaptive_detail_defaults,
                                 )
                             }
                             Ok(None) => (
@@ -1969,6 +1977,7 @@ impl AurawApp {
                                 None,
                                 false,
                                 GeometryTransform::default(),
+                                true,
                             ),
                             Err(error) => (
                                 initial_exposure,
@@ -1981,18 +1990,24 @@ impl AurawApp {
                                 )),
                                 false,
                                 GeometryTransform::default(),
+                                true,
                             ),
                         }
                     };
                     let original_raw = decoded.map_err(|error| format!("{error:#}"))?;
+                    if use_adaptive_detail_defaults {
+                        original_raw.apply_adaptive_detail_defaults(&mut rendered_exposure);
+                    }
                     crate::diagnostics::record(format!(
-                        "Edit state: process_version={} exposure={:.3} temperature={:.3} tint={:.3} saturation={:.3} vibrance={:.3} demosaic={:?} highlight={:?} masks={}",
+                        "Edit state: process_version={} exposure={:.3} temperature={:.3} tint={:.3} saturation={:.3} vibrance={:.3} luminance_nr={:.1} color_nr={:.1} demosaic={:?} highlight={:?} masks={}",
                         rendered_exposure.process_version,
                         rendered_exposure.exposure,
                         rendered_exposure.temperature,
                         rendered_exposure.tint,
                         rendered_exposure.saturation,
                         rendered_exposure.vibrance,
+                        rendered_exposure.luminance_denoise,
+                        rendered_exposure.chroma_denoise * 100.0,
                         rendered_exposure.demosaic_mode,
                         rendered_exposure.highlight_method,
                         rendered_masks.masks.len(),

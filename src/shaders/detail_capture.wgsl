@@ -73,6 +73,27 @@ fn capture_impulse_coherence(pos: vec2<i32>, center_ev: f32) -> f32 {
     return 1.0 - smoothstep(0.055, 0.22, support);
 }
 
+fn capture_noise_ev_sigma(rgb: vec3<f32>) -> f32 {
+    // Denoise runs in white-balanced camera space while capture sharpening
+    // runs after characterization. Exact channel covariance is unavailable
+    // here, but the signal-weighted scalar variance remains a reliable
+    // threshold: it follows ISO, WB amplification, and local brightness.
+    let signal = max(dot(max(rgb, vec3<f32>(0.0)), vec3<f32>(0.25, 0.50, 0.25)), 1e-5);
+    let channel_variance = max(
+        params.noise_read.rgb + params.noise_shot.rgb * vec3<f32>(signal),
+        vec3<f32>(1e-12),
+    );
+    let signal_variance = dot(
+        channel_variance,
+        vec3<f32>(0.25 * 0.25, 0.50 * 0.50, 0.25 * 0.25),
+    );
+    let relative_sigma = sqrt(max(signal_variance, 0.0)) / signal;
+    // Requested denoise reduces, but does not erase, the residual uncertainty.
+    // Keeping a floor avoids immediately sharpening the remaining fine grain.
+    let residual = mix(1.0, 0.58, clamp(params.noise_options.x, 0.0, 1.0));
+    return log2(1.0 + relative_sigma * residual);
+}
+
 fn apply_capture_sharpening(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let amount = clamp(params.creative_effects.w / 150.0, 0.0, 1.0);
     if amount < 1e-6 {
@@ -103,20 +124,32 @@ fn apply_capture_sharpening(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     // Shadow thresholding plus impulse coherence prevents capture sharpening
     // from turning sensor noise into crisp grain before creative detail runs.
     let shadow_noise = 1.0 - smoothstep(-8.2, -3.3, center_ev);
-    let detail_threshold = mix(0.015, 0.0045, detail) * mix(1.0, 2.3, shadow_noise);
+    let fixed_threshold = mix(0.015, 0.0045, detail) * mix(1.0, 2.3, shadow_noise);
+    let edge_strength = capture_sharpen_edge_strength(pos, 1);
+    // A sensor-aware threshold belongs in flat/weakly textured regions, not
+    // across an unambiguous structural edge. Relieving it continuously on
+    // strong edges keeps Amount 40 at Lightroom-like acutance without turning
+    // the same ISO noise into crisp grain in sky, snow, or painted panels.
+    let edge_noise_relief = smoothstep(0.055, 0.28, edge_strength);
+    let sensor_threshold = capture_noise_ev_sigma(rgb)
+        * mix(0.52, 0.34, detail)
+        * mix(1.0, 0.12, edge_noise_relief);
+    let detail_threshold = max(fixed_threshold, sensor_threshold);
     let thresholded = soft_detail_threshold(selected_band, detail_threshold);
     let coherence = mix(1.0, capture_impulse_coherence(pos, center_ev), 0.72 + 0.20 * detail);
 
     var edge_mask = 1.0;
     if masking > 1e-6 {
-        let edge_strength = capture_sharpen_edge_strength(pos, 1);
         let edge_threshold = mix(0.035, 0.62, pow(masking, 1.35));
         edge_mask = smoothstep(edge_threshold * 0.72, edge_threshold + 0.16, edge_strength);
     }
 
     let shadow_gate = smoothstep(-9.2, -4.3, center_ev);
     let highlight_gate = 1.0 - 0.62 * smoothstep(2.6, 6.0, center_ev);
-    let strength = amount * mix(1.18, 1.72, detail);
+    // Calibrated so Amount 40 restores comparable edge acutance to Adobe's
+    // default capture sharpening after the sensor-aware threshold has removed
+    // noise from the selected band.
+    let strength = amount * mix(4.20, 6.00, detail);
     var sharpen_ev = clamp(
         thresholded * strength * coherence * edge_mask * shadow_gate * highlight_gate,
         -0.28,

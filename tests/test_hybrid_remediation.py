@@ -40,7 +40,9 @@ def test_blacks_and_release_validation_fixes_are_present() -> None:
     gpu = text("src/pipeline/gpu.rs")
     resources = text("src/pipeline/gpu/resources.rs")
     build = text("build.rs")
-    assert "if luminance <= 0.0 || luminance >= pivot" in tone
+    assert "if luminance <= 0.0" in tone
+    assert "if luminance >= pivot" in tone
+    assert "let hdr_guard = 1.0 - tone_smoothstep(0.35, 1.0, luminance)" in tone
     assert "GPU render-plan mismatch" in gpu
     assert "pub(super) fn work_shader_source" in resources
     assert "-> Result<Cow<'_, str>>" in resources
