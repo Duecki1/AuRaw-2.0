@@ -107,7 +107,10 @@ fn requested_detail_edge(
         viewport_pixels[1].max(1) as f32 * crop_height as f32 / visible_source_height;
     (padded_width_pixels.max(padded_height_pixels) * quality.detail_pixel_scale())
         .ceil()
-        .clamp(256.0, quality.detail_edge() as f32) as u32
+        .clamp(
+            256.0,
+            quality.detail_edge_for_viewport(viewport_pixels) as f32,
+        ) as u32
 }
 
 fn navigation_proxy_edge() -> u32 {
@@ -616,6 +619,9 @@ impl AurawApp {
                 original_raw,
                 selection,
                 preview_quality: self.preview_quality,
+                preview_proxy_edge: self
+                    .preview_quality
+                    .proxy_edge_for_viewport(self.preview_viewport_pixels),
                 cached_raws,
             },
             name,
@@ -689,7 +695,7 @@ impl AurawApp {
                         });
                         repaint.request_repaint();
                         let preview_spec = ProxySpec {
-                            max_edge: request.preview_quality.proxy_edge(),
+                            max_edge: request.preview_proxy_edge,
                         };
                         let preview_raw =
                             if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
@@ -1215,6 +1221,33 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn set_preview_viewport_pixels(&mut self, viewport_pixels: [u32; 2]) -> bool {
+        if self.preview_viewport_pixels == viewport_pixels {
+            return false;
+        }
+        self.preview_viewport_pixels = viewport_pixels;
+
+        // Fit view uses the full-frame proxy rather than the zoom crop. High
+        // quality follows the visible image's physical size, including a move
+        // between monitors with different scale factors.
+        if self.preview_zoom <= DETAIL_ZOOM_START && self.preview_quality == PreviewQuality::High {
+            if let (Some(full_raw), Some(preview_raw)) =
+                (self.loaded_raw.as_ref(), self.preview_raw.as_ref())
+            {
+                let target_edge = self
+                    .preview_quality
+                    .proxy_edge_for_viewport(viewport_pixels)
+                    .min(full_raw.width.max(full_raw.height));
+                let current_edge = preview_raw.width.max(preview_raw.height);
+                // Up to five pixels can be consumed by X-Trans phase alignment.
+                if current_edge.saturating_add(5) < target_edge {
+                    self.preview_quality_dirty = true;
+                }
+            }
+        }
+        true
+    }
+
     fn upload_preview_masks(
         pipeline: &RawGpuPipeline,
         queue: &wgpu::Queue,
@@ -1246,6 +1279,14 @@ impl AurawApp {
         {
             return;
         }
+        if let Some(motion_at) = self.preview_motion_at {
+            let idle_delay = zoom_detail_idle_delay();
+            let elapsed = motion_at.elapsed();
+            if elapsed < idle_delay {
+                self.egui_ctx.request_repaint_after(idle_delay - elapsed);
+                return;
+            }
+        }
         #[cfg(target_os = "android")]
         if self.export_receiver.is_some()
             || self.export_publish_pending
@@ -1267,7 +1308,9 @@ impl AurawApp {
         };
 
         let spec = ProxySpec {
-            max_edge: self.preview_quality.proxy_edge(),
+            max_edge: self
+                .preview_quality
+                .proxy_edge_for_viewport(self.preview_viewport_pixels),
         };
         let preview_raw = if full_raw.width.max(full_raw.height) <= spec.max_edge {
             Arc::clone(&full_raw)

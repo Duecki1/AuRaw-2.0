@@ -62,7 +62,7 @@ impl Settings {
             }
             ui.add(
                 egui::Label::new(
-                    "Controls the normal proxy and the detailed visible-region render created about one second after zooming stops.",
+                    "Controls the normal proxy and zoom detail. High matches the visible image's physical monitor pixels so fit view stays sharp across display DPI and window sizes.",
                 )
                 .wrap(),
             );

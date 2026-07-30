@@ -1746,6 +1746,8 @@ impl AurawApp {
         self.image_status = format!("Loading {label}…");
         let initial_exposure = self.new_image_exposure();
         let preview_quality_setting = self.preview_quality;
+        let preview_proxy_edge_setting =
+            preview_quality_setting.proxy_edge_for_viewport(self.preview_viewport_pixels);
         let camera_profile_mode = self.camera_profile_mode;
         let camera_profile_folder = self.camera_profile_folder.clone();
         let last_camera_profile = self.last_camera_profile.clone();
@@ -2110,7 +2112,7 @@ impl AurawApp {
                         lens_started.elapsed().as_secs_f64()
                     ));
                     let preview_spec = ProxySpec {
-                        max_edge: preview_quality_setting.proxy_edge(),
+                        max_edge: preview_proxy_edge_setting,
                     };
                     let proxy_started = Instant::now();
                     let preview_raw =
