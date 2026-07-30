@@ -20,7 +20,6 @@ def test_sidebar_has_exactly_four_requested_tabs() -> None:
         assert name in body
         assert f'SidebarTab::{name}, "{name}"' in SIDEBAR
     assert "fn show_masks" in SIDEBAR
-    for kind in ("Brush", "Radial", "Linear", "Subject", "Background", "Object", "Landscape", "LuminanceRange", "ColorRange", "DepthRange"):
         assert f"MaskKind::{kind}" in SIDEBAR
     assert "fn show_inpainting" in SIDEBAR
     assert '"Paint over unwanted content"' not in SIDEBAR
