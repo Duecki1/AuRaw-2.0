@@ -1,4 +1,4 @@
-use super::basicadj::GLOBAL_TEMPERATURE_LIMIT;
+use super::basicadj::{ExposureParams, GLOBAL_TEMPERATURE_LIMIT};
 use super::color_profile::CameraProfile;
 use super::geometry::LensGeometryMap;
 use super::noise::NoiseProfile;
@@ -421,6 +421,25 @@ pub struct LoadedRaw {
 }
 
 impl LoadedRaw {
+    /// ISO sensitivity retained from the RAW metadata. Zero means unavailable.
+    pub fn iso_speed(&self) -> f32 {
+        self.capture_metadata.iso_speed
+    }
+
+    /// Apply sensor-specific Detail-panel starting values without touching
+    /// creative tone/color controls or the user's demosaic preferences.
+    pub fn apply_adaptive_detail_defaults(&self, exposure: &mut ExposureParams) {
+        let defaults = self.noise_profile.adaptive_detail_defaults(
+            self.capture_metadata.iso_speed,
+            self.white_levels,
+            self.wb_coeffs,
+        );
+        exposure.luminance_denoise = defaults.luminance_denoise;
+        exposure.chroma_denoise = defaults.chroma_denoise;
+        exposure.denoise_detail = defaults.denoise_detail;
+        exposure.denoise_quality = defaults.denoise_quality;
+    }
+
     /// Estimated as-shot scene illuminant temperature used as the neutral point
     /// for the user-facing Kelvin control.
     pub fn as_shot_temperature_kelvin(&self) -> Option<f32> {

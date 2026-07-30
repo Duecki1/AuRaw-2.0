@@ -12,7 +12,10 @@ def test_new_edits_use_process_versioned_consensus_highlight_solver() -> None:
     assert "pub const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15;" in BASIC
     assert "pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;" in BASIC
     assert "pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;" in BASIC
-    assert "pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION;" in BASIC
+    assert "pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;" in BASIC
+    assert "pub const ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION: u32 = 19;" in BASIC
+    assert "pub const MULTISCALE_COLOR_DENOISE_PROCESS_VERSION: u32 = 20;" in BASIC
+    assert "pub const CURRENT_PROCESS_VERSION: u32 = MULTISCALE_COLOR_DENOISE_PROCESS_VERSION;" in BASIC
     assert "const HIGHLIGHT_CONSENSUS_PROCESS_VERSION: u32 = 15u;" in HIGHLIGHT
     # Historical branches may remain in WGSL, but the host always supplies the
     # current process marker, so identical edit values cannot select them.

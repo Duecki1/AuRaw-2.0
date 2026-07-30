@@ -1,6 +1,25 @@
 use super::raw_loader::CompactPixelMap;
 use serde::{Deserialize, Serialize};
 
+// Horizontal and vertical same-CFA second differences share their center
+// sample, so their normalized Gaussian correlation is 2/3. The median of the
+// flatter squared difference is therefore about 0.163 * variance, not the
+// 0.454936 median of one squared standard normal. Keeping this calibration
+// explicit prevents flat-field selection from underestimating sensor variance
+// by roughly 2.8x.
+const FLAT_MIN_SECOND_DIFFERENCE_MEDIAN_SQUARED: f32 = 0.163;
+
+/// Per-capture Detail-panel starting values. These are derived from the RAW
+/// noise model rather than being global defaults, so low-noise captures remain
+/// neutral while noisier captures open with useful color/luminance cleanup.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveDetailDefaults {
+    pub luminance_denoise: f32,
+    pub chroma_denoise: f32,
+    pub denoise_detail: f32,
+    pub denoise_quality: DenoiseQuality,
+}
+
 /// Signal-dependent RAW noise model in normalized sensor units.
 ///
 /// For each CFA plane, variance is modeled as `shot[channel] * signal +
@@ -131,8 +150,9 @@ impl NoiseProfile {
                 }
                 values.sort_unstable_by(|a, b| a.total_cmp(b));
                 let median_sq = values[values.len() / 2];
-                // median(Z^2) for Z~N(0,1) is ~0.454936. Undo that bias.
-                let variance = (median_sq / 0.454_936_4).max(0.0);
+                // Undo the bias introduced by selecting the flatter of the
+                // correlated horizontal/vertical second differences.
+                let variance = (median_sq / FLAT_MIN_SECOND_DIFFERENCE_MEDIAN_SQUARED).max(0.0);
                 let signal = (bin_index as f32 + 0.5) / BIN_COUNT as f32;
                 let weight = values.len().min(256) as f32;
                 points.push((signal, variance, weight));
@@ -204,6 +224,58 @@ impl NoiseProfile {
         }
     }
 
+    /// Choose conservative Lightroom-like opening values from noise at an
+    /// 18%-signal reference. The metadata fallback is retained as a floor so a
+    /// highly textured frame cannot convince the single-image fit that a high
+    /// ISO capture is clean. White-balance gains matter because red/blue sensor
+    /// noise is amplified before this denoise stage.
+    pub fn adaptive_detail_defaults(
+        self,
+        iso_speed: f32,
+        white_levels: [f32; 4],
+        wb_coeffs: [f32; 4],
+    ) -> AdaptiveDetailDefaults {
+        const REFERENCE_SIGNAL: f32 = 0.18;
+        const METADATA_VARIANCE_FLOOR: f32 = 1.0;
+        let fallback = Self::iso_fallback(iso_speed, white_levels, self.green2_present);
+        let mut variance = [0.0f32; 3];
+        for channel in 0..3 {
+            let wb = wb_coeffs[channel].max(0.0);
+            let measured =
+                self.read[channel] * wb * wb + self.shot[channel] * wb * REFERENCE_SIGNAL;
+            let metadata =
+                fallback.read[channel] * wb * wb + fallback.shot[channel] * wb * REFERENCE_SIGNAL;
+            variance[channel] = measured.max(metadata * METADATA_VARIANCE_FLOOR);
+        }
+
+        let signal_variance = 0.25f32.powi(2) * variance[0]
+            + 0.50f32.powi(2) * variance[1]
+            + 0.25f32.powi(2) * variance[2];
+        let opponent_variance = 0.5 * ((variance[0] + variance[1]) + (variance[2] + variance[1]));
+        let relative_signal_sigma = signal_variance.max(0.0).sqrt() / REFERENCE_SIGNAL;
+        let relative_opponent_sigma = opponent_variance.max(0.0).sqrt() / REFERENCE_SIGNAL;
+
+        // At the generic ISO-100 prior these thresholds are exact no-ops.
+        // ISO 1000 with ordinary Bayer WB gains lands near Luminance 10 and
+        // Color 25; progressively noisier captures rise smoothly and remain
+        // bounded well below the plastic high end of either slider.
+        let luminance_need = smoothstep(0.018, 0.080, relative_signal_sigma);
+        let chroma_need = smoothstep(0.035, 0.160, relative_opponent_sigma);
+        let luminance_denoise = 34.0 * luminance_need.powf(1.15);
+        let chroma_denoise = 0.38 * chroma_need.powf(0.8);
+
+        AdaptiveDetailDefaults {
+            luminance_denoise,
+            chroma_denoise,
+            denoise_detail: 50.0 + 8.0 * luminance_need,
+            denoise_quality: if luminance_need > 0.72 || chroma_need > 0.40 {
+                DenoiseQuality::High
+            } else {
+                DenoiseQuality::Balanced
+            },
+        }
+    }
+
     fn iso_fallback(iso_speed: f32, white_levels: [f32; 4], green2_present: bool) -> Self {
         let iso_gain = (iso_speed.max(100.0) / 100.0).clamp(1.0, 1024.0);
         let mut shot = [0.0; 4];
@@ -228,6 +300,11 @@ impl NoiseProfile {
             green2_present,
         }
     }
+}
+
+fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
+    let t = ((value - low) / (high - low)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn cfa_plane_present(
@@ -317,5 +394,51 @@ mod tests {
         assert_eq!(coprime_stride(16, 2), 17);
         assert_eq!(coprime_stride(18, 6), 19);
         assert_eq!(coprime_stride(23, 6), 23);
+    }
+
+    #[test]
+    fn flat_difference_selection_uses_its_correlated_minimum_calibration() {
+        let historical_single_difference_median = 0.454_936_4;
+        let correction =
+            historical_single_difference_median / FLAT_MIN_SECOND_DIFFERENCE_MEDIAN_SQUARED;
+        assert!((correction - 2.79).abs() < 0.02);
+    }
+
+    #[test]
+    fn adaptive_defaults_are_neutral_for_clean_raws_and_rise_with_noise() {
+        let white = [15_360.0; 4];
+        let wb = [2.73, 1.0, 1.39, 1.0];
+        let low = NoiseProfile::iso_fallback(100.0, white, true)
+            .adaptive_detail_defaults(100.0, white, wb);
+        let medium = NoiseProfile::iso_fallback(1_000.0, white, true)
+            .adaptive_detail_defaults(1_000.0, white, wb);
+        let high = NoiseProfile::iso_fallback(6_400.0, white, true)
+            .adaptive_detail_defaults(6_400.0, white, wb);
+
+        assert_eq!(low.luminance_denoise, 0.0);
+        assert_eq!(low.chroma_denoise, 0.0);
+        assert!((8.0..=14.0).contains(&medium.luminance_denoise));
+        assert!((0.20..=0.30).contains(&medium.chroma_denoise));
+        assert!(high.luminance_denoise > medium.luminance_denoise);
+        assert!(high.chroma_denoise > medium.chroma_denoise);
+        assert_eq!(medium.denoise_quality, DenoiseQuality::High);
+        assert_eq!(high.denoise_quality, DenoiseQuality::High);
+    }
+
+    #[test]
+    fn adaptive_slider_values_change_smoothly_across_iso() {
+        let white = [15_360.0; 4];
+        let wb = [2.0, 1.0, 1.5, 1.0];
+        let mut previous = NoiseProfile::iso_fallback(100.0, white, true)
+            .adaptive_detail_defaults(100.0, white, wb);
+        for iso in (125..=6_400).step_by(25) {
+            let current = NoiseProfile::iso_fallback(iso as f32, white, true)
+                .adaptive_detail_defaults(iso as f32, white, wb);
+            assert!(current.luminance_denoise >= previous.luminance_denoise);
+            assert!(current.chroma_denoise >= previous.chroma_denoise);
+            assert!(current.luminance_denoise - previous.luminance_denoise < 0.75);
+            assert!(current.chroma_denoise - previous.chroma_denoise < 0.01);
+            previous = current;
+        }
     }
 }

@@ -120,6 +120,15 @@ const HIGHLIGHT_GUIDED_ENTRY_POINTS: [&str; 11] = [
     "highlight_guided_1_d",
 ];
 
+const COLOR_DENOISE_ENTRY_POINTS: [&str; 6] = [
+    "color_denoise_scale_1",
+    "color_denoise_scale_2",
+    "color_denoise_scale_4",
+    "color_denoise_scale_8",
+    "color_denoise_scale_16",
+    "color_denoise_scale_32",
+];
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProcessingQuality {
     /// Half-float image intermediates for lower memory use and faster previews.
@@ -157,11 +166,16 @@ fn expected_pass_count(cfa_kind: CfaKind) -> usize {
         CfaKind::XTrans => 10,
     };
     // Highlight prepare + guided stages + two finalize variants, followed by
-    // demosaic, four tone-analysis passes, and thirteen adjustment/output passes
-    // (pre-tone base, global tone, local tone, presence/color, stabilization
-    // copy, Glow extraction + five diffusion stages, creative composite, and
-    // final render).
-    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2 + demosaic_passes + 4 + 13
+    // demosaic, six colour-denoise scales, four tone-analysis passes, and
+    // thirteen adjustment/output passes (pre-tone base, global tone, local
+    // tone, presence/color, stabilization copy, Glow extraction + five
+    // diffusion stages, creative composite, and final render).
+    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len()
+        + 2
+        + demosaic_passes
+        + COLOR_DENOISE_ENTRY_POINTS.len()
+        + 4
+        + 13
 }
 
 const SHADER_BAYER_RCD_P1: &str = concat!(
@@ -284,6 +298,14 @@ const SHADER_XTRANS_P7: &str = concat!(
     include_str!("../shaders/noise.wgsl"),
     "\n",
     include_str!(concat!(env!("OUT_DIR"), "/xtrans_pass7.generated.wgsl"))
+);
+
+const SHADER_COLOR_DENOISE: &str = concat!(
+    include_str!("../shaders/common.wgsl"),
+    "\n",
+    include_str!("../shaders/noise.wgsl"),
+    "\n",
+    include_str!("../shaders/color_denoise.wgsl")
 );
 
 const SHADER_TONE_ANALYSIS: &str = concat!(
@@ -1407,6 +1429,8 @@ pub struct RawGpuPipeline {
     demosaic_dual_start_index: usize,
     demosaic_dual_end_index: usize,
     demosaic_finish_index: usize,
+    color_denoise_start_index: usize,
+    color_denoise_end_index: usize,
     adjustment_prepare_pass_index: usize,
     adjustment_tone_pass_index: usize,
     adjustment_effects_pass_index: usize,
@@ -2090,14 +2114,16 @@ impl RawGpuPipeline {
         ];
 
         let demosaic_start_for_programs = 1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2;
-        let (demosaic_high_pass_count, demosaic_pass_count) = match raw.cfa_kind {
-            CfaKind::Bayer => (3, 6),
-            CfaKind::XTrans => (7, 10),
+        let demosaic_high_pass_count = match raw.cfa_kind {
+            CfaKind::Bayer => 3,
+            CfaKind::XTrans => 7,
         };
         let dual_green_for_programs = demosaic_start_for_programs + demosaic_high_pass_count;
         let dual_rgb_for_programs = dual_green_for_programs + 1;
         let demosaic_finish_for_programs = dual_rgb_for_programs + 1;
-        let tone_prepare_for_programs = demosaic_start_for_programs + demosaic_pass_count;
+        let color_denoise_for_programs = demosaic_finish_for_programs + 1;
+        let tone_prepare_for_programs =
+            color_denoise_for_programs + COLOR_DENOISE_ENTRY_POINTS.len();
         let adjustment_prepare_for_programs = tone_prepare_for_programs + 4;
         let reused_layout = |pass_index: usize| {
             program_template.map(|template| {
@@ -2347,6 +2373,21 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
+                ],
+            })
+        });
+
+        let bgl_color_denoise = reused_layout(color_denoise_for_programs).unwrap_or_else(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl multiscale color denoise"),
+                entries: &[
+                    buffer_entry(0),
+                    storage_texture_entry(
+                        10,
+                        demosaic_format,
+                        wgpu::StorageTextureAccess::WriteOnly,
+                    ),
+                    texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
                 ],
             })
         });
@@ -2954,6 +2995,42 @@ impl RawGpuPipeline {
             ],
         });
 
+        let make_color_denoise_bind_group =
+            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_color_denoise,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: params_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(write_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: wgpu::BindingResource::TextureView(read_view),
+                        },
+                    ],
+                })
+            };
+        // Six passes end back in scene_texture. Disabled Fast/Balanced scales
+        // are explicit copies so every quality setting has identical parity.
+        let bg_color_denoise_0 =
+            make_color_denoise_bind_group("bg color denoise scale 1", &scene_view, &tex1_view);
+        let bg_color_denoise_1 =
+            make_color_denoise_bind_group("bg color denoise scale 2", &tex1_view, &tex2_view);
+        let bg_color_denoise_2 =
+            make_color_denoise_bind_group("bg color denoise scale 4", &tex2_view, &tex1_view);
+        let bg_color_denoise_3 =
+            make_color_denoise_bind_group("bg color denoise scale 8", &tex1_view, &tex2_view);
+        let bg_color_denoise_4 =
+            make_color_denoise_bind_group("bg color denoise scale 16", &tex2_view, &tex1_view);
+        let bg_color_denoise_5 =
+            make_color_denoise_bind_group("bg color denoise scale 32", &tex1_view, &scene_view);
+
         let bg_tone_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg tone prepare"),
             layout: &bgl_tone_prepare,
@@ -3377,6 +3454,8 @@ impl RawGpuPipeline {
             .context("specialize X-Trans pass 6 work format")?;
         let xtrans_p7 = work_shader_source(SHADER_XTRANS_P7, demosaic_format)
             .context("specialize X-Trans pass 7 work format")?;
+        let color_denoise_shader = work_shader_source(SHADER_COLOR_DENOISE, demosaic_format)
+            .context("specialize multiscale color denoise work format")?;
         let adjustments_shader = work_shader_source(SHADER_ADJUSTMENTS, work_format)
             .context("specialize adjustments shader work format")?;
 
@@ -3427,6 +3506,12 @@ impl RawGpuPipeline {
         let xtrans_p7_module = program_template
             .is_none()
             .then(|| create_shader("auraw X-Trans pass 7", xtrans_p7.as_ref()));
+        let color_denoise_module = program_template.is_none().then(|| {
+            create_shader(
+                "auraw multiscale color denoise",
+                color_denoise_shader.as_ref(),
+            )
+        });
         let tone_analysis_module = program_template
             .is_none()
             .then(|| create_shader("auraw tone analysis", SHADER_TONE_ANALYSIS));
@@ -3683,6 +3768,27 @@ impl RawGpuPipeline {
             }),
         }
 
+        let color_denoise_start_index = passes.len();
+        let color_denoise_bind_groups = [
+            bg_color_denoise_0,
+            bg_color_denoise_1,
+            bg_color_denoise_2,
+            bg_color_denoise_3,
+            bg_color_denoise_4,
+            bg_color_denoise_5,
+        ];
+        for (entry, bind_group) in COLOR_DENOISE_ENTRY_POINTS
+            .iter()
+            .zip(color_denoise_bind_groups)
+        {
+            passes.push(Pass {
+                pipeline: make_pipeline(color_denoise_module.as_ref(), entry, &bgl_color_denoise),
+                bind_group,
+                workgroups: image_workgroups,
+            });
+        }
+        let color_denoise_end_index = passes.len();
+
         // Analyze the unexposed scene at reduced resolution. The guide is
         // bilateral and the histogram reduction emits robust tonal anchors.
         // recompute() clears the histogram immediately before this pass.
@@ -3892,6 +3998,8 @@ impl RawGpuPipeline {
             demosaic_dual_start_index,
             demosaic_dual_end_index,
             demosaic_finish_index,
+            color_denoise_start_index,
+            color_denoise_end_index,
             adjustment_prepare_pass_index,
             adjustment_tone_pass_index,
             adjustment_effects_pass_index,
@@ -4777,6 +4885,13 @@ impl RawGpuPipeline {
             );
         }
         self.encode_pass(encoder, self.demosaic_finish_index);
+        if params.chroma_denoise > 1e-6 {
+            self.encode_pass_range(
+                encoder,
+                self.color_denoise_start_index,
+                self.color_denoise_end_index,
+            );
+        }
     }
 
     fn encode_output_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {

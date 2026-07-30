@@ -1,4 +1,4 @@
-use super::{CompactPixelMap, ExposureParams, LoadedRaw, MaskStack};
+use super::{CompactPixelMap, DenoiseQuality, ExposureParams, LoadedRaw, MaskStack};
 use rayon::prelude::*;
 
 /// Earliest pipeline stage that must be executed after a parameter change.
@@ -313,6 +313,12 @@ const HIGHLIGHT_GUIDED_SUPPORT: u32 = 2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 
 // Conservative bound over the complete Bayer RCD and X-Trans Markesteijn-3
 // pass chains, including their final detail-recovery neighbourhoods.
 const DEMOSAIC_CHAIN_SUPPORT: u32 = 32;
+// High-quality color denoise cascades dense B3 scales at radii 1/2/4/8 and
+// compact binomial scales at 16/32. Because each pass consumes the previous
+// scale, dependency support is 2*(1+2+4+8)+16+32 = 78 pixels.
+const COLOR_DENOISE_SUPPORT_FAST: u32 = 2;
+const COLOR_DENOISE_SUPPORT_BALANCED: u32 = 2 * (1 + 2 + 4 + 8);
+const COLOR_DENOISE_SUPPORT_HIGH: u32 = COLOR_DENOISE_SUPPORT_BALANCED + 16 + 32;
 // The edge-aware tone guide is blurred by five guide texels at desktop's 4x
 // reduction and three texels at Android's 8x reduction. Bilinear lookup can
 // reach one additional guide cell, so its raw-pixel support is 24/32.
@@ -328,6 +334,7 @@ const COLOR_MIXER_SUPPORT: u32 = 4;
 const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_PREP_SUPPORT
     + HIGHLIGHT_GUIDED_SUPPORT
     + DEMOSAIC_CHAIN_SUPPORT
+    + COLOR_DENOISE_SUPPORT_HIGH
     + TONE_GUIDE_SUPPORT
     + LOCAL_EFFECTS_SUPPORT
     + GLOW_SUPPORT
@@ -356,6 +363,14 @@ pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -
         + DEMOSAIC_CHAIN_SUPPORT
         + TONE_GUIDE_SUPPORT
         + COLOR_MIXER_SUPPORT;
+
+    if exposure.chroma_denoise > 1e-6 {
+        support += match exposure.denoise_quality {
+            DenoiseQuality::Fast => COLOR_DENOISE_SUPPORT_FAST,
+            DenoiseQuality::Balanced => COLOR_DENOISE_SUPPORT_BALANCED,
+            DenoiseQuality::High => COLOR_DENOISE_SUPPORT_HIGH,
+        };
+    }
 
     let local_spatial_active = exposure.sharpen_amount.abs() > 1e-6
         || exposure.texture.abs() > 1e-6
@@ -581,7 +596,8 @@ mod tests {
         EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO,
     };
     use crate::pipeline::{
-        CameraProfile, CfaKind, CompactPixelMap, ExposureParams, LoadedRaw, MaskStack,
+        CameraProfile, CfaKind, CompactPixelMap, DenoiseQuality, ExposureParams, LoadedRaw,
+        MaskStack,
     };
 
     fn test_raw(width: u32, height: u32) -> LoadedRaw {
@@ -754,6 +770,8 @@ mod tests {
         exposure.glow_amount = 1.0;
         assert!(required_export_tile_halo(&exposure, &masks) > MIN_EXPORT_TILE_HALO);
         exposure.clarity = 1.0;
+        exposure.chroma_denoise = 1.0;
+        exposure.denoise_quality = DenoiseQuality::High;
         assert_eq!(
             required_export_tile_halo(&exposure, &masks),
             EXPORT_TILE_HALO
