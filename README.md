@@ -209,9 +209,12 @@ and spreads them through a continuous five-stage diffusion cascade without
 lifting flat shadows or producing sparse sampling rings. Standard mode exposes
 Glow Amount; Expert mode adds Radius and Threshold.
 
-Vignette exposes Amount, Midpoint, Roundness, Feather, and Highlights. It uses
-full-image coordinates for stable geometry across previews and tiled exports,
-and applies a hue-preserving scene-linear gain.
+Vignette exposes Amount, Midpoint, Roundness, Feather, and Highlights. At the
+default 50 / 0 / 50 / 0 values, their combined shape follows curves measured
+from Lightroom's default vignette. Dark edges multiply toward black while
+positive edges blend toward white in display-linear RGB. Darktable-style
+independently normalized frame axes keep the default falloff consistent across
+aspect ratios, previews, crops, and tiled exports.
 
 ## Sidebar and export
 

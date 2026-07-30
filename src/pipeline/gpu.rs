@@ -1306,15 +1306,16 @@ impl GpuParams {
     fn needs_intermediate_adjustment_passes(&self) -> bool {
         // Saturation and Vibrance live in apply_scene_effects_node alongside the
         // presence controls. They must therefore keep the intermediate passes
-        // enabled even when Texture, Clarity, Dehaze, Glow, and Vignette are
-        // all neutral. Capture sharpening now lives in the always-run pre-tone
-        // sharpen/tone pass and must not force these later optional passes.
+        // enabled even when Texture, Clarity, Dehaze, and Glow are all neutral.
+        // Vignette runs in the always-dispatched display-linear view pass.
+        // Capture sharpening now lives in the always-run pre-tone sharpen/tone
+        // pass and must not force these later optional passes.
         // Omitting Saturation/Vibrance here made both global color
         // sliders a no-op.
         let global_effects = self.saturation.abs() > 1e-6
             || self.vibrance.abs() > 1e-6
             || self.presence[..3].iter().any(|value| value.abs() > 1e-6);
-        let creative = self.creative_effects[0].abs() > 1e-6 || self.vignette[0].abs() > 1e-6;
+        let creative = self.creative_effects[0].abs() > 1e-6;
         let local_count = (self.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
         let local_effects = (0..local_count).any(|index| {
             let state = self.mask_meta[index];
@@ -2536,7 +2537,7 @@ impl RawGpuPipeline {
         let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 11)
             .unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl creative glow and vignette"),
+                    label: Some("bgl creative glow"),
                     entries: &[
                         buffer_entry(0),
                         texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
@@ -3360,11 +3361,11 @@ impl RawGpuPipeline {
             make_glow_blur_bind_group("bg Glow diffusion 4", &tex2_view, &display_linear_view);
 
         // The creative pass keeps the untouched local-effects result in tex1,
-        // composites the final Glow diffusion from display_linear, applies the
-        // post-crop vignette, and writes the complete result into tex2. tex2 is
-        // therefore the final adjustment source whether optional effects run or not.
+        // composites the final Glow diffusion from display_linear and writes
+        // the result into tex2. The post-crop vignette is applied later in the
+        // always-dispatched display-linear view pass.
         let bg_adjust_creative = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg creative glow and vignette"),
+            label: Some("bg creative glow"),
             layout: &bgl_adjust_creative,
             entries: &[
                 wgpu::BindGroupEntry {

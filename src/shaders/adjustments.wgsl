@@ -454,9 +454,11 @@ fn vignette_distance(pos: vec2<i32>, roundness: f32) -> f32 {
     let dimensions = max(params.vignette_frame.zw, vec2<f32>(1.0));
     let source_delta = full_image_uv(pos) - params.vignette_frame.xy;
     let transform = params.vignette_transform;
-    // Evaluate directly in final-frame coordinates even though the creative
-    // pass runs before geometry resampling. This keeps the vignette centered
-    // on the cropped composition through rotation, flips and keystone.
+    // Evaluate directly in final-frame coordinates even though the view pass
+    // runs before geometry resampling. X and Y are normalized by their
+    // own final-frame half extent, matching darktable's auto-ratio geometry.
+    // The same normalized point therefore receives the same falloff on 3:2,
+    // 4:3, square, portrait, and panoramic frames.
     let frame_uv = vec2<f32>(
         0.5 + transform.x * source_delta.x + transform.y * source_delta.y,
         0.5 + transform.z * source_delta.x + transform.w * source_delta.y,
@@ -470,10 +472,68 @@ fn vignette_distance(pos: vec2<i32>, roundness: f32) -> f32 {
         p.y * dimensions.y / short_dimension,
     ));
 
+    if abs(roundness) < 1e-6 {
+        return frame_ellipse;
+    }
     if roundness < 0.0 {
         return mix(frame_ellipse, frame_rectangle, -roundness);
     }
     return mix(frame_ellipse, image_circle, roundness);
+}
+
+fn calibrated_vignette_anchor(
+    distance: f32,
+    start: f32,
+    end: f32,
+    power: f32,
+    edge_opacity: f32,
+) -> f32 {
+    return edge_opacity * pow(smoothstep(start, end, distance), power);
+}
+
+fn lightroom_vignette_opacity(
+    distance: f32,
+    amount: f32,
+    midpoint: f32,
+    feather: f32,
+) -> f32 {
+    let magnitude = clamp(abs(amount), 0.0, 1.0);
+    // Preserve the corner endpoint while shifting the transition inward or
+    // outward. At the default Midpoint 50 this is an exact identity.
+    var shaped_distance = distance;
+    if abs(midpoint - 0.5) >= 1e-6 {
+        let midpoint_power = exp2((midpoint - 0.5) * 1.4);
+        let corner_distance = sqrt(2.0);
+        shaped_distance = corner_distance
+            * pow(max(distance / corner_distance, 0.0), midpoint_power);
+    }
+    var half_amount = 0.0;
+    var full_amount = 0.0;
+
+    // These four curves are robust fits to linear-light differences from the
+    // supplied Lightroom default -50, -100, +50, and +100 exports. Lightroom
+    // deliberately uses a broader dark falloff and a tighter white shoulder.
+    if amount < 0.0 {
+        half_amount = calibrated_vignette_anchor(shaped_distance, 0.10, 1.235, 2.88, 0.86);
+        full_amount = calibrated_vignette_anchor(shaped_distance, 0.02, 1.135, 3.46, 1.0);
+    } else {
+        half_amount = calibrated_vignette_anchor(shaped_distance, 0.305, 1.24, 4.36, 0.90);
+        full_amount = calibrated_vignette_anchor(shaped_distance, 0.13, 1.075, 5.66, 1.0);
+    }
+
+    var opacity = 0.0;
+    if magnitude <= 0.5 {
+        opacity = half_amount * (magnitude * 2.0);
+    } else {
+        opacity = mix(half_amount, full_amount, (magnitude - 0.5) * 2.0);
+    }
+    // Feather 50 is also an exact identity. Lower values tighten the shoulder;
+    // higher values spread a softer trace farther into the frame.
+    if abs(feather - 0.5) < 1e-6 {
+        return opacity;
+    }
+    let feather_power = exp2((0.5 - feather) * 1.3);
+    return pow(clamp(opacity, 0.0, 1.0), feather_power);
 }
 
 fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
@@ -485,48 +545,26 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let midpoint = clamp(params.vignette.y / 100.0, 0.0, 1.0);
     let roundness = clamp(params.vignette.z / 100.0, -1.0, 1.0);
     let feather = clamp(params.vignette.w / 100.0, 0.0, 1.0);
-    let distance = vignette_distance(pos, roundness);
-
-    // Midpoint places the optical falloff; Feather controls both the inward
-    // reach and the outer shoulder. A second smooth polynomial removes the
-    // visibly cubic ring that a single smoothstep can leave on flat skies.
-    let midpoint_shaped = pow(midpoint, 0.82);
-    let transition_center = mix(0.20, 0.982, midpoint_shaped);
-    let inward_softness = mix(0.012, 0.58, feather)
-        * mix(1.0, 0.50, midpoint_shaped * midpoint_shaped);
-    let outward_softness = mix(0.018, 0.34, feather)
-        * mix(1.0, 0.72, midpoint_shaped * midpoint_shaped);
-    let transition_start = max(transition_center - inward_softness, 0.0);
-    let transition_end = min(
-        max(transition_center + outward_softness, transition_start + 0.018),
-        1.0,
+    var opacity = lightroom_vignette_opacity(
+        vignette_distance(pos, roundness),
+        amount,
+        midpoint,
+        feather,
     );
-    let transition = smoothstep(transition_start, transition_end, distance);
-    let smoother = transition * transition * (3.0 - 2.0 * transition);
-    let mask = pow(smoother, mix(1.28, 0.88, feather));
-
-    // Exposure-domain gain preserves hue. Dark vignettes protect both deep
-    // shadows and user-selected highlights, avoiding crushed corners and the
-    // gray highlight rings produced by RGB subtraction. Positive vignettes get
-    // a gentler shoulder to keep bright edges photographic rather than glowing.
-    let edge_ev = select(amount * 2.20, amount * 1.28, amount > 0.0);
-    let luminance = safe_luma(rgb);
-    var highlight_protection = 1.0;
-    var tonal_protection = 1.0;
     if amount < 0.0 {
         let highlights = clamp(params.vignette_options.x / 100.0, 0.0, 1.0);
-        highlight_protection = 1.0
-            - highlights * smoothstep(0.48, 2.3, luminance);
-        tonal_protection = mix(0.58, 1.0, smoothstep(0.012, 0.20, luminance));
-    } else {
-        tonal_protection = 1.0 - 0.68 * smoothstep(0.75, 3.0, luminance);
+        let highlight_protection = 1.0
+            - highlights * smoothstep(0.35, 1.0, safe_luma(rgb));
+        opacity = opacity * highlight_protection;
+        // Darktable and Lightroom both implement the dark branch as an edge
+        // multiplication. It preserves hue and reaches a true black corner at
+        // -100 without the gray rings caused by RGB subtraction.
+        return rgb * (1.0 - opacity);
     }
-    let delta_ev = clamp(
-        edge_ev * mask * highlight_protection * tonal_protection,
-        -2.7,
-        1.35,
-    );
-    return rgb * exp2(delta_ev);
+    // A positive vignette is not exposure gain: it is an additive/white edge
+    // treatment. Blending in display-linear RGB reproduces Lightroom's neutral
+    // white corners without amplifying hue or clipping channels independently.
+    return mix(rgb, vec3<f32>(1.0), opacity);
 }
 
 // Lightroom's named HSL channels are a UI model, not a reason to process in
@@ -1281,7 +1319,6 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = local_effects_at(pos);
     rgb = apply_glow(pos, rgb);
-    rgb = apply_vignette(pos, rgb);
     textureStore(creative_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
@@ -1433,6 +1470,7 @@ fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
         display_linear = apply_display_blacks_toe_value(display_linear, params.basic_tone.w);
         display_linear = apply_local_display_blacks(pos, display_linear);
     }
+    display_linear = apply_vignette(pos, display_linear);
     textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
     // Output ICC/device encoding is a separate display-domain operation, not a
     // second view transform. It receives already display-referred linear RGB.

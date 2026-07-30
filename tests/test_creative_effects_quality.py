@@ -67,10 +67,10 @@ def test_vignette_has_lightroom_style_controls_and_tile_safe_coordinates() -> No
     assert "pos + tile_origin()" in ADJUSTMENTS
     assert "params.full_width" in ADJUSTMENTS
     assert "params.full_height" in ADJUSTMENTS
+    assert "let frame_ellipse = length(p);" in ADJUSTMENTS
     assert "frame_rectangle" in ADJUSTMENTS
     assert "image_circle" in ADJUSTMENTS
-    assert "transition_center" in ADJUSTMENTS
-    assert "highlight_protection" in ADJUSTMENTS
+    assert "fn lightroom_vignette_opacity" in ADJUSTMENTS
 
 
 def test_glow_advanced_controls_are_hidden_without_expert_mode() -> None:
@@ -128,55 +128,55 @@ def test_default_glow_threshold_rejects_shadows_but_accepts_bright_sources() -> 
     assert emission_gate(1.5) > 0.95
 
 
-def test_vignette_math_keeps_center_neutral_and_reaches_edges() -> None:
-    midpoint = 0.50
-    feather = 0.50
-    midpoint_shaped = midpoint**0.82
-    center = 0.16 + (0.985 - 0.16) * midpoint_shaped
-    confinement = 1.0 + (0.16 - 1.0) * midpoint * midpoint
-    inner_width = (0.010 + (0.42 - 0.010) * feather) * confinement
-    outer_width = (0.015 + (0.12 - 0.015) * feather) * (
-        1.0 + (0.25 - 1.0) * midpoint * midpoint
+def vignette_anchor(
+    distance: float, start: float, end: float, power: float, opacity: float
+) -> float:
+    return opacity * smoothstep(start, end, distance) ** power
+
+
+def test_vignette_curves_track_supplied_lightroom_linear_light_anchors() -> None:
+    distances = (0.6, 0.8, 1.0, 1.2, 1.4)
+    curves = (
+        ((0.10, 1.235, 2.88, 0.86), (0.073, 0.262, 0.629, 0.827, 0.871)),
+        ((0.02, 1.135, 3.46, 1.00), (0.124, 0.426, 0.874, 0.995, 0.999)),
+        ((0.305, 1.24, 4.36, 0.90), (0.007, 0.061, 0.414, 0.836, 0.905)),
+        ((0.13, 1.075, 5.66, 1.00), (0.035, 0.262, 0.903, 1.000, 1.000)),
     )
-    start = max(center - inner_width, 0.0)
-    end = min(center + outer_width, 1.0)
+    for parameters, lightroom_samples in curves:
+        fitted = [vignette_anchor(distance, *parameters) for distance in distances]
+        assert max(abs(a - b) for a, b in zip(fitted, lightroom_samples)) < 0.045
 
-    assert smoothstep(start, end, 0.0) == 0.0
-    assert smoothstep(start, end, 1.0) == 1.0
-    assert 0.0 < smoothstep(start, end, center) < 1.0
-
-
-def test_vignette_highlight_protection_only_reduces_darkening() -> None:
-    amount = -1.0
-    mask = 1.0
-    highlights = 1.0
-    dark_luma = 0.1
-    bright_luma = 3.0
-
-    def delta_ev(luma: float) -> float:
-        protection = 1.0 - highlights * smoothstep(0.50, 2.4, luma)
-        return amount * 2.45 * mask * protection
-
-    assert math.isclose(delta_ev(dark_luma), -2.45)
-    assert abs(delta_ev(bright_luma)) < 1e-6
+    assert vignette_anchor(0.0, 0.02, 1.135, 3.46, 1.0) == 0.0
+    assert vignette_anchor(math.sqrt(2.0), 0.02, 1.135, 3.46, 1.0) == 1.0
+    assert "if abs(midpoint - 0.5) >= 1e-6" in ADJUSTMENTS
+    assert "let midpoint_power = exp2((midpoint - 0.5) * 1.4);" in ADJUSTMENTS
+    assert "if abs(feather - 0.5) < 1e-6" in ADJUSTMENTS
+    assert "let feather_power = exp2((0.5 - feather) * 1.3);" in ADJUSTMENTS
+    assert "highlight_protection" in ADJUSTMENTS
 
 
-def test_vignette_max_midpoint_reaches_outermost_edge() -> None:
-    midpoint = 1.0
-    feather = 0.0
-    midpoint_shaped = midpoint**0.80
-    center = 0.18 + (0.992 - 0.18) * midpoint_shaped
-    inward_softness = (0.010 + (0.72 - 0.010) * feather) * (
-        1.0 + (0.62 - 1.0) * midpoint_shaped * midpoint_shaped
+def test_vignette_distance_is_invariant_across_frame_aspect_ratios() -> None:
+    normalized_point = (0.72, 0.48)
+    expected = math.hypot(*normalized_point)
+    for width, height in ((7008, 4672), (6000, 6000), (6000, 4500), (8192, 3456)):
+        pixel_x = normalized_point[0] * width * 0.5
+        pixel_y = normalized_point[1] * height * 0.5
+        distance = math.hypot(pixel_x / (width * 0.5), pixel_y / (height * 0.5))
+        assert math.isclose(distance, expected, abs_tol=1e-12)
+
+
+def test_vignette_is_a_post_view_black_or_white_edge_treatment() -> None:
+    assert "return rgb * (1.0 - opacity);" in ADJUSTMENTS
+    assert "return mix(rgb, vec3<f32>(1.0), opacity);" in ADJUSTMENTS
+    creative = re.search(
+        r"fn apply_creative_effects.+?textureStore\(creative_effects_out",
+        ADJUSTMENTS,
+        re.DOTALL,
     )
-    start = center - inward_softness
-    assert start > 0.97
-    assert "inward_softness" in ADJUSTMENTS
-    assert "outward_softness" in ADJUSTMENTS
-
-
-def test_vignette_uses_smooth_optical_falloff_and_tonal_protection() -> None:
-    assert "let smoother = transition * transition" in ADJUSTMENTS
-    assert "tonal_protection" in ADJUSTMENTS
-    assert "smoothstep(0.012, 0.20, luminance)" in ADJUSTMENTS
-    assert "edge_ev = select(amount * 2.20, amount * 1.28" in ADJUSTMENTS
+    assert creative is not None
+    assert "apply_vignette" not in creative.group(0)
+    view = re.search(r"fn apply_view_node.+?textureStore\(out_tex", ADJUSTMENTS, re.DOTALL)
+    assert view is not None
+    assert view.group(0).index("apply_local_display_blacks") < view.group(0).index(
+        "apply_vignette"
+    )
