@@ -132,6 +132,8 @@ def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
     assert "ade20k_class_ids" in MASKS
     assert 'ui.button("Generate Mask")' in SIDEBAR
     assert "ADE20K_CLASS_COUNT: usize = 150" in ai
+    assert "class_queries_logits" in ai
+    assert "masks_queries_logits" in ai
     assert "resize_probability_u8" in ai
 
 

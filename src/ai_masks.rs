@@ -816,20 +816,15 @@ fn validate_birefnet_output_shape(shape: &[i64], logits_len: usize) -> Result<(u
         output_elements,
     ))
 }
-expected [1, {ADE20K_CLASS_COUNT}, H, W]"
     );
-    let height =
-    let width =
+    let queries =
     anyhow::ensure!(
-        width > 0 && height > 0 && width <= 2048 && height <= 2048,
     );
-    let expected = ADE20K_CLASS_COUNT
-        .checked_mul(width)
-        .and_then(|value| value.checked_mul(height))
+    let expected = queries
     anyhow::ensure!(
         logits_len == expected,
     );
-    Ok((width as u32, height as u32))
+    Ok(queries)
 }
 
 fn normalized_letterbox(
@@ -3225,6 +3220,17 @@ fn resize_f32(
 
 
     #[test]
+        assert_eq!(
+                .unwrap(),
+            (336, 192)
+        );
+        assert!(
+        );
+    }
+
+    #[test]
+        assert_eq!((layout.resized_width, layout.resized_height), (1333, 750));
+        assert_eq!((layout.padded_width, layout.padded_height), (1344, 768));
     }
 
     #[test]
@@ -3239,7 +3245,6 @@ fn resize_f32(
                 .as_nanos()
         ));
         let cancellation = AtomicBool::new(false);
-        let error =
         assert!(format!("{error:#}").contains("consent"));
         assert!(!missing.exists());
     }

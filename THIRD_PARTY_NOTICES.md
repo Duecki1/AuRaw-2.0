@@ -81,9 +81,6 @@ Promptable Object selection uses the SAM 2.1 Hiera Tiny image encoder and mask d
 
 The object-mask implementation follows the public SAM 2.1 point-prompt interface used by AnyLabeling: normalized RGB encoder input, cached high-resolution/image embedding outputs, foreground/background point prompts, previous-mask logits, and candidate mask scores.
 
-
-
-
 ## LaMa ONNX
 
 Local inpainting uses the `lama_fp32.onnx` model distributed by
