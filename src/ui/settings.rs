@@ -225,7 +225,6 @@ impl Settings {
                 .changed();
             changed |= ui
                 .checkbox(&mut settings.ai_masks, "AI masks")
-                .on_hover_text("Subject, background, object, luminance-range, and color-range components. Generated/source-dependent results are marked for regeneration on the destination image.")
                 .changed();
             changed |= ui
                 .checkbox(&mut settings.inpainting, "Inpainting")

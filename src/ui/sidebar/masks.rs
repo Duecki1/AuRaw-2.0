@@ -615,7 +615,6 @@ impl Sidebar {
             MaskKind::Subject,
             MaskKind::Background,
             MaskKind::Object,
-            MaskKind::Landscape,
             MaskKind::LuminanceRange,
             MaskKind::ColorRange,
             MaskKind::DepthRange,
@@ -1304,6 +1303,7 @@ impl Sidebar {
         if request_object {
             app.request_object_mask(mask_index, component_index);
         }
+        }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if adjustments_changed {
             app.mark_mask_adjustments_dirty();
@@ -1401,6 +1401,7 @@ impl Sidebar {
         }
         if request_object {
             app.request_object_mask(mask_index, component_index);
+        }
         }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if adjustments_changed {

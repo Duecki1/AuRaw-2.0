@@ -1,7 +1,6 @@
 use crate::ai_masks::{
-    spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent,
-    ObjectMaskRequest, SubjectMaskEvent, BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE,
-    VITMATTE_MODEL_BYTES,
+    spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent, ObjectMaskRequest, SubjectMaskEvent,
+    BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
 use crate::inpainting::{
     inpaint_capture_rect, inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintRequest,
@@ -625,16 +624,6 @@ struct ObjectMaskTaskRequest {
     request: ObjectMaskRequest,
 }
 
-struct InpaintTaskRequest {
-    document_id: u64,
-    generation: u64,
-    model_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    request: InpaintRequest,
-    dabs: Vec<BrushDab>,
-}
-
 enum BackgroundAction {
     SingleExport(ExportTaskRequest),
     LibraryBatchExport {
@@ -841,7 +830,6 @@ pub struct AurawApp {
     object_job_document_id: u64,
     object_job_target: Option<(usize, usize)>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
-
     pub(crate) inpaint_brush_size: f32,
     pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,
     pub(crate) inpaint_strokes: Vec<InpaintStroke>,

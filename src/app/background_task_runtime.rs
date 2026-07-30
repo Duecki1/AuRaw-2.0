@@ -69,6 +69,7 @@ impl AurawApp {
             }
             BackgroundAction::SubjectMask(request) => self.start_subject_mask_task(id, request),
             BackgroundAction::ObjectMask(request) => self.start_object_mask_task(id, request),
+            }
             BackgroundAction::Inpainting(request) => self.start_inpaint_task(id, request),
             BackgroundAction::LibraryAiMaskRefresh { jobs } => {
                 self.start_library_ai_mask_refresh_task(id, jobs, frame)
@@ -262,6 +263,25 @@ impl AurawApp {
             id,
             TaskProgress::indeterminate(if self.object_inferencing {
                 "Running local object-mask inference…"
+            } else {
+                "Preparing model download…"
+            }),
+        );
+        self.egui_ctx.request_repaint();
+    }
+        self.background_tasks
+            request.model_path,
+            request.allow_download,
+            request.runtime_path,
+            request.runtime_sha256,
+            request.source.width,
+            request.source.height,
+            request.source.rgba.to_vec(),
+            request.category,
+            cancellation,
+        ));
+        self.background_tasks.update_progress(
+            id,
             } else {
                 "Preparing model download…"
             }),
@@ -478,6 +498,7 @@ impl AurawApp {
                 }
                 TaskKind::ObjectMask { .. } => {
                     self.object_task_id == Some(task.id) && self.object_receiver.is_some()
+                }
                 }
                 TaskKind::Inpainting { .. } => {
                     self.inpaint_task_id == Some(task.id) && self.inpaint_receiver.is_some()
@@ -715,6 +736,8 @@ impl AurawApp {
                                 self.object_task_id = None;
                             }
                         }
+                            }
+                        }
                         BackgroundAction::Inpainting(_) => {
                             if self.inpaint_task_id == Some(id) {
                                 self.inpaint_task_id = None;
@@ -847,7 +870,7 @@ impl AurawApp {
         };
         let worker_is_reporting_progress = state.phase == LibraryAiMaskRefreshPhase::Updating
             && ((self.subject_task_id == Some(id) && self.subject_receiver.is_some())
-                || (self.object_task_id == Some(id) && self.object_receiver.is_some()));
+                || (self.object_task_id == Some(id) && self.object_receiver.is_some())
         if worker_is_reporting_progress {
             return;
         }

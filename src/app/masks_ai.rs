@@ -190,14 +190,23 @@ impl AurawApp {
         let current_object = usize::from(
             self.object_receiver.is_some() || self.object_pending_target.is_some(),
         );
+        );
         let subject_remaining = usize::from(self.ai_mask_update_subject_pending) * subject_targets;
-        subject_remaining + self.ai_mask_update_object_queue.len() + current_object
+        subject_remaining
+            + self.ai_mask_update_object_queue.len()
+            + current_object
     }
 
     /// Find masks that can be regenerated from their semantic component or
     /// saved prompt data. A pasted/stale mask may intentionally have no cached
     /// generated bitmap, so `mask: Some(_)` must not be required here.
-    fn generated_ai_mask_targets(&self) -> (bool, VecDeque<(usize, usize)>) {
+    fn generated_ai_mask_targets(
+        &self,
+    ) -> (
+        bool,
+        VecDeque<(usize, usize)>,
+        VecDeque<(usize, usize)>,
+    ) {
         let mut subject = false;
         let mut objects = VecDeque::new();
         for (mask_index, local_mask) in self.masks.masks.iter().enumerate() {
@@ -220,7 +229,6 @@ impl AurawApp {
                 }
             }
         }
-        (subject, objects)
     }
 
     fn has_range_mask_targets(&self) -> bool {
@@ -248,20 +256,22 @@ impl AurawApp {
     }
 
     pub(crate) fn note_inpainting_changed_for_ai_masks(&mut self) {
-        let (has_subject, object_targets) = self.generated_ai_mask_targets();
         let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
-        self.ai_masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
+        self.ai_masks_need_update = has_subject
+            || !object_targets.is_empty()
+            || has_ranges;
     }
 
     pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
-        let (has_subject, object_targets) = self.generated_ai_mask_targets();
         let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
         // Manual/geometric masks remain intact and are immediately reused.
         // Only source-dependent masks need regeneration against the newly
         // corrected (or uncorrected) image geometry.
-        self.ai_masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
+        self.ai_masks_need_update = has_subject
+            || !object_targets.is_empty()
+            || has_ranges;
     }
 
     #[cfg(not(target_os = "android"))]
@@ -292,18 +302,22 @@ impl AurawApp {
             self.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
         }
-        let (update_subject, object_targets) = self.generated_ai_mask_targets();
+            self.generated_ai_mask_targets();
         let update_ranges = self.has_range_mask_targets();
         if self.masks.masks.is_empty() {
             self.ai_masks_need_update = false;
             return;
         }
         #[cfg(not(target_os = "android"))]
-        if (update_subject || !object_targets.is_empty()) && !self.validate_onnx_runtime_for_ai() {
+            && !self.validate_onnx_runtime_for_ai()
+        {
             return;
         }
 
-        if update_subject || !object_targets.is_empty() || update_ranges {
+        if update_subject
+            || !object_targets.is_empty()
+            || update_ranges
+        {
             // Force a new canonical source because lens correction or
             // inpainting changed the image under content-aware masks.
             self.mask_source_cache = None;
@@ -339,7 +353,6 @@ impl AurawApp {
             }
         }
 
-        if !update_subject && object_targets.is_empty() {
             self.ai_masks_need_update = false;
             self.notice = Some("Masks were refreshed for the current image geometry.".to_owned());
             self.egui_ctx.request_repaint();
@@ -402,6 +415,27 @@ impl AurawApp {
             } else {
                 self.object_pending_target = Some((mask_index, component_index));
                 self.object_consent_open = true;
+                self.egui_ctx.request_repaint();
+            }
+            return;
+        }
+
+        while let Some((mask_index, component_index)) =
+        {
+            let valid = self
+                .masks
+                .masks
+                .get(mask_index)
+                .and_then(|mask| mask.components.get(component_index))
+                .is_some_and(|component| {
+                    matches!(
+                        (component.kind, &component.geometry),
+                    )
+                });
+            if !valid {
+                continue;
+            }
+            } else {
                 self.egui_ctx.request_repaint();
             }
             return;
@@ -752,6 +786,111 @@ impl AurawApp {
         } else {
             let message = error_message
                 .unwrap_or_else(|| "Subject selection did not produce a mask.".to_owned());
+            self.notice = Some(message.clone());
+            if failed_during_inference {
+                self.finish_background_task(task_id);
+            } else {
+                self.fail_background_task(task_id, message);
+            }
+        }
+        self.egui_ctx.request_repaint();
+    }
+        let mut events = Vec::new();
+        let mut disconnected = false;
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let finished = matches!(event::Finished(_));
+                        events.push(event);
+                        if finished {
+                            break;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let mut finished = None;
+        for event in events {
+            match event {
+                    self.background_tasks.set_global_visible(task_id, true);
+                    self.background_tasks
+                    self.update_background_progress(
+                        Some(task_id),
+                        TaskProgress::units(
+                            downloaded,
+                            total,
+                            Some("bytes".to_owned()),
+                        )
+                        .with_detail(format!(
+                            "{:.1} / {:.1} MB",
+                            downloaded as f64 / 1_000_000.0,
+                            total as f64 / 1_000_000.0
+                        )),
+                    );
+                }
+                    self.background_tasks.set_global_visible(task_id, false);
+                    if matches!(
+                        self.background_tasks.snapshot(task_id).map(|task| task.kind),
+                    ) {
+                        self.background_tasks.release_current(task_id);
+                    }
+                    self.update_background_progress(
+                        Some(task_id),
+                    );
+                }
+            }
+        }
+        if finished.is_none() && disconnected {
+            finished = Some(Err(
+            ));
+        }
+        let Some(result) = finished else {
+            return;
+        };
+
+        let updating_all = self.ai_mask_update_active && target.is_some();
+        let library_task = self.library_ai_mask_refresh_task_id == Some(task_id);
+        let cancelled = self.background_task_cancelled(task_id);
+
+        let mut succeeded = false;
+        let mut error_message = None;
+        if !cancelled && !stale {
+            match (target, job_category, result) {
+                (Some((mask_index, component_index)), Some(expected_category), Ok(result)) => {
+                    let mask_image =
+                        MaskImage::new(result.width, result.height, result.mask);
+                    let applied = self
+                        .masks
+                        .masks
+                        .get_mut(mask_index)
+                        .and_then(|mask| mask.components.get_mut(component_index))
+                        .is_some_and(|component| {
+                (_, _, Err(error)) => {
+                }
+            }
+        }
+
+        if library_task {
+            if cancelled {
+                self.cancel_ai_mask_update();
+            } else if updating_all {
+                self.ai_mask_update_failed |= !succeeded;
+                if let Some(message) = error_message.clone() {
+                    self.notice = Some(message);
+                }
+                self.continue_ai_mask_update();
+            }
+        } else if cancelled || stale {
+            self.finish_background_task(task_id);
+        } else if succeeded {
+            self.finish_background_task(task_id);
+        } else {
+            let message = error_message
             self.notice = Some(message.clone());
             if failed_during_inference {
                 self.finish_background_task(task_id);
@@ -1220,6 +1359,9 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn onnx_runtime_config_path() -> PathBuf {
         let root = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -1375,253 +1517,5 @@ impl AurawApp {
             .join("models/vitmatte-small-composition-1k.onnx")
     }
 
-    fn show_subject_dialogs(&mut self, ctx: &egui::Context) {
-        let library_batch_refreshing = self.library_ai_mask_refresh.is_some();
-        if self.subject_consent_open {
-            crate::ui::responsive_popup(
-                egui::Window::new("Download subject-selection model?"),
-                ctx,
-                520.0,
-            )
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.label("Subject masks use BiRefNet for the coarse selection, then ViTMatte refines uncertain boundaries for hair, fur, and translucent edge detail. Not Subject is the exact inverse of the refined subject alpha.");
-                    ui.label(format!(
-                        "The first use downloads about {:.0} MB total and stores both ONNX models in AuRaw's cache.",
-                        (BIREFNET_MODEL_BYTES + VITMATTE_MODEL_BYTES) as f64 / 1_000_000.0
-                    ));
-                    ui.label("Model licenses: BiRefNet MIT; ViTMatte Apache-2.0. The models are optional and used only after this download.");
-                    ui.label("Inference is local. No photograph is uploaded.");
-                    ui.label("When you continue, your device connects directly to GitHub for BiRefNet and Hugging Face for ViTMatte. Those services receive connection data such as your IP address and request time under their own privacy policies. AuRaw sends no account identifier or telemetry.");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.hyperlink_to(
-                            "GitHub privacy statement",
-                            "https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement",
-                        );
-                        ui.separator();
-                        ui.hyperlink_to(
-                            "MIT model license",
-                            "https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE",
-                        );
-                        ui.separator();
-                        ui.hyperlink_to("Hugging Face privacy policy", "https://huggingface.co/privacy");
-                        ui.separator();
-                        ui.hyperlink_to(
-                            "ViTMatte Apache-2.0 license",
-                            "https://huggingface.co/hustvl/vitmatte-small-composition-1k",
-                        );
-                    });
-                    #[cfg(not(target_os = "android"))]
-                    if self.onnx_runtime_path.is_none() {
-                        ui.colored_label(
-                            egui::Color32::YELLOW,
-                            "Select a trusted local ONNX Runtime library in Settings before continuing. AuRaw never downloads native runtime code.",
-                        );
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Consent, download and continue").clicked() {
-                            self.subject_consent_open = false;
-                            self.start_subject_worker(self.birefnet_model_path());
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.subject_consent_open = false;
-                            if self.ai_mask_update_active {
-                                self.cancel_ai_mask_update();
-                            }
-                        }
-                    });
-                });
-        }
-        // The Library batch progress is the operation-level dialog. Do not
-        // cover it with a second worker-level window while refreshing pasted
-        // masks; the batch dialog stays visible for the entire operation.
-        if self.subject_receiver.is_some() && !library_batch_refreshing
-            && self
-                .subject_task_id
-                .is_some_and(|id| self.background_task_details_open(id))
-        {
-            #[cfg(not(target_os = "android"))]
-            let mut minimize = false;
-            let mut cancel = false;
-            crate::ui::responsive_popup(egui::Window::new("Preparing subject mask"), ctx, 420.0)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    if let Some((label, downloaded, total)) = self.subject_download_progress {
-                        let fraction = downloaded as f32 / total.max(1) as f32;
-                        ui.label(format!("Downloading {label}…"));
-                        ui.add(
-                            egui::ProgressBar::new(fraction)
-                                .show_percentage()
-                                .text(format!(
-                                    "{:.1} / {:.1} MB",
-                                    downloaded as f64 / 1_000_000.0,
-                                    total as f64 / 1_000_000.0
-                                )),
-                        );
-                    } else if self.subject_inferencing {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Running high-quality local subject selection…");
-                        });
-                    } else {
-                        ui.spinner();
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        #[cfg(not(target_os = "android"))]
-                        {
-                            minimize = ui.button("Minimize").clicked();
-                        }
-                        cancel = ui.button("Cancel").clicked();
-                    });
-                });
-            if let Some(task_id) = self.subject_task_id {
-                #[cfg(not(target_os = "android"))]
-                if minimize {
-                    self.set_background_task_details_open(task_id, false);
-                }
-                if cancel {
-                    self.cancel_background_task(task_id);
-                }
-            }
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
-
-        if self.object_consent_open {
-            crate::ui::responsive_popup(
-                egui::Window::new("Download object-selection model?"),
-                ctx,
-                520.0,
-            )
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.label("Object masks use SAM 2.1 Hiera Tiny followed automatically by ViTMatte trimap-guided alpha matting for fine hair, fur, and semi-transparent boundaries.");
-                    ui.label(format!(
-                        "The first use downloads about {:.0} MB for SAM plus {:.0} MB for ViTMatte and stores the ONNX files in AuRaw's model cache.",
-                        SAM21_MODEL_BYTES_ESTIMATE as f64 / 1_000_000.0,
-                        VITMATTE_MODEL_BYTES as f64 / 1_000_000.0
-                    ));
-                    ui.label("Model licenses: Apache-2.0. The models are optional and can be used only after this download.");
-                    ui.label("Inference is local. No photograph or prompt stroke is uploaded.");
-                    ui.label("When you continue, your device connects directly to Hugging Face. Hugging Face receives connection data such as your IP address and request time under its own privacy policy. AuRaw sends no account identifier or telemetry.");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.hyperlink_to(
-                            "Hugging Face privacy policy",
-                            "https://huggingface.co/privacy",
-                        );
-                        ui.separator();
-                        ui.hyperlink_to(
-                            "Apache-2.0 model license",
-                            "https://github.com/facebookresearch/sam2/blob/main/LICENSE",
-                        );
-                    });
-                    #[cfg(not(target_os = "android"))]
-                    if self.onnx_runtime_path.is_none() {
-                        ui.colored_label(
-                            egui::Color32::YELLOW,
-                            "Select a trusted local ONNX Runtime library in Settings before continuing.",
-                        );
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Consent, download and continue").clicked() {
-                            self.object_consent_open = false;
-                            if let Some((mask_index, component_index)) = self.object_pending_target.take() {
-                                let (encoder, decoder) = self.sam21_model_paths();
-                                self.start_object_worker(mask_index, component_index, encoder, decoder);
-                            }
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.object_consent_open = false;
-                            self.object_pending_target = None;
-                            if self.ai_mask_update_active {
-                                self.cancel_ai_mask_update();
-                            }
-                        }
-                    });
-                });
-        }
-        if self.object_receiver.is_some() && !library_batch_refreshing
-            && self
-                .object_task_id
-                .is_some_and(|id| self.background_task_details_open(id))
-        {
-            #[cfg(not(target_os = "android"))]
-            let mut minimize = false;
-            let mut cancel = false;
-            crate::ui::responsive_popup(egui::Window::new("Preparing object mask"), ctx, 420.0)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    if let Some((label, downloaded, total)) = self.object_download_progress {
-                        let fraction = downloaded as f32 / total.max(1) as f32;
-                        ui.label(format!("Downloading {label}…"));
-                        ui.add(
-                            egui::ProgressBar::new(fraction)
-                                .show_percentage()
-                                .text(format!(
-                                    "{:.1} / {:.1} MB",
-                                    downloaded as f64 / 1_000_000.0,
-                                    total as f64 / 1_000_000.0
-                                )),
-                        );
-                    } else if self.object_inferencing {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(if self.object_decoder_only {
-                                "Updating the object mask…"
-                            } else {
-                                "Encoding the selected image region and generating the object mask…"
-                            });
-                        });
-                    } else {
-                        ui.spinner();
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        #[cfg(not(target_os = "android"))]
-                        {
-                            minimize = ui.button("Minimize").clicked();
-                        }
-                        cancel = ui.button("Cancel").clicked();
-                    });
-                });
-            if let Some(task_id) = self.object_task_id {
-                #[cfg(not(target_os = "android"))]
-                if minimize {
-                    self.set_background_task_details_open(task_id, false);
-                }
-                if cancel {
-                    self.cancel_background_task(task_id);
-                }
-            }
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
-
-        if let Some(message) = self.object_error_dialog.clone() {
-            let mut close = false;
-            crate::ui::responsive_popup(egui::Window::new("Object mask failed"), ctx, 420.0)
-                .collapsible(false)
-                .resizable(true)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.label(message);
-                    ui.add_space(8.0);
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
-                });
-            if close {
-                self.object_error_dialog = None;
-            }
-        }
-    }
+    #[cfg(target_os = "android")]
 }

@@ -1280,6 +1280,9 @@ fn estimate_sidecar_bytes<'a>(
                     &mut estimated,
                     base64_json_string_bytes(image.pixels.len())?,
                 )?,
+                    &mut estimated,
+                    base64_json_string_bytes(image.pixels.len())?,
+                )?,
                 MaskGeometry::Object { mask, strokes, .. } => {
                     if let Some(image) = mask {
                         checked_add(
@@ -1379,10 +1382,7 @@ fn geometry_matches_kind(kind: MaskKind, geometry: &MaskGeometry) -> bool {
                 MaskGeometry::LuminanceRange { .. }
             )
             | (MaskKind::ColorRange, MaskGeometry::ColorRange { .. })
-            | (
-                MaskKind::Landscape | MaskKind::DepthRange,
-                MaskGeometry::Placeholder
-            )
+            | (MaskKind::DepthRange, MaskGeometry::Placeholder)
     )
 }
 

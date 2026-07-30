@@ -42,7 +42,6 @@ pub enum MaskKind {
     Subject,
     Background,
     Object,
-    Landscape,
     LuminanceRange,
     ColorRange,
     DepthRange,
@@ -57,7 +56,6 @@ impl MaskKind {
             Self::Subject => "Select Subject",
             Self::Background => "Select Not Subject",
             Self::Object => "Select Object",
-            Self::Landscape => "Select Landscape",
             Self::LuminanceRange => "Luminance Range",
             Self::ColorRange => "Color Range",
             Self::DepthRange => "Depth Range",
@@ -89,6 +87,7 @@ impl MaskKind {
         )
     }
 }
+
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum MaskCombineMode {
@@ -682,6 +681,10 @@ impl MaskGeometry {
                 edge_refine: default_object_edge_refine(),
                 strokes: Vec::new(),
             },
+                mask: None,
+                grow: 0.0,
+                feather: 0.0,
+            },
             MaskKind::LuminanceRange => Self::LuminanceRange {
                 source: None,
                 low: 0.2,
@@ -703,7 +706,8 @@ impl MaskGeometry {
         match self {
             Self::Brush { dabs, .. } => !dabs.is_empty(),
             Self::Radial { initialized, .. } | Self::Linear { initialized, .. } => *initialized,
-            Self::Ai { mask, .. } | Self::Object { mask, .. } => mask.is_some(),
+                mask.is_some()
+            }
             Self::LuminanceRange { source, .. } => source.is_some(),
             Self::ColorRange {
                 source, sampled, ..
@@ -2484,5 +2488,27 @@ mod tests {
         assert_eq!(stack.selected_mask, Some(1));
         assert_eq!(stack.selected_component, Some(1));
         assert_eq!(stack.move_submask_component(0, 0, 1, 0), None);
+    }
+
+    #[test]
+        let geometry = &mut stack.masks[0].components[0].geometry;
+            mask,
+            category,
+            feather,
+            ..
+        } = geometry
+        else {
+        };
+        *mask = MaskImage::new(2, 1, vec![0, 255]);
+        *feather = 0.0;
+        assert_eq!(stack.rasterize_layer(0, 2, 1, 2, 1), [0, 255]);
+
+        let json = serde_json::to_string(&stack).unwrap();
+        let restored: MaskStack = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored.masks[0].components[0].geometry,
+                ..
+            }
+        ));
     }
 }

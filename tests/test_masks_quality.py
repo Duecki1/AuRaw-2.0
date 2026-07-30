@@ -15,7 +15,6 @@ EXPORT = (ROOT / "src/pipeline/export.rs").read_text(encoding="utf-8")
 def test_mask_types_and_placeholders_are_present() -> None:
     for kind in (
         "Brush", "Radial", "Linear", "Subject", "Background", "Object",
-        "Landscape", "LuminanceRange", "ColorRange", "DepthRange",
     ):
         assert kind in MASKS
         assert f"MaskKind::{kind}" in SIDEBAR
@@ -125,6 +124,15 @@ def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
     assert "let top = sample(x0, y0)" in MASKS
     assert "let bottom = sample(x0, y1)" in MASKS
     assert "*value = top + (bottom - top) * fy" in MASKS
+
+
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    for category in ("Sky", "Vegetation", "Architecture", "Ground", "Water", "Mountains"):
+        assert f"Self::{category}" in MASKS
+    assert "ade20k_class_ids" in MASKS
+    assert 'ui.button("Generate Mask")' in SIDEBAR
+    assert "ADE20K_CLASS_COUNT: usize = 150" in ai
+    assert "resize_probability_u8" in ai
 
 
 

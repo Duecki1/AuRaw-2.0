@@ -46,8 +46,6 @@ const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 #[cfg(not(target_os = "android"))]
 static VITMATTE_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
-#[cfg(not(target_os = "android"))]
-static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(not(target_os = "android"))]
@@ -55,22 +53,14 @@ type RuntimeProbeResult = (PathBuf, String, Option<String>);
 #[cfg(not(target_os = "android"))]
 static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
 
-#[derive(Debug)]
-pub enum SubjectMaskEvent {
-    DownloadProgress {
-        label: &'static str,
-        downloaded: u64,
-        total: u64,
-    },
-    Inferencing,
-    Finished(Result<SubjectMaskResult, String>),
-}
-
-#[derive(Debug)]
-pub struct SubjectMaskResult {
-    pub width: u32,
-    pub height: u32,
-    pub mask: Vec<u8>,
+", path.display()))?;
+    anyhow::ensure!(
+        metadata.len()
+    );
+    let actual = sha256_file_hex(path)?;
+    anyhow::ensure!(
+    );
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -826,6 +816,21 @@ fn validate_birefnet_output_shape(shape: &[i64], logits_len: usize) -> Result<(u
         output_elements,
     ))
 }
+expected [1, {ADE20K_CLASS_COUNT}, H, W]"
+    );
+    let height =
+    let width =
+    anyhow::ensure!(
+        width > 0 && height > 0 && width <= 2048 && height <= 2048,
+    );
+    let expected = ADE20K_CLASS_COUNT
+        .checked_mul(width)
+        .and_then(|value| value.checked_mul(height))
+    anyhow::ensure!(
+        logits_len == expected,
+    );
+    Ok((width as u32, height as u32))
+}
 
 fn normalized_letterbox(
     resized: &ImageBuffer<Rgba<u8>, Vec<u8>>,
@@ -1447,13 +1452,6 @@ fn sigmoid_probability(logit: f32) -> f32 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{sigmoid_probability, validate_birefnet_output_shape, Letterbox, MODEL_SIZE};
-
-    #[test]
-    fn letterbox_preserves_landscape_aspect_ratio() {
-        let box_ = Letterbox::for_image(6000, 4000).unwrap();
         assert_eq!(box_.width, MODEL_SIZE);
         assert_eq!(box_.height, 683);
         assert_eq!(box_.offset_x, 0);
@@ -3223,6 +3221,43 @@ fn resize_f32(
         }
     }
     output
+}
+
+
+    #[test]
+    }
+
+    #[test]
+    }
+
+    #[test]
+-{}.onnx",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cancellation = AtomicBool::new(false);
+        let error =
+        assert!(format!("{error:#}").contains("consent"));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+        let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
+        let sha256 = sha256_file_hex(&runtime).unwrap();
+            &model,
+            Some(&runtime),
+            Some(&sha256),
+            32,
+            24,
+            vec![127; 32 * 24 * 4]::Sky,
+        )
+        .unwrap();
+        assert_eq!((result.width, result.height), (32, 24));
+        assert_eq!(result.mask.len(), 32 * 24);
+    }
 }
 
 #[cfg(test)]

@@ -55,8 +55,9 @@ pub use masks::{
     compose_inpaint_strokes, ellipse_outline_points, export_mask_atlas_edge,
     export_mask_atlas_edge_limit, mask_atlas_edge, rasterize_brush_dabs,
     rasterize_inpaint_dabs_binary, BrushDab, BrushMode, InpaintLayer, InpaintPatch, InpaintStroke,
-    LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry, MaskImage, MaskKind,
-    MaskRgbImage, MaskStack, ObjectStroke, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry,
+    MaskImage, MaskKind, MaskRgbImage, MaskStack, ObjectStroke, MAX_LOCAL_MASKS,
+    MAX_MASK_COMPONENTS,
 };
 pub use noise::{AdaptiveDetailDefaults, DenoiseQuality, NoiseProfile};
 pub use processing::{
