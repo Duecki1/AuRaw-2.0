@@ -219,7 +219,12 @@ pub const ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION: u32 = 19;
 /// preserves the camera signal exactly, and removes demosaic-correlated colour
 /// clouds across six multiscale passes.
 pub const MULTISCALE_COLOR_DENOISE_PROCESS_VERSION: u32 = 20;
-pub const CURRENT_PROCESS_VERSION: u32 = MULTISCALE_COLOR_DENOISE_PROCESS_VERSION;
+/// Process 21 adds a variance-normalized opponent-color guide to every
+/// multiscale chroma pass. Isoluminant color boundaries no longer look flat to
+/// the denoiser, preventing broad-scale chroma from bleeding into adjacent
+/// neutral or differently colored regions.
+pub const EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 21;
+pub const CURRENT_PROCESS_VERSION: u32 = EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.

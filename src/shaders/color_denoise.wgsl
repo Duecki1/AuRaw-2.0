@@ -50,9 +50,16 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let center_signal = nr_signal(center);
     let center_variance = nr_component_variance(center);
     let detail = clamp(params.noise_options.y, 0.0, 1.0);
-    // Chroma follows luminance edges but tolerates the simultaneous signal
-    // error commonly carried by a demosaic false-colour speckle.
-    let guide_sigma = mix(10.0, 5.5, detail);
+    // Keep both brightness and genuine color boundaries out of the low pass.
+    // A signal-only guide mistakes isoluminant boundaries for flat areas, so
+    // the wide scales can otherwise carry saturated chroma many pixels into a
+    // neutral neighbor. The chroma guide is normalized by the measured pair
+    // variance: ordinary sensor/demosaic noise still pools, while opponent
+    // differences several noise sigmas apart do not cross the boundary.
+    let signal_guide_sigma = mix(10.0, 5.5, detail);
+    let opponent_guide_sigma = mix(3.6, 2.4, detail);
+    let center_opponents = nr_opponents(center);
+    let center_opponent_variance = nr_opponent_variance(center);
     // The two broadest High-quality scales use a 3x3 binomial kernel. Their
     // large spacing supplies Lightroom-like color smoothness without paying
     // for 25 samples per pixel or extending support beyond the export halo.
@@ -68,17 +75,29 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
             let sample_variance = nr_component_variance(sample);
             let signal_delta = sample_signal - center_signal;
             let signal_variance = center_variance.x + sample_variance.x;
-            let range_distance = signal_delta * signal_delta
-                / max(signal_variance * guide_sigma * guide_sigma, 1e-10);
+            let signal_distance = signal_delta * signal_delta
+                / max(
+                    signal_variance * signal_guide_sigma * signal_guide_sigma,
+                    1e-10,
+                );
+            let sample_opponents = nr_opponents(sample);
+            let opponent_delta = sample_opponents - center_opponents;
+            let opponent_variance =
+                center_opponent_variance + nr_opponent_variance(sample);
+            let opponent_distance = dot(
+                opponent_delta * opponent_delta
+                    / max(opponent_variance, vec2<f32>(1e-10)),
+                vec2<f32>(1.0),
+            ) / (opponent_guide_sigma * opponent_guide_sigma);
             let spatial = color_denoise_kernel_weight(x, compact)
                 * color_denoise_kernel_weight(y, compact);
-            let weight = spatial * exp(-0.5 * range_distance);
-            opponent_sum += nr_opponents(sample) * weight;
+            let weight =
+                spatial * exp(-0.5 * (signal_distance + opponent_distance));
+            opponent_sum += sample_opponents * weight;
             weight_sum += weight;
         }
     }
 
-    let center_opponents = nr_opponents(center);
     let low_opponents = opponent_sum / max(weight_sum, 1e-6);
     let opponent_detail = center_opponents - low_opponents;
     let opponent_sigma = sqrt(nr_opponent_variance(center));

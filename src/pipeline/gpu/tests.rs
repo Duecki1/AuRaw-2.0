@@ -1802,6 +1802,34 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
         feature_chroma_100 >= 0.90 * feature_chroma_off,
         "Color 100 desaturated a coherent color feature: {feature_chroma_off} -> {feature_chroma_100}"
     );
+    let mean_opponents_in = |pixels: &[f32], x_range: std::ops::Range<u32>| {
+        let mut sum = [0.0f32; 2];
+        let mut count = 0u32;
+        for y in 56..72 {
+            for x in x_range.clone() {
+                let index = ((y * WIDTH + x) * 3) as usize;
+                let r = pixels[index];
+                let g = pixels[index + 1];
+                let b = pixels[index + 2];
+                sum[0] += 0.5 * (r - b);
+                sum[1] += 0.25 * r - 0.5 * g + 0.25 * b;
+                count += 1;
+            }
+        }
+        [sum[0] / count as f32, sum[1] / count as f32]
+    };
+    // The colored patch is x=48..80. Its chroma must not diffuse through an
+    // equal-signal boundary into the neutral strip immediately to its left.
+    // Compare against Color Off so demosaic's own one-pixel reconstruction
+    // footprint is not attributed to the multiscale denoiser.
+    let neutral_off = mean_opponents_in(&feature_off, 36..48);
+    let neutral_100 = mean_opponents_in(&feature_100, 36..48);
+    let neutral_chroma_shift =
+        (neutral_100[0] - neutral_off[0]).hypot(neutral_100[1] - neutral_off[1]);
+    assert!(
+        neutral_chroma_shift <= 0.003,
+        "Color 100 bled patch chroma into a neutral equal-signal neighbor: {neutral_chroma_shift}"
+    );
 
     // Real fine and medium detail must move visibly; source-string wiring
     // checks cannot detect a skipped intermediate effects pass.
