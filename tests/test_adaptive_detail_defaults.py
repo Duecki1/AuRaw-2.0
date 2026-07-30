@@ -61,6 +61,9 @@ def test_denoise_uses_continuous_perceptual_strength_and_dense_chroma_wavelets()
     assert "let requested = clamp(params.chroma_denoise, 0.0, 1.0)" in SHADER_COLOR_DENOISE
     assert "let center_opponent_variance = nr_opponent_variance(center)" in SHADER_COLOR_DENOISE
     assert "center_opponent_variance + nr_opponent_variance(sample)" in SHADER_COLOR_DENOISE
+    assert "let guide_variance_scale = exp2(-f32(scale))" in SHADER_COLOR_DENOISE
+    assert "normalized_opponent_distance - opponent_noise_deadzone" in SHADER_COLOR_DENOISE
+    assert "nr_opponent_variance(center) * guide_variance_scale" in SHADER_COLOR_DENOISE
     assert "signal_distance + opponent_distance" in SHADER_COLOR_DENOISE
     assert "let filtered_opponents = low_opponents + opponent_detail * retained" in SHADER_COLOR_DENOISE
     assert "nr_from_signal_opponents(center_signal, filtered_opponents)" in SHADER_COLOR_DENOISE
