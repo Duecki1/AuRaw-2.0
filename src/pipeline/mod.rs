@@ -14,7 +14,8 @@ mod sigmoid;
 pub use basicadj::{
     temperature_kelvin_from_offset, temperature_offset_from_kelvin, ColorGradeWheel, ColorGrading,
     DemosaicMode, ExposureParams, HighlightReconstructionMethod, PointCurve,
-    ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION, BASIC_TONE_RESPONSE_PROCESS_VERSION,
+    ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION, AI_DENOISE_PROCESS_VERSION,
+    AI_DENOISE_REMOSAIC_PROCESS_VERSION, BASIC_TONE_RESPONSE_PROCESS_VERSION,
     CURRENT_PROCESS_VERSION, EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT,
     HIGHLIGHT_CONSENSUS_PROCESS_VERSION, HSL_HUE_LIMIT, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
     LEGACY_SCENE_DISPLAY_PROCESS_VERSION, LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
@@ -68,6 +69,7 @@ pub use raw_loader::{
     is_supported_raw_path, load_raw_display_dimensions, load_raw_embedded_thumbnail, load_raw_file,
     load_raw_file_with_dcp, load_raw_file_with_profile_config,
     load_raw_file_with_profile_selection, load_raw_thumbnail, CameraProfileCandidate,
-    CameraProfileMode, CfaKind, CompactPixelMap, LoadedRaw, RawThumbnail, SUPPORTED_RAW_EXTENSIONS,
+    AiDenoisedImage, CameraProfileMode, CfaKind, CompactPixelMap, LoadedRaw, RawThumbnail,
+    SUPPORTED_RAW_EXTENSIONS,
 };
 pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};

@@ -974,7 +974,7 @@ impl GpuParams {
                 shader_highlight_method(raw.cfa_kind, exposure.highlight_method),
                 exposure.highlight_iterations.clamp(1, 4) as f32,
                 exposure.highlight_color_adaptation.clamp(0.0, 1.0),
-                0.0,
+                if exposure.ai_denoise_enabled { 1.0 } else { 0.0 },
             ],
             noise_shot: canonicalize_green_noise(
                 std::array::from_fn(|channel| {
@@ -1451,6 +1451,7 @@ pub struct RawGpuPipeline {
     _tex2: wgpu::Texture,
     scene_texture: wgpu::Texture,
     scene_format: wgpu::TextureFormat,
+    has_ai_scene: bool,
     display_linear_texture: wgpu::Texture,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
@@ -1656,6 +1657,7 @@ impl RawGpuPipeline {
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
             lens_geometry: None,
+            ai_denoised: Arc::new(std::sync::RwLock::new(None)),
         };
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
@@ -1954,6 +1956,8 @@ impl RawGpuPipeline {
             demosaic_format,
             "auraw scene-linear camera RGB",
         );
+        let has_ai_scene =
+            upload_ai_scene_texture(queue, &scene_texture, demosaic_format, raw)?;
 
         // The final creative result is tone-mapped into display-linear Rec.2020
         // before any output transfer function is applied. Export reads this
@@ -4020,6 +4024,7 @@ impl RawGpuPipeline {
             _tex2: tex2,
             scene_texture,
             scene_format: demosaic_format,
+            has_ai_scene,
             display_linear_texture,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
@@ -4358,6 +4363,12 @@ impl RawGpuPipeline {
         );
         upload_color_texture(queue, &self.color_texture, raw);
         upload_black_texture(queue, &self.black_texture, raw);
+        if self.has_ai_scene {
+            anyhow::ensure!(
+                upload_ai_scene_texture(queue, &self.scene_texture, self.scene_format, raw)?,
+                "reusable AI-denoise pipeline received a tile without derived model output"
+            );
+        }
         Ok(())
     }
 
@@ -4562,6 +4573,29 @@ impl RawGpuPipeline {
             self.height,
             "auraw scene texture readback",
         )
+    }
+
+    /// Runs only RAW reconstruction and returns its white-balanced camera-RGB
+    /// boundary. RawNIND's linear Rec.2020 variant uses this for non-Bayer
+    /// sensors before converting into the model's declared colour space.
+    pub(crate) fn render_camera_scene_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: &GpuParams,
+    ) -> Result<Vec<f32>> {
+        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
+            return Err(anyhow!(
+                "camera scene readback requires ProcessingQuality::High (RGBA32Float)"
+            ));
+        }
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw camera scene readback encoder"),
+        });
+        self.encode_raw_stage(&mut encoder, params);
+        queue.submit(Some(encoder.finish()));
+        self.read_scene_texture_blocking(device, queue)
     }
 
     /// Runs the raw stage and converts its camera-RGB scene texture into the
@@ -4862,6 +4896,12 @@ impl RawGpuPipeline {
     }
 
     fn encode_raw_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
+        if self.has_ai_scene && params.highlight_options[3] >= 0.5 {
+            // The RawNIND result was uploaded directly into the camera-RGB
+            // scene boundary. Tone analysis and the complete output stage,
+            // including capture sharpening, still execute normally.
+            return;
+        }
         self.encode_pass(encoder, 0);
         if params.needs_guided_highlight_passes() {
             self.encode_pass_range(

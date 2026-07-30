@@ -234,7 +234,13 @@ pub const SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 22;
 /// controls. Its final-frame geometry follows darktable's auto-ratio
 /// convention, so the default falloff is stable across aspect ratios.
 pub const LIGHTROOM_VIGNETTE_PROCESS_VERSION: u32 = 23;
-pub const CURRENT_PROCESS_VERSION: u32 = LIGHTROOM_VIGNETTE_PROCESS_VERSION;
+/// RawNIND AI denoise is a persisted, mutually-exclusive RAW reconstruction
+/// choice. Its derived pixels are deliberately not serialized.
+pub const AI_DENOISE_PROCESS_VERSION: u32 = 24;
+/// Bayer RawNIND output follows darktable's production remosaic contract
+/// before entering AuRaw's ordinary demosaic stage.
+pub const AI_DENOISE_REMOSAIC_PROCESS_VERSION: u32 = 25;
+pub const CURRENT_PROCESS_VERSION: u32 = AI_DENOISE_REMOSAIC_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.
@@ -302,6 +308,11 @@ pub struct ExposureParams {
     /// Tap budget / scale count for the multiscale denoise stage.
     #[serde(default)]
     pub denoise_quality: DenoiseQuality,
+    /// Use the pinned RawNIND UtNet2 model instead of AuRaw's standard
+    /// luminance/chroma denoise path. The original standard values remain
+    /// serialized so disabling AI restores them exactly.
+    #[serde(default)]
+    pub ai_denoise_enabled: bool,
     /// Demosaic finishing mode. The reference algorithm is always run first.
     pub demosaic_mode: DemosaicMode,
     /// Detail threshold in darktable-compatible 0..100 units for dual mode.
@@ -424,6 +435,7 @@ impl ExposureParams {
             && self.luminance_denoise == 0.0
             && self.denoise_detail == default_denoise_detail()
             && self.denoise_quality == DenoiseQuality::Balanced
+            && !self.ai_denoise_enabled
             && self.sharpen_amount == default_sharpen_amount()
             && self.sharpen_radius == default_sharpen_radius()
             && self.sharpen_detail == default_sharpen_detail()
@@ -451,6 +463,7 @@ impl Default for ExposureParams {
             luminance_denoise: 0.0,
             denoise_detail: default_denoise_detail(),
             denoise_quality: DenoiseQuality::default(),
+            ai_denoise_enabled: false,
             demosaic_mode: DemosaicMode::Reference,
             dual_threshold: 20.0,
             frequency_chroma: 1.0,

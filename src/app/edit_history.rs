@@ -611,6 +611,8 @@ impl AurawApp {
         inpainting_changed: bool,
     ) {
         let lens_changed = !snapshot.lens.matches(&self.lens_correction);
+        let ai_denoise_changed =
+            snapshot.exposure.ai_denoise_enabled != self.exposure.ai_denoise_enabled;
         self.cancel_document_bound_background_tasks();
 
         self.edit_history.set_restoring_snapshot(true);
@@ -629,6 +631,9 @@ impl AurawApp {
         }
         snapshot.lens.apply_to(&mut self.lens_correction);
         self.rehydrate_restored_mask_state();
+        if ai_denoise_changed && self.exposure.ai_denoise_enabled {
+            self.ai_denoise_resume_pending = true;
+        }
 
         if lens_changed {
             // Lens correction rebuilds image geometry. Keep the snapshot's
@@ -645,6 +650,11 @@ impl AurawApp {
                 self.queue_preview_processing(crate::pipeline::ProcessingStage::Tone);
             }
             self.mark_pipeline_dirty();
+            if ai_denoise_changed && self.exposure.ai_denoise_enabled {
+                self.preview_quality_dirty = true;
+                self.preview_detail = None;
+                self.preview_navigation = None;
+            }
         }
         self.edit_history.set_restoring_snapshot(false);
     }
