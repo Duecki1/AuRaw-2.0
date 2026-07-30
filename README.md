@@ -250,7 +250,8 @@ until a local runtime has been selected and pinned.
 Detail's optional **AI Denoise** uses the GPL-3.0 RawNIND UtNet2 package from
 the published darktable-ai 5.6 release. The first enable asks before contacting
 GitHub. AuRaw pins the complete `.dtmodel` archive and both extracted ONNX
-graphs by SHA-256. Bayer RAWs use the joint denoise/demosaic graph; X-Trans uses
+graphs by SHA-256. Bayer RAWs use the joint denoise/demosaic graph, then remosaic
+its result and run AuRaw's normal demosaic stage as darktable does; X-Trans uses
 the declared linear Rec.2020 graph. Inference is overlap-tiled locally, and only
 the checkbox is persisted—the half-float derived camera-RGB cache is rebuilt
 from the original mosaic and enters the ordinary non-destructive pipeline

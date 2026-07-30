@@ -237,7 +237,10 @@ pub const LIGHTROOM_VIGNETTE_PROCESS_VERSION: u32 = 23;
 /// RawNIND AI denoise is a persisted, mutually-exclusive RAW reconstruction
 /// choice. Its derived pixels are deliberately not serialized.
 pub const AI_DENOISE_PROCESS_VERSION: u32 = 24;
-pub const CURRENT_PROCESS_VERSION: u32 = AI_DENOISE_PROCESS_VERSION;
+/// Bayer RawNIND output follows darktable's production remosaic contract
+/// before entering AuRaw's ordinary demosaic stage.
+pub const AI_DENOISE_REMOSAIC_PROCESS_VERSION: u32 = 25;
+pub const CURRENT_PROCESS_VERSION: u32 = AI_DENOISE_REMOSAIC_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.
