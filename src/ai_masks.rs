@@ -518,7 +518,7 @@ pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
 }
 
 #[cfg(not(target_os = "android"))]
-fn create_cpu_session(model_path: &Path) -> Result<Session> {
+pub(crate) fn create_cpu_session(model_path: &Path) -> Result<Session> {
     let mut builder = Session::builder()
         .context("create CPU ONNX Runtime session")?
         .with_memory_pattern(false)

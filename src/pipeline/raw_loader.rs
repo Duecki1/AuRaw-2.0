@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::ops::Index;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -374,6 +374,47 @@ pub(crate) struct CaptureMetadata {
     pub artist: String,
 }
 
+/// Cached RawNIND output in the same white-balanced camera-RGB domain as the
+/// ordinary demosaic stage. Samples are interleaved RGB IEEE-754 half floats.
+/// Sidecars persist only the model toggle; this derived cache is always
+/// rebuildable from the original sensor mosaic.
+#[derive(Clone, Debug)]
+pub struct AiDenoisedImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgb16f: Arc<[u16]>,
+}
+
+impl AiDenoisedImage {
+    pub(crate) fn new(width: u32, height: u32, rgb16f: Vec<u16>) -> Result<Self> {
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(3))
+            .and_then(|elements| usize::try_from(elements).ok())
+            .context("AI-denoise image dimensions overflow")?;
+        anyhow::ensure!(
+            width > 0 && height > 0 && rgb16f.len() == expected,
+            "AI-denoise image has {} values, expected {expected} for {width}x{height}",
+            rgb16f.len()
+        );
+        Ok(Self {
+            width,
+            height,
+            rgb16f: rgb16f.into(),
+        })
+    }
+
+    pub(crate) fn is_valid_for(&self, width: u32, height: u32) -> bool {
+        self.width == width
+            && self.height == height
+            && u64::from(width)
+                .checked_mul(u64::from(height))
+                .and_then(|pixels| pixels.checked_mul(3))
+                .and_then(|elements| usize::try_from(elements).ok())
+                .is_some_and(|expected| self.rgb16f.len() == expected)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LoadedRaw {
     pub width: u32,
@@ -418,9 +459,43 @@ pub struct LoadedRaw {
     /// and TCA are already applied to the CFA, while this common geometric
     /// component is deferred until the float RGB geometry pass.
     pub lens_geometry: Option<Arc<LensGeometryMap>>,
+    /// Runtime-only derived output. Interior mutability lets a background
+    /// worker publish it without cloning the much larger decoded RAW buffers.
+    pub(crate) ai_denoised: Arc<RwLock<Option<AiDenoisedImage>>>,
 }
 
 impl LoadedRaw {
+    pub(crate) fn ai_denoised_image(&self) -> Option<AiDenoisedImage> {
+        self.ai_denoised
+            .read()
+            .ok()
+            .and_then(|image| image.as_ref().cloned())
+            .filter(|image| image.is_valid_for(self.width, self.height))
+    }
+
+    pub(crate) fn set_ai_denoised_image(&self, image: AiDenoisedImage) -> Result<()> {
+        anyhow::ensure!(
+            image.is_valid_for(self.width, self.height),
+            "AI-denoise result {}x{} does not match RAW {}x{}",
+            image.width,
+            image.height,
+            self.width,
+            self.height
+        );
+        let mut cached = self
+            .ai_denoised
+            .write()
+            .map_err(|_| anyhow::anyhow!("AI-denoise cache lock was poisoned"))?;
+        *cached = Some(image);
+        Ok(())
+    }
+
+    pub(crate) fn clear_ai_denoised_image(&self) {
+        if let Ok(mut cached) = self.ai_denoised.write() {
+            *cached = None;
+        }
+    }
+
     /// ISO sensitivity retained from the RAW metadata. Zero means unavailable.
     pub fn iso_speed(&self) -> f32 {
         self.capture_metadata.iso_speed
@@ -650,6 +725,7 @@ mod tests {
                 },
             }),
             lens_geometry: None,
+            ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 

@@ -85,6 +85,8 @@ impl eframe::App for AurawApp {
         self.poll_object_worker();
         self.poll_library_ai_mask_refresh(frame);
         self.poll_inpaint_worker();
+        self.poll_ai_denoise_worker();
+        self.resume_pending_ai_denoise(frame);
         self.drive_background_tasks(frame);
         #[cfg(target_os = "android")]
         self.sync_android_task_notification();
@@ -217,6 +219,7 @@ impl eframe::App for AurawApp {
             || self.export_receiver.is_some()
             || self.export_publish_pending
             || self.inpaint_receiver.is_some()
+            || self.ai_denoise_receiver.is_some()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
@@ -248,6 +251,7 @@ impl eframe::App for AurawApp {
         }
         self.show_subject_dialogs(ui.ctx());
         self.show_inpainting_dialogs(ui.ctx());
+        self.show_ai_denoise_dialogs(ui.ctx(), frame);
         self.show_background_task_detail_windows(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
         self.observe_edit_history(ui.ctx());
