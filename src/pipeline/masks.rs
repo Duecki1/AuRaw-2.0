@@ -84,9 +84,58 @@ impl MaskKind {
                 | Self::Subject
                 | Self::Background
                 | Self::Object
+                | Self::Landscape
                 | Self::LuminanceRange
                 | Self::ColorRange
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LandscapeCategory {
+    #[default]
+    Sky,
+    Vegetation,
+    Architecture,
+    Ground,
+    Water,
+    Mountains,
+}
+
+impl LandscapeCategory {
+    pub const ALL: [Self; 6] = [
+        Self::Sky,
+        Self::Vegetation,
+        Self::Architecture,
+        Self::Ground,
+        Self::Water,
+        Self::Mountains,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sky => "Sky",
+            Self::Vegetation => "Vegetation",
+            Self::Architecture => "Architecture",
+            Self::Ground => "Ground",
+            Self::Water => "Water",
+            Self::Mountains => "Mountains & rocks",
+        }
+    }
+
+    /// Zero-based ADE20K semantic class IDs emitted by SegFormer.
+    pub const fn ade20k_class_ids(self) -> &'static [usize] {
+        match self {
+            Self::Sky => &[2],
+            Self::Vegetation => &[4, 9, 17, 29, 66, 72],
+            Self::Architecture => &[
+                0, 1, 5, 8, 14, 25, 32, 38, 42, 48, 53, 58, 59, 61, 79, 84, 86, 88, 95, 96, 106,
+                114, 121, 140, 145, 146, 147,
+            ],
+            Self::Ground => &[3, 6, 11, 13, 46, 52, 54, 91, 94],
+            Self::Water => &[21, 26, 60, 104, 109, 113, 128],
+            Self::Mountains => &[16, 34, 68],
+        }
     }
 }
 
@@ -608,6 +657,14 @@ pub enum MaskGeometry {
         grow: f32,
         feather: f32,
     },
+    Landscape {
+        mask: Option<MaskImage>,
+        #[serde(default)]
+        category: LandscapeCategory,
+        #[serde(default)]
+        grow: f32,
+        feather: f32,
+    },
     Object {
         mask: Option<MaskImage>,
         #[serde(default)]
@@ -682,6 +739,12 @@ impl MaskGeometry {
                 edge_refine: default_object_edge_refine(),
                 strokes: Vec::new(),
             },
+            MaskKind::Landscape => Self::Landscape {
+                mask: None,
+                category: LandscapeCategory::default(),
+                grow: 0.0,
+                feather: 0.0,
+            },
             MaskKind::LuminanceRange => Self::LuminanceRange {
                 source: None,
                 low: 0.2,
@@ -703,7 +766,9 @@ impl MaskGeometry {
         match self {
             Self::Brush { dabs, .. } => !dabs.is_empty(),
             Self::Radial { initialized, .. } | Self::Linear { initialized, .. } => *initialized,
-            Self::Ai { mask, .. } | Self::Object { mask, .. } => mask.is_some(),
+            Self::Ai { mask, .. } | Self::Landscape { mask, .. } | Self::Object { mask, .. } => {
+                mask.is_some()
+            }
             Self::LuminanceRange { source, .. } => source.is_some(),
             Self::ColorRange {
                 source, sampled, ..
@@ -914,6 +979,11 @@ impl MaskStack {
                         remap_point(end);
                     }
                     MaskGeometry::Ai { mask, .. } => {
+                        *mask = mask
+                            .as_ref()
+                            .map(|source| crop_mask_image(source, u0, v0, du, dv));
+                    }
+                    MaskGeometry::Landscape { mask, .. } => {
                         *mask = mask
                             .as_ref()
                             .map(|source| crop_mask_image(source, u0, v0, du, dv));
@@ -1362,6 +1432,16 @@ fn rasterize_component(
             coverage
         }
         MaskGeometry::Object {
+            mask: Some(mask),
+            grow,
+            feather,
+            ..
+        } => {
+            let mut coverage = rasterize_mask_image(width, height, mask);
+            shape_probability_mask(&mut coverage, width, height, *grow, *feather);
+            coverage
+        }
+        MaskGeometry::Landscape {
             mask: Some(mask),
             grow,
             feather,
@@ -2484,5 +2564,35 @@ mod tests {
         assert_eq!(stack.selected_mask, Some(1));
         assert_eq!(stack.selected_component, Some(1));
         assert_eq!(stack.move_submask_component(0, 0, 1, 0), None);
+    }
+
+    #[test]
+    fn landscape_masks_are_available_persisted_and_rasterized() {
+        let mut stack = MaskStack::default();
+        assert_eq!(stack.add_mask(MaskKind::Landscape), Some((0, 0)));
+        let geometry = &mut stack.masks[0].components[0].geometry;
+        let MaskGeometry::Landscape {
+            mask,
+            category,
+            feather,
+            ..
+        } = geometry
+        else {
+            panic!("landscape mask used unexpected geometry");
+        };
+        *category = LandscapeCategory::Water;
+        *mask = MaskImage::new(2, 1, vec![0, 255]);
+        *feather = 0.0;
+        assert_eq!(stack.rasterize_layer(0, 2, 1, 2, 1), [0, 255]);
+
+        let json = serde_json::to_string(&stack).unwrap();
+        let restored: MaskStack = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored.masks[0].components[0].geometry,
+            MaskGeometry::Landscape {
+                category: LandscapeCategory::Water,
+                ..
+            }
+        ));
     }
 }

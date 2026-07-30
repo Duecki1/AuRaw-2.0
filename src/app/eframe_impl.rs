@@ -83,6 +83,7 @@ impl eframe::App for AurawApp {
         self.resume_android_library_batch_export_if_possible();
         self.poll_subject_worker();
         self.poll_object_worker();
+        self.poll_landscape_worker();
         self.poll_library_ai_mask_refresh(frame);
         self.poll_inpaint_worker();
         self.poll_ai_denoise_worker();

@@ -154,10 +154,13 @@ impl AurawApp {
         self.ai_mask_update_active
             || self.subject_task_id.is_some()
             || self.object_task_id.is_some()
+            || self.landscape_task_id.is_some()
             || self.subject_receiver.is_some()
             || self.object_receiver.is_some()
+            || self.landscape_receiver.is_some()
             || self.subject_consent_open
             || self.object_consent_open
+            || self.landscape_consent_open
     }
 
     pub(crate) fn ai_masks_need_update(&self) -> bool {
@@ -190,16 +193,30 @@ impl AurawApp {
         let current_object = usize::from(
             self.object_receiver.is_some() || self.object_pending_target.is_some(),
         );
+        let current_landscape = usize::from(
+            self.landscape_receiver.is_some() || self.landscape_pending_target.is_some(),
+        );
         let subject_remaining = usize::from(self.ai_mask_update_subject_pending) * subject_targets;
-        subject_remaining + self.ai_mask_update_object_queue.len() + current_object
+        subject_remaining
+            + self.ai_mask_update_object_queue.len()
+            + current_object
+            + self.ai_mask_update_landscape_queue.len()
+            + current_landscape
     }
 
     /// Find masks that can be regenerated from their semantic component or
     /// saved prompt data. A pasted/stale mask may intentionally have no cached
     /// generated bitmap, so `mask: Some(_)` must not be required here.
-    fn generated_ai_mask_targets(&self) -> (bool, VecDeque<(usize, usize)>) {
+    fn generated_ai_mask_targets(
+        &self,
+    ) -> (
+        bool,
+        VecDeque<(usize, usize)>,
+        VecDeque<(usize, usize)>,
+    ) {
         let mut subject = false;
         let mut objects = VecDeque::new();
+        let mut landscapes = VecDeque::new();
         for (mask_index, local_mask) in self.masks.masks.iter().enumerate() {
             for (component_index, component) in local_mask.components.iter().enumerate() {
                 match (component.kind, &component.geometry) {
@@ -216,11 +233,14 @@ impl AurawApp {
                     {
                         objects.push_back((mask_index, component_index));
                     }
+                    (MaskKind::Landscape, MaskGeometry::Landscape { .. }) => {
+                        landscapes.push_back((mask_index, component_index));
+                    }
                     _ => {}
                 }
             }
         }
-        (subject, objects)
+        (subject, objects, landscapes)
     }
 
     fn has_range_mask_targets(&self) -> bool {
@@ -238,30 +258,39 @@ impl AurawApp {
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
         self.object_cache = None;
+        self.landscape_generation = self.landscape_generation.wrapping_add(1);
+        self.landscape_pending_target = None;
         self.subject_generation = self.subject_generation.wrapping_add(1);
         self.object_generation = self.object_generation.wrapping_add(1);
         self.object_pending_target = None;
         self.ai_mask_update_active = false;
         self.ai_mask_update_subject_pending = false;
         self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_landscape_queue.clear();
         self.ai_mask_update_failed = false;
     }
 
     pub(crate) fn note_inpainting_changed_for_ai_masks(&mut self) {
-        let (has_subject, object_targets) = self.generated_ai_mask_targets();
+        let (has_subject, object_targets, landscape_targets) = self.generated_ai_mask_targets();
         let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
-        self.ai_masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
+        self.ai_masks_need_update = has_subject
+            || !object_targets.is_empty()
+            || !landscape_targets.is_empty()
+            || has_ranges;
     }
 
     pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
-        let (has_subject, object_targets) = self.generated_ai_mask_targets();
+        let (has_subject, object_targets, landscape_targets) = self.generated_ai_mask_targets();
         let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
         // Manual/geometric masks remain intact and are immediately reused.
         // Only source-dependent masks need regeneration against the newly
         // corrected (or uncorrected) image geometry.
-        self.ai_masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
+        self.ai_masks_need_update = has_subject
+            || !object_targets.is_empty()
+            || !landscape_targets.is_empty()
+            || has_ranges;
     }
 
     #[cfg(not(target_os = "android"))]
@@ -292,18 +321,25 @@ impl AurawApp {
             self.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
         }
-        let (update_subject, object_targets) = self.generated_ai_mask_targets();
+        let (update_subject, object_targets, landscape_targets) =
+            self.generated_ai_mask_targets();
         let update_ranges = self.has_range_mask_targets();
         if self.masks.masks.is_empty() {
             self.ai_masks_need_update = false;
             return;
         }
         #[cfg(not(target_os = "android"))]
-        if (update_subject || !object_targets.is_empty()) && !self.validate_onnx_runtime_for_ai() {
+        if (update_subject || !object_targets.is_empty() || !landscape_targets.is_empty())
+            && !self.validate_onnx_runtime_for_ai()
+        {
             return;
         }
 
-        if update_subject || !object_targets.is_empty() || update_ranges {
+        if update_subject
+            || !object_targets.is_empty()
+            || !landscape_targets.is_empty()
+            || update_ranges
+        {
             // Force a new canonical source because lens correction or
             // inpainting changed the image under content-aware masks.
             self.mask_source_cache = None;
@@ -339,7 +375,7 @@ impl AurawApp {
             }
         }
 
-        if !update_subject && object_targets.is_empty() {
+        if !update_subject && object_targets.is_empty() && landscape_targets.is_empty() {
             self.ai_masks_need_update = false;
             self.notice = Some("Masks were refreshed for the current image geometry.".to_owned());
             self.egui_ctx.request_repaint();
@@ -349,6 +385,7 @@ impl AurawApp {
         self.ai_mask_update_active = true;
         self.ai_mask_update_subject_pending = update_subject;
         self.ai_mask_update_object_queue = object_targets;
+        self.ai_mask_update_landscape_queue = landscape_targets;
         self.ai_mask_update_failed = false;
 
         if update_subject {
@@ -369,8 +406,10 @@ impl AurawApp {
             || self.ai_mask_update_subject_pending
             || self.subject_receiver.is_some()
             || self.object_receiver.is_some()
+            || self.landscape_receiver.is_some()
             || self.subject_consent_open
             || self.object_consent_open
+            || self.landscape_consent_open
         {
             return;
         }
@@ -407,6 +446,34 @@ impl AurawApp {
             return;
         }
 
+        while let Some((mask_index, component_index)) =
+            self.ai_mask_update_landscape_queue.pop_front()
+        {
+            let valid = self
+                .masks
+                .masks
+                .get(mask_index)
+                .and_then(|mask| mask.components.get(component_index))
+                .is_some_and(|component| {
+                    matches!(
+                        (component.kind, &component.geometry),
+                        (MaskKind::Landscape, MaskGeometry::Landscape { .. })
+                    )
+                });
+            if !valid {
+                continue;
+            }
+            let path = self.landscape_model_path();
+            if crate::ai_masks::landscape_model_is_verified(&path) {
+                self.start_landscape_worker(mask_index, component_index, path, false);
+            } else {
+                self.landscape_pending_target = Some((mask_index, component_index));
+                self.landscape_consent_open = true;
+                self.egui_ctx.request_repaint();
+            }
+            return;
+        }
+
         self.finish_ai_mask_update();
     }
 
@@ -417,6 +484,7 @@ impl AurawApp {
         self.ai_mask_update_active = false;
         self.ai_mask_update_subject_pending = false;
         self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_landscape_queue.clear();
         if self.ai_mask_update_failed {
             self.ai_masks_need_update = true;
             self.notice = Some(
@@ -434,8 +502,10 @@ impl AurawApp {
         self.ai_mask_update_active = false;
         self.ai_mask_update_subject_pending = false;
         self.ai_mask_update_object_queue.clear();
+        self.ai_mask_update_landscape_queue.clear();
         self.ai_mask_update_failed = false;
         self.object_pending_target = None;
+        self.landscape_pending_target = None;
         self.ai_masks_need_update = true;
         self.notice = Some("AI-mask update canceled.".to_owned());
         self.egui_ctx.request_repaint();
@@ -752,6 +822,296 @@ impl AurawApp {
         } else {
             let message = error_message
                 .unwrap_or_else(|| "Subject selection did not produce a mask.".to_owned());
+            self.notice = Some(message.clone());
+            if failed_during_inference {
+                self.finish_background_task(task_id);
+            } else {
+                self.fail_background_task(task_id, message);
+            }
+        }
+        self.egui_ctx.request_repaint();
+    }
+
+    pub(crate) fn request_landscape_mask(
+        &mut self,
+        frame: &eframe::Frame,
+        mask_index: usize,
+        component_index: usize,
+    ) {
+        if self.landscape_task_id.is_some() || self.landscape_receiver.is_some() {
+            self.notice = Some("Wait for the current landscape mask to finish.".to_owned());
+            return;
+        }
+        let valid = self
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .is_some_and(|component| {
+                matches!(
+                    (component.kind, &component.geometry),
+                    (MaskKind::Landscape, MaskGeometry::Landscape { .. })
+                )
+            });
+        if !valid {
+            self.notice = Some("The selected landscape mask is no longer available.".to_owned());
+            return;
+        }
+        #[cfg(not(target_os = "android"))]
+        if !self.validate_onnx_runtime_for_ai() {
+            return;
+        }
+        if let Err(error) = self.capture_mask_source(frame) {
+            self.notice = Some(error);
+            return;
+        }
+        let path = self.landscape_model_path();
+        if crate::ai_masks::landscape_model_is_verified(&path) {
+            self.start_landscape_worker(mask_index, component_index, path, false);
+        } else {
+            self.landscape_pending_target = Some((mask_index, component_index));
+            self.landscape_consent_open = true;
+            self.egui_ctx.request_repaint();
+        }
+    }
+
+    fn start_landscape_worker(
+        &mut self,
+        mask_index: usize,
+        component_index: usize,
+        model_path: PathBuf,
+        allow_download: bool,
+    ) {
+        if self.landscape_task_id.is_some() || self.landscape_receiver.is_some() {
+            return;
+        }
+        let Some(source) = self.mask_source_cache.clone() else {
+            self.notice =
+                Some("The preview could not be prepared for landscape selection.".to_owned());
+            return;
+        };
+        let needs_download =
+            !crate::ai_masks::landscape_model_is_verified(&model_path);
+        if needs_download && !allow_download {
+            self.landscape_pending_target = Some((mask_index, component_index));
+            self.landscape_consent_open = true;
+            self.egui_ctx.request_repaint();
+            return;
+        }
+        let Some(category) = self
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .and_then(|component| match &component.geometry {
+                MaskGeometry::Landscape { category, .. } => Some(*category),
+                _ => None,
+            })
+        else {
+            self.notice = Some("The selected landscape mask is no longer available.".to_owned());
+            return;
+        };
+        #[cfg(not(target_os = "android"))]
+        let runtime_path = self.onnx_runtime_path.clone();
+        #[cfg(not(target_os = "android"))]
+        let runtime_sha256 = self.onnx_runtime_sha256.clone();
+        #[cfg(target_os = "android")]
+        let runtime_path = None;
+        #[cfg(target_os = "android")]
+        let runtime_sha256 = None;
+
+        self.landscape_generation = self.landscape_generation.wrapping_add(1);
+        let generation = self.landscape_generation;
+        let request = LandscapeMaskTaskRequest {
+            document_id: self.sidecar_generation,
+            generation,
+            target: (mask_index, component_index),
+            source,
+            model_path,
+            allow_download,
+            runtime_path,
+            runtime_sha256,
+            category,
+        };
+
+        if let Some(task_id) = self.library_ai_mask_refresh_task_id.filter(|task_id| {
+            self.background_tasks.current_id() == Some(*task_id) && self.ai_mask_update_active
+        }) {
+            self.start_landscape_mask_task(task_id, request);
+        } else if needs_download {
+            let task_id = self.enqueue_background_action(
+                TaskKind::LandscapeMask {
+                    document_id: request.document_id,
+                    generation,
+                },
+                "Downloading landscape-mask model",
+                TaskProgress::indeterminate("Waiting for earlier background work…"),
+                true,
+                BackgroundAction::LandscapeMask(request),
+            );
+            self.landscape_task_id = Some(task_id);
+        } else {
+            let task_id = self.background_tasks.start_nonblocking(
+                TaskKind::LandscapeMask {
+                    document_id: request.document_id,
+                    generation,
+                },
+                "Generating landscape mask",
+                TaskProgress::indeterminate("Running local landscape-mask inference…"),
+                true,
+            );
+            self.start_landscape_mask_task(task_id, request);
+        }
+        self.egui_ctx.request_repaint();
+    }
+
+    fn poll_landscape_worker(&mut self) {
+        let Some(task_id) = self.landscape_task_id else {
+            return;
+        };
+        let mut events = Vec::new();
+        let mut disconnected = false;
+        if let Some(receiver) = &self.landscape_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let finished = matches!(event, LandscapeMaskEvent::Finished(_));
+                        events.push(event);
+                        if finished {
+                            break;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let mut finished = None;
+        for event in events {
+            match event {
+                LandscapeMaskEvent::DownloadProgress { downloaded, total } => {
+                    self.landscape_download_progress = Some((downloaded, total));
+                    self.landscape_inferencing = false;
+                    self.background_tasks.set_global_visible(task_id, true);
+                    self.background_tasks
+                        .rename(task_id, "Downloading landscape-mask model");
+                    self.update_background_progress(
+                        Some(task_id),
+                        TaskProgress::units(
+                            downloaded,
+                            total,
+                            Some("bytes".to_owned()),
+                            "Downloading SegFormer landscape model",
+                        )
+                        .with_detail(format!(
+                            "{:.1} / {:.1} MB",
+                            downloaded as f64 / 1_000_000.0,
+                            total as f64 / 1_000_000.0
+                        )),
+                    );
+                }
+                LandscapeMaskEvent::Inferencing => {
+                    self.landscape_download_progress = None;
+                    self.landscape_inferencing = true;
+                    self.background_tasks.set_global_visible(task_id, false);
+                    if matches!(
+                        self.background_tasks.snapshot(task_id).map(|task| task.kind),
+                        Some(TaskKind::LandscapeMask { .. })
+                    ) {
+                        self.background_tasks.release_current(task_id);
+                    }
+                    self.update_background_progress(
+                        Some(task_id),
+                        TaskProgress::indeterminate("Running local landscape-mask inference…"),
+                    );
+                }
+                LandscapeMaskEvent::Finished(result) => finished = Some(result),
+            }
+        }
+        if finished.is_none() && disconnected {
+            finished = Some(Err(
+                "The landscape-mask worker stopped unexpectedly.".to_owned(),
+            ));
+        }
+        let Some(result) = finished else {
+            return;
+        };
+
+        let target = self.landscape_job_target;
+        let job_category = self.landscape_job_category;
+        let updating_all = self.ai_mask_update_active && target.is_some();
+        let library_task = self.library_ai_mask_refresh_task_id == Some(task_id);
+        let cancelled = self.background_task_cancelled(task_id);
+        let stale = self.landscape_job_document_id != self.sidecar_generation
+            || self.landscape_job_generation != self.landscape_generation;
+        let failed_during_inference = self.landscape_inferencing;
+        self.landscape_receiver = None;
+        self.landscape_task_id = None;
+        self.landscape_download_progress = None;
+        self.landscape_inferencing = false;
+        self.landscape_job_target = None;
+        self.landscape_job_category = None;
+
+        let mut succeeded = false;
+        let mut error_message = None;
+        if !cancelled && !stale {
+            match (target, job_category, result) {
+                (Some((mask_index, component_index)), Some(expected_category), Ok(result)) => {
+                    let mask_image =
+                        MaskImage::new(result.width, result.height, result.mask);
+                    let applied = self
+                        .masks
+                        .masks
+                        .get_mut(mask_index)
+                        .and_then(|mask| mask.components.get_mut(component_index))
+                        .is_some_and(|component| {
+                            if let MaskGeometry::Landscape { mask, category, .. } =
+                                &mut component.geometry
+                            {
+                                if *category == expected_category {
+                                    *mask = mask_image;
+                                    return mask.is_some();
+                                }
+                            }
+                            false
+                        });
+                    if applied {
+                        self.mark_mask_geometry_dirty(mask_index);
+                        self.blink_selected_component();
+                        succeeded = true;
+                    } else {
+                        error_message = Some(
+                            "Landscape selection changed before inference completed.".to_owned(),
+                        );
+                    }
+                }
+                (_, _, Ok(_)) => {}
+                (_, _, Err(error)) => {
+                    error_message = Some(format!("Landscape selection failed: {error}"));
+                }
+            }
+        }
+
+        if library_task {
+            if cancelled {
+                self.cancel_ai_mask_update();
+            } else if updating_all {
+                self.ai_mask_update_failed |= !succeeded;
+                if let Some(message) = error_message.clone() {
+                    self.notice = Some(message);
+                }
+                self.continue_ai_mask_update();
+            }
+        } else if cancelled || stale {
+            self.finish_background_task(task_id);
+        } else if succeeded {
+            self.finish_background_task(task_id);
+        } else {
+            let message = error_message
+                .unwrap_or_else(|| "Landscape selection did not produce a mask.".to_owned());
             self.notice = Some(message.clone());
             if failed_during_inference {
                 self.finish_background_task(task_id);
@@ -1220,6 +1580,15 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
+    fn landscape_model_path(&self) -> PathBuf {
+        let root = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(std::env::temp_dir);
+        root.join("auraw/models/segformer-b0-ade20k.onnx")
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn onnx_runtime_config_path() -> PathBuf {
         let root = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -1375,6 +1744,14 @@ impl AurawApp {
             .join("models/vitmatte-small-composition-1k.onnx")
     }
 
+    #[cfg(target_os = "android")]
+    fn landscape_model_path(&self) -> PathBuf {
+        self.android_app
+            .internal_data_path()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("models/segformer-b0-ade20k.onnx")
+    }
+
     fn show_subject_dialogs(&mut self, ctx: &egui::Context) {
         let library_batch_refreshing = self.library_ai_mask_refresh.is_some();
         if self.subject_consent_open {
@@ -1481,6 +1858,135 @@ impl AurawApp {
                     });
                 });
             if let Some(task_id) = self.subject_task_id {
+                #[cfg(not(target_os = "android"))]
+                if minimize {
+                    self.set_background_task_details_open(task_id, false);
+                }
+                if cancel {
+                    self.cancel_background_task(task_id);
+                }
+            }
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+
+        if self.landscape_consent_open {
+            crate::ui::responsive_popup(
+                egui::Window::new("Download landscape-selection model?"),
+                ctx,
+                540.0,
+            )
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Landscape masks use NVIDIA SegFormer-B0 trained on ADE20K to identify sky, vegetation, architecture, ground, water, and mountains.");
+                ui.label(format!(
+                    "The first use downloads {:.1} MB and stores the ONNX model in AuRaw's cache.",
+                    LANDSCAPE_MODEL_BYTES as f64 / 1_000_000.0
+                ));
+                ui.label("The upstream SegFormer weights are licensed for noncommercial research and evaluation. Continue only if that restriction fits your use.");
+                ui.label("Inference is local. No photograph or selected category is uploaded.");
+                ui.label("When you continue, your device connects directly to Hugging Face. It receives connection data such as your IP address and request time under its privacy policy. AuRaw sends no account identifier or telemetry.");
+                ui.label(format!(
+                    "AuRaw accepts only the pinned file after its exact size and SHA-256 ({}) are verified.",
+                    &crate::ai_masks::LANDSCAPE_MODEL_SHA256_HEX[..12]
+                ));
+                ui.horizontal_wrapped(|ui| {
+                    ui.hyperlink_to(
+                        "Hugging Face privacy policy",
+                        "https://huggingface.co/privacy",
+                    );
+                    ui.separator();
+                    ui.hyperlink_to(
+                        "SegFormer license",
+                        "https://github.com/NVlabs/SegFormer",
+                    );
+                    ui.separator();
+                    ui.hyperlink_to(
+                        "Model card",
+                        "https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512",
+                    );
+                });
+                #[cfg(not(target_os = "android"))]
+                if self.onnx_runtime_path.is_none() {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Select a trusted local ONNX Runtime library in Settings before continuing.",
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Consent, download and continue").clicked() {
+                        self.landscape_consent_open = false;
+                        if let Some((mask_index, component_index)) =
+                            self.landscape_pending_target.take()
+                        {
+                            self.start_landscape_worker(
+                                mask_index,
+                                component_index,
+                                self.landscape_model_path(),
+                                true,
+                            );
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.landscape_consent_open = false;
+                        self.landscape_pending_target = None;
+                        if self.ai_mask_update_active {
+                            self.cancel_ai_mask_update();
+                        }
+                    }
+                });
+            });
+        }
+        if self.landscape_receiver.is_some()
+            && !library_batch_refreshing
+            && self
+                .landscape_task_id
+                .is_some_and(|id| self.background_task_details_open(id))
+        {
+            #[cfg(not(target_os = "android"))]
+            let mut minimize = false;
+            let mut cancel = false;
+            crate::ui::responsive_popup(
+                egui::Window::new("Preparing landscape mask"),
+                ctx,
+                420.0,
+            )
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                if let Some((downloaded, total)) = self.landscape_download_progress {
+                    let fraction = downloaded as f32 / total.max(1) as f32;
+                    ui.label("Downloading SegFormer landscape model…");
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .show_percentage()
+                            .text(format!(
+                                "{:.1} / {:.1} MB",
+                                downloaded as f64 / 1_000_000.0,
+                                total as f64 / 1_000_000.0
+                            )),
+                    );
+                } else if self.landscape_inferencing {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Running local semantic landscape selection…");
+                    });
+                } else {
+                    ui.spinner();
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        minimize = ui.button("Minimize").clicked();
+                    }
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+            if let Some(task_id) = self.landscape_task_id {
                 #[cfg(not(target_os = "android"))]
                 if minimize {
                     self.set_background_task_details_open(task_id, false);

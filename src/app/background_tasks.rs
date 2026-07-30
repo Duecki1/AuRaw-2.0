@@ -29,6 +29,10 @@ pub(crate) enum TaskKind {
         document_id: u64,
         generation: u64,
     },
+    LandscapeMask {
+        document_id: u64,
+        generation: u64,
+    },
     Inpainting {
         document_id: u64,
         generation: u64,

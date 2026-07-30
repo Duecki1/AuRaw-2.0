@@ -68,6 +68,12 @@ Promptable Object selection uses the SAM 2.1 Hiera Tiny image encoder and mask d
 
 The object-mask implementation follows the public SAM 2.1 point-prompt interface used by AnyLabeling: normalized RGB encoder input, cached high-resolution/image embedding outputs, foreground/background point prompts, previous-mask logits, and candidate mask scores.
 
+## SegFormer
+
+Landscape selection uses NVIDIA's SegFormer-B0 model fine-tuned on ADE20K. AuRaw downloads the ONNX export from the immutable `6700676d80f989a1e7096fd6d89e88e9b9ca61ce` revision of the `nvidia/segformer-b0-finetuned-ade-512-512` Hugging Face repository only after explicit user consent. The file is pinned by its exact byte count and SHA-256 before publication to the local cache and on every cache hit.
+
+The upstream NVlabs SegFormer repository and pretrained weights state that they are available for noncommercial research and evaluation use. AuRaw displays that restriction in the consent dialog; the optional model is not distributed with AuRaw. ADE20K category names and class grouping are used to construct the Sky, Vegetation, Architecture, Ground, Water, and Mountains masks.
+
 ## LaMa ONNX
 
 Local inpainting uses the `lama_fp32.onnx` model distributed by

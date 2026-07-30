@@ -501,6 +501,10 @@ fn ai_mask_refresh_target_count(masks: &crate::pipeline::MaskStack) -> usize {
                 .iter()
                 .any(|stroke| stroke.positive && !stroke.points.is_empty()),
             (
+                crate::pipeline::MaskKind::Landscape,
+                crate::pipeline::MaskGeometry::Landscape { .. },
+            ) => true,
+            (
                 crate::pipeline::MaskKind::LuminanceRange,
                 crate::pipeline::MaskGeometry::LuminanceRange { .. },
             )

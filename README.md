@@ -221,7 +221,7 @@ aspect ratios, previews, crops, and tiled exports.
 The Develop sidebar is divided into four tabs:
 
 - **Adjustments** contains the complete photographic processing stack.
-- **Masks** provides Lightroom-style Brush, Radial Gradient, Linear Gradient, Subject, Background, Object, Luminance Range, and Color Range masks with add, subtract, and intersect submasks. Object selection uses a hard-edged Size brush, a brush-footprint focus box with automatic background guards, adaptive crop expansion, cached SAM 2.1 image embeddings, clean replacement strokes after refinement, connected-component cleanup, touch-safe pinch cancellation, and automatic ViTMatte alpha-matting refinement for hair/fur/semi-transparent boundaries. Subject and Not Subject masks use the same ViTMatte boundary refiner automatically after BiRefNet. Landscape and Depth Range remain future tools. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
+- **Masks** provides Lightroom-style Brush, Radial Gradient, Linear Gradient, Subject, Background, Object, Landscape, Luminance Range, and Color Range masks with add, subtract, and intersect submasks. Object selection uses a hard-edged Size brush, a brush-footprint focus box with automatic background guards, adaptive crop expansion, cached SAM 2.1 image embeddings, clean replacement strokes after refinement, connected-component cleanup, touch-safe pinch cancellation, and automatic ViTMatte alpha-matting refinement for hair/fur/semi-transparent boundaries. Subject and Not Subject masks use the same ViTMatte boundary refiner automatically after BiRefNet. Landscape selection uses SegFormer-B0/ADE20K and an explicit category dropdown for sky, vegetation, architecture, ground, water, or mountains. Depth Range remains a future tool. Background currently means the inverse of the subject probability and is labeled accordingly in the mask UI.
 - **Inpainting** provides local LaMa-based object removal. It processes a bounded context crop locally, then stores only the affected full-resolution scene-linear patch in the edit sidecar.
 - **Export** contains the PNG export action and all output options.
 
@@ -238,12 +238,12 @@ and eXIf metadata.
 
 ## Local AI runtime trust
 
-Desktop Subject and Object selection never download or extract native runtime code.
+Desktop Subject, Object, and Landscape selection never download or extract native runtime code.
 Choose a local ONNX Runtime library in Settings; AuRaw records its SHA-256 and
 revalidates that exact file before every dynamic load. Each segmentation model is separately pinned by SHA-256, downloaded through a
 temporary file, revalidated on cache hits, and atomically moved into the cache
 only after verification. Subject selection uses BiRefNet followed by a pinned ViTMatte ONNX edge refiner; Object selection uses
-the separate SAM 2.1 Hiera Tiny encoder and prompt decoder ONNX files, followed automatically by the same ViTMatte refiner. On Linux,
+the separate SAM 2.1 Hiera Tiny encoder and prompt decoder ONNX files, followed automatically by the same ViTMatte refiner. Landscape selection uses a pinned SegFormer-B0 ADE20K ONNX file. On Linux,
 AI selection stays disabled
 until a local runtime has been selected and pinned.
 

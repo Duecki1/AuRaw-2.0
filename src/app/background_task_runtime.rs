@@ -69,6 +69,9 @@ impl AurawApp {
             }
             BackgroundAction::SubjectMask(request) => self.start_subject_mask_task(id, request),
             BackgroundAction::ObjectMask(request) => self.start_object_mask_task(id, request),
+            BackgroundAction::LandscapeMask(request) => {
+                self.start_landscape_mask_task(id, request)
+            }
             BackgroundAction::Inpainting(request) => self.start_inpaint_task(id, request),
             BackgroundAction::LibraryAiMaskRefresh { jobs } => {
                 self.start_library_ai_mask_refresh_task(id, jobs, frame)
@@ -262,6 +265,44 @@ impl AurawApp {
             id,
             TaskProgress::indeterminate(if self.object_inferencing {
                 "Running local object-mask inference…"
+            } else {
+                "Preparing model download…"
+            }),
+        );
+        self.egui_ctx.request_repaint();
+    }
+
+    fn start_landscape_mask_task(&mut self, id: TaskId, request: LandscapeMaskTaskRequest) {
+        let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
+            self.fail_background_task(id, "Landscape-mask task lost its cancellation state.");
+            return;
+        };
+        self.landscape_task_id = Some(id);
+        self.landscape_job_document_id = request.document_id;
+        self.landscape_job_generation = request.generation;
+        self.landscape_job_target = Some(request.target);
+        self.landscape_job_category = Some(request.category);
+        self.landscape_pending_target = None;
+        self.landscape_download_progress = None;
+        self.landscape_inferencing =
+            crate::ai_masks::landscape_model_is_verified(&request.model_path);
+        self.background_tasks
+            .set_global_visible(id, !self.landscape_inferencing);
+        self.landscape_receiver = Some(spawn_landscape_mask(
+            request.model_path,
+            request.allow_download,
+            request.runtime_path,
+            request.runtime_sha256,
+            request.source.width,
+            request.source.height,
+            request.source.rgba.to_vec(),
+            request.category,
+            cancellation,
+        ));
+        self.background_tasks.update_progress(
+            id,
+            TaskProgress::indeterminate(if self.landscape_inferencing {
+                "Running local landscape-mask inference…"
             } else {
                 "Preparing model download…"
             }),
@@ -479,6 +520,10 @@ impl AurawApp {
                 TaskKind::ObjectMask { .. } => {
                     self.object_task_id == Some(task.id) && self.object_receiver.is_some()
                 }
+                TaskKind::LandscapeMask { .. } => {
+                    self.landscape_task_id == Some(task.id)
+                        && self.landscape_receiver.is_some()
+                }
                 TaskKind::Inpainting { .. } => {
                     self.inpaint_task_id == Some(task.id) && self.inpaint_receiver.is_some()
                 }
@@ -502,6 +547,7 @@ impl AurawApp {
                 TaskKind::LensCorrection { .. } => "Applying lens correction",
                 TaskKind::SubjectMask { .. } => "Preparing subject mask",
                 TaskKind::ObjectMask { .. } => "Preparing object mask",
+                TaskKind::LandscapeMask { .. } => "Preparing landscape mask",
                 TaskKind::Inpainting { .. } => "Erasing selection",
                 TaskKind::LibraryAiMaskRefresh => "Regenerating AI masks",
             };
@@ -715,6 +761,11 @@ impl AurawApp {
                                 self.object_task_id = None;
                             }
                         }
+                        BackgroundAction::LandscapeMask(_) => {
+                            if self.landscape_task_id == Some(id) {
+                                self.landscape_task_id = None;
+                            }
+                        }
                         BackgroundAction::Inpainting(_) => {
                             if self.inpaint_task_id == Some(id) {
                                 self.inpaint_task_id = None;
@@ -847,7 +898,9 @@ impl AurawApp {
         };
         let worker_is_reporting_progress = state.phase == LibraryAiMaskRefreshPhase::Updating
             && ((self.subject_task_id == Some(id) && self.subject_receiver.is_some())
-                || (self.object_task_id == Some(id) && self.object_receiver.is_some()));
+                || (self.object_task_id == Some(id) && self.object_receiver.is_some())
+                || (self.landscape_task_id == Some(id)
+                    && self.landscape_receiver.is_some()));
         if worker_is_reporting_progress {
             return;
         }
@@ -908,6 +961,7 @@ impl AurawApp {
                         TaskKind::LensCorrection { .. }
                             | TaskKind::SubjectMask { .. }
                             | TaskKind::ObjectMask { .. }
+                            | TaskKind::LandscapeMask { .. }
                             | TaskKind::Inpainting { .. }
                     )
             })
@@ -929,6 +983,7 @@ impl AurawApp {
                         TaskKind::LensCorrection { document_id, .. }
                         | TaskKind::SubjectMask { document_id, .. }
                         | TaskKind::ObjectMask { document_id, .. }
+                        | TaskKind::LandscapeMask { document_id, .. }
                         | TaskKind::Inpainting { document_id, .. } => {
                             document_id != current_document
                         }
