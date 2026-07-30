@@ -222,8 +222,7 @@ impl Preview {
                 .round()
                 .max(1.0) as u32,
         ];
-        if app.preview_viewport_pixels != viewport_pixels {
-            app.preview_viewport_pixels = viewport_pixels;
+        if app.set_preview_viewport_pixels(viewport_pixels) {
             moved = true;
         }
         let visible_uv = if crop_preview {

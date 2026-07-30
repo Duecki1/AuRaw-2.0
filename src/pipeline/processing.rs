@@ -155,30 +155,55 @@ pub fn build_region_proxy(
     let region_height = height.max(1).min(raw.height - y);
     let max_edge = spec.max_edge.max(1);
     let longest = region_width.max(region_height);
-    let scale = longest.div_ceil(max_edge).max(1);
-    if scale == 1 {
+    if longest <= max_edge {
         if x == 0 && y == 0 && region_width == raw.width && region_height == raw.height {
             return raw.clone();
         }
         return crop_raw(raw, x, y, region_width, region_height);
     }
 
-    let width = region_width.div_ceil(scale);
-    let height = region_height.div_ceil(scale);
+    let cfa_period = match raw.cfa_kind {
+        super::CfaKind::Bayer => 2,
+        super::CfaKind::XTrans => 6,
+    };
+    let target_scale = max_edge as f64 / longest as f64;
+    let target_width = (region_width as f64 * target_scale).floor().max(1.0) as u32;
+    let target_height = (region_height as f64 * target_scale).floor().max(1.0) as u32;
+    let phase_aligned_dimension = |source: u32, target: u32| {
+        if target >= source {
+            source
+        } else {
+            target
+                .div_euclid(cfa_period)
+                .max(1)
+                .saturating_mul(cfa_period)
+                .min(source)
+        }
+    };
+    let width = phase_aligned_dimension(region_width, target_width);
+    let height = phase_aligned_dimension(region_height, target_height);
     let len = (width * height) as usize;
     let row_stride = width as usize;
     let mut raw_pixels = vec![0u16; len];
     let mut color_indices = vec![0u8; len];
     let mut black_levels_per_pixel = vec![0.0f32; len];
-
-    let cfa_period = match raw.cfa_kind {
-        super::CfaKind::Bayer => 2,
-        super::CfaKind::XTrans => 6,
+    let source_macro_width = region_width.div_ceil(cfa_period);
+    let source_macro_height = region_height.div_ceil(cfa_period);
+    let output_macro_width = width.div_ceil(cfa_period);
+    let output_macro_height = height.div_ceil(cfa_period);
+    let proportional_partition = |output_index: u32, source_count: u32, output_count: u32| {
+        let start =
+            (u64::from(output_index) * u64::from(source_count) / u64::from(output_count)) as u32;
+        let end = (u64::from(output_index + 1) * u64::from(source_count)
+            / u64::from(output_count)) as u32;
+        (start, end.max(start + 1).min(source_count))
     };
 
     // One complete output CFA cell summarizes one shared source macrocell.
     // Each output phase averages only matching source photosites in that macrocell,
-    // keeping R/G/B measurements co-sited before demosaic.
+    // keeping R/G/B measurements co-sited before demosaic. Proportional macrocell
+    // boundaries permit arbitrary output dimensions instead of quantizing every
+    // preview to a coarse integer sensor-decimation factor.
     raw_pixels
         .par_chunks_mut(row_stride)
         .zip(color_indices.par_chunks_mut(row_stride))
@@ -187,13 +212,19 @@ pub fn build_region_proxy(
         .for_each(|(py, ((raw_row, cfa_row), black_row))| {
             let py = py as u32;
             let output_phase_y = py % cfa_period;
-            let macro_y0 = y + (py / cfa_period) * scale * cfa_period;
-            let macro_y1 = (macro_y0 + scale * cfa_period).min(y + region_height);
+            let output_macro_y = py / cfa_period;
+            let (source_macro_y0, source_macro_y1) =
+                proportional_partition(output_macro_y, source_macro_height, output_macro_height);
+            let macro_y0 = y + source_macro_y0 * cfa_period;
+            let macro_y1 = (y + source_macro_y1 * cfa_period).min(y + region_height);
 
             for px in 0..width {
                 let output_phase_x = px % cfa_period;
-                let macro_x0 = x + (px / cfa_period) * scale * cfa_period;
-                let macro_x1 = (macro_x0 + scale * cfa_period).min(x + region_width);
+                let output_macro_x = px / cfa_period;
+                let (source_macro_x0, source_macro_x1) =
+                    proportional_partition(output_macro_x, source_macro_width, output_macro_width);
+                let macro_x0 = x + source_macro_x0 * cfa_period;
+                let macro_x1 = (x + source_macro_x1 * cfa_period).min(x + region_width);
                 let center_x =
                     (macro_x0 + (macro_x1.saturating_sub(macro_x0)) / 2).min(raw.width - 1);
                 let center_y =
@@ -261,9 +292,11 @@ pub fn build_region_proxy(
             64,
         ),
         white_levels: raw.white_levels,
-        noise_profile: raw
-            .noise_profile
-            .scaled_variance(1.0 / (scale * scale) as f32),
+        noise_profile: raw.noise_profile.scaled_variance(
+            ((u64::from(width) * u64::from(height)) as f64
+                / (u64::from(region_width) * u64::from(region_height)) as f64)
+                .clamp(0.0, 1.0) as f32,
+        ),
         camera_profile: raw.camera_profile.clone(),
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
@@ -852,7 +885,7 @@ mod tests {
             .chunks_exact(3)
             .map(|pixel| f16::from_bits(pixel[0]).to_f32())
             .collect::<Vec<_>>();
-        assert_eq!(proxy_values, vec![2.5, 4.5]);
+        assert_eq!(proxy_values, vec![0.5, 2.5, 4.5, 6.5]);
 
         let tile = extract_padded_tile(
             &raw,
@@ -1081,5 +1114,45 @@ mod tests {
         let proxy_cfa = proxy.color_indices.iter().copied().collect::<Vec<_>>();
         assert_eq!(&proxy_cfa[..4], &[0, 1, 0, 1]);
         assert_eq!(&proxy_cfa[4..8], &[3, 2, 3, 2]);
+    }
+
+    #[test]
+    fn proxy_long_edge_does_not_drop_at_integer_scale_thresholds() {
+        // These small rasters mirror the aspect ratios and scale thresholds
+        // that previously made a 45 MP RAW produce a lower-resolution preview
+        // than a 33 MP RAW for the same max_edge request.
+        let larger = build_proxy(&test_raw(82, 54), ProxySpec { max_edge: 26 });
+        let smaller = build_proxy(&test_raw(70, 46), ProxySpec { max_edge: 26 });
+        let portrait = build_proxy(&test_raw(54, 82), ProxySpec { max_edge: 26 });
+
+        assert_eq!(larger.width.max(larger.height), 26);
+        assert_eq!(smaller.width.max(smaller.height), 26);
+        assert_eq!(portrait.width.max(portrait.height), 26);
+        assert_eq!(larger.width % 2, 0);
+        assert_eq!(larger.height % 2, 0);
+    }
+
+    #[test]
+    fn fractional_xtrans_proxy_keeps_complete_six_by_six_phases() {
+        let pattern = vec![
+            0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1,
+            2, 1, 2, 0, 1, 0, 0, 1, 0,
+        ];
+        let mut raw = test_raw(98, 66);
+        raw.cfa_kind = CfaKind::XTrans;
+        raw.color_indices = CompactPixelMap::repeating(98, 66, 6, 6, pattern.clone());
+
+        // Six guard pixels are sufficient for a 32 px physical viewport even
+        // after the output is aligned down to a complete X-Trans period.
+        let proxy = build_proxy(&raw, ProxySpec { max_edge: 38 });
+        assert!(proxy.width.max(proxy.height) >= 32);
+        assert_eq!(proxy.width % 6, 0);
+        assert_eq!(proxy.height % 6, 0);
+        let proxy_cfa = &proxy.color_indices;
+        let proxy_width = proxy.width;
+        let first_period = (0..6)
+            .flat_map(|y| (0..6).map(move |x| proxy_cfa[(y * proxy_width + x) as usize]))
+            .collect::<Vec<_>>();
+        assert_eq!(first_period, pattern);
     }
 }

@@ -93,6 +93,18 @@ impl PreviewQuality {
         }
     }
 
+    /// Full-frame High previews track the physical pixel length of the visible
+    /// image, so moving the window between monitors cannot leave a 1x fit view
+    /// backed by an undersized texture. The small guard band absorbs Bayer and
+    /// X-Trans phase alignment in the RAW proxy reducer.
+    pub fn proxy_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
+        let base = self.proxy_edge();
+        if self != Self::High || cfg!(target_os = "android") {
+            return base;
+        }
+        base.max(viewport_pixels[0].max(viewport_pixels[1]).saturating_add(6))
+    }
+
     pub const fn detail_edge(self) -> u32 {
         match (self, cfg!(target_os = "android")) {
             // Zoom detail coexists with the full preview and navigation proxy.
@@ -107,6 +119,23 @@ impl PreviewQuality {
             (Self::Balanced, false) => 2560,
             (Self::High, false) => 3072,
         }
+    }
+
+    /// A zoom crop contains processing support outside the visible rectangle.
+    /// Allow enough additional texture resolution for that padding while
+    /// retaining the established minimum for High-quality detail previews.
+    pub fn detail_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
+        let base = self.detail_edge();
+        if self != Self::High || cfg!(target_os = "android") {
+            return base;
+        }
+        let viewport_edge = u64::from(viewport_pixels[0].max(viewport_pixels[1]));
+        let dpi_edge = viewport_edge
+            .saturating_mul(5)
+            .div_ceil(4)
+            .saturating_add(6)
+            .min(u64::from(u32::MAX)) as u32;
+        base.max(dpi_edge)
     }
 
     pub const fn detail_pixel_scale(self) -> f32 {
@@ -570,6 +599,7 @@ struct LensCorrectionTaskRequest {
     original_raw: Arc<LoadedRaw>,
     selection: Option<LensfunLens>,
     preview_quality: PreviewQuality,
+    preview_proxy_edge: u32,
     cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
 }
 
@@ -969,7 +999,36 @@ include!("app/eframe_impl.rs");
 
 #[cfg(test)]
 mod transactional_pipeline_tests {
-    use super::collect_pipeline_update_results;
+    use super::{collect_pipeline_update_results, PreviewQuality};
+
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn high_preview_quality_tracks_physical_viewport_density() {
+        assert_eq!(
+            PreviewQuality::High.proxy_edge_for_viewport([3_000, 2_000]),
+            3_006
+        );
+        assert_eq!(
+            PreviewQuality::High.proxy_edge_for_viewport([1_920, 1_080]),
+            PreviewQuality::High.proxy_edge()
+        );
+        assert!(
+            PreviewQuality::High.detail_edge_for_viewport([3_200, 1_800])
+                >= 3_200 * 5 / 4
+        );
+    }
+
+    #[test]
+    fn balanced_preview_quality_keeps_its_performance_bound() {
+        assert_eq!(
+            PreviewQuality::Balanced.proxy_edge_for_viewport([7_680, 4_320]),
+            PreviewQuality::Balanced.proxy_edge()
+        );
+        assert_eq!(
+            PreviewQuality::Balanced.detail_edge_for_viewport([7_680, 4_320]),
+            PreviewQuality::Balanced.detail_edge()
+        );
+    }
 
     #[test]
     fn each_present_pipeline_failure_has_operation_context() {
