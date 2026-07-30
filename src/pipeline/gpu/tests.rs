@@ -1831,6 +1831,48 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
         "Color 100 bled patch chroma into a neutral equal-signal neighbor: {neutral_chroma_shift}"
     );
 
+    // Dark coherent colors need the same protection even when they are not
+    // saturated or bright enough for the highlight-oriented feature guard.
+    // A five-sigma opponent boundary is still real image structure; broad
+    // denoise scales must neither desaturate it nor tint its neutral neighbor.
+    let mut subtle_feature = fixture(WIDTH, HEIGHT, |_, _| 0.06);
+    subtle_feature.noise_profile = crate::pipeline::NoiseProfile {
+        shot: [0.0; 4],
+        read: [0.000025; 4],
+        confidence: 1.0,
+        green2_present: true,
+    };
+    for y in 48..80 {
+        for x in 48..80 {
+            let index = (y * WIDTH + x) as usize;
+            let channel = match (x % 2, y % 2) {
+                (0, 0) => 0,
+                (1, 1) => 2,
+                _ => 1,
+            };
+            let signal = [0.085f32, 0.06, 0.035][channel];
+            subtle_feature.raw_pixels[index] = (signal * 4095.0).round() as u16;
+        }
+    }
+    let subtle_off = render_camera(&subtle_feature, &color_exposure(0.0));
+    let subtle_100 = render_camera(&subtle_feature, &color_exposure(1.0));
+    let subtle_inside_off = mean_opponents_in(&subtle_off, 56..72);
+    let subtle_inside_100 = mean_opponents_in(&subtle_100, 56..72);
+    let subtle_chroma_off = subtle_inside_off[0].hypot(subtle_inside_off[1]);
+    let subtle_chroma_100 = subtle_inside_100[0].hypot(subtle_inside_100[1]);
+    assert!(
+        subtle_chroma_100 >= 0.95 * subtle_chroma_off,
+        "Color 100 desaturated a coherent dark color: {subtle_chroma_off} -> {subtle_chroma_100}"
+    );
+    let subtle_neutral_off = mean_opponents_in(&subtle_off, 36..48);
+    let subtle_neutral_100 = mean_opponents_in(&subtle_100, 36..48);
+    let subtle_neutral_shift = (subtle_neutral_100[0] - subtle_neutral_off[0])
+        .hypot(subtle_neutral_100[1] - subtle_neutral_off[1]);
+    assert!(
+        subtle_neutral_shift <= 0.002,
+        "Color 100 bled dark coherent chroma into a neutral neighbor: {subtle_neutral_shift}"
+    );
+
     // Real fine and medium detail must move visibly; source-string wiring
     // checks cannot detect a skipped intermediate effects pass.
     let detailed = fixture(WIDTH, HEIGHT, |x, y| {

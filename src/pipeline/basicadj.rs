@@ -224,7 +224,12 @@ pub const MULTISCALE_COLOR_DENOISE_PROCESS_VERSION: u32 = 20;
 /// the denoiser, preventing broad-scale chroma from bleeding into adjacent
 /// neutral or differently colored regions.
 pub const EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 21;
-pub const CURRENT_PROCESS_VERSION: u32 = EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION;
+/// Process 22 tracks the falling residual noise variance across the staged
+/// chroma wavelet passes and uses a profiled-noise dead zone in the color
+/// guide. High Color values can therefore reject subtle dark color boundaries
+/// without blocking the smoothing of stochastic chroma noise.
+pub const SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 22;
+pub const CURRENT_PROCESS_VERSION: u32 = SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.

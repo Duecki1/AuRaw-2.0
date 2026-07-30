@@ -50,14 +50,26 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let center_signal = nr_signal(center);
     let center_variance = nr_component_variance(center);
     let detail = clamp(params.noise_options.y, 0.0, 1.0);
+    let requested = clamp(params.chroma_denoise, 0.0, 1.0);
+    // Each accepted low pass reduces the noise presented to the next scale.
+    // Using the original sensor variance forever makes a real boundary look
+    // progressively less significant after the first shrinkage pass, which is
+    // why high Color values used to diffuse dark chroma at radii 8/16/32.
+    // Track the approximate residual guide variance so later scales compare
+    // against their much cleaner input rather than the original RAW noise.
+    let guide_variance_scale = exp2(-f32(scale));
     // Keep both brightness and genuine color boundaries out of the low pass.
     // A signal-only guide mistakes isoluminant boundaries for flat areas, so
     // the wide scales can otherwise carry saturated chroma many pixels into a
     // neutral neighbor. The chroma guide is normalized by the measured pair
-    // variance: ordinary sensor/demosaic noise still pools, while opponent
-    // differences several noise sigmas apart do not cross the boundary.
+    // variance. Like Darktable's profiled-denoise wavelet guide, keep a noise
+    // dead zone before applying a steep edge falloff: ordinary sensor/demosaic
+    // noise pools at full weight, while a coherent color difference just
+    // beyond the noise envelope is rejected instead of partially crossing the
+    // boundary at every broad scale.
     let signal_guide_sigma = mix(10.0, 5.5, detail);
-    let opponent_guide_sigma = mix(3.6, 2.4, detail);
+    let opponent_noise_deadzone = mix(12.0, 6.0, detail);
+    let opponent_edge_slope = mix(0.28, 0.52, detail);
     let center_opponents = nr_opponents(center);
     let center_opponent_variance = nr_opponent_variance(center);
     // The two broadest High-quality scales use a 3x3 binomial kernel. Their
@@ -77,18 +89,28 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
             let signal_variance = center_variance.x + sample_variance.x;
             let signal_distance = signal_delta * signal_delta
                 / max(
-                    signal_variance * signal_guide_sigma * signal_guide_sigma,
+                    signal_variance
+                        * guide_variance_scale
+                        * signal_guide_sigma
+                        * signal_guide_sigma,
                     1e-10,
                 );
             let sample_opponents = nr_opponents(sample);
             let opponent_delta = sample_opponents - center_opponents;
             let opponent_variance =
                 center_opponent_variance + nr_opponent_variance(sample);
-            let opponent_distance = dot(
+            let normalized_opponent_distance = dot(
                 opponent_delta * opponent_delta
-                    / max(opponent_variance, vec2<f32>(1e-10)),
+                    / max(
+                        opponent_variance * guide_variance_scale,
+                        vec2<f32>(1e-10),
+                    ),
                 vec2<f32>(1.0),
-            ) / (opponent_guide_sigma * opponent_guide_sigma);
+            );
+            let opponent_distance = max(
+                normalized_opponent_distance - opponent_noise_deadzone,
+                0.0,
+            ) * opponent_edge_slope;
             let spatial = color_denoise_kernel_weight(x, compact)
                 * color_denoise_kernel_weight(y, compact);
             let weight =
@@ -100,7 +122,9 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
 
     let low_opponents = opponent_sum / max(weight_sum, 1e-6);
     let opponent_detail = center_opponents - low_opponents;
-    let opponent_sigma = sqrt(nr_opponent_variance(center));
+    let opponent_sigma = sqrt(
+        nr_opponent_variance(center) * guide_variance_scale,
+    );
 
     // A soft threshold is the key distinction from a blur: noise-sized colour
     // variation disappears, while coherent isoluminant colour edges keep the
@@ -108,7 +132,6 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     // Thresholding already has a perceptual onset, so keep this mapping close
     // to linear. Unlike the old response=16 blend, Color 25 must not be
     // numerically indistinguishable from Color 100.
-    let requested = clamp(params.chroma_denoise, 0.0, 1.0);
     let threshold_strength = mix(3.1, 1.35, detail)
         * color_denoise_scale_gain(scale)
         * requested;
