@@ -229,7 +229,12 @@ pub const EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 21;
 /// guide. High Color values can therefore reject subtle dark color boundaries
 /// without blocking the smoothing of stochastic chroma noise.
 pub const SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 22;
-pub const CURRENT_PROCESS_VERSION: u32 = SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION;
+/// Process 23 calibrates the default vignette shape against Lightroom while
+/// retaining the optional Midpoint, Roundness, Feather, and Highlights
+/// controls. Its final-frame geometry follows darktable's auto-ratio
+/// convention, so the default falloff is stable across aspect ratios.
+pub const LIGHTROOM_VIGNETTE_PROCESS_VERSION: u32 = 23;
+pub const CURRENT_PROCESS_VERSION: u32 = LIGHTROOM_VIGNETTE_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.
@@ -342,8 +347,9 @@ pub struct ExposureParams {
     #[serde(default)]
     pub sharpen_masking: f32,
 
-    // Creative effects. Glow follows a highlight-aware, multi-scale bloom
-    // model; vignette is a post-crop, exposure-domain edge treatment.
+    // Creative effects. Glow follows a highlight-aware, multi-scale bloom.
+    // Vignette is a post-crop, display-linear edge treatment calibrated from
+    // Lightroom's default composite shape.
     pub glow_amount: f32,
     pub glow_radius: f32,
     pub glow_threshold: f32,
