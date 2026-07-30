@@ -137,6 +137,7 @@ impl Sidebar {
 
         let mut changed = false;
         let mut lens_changed = false;
+        let mut ai_denoise_request = None;
         let as_shot_temperature = app
             .original_raw
             .as_ref()
@@ -166,7 +167,10 @@ impl Sidebar {
                     );
                 }
                 AdjustmentSection::Detail => {
-                    changed |= Self::show_detail(ui, &mut app.exposure, false);
+                    let (detail_changed, request) =
+                        Self::show_detail(ui, &mut app.exposure, false);
+                    changed |= detail_changed;
+                    ai_denoise_request = request;
                 }
                 AdjustmentSection::Effects => {
                     changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, false);
@@ -195,7 +199,9 @@ impl Sidebar {
                 &mut app.color_grade_tab,
                 true,
             );
-            changed |= Self::show_detail(ui, &mut app.exposure, true);
+            let (detail_changed, request) = Self::show_detail(ui, &mut app.exposure, true);
+            changed |= detail_changed;
+            ai_denoise_request = request;
             changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, true);
             changed |= Self::show_hsl(ui, &mut app.exposure, true);
             lens_changed |= Self::show_optics(ui, app, true);
@@ -211,6 +217,9 @@ impl Sidebar {
         }
         if lens_changed {
             app.mark_lens_correction_dirty();
+        }
+        if let Some(enabled) = ai_denoise_request {
+            app.set_ai_denoise_enabled(enabled, frame);
         }
     }
 

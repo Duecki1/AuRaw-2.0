@@ -1043,6 +1043,10 @@ where
     } = request;
     let export_started = Instant::now();
     ensure_export_not_cancelled(cancellation)?;
+    anyhow::ensure!(
+        !exposure.ai_denoise_enabled || raw.ai_denoised_image().is_some(),
+        "AI denoise is enabled but its full-resolution RawNIND result is not ready"
+    );
     validate_export_dimensions(output_width, output_height)?;
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
     crate::diagnostics::record(format!(

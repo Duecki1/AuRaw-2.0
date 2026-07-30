@@ -39,6 +39,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 mod background_tasks;
+mod ai_denoise;
 use background_tasks::{
     BackgroundTaskManager, CancelTaskResult, TaskId, TaskKind, TaskProgress, TaskProgressValue,
     TaskSnapshot, TaskStatus,
@@ -835,6 +836,13 @@ pub struct AurawApp {
     inpaint_receiver: Option<mpsc::Receiver<InpaintEvent>>,
     inpaint_download_progress: Option<(u64, u64)>,
     inpaint_inferencing: bool,
+    ai_denoise_consent_open: bool,
+    ai_denoise_receiver: Option<mpsc::Receiver<crate::ai_denoise::AiDenoiseEvent>>,
+    ai_denoise_download_progress: Option<(u64, u64)>,
+    ai_denoise_apply_progress: Option<(&'static str, usize, usize)>,
+    ai_denoise_cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ai_denoise_job_document_id: u64,
+    ai_denoise_resume_pending: bool,
 
     #[cfg(target_os = "android")]
     android_app: android_activity::AndroidApp,

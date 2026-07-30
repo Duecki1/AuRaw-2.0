@@ -525,6 +525,13 @@ impl AurawApp {
             inpaint_receiver: None,
             inpaint_download_progress: None,
             inpaint_inferencing: false,
+            ai_denoise_consent_open: false,
+            ai_denoise_receiver: None,
+            ai_denoise_download_progress: None,
+            ai_denoise_apply_progress: None,
+            ai_denoise_cancellation: None,
+            ai_denoise_job_document_id: 0,
+            ai_denoise_resume_pending: false,
         };
         if let Some(folder) = last_library_folder.filter(|folder| folder.is_dir()) {
             app.library.open_folder(folder, ctx);
@@ -777,6 +784,13 @@ impl AurawApp {
             inpaint_receiver: None,
             inpaint_download_progress: None,
             inpaint_inferencing: false,
+            ai_denoise_consent_open: false,
+            ai_denoise_receiver: None,
+            ai_denoise_download_progress: None,
+            ai_denoise_apply_progress: None,
+            ai_denoise_cancellation: None,
+            ai_denoise_job_document_id: 0,
+            ai_denoise_resume_pending: false,
             android_app,
             picker_pending: false,
             android_batch_load_pending: false,
@@ -1712,6 +1726,7 @@ impl AurawApp {
         // cancellation before advancing the document identity, and keep their
         // receivers alive so their terminal events can be drained safely.
         self.cancel_document_bound_background_tasks();
+        self.abandon_ai_denoise_worker();
         let sidecar_generation = self.begin_sidecar_open();
         // Reuse compiled GPU programs across RAW opens; retire the old texture IDs for next-frame cleanup.
         let reusable_preview_pipeline = {
@@ -2714,6 +2729,7 @@ impl AurawApp {
                     loaded.sidecar_needs_rewrite,
                 );
                 self.cancel_stale_document_background_tasks();
+                self.resume_persisted_ai_denoise(frame);
                 log::info!("loaded RAW preview for {}", loaded.label);
                 self.on_library_ai_mask_refresh_load_finished(true, frame);
                 #[cfg(target_os = "android")]

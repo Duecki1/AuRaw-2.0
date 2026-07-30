@@ -721,6 +721,7 @@ mod imp {
             available_camera_profiles: raw.available_camera_profiles.clone(),
             white_balance_model: raw.white_balance_model.clone(),
             lens_geometry,
+            ai_denoised: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 

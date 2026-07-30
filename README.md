@@ -236,7 +236,7 @@ option embeds the available source filename, camera make/model, original
 dimensions, output dimensions, software, and normalized orientation in PNG iTXt
 and eXIf metadata.
 
-## AI-mask runtime trust
+## Local AI runtime trust
 
 Desktop Subject and Object selection never download or extract native runtime code.
 Choose a local ONNX Runtime library in Settings; AuRaw records its SHA-256 and
@@ -246,6 +246,16 @@ only after verification. Subject selection uses BiRefNet followed by a pinned Vi
 the separate SAM 2.1 Hiera Tiny encoder and prompt decoder ONNX files, followed automatically by the same ViTMatte refiner. On Linux,
 AI selection stays disabled
 until a local runtime has been selected and pinned.
+
+Detail's optional **AI Denoise** uses the GPL-3.0 RawNIND UtNet2 package from
+the published darktable-ai 5.6 release. The first enable asks before contacting
+GitHub. AuRaw pins the complete `.dtmodel` archive and both extracted ONNX
+graphs by SHA-256. Bayer RAWs use the joint denoise/demosaic graph; X-Trans uses
+the declared linear Rec.2020 graph. Inference is overlap-tiled locally, and only
+the checkbox is persisted—the half-float derived camera-RGB cache is rebuilt
+from the original mosaic and enters the ordinary non-destructive pipeline
+before capture sharpening. Standard denoise values remain saved and are
+restored unchanged when AI Denoise is disabled.
 
 ## Resource limits
 

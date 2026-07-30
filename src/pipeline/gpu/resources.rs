@@ -501,9 +501,113 @@ pub(super) fn create_demosaic_texture(
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::STORAGE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[format],
     })
+}
+
+pub(super) fn upload_ai_scene_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    raw: &LoadedRaw,
+) -> Result<bool> {
+    let Some(image) = raw.ai_denoised_image() else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        image.is_valid_for(raw.width, raw.height),
+        "AI-denoise texture dimensions do not match the RAW"
+    );
+    let row_elements = raw.width as usize * 4;
+    let bytes_per_texel = match format {
+        wgpu::TextureFormat::Rgba16Float => 8usize,
+        wgpu::TextureFormat::Rgba32Float => 16usize,
+        _ => return Err(anyhow!("unsupported AI-denoise scene format {format:?}")),
+    };
+    let bytes_per_row = raw
+        .width
+        .checked_mul(bytes_per_texel as u32)
+        .ok_or_else(|| anyhow!("AI-denoise upload row byte count overflows"))?;
+    let rows_per_chunk = (MAX_UPLOAD_SCRATCH_BYTES / bytes_per_row as usize).max(1) as u32;
+
+    for first_row in (0..raw.height).step_by(rows_per_chunk as usize) {
+        let row_count = rows_per_chunk.min(raw.height - first_row);
+        let pixels = row_count as usize * raw.width as usize;
+        match format {
+            wgpu::TextureFormat::Rgba16Float => {
+                let mut rgba = vec![0u16; row_count as usize * row_elements];
+                for pixel in 0..pixels {
+                    let source = (first_row as usize * raw.width as usize + pixel) * 3;
+                    let destination = pixel * 4;
+                    rgba[destination..destination + 3]
+                        .copy_from_slice(&image.rgb16f[source..source + 3]);
+                    rgba[destination + 3] = half::f16::ONE.to_bits();
+                }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: first_row,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&rgba),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(row_count),
+                    },
+                    wgpu::Extent3d {
+                        width: raw.width,
+                        height: row_count,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            wgpu::TextureFormat::Rgba32Float => {
+                let mut rgba = vec![0.0f32; row_count as usize * row_elements];
+                for pixel in 0..pixels {
+                    let source = (first_row as usize * raw.width as usize + pixel) * 3;
+                    let destination = pixel * 4;
+                    for channel in 0..3 {
+                        rgba[destination + channel] =
+                            half::f16::from_bits(image.rgb16f[source + channel]).to_f32();
+                    }
+                    rgba[destination + 3] = 1.0;
+                }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: first_row,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&rgba),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(row_count),
+                    },
+                    wgpu::Extent3d {
+                        width: raw.width,
+                        height: row_count,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(true)
 }
 
 pub(super) fn create_tone_guide_texture(

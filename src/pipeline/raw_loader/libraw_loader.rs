@@ -1352,6 +1352,7 @@ unsafe fn loaded_raw_from_context(
         available_camera_profiles: Vec::new(),
         white_balance_model,
         lens_geometry: None,
+        ai_denoised: Arc::new(std::sync::RwLock::new(None)),
     })
 }
 
