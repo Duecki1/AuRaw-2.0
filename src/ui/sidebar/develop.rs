@@ -407,7 +407,7 @@ impl Sidebar {
             );
             ui.label(
                 egui::RichText::new(
-                    "Signal-dependent multiscale filtering; opening values adapt to each RAW",
+                    "Profiled luminance filtering and multiscale color wavelets; opening values adapt to each RAW",
                 )
                 .size(10.5)
                 .color(ui.visuals().weak_text_color()),
@@ -464,7 +464,7 @@ impl Sidebar {
                     );
                 });
             ui.label(
-                egui::RichText::new("Fast: 8 taps · Balanced: 24 taps · High: 48 taps")
+                egui::RichText::new("Fast: fine color scale · Balanced: 4 scales · High: 6 scales")
                     .size(10.0)
                     .color(ui.visuals().weak_text_color()),
             );

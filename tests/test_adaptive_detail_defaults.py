@@ -7,6 +7,7 @@ LIFECYCLE = (ROOT / "src/app/lifecycle.rs").read_text(encoding="utf-8")
 EXPORT = (ROOT / "src/app/processing_export.rs").read_text(encoding="utf-8")
 DEVELOP_EXPORT = (ROOT / "src/bin/auraw-develop-export.rs").read_text(encoding="utf-8")
 SHADER_NOISE = (ROOT / "src/shaders/noise.wgsl").read_text(encoding="utf-8")
+SHADER_COLOR_DENOISE = (ROOT / "src/shaders/color_denoise.wgsl").read_text(encoding="utf-8")
 SIDECAR = (ROOT / "src/sidecar.rs").read_text(encoding="utf-8")
 
 
@@ -50,13 +51,13 @@ def test_detail_comparison_exporter_exposes_all_relevant_controls() -> None:
     assert "--report-detail-defaults" in DEVELOP_EXPORT
 
 
-def test_denoise_uses_continuous_perceptual_strength_and_signal_guided_chroma() -> None:
+def test_denoise_uses_continuous_perceptual_strength_and_dense_chroma_wavelets() -> None:
     assert "fn nr_perceptual_strength" in SHADER_NOISE
     assert "nr_perceptual_strength(params.noise_options.x, 3.2)" in SHADER_NOISE
-    assert "nr_perceptual_strength(params.chroma_denoise, 16.0)" in SHADER_NOISE
-    assert "let opponent_signal_sigma = mix(10.0, 6.0, detail)" in SHADER_NOISE
-    assert "return spatial * vec2<f32>(signal_weight, opponent_weight)" in SHADER_NOISE
-    assert "let color_edge_gate = 1.0 - smoothstep" in SHADER_NOISE
-    assert "NR_KNIGHT_DIRECTIONS" in SHADER_NOISE
-    assert "fn nr_chroma_spatial_boost" in SHADER_NOISE
-    assert "opponent_distance" not in SHADER_NOISE
+    assert "0.5 * (rgb.r - rgb.b)" in SHADER_NOISE
+    assert "fn nr_opponent_variance" in SHADER_NOISE
+    assert "for (var y = -extent; y <= extent; y = y + 1)" in SHADER_COLOR_DENOISE
+    assert "for (var x = -extent; x <= extent; x = x + 1)" in SHADER_COLOR_DENOISE
+    assert "let requested = clamp(params.chroma_denoise, 0.0, 1.0)" in SHADER_COLOR_DENOISE
+    assert "let filtered_opponents = low_opponents + opponent_detail * retained" in SHADER_COLOR_DENOISE
+    assert "nr_from_signal_opponents(center_signal, filtered_opponents)" in SHADER_COLOR_DENOISE

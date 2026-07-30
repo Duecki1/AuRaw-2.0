@@ -60,16 +60,12 @@ fn finish_apply_legacy_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f3
 
 fn finish_apply_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let signal_strength = nr_perceptual_strength(params.noise_options.x, 3.2);
-    let chroma_strength = nr_perceptual_strength(params.chroma_denoise, 16.0);
-    if signal_strength <= 1e-6 && chroma_strength <= 1e-6 { return rgb; }
+    if signal_strength <= 1e-6 { return rgb; }
 
     let center_signal = nr_signal(rgb);
-    let center_opponents = nr_opponents(rgb);
     let center_variance = nr_component_variance(rgb);
     var signal_sum = center_signal;
     var signal_weights = 1.0;
-    var opponent_sum = center_opponents;
-    var opponent_weights = 1.0;
 
     let scale_count = nr_scale_count();
     for (var scale = 0; scale < 5; scale = scale + 1) {
@@ -80,50 +76,37 @@ fn finish_apply_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
             let sample = finish_reference_at(pos + direction * radius);
             let spatial = nr_scale_spatial_weight(radius, direction);
             let sample_signal = nr_signal(sample);
-            let sample_opponents = nr_opponents(sample);
             let sample_variance = nr_component_variance(sample);
-            let range_weights = nr_range_weights(
+            let range_weight = nr_signal_range_weight(
                 center_signal,
-                center_opponents,
                 center_variance,
                 sample_signal,
-                sample_opponents,
                 sample_variance,
                 spatial,
             );
-            signal_sum += sample_signal * range_weights.x;
-            signal_weights += range_weights.x;
-            let opponent_weight = range_weights.y * nr_chroma_spatial_boost(direction * radius);
-            opponent_sum += sample_opponents * opponent_weight;
-            opponent_weights += opponent_weight;
+            signal_sum += sample_signal * range_weight;
+            signal_weights += range_weight;
         }
-        // Balanced/High fill the missing positions of the 5x5 support instead
-        // of sampling only axes and diagonals. Sparse radius-two taps produced
-        // small chroma islands even when the slider response itself was smooth.
+        // Balanced/High fill the missing positions of the 5x5 signal support
+        // instead of sampling only axes and diagonals.
         if scale == 1 {
             for (var direction_index = 0; direction_index < 8; direction_index = direction_index + 1) {
                 let offset = NR_KNIGHT_DIRECTIONS[direction_index];
                 let sample = finish_reference_at(pos + offset);
                 let spatial = nr_offset_spatial_weight(offset);
                 let sample_signal = nr_signal(sample);
-                let sample_opponents = nr_opponents(sample);
                 let sample_variance = nr_component_variance(sample);
-                let range_weights = nr_range_weights(
+                let range_weight = nr_signal_range_weight(
                     center_signal,
-                    center_opponents,
                     center_variance,
                     sample_signal,
-                    sample_opponents,
                     sample_variance,
                     spatial,
                 );
-                signal_sum += sample_signal * range_weights.x;
-                signal_weights += range_weights.x;
-                let opponent_weight = range_weights.y * nr_chroma_spatial_boost(offset);
-                opponent_sum += sample_opponents * opponent_weight;
-                opponent_weights += opponent_weight;
+                signal_sum += sample_signal * range_weight;
+                signal_weights += range_weight;
             }
         }
     }
-    return nr_finish(rgb, signal_sum, signal_weights, opponent_sum, opponent_weights);
+    return nr_finish_signal(rgb, signal_sum, signal_weights);
 }
