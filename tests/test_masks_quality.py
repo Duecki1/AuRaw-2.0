@@ -138,6 +138,9 @@ def test_landscape_masks_have_persisted_categories_and_explicit_generation() -> 
     assert "request_landscape_mask(frame, mask_index, component_index)" in SIDEBAR
     assert "ADE20K_CLASS_COUNT: usize = 150" in ai
     assert "run_landscape_session" in ai
+    assert "class_queries_logits" in ai
+    assert "masks_queries_logits" in ai
+    assert "MaskFormerInputLayout" in ai
     assert "resize_probability_u8" in ai
 
 

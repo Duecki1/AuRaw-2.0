@@ -35,11 +35,15 @@ pub const VITMATTE_MODEL_BYTES: u64 = 103_885_865;
 pub const VITMATTE_MODEL_URL: &str = "https://huggingface.co/Xenova/vitmatte-small-composition-1k/resolve/5e04250c42d7a03dc125b13adb415a47584ec60b/onnx/model.onnx";
 pub const VITMATTE_MODEL_SHA256_HEX: &str =
     "bf28d2e0be2c073286e88d60ad649d7123da2749a2d99133fd1098d5887e0225";
-pub const LANDSCAPE_MODEL_BYTES: u64 = 15_225_079;
-pub const LANDSCAPE_MODEL_URL: &str = "https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512/resolve/6700676d80f989a1e7096fd6d89e88e9b9ca61ce/model.onnx";
+pub const LANDSCAPE_MODEL_BYTES: u64 = 141_790_090;
+pub const LANDSCAPE_MODEL_URL: &str = "https://huggingface.co/onnx-community/maskformer-swin-base-ade/resolve/9366a4a18164800bcb3e01eb3ddb82160173c1c7/onnx/model_quantized.onnx";
 pub const LANDSCAPE_MODEL_SHA256_HEX: &str =
-    "341333427d74b95391227b7d5935c1854094f7c4b7cc0d144dc6720735dba3bd";
-const LANDSCAPE_MODEL_SIZE: u32 = 512;
+    "9d46ef6268d4d37d3ec3733d961e2462ef2d8ff1c2a54e1122c4bbba561ad738";
+const MASKFORMER_SHORTEST_EDGE: u32 = 800;
+const MASKFORMER_LONGEST_EDGE: u32 = 1333;
+const MASKFORMER_SIZE_DIVISOR: u32 = 32;
+const MASKFORMER_CLASS_OUTPUT_COUNT: usize = 151;
+const MASKFORMER_MAX_QUERIES: usize = 256;
 const ADE20K_CLASS_COUNT: usize = 150;
 const VITMATTE_MAX_EDGE_DESKTOP: u32 = 1280;
 const VITMATTE_MAX_EDGE_ANDROID: u32 = 768;
@@ -172,36 +176,36 @@ where
         Ok(()) => return Ok(()),
         Err(error) if !allow_download => {
             anyhow::bail!(
-                "the pinned SegFormer model is unavailable or invalid ({error:#}); consent to its download again"
+                "the pinned MaskFormer model is unavailable or invalid ({error:#}); consent to its download again"
             );
         }
         Err(error) if path.exists() => {
             log::warn!(
-                "discarding invalid SegFormer cache {}: {error:#}",
+                "discarding invalid MaskFormer cache {}: {error:#}",
                 path.display()
             );
             fs::remove_file(path)
-                .with_context(|| format!("remove invalid SegFormer model {}", path.display()))?;
+                .with_context(|| format!("remove invalid MaskFormer model {}", path.display()))?;
         }
         Err(_) => {}
     }
     download_pinned_landscape_model(path, cancellation, &mut progress)?;
-    verify_landscape_model(path).context("verify published SegFormer landscape model")
+    verify_landscape_model(path).context("verify published MaskFormer landscape model")
 }
 
 fn verify_landscape_model(path: &Path) -> Result<()> {
     let metadata = fs::metadata(path)
-        .with_context(|| format!("read SegFormer model metadata {}", path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "SegFormer cache is not a regular file");
+        .with_context(|| format!("read MaskFormer model metadata {}", path.display()))?;
+    anyhow::ensure!(metadata.is_file(), "MaskFormer cache is not a regular file");
     anyhow::ensure!(
         metadata.len() == LANDSCAPE_MODEL_BYTES,
-        "SegFormer model size mismatch: found {}, expected {LANDSCAPE_MODEL_BYTES}",
+        "MaskFormer model size mismatch: found {}, expected {LANDSCAPE_MODEL_BYTES}",
         metadata.len()
     );
     let actual = sha256_file_hex(path)?;
     anyhow::ensure!(
         actual == LANDSCAPE_MODEL_SHA256_HEX,
-        "SegFormer model SHA-256 mismatch (expected {LANDSCAPE_MODEL_SHA256_HEX})"
+        "MaskFormer model SHA-256 mismatch (expected {LANDSCAPE_MODEL_SHA256_HEX})"
     );
     Ok(())
 }
@@ -238,11 +242,11 @@ where
         let mut response = agent
             .get(LANDSCAPE_MODEL_URL)
             .call()
-            .context("download pinned SegFormer ONNX model")?;
+            .context("download pinned MaskFormer ONNX model")?;
         if let Some(length) = response.body().content_length() {
             anyhow::ensure!(
                 length == LANDSCAPE_MODEL_BYTES,
-                "SegFormer server declared {length} bytes, expected {LANDSCAPE_MODEL_BYTES}"
+                "MaskFormer server declared {length} bytes, expected {LANDSCAPE_MODEL_BYTES}"
             );
         }
         let mut reader = response.body_mut().as_reader();
@@ -258,26 +262,26 @@ where
             ensure_ai_not_cancelled(cancellation)?;
             let read = reader
                 .read(&mut buffer)
-                .context("read SegFormer download")?;
+                .context("read MaskFormer download")?;
             if read == 0 {
                 break;
             }
             downloaded = downloaded
                 .checked_add(read as u64)
-                .context("SegFormer download byte count overflow")?;
+                .context("MaskFormer download byte count overflow")?;
             anyhow::ensure!(
                 downloaded <= LANDSCAPE_MODEL_BYTES,
-                "SegFormer download exceeded its pinned {LANDSCAPE_MODEL_BYTES}-byte size"
+                "MaskFormer download exceeded its pinned {LANDSCAPE_MODEL_BYTES}-byte size"
             );
             hasher.update(&buffer[..read]);
             file.write_all(&buffer[..read])
-                .context("write SegFormer ONNX model")?;
+                .context("write MaskFormer ONNX model")?;
             progress(downloaded, LANDSCAPE_MODEL_BYTES);
         }
-        file.sync_all().context("flush SegFormer ONNX model")?;
+        file.sync_all().context("flush MaskFormer ONNX model")?;
         anyhow::ensure!(
             downloaded == LANDSCAPE_MODEL_BYTES,
-            "SegFormer model size mismatch: received {downloaded}, expected {LANDSCAPE_MODEL_BYTES}"
+            "MaskFormer model size mismatch: received {downloaded}, expected {LANDSCAPE_MODEL_BYTES}"
         );
         let digest = hasher
             .finish()
@@ -287,11 +291,11 @@ where
             .collect::<String>();
         anyhow::ensure!(
             digest == LANDSCAPE_MODEL_SHA256_HEX,
-            "SegFormer model SHA-256 mismatch (expected {LANDSCAPE_MODEL_SHA256_HEX})"
+            "MaskFormer model SHA-256 mismatch (expected {LANDSCAPE_MODEL_SHA256_HEX})"
         );
         ensure_ai_not_cancelled(cancellation)?;
         fs::rename(&temporary, path)
-            .with_context(|| format!("publish SegFormer model to {}", path.display()))
+            .with_context(|| format!("publish MaskFormer model to {}", path.display()))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -1053,6 +1057,40 @@ fn validate_birefnet_output_shape(shape: &[i64], logits_len: usize) -> Result<(u
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MaskFormerInputLayout {
+    resized_width: u32,
+    resized_height: u32,
+    padded_width: u32,
+    padded_height: u32,
+}
+
+impl MaskFormerInputLayout {
+    fn for_image(width: u32, height: u32) -> Result<Self> {
+        anyhow::ensure!(width > 0 && height > 0, "landscape-mask input is empty");
+        let shortest = width.min(height) as f64;
+        let longest = width.max(height) as f64;
+        let mut scale = MASKFORMER_SHORTEST_EDGE as f64 / shortest;
+        if longest * scale > MASKFORMER_LONGEST_EDGE as f64 {
+            scale = MASKFORMER_LONGEST_EDGE as f64 / longest;
+        }
+        let resized_width =
+            ((width as f64 * scale).round() as u32).clamp(1, MASKFORMER_LONGEST_EDGE);
+        let resized_height =
+            ((height as f64 * scale).round() as u32).clamp(1, MASKFORMER_LONGEST_EDGE);
+        let padded_width =
+            resized_width.div_ceil(MASKFORMER_SIZE_DIVISOR) * MASKFORMER_SIZE_DIVISOR;
+        let padded_height =
+            resized_height.div_ceil(MASKFORMER_SIZE_DIVISOR) * MASKFORMER_SIZE_DIVISOR;
+        Ok(Self {
+            resized_width,
+            resized_height,
+            padded_width,
+            padded_height,
+        })
+    }
+}
+
 fn infer_landscape(
     model_path: &Path,
     runtime_path: Option<&Path>,
@@ -1081,17 +1119,19 @@ fn infer_landscape(
     );
     initialize_runtime(runtime_path, runtime_sha256)?;
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
-        .context("invalid preview image for SegFormer")?;
+        .context("invalid preview image for MaskFormer")?;
+    let layout = MaskFormerInputLayout::for_image(width, height)?;
     let resized = image::imageops::resize(
         &image,
-        LANDSCAPE_MODEL_SIZE,
-        LANDSCAPE_MODEL_SIZE,
+        layout.resized_width,
+        layout.resized_height,
         FilterType::Triangle,
     );
-    let plane = LANDSCAPE_MODEL_SIZE as usize * LANDSCAPE_MODEL_SIZE as usize;
+    let plane = layout.padded_width as usize * layout.padded_height as usize;
     let mut values = vec![0.0f32; plane * 3];
-    for (index, pixel) in resized.pixels().enumerate() {
-        for channel in 0..3 {
+    for (x, y, pixel) in resized.enumerate_pixels() {
+        let index = y as usize * layout.padded_width as usize + x as usize;
+        for channel in 0..3usize {
             values[channel * plane + index] =
                 (pixel[channel] as f32 / 255.0 - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
         }
@@ -1100,17 +1140,17 @@ fn infer_landscape(
         [
             1usize,
             3,
-            LANDSCAPE_MODEL_SIZE as usize,
-            LANDSCAPE_MODEL_SIZE as usize,
+            layout.padded_height as usize,
+            layout.padded_width as usize,
         ],
         values,
     ))
-    .context("create SegFormer input tensor")?;
+    .context("create MaskFormer input tensor")?;
 
     #[cfg(target_os = "android")]
     let (output_width, output_height, probabilities) = {
         let mut session = create_session(model_path)?;
-        run_landscape_session(&mut session, input, category)?
+        run_landscape_session(&mut session, input, category, layout)?
     };
 
     #[cfg(not(target_os = "android"))]
@@ -1118,20 +1158,20 @@ fn infer_landscape(
         let sessions = LANDSCAPE_SESSION.get_or_init(|| Mutex::new(None));
         let mut session = sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("SegFormer session lock was poisoned"))?;
+            .map_err(|_| anyhow::anyhow!("MaskFormer session lock was poisoned"))?;
         if session.is_none() {
             *session = Some(create_session(model_path)?);
         }
         let session = session.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("SegFormer session initialization produced no session")
+            anyhow::anyhow!("MaskFormer session initialization produced no session")
         })?;
-        run_landscape_session(session, input, category)?
+        run_landscape_session(session, input, category, layout)?
     };
 
     let mask = resize_probability_u8(&probabilities, output_width, output_height, width, height);
     anyhow::ensure!(
         mask.len() == width as usize * height as usize,
-        "SegFormer output resize produced an invalid mask"
+        "MaskFormer output resize produced an invalid mask"
     );
     Ok(LandscapeMaskResult {
         width,
@@ -1144,21 +1184,30 @@ fn run_landscape_session(
     session: &mut Session,
     input: Tensor<f32>,
     category: LandscapeCategory,
+    layout: MaskFormerInputLayout,
 ) -> Result<(u32, u32, Vec<f32>)> {
     let outputs = session
         .run(ort::inputs![input])
-        .context("run SegFormer ONNX inference")?;
-    let output = outputs
-        .values()
-        .next()
-        .context("SegFormer returned no output tensors")?;
-    let (shape, logits) = output
+        .context("run MaskFormer ONNX inference")?;
+    let class_output = outputs
+        .get("class_queries_logits")
+        .context("MaskFormer returned no class_queries_logits tensor")?;
+    let mask_output = outputs
+        .get("masks_queries_logits")
+        .context("MaskFormer returned no masks_queries_logits tensor")?;
+    let (class_shape, class_logits) = class_output
         .try_extract_tensor::<f32>()
-        .context("read SegFormer output tensor")?;
-    let (width, height) = validate_segformer_output_shape(shape, logits.len())?;
+        .context("read MaskFormer class-query output tensor")?;
+    let (mask_shape, mask_logits) = mask_output
+        .try_extract_tensor::<f32>()
+        .context("read MaskFormer mask-query output tensor")?;
+    let queries = validate_maskformer_class_output_shape(class_shape, class_logits.len())?;
+    let (width, height) =
+        validate_maskformer_mask_output_shape(mask_shape, mask_logits.len(), queries)?;
     anyhow::ensure!(
-        logits.iter().all(|value| value.is_finite()),
-        "SegFormer output contains non-finite logits"
+        class_logits.iter().all(|value| value.is_finite())
+            && mask_logits.iter().all(|value| value.is_finite()),
+        "MaskFormer output contains non-finite logits"
     );
     let plane = width as usize * height as usize;
     let class_ids = category.ade20k_class_ids();
@@ -1167,54 +1216,132 @@ fn run_landscape_session(
         "landscape category contains an invalid ADE20K class"
     );
 
-    let probabilities = (0..plane)
+    let query_weights = (0..queries)
+        .map(|query| {
+            let logits = &class_logits[query * MASKFORMER_CLASS_OUTPUT_COUNT
+                ..(query + 1) * MASKFORMER_CLASS_OUTPUT_COUNT];
+            let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let denominator = logits
+                .iter()
+                .map(|logit| (*logit - maximum).exp())
+                .sum::<f32>();
+            let foreground = logits[..ADE20K_CLASS_COUNT]
+                .iter()
+                .map(|logit| (*logit - maximum).exp())
+                .sum::<f32>();
+            let selected = class_ids
+                .iter()
+                .map(|class| (logits[*class] - maximum).exp())
+                .sum::<f32>();
+            anyhow::ensure!(
+                denominator.is_finite() && denominator > 0.0,
+                "MaskFormer class-query softmax is invalid"
+            );
+            Ok((selected / denominator, foreground / denominator))
+        })
+        .collect::<Result<Vec<(f32, f32)>>>()?;
+
+    let padded_probabilities = (0..plane)
         .into_par_iter()
         .map(|pixel| {
-            let mut maximum = f32::NEG_INFINITY;
-            for class in 0..ADE20K_CLASS_COUNT {
-                maximum = maximum.max(logits[class * plane + pixel]);
-            }
-            let mut denominator = 0.0f32;
             let mut selected = 0.0f32;
-            for class in 0..ADE20K_CLASS_COUNT {
-                let probability = (logits[class * plane + pixel] - maximum).exp();
-                denominator += probability;
-                if class_ids.contains(&class) {
-                    selected += probability;
-                }
+            let mut foreground = 0.0f32;
+            for (query, &(selected_weight, foreground_weight)) in query_weights.iter().enumerate() {
+                let mask_probability = sigmoid_probability(mask_logits[query * plane + pixel]);
+                selected += selected_weight * mask_probability;
+                foreground += foreground_weight * mask_probability;
             }
-            if denominator.is_finite() && denominator > 0.0 {
-                (selected / denominator).clamp(0.0, 1.0)
+            if foreground.is_finite() && foreground > f32::EPSILON {
+                (selected / foreground).clamp(0.0, 1.0)
             } else {
                 0.0
             }
         })
-        .collect();
-    Ok((width, height, probabilities))
+        .collect::<Vec<_>>();
+    crop_maskformer_probabilities(&padded_probabilities, width, height, layout)
 }
 
-fn validate_segformer_output_shape(shape: &[i64], logits_len: usize) -> Result<(u32, u32)> {
+fn validate_maskformer_class_output_shape(shape: &[i64], logits_len: usize) -> Result<usize> {
     anyhow::ensure!(
-        shape.len() == 4 && shape[0] == 1 && shape[1] == ADE20K_CLASS_COUNT as i64,
-        "unexpected SegFormer output shape {shape:?}; expected [1, {ADE20K_CLASS_COUNT}, H, W]"
+        shape.len() == 3
+            && shape[0] == 1
+            && shape[2] == MASKFORMER_CLASS_OUTPUT_COUNT as i64,
+        "unexpected MaskFormer class output shape {shape:?}; expected [1, queries, {MASKFORMER_CLASS_OUTPUT_COUNT}]"
     );
-    let height =
-        usize::try_from(shape[2]).context("SegFormer output height is negative or too large")?;
-    let width =
-        usize::try_from(shape[3]).context("SegFormer output width is negative or too large")?;
+    let queries =
+        usize::try_from(shape[1]).context("MaskFormer query count is negative or too large")?;
     anyhow::ensure!(
-        width > 0 && height > 0 && width <= 2048 && height <= 2048,
-        "SegFormer output dimensions are invalid: {shape:?}"
+        (1..=MASKFORMER_MAX_QUERIES).contains(&queries),
+        "MaskFormer query count is invalid: {shape:?}"
     );
-    let expected = ADE20K_CLASS_COUNT
-        .checked_mul(width)
-        .and_then(|value| value.checked_mul(height))
-        .context("SegFormer output dimensions overflow")?;
+    let expected = queries
+        .checked_mul(MASKFORMER_CLASS_OUTPUT_COUNT)
+        .context("MaskFormer class output dimensions overflow")?;
     anyhow::ensure!(
         logits_len == expected,
-        "SegFormer output has {logits_len} values, expected {expected}"
+        "MaskFormer class output has {logits_len} values, expected {expected}"
     );
-    Ok((width as u32, height as u32))
+    Ok(queries)
+}
+
+fn validate_maskformer_mask_output_shape(
+    shape: &[i64],
+    logits_len: usize,
+    expected_queries: usize,
+) -> Result<(u32, u32)> {
+    anyhow::ensure!(
+        shape.len() == 4 && shape[0] == 1 && shape[1] == expected_queries as i64,
+        "unexpected MaskFormer mask output shape {shape:?}; expected [1, {expected_queries}, H, W]"
+    );
+    let height =
+        usize::try_from(shape[2]).context("MaskFormer output height is negative or too large")?;
+    let width =
+        usize::try_from(shape[3]).context("MaskFormer output width is negative or too large")?;
+    anyhow::ensure!(
+        width > 0 && height > 0 && width <= 2048 && height <= 2048,
+        "MaskFormer output dimensions are invalid: {shape:?}"
+    );
+    let expected = expected_queries
+        .checked_mul(width)
+        .and_then(|value| value.checked_mul(height))
+        .context("MaskFormer mask output dimensions overflow")?;
+    anyhow::ensure!(
+        logits_len == expected,
+        "MaskFormer mask output has {logits_len} values, expected {expected}"
+    );
+    Ok((
+        u32::try_from(width).context("MaskFormer output width exceeds u32")?,
+        u32::try_from(height).context("MaskFormer output height exceeds u32")?,
+    ))
+}
+
+fn crop_maskformer_probabilities(
+    probabilities: &[f32],
+    width: u32,
+    height: u32,
+    layout: MaskFormerInputLayout,
+) -> Result<(u32, u32, Vec<f32>)> {
+    anyhow::ensure!(
+        probabilities.len() == width as usize * height as usize,
+        "MaskFormer probability dimensions do not match their buffer"
+    );
+    let valid_width = ((u64::from(width) * u64::from(layout.resized_width)
+        + u64::from(layout.padded_width) / 2)
+        / u64::from(layout.padded_width))
+    .clamp(1, u64::from(width)) as u32;
+    let valid_height = ((u64::from(height) * u64::from(layout.resized_height)
+        + u64::from(layout.padded_height) / 2)
+        / u64::from(layout.padded_height))
+    .clamp(1, u64::from(height)) as u32;
+    let mut cropped = Vec::new();
+    cropped
+        .try_reserve_exact(valid_width as usize * valid_height as usize)
+        .context("reserve cropped MaskFormer probabilities")?;
+    for y in 0..valid_height as usize {
+        let row = y * width as usize;
+        cropped.extend_from_slice(&probabilities[row..row + valid_width as usize]);
+    }
+    Ok((valid_width, valid_height, cropped))
 }
 
 fn normalized_letterbox(
@@ -3620,13 +3747,29 @@ mod landscape_mask_tests {
     use super::*;
 
     #[test]
-    fn segformer_shape_guard_accepts_only_ade20k_logits() {
+    fn maskformer_shape_guards_require_matching_queries() {
         assert_eq!(
-            validate_segformer_output_shape(&[1, 150, 128, 128], 150 * 128 * 128).unwrap(),
-            (128, 128)
+            validate_maskformer_class_output_shape(&[1, 100, 151], 100 * 151).unwrap(),
+            100
         );
-        assert!(validate_segformer_output_shape(&[1, 149, 128, 128], 149 * 128 * 128).is_err());
-        assert!(validate_segformer_output_shape(&[1, 150, 128, 128], 17).is_err());
+        assert_eq!(
+            validate_maskformer_mask_output_shape(&[1, 100, 192, 336], 100 * 192 * 336, 100)
+                .unwrap(),
+            (336, 192)
+        );
+        assert!(validate_maskformer_class_output_shape(&[1, 100, 150], 100 * 150).is_err());
+        assert!(
+            validate_maskformer_mask_output_shape(&[1, 99, 192, 336], 99 * 192 * 336, 100).is_err()
+        );
+    }
+
+    #[test]
+    fn maskformer_input_preserves_aspect_ratio_and_pads_to_swin_divisor() {
+        let layout = MaskFormerInputLayout::for_image(1600, 900).unwrap();
+        assert_eq!((layout.resized_width, layout.resized_height), (1333, 750));
+        assert_eq!((layout.padded_width, layout.padded_height), (1344, 768));
+        assert_eq!(layout.padded_width % MASKFORMER_SIZE_DIVISOR, 0);
+        assert_eq!(layout.padded_height % MASKFORMER_SIZE_DIVISOR, 0);
     }
 
     #[test]
@@ -3643,7 +3786,7 @@ mod landscape_mask_tests {
     #[test]
     fn landscape_worker_cannot_download_without_explicit_authorization() {
         let missing = std::env::temp_dir().join(format!(
-            "auraw-missing-segformer-{}-{}.onnx",
+            "auraw-missing-maskformer-{}-{}.onnx",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -3651,16 +3794,15 @@ mod landscape_mask_tests {
                 .as_nanos()
         ));
         let cancellation = AtomicBool::new(false);
-        let error =
-            ensure_landscape_model(&missing, false, &cancellation, |_, _| {}).unwrap_err();
+        let error = ensure_landscape_model(&missing, false, &cancellation, |_, _| {}).unwrap_err();
         assert!(format!("{error:#}").contains("consent"));
         assert!(!missing.exists());
     }
 
     #[test]
-    #[ignore = "manual integration probe requiring AURAW_TEST_SEGFORMER and AURAW_TEST_ORT"]
-    fn pinned_segformer_runs_through_onnx_runtime() {
-        let model = PathBuf::from(std::env::var_os("AURAW_TEST_SEGFORMER").unwrap());
+    #[ignore = "manual integration probe requiring AURAW_TEST_MASKFORMER and AURAW_TEST_ORT"]
+    fn pinned_maskformer_runs_through_onnx_runtime() {
+        let model = PathBuf::from(std::env::var_os("AURAW_TEST_MASKFORMER").unwrap());
         let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
         let sha256 = sha256_file_hex(&runtime).unwrap();
         let result = infer_landscape(

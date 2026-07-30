@@ -1004,7 +1004,7 @@ impl AurawApp {
                             downloaded,
                             total,
                             Some("bytes".to_owned()),
-                            "Downloading SegFormer landscape model",
+                            "Downloading MaskFormer landscape model",
                         )
                         .with_detail(format!(
                             "{:.1} / {:.1} MB",
@@ -1585,7 +1585,7 @@ impl AurawApp {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
             .unwrap_or_else(std::env::temp_dir);
-        root.join("auraw/models/segformer-b0-ade20k.onnx")
+        root.join("auraw/models/maskformer-swin-base-ade20k-int8.onnx")
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1749,7 +1749,7 @@ impl AurawApp {
         self.android_app
             .internal_data_path()
             .unwrap_or_else(std::env::temp_dir)
-            .join("models/segformer-b0-ade20k.onnx")
+            .join("models/maskformer-swin-base-ade20k-int8.onnx")
     }
 
     fn show_subject_dialogs(&mut self, ctx: &egui::Context) {
@@ -1879,12 +1879,12 @@ impl AurawApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label("Landscape masks use NVIDIA SegFormer-B0 trained on ADE20K to identify sky, vegetation, architecture, ground, water, and mountains.");
+                ui.label("Landscape masks use MaskFormer with a Swin-Base backbone trained on ADE20K to identify sky, vegetation, architecture, ground, water, and mountains.");
                 ui.label(format!(
                     "The first use downloads {:.1} MB and stores the ONNX model in AuRaw's cache.",
                     LANDSCAPE_MODEL_BYTES as f64 / 1_000_000.0
                 ));
-                ui.label("The upstream SegFormer weights are licensed for noncommercial research and evaluation. Continue only if that restriction fits your use.");
+                ui.label("The upstream MaskFormer project is licensed under CC BY-NC 4.0, which permits noncommercial use with attribution. Continue only if that restriction fits your use.");
                 ui.label("Inference is local. No photograph or selected category is uploaded.");
                 ui.label("When you continue, your device connects directly to Hugging Face. It receives connection data such as your IP address and request time under its privacy policy. AuRaw sends no account identifier or telemetry.");
                 ui.label(format!(
@@ -1898,13 +1898,13 @@ impl AurawApp {
                     );
                     ui.separator();
                     ui.hyperlink_to(
-                        "SegFormer license",
-                        "https://github.com/NVlabs/SegFormer",
+                        "MaskFormer license",
+                        "https://github.com/facebookresearch/MaskFormer/blob/main/LICENSE",
                     );
                     ui.separator();
                     ui.hyperlink_to(
                         "Model card",
-                        "https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512",
+                        "https://huggingface.co/onnx-community/maskformer-swin-base-ade",
                     );
                 });
                 #[cfg(not(target_os = "android"))]
@@ -1959,7 +1959,7 @@ impl AurawApp {
             .show(ctx, |ui| {
                 if let Some((downloaded, total)) = self.landscape_download_progress {
                     let fraction = downloaded as f32 / total.max(1) as f32;
-                    ui.label("Downloading SegFormer landscape model…");
+                    ui.label("Downloading MaskFormer landscape model…");
                     ui.add(
                         egui::ProgressBar::new(fraction)
                             .show_percentage()

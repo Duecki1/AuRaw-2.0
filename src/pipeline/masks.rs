@@ -123,7 +123,7 @@ impl LandscapeCategory {
         }
     }
 
-    /// Zero-based ADE20K semantic class IDs emitted by SegFormer.
+    /// Zero-based ADE20K semantic class IDs emitted by MaskFormer.
     pub const fn ade20k_class_ids(self) -> &'static [usize] {
         match self {
             Self::Sky => &[2],
