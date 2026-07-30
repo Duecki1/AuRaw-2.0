@@ -979,6 +979,7 @@ impl AurawApp {
         );
         self.notice = None;
         self.finish_background_task(task_id);
+        self.resume_persisted_ai_denoise(frame);
         self.egui_ctx.request_repaint();
     }
 

@@ -76,6 +76,17 @@ original LaMa model. The model repository identifies the model as licensed
 under the Apache License 2.0. AuRaw downloads it only after an explicit user
 choice and verifies it against a pinned SHA-256 digest before use.
 
+## RawNIND UtNet2
+
+Optional AI RAW denoise uses the `rawdenoise-nind` package published by
+[darktable-ai](https://github.com/darktable-org/darktable-ai). It contains the
+RawNIND UtNet2 Bayer joint-denoise/demosaic graph and the linear Rec.2020 graph
+used for X-Trans. AuRaw downloads the published darktable-ai 5.6 release asset
+only after explicit consent and pins the archive and extracted ONNX files by
+SHA-256. The model, its upstream implementation, and darktable-ai integration
+are licensed under GPL-3.0; RawNIND training photographs are published under CC
+BY 4.0 or CC0 as documented by the model card.
+
 ## Lensfun
 
 Lens correction uses the Lensfun library and its camera/lens profile database.

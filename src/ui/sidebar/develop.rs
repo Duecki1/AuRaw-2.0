@@ -397,9 +397,34 @@ impl Sidebar {
         changed
     }
 
-    fn show_detail(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
+    fn show_detail(
+        ui: &mut Ui,
+        exposure: &mut ExposureParams,
+        foldable: bool,
+    ) -> (bool, Option<bool>) {
         let mut changed = false;
+        let mut ai_request = None;
         Self::adjustment_section(ui, "Detail", false, foldable, |ui| {
+            let mut ai_enabled = exposure.ai_denoise_enabled;
+            let ai_response = ui.checkbox(&mut ai_enabled, "AI Denoise — RawNIND UtNet2");
+            if ai_response.changed() {
+                ai_request = Some(ai_enabled);
+            }
+            ai_response.on_hover_text(
+                "Runs the pinned darktable-ai RawNIND model locally. Bayer uses joint denoise/demosaic; X-Trans uses the linear Rec.2020 variant.",
+            );
+            ui.label(
+                egui::RichText::new(if exposure.ai_denoise_enabled {
+                    "Replaces standard luminance and color denoise; their saved values are retained."
+                } else {
+                    "Optional local neural RAW denoise. First use asks before downloading the models."
+                })
+                .size(10.5)
+                .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
             ui.label(
                 egui::RichText::new("Sensor-profiled noise reduction")
                     .strong()
@@ -412,63 +437,67 @@ impl Sidebar {
                 .size(10.5)
                 .color(ui.visuals().weak_text_color()),
             );
-            changed |= adjustment_slider(
-                ui,
-                "Luminance",
-                &mut exposure.luminance_denoise,
-                0.0..=100.0,
-                0,
-                1.0,
-                Some("Reduces shot/read noise using the RAW's estimated a·signal+b sensor model. Higher values can smooth fine texture."),
-            );
-            let mut color_percent = exposure.chroma_denoise.clamp(0.0, 1.0) * 100.0;
-            if adjustment_slider(
-                ui,
-                "Color",
-                &mut color_percent,
-                0.0..=100.0,
-                0,
-                1.0,
-                Some("Reduces color speckling while keeping luminance structure comparatively intact."),
-            ) {
-                exposure.chroma_denoise = color_percent / 100.0;
-                changed = true;
-            }
-            changed |= adjustment_slider(
-                ui,
-                "Denoise Detail",
-                &mut exposure.denoise_detail,
-                0.0..=100.0,
-                0,
-                1.0,
-                Some("Higher values protect edges and microtexture more strongly; lower values permit smoother denoising."),
-            );
-            let previous_quality = exposure.denoise_quality;
-            egui::ComboBox::from_label("Denoise Quality")
-                .selected_text(exposure.denoise_quality.label())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut exposure.denoise_quality,
-                        DenoiseQuality::Fast,
-                        DenoiseQuality::Fast.label(),
-                    );
-                    ui.selectable_value(
-                        &mut exposure.denoise_quality,
-                        DenoiseQuality::Balanced,
-                        DenoiseQuality::Balanced.label(),
-                    );
-                    ui.selectable_value(
-                        &mut exposure.denoise_quality,
-                        DenoiseQuality::High,
-                        DenoiseQuality::High.label(),
-                    );
-                });
-            ui.label(
-                egui::RichText::new("Fast: fine color scale · Balanced: 4 scales · High: 6 scales")
+            ui.add_enabled_ui(!exposure.ai_denoise_enabled, |ui| {
+                changed |= adjustment_slider(
+                    ui,
+                    "Luminance",
+                    &mut exposure.luminance_denoise,
+                    0.0..=100.0,
+                    0,
+                    1.0,
+                    Some("Reduces shot/read noise using the RAW's estimated a·signal+b sensor model. Higher values can smooth fine texture."),
+                );
+                let mut color_percent = exposure.chroma_denoise.clamp(0.0, 1.0) * 100.0;
+                if adjustment_slider(
+                    ui,
+                    "Color",
+                    &mut color_percent,
+                    0.0..=100.0,
+                    0,
+                    1.0,
+                    Some("Reduces color speckling while keeping luminance structure comparatively intact."),
+                ) {
+                    exposure.chroma_denoise = color_percent / 100.0;
+                    changed = true;
+                }
+                changed |= adjustment_slider(
+                    ui,
+                    "Denoise Detail",
+                    &mut exposure.denoise_detail,
+                    0.0..=100.0,
+                    0,
+                    1.0,
+                    Some("Higher values protect edges and microtexture more strongly; lower values permit smoother denoising."),
+                );
+                let previous_quality = exposure.denoise_quality;
+                egui::ComboBox::from_label("Denoise Quality")
+                    .selected_text(exposure.denoise_quality.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut exposure.denoise_quality,
+                            DenoiseQuality::Fast,
+                            DenoiseQuality::Fast.label(),
+                        );
+                        ui.selectable_value(
+                            &mut exposure.denoise_quality,
+                            DenoiseQuality::Balanced,
+                            DenoiseQuality::Balanced.label(),
+                        );
+                        ui.selectable_value(
+                            &mut exposure.denoise_quality,
+                            DenoiseQuality::High,
+                            DenoiseQuality::High.label(),
+                        );
+                    });
+                changed |= previous_quality != exposure.denoise_quality;
+                ui.label(
+                    egui::RichText::new(
+                        "Fast: fine color scale · Balanced: 4 scales · High: 6 scales",
+                    )
                     .size(10.0)
                     .color(ui.visuals().weak_text_color()),
-            );
-            changed |= previous_quality != exposure.denoise_quality;
+                );
+            });
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
@@ -514,7 +543,7 @@ impl Sidebar {
                 Some("Restricts sharpening to stronger luminance edges as the value increases, protecting flat areas and noise."),
             );
         });
-        changed
+        (changed, ai_request)
     }
 
     fn show_presence(

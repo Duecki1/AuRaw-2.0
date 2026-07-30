@@ -44,6 +44,7 @@ fn raw_controls_changed(before: &ExposureParams, after: &ExposureParams) -> bool
         || before.luminance_denoise != after.luminance_denoise
         || before.denoise_detail != after.denoise_detail
         || before.denoise_quality != after.denoise_quality
+        || before.ai_denoise_enabled != after.ai_denoise_enabled
         || before.demosaic_mode != after.demosaic_mode
         || before.dual_threshold != after.dual_threshold
         || before.frequency_chroma != after.frequency_chroma
@@ -123,6 +124,9 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         lens_geometry: (x == 0 && y == 0 && width == raw.width && height == raw.height)
             .then(|| raw.lens_geometry.clone())
             .flatten(),
+        ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(
+            crop_ai_denoised(raw, x, y, width, height),
+        )),
     }
 }
 
@@ -270,6 +274,9 @@ pub fn build_region_proxy(
             && region_height == raw.height)
             .then(|| raw.lens_geometry.clone())
             .flatten(),
+        ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(
+            proxy_ai_denoised(raw, x, y, region_width, region_height, width, height),
+        )),
     }
 }
 
@@ -300,6 +307,113 @@ fn nearest_cfa_sample(
     }
 
     (center_y * raw.width + center_x) as usize
+}
+
+fn crop_ai_denoised(
+    raw: &LoadedRaw,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Option<super::AiDenoisedImage> {
+    let source = raw.ai_denoised_image()?;
+    let elements = u64::from(width)
+        .checked_mul(u64::from(height))?
+        .checked_mul(3)
+        .and_then(|count| usize::try_from(count).ok())?;
+    let mut rgb16f = Vec::new();
+    rgb16f.try_reserve_exact(elements).ok()?;
+    for row in y..y + height {
+        let start = ((row * raw.width + x) * 3) as usize;
+        let end = start + width as usize * 3;
+        rgb16f.extend_from_slice(&source.rgb16f[start..end]);
+    }
+    super::AiDenoisedImage::new(width, height, rgb16f).ok()
+}
+
+fn proxy_ai_denoised(
+    raw: &LoadedRaw,
+    x: u32,
+    y: u32,
+    region_width: u32,
+    region_height: u32,
+    output_width: u32,
+    output_height: u32,
+) -> Option<super::AiDenoisedImage> {
+    let source = raw.ai_denoised_image()?;
+    let elements = u64::from(output_width)
+        .checked_mul(u64::from(output_height))?
+        .checked_mul(3)
+        .and_then(|count| usize::try_from(count).ok())?;
+    let mut rgb16f = vec![0u16; elements];
+    use half::f16;
+    rgb16f
+        .par_chunks_mut(output_width as usize * 3)
+        .enumerate()
+        .for_each(|(output_y, row)| {
+            let source_y0 =
+                y + ((output_y as u64 * u64::from(region_height)) / u64::from(output_height))
+                    as u32;
+            let source_y1 = y
+                + (((output_y as u64 + 1) * u64::from(region_height))
+                    .div_ceil(u64::from(output_height))) as u32;
+            let source_y1 = source_y1.min(y + region_height).max(source_y0 + 1);
+            for output_x in 0..output_width {
+                let source_x0 = x
+                    + ((u64::from(output_x) * u64::from(region_width))
+                        / u64::from(output_width)) as u32;
+                let source_x1 = x
+                    + ((u64::from(output_x + 1) * u64::from(region_width))
+                        .div_ceil(u64::from(output_width))) as u32;
+                let source_x1 = source_x1.min(x + region_width).max(source_x0 + 1);
+                let mut sum = [0.0f64; 3];
+                let mut count = 0u32;
+                for source_y in source_y0..source_y1 {
+                    for source_x in source_x0..source_x1 {
+                        let index = ((source_y * raw.width + source_x) * 3) as usize;
+                        for channel in 0..3 {
+                            sum[channel] +=
+                                f64::from(f16::from_bits(source.rgb16f[index + channel]).to_f32());
+                        }
+                        count += 1;
+                    }
+                }
+                let destination = output_x as usize * 3;
+                for channel in 0..3 {
+                    row[destination + channel] =
+                        f16::from_f32((sum[channel] / f64::from(count.max(1))) as f32).to_bits();
+                }
+            }
+        });
+    super::AiDenoisedImage::new(output_width, output_height, rgb16f).ok()
+}
+
+fn padded_tile_ai_denoised(
+    raw: &LoadedRaw,
+    tile: ExportTile,
+) -> Option<super::AiDenoisedImage> {
+    let source = raw.ai_denoised_image()?;
+    let elements = u64::from(tile.padded_width)
+        .checked_mul(u64::from(tile.padded_height))?
+        .checked_mul(3)
+        .and_then(|count| usize::try_from(count).ok())?;
+    let mut rgb16f = vec![0u16; elements];
+    let max_x = i64::from(raw.width.saturating_sub(1));
+    let max_y = i64::from(raw.height.saturating_sub(1));
+    for local_y in 0..tile.padded_height {
+        let source_y =
+            (i64::from(tile.global_origin_y) + i64::from(local_y)).clamp(0, max_y) as u32;
+        for local_x in 0..tile.padded_width {
+            let source_x =
+                (i64::from(tile.global_origin_x) + i64::from(local_x)).clamp(0, max_x) as u32;
+            let source_index = ((source_y * raw.width + source_x) * 3) as usize;
+            let destination_index =
+                ((local_y * tile.padded_width + local_x) * 3) as usize;
+            rgb16f[destination_index..destination_index + 3]
+                .copy_from_slice(&source.rgb16f[source_index..source_index + 3]);
+        }
+    }
+    super::AiDenoisedImage::new(tile.padded_width, tile.padded_height, rgb16f).ok()
 }
 
 /// Cumulative input support of every spatial stage used by an export tile.
@@ -519,6 +633,7 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
         // Export tiles use global coordinates for masks and are stitched back
         // into one native raster before the deferred lens map is applied.
         lens_geometry: None,
+        ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
     };
     fill_padded_tile(raw, tile, &mut tile_raw);
     tile_raw
@@ -546,6 +661,9 @@ pub fn extract_padded_tile_into(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mu
 }
 
 fn fill_padded_tile(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw) {
+    if let Ok(mut cached) = tile_raw.ai_denoised.write() {
+        *cached = padded_tile_ai_denoised(raw, tile);
+    }
     let width = tile.padded_width as usize;
     let height = tile.padded_height as usize;
     // Keep the reusable tile buffer fully allocated before row slices are taken.
@@ -596,8 +714,8 @@ mod tests {
         EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO,
     };
     use crate::pipeline::{
-        CameraProfile, CfaKind, CompactPixelMap, DenoiseQuality, ExposureParams, LoadedRaw,
-        MaskStack,
+        AiDenoisedImage, CameraProfile, CfaKind, CompactPixelMap, DenoiseQuality, ExposureParams,
+        LoadedRaw, MaskStack,
     };
 
     fn test_raw(width: u32, height: u32) -> LoadedRaw {
@@ -637,6 +755,7 @@ mod tests {
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
             lens_geometry: None,
+            ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -699,6 +818,64 @@ mod tests {
         assert_eq!(scratch.raw_pixels.len(), 30);
         assert_eq!(&scratch.raw_pixels[0..6], &[0, 0, 1, 2, 3, 3]);
         assert_eq!(&scratch.raw_pixels[24..30], &[8, 8, 9, 10, 11, 11]);
+    }
+
+    #[test]
+    fn ai_denoise_cache_tracks_crop_proxy_and_export_tile_geometry() {
+        use half::f16;
+
+        let raw = test_raw(4, 2);
+        let rgb16f = (0..8)
+            .flat_map(|pixel| {
+                let value = f16::from_f32(pixel as f32).to_bits();
+                [value; 3]
+            })
+            .collect();
+        raw.set_ai_denoised_image(AiDenoisedImage::new(4, 2, rgb16f).unwrap())
+            .unwrap();
+
+        let crop = crop_raw(&raw, 1, 0, 2, 2)
+            .ai_denoised_image()
+            .expect("crop retains aligned AI output");
+        let cropped_values = crop
+            .rgb16f
+            .chunks_exact(3)
+            .map(|pixel| f16::from_bits(pixel[0]).to_f32())
+            .collect::<Vec<_>>();
+        assert_eq!(cropped_values, vec![1.0, 2.0, 5.0, 6.0]);
+
+        let proxy = build_proxy(&raw, ProxySpec { max_edge: 2 })
+            .ai_denoised_image()
+            .expect("proxy derives AI output");
+        let proxy_values = proxy
+            .rgb16f
+            .chunks_exact(3)
+            .map(|pixel| f16::from_bits(pixel[0]).to_f32())
+            .collect::<Vec<_>>();
+        assert_eq!(proxy_values, vec![2.5, 4.5]);
+
+        let tile = extract_padded_tile(
+            &raw,
+            ExportTile {
+                core_x: 0,
+                core_y: 0,
+                core_width: 4,
+                core_height: 2,
+                local_core_x: 1,
+                local_core_y: 1,
+                padded_width: 6,
+                padded_height: 4,
+                global_origin_x: -1,
+                global_origin_y: -1,
+            },
+        )
+        .ai_denoised_image()
+        .expect("export tile retains aligned AI output");
+        assert_eq!(f16::from_bits(tile.rgb16f[0]).to_f32(), 0.0);
+        assert_eq!(
+            f16::from_bits(tile.rgb16f[tile.rgb16f.len() - 3]).to_f32(),
+            7.0
+        );
     }
 
     #[test]
@@ -830,6 +1007,7 @@ mod tests {
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
             lens_geometry: None,
+            ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
         };
 
         let cropped = crop_raw(&raw, 1, 1, 2, 2);
@@ -894,6 +1072,7 @@ mod tests {
             available_camera_profiles: Vec::new(),
             white_balance_model: None,
             lens_geometry: None,
+            ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
         };
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 4 });
