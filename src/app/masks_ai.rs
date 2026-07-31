@@ -231,6 +231,33 @@ impl AurawApp {
             || self.landscape_consent_open
     }
 
+    fn recover_terminal_ai_mask_task_owners(&mut self) {
+        let subject = self.subject_task_id.filter(|id| {
+            self.subject_receiver.is_none()
+                && self
+                    .background_tasks
+                    .snapshot(*id)
+                    .is_none_or(|task| task.status == TaskStatus::Failed)
+        });
+        let object = self.object_task_id.filter(|id| {
+            self.object_receiver.is_none()
+                && self
+                    .background_tasks
+                    .snapshot(*id)
+                    .is_none_or(|task| task.status == TaskStatus::Failed)
+        });
+        let landscape = self.landscape_task_id.filter(|id| {
+            self.landscape_receiver.is_none()
+                && self
+                    .background_tasks
+                    .snapshot(*id)
+                    .is_none_or(|task| task.status == TaskStatus::Failed)
+        });
+        for id in [subject, object, landscape].into_iter().flatten() {
+            self.clear_ai_mask_task_owner(id);
+        }
+    }
+
     pub(crate) fn ai_masks_need_update(&self) -> bool {
         self.ai_masks_need_update && !self.masks.masks.is_empty()
     }
@@ -384,7 +411,19 @@ impl AurawApp {
         }
     }
 
+    fn ai_runtime_ready(&mut self) -> bool {
+        #[cfg(not(target_os = "android"))]
+        {
+            self.validate_onnx_runtime_for_ai()
+        }
+        #[cfg(target_os = "android")]
+        {
+            true
+        }
+    }
+
     pub(crate) fn request_update_all_ai_masks(&mut self, frame: &eframe::Frame) {
+        self.recover_terminal_ai_mask_task_owners();
         if self.ai_mask_update_busy() {
             self.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
@@ -666,6 +705,7 @@ impl AurawApp {
     }
 
     pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
+        self.recover_terminal_ai_mask_task_owners();
         if let Some(mask) = self.subject_mask_cache.clone() {
             self.apply_subject_mask(mask);
             return;
@@ -684,6 +724,7 @@ impl AurawApp {
             self.start_subject_worker(path);
         } else {
             self.subject_consent_open = true;
+            self.egui_ctx.request_repaint();
         }
     }
 
@@ -911,6 +952,7 @@ impl AurawApp {
         mask_index: usize,
         component_index: usize,
     ) {
+        self.recover_terminal_ai_mask_task_owners();
         if self.landscape_task_id.is_some() || self.landscape_receiver.is_some() {
             self.notice = Some("Wait for the current landscape mask to finish.".to_owned());
             return;
@@ -1261,6 +1303,7 @@ impl AurawApp {
     }
 
     pub(crate) fn request_object_mask(&mut self, mask_index: usize, component_index: usize) {
+        self.recover_terminal_ai_mask_task_owners();
         self.object_error_dialog = None;
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
@@ -1301,6 +1344,7 @@ impl AurawApp {
         } else {
             self.object_pending_target = Some((mask_index, component_index));
             self.object_consent_open = true;
+            self.egui_ctx.request_repaint();
         }
     }
 
@@ -1913,7 +1957,9 @@ impl AurawApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Consent, download and continue").clicked() {
+                        if ui.button("Consent, download and continue").clicked()
+                            && self.ai_runtime_ready()
+                        {
                             self.subject_consent_open = false;
                             self.start_subject_worker(self.birefnet_model_path());
                         }
@@ -2030,7 +2076,9 @@ impl AurawApp {
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Consent, download and continue").clicked() {
+                    if ui.button("Consent, download and continue").clicked()
+                        && self.ai_runtime_ready()
+                    {
                         self.landscape_consent_open = false;
                         if let Some((mask_index, component_index)) =
                             self.landscape_pending_target.take()
@@ -2151,7 +2199,9 @@ impl AurawApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Consent, download and continue").clicked() {
+                        if ui.button("Consent, download and continue").clicked()
+                            && self.ai_runtime_ready()
+                        {
                             self.object_consent_open = false;
                             if let Some((mask_index, component_index)) = self.object_pending_target.take() {
                                 let (encoder, decoder) = self.sam21_model_paths();
