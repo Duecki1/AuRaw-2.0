@@ -52,6 +52,42 @@ def test_downloaded_model_is_size_and_sha256_pinned() -> None:
     assert "consent to its download again" in AI
 
 
+def test_large_ai_model_hashing_stays_off_the_ui_thread() -> None:
+    subject_request = APP[
+        APP.index("pub(crate) fn request_subject_mask"):
+        APP.index("fn start_subject_worker")
+    ]
+    object_request = APP[
+        APP.index("pub(crate) fn request_object_mask"):
+        APP.index("fn start_object_worker")
+    ]
+    runtime = (ROOT / "src/app/background_task_runtime.rs").read_text(encoding="utf-8")
+    subject_start = runtime[
+        runtime.index("fn start_subject_mask_task"):
+        runtime.index("fn start_object_mask_task")
+    ]
+    object_start = runtime[
+        runtime.index("fn start_object_mask_task"):
+    ]
+
+    assert "subject_models_are_verified" not in subject_request
+    assert "object_models_are_verified" not in object_request
+    assert "subject_models_are_verified" not in subject_start
+    assert "object_models_are_verified" not in object_start
+    assert ".is_file()" in subject_request
+    assert ".is_file()" in object_request
+    assert ".is_file()" in subject_start
+    assert ".is_file()" in object_start
+
+    # Exact size/SHA verification remains mandatory in the worker before use.
+    subject_worker = AI[AI.index("pub fn spawn_subject_mask"):AI.index("pub fn spawn_object_mask")]
+    object_worker = AI[AI.index("pub fn spawn_object_mask"):AI.index("fn infer_object_mask")]
+    assert "ensure_model(" in subject_worker
+    assert "ensure_vitmatte_model(" in subject_worker
+    assert "ensure_sam_model(" in object_worker
+    assert "ensure_vitmatte_model(" in object_worker
+
+
 def test_desktop_requires_runtime_before_model_download() -> None:
     assert "validate_onnx_runtime_for_ai" in APP
     request = APP[APP.index("pub(crate) fn request_subject_mask"):APP.index("fn start_subject_worker")]

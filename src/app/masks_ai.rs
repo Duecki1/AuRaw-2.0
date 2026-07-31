@@ -228,30 +228,6 @@ impl AurawApp {
             || self.object_consent_open
     }
 
-    fn recover_terminal_ai_mask_task_owners(&mut self) {
-        let subject = self.subject_task_id.filter(|id| {
-            self.subject_receiver.is_none()
-                && self
-                    .background_tasks
-                    .snapshot(*id)
-                    .is_none_or(|task| task.status == TaskStatus::Failed)
-        });
-        let object = self.object_task_id.filter(|id| {
-            self.object_receiver.is_none()
-                && self
-                    .background_tasks
-                    .snapshot(*id)
-                    .is_none_or(|task| task.status == TaskStatus::Failed)
-        });
-                && self
-                    .background_tasks
-                    .snapshot(*id)
-                    .is_none_or(|task| task.status == TaskStatus::Failed)
-        });
-            self.clear_ai_mask_task_owner(id);
-        }
-    }
-
     pub(crate) fn ai_masks_need_update(&self) -> bool {
         self.ai_masks_need_update && !self.masks.masks.is_empty()
     }
@@ -389,19 +365,7 @@ impl AurawApp {
         }
     }
 
-    fn ai_runtime_ready(&mut self) -> bool {
-        #[cfg(not(target_os = "android"))]
-        {
-            self.validate_onnx_runtime_for_ai()
-        }
-        #[cfg(target_os = "android")]
-        {
-            true
-        }
-    }
-
     pub(crate) fn request_update_all_ai_masks(&mut self, frame: &eframe::Frame) {
-        self.recover_terminal_ai_mask_task_owners();
         if self.ai_mask_update_busy() {
             self.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
@@ -470,7 +434,7 @@ impl AurawApp {
 
         if update_subject {
             let path = self.birefnet_model_path();
-            if crate::ai_masks::subject_models_are_verified(&path, &self.vitmatte_model_path()) {
+            if path.is_file() && self.vitmatte_model_path().is_file() {
                 self.start_subject_worker(path);
             } else {
                 self.subject_consent_open = true;
@@ -513,11 +477,7 @@ impl AurawApp {
             }
 
             let (encoder, decoder) = self.sam21_model_paths();
-            if crate::ai_masks::object_models_are_verified(
-                &encoder,
-                &decoder,
-                &self.vitmatte_model_path(),
-            ) {
+            if encoder.is_file() && decoder.is_file() && self.vitmatte_model_path().is_file() {
                 self.start_object_worker(mask_index, component_index, encoder, decoder);
             } else {
                 self.object_pending_target = Some((mask_index, component_index));
@@ -592,81 +552,118 @@ impl AurawApp {
         let program_template = self
             .gpu_pipeline
             .as_ref()
+            .map(RawGpuPipeline::program_template)
+            .or_else(|| self.preview_program_template.clone())
             .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
         let full_raw = self
             .loaded_raw
             .as_ref()
             .ok_or_else(|| "The original RAW is not available.".to_owned())?;
-        let source_edge = if cfg!(target_os = "android") {
-            2048
-        } else {
-            3072
-        };
-        let raw = if full_raw.width.max(full_raw.height) <= source_edge {
-            Arc::clone(full_raw)
-        } else {
-            Arc::new(build_proxy(
-                full_raw,
-                ProxySpec {
-                    max_edge: source_edge,
-                },
-            ))
-        };
 
-        // Subject, Object, and range classifiers must be stable when the user changes
-        // Exposure, Color, Effects, curves, grading, or local masks. Render a
-        // fresh canonical rendition from the unedited RAW proxy instead of
-        // reading the live edited output texture. Camera white balance,
-        // profile color, demosaic, and lens-corrected geometry are retained so
-        // the model sees a natural image that remains pixel-aligned with the
-        // preview and export. A dedicated 2048/3072-edge proxy preserves much
-        // finer boundary guidance than the 1024px model input while keeping
-        // inference memory bounded and independent of Preview Quality.
-        let reference_exposure = ExposureParams::scene_referred_default();
-        let reference_masks = MaskStack::default();
-        let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
-        let reference_pipeline = RawGpuPipeline::new_headless_reusing_programs(
-            &render_state.device,
-            &render_state.queue,
-            &raw,
-            &params,
-            ProcessingQuality::Preview,
-            program_template,
-        )
-        .map_err(|error| format!("Could not prepare the original RAW for masking: {error:#}"))?;
-        reference_pipeline
-            .update_inpaint_layer(
-                &render_state.queue,
-                self.inpaint_layer.as_ref(),
-                0,
-                0,
-                raw.width,
-                raw.height,
-            )
-            .map_err(|error| format!("Could not prepare erased pixels for masking: {error:#}"))?;
-        reference_pipeline.recompute(&render_state.queue, &render_state.device, &params);
-        let rgba = reference_pipeline
-            .read_output_region_blocking(
+        // A DPI-sized Android preview can coexist poorly with a second 2048px
+        // render graph under the fixed mobile GPU budget. The ONNX models use
+        // at most a 1024px image (and ViTMatte uses 768px on Android), so only
+        // reduce this canonical source proxy when the larger graph cannot be
+        // admitted instead of failing the complete AI-mask operation.
+        const ANDROID_SOURCE_EDGES: &[u32] = &[2048, 1536, 1280, 1024];
+        const DESKTOP_SOURCE_EDGES: &[u32] = &[3072];
+        let source_edges = if cfg!(target_os = "android") {
+            ANDROID_SOURCE_EDGES
+        } else {
+            DESKTOP_SOURCE_EDGES
+        };
+        let mut last_budget_error = None;
+
+        for &source_edge in source_edges {
+            let raw = if full_raw.width.max(full_raw.height) <= source_edge {
+                Arc::clone(full_raw)
+            } else {
+                Arc::new(build_proxy(
+                    full_raw,
+                    ProxySpec {
+                        max_edge: source_edge,
+                    },
+                ))
+            };
+
+            // Subject, Object, and range classifiers must be stable when the
+            // user changes edits. Render a fresh canonical rendition from the
+            // unedited RAW proxy while retaining camera color, demosaic, and
+            // lens-corrected geometry for model quality and pixel alignment.
+            let reference_exposure = ExposureParams::scene_referred_default();
+            let reference_masks = MaskStack::default();
+            let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
+            let reference_pipeline = match RawGpuPipeline::new_headless_reusing_program_template(
                 &render_state.device,
                 &render_state.queue,
-                0,
-                0,
+                &raw,
+                &params,
+                ProcessingQuality::Preview,
+                &program_template,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(error)
+                    if cfg!(target_os = "android")
+                        && error
+                            .to_string()
+                            .contains("GPU pipelines already reserve") =>
+                {
+                    crate::diagnostics::record(format!(
+                        "Canonical AI-mask source at {source_edge}px exceeded the Android GPU coexistence budget; retrying smaller: {error:#}"
+                    ));
+                    last_budget_error = Some(error);
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Could not prepare the original RAW for masking: {error:#}"
+                    ));
+                }
+            };
+            reference_pipeline
+                .update_inpaint_layer(
+                    &render_state.queue,
+                    self.inpaint_layer.as_ref(),
+                    0,
+                    0,
+                    raw.width,
+                    raw.height,
+                )
+                .map_err(|error| {
+                    format!("Could not prepare erased pixels for masking: {error:#}")
+                })?;
+            reference_pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            let rgba = reference_pipeline
+                .read_output_region_blocking(
+                    &render_state.device,
+                    &render_state.queue,
+                    0,
+                    0,
+                    reference_pipeline.width,
+                    reference_pipeline.height,
+                )
+                .map_err(|error| {
+                    format!("Could not read the original RAW for masking: {error:#}")
+                })?;
+            let source = MaskRgbImage::new(
                 reference_pipeline.width,
                 reference_pipeline.height,
+                rgba,
             )
-            .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
-        let source = MaskRgbImage::new(
-            reference_pipeline.width,
-            reference_pipeline.height,
-            rgba,
-        )
-        .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
-        self.mask_source_cache = Some(source);
-        Ok(())
+            .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
+            self.mask_source_cache = Some(source);
+            return Ok(());
+        }
+
+        let detail = last_budget_error
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_else(|| "unknown GPU budget failure".to_owned());
+        Err(format!(
+            "Could not prepare the original RAW for masking within Android's GPU budget: {detail}"
+        ))
     }
 
     pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
-        self.recover_terminal_ai_mask_task_owners();
         if let Some(mask) = self.subject_mask_cache.clone() {
             self.apply_subject_mask(mask);
             return;
@@ -681,11 +678,10 @@ impl AurawApp {
         }
         let path = self.birefnet_model_path();
         let vitmatte = self.vitmatte_model_path();
-        if crate::ai_masks::subject_models_are_verified(&path, &vitmatte) {
+        if path.is_file() && vitmatte.is_file() {
             self.start_subject_worker(path);
         } else {
             self.subject_consent_open = true;
-            self.egui_ctx.request_repaint();
         }
     }
 
@@ -725,10 +721,11 @@ impl AurawApp {
         }) {
             self.start_subject_mask_task(task_id, request);
         } else {
-            let needs_download = !crate::ai_masks::subject_models_are_verified(
-                &request.model_path,
-                &request.vitmatte_path,
-            );
+            // Full SHA-256 verification belongs in the worker. Hashing the
+            // 328 MB subject model set here blocks Android's UI thread long
+            // enough to look like a hung mask operation.
+            let needs_download =
+                !request.model_path.is_file() || !request.vitmatte_path.is_file();
             if needs_download {
                 let task_id = self.enqueue_background_action(
                     TaskKind::SubjectMask {
@@ -1070,7 +1067,6 @@ impl AurawApp {
     }
 
     pub(crate) fn request_object_mask(&mut self, mask_index: usize, component_index: usize) {
-        self.recover_terminal_ai_mask_task_owners();
         self.object_error_dialog = None;
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
@@ -1102,16 +1098,11 @@ impl AurawApp {
             return;
         }
         let (encoder, decoder) = self.sam21_model_paths();
-        if crate::ai_masks::object_models_are_verified(
-            &encoder,
-            &decoder,
-            &self.vitmatte_model_path(),
-        ) {
+        if encoder.is_file() && decoder.is_file() && self.vitmatte_model_path().is_file() {
             self.start_object_worker(mask_index, component_index, encoder, decoder);
         } else {
             self.object_pending_target = Some((mask_index, component_index));
             self.object_consent_open = true;
-            self.egui_ctx.request_repaint();
         }
     }
 
@@ -1224,11 +1215,12 @@ impl AurawApp {
         if let Some(task_id) = library_task {
             self.start_object_mask_task(task_id, request);
         } else {
-            let needs_download = !crate::ai_masks::object_models_are_verified(
-                &request.encoder_path,
-                &request.decoder_path,
-                &request.vitmatte_path,
-            );
+            // The object worker verifies every model before loading it.
+            // Keep this UI-thread decision metadata-only on Android/mobile
+            // storage instead of synchronously hashing the complete model set.
+            let needs_download = !request.encoder_path.is_file()
+                || !request.decoder_path.is_file()
+                || !request.vitmatte_path.is_file();
             if needs_download {
                 let task_id = self.enqueue_background_action(
                     TaskKind::ObjectMask {

@@ -49,7 +49,7 @@ static VITMATTE_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(not(target_os = "android"))]
-type RuntimeProbeResult = (PathBuf, String);
+type RuntimeProbeResult = (PathBuf, String, Option<String>);
 #[cfg(not(target_os = "android"))]
 static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
 
@@ -319,9 +319,12 @@ pub(crate) fn probe_runtime_subprocess(runtime_path: &Path, expected_sha256: &st
         let cached = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("ONNX Runtime probe cache lock was poisoned"))?;
-        if let Some((cached_path, cached_sha256)) = cached.as_ref() {
+        if let Some((cached_path, cached_sha256, cached_error)) = cached.as_ref() {
             if cached_path == &runtime_path && cached_sha256 == expected_sha256 {
-                return Ok(());
+                return match cached_error {
+                    Some(error) => Err(anyhow::anyhow!(error.clone())),
+                    None => Ok(()),
+                };
             }
         }
     }
@@ -339,21 +342,23 @@ pub(crate) fn probe_runtime_subprocess(runtime_path: &Path, expected_sha256: &st
                 executable.display()
             )
         })?;
-    if !status.success() {
-        // A probe process can fail for transient operating-system reasons
-        // (startup races, security scanners, temporary resource pressure).
-        // Never cache a negative result: doing so disables every desktop AI
-        // tool until AuRaw is restarted even when the next probe would work.
-        anyhow::bail!(
+    let error = if status.success() {
+        None
+    } else {
+        Some(format!(
             "the selected ONNX Runtime failed AuRaw's isolated compatibility probe ({status}). Use a matching native {} ONNX Runtime DLL; on Windows the standard CPU package is the safest choice",
             std::env::consts::ARCH
-        );
-    }
+        ))
+    };
+    let result = match &error {
+        Some(error) => Err(anyhow::anyhow!(error.clone())),
+        None => Ok(()),
+    };
     let mut cached = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("ONNX Runtime probe cache lock was poisoned"))?;
-    *cached = Some((runtime_path, expected_sha256.to_owned()));
-    Ok(())
+    *cached = Some((runtime_path, expected_sha256.to_owned(), error));
+    result
 }
 
 #[cfg(not(target_os = "android"))]
