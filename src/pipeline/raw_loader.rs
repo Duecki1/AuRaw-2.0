@@ -215,6 +215,13 @@ impl<T> CompactPixelMap<T> {
     pub fn iter(&self) -> CompactPixelMapIter<'_, T> {
         CompactPixelMapIter { map: self, next: 0 }
     }
+
+    /// Compact backing storage used when fingerprinting runtime-derived data.
+    /// Including the stored shape distinguishes a dense map from a repeating
+    /// map without materializing either map at full image resolution.
+    pub(crate) fn storage_parts(&self) -> (u32, u32, &[T]) {
+        (self.storage_width, self.storage_height, &self.values)
+    }
 }
 
 impl<T: Copy> CompactPixelMap<T> {
@@ -522,6 +529,41 @@ impl LoadedRaw {
             .as_ref()
             .map(|model| model.base_cct)
             .filter(|temperature| temperature.is_finite() && *temperature > 0.0)
+    }
+
+    /// RawNIND's published Bayer weights were trained with a D65/daylight
+    /// white balance. Return camera-channel multipliers normalized to green,
+    /// falling back to the as-shot multipliers when a colour matrix is absent.
+    pub(crate) fn rawnind_daylight_white_balance(&self) -> [f32; 3] {
+        #[cfg(libraw_available)]
+        if let Some(model) = &self.white_balance_model {
+            if let Some(daylight) = libraw_loader::daylight_white_balance(model) {
+                return daylight;
+            }
+        }
+
+        let green = [self.wb_coeffs[1], self.wb_coeffs[3]]
+            .into_iter()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .fold((0.0, 0u32), |(sum, count), value| (sum + value, count + 1));
+        let green = if green.1 > 0 {
+            green.0 / green.1 as f32
+        } else {
+            1.0
+        };
+        let normalize = |value: f32| {
+            let value = value / green.max(1e-8);
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                1.0
+            }
+        };
+        [
+            normalize(self.wb_coeffs[0]),
+            1.0,
+            normalize(self.wb_coeffs[2]),
+        ]
     }
 
     /// Returns the camera-to-working transform and DCP blend for a relative
