@@ -11,6 +11,22 @@ use std::{
 };
 
 impl AurawApp {
+    fn discard_ai_preview_caches(&mut self) {
+        for texture_id in [
+            self.preview_detail
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+            self.preview_navigation
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.retire_egui_texture(texture_id);
+        }
+    }
+
     fn rawnind_model_dir(&self) -> PathBuf {
         #[cfg(target_os = "android")]
         {
@@ -31,7 +47,7 @@ impl AurawApp {
             self.android_app
                 .internal_data_path()
                 .unwrap_or_else(std::env::temp_dir)
-                .join("ai-denoise-results-v1")
+                .join("ai-denoise-results-v2")
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -41,7 +57,7 @@ impl AurawApp {
                 .and_then(std::path::Path::parent)
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(std::env::temp_dir)
-                .join("ai-denoise-results-v1")
+                .join("ai-denoise-results-v2")
         }
     }
 
@@ -73,8 +89,21 @@ impl AurawApp {
             if let Some(cancellation) = &self.ai_denoise_cancellation {
                 cancellation.store(true, Ordering::Release);
             }
+            let changed = self.exposure.ai_denoise_enabled;
             self.exposure.ai_denoise_enabled = false;
-            self.mark_pipeline_dirty();
+            self.target_exposure.ai_denoise_enabled = false;
+            // Bayer AI denoise now supplies the pipeline's CFA texture. A
+            // normal stage update cannot swap that immutable source texture,
+            // so disabling it must rebuild the preview from the original RAW.
+            self.preview_quality_dirty = true;
+            self.discard_ai_preview_caches();
+            self.pending_stage = None;
+            self.preview_detail_pending_stage = None;
+            self.navigation_pending_stage = None;
+            if changed {
+                self.note_edit_changed();
+            }
+            self.egui_ctx.request_repaint();
             return;
         }
         if self.ai_denoise_receiver.is_some() {
@@ -95,8 +124,7 @@ impl AurawApp {
             self.exposure.ai_denoise_enabled = true;
             self.note_edit_changed();
             self.preview_quality_dirty = true;
-            self.preview_detail = None;
-            self.preview_navigation = None;
+            self.discard_ai_preview_caches();
             return;
         }
         let saved_result_exists = self
@@ -156,17 +184,17 @@ impl AurawApp {
             return;
         };
         raw.clear_ai_denoised_image();
-        // Bayer follows darktable's remosaic-then-demosaic contract using one
-        // temporary high-quality GPU tile pipeline. Release optional zoom and
-        // navigation pipelines first so the fixed GPU resource budget remains
-        // available while the modal operation is running.
+        // RawNIND's tensors and the full-resolution blended CFA have a large
+        // temporary memory peak. Release disposable preview graphs while the
+        // worker runs so Android does not retain display-sized GPU surfaces on
+        // top of that peak. Bayer inference itself no longer needs a GPU
+        // demosaic pipeline.
         #[cfg(target_os = "android")]
         {
-            // RawNIND owns a 512px high-quality GPU tile pipeline in addition
-            // to ONNX Runtime's tensors. Keeping a DPI-sized preview resident
-            // at the same time can exceed mobile GPU budgets before inference
-            // even starts. Retire every preview texture and rebuild it after
-            // every success, failure, or cancellation path below.
+            // Keeping a DPI-sized preview resident alongside ONNX Runtime's
+            // tensors can exceed the mobile process budget. Retire every
+            // preview texture and rebuild it after every success, failure, or
+            // cancellation path below.
             let previous_pipeline = {
                 let mut renderer = render_state.renderer.write();
                 self.take_preview_pipeline_and_release_textures(&mut renderer)
@@ -236,8 +264,15 @@ impl AurawApp {
         ));
         self.ai_denoise_cancellation = Some(cancellation);
         self.ai_denoise_job_document_id = self.sidecar_generation;
+        let changed = !self.exposure.ai_denoise_enabled;
         self.exposure.ai_denoise_enabled = true;
         self.target_exposure.ai_denoise_enabled = true;
+        if changed {
+            // This is the semantic toggle transaction. Persist it once here;
+            // reopening an already-enabled sidecar reaches this path with
+            // `changed == false` and therefore does not create another edit.
+            self.note_edit_changed();
+        }
         crate::diagnostics::record(format!(
             "RawNIND worker started for document {} on {}",
             self.ai_denoise_job_document_id,
@@ -300,8 +335,7 @@ impl AurawApp {
         // released the preview. Keep this one terminal transaction for every
         // path so the UI can never remain blank after the worker exits.
         self.preview_quality_dirty = true;
-        self.preview_detail = None;
-        self.preview_navigation = None;
+        self.discard_ai_preview_caches();
         self.pending_stage = None;
         self.preview_detail_pending_stage = None;
         self.navigation_pending_stage = None;
@@ -324,8 +358,12 @@ impl AurawApp {
                         );
                     }
                     Err(error) => {
+                        let changed = self.exposure.ai_denoise_enabled;
                         self.exposure.ai_denoise_enabled = false;
                         self.target_exposure.ai_denoise_enabled = false;
+                        if changed {
+                            self.note_edit_changed();
+                        }
                         self.notice = Some(format!("Could not install AI denoise: {error:#}"));
                     }
                 }
@@ -336,8 +374,12 @@ impl AurawApp {
                 self.target_exposure.ai_denoise_enabled = false;
             }
             Err(error) => {
+                let changed = self.exposure.ai_denoise_enabled;
                 self.exposure.ai_denoise_enabled = false;
                 self.target_exposure.ai_denoise_enabled = false;
+                if changed {
+                    self.note_edit_changed();
+                }
                 if !error.contains("cancelled") {
                     self.notice = Some(format!("AI denoise failed: {error}"));
                 }

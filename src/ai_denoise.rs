@@ -39,9 +39,9 @@ const OVERLAP: usize = 64;
 const CORE_EDGE: usize = TILE_EDGE - 2 * OVERLAP;
 const MAX_MODEL_ABS: f32 = 60_000.0;
 const RESULT_CACHE_MAGIC: [u8; 8] = *b"AURAWAI\0";
-const RESULT_CACHE_VERSION: u32 = 1;
+const RESULT_CACHE_VERSION: u32 = 2;
 const RESULT_CACHE_MANIFEST: &str = "manifest.bin";
-const RESULT_CACHE_PAYLOAD: &str = "scene-rgb16f.bin";
+const RESULT_CACHE_PAYLOAD: &str = "denoised-pixels.bin";
 const RESULT_CACHE_HEADER_BYTES: usize = 96;
 const RESULT_CACHE_IO_CHUNK: usize = 1024 * 1024;
 static NEXT_RESULT_CACHE_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
@@ -115,9 +115,13 @@ pub(crate) fn load_result_cache(path: &Path, raw: &LoadedRaw) -> Result<Option<A
         manifest.cfa_kind == cfa_cache_code(raw.cfa_kind),
         "AI-denoise cache CFA type does not match the RAW"
     );
+    let channels = match raw.cfa_kind {
+        CfaKind::Bayer => 1,
+        CfaKind::XTrans => 3,
+    };
     let expected_elements = u64::from(raw.width)
         .checked_mul(u64::from(raw.height))
-        .and_then(|pixels| pixels.checked_mul(3))
+        .and_then(|pixels| pixels.checked_mul(channels))
         .and_then(|elements| usize::try_from(elements).ok())
         .context("AI-denoise cache dimensions overflow")?;
     let expected_bytes = expected_elements
@@ -132,7 +136,7 @@ pub(crate) fn load_result_cache(path: &Path, raw: &LoadedRaw) -> Result<Option<A
         "AI-denoise cache belongs to a different RAW reconstruction"
     );
 
-    let mut rgb16f = vec![0u16; expected_elements];
+    let mut payload = vec![0u16; expected_elements];
     {
         let mut entry = archive
             .by_name(RESULT_CACHE_PAYLOAD)
@@ -142,7 +146,7 @@ pub(crate) fn load_result_cache(path: &Path, raw: &LoadedRaw) -> Result<Option<A
             "AI-denoise cache scene payload has an unexpected size"
         );
         entry
-            .read_exact(bytemuck::cast_slice_mut(&mut rgb16f))
+            .read_exact(bytemuck::cast_slice_mut(&mut payload))
             .context("read AI-denoise cache scene payload")?;
         let mut trailing = [0u8; 1];
         anyhow::ensure!(
@@ -150,12 +154,16 @@ pub(crate) fn load_result_cache(path: &Path, raw: &LoadedRaw) -> Result<Option<A
             "AI-denoise cache scene payload contains trailing data"
         );
     }
-    let actual_payload = ring::digest::digest(&SHA256, bytemuck::cast_slice(&rgb16f));
+    let actual_payload = ring::digest::digest(&SHA256, bytemuck::cast_slice(&payload));
     anyhow::ensure!(
         actual_payload.as_ref() == manifest.payload_sha256,
         "AI-denoise cache scene checksum does not match"
     );
-    AiDenoisedImage::new(raw.width, raw.height, rgb16f).map(Some)
+    match raw.cfa_kind {
+        CfaKind::Bayer => AiDenoisedImage::new_bayer_cfa(raw.width, raw.height, payload),
+        CfaKind::XTrans => AiDenoisedImage::new(raw.width, raw.height, payload),
+    }
+    .map(Some)
 }
 
 pub(crate) fn save_result_cache(
@@ -170,7 +178,11 @@ pub(crate) fn save_result_cache(
     );
     ensure_not_cancelled(cancellation)?;
     let source_sha256 = source_fingerprint(raw, Some(cancellation))?;
-    let payload = bytemuck::cast_slice(image.rgb16f.as_ref());
+    anyhow::ensure!(
+        matches!(raw.cfa_kind, CfaKind::Bayer) == image.bayer_cfa().is_some(),
+        "cannot cache an AI-denoise payload for a different CFA type"
+    );
+    let payload = bytemuck::cast_slice(image.payload());
     let payload_sha256 = digest_cancelable(payload, Some(cancellation))?;
     let manifest = ResultCacheManifest {
         width: raw.width,
@@ -440,12 +452,6 @@ pub fn spawn_rawnind_denoise(
                         CfaKind::Bayer => infer_bayer(
                             &model_dir.join("model_bayer.onnx"),
                             &raw,
-                            device
-                                .as_ref()
-                                .context("Bayer AI denoise requires AuRaw's wgpu device")?,
-                            queue
-                                .as_ref()
-                                .context("Bayer AI denoise requires AuRaw's wgpu queue")?,
                             &worker_sender,
                             &cancellation,
                         ),
@@ -789,8 +795,6 @@ fn run_model_tile(
 fn infer_bayer(
     model_path: &Path,
     raw: &LoadedRaw,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
     events: &mpsc::Sender<AiDenoiseEvent>,
     cancellation: &AtomicBool,
 ) -> Result<AiDenoisedImage> {
@@ -806,20 +810,15 @@ fn infer_bayer(
     let total_tiles = tiles_x * tiles_y;
     let output_elements = u64::from(raw.width)
         .checked_mul(u64::from(raw.height))
-        .and_then(|pixels| pixels.checked_mul(3))
         .and_then(|elements| usize::try_from(elements).ok())
         .context("RawNIND Bayer output dimensions overflow")?;
-    let mut stored = vec![0u16; output_elements];
+    // Accumulate one denoised value per photosite. Keeping the model result as
+    // CFA until the interactive/export pipeline is the crucial contract: the
+    // full image is highlight-reconstructed and demosaicked only once, after
+    // all tiles have been blended, and those stages remain responsive to edits.
+    let mut normalized_cfa = vec![0.0f32; output_elements];
     let mut session = create_bayer_session(model_path)?;
     let model_white_balance = raw.rawnind_daylight_white_balance();
-    let mut neutral = ExposureParams::scene_referred_default();
-    neutral.ai_denoise_enabled = false;
-    neutral.luminance_denoise = 0.0;
-    neutral.chroma_denoise = 0.0;
-    neutral.ca_red = 0.0;
-    neutral.ca_blue = 0.0;
-    let masks = MaskStack::default();
-    let mut demosaic_pipeline: Option<RawGpuPipeline> = None;
     for tile_y in 0..tiles_y {
         for tile_x in 0..tiles_x {
             ensure_not_cancelled(cancellation)?;
@@ -859,24 +858,7 @@ fn infer_bayer(
             let mut output = run_model_tile(&mut session, 4, input.clone(), TILE_EDGE * 2)?;
             match_gain_tile(&input, &mut output)?;
             let output_edge = TILE_EDGE * 2;
-            let remosaicked =
-                remosaic_bayer_model_tile(raw, &output, output_edge, model_white_balance)?;
-            let params = GpuParams::new(&neutral, &masks, &remosaicked);
-            if let Some(existing) = &demosaic_pipeline {
-                existing.upload_raw_tile(queue, &remosaicked)?;
-            } else {
-                demosaic_pipeline = Some(RawGpuPipeline::new_headless_with_quality(
-                    device,
-                    queue,
-                    &remosaicked,
-                    &params,
-                    ProcessingQuality::High,
-                )?);
-            }
-            let camera = demosaic_pipeline
-                .as_ref()
-                .context("Bayer remosaic pipeline was not created")?
-                .render_camera_scene_blocking(device, queue, &params)?;
+            let output_plane = output_edge * output_edge;
             let sensor_overlap = OVERLAP * 2;
             let core_start_x = origin_x as usize + core_x * 2;
             let core_start_y = origin_y as usize + core_y * 2;
@@ -921,7 +903,7 @@ fn infer_bayer(
                     has_bottom,
                 );
                 for destination_x in extended_start_x..extended_end_x {
-                    let destination = (destination_y * raw.width as usize + destination_x) * 3;
+                    let destination = destination_y * raw.width as usize + destination_x;
                     let model_x = sensor_overlap + destination_x - core_start_x;
                     let model_index = model_y * output_edge + model_x;
                     let weight_x = seam_weight(
@@ -932,17 +914,18 @@ fn infer_bayer(
                         has_left,
                         has_right,
                     );
-                    accumulate_half_rgb(
-                        &mut stored,
-                        destination,
-                        [
-                            camera[model_index * 3],
-                            camera[model_index * 3 + 1],
-                            camera[model_index * 3 + 2],
-                        ],
-                        weight_x * weight_y,
-                        "RawNIND Bayer remosaic/demosaic",
-                    )?;
+                    let channel = match raw.color_indices[destination] {
+                        0 => 0,
+                        2 => 2,
+                        _ => 1,
+                    };
+                    let value =
+                        output[channel * output_plane + model_index] / model_white_balance[channel];
+                    anyhow::ensure!(
+                        value.is_finite(),
+                        "RawNIND Bayer remosaic produced a non-finite value"
+                    );
+                    normalized_cfa[destination] += value.clamp(0.0, 1.0) * weight_x * weight_y;
                 }
             }
             let completed = tile_y * tiles_x + tile_x + 1;
@@ -955,7 +938,7 @@ fn infer_bayer(
     }
 
     fill_bayer_crop_edges(
-        &mut stored,
+        &mut normalized_cfa,
         raw.width,
         raw.height,
         origin_x,
@@ -963,7 +946,80 @@ fn infer_bayer(
         packed_width * 2,
         packed_height * 2,
     );
-    AiDenoisedImage::new(raw.width, raw.height, stored)
+    // RawNIND can regress a saturated photosite slightly below one. If that
+    // value replaced the sensor code verbatim, the downstream highlight stage
+    // would lose the fact that the channel clipped and could reveal a false
+    // pink/magenta model ratio when Exposure is reduced. Retain the original
+    // high-SNR shoulder, with a smooth neighbourhood guard around actual
+    // clipping. Noise reduction is preserved throughout shadows and midtones.
+    const CLIP_THRESHOLD: f32 = 0.98;
+    const HIGH_SNR_SHOULDER_START: f32 = 0.72;
+    const CLIP_CORE_RADIUS: u8 = 4;
+    const CLIP_FEATHER_RADIUS: u8 = 32;
+    let width = raw.width as usize;
+    let height = raw.height as usize;
+    let mut clip_distance = vec![u8::MAX; output_elements];
+    for y in 0..height {
+        for x in 0..width {
+            if normalized_sensor_site(raw, x as u32, y as u32) >= CLIP_THRESHOLD {
+                clip_distance[y * width + x] = 0;
+            }
+        }
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let mut distance = clip_distance[index];
+            if x > 0 {
+                distance = distance.min(clip_distance[index - 1].saturating_add(1));
+            }
+            if y > 0 {
+                distance = distance.min(clip_distance[index - width].saturating_add(1));
+            }
+            clip_distance[index] = distance;
+        }
+    }
+    for y in (0..height).rev() {
+        for x in (0..width).rev() {
+            let index = y * width + x;
+            let mut distance = clip_distance[index];
+            if x + 1 < width {
+                distance = distance.min(clip_distance[index + 1].saturating_add(1));
+            }
+            if y + 1 < height {
+                distance = distance.min(clip_distance[index + width].saturating_add(1));
+            }
+            clip_distance[index] = distance;
+        }
+    }
+    let mut stored = vec![0u16; output_elements];
+    for (index, destination) in stored.iter_mut().enumerate() {
+        let cfa = raw.color_indices[index] as usize;
+        let black = raw.black_levels_per_pixel[index];
+        let white = raw.white_levels[cfa].max(black + 1.0);
+        let original = ((f32::from(raw.raw_pixels[index]) - black) / (white - black))
+            .clamp(0.0, 1.0);
+        let distance = clip_distance[index];
+        let proximity = if distance <= CLIP_CORE_RADIUS {
+            1.0
+        } else if distance < CLIP_FEATHER_RADIUS {
+            let t = f32::from(CLIP_FEATHER_RADIUS - distance)
+                / f32::from(CLIP_FEATHER_RADIUS - CLIP_CORE_RADIUS);
+            t * t * (3.0 - 2.0 * t)
+        } else {
+            0.0
+        };
+        let shoulder_t = ((original - HIGH_SNR_SHOULDER_START)
+            / (CLIP_THRESHOLD - HIGH_SNR_SHOULDER_START))
+            .clamp(0.0, 1.0);
+        let shoulder = shoulder_t * shoulder_t * (3.0 - 2.0 * shoulder_t);
+        let source_weight = proximity.max(shoulder);
+        let normalized = normalized_cfa[index].clamp(0.0, 1.0) * (1.0 - source_weight)
+            + original * source_weight;
+        let code = black + normalized * (white - black);
+        *destination = code.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+    }
+    AiDenoisedImage::new_bayer_cfa(raw.width, raw.height, stored)
 }
 
 /// RawNIND's Bayer graph produces three-channel camera RGB, but darktable's
@@ -972,57 +1028,7 @@ fn infer_bayer(
 /// result and runs the ordinary demosaic stage. Besides preserving the normal
 /// RAW pipeline contract, that step prevents small independent RGB edge
 /// offsets in the neural output from becoming visible colour fringes.
-fn remosaic_bayer_model_tile(
-    source: &LoadedRaw,
-    model_rgb: &[f32],
-    edge: usize,
-    model_white_balance: [f32; 3],
-) -> Result<LoadedRaw> {
-    anyhow::ensure!(
-        edge == TILE_EDGE * 2,
-        "RawNIND remosaic received an unexpected model tensor"
-    );
-    let (raw_pixels, color_indices) = remosaic_bayer_pixels(model_rgb, edge, model_white_balance)?;
-    Ok(LoadedRaw {
-        width: edge as u32,
-        height: edge as u32,
-        camera_make: source.camera_make.clone(),
-        camera_model: source.camera_model.clone(),
-        lens_make: source.lens_make.clone(),
-        lens_model: source.lens_model.clone(),
-        focal_length: source.focal_length,
-        aperture: source.aperture,
-        focus_distance: source.focus_distance,
-        capture_metadata: source.capture_metadata.clone(),
-        cfa_kind: CfaKind::Bayer,
-        raw_pixels,
-        color_indices: CompactPixelMap::compact_from_dense(
-            edge as u32,
-            edge as u32,
-            color_indices,
-            64,
-        ),
-        wb_coeffs: source.wb_coeffs,
-        cam_to_srgb: source.cam_to_srgb,
-        black_levels: [0.0; 4],
-        black_levels_per_pixel: CompactPixelMap::repeating(
-            edge as u32,
-            edge as u32,
-            1,
-            1,
-            vec![0.0],
-        ),
-        white_levels: [65_535.0; 4],
-        noise_profile: source.noise_profile,
-        camera_profile: source.camera_profile.clone(),
-        camera_profile_source: source.camera_profile_source.clone(),
-        available_camera_profiles: source.available_camera_profiles.clone(),
-        white_balance_model: source.white_balance_model.clone(),
-        lens_geometry: None,
-        ai_denoised: Arc::new(RwLock::new(None)),
-    })
-}
-
+#[cfg(test)]
 fn remosaic_bayer_pixels(
     model_rgb: &[f32],
     edge: usize,
@@ -1342,7 +1348,7 @@ fn accumulate_half_rgb(
 }
 
 fn fill_bayer_crop_edges(
-    values: &mut [u16],
+    values: &mut [f32],
     width: u32,
     height: u32,
     origin_x: u32,
@@ -1359,9 +1365,9 @@ fn fill_bayer_crop_edges(
             }
             let source_x = x.clamp(origin_x, max_x);
             let source_y = y.clamp(origin_y, max_y);
-            let source = ((source_y * width + source_x) * 3) as usize;
-            let destination = ((y * width + x) * 3) as usize;
-            values.copy_within(source..source + 3, destination);
+            let source = (source_y * width + source_x) as usize;
+            let destination = (y * width + x) as usize;
+            values[destination] = values[source];
         }
     }
 }
@@ -1483,7 +1489,9 @@ mod tests {
         SRGB_TO_REC2020, TILE_EDGE,
     };
     use crate::pipeline::{
-        AiDenoisedImage, CameraProfile, CfaKind, CompactPixelMap, LoadedRaw, NoiseProfile,
+        build_proxy, AiDenoisedImage, CameraProfile, CfaKind, CompactPixelMap, ExposureParams,
+        GpuParams, LoadedRaw, MaskStack, NoiseProfile, ProcessingQuality, ProxySpec,
+        RawGpuPipeline,
     };
 
     fn cache_test_raw(width: u32, height: u32) -> LoadedRaw {
@@ -1521,17 +1529,11 @@ mod tests {
         }
     }
 
-    fn adjacent_rgb_difference(image: &AiDenoisedImage, a: (u32, u32), b: (u32, u32)) -> f64 {
-        let a = ((a.1 * image.width + a.0) * 3) as usize;
-        let b = ((b.1 * image.width + b.0) * 3) as usize;
-        (0..3)
-            .map(|channel| {
-                let left = half::f16::from_bits(image.rgb16f[a + channel]).to_f32();
-                let right = half::f16::from_bits(image.rgb16f[b + channel]).to_f32();
-                f64::from((left - right).abs())
-            })
-            .sum::<f64>()
-            / 3.0
+    fn adjacent_cfa_difference(image: &AiDenoisedImage, a: (u32, u32), b: (u32, u32)) -> f64 {
+        let cfa = image.bayer_cfa().expect("Bayer integration result");
+        let a = (a.1 * image.width + a.0) as usize;
+        let b = (b.1 * image.width + b.0) as usize;
+        f64::from(cfa[a].abs_diff(cfa[b]))
     }
 
     fn bayer_seam_gradient_ratio(raw: &LoadedRaw, image: &AiDenoisedImage) -> f64 {
@@ -1547,9 +1549,9 @@ mod tests {
                 continue;
             }
             for y in (origin_y..origin_y + packed_height * 2).step_by(8) {
-                seam += adjacent_rgb_difference(image, (x - 1, y), (x, y));
-                nearby += adjacent_rgb_difference(image, (x - 33, y), (x - 32, y));
-                nearby += adjacent_rgb_difference(image, (x + 31, y), (x + 32, y));
+                seam += adjacent_cfa_difference(image, (x - 2, y), (x, y));
+                nearby += adjacent_cfa_difference(image, (x - 34, y), (x - 32, y));
+                nearby += adjacent_cfa_difference(image, (x + 30, y), (x + 32, y));
                 samples += 2;
             }
         }
@@ -1559,9 +1561,9 @@ mod tests {
                 continue;
             }
             for x in (origin_x..origin_x + packed_width * 2).step_by(8) {
-                seam += adjacent_rgb_difference(image, (x, y - 1), (x, y));
-                nearby += adjacent_rgb_difference(image, (x, y - 33), (x, y - 32));
-                nearby += adjacent_rgb_difference(image, (x, y + 31), (x, y + 32));
+                seam += adjacent_cfa_difference(image, (x, y - 2), (x, y));
+                nearby += adjacent_cfa_difference(image, (x, y - 34), (x, y - 32));
+                nearby += adjacent_cfa_difference(image, (x, y + 30), (x, y + 32));
                 samples += 2;
             }
         }
@@ -1649,15 +1651,13 @@ mod tests {
         ));
         let path = result_cache_path(&directory, "synthetic-source");
         let mut raw = cache_test_raw(4, 4);
-        let values = (0..4 * 4 * 3)
-            .map(|index| half::f16::from_f32(index as f32 / 47.0).to_bits())
-            .collect();
-        let expected = AiDenoisedImage::new(4, 4, values).unwrap();
+        let values = (0..4 * 4).map(|index| index as u16 * 97).collect();
+        let expected = AiDenoisedImage::new_bayer_cfa(4, 4, values).unwrap();
         let cancellation = std::sync::atomic::AtomicBool::new(false);
 
         save_result_cache(&path, &raw, &expected, &cancellation).unwrap();
         let restored = load_result_cache(&path, &raw).unwrap().unwrap();
-        assert_eq!(restored.rgb16f.as_ref(), expected.rgb16f.as_ref());
+        assert_eq!(restored.raw_cfa16.as_ref(), expected.raw_cfa16.as_ref());
 
         raw.raw_pixels[3] ^= 1;
         assert!(load_result_cache(&path, &raw).is_err());
@@ -1674,10 +1674,8 @@ mod tests {
         ));
         let path = result_cache_path(&directory, "restore-only-source");
         let raw = std::sync::Arc::new(cache_test_raw(4, 4));
-        let values = (0..4 * 4 * 3)
-            .map(|index| half::f16::from_f32(index as f32 / 47.0).to_bits())
-            .collect();
-        let expected = AiDenoisedImage::new(4, 4, values).unwrap();
+        let values = (0..4 * 4).map(|index| index as u16 * 97).collect();
+        let expected = AiDenoisedImage::new_bayer_cfa(4, 4, values).unwrap();
         let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         save_result_cache(&path, &raw, &expected, &cancellation).unwrap();
 
@@ -1699,7 +1697,7 @@ mod tests {
                 _ => None,
             })
             .expect("restore worker must send a terminal event");
-        assert_eq!(restored.rgb16f.as_ref(), expected.rgb16f.as_ref());
+        assert_eq!(restored.raw_cfa16.as_ref(), expected.raw_cfa16.as_ref());
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -1807,29 +1805,103 @@ mod tests {
         crate::ai_masks::initialize_runtime(Some(&runtime), Some(&sha)).unwrap();
         let raw = crate::pipeline::load_raw_file(&raw_path).unwrap();
         assert_eq!(raw.cfa_kind, crate::pipeline::CfaKind::Bayer);
-        let (device, queue) = test_wgpu_device();
         let (events, _receiver) = std::sync::mpsc::channel();
         let cancellation = std::sync::atomic::AtomicBool::new(false);
         let image = super::infer_bayer(
             &model_dir.join("model_bayer.onnx"),
             &raw,
-            &device,
-            &queue,
             &events,
             &cancellation,
         )
         .unwrap();
         assert!(image.is_valid_for(raw.width, raw.height));
-        assert!(image
-            .rgb16f
-            .iter()
-            .all(|value| { half::f16::from_bits(*value).to_f32().is_finite() }));
+        assert_eq!(image.raw_cfa16.len(), raw.raw_pixels.len());
         let seam_ratio = bayer_seam_gradient_ratio(&raw, &image);
         eprintln!("RawNIND seam/nearby-gradient ratio: {seam_ratio:.4}");
         assert!(
             seam_ratio < 1.5,
             "RawNIND tile boundaries are stronger than nearby image gradients"
         );
+
+        raw.set_ai_denoised_image(image).unwrap();
+        let proxy = build_proxy(&raw, ProxySpec { max_edge: 1600 });
+        let (device, queue) = test_wgpu_device();
+        let render = |exposure_stops: f32, ai_enabled: bool| {
+            let mut exposure = ExposureParams::default();
+            exposure.exposure = exposure_stops;
+            exposure.ai_denoise_enabled = ai_enabled;
+            let params = GpuParams::new(&exposure, &MaskStack::default(), &proxy);
+            let pipeline = RawGpuPipeline::new_headless_with_quality(
+                &device,
+                &queue,
+                &proxy,
+                &params,
+                ProcessingQuality::Preview,
+            )
+            .unwrap();
+            pipeline.recompute(&queue, &device, &params);
+            pipeline
+                .read_output_region_blocking(&device, &queue, 0, 0, proxy.width, proxy.height)
+                .unwrap()
+        };
+        let is_pink = |pixel: &[u8]| {
+            let red_blue = pixel[0].min(pixel[2]);
+            red_blue > 24 && u16::from(pixel[1]) * 3 < u16::from(red_blue) * 2
+        };
+        for exposure_stops in [-1.0, -5.0] {
+            let normal = render(exposure_stops, false);
+            let denoised = render(exposure_stops, true);
+            let false_pink_mask = normal
+                .chunks_exact(4)
+                .zip(denoised.chunks_exact(4))
+                .map(|(normal, denoised)| !is_pink(normal) && is_pink(denoised))
+                .collect::<Vec<_>>();
+            let false_pink = false_pink_mask.iter().filter(|value| **value).count();
+            let width = proxy.width as usize;
+            let height = proxy.height as usize;
+            let mut visited = vec![false; false_pink_mask.len()];
+            let mut largest_region = 0usize;
+            for seed in 0..false_pink_mask.len() {
+                if !false_pink_mask[seed] || visited[seed] {
+                    continue;
+                }
+                visited[seed] = true;
+                let mut stack = vec![seed];
+                let mut region = 0usize;
+                while let Some(index) = stack.pop() {
+                    region += 1;
+                    let x = index % width;
+                    let y = index / width;
+                    for neighbor in [
+                        (x > 0).then_some(index - 1),
+                        (x + 1 < width).then_some(index + 1),
+                        (y > 0).then_some(index - width),
+                        (y + 1 < height).then_some(index + width),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if false_pink_mask[neighbor] && !visited[neighbor] {
+                            visited[neighbor] = true;
+                            stack.push(neighbor);
+                        }
+                    }
+                }
+                largest_region = largest_region.max(region);
+            }
+            eprintln!(
+                "RawNIND {exposure_stops} EV newly pink pixels: {false_pink}/{}, largest region {largest_region}",
+                normal.len() / 4
+            );
+            assert!(
+                false_pink * 10_000 <= normal.len() / 4,
+                "AI denoise creates visible false-pink highlight regions at {exposure_stops} EV"
+            );
+            assert!(
+                largest_region <= 16,
+                "AI denoise creates a contiguous false-pink region at {exposure_stops} EV"
+            );
+        }
     }
 
     #[test]

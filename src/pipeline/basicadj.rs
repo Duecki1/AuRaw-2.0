@@ -250,7 +250,12 @@ pub const LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION: u32 = 26;
 /// clipped highlights before the scene boundary, overlap-blends every tile,
 /// and persists a versioned derived result for instant reopen.
 pub const AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION: u32 = 27;
-pub const CURRENT_PROCESS_VERSION: u32 = AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION;
+/// Process 28 retains Bayer RawNIND output as a denoised sensor mosaic. The
+/// ordinary full-frame highlight reconstruction and demosaic therefore remain
+/// live for every edit/export instead of baking tile-local RGB (and its false
+/// highlight colour) into the derived cache.
+pub const AI_DENOISE_CFA_CACHE_PROCESS_VERSION: u32 = 28;
+pub const CURRENT_PROCESS_VERSION: u32 = AI_DENOISE_CFA_CACHE_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.

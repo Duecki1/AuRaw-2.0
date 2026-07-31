@@ -6,19 +6,19 @@ use crate::inpainting::{
     inpaint_capture_rect, inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintRequest,
     PreparedInpaintSource, LAMA_EDGE, LAMA_MODEL_BYTES,
 };
+#[cfg(target_os = "android")]
+use crate::pipeline::GpuProgramPrewarm;
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_jpeg_export_with_program_prewarm,
-    spawn_tiled_png_export_with_program_prewarm,
+    spawn_tiled_jpeg_export_with_program_prewarm, spawn_tiled_png_export_with_program_prewarm,
     spawn_tiled_tiff_export_with_program_prewarm, BrushDab, BrushMode, CameraProfileMode,
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
     GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog, LensfunLens,
     LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality,
-    ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate, TileSpec, EXPORT_TILE_HALO,
+    MAX_LOCAL_MASKS,
 };
-#[cfg(target_os = "android")]
-use crate::pipeline::GpuProgramPrewarm;
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
     LensEditState as SidecarLensEditState,
@@ -37,8 +37,8 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-mod background_tasks;
 mod ai_denoise;
+mod background_tasks;
 use background_tasks::{
     BackgroundTaskManager, CancelTaskResult, TaskId, TaskKind, TaskProgress, TaskProgressValue,
     TaskSnapshot, TaskStatus,
@@ -78,14 +78,16 @@ pub(crate) enum PreviewQuality {
 impl PreviewQuality {
     /// Requested output pixels per physical display pixel. Every level follows
     /// the actual preview viewport; levels differ only in sampling density.
-    /// Max is one rendered pixel per display pixel, with phase guard pixels
-    /// added separately by `edge_for_scale`.
+    /// Medium is one rendered sample per display pixel. High and Max retain
+    /// extra sampling support for geometric filtering and high-DPI sharpness.
     pub const fn pixel_scale(self) -> f32 {
         match self {
-            Self::Low => 0.50,
-            Self::Medium => 0.67,
-            Self::High => 0.84,
-            Self::Max => 1.00,
+            Self::Low => 0.65,
+            Self::Medium => 1.00,
+            Self::High => 1.50,
+            // Two samples per physical display pixel retain a crisp Nyquist
+            // margin after crop, rotation, Lensfun warp and bilinear display.
+            Self::Max => 2.00,
         }
     }
 
@@ -104,9 +106,9 @@ impl PreviewQuality {
     pub const fn proxy_edge(self) -> u32 {
         match self {
             Self::Low => 640,
-            Self::Medium => 800,
-            Self::High => 1024,
-            Self::Max => 1280,
+            Self::Medium => 960,
+            Self::High => 1280,
+            Self::Max => 1600,
         }
     }
 
@@ -123,6 +125,38 @@ impl PreviewQuality {
     /// phase rounding without allowing a one-pixel undersize at Max quality.
     pub fn proxy_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
         self.edge_for_scale(viewport_pixels, 1.0)
+    }
+
+    /// Size a full-source proxy for an image fitted inside the available
+    /// viewport. This is used before the first painted image rectangle exists;
+    /// accounting for the crop/aspect ratio avoids treating phone letterbox
+    /// space as image pixels while still meeting the selected physical-DPI
+    /// density inside the photo.
+    pub fn proxy_edge_for_fitted_source(
+        self,
+        viewport_pixels: [u32; 2],
+        source_width: u32,
+        source_height: u32,
+        geometry: GeometryTransform,
+    ) -> u32 {
+        const CFA_PHASE_GUARD: u32 = 6;
+        let source_width = source_width.max(1);
+        let source_height = source_height.max(1);
+        let source_edge = source_width.max(source_height);
+        let (display_width, display_height) =
+            geometry.crop_pixel_dimensions(source_width, source_height);
+        let fit_scale = (f64::from(viewport_pixels[0].max(1))
+            / f64::from(display_width.max(1)))
+        .min(
+            f64::from(viewport_pixels[1].max(1)) / f64::from(display_height.max(1)),
+        );
+        let requested = (f64::from(source_edge)
+            * fit_scale
+            * f64::from(self.pixel_scale()))
+        .ceil()
+        .min(f64::from(u32::MAX - CFA_PHASE_GUARD)) as u32
+            + CFA_PHASE_GUARD;
+        self.proxy_edge().max(requested).min(source_edge)
     }
 
     /// Detail crops include filtering support around the visible rectangle.
@@ -337,6 +371,18 @@ struct LoadedPreview {
     sidecar_needs_rewrite: bool,
     selected_camera_profile: Option<PathBuf>,
     geometry: GeometryTransform,
+}
+
+struct PreparedPreviewRebuild {
+    source_raw: Arc<LoadedRaw>,
+    preview_raw: Arc<LoadedRaw>,
+    quality: PreviewQuality,
+    requested_edge: u32,
+    ai_enabled: bool,
+}
+
+enum PreviewRebuildEvent {
+    Finished(Result<PreparedPreviewRebuild, String>),
 }
 
 enum LoadEvent {
@@ -644,6 +690,10 @@ pub struct AurawApp {
     pub loaded_raw: Option<Arc<LoadedRaw>>,
     pub preview_raw: Option<Arc<LoadedRaw>>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
+    // Compiled preview programs are tiny compared with an image-sized render
+    // graph. Retain them independently so replacing or temporarily releasing
+    // a preview never forces Android to compile the full graph again.
+    preview_program_template: Option<RawGpuProgramTemplate>,
     // Native preview texture IDs cannot be freed during `App::ui`: egui may
     // already have emitted meshes that reference them for the current frame.
     // Retire them now and remove them from the renderer at the start of the
@@ -667,6 +717,7 @@ pub struct AurawApp {
     navigation_pending_stage: Option<ProcessingStage>,
     preview_detail_urgent: bool,
     preview_quality_dirty: bool,
+    preview_rebuild_receiver: Option<mpsc::Receiver<PreviewRebuildEvent>>,
     pub(crate) original_preview_exposure: ExposureParams,
     pub(crate) original_preview_requested: bool,
     original_preview_rendered_state: Option<(bool, u64)>,
@@ -946,6 +997,9 @@ impl AurawApp {
         _renderer: &mut eframe::egui_wgpu::Renderer,
     ) -> Option<RawGpuPipeline> {
         let pipeline = self.gpu_pipeline.take();
+        if let Some(pipeline) = pipeline.as_ref() {
+            self.preview_program_template = Some(pipeline.program_template());
+        }
         if let Some(texture_id) = pipeline
             .as_ref()
             .and_then(|pipeline| pipeline.egui_texture_id)
@@ -986,20 +1040,19 @@ include!("app/eframe_impl.rs");
 #[cfg(test)]
 mod transactional_pipeline_tests {
     use super::{
-        collect_pipeline_update_results, AiMaskTarget, AurawApp, BackgroundTaskManager, MaskGeometry,
-        MaskKind, MaskStack, TaskKind, TaskProgress, TaskStatus, PreviewQuality,
+        collect_pipeline_update_results, AiMaskTarget, AurawApp, BackgroundTaskManager,
+        MaskGeometry, MaskKind, MaskStack, PreviewQuality, TaskKind, TaskProgress, TaskStatus,
     };
+    use crate::pipeline::GeometryTransform;
 
     #[test]
     #[cfg(not(target_os = "android"))]
     fn preview_quality_levels_track_physical_viewport_density() {
         assert_eq!(
             PreviewQuality::Max.proxy_edge_for_viewport([3_000, 2_000]),
-            3_006
+            6_006
         );
-        assert!(
-            PreviewQuality::Max.detail_edge_for_viewport([3_200, 1_800]) >= 3_200 * 135 / 100
-        );
+        assert!(PreviewQuality::Max.detail_edge_for_viewport([3_200, 1_800]) >= 3_200 * 135 / 100);
         for quality in [
             PreviewQuality::Low,
             PreviewQuality::Medium,
@@ -1011,7 +1064,7 @@ mod transactional_pipeline_tests {
     }
 
     #[test]
-    fn preview_quality_density_is_ordered_and_max_is_one_to_one() {
+    fn preview_quality_density_is_ordered_and_max_is_two_samples_per_pixel() {
         let viewport = [2_400, 1_600];
         let edges = [
             PreviewQuality::Low.proxy_edge_for_viewport(viewport),
@@ -1020,7 +1073,32 @@ mod transactional_pipeline_tests {
             PreviewQuality::Max.proxy_edge_for_viewport(viewport),
         ];
         assert!(edges.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(edges[3], 2_406);
+        assert_eq!(edges[3], 4_806);
+    }
+
+    #[test]
+    fn fitted_preview_density_excludes_phone_letterbox_space() {
+        let geometry = GeometryTransform::default();
+        let edge = PreviewQuality::Max.proxy_edge_for_fitted_source(
+            [720, 1_500],
+            7_028,
+            4_688,
+            geometry,
+        );
+        // two-sample margin plus its 1600px startup floor, rather than sizing
+        // from the unrelated 1500px-tall editor panel.
+        assert_eq!(edge, 1_600);
+
+        let mut cropped = geometry;
+        cropped.crop = [0.375, 0.0, 0.625, 1.0];
+        assert!(
+            PreviewQuality::Max.proxy_edge_for_fitted_source(
+                [720, 1_500],
+                7_028,
+                4_688,
+                cropped,
+            ) > edge
+        );
     }
 
     #[test]

@@ -320,6 +320,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            preview_program_template: None,
             retired_egui_textures: Vec::new(),
             preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
@@ -338,6 +339,7 @@ impl AurawApp {
             navigation_pending_stage: None,
             preview_detail_urgent: false,
             preview_quality_dirty: false,
+            preview_rebuild_receiver: None,
             original_preview_exposure: exposure,
             original_preview_requested: false,
             original_preview_rendered_state: None,
@@ -579,6 +581,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            preview_program_template: None,
             retired_egui_textures: Vec::new(),
             gpu_preview_prewarm_receiver,
             gpu_export_prewarm: Some(gpu_export_prewarm),
@@ -599,6 +602,7 @@ impl AurawApp {
             navigation_pending_stage: None,
             preview_detail_urgent: false,
             preview_quality_dirty: false,
+            preview_rebuild_receiver: None,
             original_preview_exposure: exposure,
             original_preview_requested: false,
             original_preview_rendered_state: None,
@@ -1712,12 +1716,17 @@ impl AurawApp {
         // receivers alive so their terminal events can be drained safely.
         self.cancel_document_bound_background_tasks();
         self.abandon_ai_denoise_worker();
+        // A DPI rebuild belongs to the outgoing document. Dropping the
+        // receiver lets its worker dispose the result instead of installing it
+        // over the newly opened RAW.
+        self.preview_rebuild_receiver = None;
         let sidecar_generation = self.begin_sidecar_open();
         // Reuse compiled GPU programs across RAW opens; retire the old texture IDs for next-frame cleanup.
         let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
             self.take_preview_pipeline_and_release_textures(&mut renderer)
         };
+        let retained_preview_program_template = self.preview_program_template.clone();
         #[cfg(target_os = "android")]
         let export_active_while_opening = self.export_receiver.is_some();
         #[cfg(target_os = "android")]
@@ -1731,8 +1740,7 @@ impl AurawApp {
         self.image_status = format!("Loading {label}…");
         let initial_exposure = self.new_image_exposure();
         let preview_quality_setting = self.preview_quality;
-        let preview_proxy_edge_setting =
-            preview_quality_setting.proxy_edge_for_viewport(self.preview_viewport_pixels);
+        let preview_viewport_pixels_setting = self.preview_viewport_pixels;
         let camera_profile_mode = self.camera_profile_mode;
         let camera_profile_folder = self.camera_profile_folder.clone();
         let last_camera_profile = self.last_camera_profile.clone();
@@ -2148,7 +2156,12 @@ impl AurawApp {
                         full_raw.clear_ai_denoised_image();
                     }
                     let preview_spec = ProxySpec {
-                        max_edge: preview_proxy_edge_setting,
+                        max_edge: preview_quality_setting.proxy_edge_for_fitted_source(
+                            preview_viewport_pixels_setting,
+                            full_raw.width,
+                            full_raw.height,
+                            geometry,
+                        ),
                     };
                     let proxy_started = Instant::now();
                     let preview_raw =
@@ -2176,7 +2189,9 @@ impl AurawApp {
                     #[cfg(target_os = "android")]
                     let mut startup_gpu_prewarm_template = None;
                     #[cfg(target_os = "android")]
-                    if reusable_preview_pipeline.is_none() {
+                    if reusable_preview_pipeline.is_none()
+                        && retained_preview_program_template.is_none()
+                    {
                         if let Some(receiver) = startup_gpu_prewarm_receiver {
                             let wait_started = Instant::now();
                             match receiver.recv() {
@@ -2194,15 +2209,25 @@ impl AurawApp {
                             }
                         }
                     }
-                    #[cfg(target_os = "android")]
                     let reusable_program_template = reusable_preview_pipeline
                         .as_ref()
-                        .or(startup_gpu_prewarm_template.as_ref());
-                    #[cfg(not(target_os = "android"))]
-                    let reusable_program_template = reusable_preview_pipeline.as_ref();
+                        .map(RawGpuPipeline::program_template)
+                        .or(retained_preview_program_template)
+                        .or_else(|| {
+                            #[cfg(target_os = "android")]
+                            {
+                                startup_gpu_prewarm_template
+                                    .as_ref()
+                                    .map(RawGpuPipeline::program_template)
+                            }
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                None
+                            }
+                        });
                     let pipeline_started = Instant::now();
-                    let pipeline = if let Some(template) = reusable_program_template {
-                        match RawGpuPipeline::new_headless_reusing_programs(
+                    let pipeline = if let Some(template) = reusable_program_template.as_ref() {
+                        match RawGpuPipeline::new_headless_reusing_program_template(
                             &device,
                             &queue,
                             &preview_raw,
@@ -2684,6 +2709,7 @@ impl AurawApp {
                 self.original_raw = Some(loaded.original_raw);
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
+                self.preview_program_template = Some(loaded.pipeline.program_template());
                 self.gpu_pipeline = Some(loaded.pipeline);
                 self.exposure = loaded.rendered_exposure;
                 self.geometry = loaded.geometry.sanitized();
