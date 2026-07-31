@@ -381,18 +381,22 @@ pub(crate) struct CaptureMetadata {
     pub artist: String,
 }
 
-/// Cached RawNIND output in the same white-balanced camera-RGB domain as the
-/// ordinary demosaic stage. Samples are interleaved RGB IEEE-754 half floats.
-/// Sidecars persist only the model toggle; this derived cache is always
-/// rebuildable from the original sensor mosaic.
+/// Cached RawNIND output. Bayer models are retained as a denoised CFA mosaic
+/// in the original sensor code-value domain, so highlight reconstruction and
+/// demosaic remain full-frame, edit-dependent pipeline stages. The linear
+/// model used for X-Trans remains interleaved camera-RGB IEEE-754 half floats.
+/// Exactly one payload is populated. Sidecars persist only the model toggle;
+/// this derived cache is always rebuildable from the original sensor mosaic.
 #[derive(Clone, Debug)]
 pub struct AiDenoisedImage {
     pub width: u32,
     pub height: u32,
     pub rgb16f: Arc<[u16]>,
+    pub raw_cfa16: Arc<[u16]>,
 }
 
 impl AiDenoisedImage {
+    /// Constructs a linear camera-RGB result (currently the X-Trans path).
     pub(crate) fn new(width: u32, height: u32, rgb16f: Vec<u16>) -> Result<Self> {
         let expected = u64::from(width)
             .checked_mul(u64::from(height))
@@ -408,17 +412,57 @@ impl AiDenoisedImage {
             width,
             height,
             rgb16f: rgb16f.into(),
+            raw_cfa16: Arc::from([]),
         })
     }
 
+    /// Constructs a Bayer result in the source RAW's code-value domain.
+    pub(crate) fn new_bayer_cfa(width: u32, height: u32, raw_cfa16: Vec<u16>) -> Result<Self> {
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| usize::try_from(pixels).ok())
+            .context("AI-denoise Bayer dimensions overflow")?;
+        anyhow::ensure!(
+            width > 0 && height > 0 && raw_cfa16.len() == expected,
+            "AI-denoise Bayer image has {} values, expected {expected} for {width}x{height}",
+            raw_cfa16.len()
+        );
+        Ok(Self {
+            width,
+            height,
+            rgb16f: Arc::from([]),
+            raw_cfa16: raw_cfa16.into(),
+        })
+    }
+
+    pub(crate) fn bayer_cfa(&self) -> Option<&[u16]> {
+        (!self.raw_cfa16.is_empty()).then_some(self.raw_cfa16.as_ref())
+    }
+
+    pub(crate) fn camera_rgb16f(&self) -> Option<&[u16]> {
+        (!self.rgb16f.is_empty()).then_some(self.rgb16f.as_ref())
+    }
+
+    pub(crate) fn payload(&self) -> &[u16] {
+        if let Some(raw_cfa) = self.bayer_cfa() {
+            raw_cfa
+        } else {
+            self.rgb16f.as_ref()
+        }
+    }
+
     pub(crate) fn is_valid_for(&self, width: u32, height: u32) -> bool {
-        self.width == width
-            && self.height == height
-            && u64::from(width)
-                .checked_mul(u64::from(height))
-                .and_then(|pixels| pixels.checked_mul(3))
-                .and_then(|elements| usize::try_from(elements).ok())
-                .is_some_and(|expected| self.rgb16f.len() == expected)
+        if self.width != width || self.height != height {
+            return false;
+        }
+        let Some(pixels) = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| usize::try_from(pixels).ok())
+        else {
+            return false;
+        };
+        (self.raw_cfa16.len() == pixels && self.rgb16f.is_empty())
+            || (self.rgb16f.len() == pixels.saturating_mul(3) && self.raw_cfa16.is_empty())
     }
 }
 
@@ -488,6 +532,10 @@ impl LoadedRaw {
             image.height,
             self.width,
             self.height
+        );
+        anyhow::ensure!(
+            matches!(self.cfa_kind, CfaKind::Bayer) == image.bayer_cfa().is_some(),
+            "AI-denoise payload type does not match the RAW CFA"
         );
         let mut cached = self
             .ai_denoised

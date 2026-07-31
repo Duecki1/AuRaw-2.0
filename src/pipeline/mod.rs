@@ -14,17 +14,17 @@ mod sigmoid;
 pub use basicadj::{
     temperature_kelvin_from_offset, temperature_offset_from_kelvin, ColorGradeWheel, ColorGrading,
     DemosaicMode, ExposureParams, HighlightReconstructionMethod, PointCurve,
-    ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION, AI_DENOISE_PROCESS_VERSION,
-    AI_DENOISE_REMOSAIC_PROCESS_VERSION, AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION,
-    BASIC_TONE_RESPONSE_PROCESS_VERSION, CURRENT_PROCESS_VERSION,
-    EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT,
+    ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION, AI_DENOISE_CFA_CACHE_PROCESS_VERSION,
+    AI_DENOISE_PROCESS_VERSION, AI_DENOISE_REMOSAIC_PROCESS_VERSION,
+    AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION, BASIC_TONE_RESPONSE_PROCESS_VERSION,
+    CURRENT_PROCESS_VERSION, EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT,
     HIGHLIGHT_CONSENSUS_PROCESS_VERSION, HSL_HUE_LIMIT, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
     LEGACY_SCENE_DISPLAY_PROCESS_VERSION, LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION, LIGHTROOM_VIGNETTE_PROCESS_VERSION,
-    MAX_POINT_CURVE_POINTS, MAX_TEMPERATURE_KELVIN,
-    MIN_TEMPERATURE_KELVIN, MULTISCALE_COLOR_DENOISE_PROCESS_VERSION,
-    PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION, SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION,
-    SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION, SENSOR_DENOISE_PROCESS_VERSION,
+    MAX_POINT_CURVE_POINTS, MAX_TEMPERATURE_KELVIN, MIN_TEMPERATURE_KELVIN,
+    MULTISCALE_COLOR_DENOISE_PROCESS_VERSION, PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION,
+    SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION, SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
+    SENSOR_DENOISE_PROCESS_VERSION,
 };
 #[cfg(not(target_os = "android"))]
 pub use color_profile::{
@@ -40,8 +40,7 @@ pub use export::{
     ExportSettings, MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub(crate) use export::{
-    spawn_tiled_jpeg_export_with_program_prewarm,
-    spawn_tiled_png_export_with_program_prewarm,
+    spawn_tiled_jpeg_export_with_program_prewarm, spawn_tiled_png_export_with_program_prewarm,
     spawn_tiled_tiff_export_with_program_prewarm,
 };
 pub use geometry::{
@@ -71,8 +70,8 @@ pub(crate) use raw_loader::{invalidate_dcp_profile_index, prewarm_dcp_profile_in
 pub use raw_loader::{
     is_supported_raw_path, load_raw_display_dimensions, load_raw_embedded_thumbnail, load_raw_file,
     load_raw_file_with_dcp, load_raw_file_with_profile_config,
-    load_raw_file_with_profile_selection, load_raw_thumbnail, CameraProfileCandidate,
-    AiDenoisedImage, CameraProfileMode, CfaKind, CompactPixelMap, LoadedRaw, RawThumbnail,
+    load_raw_file_with_profile_selection, load_raw_thumbnail, AiDenoisedImage,
+    CameraProfileCandidate, CameraProfileMode, CfaKind, CompactPixelMap, LoadedRaw, RawThumbnail,
     SUPPORTED_RAW_EXTENSIONS,
 };
 pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};

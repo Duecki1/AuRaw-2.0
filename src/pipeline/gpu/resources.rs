@@ -516,6 +516,9 @@ pub(super) fn upload_ai_scene_texture(
     let Some(image) = raw.ai_denoised_image() else {
         return Ok(false);
     };
+    let Some(rgb16f) = image.camera_rgb16f() else {
+        return Ok(false);
+    };
     anyhow::ensure!(
         image.is_valid_for(raw.width, raw.height),
         "AI-denoise texture dimensions do not match the RAW"
@@ -541,8 +544,7 @@ pub(super) fn upload_ai_scene_texture(
                 for pixel in 0..pixels {
                     let source = (first_row as usize * raw.width as usize + pixel) * 3;
                     let destination = pixel * 4;
-                    rgba[destination..destination + 3]
-                        .copy_from_slice(&image.rgb16f[source..source + 3]);
+                    rgba[destination..destination + 3].copy_from_slice(&rgb16f[source..source + 3]);
                     rgba[destination + 3] = half::f16::ONE.to_bits();
                 }
                 queue.write_texture(
@@ -576,7 +578,7 @@ pub(super) fn upload_ai_scene_texture(
                     let destination = pixel * 4;
                     for channel in 0..3 {
                         rgba[destination + channel] =
-                            half::f16::from_bits(image.rgb16f[source + channel]).to_f32();
+                            half::f16::from_bits(rgb16f[source + channel]).to_f32();
                     }
                     rgba[destination + 3] = 1.0;
                 }
@@ -848,7 +850,9 @@ pub(super) fn create_raw_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     raw: &LoadedRaw,
+    raw_pixels: &[u16],
 ) -> wgpu::Texture {
+    debug_assert_eq!(raw_pixels.len(), raw.raw_pixels.len());
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("auraw raw mosaic"),
         size: texture_size(raw.width, raw.height),
@@ -861,7 +865,7 @@ pub(super) fn create_raw_texture(
     });
     queue.write_texture(
         copy_texture(&texture),
-        bytemuck::cast_slice(&raw.raw_pixels),
+        bytemuck::cast_slice(raw_pixels),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(raw.width * 2),

@@ -1,10 +1,10 @@
 use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
-    export_mask_atlas_edge_limit, mask_atlas_edge, CfaKind, ExposureParams, GeometryTransform,
-    HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack, PointCurve,
-    ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams, CURRENT_PROCESS_VERSION,
-    GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
+    export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
+    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
+    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
+    CURRENT_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -974,7 +974,11 @@ impl GpuParams {
                 shader_highlight_method(raw.cfa_kind, exposure.highlight_method),
                 exposure.highlight_iterations.clamp(1, 4) as f32,
                 exposure.highlight_color_adaptation.clamp(0.0, 1.0),
-                if exposure.ai_denoise_enabled { 1.0 } else { 0.0 },
+                if exposure.ai_denoise_enabled {
+                    1.0
+                } else {
+                    0.0
+                },
             ],
             noise_shot: canonicalize_green_noise(
                 std::array::from_fn(|channel| {
@@ -1355,6 +1359,7 @@ struct Pass {
     workgroups: [u32; 3],
 }
 
+#[derive(Clone)]
 pub(crate) struct RawGpuProgramTemplate {
     cfa_kind: CfaKind,
     processing_quality: ProcessingQuality,
@@ -1378,10 +1383,7 @@ impl GpuProgramPrewarm {
         }
     }
 
-    pub(crate) fn publish(
-        &self,
-        result: std::result::Result<RawGpuProgramTemplate, String>,
-    ) {
+    pub(crate) fn publish(&self, result: std::result::Result<RawGpuProgramTemplate, String>) {
         let Ok(mut slot) = self.result.lock() else {
             return;
         };
@@ -1391,9 +1393,7 @@ impl GpuProgramPrewarm {
         }
     }
 
-    pub(crate) fn wait(
-        &self,
-    ) -> std::result::Result<Arc<RawGpuProgramTemplate>, String> {
+    pub(crate) fn wait(&self) -> std::result::Result<Arc<RawGpuProgramTemplate>, String> {
         let mut slot = self
             .result
             .lock()
@@ -1452,6 +1452,7 @@ pub struct RawGpuPipeline {
     scene_texture: wgpu::Texture,
     scene_format: wgpu::TextureFormat,
     has_ai_scene: bool,
+    has_ai_cfa: bool,
     display_linear_texture: wgpu::Texture,
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
@@ -1519,7 +1520,7 @@ impl GpuOutputSnapshot {
 }
 
 impl RawGpuPipeline {
-    fn program_template(&self) -> RawGpuProgramTemplate {
+    pub(crate) fn program_template(&self) -> RawGpuProgramTemplate {
         RawGpuProgramTemplate {
             cfa_kind: self.cfa_kind,
             processing_quality: self.processing_quality,
@@ -1536,11 +1537,7 @@ impl RawGpuPipeline {
         RawGpuProgramTemplate {
             cfa_kind: self.cfa_kind,
             processing_quality: self.processing_quality,
-            pipelines: self
-                .passes
-                .into_iter()
-                .map(|pass| pass.pipeline)
-                .collect(),
+            pipelines: self.passes.into_iter().map(|pass| pass.pipeline).collect(),
             pipeline_cache: self.pipeline_cache,
         }
     }
@@ -1834,6 +1831,30 @@ impl RawGpuPipeline {
         )
     }
 
+    /// Reuses an owned program template for a normal interactive preview.
+    /// Keeping this template separate from image-sized textures lets preview
+    /// surfaces be replaced without recompiling the complete shader graph.
+    pub(crate) fn new_headless_reusing_program_template(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+        template: &RawGpuProgramTemplate,
+    ) -> Result<Self> {
+        Self::new_internal(
+            device,
+            queue,
+            None,
+            Some(template),
+            template.pipeline_cache.clone(),
+            raw,
+            params,
+            quality,
+            None,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new_internal(
         device: &wgpu::Device,
@@ -1914,7 +1935,17 @@ impl RawGpuPipeline {
         // allocation below has a corresponding named entry in `resource_plan`;
         // on-demand conversion/readback peaks and the 20% safety margin are also
         // reserved before construction begins.
-        let raw_texture = create_raw_texture(device, queue, raw);
+        let ai_image = raw.ai_denoised_image();
+        let ai_cfa = (params.highlight_options[3] >= 0.5)
+            .then(|| ai_image.as_ref().and_then(AiDenoisedImage::bayer_cfa))
+            .flatten();
+        let has_ai_cfa = ai_cfa.is_some();
+        let raw_texture = create_raw_texture(
+            device,
+            queue,
+            raw,
+            ai_cfa.unwrap_or(raw.raw_pixels.as_slice()),
+        );
         let color_texture = create_color_texture(device, queue, raw);
         let black_texture = create_black_texture(device, queue, raw);
 
@@ -1956,8 +1987,7 @@ impl RawGpuPipeline {
             demosaic_format,
             "auraw scene-linear camera RGB",
         );
-        let has_ai_scene =
-            upload_ai_scene_texture(queue, &scene_texture, demosaic_format, raw)?;
+        let has_ai_scene = upload_ai_scene_texture(queue, &scene_texture, demosaic_format, raw)?;
 
         // The final creative result is tone-mapped into display-linear Rec.2020
         // before any output transfer function is applied. Export reads this
@@ -2131,9 +2161,7 @@ impl RawGpuPipeline {
             color_denoise_for_programs + COLOR_DENOISE_ENTRY_POINTS.len();
         let adjustment_prepare_for_programs = tone_prepare_for_programs + 4;
         let reused_layout = |pass_index: usize| {
-            program_template.map(|template| {
-                template.pipelines[pass_index].get_bind_group_layout(0)
-            })
+            program_template.map(|template| template.pipelines[pass_index].get_bind_group_layout(0))
         };
 
         let bgl_highlights = reused_layout(0).unwrap_or_else(|| {
@@ -4025,6 +4053,7 @@ impl RawGpuPipeline {
             scene_texture,
             scene_format: demosaic_format,
             has_ai_scene,
+            has_ai_cfa,
             display_linear_texture,
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
@@ -4218,6 +4247,21 @@ impl RawGpuPipeline {
         self.mask_atlas_edge
     }
 
+    /// Whether this image-sized graph already contains every immutable AI
+    /// source texture needed for the requested state. Bayer AI output replaces
+    /// the mosaic upload and therefore must match exactly. X-Trans uses a
+    /// separate scene texture which may safely remain resident while disabled.
+    pub(crate) const fn immutable_ai_source_matches(
+        &self,
+        cfa_kind: CfaKind,
+        enabled: bool,
+    ) -> bool {
+        match cfa_kind {
+            CfaKind::Bayer => self.has_ai_cfa == enabled,
+            CfaKind::XTrans => !enabled || self.has_ai_scene,
+        }
+    }
+
     /// Registers a headless pipeline's output texture with egui after the
     /// expensive GPU setup has completed on a worker thread.
     pub fn register_egui_texture(
@@ -4351,9 +4395,18 @@ impl RawGpuPipeline {
         }
         validate_raw(raw)?;
 
+        let ai_image = raw.ai_denoised_image();
+        let raw_pixels = if self.has_ai_cfa {
+            ai_image
+                .as_ref()
+                .and_then(AiDenoisedImage::bayer_cfa)
+                .context("reusable AI-denoise pipeline received a tile without denoised CFA")?
+        } else {
+            raw.raw_pixels.as_slice()
+        };
         queue.write_texture(
             copy_texture(&self.raw_texture),
-            bytemuck::cast_slice(&raw.raw_pixels),
+            bytemuck::cast_slice(raw_pixels),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(raw.width * 2),

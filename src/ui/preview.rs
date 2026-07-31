@@ -11,8 +11,16 @@ use crate::pipeline::{
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui};
 
-const MIN_PREVIEW_ZOOM: f32 = 0.70;
+const MIN_PREVIEW_ZOOM: f32 = 0.01;
 const MAX_PREVIEW_ZOOM: f32 = 32.0;
+
+fn physical_pixels_per_point(ctx: &egui::Context) -> f32 {
+    let native = ctx.input(|input| input.viewport().native_pixels_per_point);
+    native
+        .unwrap_or_else(|| ctx.pixels_per_point())
+        .max(ctx.pixels_per_point())
+        .max(0.1)
+}
 
 pub struct Preview;
 
@@ -29,7 +37,7 @@ impl Preview {
         // the phone/monitor's physical pixel dimensions. Once an image exists,
         // the more exact visible-image measurement below replaces this bound.
         if base_pipeline.is_none() && available.x > 0.0 && available.y > 0.0 {
-            let pixels_per_point = ui.ctx().pixels_per_point();
+            let pixels_per_point = physical_pixels_per_point(ui.ctx());
             app.set_preview_viewport_pixels([
                 (available.x * pixels_per_point).round().max(1.0) as u32,
                 (available.y * pixels_per_point).round().max(1.0) as u32,
@@ -226,16 +234,18 @@ impl Preview {
 
         image_rect = zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
         let visible_screen = outer_rect.intersect(image_rect);
-        let pixels_per_point = ui.ctx().pixels_per_point();
+        let pixels_per_point = physical_pixels_per_point(ui.ctx());
         let viewport_pixels = [
             (visible_screen.width() * pixels_per_point).round().max(1.0) as u32,
             (visible_screen.height() * pixels_per_point)
                 .round()
                 .max(1.0) as u32,
         ];
-        if app.set_preview_viewport_pixels(viewport_pixels) {
-            moved = true;
-        }
+        // A layout/DPI measurement is not user motion. Treating one-pixel
+        // viewport settling as a pan continuously restarted the preview idle
+        // timer on Android, so the sharper replacement could be deferred
+        // forever. The setter queues a density rebuild on its own.
+        app.set_preview_viewport_pixels(viewport_pixels);
         let visible_uv = if crop_preview {
             crop_workspace_visible_source_uv(
                 image_rect,
@@ -272,6 +282,7 @@ impl Preview {
         };
         if preview_uv_changed(app.preview_visible_uv, visible_uv) {
             app.preview_visible_uv = visible_uv;
+            app.preview_source_region_changed();
             moved = true;
         }
         if moved {
@@ -392,8 +403,14 @@ impl Preview {
             outer_rect.left_top() + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
             format!(
-                "{:.0}% · pinch/scroll zoom · drag pan · double-tap/click fit",
-                app.preview_zoom * 100.0
+                "{:.1}% · pinch/scroll zoom · drag pan · double-tap/click fit",
+                ((image_rect.width() * physical_pixels_per_point(ui.ctx())
+                    / geometry_width.max(1) as f32)
+                    .min(
+                        image_rect.height() * physical_pixels_per_point(ui.ctx())
+                            / geometry_height.max(1) as f32,
+                    )
+                    * 100.0)
             ),
             egui::FontId::proportional(11.0),
             Color32::from_white_alpha(180),
