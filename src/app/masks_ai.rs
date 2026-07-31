@@ -1539,6 +1539,7 @@ impl AurawApp {
         let cancelled = self.background_task_cancelled(task_id);
         let stale = generation != self.object_generation
             || document_id != self.sidecar_generation;
+        let failed_during_inference = self.object_inferencing;
         self.object_receiver = None;
         self.object_task_id = None;
         self.object_download_progress = None;
@@ -1620,7 +1621,7 @@ impl AurawApp {
                 }
                 self.continue_ai_mask_update();
             }
-        } else if cancelled {
+        } else if cancelled || stale {
             self.finish_background_task(task_id);
             if let Some((mask_index, component_index)) = self.object_pending_target.take() {
                 let (encoder, decoder) = self.sam21_model_paths();
@@ -1638,8 +1639,12 @@ impl AurawApp {
                     }
                 });
             self.notice = Some(message.clone());
-            self.object_error_dialog = Some(message.clone());
-            self.fail_background_task(task_id, message);
+            if failed_during_inference {
+                self.object_error_dialog = Some(message);
+                self.finish_background_task(task_id);
+            } else {
+                self.fail_background_task(task_id, message);
+            }
         }
         self.egui_ctx.request_repaint();
     }

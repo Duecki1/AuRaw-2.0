@@ -195,12 +195,6 @@ pub fn build_region_proxy(
         (start, end.max(start + 1).min(source_count))
     };
 
-    // Resample at output-pixel granularity, averaging only source photosites
-    // with the requested CFA colour inside that pixel's source footprint. The
-    // former implementation partitioned in whole 2x2/6x6 CFA macrocells and
-    // then gave every phase the entire macrocell block. That multiplied the
-    // filter footprint by the CFA period (six times on X-Trans), turning a
-    // nominal 1600 px preview into visibly blocky low-resolution data.
     raw_pixels
         .par_chunks_mut(row_stride)
         .zip(color_indices.par_chunks_mut(row_stride))
@@ -227,7 +221,6 @@ pub fn build_region_proxy(
                     + (footprint_y1.saturating_sub(footprint_y0)) / 2)
                     .min(raw.height - 1);
 
-                // Preserve the source region's CFA phase for detail crops.
                 let phase_x = (x + output_phase_x).min(raw.width - 1);
                 let phase_y = (y + output_phase_y).min(raw.height - 1);
                 let phase_index = (phase_y * raw.width + phase_x) as usize;
@@ -237,9 +230,6 @@ pub fn build_region_proxy(
                 let mut black_sum = 0.0f64;
                 let mut count = 0u32;
 
-                // The explicit map is authoritative for non-Bayer layouts and
-                // for cameras with two distinct green planes. Spatial boxes do
-                // not overlap, keeping the area filter deterministic.
                 for sy in footprint_y0..footprint_y1 {
                     let row = sy * raw.width;
                     for sx in footprint_x0..footprint_x1 {

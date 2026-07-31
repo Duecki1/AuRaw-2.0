@@ -39,9 +39,10 @@ def test_zoom_detail_hides_processing_halo_and_aligns_cfa_phase() -> None:
     assert "let phase_y = (y + output_phase_y).min(raw.height - 1);" in PROCESSING
 
 
-def test_zoomed_adjustments_dispatch_detail_with_statistics_only_navigation() -> None:
+def test_zoomed_adjustments_dispatch_detail_with_live_main_fallback() -> None:
     assert "queue_preview_processing" in PROCESSING_EXPORT
-    assert "if self.preview_zoom > DETAIL_ZOOM_START {\n            self.advance_zoomed_processing(frame);\n            return;" in PROCESSING_EXPORT
+    assert "self.advance_zoomed_processing(frame);" in PROCESSING_EXPORT
+    assert "if self.preview_detail_is_current()" in PROCESSING_EXPORT
     assert ".dispatch_stage(&render_state.queue, &render_state.device, &params, stage)" in PROCESSING_EXPORT
     assert "navigation_pending_stage" in APP
     assert "advance_navigation_preview" in PROCESSING_EXPORT
@@ -49,8 +50,6 @@ def test_zoomed_adjustments_dispatch_detail_with_statistics_only_navigation() ->
     assert "new_headless_reusing_programs_with_mask_edge" in PROCESSING_EXPORT
     assert "preview_base_pipeline" in PROCESSING_EXPORT
     assert ".preview_base_pipeline()" in PREVIEW
-    assert "tiny adjusted full-frame navigation proxy" in PROCESSING_EXPORT
-    assert "unedited/stale RAW rendition" in PROCESSING_EXPORT
     preview_base = PROCESSING_EXPORT[
         PROCESSING_EXPORT.index("pub(crate) fn preview_base_pipeline"):
         PROCESSING_EXPORT.index("pub(crate) fn preview_is_preparing")
@@ -69,11 +68,16 @@ def test_zoomed_adjustments_reuse_the_existing_crop_without_rebuilding_raw() -> 
     assert "return;" in PROCESSING_EXPORT[detail_guard_start:detail_guard_end]
 
 
-def test_deferred_full_preview_does_not_force_continuous_zoomed_repaints() -> None:
+def test_zoomed_fallback_processing_repaints_until_complete() -> None:
     eframe_impl = (ROOT / "src/app/eframe_impl.rs").read_text(encoding="utf-8")
-    assert "self.preview_detail_pending_stage.is_some()" in eframe_impl
-    assert "self.navigation_pending_stage.is_some()" in eframe_impl
-    assert "self.preview_zoom <= DETAIL_ZOOM_START && self.pending_stage.is_some()" in eframe_impl
+    assert "self.preview_processing_pending()" in eframe_impl
+    pending = PROCESSING_EXPORT[
+        PROCESSING_EXPORT.index("pub(crate) fn preview_processing_pending"):
+        PROCESSING_EXPORT.index("pub(crate) fn note_preview_motion")
+    ]
+    assert "self.preview_detail_pending_stage.is_some()" in pending
+    assert "self.navigation_pending_stage.is_some()" in pending
+    assert "!self.preview_detail_is_current()" in pending
 
 
 def test_navigation_proxy_is_full_frame_but_intentionally_very_low_resolution() -> None:
@@ -90,7 +94,6 @@ def test_no_zoom_phase_can_flash_the_tiny_navigation_proxy() -> None:
     ]
     assert "self.gpu_pipeline.as_ref()" in preview_base
     assert "preview_navigation" not in preview_base
-    assert "must never become the image shown to the user" in preview_base
     assert "if !should_exist && !should_update {" in PROCESSING_EXPORT
     assert "self.preview_navigation.take()" in PROCESSING_EXPORT
     assert "if self.preview_zoom > DETAIL_ZOOM_START {" in PROCESSING_EXPORT
