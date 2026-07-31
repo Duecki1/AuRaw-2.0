@@ -101,8 +101,18 @@ pub fn spawn_rawnind_denoise(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
                     ensure_not_cancelled(&cancellation)?;
+                    let _ = worker_sender.send(AiDenoiseEvent::Progress {
+                        phase: "Checking RawNIND models",
+                        completed: 0,
+                        total: 0,
+                    });
                     ensure_models(&model_dir, &worker_sender, &cancellation)?;
                     ensure_not_cancelled(&cancellation)?;
+                    let _ = worker_sender.send(AiDenoiseEvent::Progress {
+                        phase: "Starting AI runtime",
+                        completed: 0,
+                        total: 0,
+                    });
                     crate::ai_masks::initialize_runtime(
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),

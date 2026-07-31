@@ -969,7 +969,6 @@ impl AurawApp {
             min: [0.0, 0.0],
             max: [1.0, 1.0],
         };
-        self.preview_viewport_pixels = [1, 1];
         self.preview_motion_at = None;
         self.preview_touch_navigation_active = false;
         self.preview_revision = self.preview_revision.wrapping_add(1);
@@ -1195,22 +1194,18 @@ impl AurawApp {
     }
 
     pub(crate) fn preview_base_pipeline(&self) -> Option<&RawGpuPipeline> {
-        // Keep fit view on the normal-resolution proxy.
-        let detail_is_current = self
-            .preview_detail
-            .as_ref()
-            .is_some_and(|detail| detail.revision == self.preview_revision);
-        let use_navigation = self.preview_zoom > DETAIL_ZOOM_START
-            && !detail_is_current
-            && self.preview_navigation.is_some()
-            && self.pending_stage.is_some();
-        if use_navigation {
-            self.preview_navigation
-                .as_ref()
-                .map(|preview| &preview.pipeline)
-        } else {
-            self.gpu_pipeline.as_ref()
-        }
+        // The navigation pipeline exists only to provide inexpensive full-frame
+        // tone statistics while a zoom crop is updating. It is intentionally
+        // tiny and must never become the image shown to the user: doing so made
+        // the transition from fit to 101% zoom look like a pixelated thumbnail.
+        self.gpu_pipeline.as_ref()
+    }
+
+    pub(crate) fn preview_is_preparing(&self) -> bool {
+        self.gpu_pipeline.is_some()
+            || self.loaded_raw.is_some()
+            || self.load_receiver.is_some()
+            || self.ai_denoise_receiver.is_some()
     }
 
     pub(crate) fn preview_quality_changed(&mut self) {
@@ -1227,22 +1222,27 @@ impl AurawApp {
         }
         self.preview_viewport_pixels = viewport_pixels;
 
-        // Fit view uses the full-frame proxy rather than the zoom crop. High
-        // quality follows the visible image's physical size, including a move
-        // between monitors with different scale factors.
-        if self.preview_zoom <= DETAIL_ZOOM_START && self.preview_quality == PreviewQuality::High {
-            if let (Some(full_raw), Some(preview_raw)) =
-                (self.loaded_raw.as_ref(), self.preview_raw.as_ref())
-            {
-                let target_edge = self
-                    .preview_quality
-                    .proxy_edge_for_viewport(viewport_pixels)
-                    .min(full_raw.width.max(full_raw.height));
-                let current_edge = preview_raw.width.max(preview_raw.height);
-                // Up to five pixels can be consumed by X-Trans phase alignment.
-                if current_edge.saturating_add(5) < target_edge {
-                    self.preview_quality_dirty = true;
-                }
+        if self.load_receiver.is_some() {
+            // The load request may already have captured the startup floor.
+            // Preserve this measurement so the post-load rebuild uses the real
+            // physical viewport rather than leaving the first preview blurry.
+            self.preview_quality_dirty = true;
+        }
+
+        // Every quality is a density relative to the physical display, not a
+        // fixed texture size. Rebuild only when the existing full-frame proxy
+        // is too small; shrinking a window can safely retain the sharper proxy.
+        if let (Some(full_raw), Some(preview_raw)) =
+            (self.loaded_raw.as_ref(), self.preview_raw.as_ref())
+        {
+            let target_edge = self
+                .preview_quality
+                .proxy_edge_for_viewport(viewport_pixels)
+                .min(full_raw.width.max(full_raw.height));
+            let current_edge = preview_raw.width.max(preview_raw.height);
+            // Up to five pixels can be consumed by X-Trans phase alignment.
+            if current_edge.saturating_add(5) < target_edge {
+                self.preview_quality_dirty = true;
             }
         }
         true
@@ -1291,10 +1291,11 @@ impl AurawApp {
         if self.export_receiver.is_some()
             || self.export_publish_pending
             || self.library_batch_export.is_some()
+            || self.ai_denoise_receiver.is_some()
         {
-            // The preview was intentionally released so the full-quality export
-            // pipeline fits within the mobile GPU budget. Rebuild it only after
-            // the foreground export and any MediaStore publication have ended.
+            // Export and AI denoise intentionally release the preview so their
+            // full-quality GPU work fits within the mobile residency budget.
+            // Rebuild it only after that foreground operation has ended.
             return;
         }
         let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
@@ -1319,14 +1320,61 @@ impl AurawApp {
         };
         let params = GpuParams::new(&self.exposure, &self.masks, &preview_raw)
             .with_vignette_geometry(self.geometry);
-        let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
-            &render_state.device,
-            &render_state.queue,
-            &preview_raw,
-            &params,
-            ProcessingQuality::Preview,
-        ) {
+        // Detail/navigation are disposable caches. Drop them before allocating
+        // a new DPI-sized main surface so a quality change does not temporarily
+        // reserve all three old pipelines plus the replacement.
+        for texture_id in [
+            self.preview_detail
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+            self.preview_navigation
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.retire_egui_texture(texture_id);
+        }
+        let build_pipeline = || {
+            RawGpuPipeline::new_headless_with_quality(
+                &render_state.device,
+                &render_state.queue,
+                &preview_raw,
+                &params,
+                ProcessingQuality::Preview,
+            )
+        };
+        let first_attempt = build_pipeline();
+        let mut pipeline = match first_attempt {
             Ok(pipeline) => pipeline,
+            Err(error)
+                if self.gpu_pipeline.is_some()
+                    && error
+                        .to_string()
+                        .contains("GPU pipelines already reserve") =>
+            {
+                // A 4K/HiDPI Max surface can be valid by itself but too large
+                // to coexist transactionally with the previous preview. Retry
+                // after releasing the old one instead of leaving the requested
+                // quality permanently unapplied.
+                crate::diagnostics::record(format!(
+                    "retrying preview resize after releasing the previous GPU surface: {error:#}"
+                ));
+                let previous_pipeline = {
+                    let mut renderer = render_state.renderer.write();
+                    self.take_preview_pipeline_and_release_textures(&mut renderer)
+                };
+                drop(previous_pipeline);
+                match build_pipeline() {
+                    Ok(pipeline) => pipeline,
+                    Err(error) => {
+                        self.notice =
+                            Some(format!("Could not rebuild the GPU preview: {error:#}"));
+                        return;
+                    }
+                }
+            }
             Err(error) => {
                 self.notice = Some(format!("Could not rebuild the GPU preview: {error:#}"));
                 return;
@@ -1363,10 +1411,14 @@ impl AurawApp {
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
         let inpaint_source = None;
 
-        let mut renderer = render_state.renderer.write();
-        self.take_preview_pipeline_and_release_textures(&mut renderer);
-        pipeline.register_egui_texture(&render_state.device, &mut renderer);
-        drop(renderer);
+        let previous_pipeline = {
+            let mut renderer = render_state.renderer.write();
+            let previous_pipeline =
+                self.take_preview_pipeline_and_release_textures(&mut renderer);
+            pipeline.register_egui_texture(&render_state.device, &mut renderer);
+            previous_pipeline
+        };
+        drop(previous_pipeline);
 
         self.preview_raw = Some(preview_raw);
         #[cfg(target_os = "android")]
@@ -1441,6 +1493,7 @@ impl AurawApp {
             || self.lens_correction_dirty
             || self.lens_correction_busy()
             || self.load_receiver.is_some()
+            || self.ai_denoise_receiver.is_some()
         {
             return;
         }
@@ -1755,6 +1808,9 @@ impl AurawApp {
     }
 
     fn advance_navigation_preview(&mut self, frame: &eframe::Frame) {
+        if self.ai_denoise_receiver.is_some() {
+            return;
+        }
         let should_exist = self.preview_zoom > DETAIL_ZOOM_START;
         let should_update = self.navigation_pending_stage.is_some();
         if !should_exist && !should_update {

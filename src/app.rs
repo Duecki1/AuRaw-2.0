@@ -66,86 +66,74 @@ pub(crate) struct AndroidOriginalHold {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PreviewQuality {
-    Fast,
+    #[serde(alias = "fast")]
+    Low,
+    #[serde(alias = "balanced")]
     #[default]
-    Balanced,
+    Medium,
     High,
+    Max,
 }
 
 impl PreviewQuality {
+    /// Requested output pixels per physical display pixel. Every level follows
+    /// the actual preview viewport; levels differ only in sampling density.
+    /// Max is one rendered pixel per display pixel, with phase guard pixels
+    /// added separately by `edge_for_scale`.
+    pub const fn pixel_scale(self) -> f32 {
+        match self {
+            Self::Low => 0.50,
+            Self::Medium => 0.67,
+            Self::High => 0.84,
+            Self::Max => 1.00,
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Fast => "Fast",
-            Self::Balanced => "Balanced",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
             Self::High => "High",
+            Self::Max => "Max",
         }
     }
 
+    /// Minimum edge used before the first viewport measurement arrives. This
+    /// is a startup floor, not a fixed quality cap; every quality level grows
+    /// with the screen's physical pixel dimensions.
     pub const fn proxy_edge(self) -> u32 {
-        match (self, cfg!(target_os = "android")) {
-            (Self::Fast, true) => 960,
-            (Self::Balanced, true) => 1280,
-            (Self::High, true) => 1600,
-            (Self::Fast, false) => 1280,
-            (Self::Balanced, false) => 2048,
-            (Self::High, false) => 2560,
+        match self {
+            Self::Low => 640,
+            Self::Medium => 800,
+            Self::High => 1024,
+            Self::Max => 1280,
         }
     }
 
-    /// Full-frame High previews track the physical pixel length of the visible
-    /// image, so moving the window between monitors cannot leave a 1x fit view
-    /// backed by an undersized texture. The small guard band absorbs Bayer and
-    /// X-Trans phase alignment in the RAW proxy reducer.
+    fn edge_for_scale(self, viewport_pixels: [u32; 2], support_scale: f32) -> u32 {
+        const CFA_PHASE_GUARD: u32 = 6;
+        let viewport_edge = viewport_pixels[0].max(viewport_pixels[1]).max(1) as f64;
+        let requested = (viewport_edge * f64::from(self.pixel_scale() * support_scale)).ceil();
+        self.proxy_edge()
+            .max(requested.min(f64::from(u32::MAX - CFA_PHASE_GUARD)) as u32 + CFA_PHASE_GUARD)
+    }
+
+    /// Fit previews are sized from the visible image's physical display pixels
+    /// on every platform and quality level. The guard absorbs Bayer/X-Trans
+    /// phase rounding without allowing a one-pixel undersize at Max quality.
     pub fn proxy_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
-        let base = self.proxy_edge();
-        if self != Self::High || cfg!(target_os = "android") {
-            return base;
-        }
-        base.max(viewport_pixels[0].max(viewport_pixels[1]).saturating_add(6))
+        self.edge_for_scale(viewport_pixels, 1.0)
     }
 
-    pub const fn detail_edge(self) -> u32 {
-        match (self, cfg!(target_os = "android")) {
-            // Zoom detail coexists with the full preview and navigation proxy.
-            // The hybrid branch's additional scene/display working textures make
-            // the former 1600/2048 limits exceed the Android GPU budget before a
-            // crop can be shown. These still meet or exceed common phone viewport
-            // resolution while leaving room for inpainting's 512px work surface.
-            (Self::Fast, true) => 960,
-            (Self::Balanced, true) => 1152,
-            (Self::High, true) => 1280,
-            (Self::Fast, false) => 1920,
-            (Self::Balanced, false) => 2560,
-            (Self::High, false) => 3072,
-        }
-    }
-
-    /// A zoom crop contains processing support outside the visible rectangle.
-    /// Allow enough additional texture resolution for that padding while
-    /// retaining the established minimum for High-quality detail previews.
+    /// Detail crops include filtering support around the visible rectangle.
+    /// The 35% ceiling pays for that non-visible padding while the visible
+    /// region itself keeps exactly the same DPI scale as fit view.
     pub fn detail_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
-        let base = self.detail_edge();
-        if self != Self::High || cfg!(target_os = "android") {
-            return base;
-        }
-        let viewport_edge = u64::from(viewport_pixels[0].max(viewport_pixels[1]));
-        let dpi_edge = viewport_edge
-            .saturating_mul(5)
-            .div_ceil(4)
-            .saturating_add(6)
-            .min(u64::from(u32::MAX)) as u32;
-        base.max(dpi_edge)
+        self.edge_for_scale(viewport_pixels, 1.35)
     }
 
     pub const fn detail_pixel_scale(self) -> f32 {
-        match (self, cfg!(target_os = "android")) {
-            (Self::Fast, true) => 0.75,
-            (Self::Balanced, true) => 1.00,
-            (Self::High, true) => 1.35,
-            (Self::Fast, false) => 0.90,
-            (Self::Balanced, false) => 1.20,
-            (Self::High, false) => 1.50,
-        }
+        self.pixel_scale()
     }
 }
 
@@ -1004,31 +992,35 @@ mod transactional_pipeline_tests {
 
     #[test]
     #[cfg(not(target_os = "android"))]
-    fn high_preview_quality_tracks_physical_viewport_density() {
+    fn preview_quality_levels_track_physical_viewport_density() {
         assert_eq!(
-            PreviewQuality::High.proxy_edge_for_viewport([3_000, 2_000]),
+            PreviewQuality::Max.proxy_edge_for_viewport([3_000, 2_000]),
             3_006
         );
-        assert_eq!(
-            PreviewQuality::High.proxy_edge_for_viewport([1_920, 1_080]),
-            PreviewQuality::High.proxy_edge()
-        );
         assert!(
-            PreviewQuality::High.detail_edge_for_viewport([3_200, 1_800])
-                >= 3_200 * 5 / 4
+            PreviewQuality::Max.detail_edge_for_viewport([3_200, 1_800]) >= 3_200 * 135 / 100
         );
+        for quality in [
+            PreviewQuality::Low,
+            PreviewQuality::Medium,
+            PreviewQuality::High,
+            PreviewQuality::Max,
+        ] {
+            assert!(quality.proxy_edge_for_viewport([3_840, 2_160]) > quality.proxy_edge());
+        }
     }
 
     #[test]
-    fn balanced_preview_quality_keeps_its_performance_bound() {
-        assert_eq!(
-            PreviewQuality::Balanced.proxy_edge_for_viewport([7_680, 4_320]),
-            PreviewQuality::Balanced.proxy_edge()
-        );
-        assert_eq!(
-            PreviewQuality::Balanced.detail_edge_for_viewport([7_680, 4_320]),
-            PreviewQuality::Balanced.detail_edge()
-        );
+    fn preview_quality_density_is_ordered_and_max_is_one_to_one() {
+        let viewport = [2_400, 1_600];
+        let edges = [
+            PreviewQuality::Low.proxy_edge_for_viewport(viewport),
+            PreviewQuality::Medium.proxy_edge_for_viewport(viewport),
+            PreviewQuality::High.proxy_edge_for_viewport(viewport),
+            PreviewQuality::Max.proxy_edge_for_viewport(viewport),
+        ];
+        assert!(edges.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(edges[3], 2_406);
     }
 
     #[test]

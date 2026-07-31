@@ -6,6 +6,8 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 AI = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+RAWNIND = (ROOT / "src/ai_denoise.rs").read_text(encoding="utf-8")
+APP_RAWNIND = (ROOT / "src/app/ai_denoise.rs").read_text(encoding="utf-8")
 APP = read_source_tree(ROOT / "src/app.rs")
 RAW = read_source_tree(ROOT / "src/pipeline/raw_loader.rs")
 COLOR_PROFILE = read_source_tree(ROOT / "src/pipeline/color_profile.rs")
@@ -57,6 +59,33 @@ def test_desktop_requires_runtime_before_model_download() -> None:
     ]
     )
     assert '"Consent, download and continue"' in consent
+
+
+def test_android_rawnind_starts_visibly_and_releases_preview_gpu_memory() -> None:
+    start = APP_RAWNIND[
+        APP_RAWNIND.index("fn start_ai_denoise"):
+        APP_RAWNIND.index("pub(crate) fn poll_ai_denoise_worker")
+    ]
+    assert "crate::ai_masks::initialize_runtime(None, None)" in start
+    assert "take_preview_pipeline_and_release_textures" in start
+    assert "self.ai_denoise_receiver = Some(receiver)" in start
+    assert "self.ai_denoise_apply_progress = Some" in start
+    worker = RAWNIND[
+        RAWNIND.index("pub fn spawn_rawnind_denoise"):
+        RAWNIND.index("fn ensure_not_cancelled")
+    ]
+    assert 'phase: "Checking RawNIND models"' in worker
+    assert 'phase: "Starting AI runtime"' in worker
+
+
+def test_rawnind_restores_preview_after_every_terminal_result() -> None:
+    poll = APP_RAWNIND[
+        APP_RAWNIND.index("pub(crate) fn poll_ai_denoise_worker"):
+        APP_RAWNIND.index("pub(crate) fn abandon_ai_denoise_worker")
+    ]
+    assert "self.preview_quality_dirty = true" in poll
+    assert poll.index("self.preview_quality_dirty = true") < poll.index("match result")
+    assert "self.target_exposure.ai_denoise_enabled = false" in poll
 
 
 def test_windows_runtime_is_isolated_and_uses_safe_cpu_fallback() -> None:
