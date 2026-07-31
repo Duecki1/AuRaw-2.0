@@ -993,12 +993,21 @@ impl AurawApp {
     }
 
     pub(crate) fn note_preview_motion(&mut self) {
+        // Sidebar controls are laid out before the central preview. If an edit
+        // and a genuine navigation event land in the same frame, retain the
+        // edit as an urgent full detail rebuild. Clearing it here used to make
+        // slider output depend on whether an Android layout/gesture pass ran
+        // later in that frame.
+        let edit_was_pending = self.preview_detail_pending_stage.is_some();
         self.preview_revision = self.preview_revision.wrapping_add(1);
-        self.preview_detail_pending_stage = None;
-        self.preview_detail_urgent = false;
+        self.preview_detail_urgent = edit_was_pending;
         self.preview_motion_at = Some(Instant::now());
-        self.egui_ctx
-            .request_repaint_after(zoom_detail_idle_delay());
+        if edit_was_pending {
+            self.egui_ctx.request_repaint();
+        } else {
+            self.egui_ctx
+                .request_repaint_after(zoom_detail_idle_delay());
+        }
     }
 
     /// Queue processing for the full proxy and, while zoomed, both the visible
@@ -1547,14 +1556,6 @@ impl AurawApp {
             || self.lens_correction_busy()
         {
             return;
-        }
-        if let Some(motion_at) = self.preview_motion_at {
-            let idle_delay = zoom_detail_idle_delay();
-            let elapsed = motion_at.elapsed();
-            if elapsed < idle_delay {
-                self.egui_ctx.request_repaint_after(idle_delay - elapsed);
-                return;
-            }
         }
         #[cfg(target_os = "android")]
         if self.export_receiver.is_some()
