@@ -235,7 +235,7 @@ pub const SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 22;
 /// convention, so the default falloff is stable across aspect ratios.
 pub const LIGHTROOM_VIGNETTE_PROCESS_VERSION: u32 = 23;
 /// RawNIND AI denoise is a persisted, mutually-exclusive RAW reconstruction
-/// choice. Its derived pixels are deliberately not serialized.
+/// choice. Derived pixels live in a rebuildable, source-validated disk cache.
 pub const AI_DENOISE_PROCESS_VERSION: u32 = 24;
 /// Bayer RawNIND output follows darktable's production remosaic contract
 /// before entering AuRaw's ordinary demosaic stage.
@@ -246,7 +246,11 @@ pub const AI_DENOISE_REMOSAIC_PROCESS_VERSION: u32 = 25;
 /// and balances the presence and color-control endpoints without weakening the
 /// scene-linear, hue-preserving processing guarantees.
 pub const LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION: u32 = 26;
-pub const CURRENT_PROCESS_VERSION: u32 = LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION;
+/// Process 27 matches RawNIND's daylight-WB preprocessing, reconstructs
+/// clipped highlights before the scene boundary, overlap-blends every tile,
+/// and persists a versioned derived result for instant reopen.
+pub const AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION: u32 = 27;
+pub const CURRENT_PROCESS_VERSION: u32 = AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.

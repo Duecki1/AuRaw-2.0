@@ -12,15 +12,16 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::pipeline::{
-    AiDenoisedImage, CfaKind, CompactPixelMap, ExposureParams, GpuParams,
-    HighlightReconstructionMethod, LoadedRaw, MaskStack, ProcessingQuality, RawGpuPipeline,
+    AiDenoisedImage, CfaKind, CompactPixelMap, ExposureParams, GpuParams, LoadedRaw, MaskStack,
+    ProcessingQuality, RawGpuPipeline,
 };
 
 pub const RAWNIND_PACKAGE_URL: &str =
@@ -37,6 +38,13 @@ const TILE_EDGE: usize = 512;
 const OVERLAP: usize = 64;
 const CORE_EDGE: usize = TILE_EDGE - 2 * OVERLAP;
 const MAX_MODEL_ABS: f32 = 60_000.0;
+const RESULT_CACHE_MAGIC: [u8; 8] = *b"AURAWAI\0";
+const RESULT_CACHE_VERSION: u32 = 1;
+const RESULT_CACHE_MANIFEST: &str = "manifest.bin";
+const RESULT_CACHE_PAYLOAD: &str = "scene-rgb16f.bin";
+const RESULT_CACHE_HEADER_BYTES: usize = 96;
+const RESULT_CACHE_IO_CHUNK: usize = 1024 * 1024;
+static NEXT_RESULT_CACHE_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum AiDenoiseEvent {
@@ -68,6 +76,276 @@ pub fn model_cache_dir() -> PathBuf {
     }
 }
 
+pub(crate) fn result_cache_path(root: &Path, source_identity: &str) -> PathBuf {
+    let digest = ring::digest::digest(&SHA256, source_identity.as_bytes());
+    root.join(format!("{}.auraw-ai.zip", hex_digest(digest.as_ref())))
+}
+
+/// Loads a source- and process-validated derived RawNIND scene. A missing file
+/// is an ordinary cache miss; malformed or stale files return an error so the
+/// caller can discard them and regenerate from the original RAW.
+pub(crate) fn load_result_cache(path: &Path, raw: &LoadedRaw) -> Result<Option<AiDenoisedImage>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+    };
+    let mut archive = ZipArchive::new(file)
+        .with_context(|| format!("read AI-denoise cache archive {}", path.display()))?;
+    let header = {
+        let mut entry = archive
+            .by_name(RESULT_CACHE_MANIFEST)
+            .context("AI-denoise cache has no manifest")?;
+        anyhow::ensure!(
+            entry.size() == RESULT_CACHE_HEADER_BYTES as u64,
+            "AI-denoise cache manifest has an unexpected size"
+        );
+        let mut header = [0u8; RESULT_CACHE_HEADER_BYTES];
+        entry
+            .read_exact(&mut header)
+            .context("read AI-denoise cache manifest")?;
+        header
+    };
+    let manifest = ResultCacheManifest::decode(&header)?;
+    anyhow::ensure!(
+        manifest.width == raw.width && manifest.height == raw.height,
+        "AI-denoise cache dimensions do not match the RAW"
+    );
+    anyhow::ensure!(
+        manifest.cfa_kind == cfa_cache_code(raw.cfa_kind),
+        "AI-denoise cache CFA type does not match the RAW"
+    );
+    let expected_elements = u64::from(raw.width)
+        .checked_mul(u64::from(raw.height))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .and_then(|elements| usize::try_from(elements).ok())
+        .context("AI-denoise cache dimensions overflow")?;
+    let expected_bytes = expected_elements
+        .checked_mul(std::mem::size_of::<u16>())
+        .context("AI-denoise cache byte count overflow")?;
+    anyhow::ensure!(
+        manifest.payload_bytes == expected_bytes as u64,
+        "AI-denoise cache payload size does not match the RAW"
+    );
+    anyhow::ensure!(
+        manifest.source_sha256 == source_fingerprint(raw, None)?,
+        "AI-denoise cache belongs to a different RAW reconstruction"
+    );
+
+    let mut rgb16f = vec![0u16; expected_elements];
+    {
+        let mut entry = archive
+            .by_name(RESULT_CACHE_PAYLOAD)
+            .context("AI-denoise cache has no scene payload")?;
+        anyhow::ensure!(
+            entry.size() == expected_bytes as u64,
+            "AI-denoise cache scene payload has an unexpected size"
+        );
+        entry
+            .read_exact(bytemuck::cast_slice_mut(&mut rgb16f))
+            .context("read AI-denoise cache scene payload")?;
+        let mut trailing = [0u8; 1];
+        anyhow::ensure!(
+            entry.read(&mut trailing)? == 0,
+            "AI-denoise cache scene payload contains trailing data"
+        );
+    }
+    let actual_payload = ring::digest::digest(&SHA256, bytemuck::cast_slice(&rgb16f));
+    anyhow::ensure!(
+        actual_payload.as_ref() == manifest.payload_sha256,
+        "AI-denoise cache scene checksum does not match"
+    );
+    AiDenoisedImage::new(raw.width, raw.height, rgb16f).map(Some)
+}
+
+pub(crate) fn save_result_cache(
+    path: &Path,
+    raw: &LoadedRaw,
+    image: &AiDenoisedImage,
+    cancellation: &AtomicBool,
+) -> Result<()> {
+    anyhow::ensure!(
+        image.is_valid_for(raw.width, raw.height),
+        "cannot cache an AI-denoise result with mismatched dimensions"
+    );
+    ensure_not_cancelled(cancellation)?;
+    let source_sha256 = source_fingerprint(raw, Some(cancellation))?;
+    let payload = bytemuck::cast_slice(image.rgb16f.as_ref());
+    let payload_sha256 = digest_cancelable(payload, Some(cancellation))?;
+    let manifest = ResultCacheManifest {
+        width: raw.width,
+        height: raw.height,
+        cfa_kind: cfa_cache_code(raw.cfa_kind),
+        payload_bytes: payload.len() as u64,
+        source_sha256,
+        payload_sha256,
+    }
+    .encode();
+
+    let parent = path
+        .parent()
+        .context("AI-denoise cache path has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create AI-denoise cache directory {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("result.auraw-ai.zip");
+    let temporary_id = NEXT_RESULT_CACHE_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{file_name}.tmp-{}-{temporary_id}",
+        std::process::id()
+    ));
+    let result = (|| {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("create {}", temporary.display()))?;
+        let mut archive = ZipWriter::new(file);
+        let stored = FileOptions::default().compression_method(CompressionMethod::Stored);
+        archive
+            .start_file(RESULT_CACHE_MANIFEST, stored)
+            .context("start AI-denoise cache manifest")?;
+        archive
+            .write_all(&manifest)
+            .context("write AI-denoise cache manifest")?;
+        let compressed = FileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .compression_level(Some(3));
+        archive
+            .start_file(RESULT_CACHE_PAYLOAD, compressed)
+            .context("start AI-denoise cache scene payload")?;
+        for chunk in payload.chunks(RESULT_CACHE_IO_CHUNK) {
+            ensure_not_cancelled(cancellation)?;
+            archive
+                .write_all(chunk)
+                .context("write AI-denoise cache scene payload")?;
+        }
+        let file = archive.finish().context("finalize AI-denoise cache")?;
+        file.sync_all().context("flush AI-denoise cache")?;
+        ensure_not_cancelled(cancellation)?;
+        crate::file_ops::replace_file(&temporary, path)
+            .with_context(|| format!("publish AI-denoise cache to {}", path.display()))?;
+        crate::file_ops::sync_parent_directory(parent)
+            .context("flush AI-denoise cache directory")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResultCacheManifest {
+    width: u32,
+    height: u32,
+    cfa_kind: u32,
+    payload_bytes: u64,
+    source_sha256: [u8; 32],
+    payload_sha256: [u8; 32],
+}
+
+impl ResultCacheManifest {
+    fn encode(self) -> [u8; RESULT_CACHE_HEADER_BYTES] {
+        let mut bytes = [0u8; RESULT_CACHE_HEADER_BYTES];
+        bytes[0..8].copy_from_slice(&RESULT_CACHE_MAGIC);
+        bytes[8..12].copy_from_slice(&RESULT_CACHE_VERSION.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.width.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.height.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.cfa_kind.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.payload_bytes.to_le_bytes());
+        bytes[32..64].copy_from_slice(&self.source_sha256);
+        bytes[64..96].copy_from_slice(&self.payload_sha256);
+        bytes
+    }
+
+    fn decode(bytes: &[u8; RESULT_CACHE_HEADER_BYTES]) -> Result<Self> {
+        anyhow::ensure!(
+            bytes[0..8] == RESULT_CACHE_MAGIC,
+            "invalid AI-denoise cache magic"
+        );
+        let read_u32 = |offset: usize| {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("fixed header"))
+        };
+        let version = read_u32(8);
+        anyhow::ensure!(
+            version == RESULT_CACHE_VERSION,
+            "AI-denoise cache process version {version} is stale"
+        );
+        Ok(Self {
+            width: read_u32(12),
+            height: read_u32(16),
+            cfa_kind: read_u32(20),
+            payload_bytes: u64::from_le_bytes(bytes[24..32].try_into().expect("fixed header")),
+            source_sha256: bytes[32..64].try_into().expect("fixed header"),
+            payload_sha256: bytes[64..96].try_into().expect("fixed header"),
+        })
+    }
+}
+
+fn cfa_cache_code(kind: CfaKind) -> u32 {
+    match kind {
+        CfaKind::Bayer => 1,
+        CfaKind::XTrans => 2,
+    }
+}
+
+fn source_fingerprint(raw: &LoadedRaw, cancellation: Option<&AtomicBool>) -> Result<[u8; 32]> {
+    let mut digest = Sha256Context::new(&SHA256);
+    digest.update(b"AuRaw RawNIND source fingerprint v1\0");
+    digest.update(&raw.width.to_le_bytes());
+    digest.update(&raw.height.to_le_bytes());
+    digest.update(&cfa_cache_code(raw.cfa_kind).to_le_bytes());
+    update_digest_cancelable(
+        &mut digest,
+        bytemuck::cast_slice(raw.raw_pixels.as_slice()),
+        cancellation,
+    )?;
+    let (color_width, color_height, colors) = raw.color_indices.storage_parts();
+    digest.update(&color_width.to_le_bytes());
+    digest.update(&color_height.to_le_bytes());
+    update_digest_cancelable(&mut digest, colors, cancellation)?;
+    let (black_width, black_height, blacks) = raw.black_levels_per_pixel.storage_parts();
+    digest.update(&black_width.to_le_bytes());
+    digest.update(&black_height.to_le_bytes());
+    update_digest_cancelable(&mut digest, bytemuck::cast_slice(blacks), cancellation)?;
+    digest.update(bytemuck::bytes_of(&raw.wb_coeffs));
+    digest.update(bytemuck::bytes_of(&raw.cam_to_srgb));
+    digest.update(bytemuck::bytes_of(&raw.black_levels));
+    digest.update(bytemuck::bytes_of(&raw.white_levels));
+    Ok(digest
+        .finish()
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 is always 32 bytes"))
+}
+
+fn digest_cancelable(bytes: &[u8], cancellation: Option<&AtomicBool>) -> Result<[u8; 32]> {
+    let mut digest = Sha256Context::new(&SHA256);
+    update_digest_cancelable(&mut digest, bytes, cancellation)?;
+    Ok(digest
+        .finish()
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 is always 32 bytes"))
+}
+
+fn update_digest_cancelable(
+    digest: &mut Sha256Context,
+    bytes: &[u8],
+    cancellation: Option<&AtomicBool>,
+) -> Result<()> {
+    for chunk in bytes.chunks(RESULT_CACHE_IO_CHUNK) {
+        if let Some(cancellation) = cancellation {
+            ensure_not_cancelled(cancellation)?;
+        }
+        digest.update(chunk);
+    }
+    Ok(())
+}
+
 pub fn models_are_verified(model_dir: &Path) -> bool {
     verify_file(
         &model_dir.join("model_bayer.onnx"),
@@ -91,6 +369,8 @@ pub fn spawn_rawnind_denoise(
     raw: Arc<LoadedRaw>,
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
+    result_cache_path: Option<PathBuf>,
+    allow_model_download: bool,
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<AiDenoiseEvent> {
     let (sender, receiver) = mpsc::channel();
@@ -101,11 +381,50 @@ pub fn spawn_rawnind_denoise(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
                     ensure_not_cancelled(&cancellation)?;
+                    if let Some(path) = result_cache_path.as_deref() {
+                        let _ = worker_sender.send(AiDenoiseEvent::Progress {
+                            phase: "Restoring saved AI denoise",
+                            completed: 0,
+                            total: 0,
+                        });
+                        match load_result_cache(path, &raw) {
+                            Ok(Some(image)) => {
+                                crate::diagnostics::record(format!(
+                                    "AI-denoise worker restored {} without model inference",
+                                    path.display()
+                                ));
+                                return Ok(image);
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                log::warn!(
+                                    "discarding invalid AI-denoise result cache {}: {error:#}",
+                                    path.display()
+                                );
+                                crate::diagnostics::record(format!(
+                                    "AI-denoise worker rejected saved result: {error:#}"
+                                ));
+                                if let Err(remove_error) = fs::remove_file(path) {
+                                    if remove_error.kind() != std::io::ErrorKind::NotFound {
+                                        log::warn!(
+                                            "could not remove invalid AI-denoise cache {}: {remove_error}",
+                                            path.display()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        ensure_not_cancelled(&cancellation)?;
+                    }
                     let _ = worker_sender.send(AiDenoiseEvent::Progress {
                         phase: "Checking RawNIND models",
                         completed: 0,
                         total: 0,
                     });
+                    anyhow::ensure!(
+                        allow_model_download || models_are_verified(&model_dir),
+                        "the saved AI-denoise result is unavailable; enable AI denoise again to authorize any required model download"
+                    );
                     ensure_models(&model_dir, &worker_sender, &cancellation)?;
                     ensure_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(AiDenoiseEvent::Progress {
@@ -117,7 +436,7 @@ pub fn spawn_rawnind_denoise(
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
                     )?;
-                    match raw.cfa_kind {
+                    let image = match raw.cfa_kind {
                         CfaKind::Bayer => infer_bayer(
                             &model_dir.join("model_bayer.onnx"),
                             &raw,
@@ -142,7 +461,28 @@ pub fn spawn_rawnind_denoise(
                             &worker_sender,
                             &cancellation,
                         ),
+                    }?;
+                    if let Some(path) = result_cache_path.as_deref() {
+                        ensure_not_cancelled(&cancellation)?;
+                        let _ = worker_sender.send(AiDenoiseEvent::Progress {
+                            phase: "Saving AI denoise result",
+                            completed: 0,
+                            total: 0,
+                        });
+                        if let Err(error) = save_result_cache(path, &raw, &image, &cancellation) {
+                            ensure_not_cancelled(&cancellation)?;
+                            log::warn!(
+                                "could not persist AI-denoise result {}: {error:#}",
+                                path.display()
+                            );
+                            crate::diagnostics::record(format!(
+                                "AI-denoise result cache write failed for {}: {error:#}",
+                                path.display()
+                            ));
+                        }
                     }
+                    ensure_not_cancelled(&cancellation)?;
+                    Ok(image)
                 })()
             }))
             .unwrap_or_else(|panic| {
@@ -471,14 +811,13 @@ fn infer_bayer(
         .context("RawNIND Bayer output dimensions overflow")?;
     let mut stored = vec![0u16; output_elements];
     let mut session = create_bayer_session(model_path)?;
+    let model_white_balance = raw.rawnind_daylight_white_balance();
     let mut neutral = ExposureParams::scene_referred_default();
     neutral.ai_denoise_enabled = false;
     neutral.luminance_denoise = 0.0;
     neutral.chroma_denoise = 0.0;
     neutral.ca_red = 0.0;
     neutral.ca_blue = 0.0;
-    neutral.highlight_method = HighlightReconstructionMethod::Off;
-    neutral.highlight_reconstruction = 0.0;
     let masks = MaskStack::default();
     let mut demosaic_pipeline: Option<RawGpuPipeline> = None;
     for tile_y in 0..tiles_y {
@@ -499,22 +838,29 @@ fn infer_bayer(
                         core_x as i64 + tile_column as i64 - OVERLAP as i64,
                         packed_width as usize,
                     );
-                    for (channel, [phase_x, phase_y]) in [[0u32, 0u32], [1, 0], [0, 1], [1, 1]]
-                        .into_iter()
-                        .enumerate()
+                    for (channel, ([phase_x, phase_y], wb_channel)) in [
+                        ([0u32, 0u32], 0usize),
+                        ([1, 0], 1),
+                        ([0, 1], 1),
+                        ([1, 1], 2),
+                    ]
+                    .into_iter()
+                    .enumerate()
                     {
                         let x = origin_x + packed_x as u32 * 2 + phase_x;
                         let y = origin_y + packed_y as u32 * 2 + phase_y;
                         input[channel * TILE_EDGE * TILE_EDGE
                             + tile_row * TILE_EDGE
-                            + tile_column] = normalized_sensor_site(raw, x, y);
+                            + tile_column] =
+                            normalized_sensor_site(raw, x, y) * model_white_balance[wb_channel];
                     }
                 }
             }
             let mut output = run_model_tile(&mut session, 4, input.clone(), TILE_EDGE * 2)?;
             match_gain_tile(&input, &mut output)?;
             let output_edge = TILE_EDGE * 2;
-            let remosaicked = remosaic_bayer_model_tile(raw, &output, output_edge)?;
+            let remosaicked =
+                remosaic_bayer_model_tile(raw, &output, output_edge, model_white_balance)?;
             let params = GpuParams::new(&neutral, &masks, &remosaicked);
             if let Some(existing) = &demosaic_pipeline {
                 existing.upload_raw_tile(queue, &remosaicked)?;
@@ -531,20 +877,72 @@ fn infer_bayer(
                 .as_ref()
                 .context("Bayer remosaic pipeline was not created")?
                 .render_camera_scene_blocking(device, queue, &params)?;
-            for row in 0..core_height * 2 {
-                let destination_y = origin_y as usize + core_y * 2 + row;
-                for column in 0..core_width * 2 {
-                    let destination_x = origin_x as usize + core_x * 2 + column;
+            let sensor_overlap = OVERLAP * 2;
+            let core_start_x = origin_x as usize + core_x * 2;
+            let core_start_y = origin_y as usize + core_y * 2;
+            let core_end_x = core_start_x + core_width * 2;
+            let core_end_y = core_start_y + core_height * 2;
+            let has_left = tile_x > 0;
+            let has_right = tile_x + 1 < tiles_x;
+            let has_top = tile_y > 0;
+            let has_bottom = tile_y + 1 < tiles_y;
+            let working_end_x = origin_x as usize + packed_width as usize * 2;
+            let working_end_y = origin_y as usize + packed_height as usize * 2;
+            let extended_start_x = if has_left {
+                core_start_x - sensor_overlap
+            } else {
+                core_start_x
+            };
+            let extended_start_y = if has_top {
+                core_start_y - sensor_overlap
+            } else {
+                core_start_y
+            };
+            let extended_end_x = if has_right {
+                core_end_x + sensor_overlap
+            } else {
+                core_end_x
+            }
+            .min(working_end_x);
+            let extended_end_y = if has_bottom {
+                core_end_y + sensor_overlap
+            } else {
+                core_end_y
+            }
+            .min(working_end_y);
+            for destination_y in extended_start_y..extended_end_y {
+                let model_y = sensor_overlap + destination_y - core_start_y;
+                let weight_y = seam_weight(
+                    destination_y,
+                    core_start_y,
+                    core_end_y,
+                    sensor_overlap,
+                    has_top,
+                    has_bottom,
+                );
+                for destination_x in extended_start_x..extended_end_x {
                     let destination = (destination_y * raw.width as usize + destination_x) * 3;
-                    let model_index = (OVERLAP * 2 + row) * output_edge + OVERLAP * 2 + column;
-                    for channel in 0..3 {
-                        let value = camera[model_index * 3 + channel];
-                        anyhow::ensure!(
-                            value.is_finite() && value.abs() <= half::f16::MAX.to_f32(),
-                            "RawNIND Bayer remosaic/demosaic produced a divergent value"
-                        );
-                        stored[destination + channel] = half::f16::from_f32(value).to_bits();
-                    }
+                    let model_x = sensor_overlap + destination_x - core_start_x;
+                    let model_index = model_y * output_edge + model_x;
+                    let weight_x = seam_weight(
+                        destination_x,
+                        core_start_x,
+                        core_end_x,
+                        sensor_overlap,
+                        has_left,
+                        has_right,
+                    );
+                    accumulate_half_rgb(
+                        &mut stored,
+                        destination,
+                        [
+                            camera[model_index * 3],
+                            camera[model_index * 3 + 1],
+                            camera[model_index * 3 + 2],
+                        ],
+                        weight_x * weight_y,
+                        "RawNIND Bayer remosaic/demosaic",
+                    )?;
                 }
             }
             let completed = tile_y * tiles_x + tile_x + 1;
@@ -578,12 +976,13 @@ fn remosaic_bayer_model_tile(
     source: &LoadedRaw,
     model_rgb: &[f32],
     edge: usize,
+    model_white_balance: [f32; 3],
 ) -> Result<LoadedRaw> {
     anyhow::ensure!(
         edge == TILE_EDGE * 2,
         "RawNIND remosaic received an unexpected model tensor"
     );
-    let (raw_pixels, color_indices) = remosaic_bayer_pixels(model_rgb, edge)?;
+    let (raw_pixels, color_indices) = remosaic_bayer_pixels(model_rgb, edge, model_white_balance)?;
     Ok(LoadedRaw {
         width: edge as u32,
         height: edge as u32,
@@ -624,7 +1023,11 @@ fn remosaic_bayer_model_tile(
     })
 }
 
-fn remosaic_bayer_pixels(model_rgb: &[f32], edge: usize) -> Result<(Vec<u16>, Vec<u8>)> {
+fn remosaic_bayer_pixels(
+    model_rgb: &[f32],
+    edge: usize,
+    model_white_balance: [f32; 3],
+) -> Result<(Vec<u16>, Vec<u8>)> {
     let plane = edge
         .checked_mul(edge)
         .context("RawNIND remosaic tile dimensions overflow")?;
@@ -649,7 +1052,12 @@ fn remosaic_bayer_pixels(model_rgb: &[f32], edge: usize) -> Result<(Vec<u16>, Ve
                 (0, 1) => 3,
                 _ => 2,
             };
-            let value = model_rgb[channel * plane + index];
+            let white_balance = model_white_balance[channel];
+            anyhow::ensure!(
+                white_balance.is_finite() && white_balance > 0.0,
+                "RawNIND Bayer white balance is invalid"
+            );
+            let value = model_rgb[channel * plane + index] / white_balance;
             anyhow::ensure!(value.is_finite(), "RawNIND Bayer output is non-finite");
             raw_pixels[index] = (value.clamp(0.0, 1.0) * 65_535.0).round() as u16;
         }
@@ -681,8 +1089,6 @@ fn infer_linear(
     neutral.chroma_denoise = 0.0;
     neutral.ca_red = 0.0;
     neutral.ca_blue = 0.0;
-    neutral.highlight_method = HighlightReconstructionMethod::Off;
-    neutral.highlight_reconstruction = 0.0;
     let masks = MaskStack::default();
     let mut pipeline: Option<RawGpuPipeline> = None;
     let cam_to_rec2020 = multiply3(SRGB_TO_REC2020, rows3(raw.cam_to_srgb));
@@ -732,16 +1138,59 @@ fn infer_linear(
             }
             let mut output = run_model_tile(&mut session, 3, input.clone(), TILE_EDGE)?;
             match_gain_tile(&input, &mut output)?;
-            for row in 0..core_height {
-                let destination_y = core_y + row;
-                for column in 0..core_width {
-                    let destination_x = core_x + column;
+            let has_left = tile_x > 0;
+            let has_right = tile_x + 1 < tiles_x;
+            let has_top = tile_y > 0;
+            let has_bottom = tile_y + 1 < tiles_y;
+            let core_end_x = core_x + core_width;
+            let core_end_y = core_y + core_height;
+            let extended_start_x = if has_left { core_x - OVERLAP } else { core_x };
+            let extended_start_y = if has_top { core_y - OVERLAP } else { core_y };
+            let extended_end_x = if has_right {
+                core_end_x + OVERLAP
+            } else {
+                core_end_x
+            }
+            .min(raw.width as usize);
+            let extended_end_y = if has_bottom {
+                core_end_y + OVERLAP
+            } else {
+                core_end_y
+            }
+            .min(raw.height as usize);
+            for destination_y in extended_start_y..extended_end_y {
+                let model_y = OVERLAP + destination_y - core_y;
+                let weight_y = seam_weight(
+                    destination_y,
+                    core_y,
+                    core_end_y,
+                    OVERLAP,
+                    has_top,
+                    has_bottom,
+                );
+                for destination_x in extended_start_x..extended_end_x {
                     let destination = (destination_y * raw.width as usize + destination_x) * 3;
-                    let model_index = (OVERLAP + row) * TILE_EDGE + OVERLAP + column;
-                    for channel in 0..3 {
-                        let value = output[channel * TILE_EDGE * TILE_EDGE + model_index];
-                        stored[destination + channel] = half::f16::from_f32(value).to_bits();
-                    }
+                    let model_x = OVERLAP + destination_x - core_x;
+                    let model_index = model_y * TILE_EDGE + model_x;
+                    let weight_x = seam_weight(
+                        destination_x,
+                        core_x,
+                        core_end_x,
+                        OVERLAP,
+                        has_left,
+                        has_right,
+                    );
+                    accumulate_half_rgb(
+                        &mut stored,
+                        destination,
+                        [
+                            output[model_index],
+                            output[TILE_EDGE * TILE_EDGE + model_index],
+                            output[2 * TILE_EDGE * TILE_EDGE + model_index],
+                        ],
+                        weight_x * weight_y,
+                        "RawNIND linear output",
+                    )?;
                 }
             }
             let completed = tile_y * tiles_x + tile_x + 1;
@@ -843,6 +1292,53 @@ fn reflect_index(index: i64, length: usize) -> usize {
     } else {
         (period - folded) as usize
     }
+}
+
+fn seam_ramp(distance: usize, overlap: usize) -> f32 {
+    (distance as f32 + 0.5) / (2 * overlap) as f32
+}
+
+/// Weight for one axis of darktable's RawNIND overlap blend. Neighboring
+/// ramps sum to exactly one throughout the 2*overlap-wide seam.
+fn seam_weight(
+    coordinate: usize,
+    core_start: usize,
+    core_end: usize,
+    overlap: usize,
+    has_before: bool,
+    has_after: bool,
+) -> f32 {
+    if has_before && coordinate < core_start + overlap {
+        return seam_ramp(coordinate - (core_start - overlap), overlap);
+    }
+    if has_after && coordinate >= core_end - overlap {
+        return 1.0 - seam_ramp(coordinate - (core_end - overlap), overlap);
+    }
+    1.0
+}
+
+fn accumulate_half_rgb(
+    stored: &mut [u16],
+    destination: usize,
+    rgb: [f32; 3],
+    weight: f32,
+    phase: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        weight.is_finite() && (0.0..=1.0).contains(&weight),
+        "{phase} produced an invalid overlap weight"
+    );
+    for channel in 0..3 {
+        let contribution = rgb[channel] * weight;
+        let previous = half::f16::from_bits(stored[destination + channel]).to_f32();
+        let value = previous + contribution;
+        anyhow::ensure!(
+            value.is_finite() && value.abs() <= half::f16::MAX.to_f32(),
+            "{phase} produced a divergent value"
+        );
+        stored[destination + channel] = half::f16::from_f32(value).to_bits();
+    }
+    Ok(())
 }
 
 fn fill_bayer_crop_edges(
@@ -981,9 +1477,99 @@ fn inverse3(matrix: Matrix3) -> Option<Matrix3> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_bayer_session, inverse3, match_gain_tile, mul3, reflect_index,
-        remosaic_bayer_pixels, run_model_tile, SRGB_TO_REC2020, TILE_EDGE,
+        bayer_rggb_origin, create_bayer_session, inverse3, load_result_cache, match_gain_tile,
+        mul3, reflect_index, remosaic_bayer_pixels, result_cache_path, run_model_tile,
+        save_result_cache, seam_weight, spawn_rawnind_denoise, AiDenoiseEvent, CORE_EDGE,
+        SRGB_TO_REC2020, TILE_EDGE,
     };
+    use crate::pipeline::{
+        AiDenoisedImage, CameraProfile, CfaKind, CompactPixelMap, LoadedRaw, NoiseProfile,
+    };
+
+    fn cache_test_raw(width: u32, height: u32) -> LoadedRaw {
+        let pixels = (width * height) as usize;
+        LoadedRaw {
+            width,
+            height,
+            camera_make: "Cache Test".to_owned(),
+            camera_model: "Synthetic".to_owned(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            focal_length: 0.0,
+            aperture: 0.0,
+            focus_distance: 0.0,
+            capture_metadata: Default::default(),
+            cfa_kind: CfaKind::Bayer,
+            raw_pixels: (0..pixels).map(|index| index as u16 * 17).collect(),
+            color_indices: CompactPixelMap::repeating(width, height, 2, 2, vec![0, 1, 3, 2]),
+            wb_coeffs: [2.0, 1.0, 1.5, 1.0],
+            cam_to_srgb: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            black_levels: [64.0; 4],
+            black_levels_per_pixel: CompactPixelMap::repeating(width, height, 1, 1, vec![64.0]),
+            white_levels: [16_383.0; 4],
+            noise_profile: NoiseProfile::default(),
+            camera_profile: CameraProfile::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
+            white_balance_model: None,
+            lens_geometry: None,
+            ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    fn adjacent_rgb_difference(image: &AiDenoisedImage, a: (u32, u32), b: (u32, u32)) -> f64 {
+        let a = ((a.1 * image.width + a.0) * 3) as usize;
+        let b = ((b.1 * image.width + b.0) * 3) as usize;
+        (0..3)
+            .map(|channel| {
+                let left = half::f16::from_bits(image.rgb16f[a + channel]).to_f32();
+                let right = half::f16::from_bits(image.rgb16f[b + channel]).to_f32();
+                f64::from((left - right).abs())
+            })
+            .sum::<f64>()
+            / 3.0
+    }
+
+    fn bayer_seam_gradient_ratio(raw: &LoadedRaw, image: &AiDenoisedImage) -> f64 {
+        let (origin_x, origin_y) = bayer_rggb_origin(raw).unwrap();
+        let packed_width = (raw.width - origin_x) / 2;
+        let packed_height = (raw.height - origin_y) / 2;
+        let mut seam = 0.0;
+        let mut nearby = 0.0;
+        let mut samples = 0u64;
+        for packed_x in (CORE_EDGE as u32..packed_width).step_by(CORE_EDGE) {
+            let x = origin_x + packed_x * 2;
+            if x < 34 || x + 33 >= raw.width {
+                continue;
+            }
+            for y in (origin_y..origin_y + packed_height * 2).step_by(8) {
+                seam += adjacent_rgb_difference(image, (x - 1, y), (x, y));
+                nearby += adjacent_rgb_difference(image, (x - 33, y), (x - 32, y));
+                nearby += adjacent_rgb_difference(image, (x + 31, y), (x + 32, y));
+                samples += 2;
+            }
+        }
+        for packed_y in (CORE_EDGE as u32..packed_height).step_by(CORE_EDGE) {
+            let y = origin_y + packed_y * 2;
+            if y < 34 || y + 33 >= raw.height {
+                continue;
+            }
+            for x in (origin_x..origin_x + packed_width * 2).step_by(8) {
+                seam += adjacent_rgb_difference(image, (x, y - 1), (x, y));
+                nearby += adjacent_rgb_difference(image, (x, y - 33), (x, y - 32));
+                nearby += adjacent_rgb_difference(image, (x, y + 31), (x, y + 32));
+                samples += 2;
+            }
+        }
+        // `samples` counts the two nearby gradients per seam gradient.
+        let seam_mean = seam / (samples.max(1) as f64 * 0.5);
+        let nearby_mean = nearby / samples.max(1) as f64;
+        seam_mean / nearby_mean.max(1e-12)
+    }
 
     fn test_wgpu_device() -> (eframe::wgpu::Device, eframe::wgpu::Queue) {
         let instance = eframe::wgpu::Instance::default();
@@ -1023,10 +1609,138 @@ mod tests {
             0.5, 0.6, 0.7, 0.8, // G plane
             0.9, 1.0, 0.4, 0.2, // B plane
         ];
-        let (mosaic, cfa) = remosaic_bayer_pixels(&model_rgb, 2).unwrap();
+        let (mosaic, cfa) = remosaic_bayer_pixels(&model_rgb, 2, [1.0; 3]).unwrap();
         let expected = [0.1f32, 0.6, 0.7, 0.2].map(|value| (value * 65_535.0).round() as u16);
         assert_eq!(mosaic, expected);
         assert_eq!(cfa, [0, 1, 3, 2]);
+    }
+
+    #[test]
+    fn bayer_remosaic_reverses_model_daylight_white_balance() {
+        let model_rgb = [
+            0.8, 0.8, 0.8, 0.8, // R plane
+            0.6, 0.6, 0.6, 0.6, // G plane
+            0.4, 0.4, 0.4, 0.4, // B plane
+        ];
+        let (mosaic, _) = remosaic_bayer_pixels(&model_rgb, 2, [2.0, 1.0, 4.0]).unwrap();
+        let expected = [0.4f32, 0.6, 0.6, 0.1].map(|value| (value * 65_535.0).round() as u16);
+        assert_eq!(mosaic, expected);
+    }
+
+    #[test]
+    fn neighboring_overlap_weights_sum_to_one() {
+        const OVERLAP: usize = 64;
+        const BOUNDARY: usize = 1_000;
+        for coordinate in BOUNDARY - OVERLAP..BOUNDARY + OVERLAP {
+            let left = seam_weight(coordinate, BOUNDARY - 384, BOUNDARY, OVERLAP, false, true);
+            let right = seam_weight(coordinate, BOUNDARY, BOUNDARY + 384, OVERLAP, true, false);
+            assert!((left + right - 1.0).abs() < f32::EPSILON);
+            assert!(left > 0.0 && right > 0.0);
+        }
+    }
+
+    #[test]
+    fn result_cache_round_trips_and_rejects_changed_source() {
+        let directory = std::env::temp_dir().join(format!(
+            "auraw-ai-cache-test-{}-{}",
+            std::process::id(),
+            super::NEXT_RESULT_CACHE_TEMPORARY_ID
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed,)
+        ));
+        let path = result_cache_path(&directory, "synthetic-source");
+        let mut raw = cache_test_raw(4, 4);
+        let values = (0..4 * 4 * 3)
+            .map(|index| half::f16::from_f32(index as f32 / 47.0).to_bits())
+            .collect();
+        let expected = AiDenoisedImage::new(4, 4, values).unwrap();
+        let cancellation = std::sync::atomic::AtomicBool::new(false);
+
+        save_result_cache(&path, &raw, &expected, &cancellation).unwrap();
+        let restored = load_result_cache(&path, &raw).unwrap().unwrap();
+        assert_eq!(restored.rgb16f.as_ref(), expected.rgb16f.as_ref());
+
+        raw.raw_pixels[3] ^= 1;
+        assert!(load_result_cache(&path, &raw).is_err());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn saved_result_worker_finishes_without_models_runtime_or_gpu() {
+        let directory = std::env::temp_dir().join(format!(
+            "auraw-ai-restore-test-{}-{}",
+            std::process::id(),
+            super::NEXT_RESULT_CACHE_TEMPORARY_ID
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = result_cache_path(&directory, "restore-only-source");
+        let raw = std::sync::Arc::new(cache_test_raw(4, 4));
+        let values = (0..4 * 4 * 3)
+            .map(|index| half::f16::from_f32(index as f32 / 47.0).to_bits())
+            .collect();
+        let expected = AiDenoisedImage::new(4, 4, values).unwrap();
+        let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        save_result_cache(&path, &raw, &expected, &cancellation).unwrap();
+
+        let receiver = spawn_rawnind_denoise(
+            directory.join("models-do-not-exist"),
+            None,
+            None,
+            std::sync::Arc::clone(&raw),
+            None,
+            None,
+            Some(path),
+            false,
+            cancellation,
+        );
+        let restored = receiver
+            .into_iter()
+            .find_map(|event| match event {
+                AiDenoiseEvent::Finished(result) => Some(result.unwrap()),
+                _ => None,
+            })
+            .expect("restore worker must send a terminal event");
+        assert_eq!(restored.rgb16f.as_ref(), expected.rgb16f.as_ref());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn cache_miss_cannot_download_models_without_consent() {
+        let directory = std::env::temp_dir().join(format!(
+            "auraw-ai-no-download-test-{}-{}",
+            std::process::id(),
+            super::NEXT_RESULT_CACHE_TEMPORARY_ID
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let raw = std::sync::Arc::new(cache_test_raw(4, 4));
+        let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let receiver = spawn_rawnind_denoise(
+            directory.join("models-do-not-exist"),
+            None,
+            None,
+            raw,
+            None,
+            None,
+            Some(result_cache_path(&directory, "missing-source")),
+            false,
+            cancellation,
+        );
+        let error = receiver
+            .into_iter()
+            .find_map(|event| match event {
+                AiDenoiseEvent::Finished(Err(error)) => Some(error),
+                _ => None,
+            })
+            .expect("cache miss must terminate before model acquisition");
+        assert!(error.contains("authorize any required model download"));
+        assert!(!directory.join("models-do-not-exist").exists());
+    }
+
+    #[test]
+    fn daylight_white_balance_falls_back_to_as_shot_coefficients() {
+        assert_eq!(
+            cache_test_raw(2, 2).rawnind_daylight_white_balance(),
+            [2.0, 1.0, 1.5]
+        );
     }
 
     /// Opt-in contract check for the pinned published graph. CI does not carry
@@ -1110,6 +1824,12 @@ mod tests {
             .rgb16f
             .iter()
             .all(|value| { half::f16::from_bits(*value).to_f32().is_finite() }));
+        let seam_ratio = bayer_seam_gradient_ratio(&raw, &image);
+        eprintln!("RawNIND seam/nearby-gradient ratio: {seam_ratio:.4}");
+        assert!(
+            seam_ratio < 1.5,
+            "RawNIND tile boundaries are stronger than nearby image gradients"
+        );
     }
 
     #[test]

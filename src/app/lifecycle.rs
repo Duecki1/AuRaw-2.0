@@ -1776,6 +1776,8 @@ impl AurawApp {
         let camera_profile_mode = self.camera_profile_mode;
         let camera_profile_folder = self.camera_profile_folder.clone();
         let last_camera_profile = self.last_camera_profile.clone();
+        let ai_denoise_cache_path =
+            self.rawnind_result_cache_path_for_target(&sidecar_target);
         self.original_preview_exposure = initial_exposure;
         self.original_preview_requested = false;
         self.original_preview_rendered_state = None;
@@ -2147,6 +2149,55 @@ impl AurawApp {
                         "Lensfun catalog/correction prepared in {:.3}s",
                         lens_started.elapsed().as_secs_f64()
                     ));
+                    if rendered_exposure.ai_denoise_enabled {
+                        if full_raw.ai_denoised_image().is_none() {
+                            let cache_started = Instant::now();
+                            match crate::ai_denoise::load_result_cache(
+                                &ai_denoise_cache_path,
+                                &full_raw,
+                            ) {
+                                Ok(Some(image)) => {
+                                    full_raw.set_ai_denoised_image(image).map_err(|error| {
+                                        format!(
+                                            "could not install saved AI-denoise result: {error:#}"
+                                        )
+                                    })?;
+                                    crate::diagnostics::record(format!(
+                                        "AI-denoise result cache restored in {:.3}s from {}",
+                                        cache_started.elapsed().as_secs_f64(),
+                                        ai_denoise_cache_path.display()
+                                    ));
+                                }
+                                Ok(None) => crate::diagnostics::record(
+                                    "AI-denoise result cache miss; RawNIND will run after open",
+                                ),
+                                Err(error) => {
+                                    log::warn!(
+                                        "discarding invalid AI-denoise result cache {}: {error:#}",
+                                        ai_denoise_cache_path.display()
+                                    );
+                                    crate::diagnostics::record(format!(
+                                        "AI-denoise result cache rejected: {error:#}"
+                                    ));
+                                    if let Err(remove_error) =
+                                        std::fs::remove_file(&ai_denoise_cache_path)
+                                    {
+                                        if remove_error.kind() != std::io::ErrorKind::NotFound {
+                                            log::warn!(
+                                                "could not remove invalid AI-denoise cache {}: {remove_error}",
+                                                ai_denoise_cache_path.display()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Decoded RAWs are reused in-process. Do not retain a
+                        // previous document's large derived scene when the
+                        // current sidecar has AI denoise disabled.
+                        full_raw.clear_ai_denoised_image();
+                    }
                     let preview_spec = ProxySpec {
                         max_edge: preview_proxy_edge_setting,
                     };
