@@ -283,8 +283,14 @@ impl Preview {
         if preview_uv_changed(app.preview_visible_uv, visible_uv) {
             app.preview_visible_uv = visible_uv;
             app.preview_source_region_changed();
-            moved = true;
         }
+        // `visible_uv` is derived from the camera state and the current layout.
+        // Egui can run more than one layout pass for a frame, especially while
+        // an Android sidebar slider is changing. Treating that derived value as
+        // a new gesture invalidated the detail revision *after* the sidebar had
+        // queued its edit, so the sharp texture disappeared and the edit was
+        // cancelled until the next pinch. Only the gesture handlers above are
+        // allowed to report preview motion.
         if moved {
             app.note_preview_motion();
         }

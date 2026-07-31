@@ -187,10 +187,6 @@ pub fn build_region_proxy(
     let mut raw_pixels = vec![0u16; len];
     let mut color_indices = vec![0u8; len];
     let mut black_levels_per_pixel = vec![0.0f32; len];
-    let source_macro_width = region_width.div_ceil(cfa_period);
-    let source_macro_height = region_height.div_ceil(cfa_period);
-    let output_macro_width = width.div_ceil(cfa_period);
-    let output_macro_height = height.div_ceil(cfa_period);
     let proportional_partition = |output_index: u32, source_count: u32, output_count: u32| {
         let start =
             (u64::from(output_index) * u64::from(source_count) / u64::from(output_count)) as u32;
@@ -199,11 +195,12 @@ pub fn build_region_proxy(
         (start, end.max(start + 1).min(source_count))
     };
 
-    // One complete output CFA cell summarizes one shared source macrocell.
-    // Each output phase averages only matching source photosites in that macrocell,
-    // keeping R/G/B measurements co-sited before demosaic. Proportional macrocell
-    // boundaries permit arbitrary output dimensions instead of quantizing every
-    // preview to a coarse integer sensor-decimation factor.
+    // Resample at output-pixel granularity, averaging only source photosites
+    // with the requested CFA colour inside that pixel's source footprint. The
+    // former implementation partitioned in whole 2x2/6x6 CFA macrocells and
+    // then gave every phase the entire macrocell block. That multiplied the
+    // filter footprint by the CFA period (six times on X-Trans), turning a
+    // nominal 1600 px preview into visibly blocky low-resolution data.
     raw_pixels
         .par_chunks_mut(row_stride)
         .zip(color_indices.par_chunks_mut(row_stride))
@@ -212,23 +209,23 @@ pub fn build_region_proxy(
         .for_each(|(py, ((raw_row, cfa_row), black_row))| {
             let py = py as u32;
             let output_phase_y = py % cfa_period;
-            let output_macro_y = py / cfa_period;
-            let (source_macro_y0, source_macro_y1) =
-                proportional_partition(output_macro_y, source_macro_height, output_macro_height);
-            let macro_y0 = y + source_macro_y0 * cfa_period;
-            let macro_y1 = (y + source_macro_y1 * cfa_period).min(y + region_height);
+            let (source_y0, source_y1) =
+                proportional_partition(py, region_height, height);
+            let footprint_y0 = y + source_y0;
+            let footprint_y1 = (y + source_y1).min(y + region_height);
 
             for px in 0..width {
                 let output_phase_x = px % cfa_period;
-                let output_macro_x = px / cfa_period;
-                let (source_macro_x0, source_macro_x1) =
-                    proportional_partition(output_macro_x, source_macro_width, output_macro_width);
-                let macro_x0 = x + source_macro_x0 * cfa_period;
-                let macro_x1 = (x + source_macro_x1 * cfa_period).min(x + region_width);
-                let center_x =
-                    (macro_x0 + (macro_x1.saturating_sub(macro_x0)) / 2).min(raw.width - 1);
-                let center_y =
-                    (macro_y0 + (macro_y1.saturating_sub(macro_y0)) / 2).min(raw.height - 1);
+                let (source_x0, source_x1) =
+                    proportional_partition(px, region_width, width);
+                let footprint_x0 = x + source_x0;
+                let footprint_x1 = (x + source_x1).min(x + region_width);
+                let center_x = (footprint_x0
+                    + (footprint_x1.saturating_sub(footprint_x0)) / 2)
+                    .min(raw.width - 1);
+                let center_y = (footprint_y0
+                    + (footprint_y1.saturating_sub(footprint_y0)) / 2)
+                    .min(raw.height - 1);
 
                 // Preserve the source region's CFA phase for detail crops.
                 let phase_x = (x + output_phase_x).min(raw.width - 1);
@@ -240,12 +237,12 @@ pub fn build_region_proxy(
                 let mut black_sum = 0.0f64;
                 let mut count = 0u32;
 
-                // Parallelize rows without changing per-photosite accumulation order.
-                let first_sy = macro_y0 + output_phase_y;
-                let first_sx = macro_x0 + output_phase_x;
-                for sy in (first_sy..macro_y1).step_by(cfa_period as usize) {
+                // The explicit map is authoritative for non-Bayer layouts and
+                // for cameras with two distinct green planes. Spatial boxes do
+                // not overlap, keeping the area filter deterministic.
+                for sy in footprint_y0..footprint_y1 {
                     let row = sy * raw.width;
-                    for sx in (first_sx..macro_x1).step_by(cfa_period as usize) {
+                    for sx in footprint_x0..footprint_x1 {
                         let index = (row + sx) as usize;
                         if raw.color_indices[index] == cfa {
                             pixel_sum += u64::from(raw.raw_pixels[index]);
@@ -399,10 +396,6 @@ fn proxy_ai_denoised(
             .checked_mul(u64::from(output_height))
             .and_then(|count| usize::try_from(count).ok())?;
         let mut raw_cfa16 = vec![0u16; elements];
-        let source_macro_width = region_width.div_ceil(2);
-        let source_macro_height = region_height.div_ceil(2);
-        let output_macro_width = output_width.div_ceil(2);
-        let output_macro_height = output_height.div_ceil(2);
         let partition = |output_index: u32, source_count: u32, output_count: u32| {
             let start = (u64::from(output_index) * u64::from(source_count)
                 / u64::from(output_count)) as u32;
@@ -416,30 +409,42 @@ fn proxy_ai_denoised(
             .for_each(|(output_y, row)| {
                 let output_y = output_y as u32;
                 let phase_y = output_y % 2;
-                let (macro_y0, macro_y1) =
-                    partition(output_y / 2, source_macro_height, output_macro_height);
+                let (source_y0, source_y1) =
+                    partition(output_y, region_height, output_height);
+                let footprint_y0 = y + source_y0;
+                let footprint_y1 = (y + source_y1).min(y + region_height);
                 for output_x in 0..output_width {
                     let phase_x = output_x % 2;
-                    let (macro_x0, macro_x1) =
-                        partition(output_x / 2, source_macro_width, output_macro_width);
+                    let (source_x0, source_x1) =
+                        partition(output_x, region_width, output_width);
+                    let footprint_x0 = x + source_x0;
+                    let footprint_x1 = (x + source_x1).min(x + region_width);
+                    let phase_index = (((y + phase_y).min(raw.height - 1) * raw.width)
+                        + (x + phase_x).min(raw.width - 1))
+                        as usize;
+                    let cfa = raw.color_indices[phase_index];
                     let mut sum = 0u64;
                     let mut count = 0u64;
-                    for source_macro_y in macro_y0..macro_y1 {
-                        let source_y = y + source_macro_y * 2 + phase_y;
-                        if source_y >= y + region_height {
-                            continue;
-                        }
-                        for source_macro_x in macro_x0..macro_x1 {
-                            let source_x = x + source_macro_x * 2 + phase_x;
-                            if source_x < x + region_width {
-                                sum += u64::from(
-                                    source_cfa[(source_y * raw.width + source_x) as usize],
-                                );
+                    for source_y in footprint_y0..footprint_y1 {
+                        for source_x in footprint_x0..footprint_x1 {
+                            let source_index = (source_y * raw.width + source_x) as usize;
+                            if raw.color_indices[source_index] == cfa {
+                                sum += u64::from(source_cfa[source_index]);
                                 count += 1;
                             }
                         }
                     }
-                    row[output_x as usize] = (sum / count.max(1)) as u16;
+                    row[output_x as usize] = if count > 0 {
+                        (sum / count) as u16
+                    } else {
+                        let center_x = (footprint_x0
+                            + footprint_x1.saturating_sub(footprint_x0) / 2)
+                            .min(raw.width - 1);
+                        let center_y = (footprint_y0
+                            + footprint_y1.saturating_sub(footprint_y0) / 2)
+                            .min(raw.height - 1);
+                        source_cfa[nearest_cfa_sample(raw, center_x, center_y, cfa, 2)]
+                    };
                 }
             });
         return super::AiDenoisedImage::new_bayer_cfa(output_width, output_height, raw_cfa16).ok();
@@ -959,7 +964,7 @@ mod tests {
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 2 })
             .ai_denoised_image()
             .expect("proxy derives AI output");
-        assert_eq!(proxy.raw_cfa16.as_ref(), &[1, 2, 5, 6]);
+        assert_eq!(proxy.raw_cfa16.as_ref(), &[0, 2, 4, 6]);
 
         let tile = extract_padded_tile(
             &raw,
@@ -1225,5 +1230,27 @@ mod tests {
             .flat_map(|y| (0..6).map(move |x| proxy_cfa[(y * proxy_width + x) as usize]))
             .collect::<Vec<_>>();
         assert_eq!(first_period, pattern);
+    }
+
+    #[test]
+    fn xtrans_proxy_filters_each_output_pixel_not_a_whole_six_pixel_macrocell() {
+        let pattern = vec![
+            0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1,
+            2, 1, 2, 0, 1, 0, 0, 1, 0,
+        ];
+        let mut raw = test_raw(120, 120);
+        raw.cfa_kind = CfaKind::XTrans;
+        raw.color_indices = CompactPixelMap::repeating(120, 120, 6, 6, pattern);
+        raw.raw_pixels = (0..120)
+            .flat_map(|_| (0..120).map(|x| (x * 100) as u16))
+            .collect();
+
+        let proxy = build_proxy(&raw, ProxySpec { max_edge: 60 });
+        // A 2:1 reduction maps the first six output pixels across source
+        // columns 0..12. They must retain that spatial progression. The old
+        // macrocell implementation averaged all twelve columns into every one
+        // of these samples, which is the sixfold blur seen in Fuji previews.
+        assert!(proxy.raw_pixels[0] <= 200, "left sample was over-blurred");
+        assert!(proxy.raw_pixels[5] >= 900, "right sample was over-blurred");
     }
 }
