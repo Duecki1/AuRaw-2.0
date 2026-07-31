@@ -92,11 +92,12 @@ def test_ai_and_range_masks_use_a_stable_unedited_raw_reference() -> None:
     assert "loaded_raw" in capture
     assert "ExposureParams::scene_referred_default()" in capture
     assert "MaskStack::default()" in capture
-    assert "RawGpuPipeline::new_headless_reusing_programs" in capture
+    assert "RawGpuPipeline::new_headless_reusing_program_template" in capture
     assert "reference_pipeline.read_output_region_blocking" not in capture  # formatted as a chained call
     assert "let rgba = reference_pipeline" in capture
-    assert "live edited output texture" in capture
-    assert "source_edge" in capture and "3072" in capture and "2048" in capture
+    assert "ANDROID_SOURCE_EDGES: &[u32] = &[2048, 1536, 1280, 1024]" in capture
+    assert "DESKTOP_SOURCE_EDGES: &[u32] = &[3072]" in capture
+    assert "GPU pipelines already reserve" in capture
 
 
 def test_brush_input_and_rasterization_avoid_progressive_slowdown() -> None:
@@ -193,7 +194,10 @@ def test_object_masks_always_run_vitmatte_fine_edge_refinement() -> None:
     assert "ViTMatte object-edge refinement failed; using the cleaned SAM mask" in infer
     assert "if request.detailed_edges" not in infer
     request = app[app.index("pub(crate) fn request_object_mask"):app.index("fn start_object_worker")]
-    assert "crate::ai_masks::object_models_are_verified(" in request
+    assert "encoder.is_file()" in request
+    assert "decoder.is_file()" in request
+    assert "self.vitmatte_model_path().is_file()" in request
+    assert "crate::ai_masks::object_models_are_verified(" not in request
     verified = ai[ai.index("pub(crate) fn object_models_are_verified"):ai.index("fn download_pinned_landscape_model")]
     assert "verify_vitmatte_model(vitmatte).is_ok()" in verified
 
