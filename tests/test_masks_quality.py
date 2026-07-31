@@ -186,7 +186,8 @@ def test_object_masks_always_run_vitmatte_fine_edge_refinement() -> None:
     assert "ViTMatte object-edge refinement failed; using the cleaned SAM mask" in infer
     assert "if request.detailed_edges" not in infer
     request = app[app.index("pub(crate) fn request_object_mask"):app.index("fn start_object_worker")]
-    assert "let vitmatte_ready = self.vitmatte_model_path().exists();" in request
+    assert "crate::ai_masks::object_models_are_verified(" in request
+    assert "verify_vitmatte_model(vitmatte).is_ok()" in verified
 
 
 def test_all_canvas_brushes_keep_constant_screen_size_across_zoom() -> None:

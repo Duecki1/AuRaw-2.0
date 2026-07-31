@@ -11,7 +11,7 @@ use crate::pipeline::{
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui};
 
-const MIN_PREVIEW_ZOOM: f32 = 0.01;
+const MIN_PREVIEW_ZOOM: f32 = 0.70;
 const MAX_PREVIEW_ZOOM: f32 = 32.0;
 
 fn physical_pixels_per_point(ctx: &egui::Context) -> f32 {
@@ -32,10 +32,6 @@ impl Preview {
                 .egui_texture_id
                 .map(|texture_id| (texture_id, pipeline.width, pipeline.height))
         });
-        // Measure the panel before a pipeline exists. A RAW can otherwise finish
-        // loading from the small startup proxy before Max quality ever learns
-        // the phone/monitor's physical pixel dimensions. Once an image exists,
-        // the more exact visible-image measurement below replaces this bound.
         if base_pipeline.is_none() && available.x > 0.0 && available.y > 0.0 {
             let pixels_per_point = physical_pixels_per_point(ui.ctx());
             app.set_preview_viewport_pixels([
@@ -241,10 +237,6 @@ impl Preview {
                 .round()
                 .max(1.0) as u32,
         ];
-        // A layout/DPI measurement is not user motion. Treating one-pixel
-        // viewport settling as a pan continuously restarted the preview idle
-        // timer on Android, so the sharper replacement could be deferred
-        // forever. The setter queues a density rebuild on its own.
         app.set_preview_viewport_pixels(viewport_pixels);
         let visible_uv = if crop_preview {
             crop_workspace_visible_source_uv(
@@ -284,13 +276,6 @@ impl Preview {
             app.preview_visible_uv = visible_uv;
             app.preview_source_region_changed();
         }
-        // `visible_uv` is derived from the camera state and the current layout.
-        // Egui can run more than one layout pass for a frame, especially while
-        // an Android sidebar slider is changing. Treating that derived value as
-        // a new gesture invalidated the detail revision *after* the sidebar had
-        // queued its edit, so the sharp texture disappeared and the edit was
-        // cancelled until the next pinch. Only the gesture handlers above are
-        // allowed to report preview motion.
         if moved {
             app.note_preview_motion();
         }

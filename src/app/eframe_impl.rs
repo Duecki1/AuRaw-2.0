@@ -201,19 +201,13 @@ impl eframe::App for AurawApp {
         self.apply_pending_preview_quality(frame);
         self.sync_original_preview(frame);
         if !self.original_preview_requested {
-            // Keep the tiny full-frame navigation proxy current before rendering a
-            // visible high-resolution crop. Detail Dehaze/adaptive-tone output can
-            // then inherit one stable set of full-image statistics while panning.
             self.advance_navigation_preview(frame);
             self.advance_preview_detail(frame);
             self.advance_processing(frame);
         }
         self.refresh_status();
 
-        if self.preview_detail_pending_stage.is_some()
-            || self.navigation_pending_stage.is_some()
-            || (self.preview_zoom <= DETAIL_ZOOM_START && self.pending_stage.is_some())
-        {
+        if self.preview_processing_pending() {
             ui.ctx().request_repaint();
         }
         if self.has_background_tasks()

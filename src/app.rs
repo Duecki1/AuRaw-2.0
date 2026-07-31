@@ -76,18 +76,12 @@ pub(crate) enum PreviewQuality {
 }
 
 impl PreviewQuality {
-    /// Requested output pixels per physical display pixel. Every level follows
-    /// the actual preview viewport; levels differ only in sampling density.
-    /// Medium is one rendered sample per display pixel. High and Max retain
-    /// extra sampling support for geometric filtering and high-DPI sharpness.
     pub const fn pixel_scale(self) -> f32 {
         match self {
-            Self::Low => 0.65,
-            Self::Medium => 1.00,
-            Self::High => 1.50,
-            // Two samples per physical display pixel retain a crisp Nyquist
-            // margin after crop, rotation, Lensfun warp and bilinear display.
-            Self::Max => 2.00,
+            Self::Low => 0.50,
+            Self::Medium => 0.67,
+            Self::High => 0.84,
+            Self::Max => 1.00,
         }
     }
 
@@ -100,15 +94,12 @@ impl PreviewQuality {
         }
     }
 
-    /// Minimum edge used before the first viewport measurement arrives. This
-    /// is a startup floor, not a fixed quality cap; every quality level grows
-    /// with the screen's physical pixel dimensions.
     pub const fn proxy_edge(self) -> u32 {
         match self {
             Self::Low => 640,
-            Self::Medium => 960,
-            Self::High => 1280,
-            Self::Max => 1600,
+            Self::Medium => 800,
+            Self::High => 1024,
+            Self::Max => 1280,
         }
     }
 
@@ -120,18 +111,10 @@ impl PreviewQuality {
             .max(requested.min(f64::from(u32::MAX - CFA_PHASE_GUARD)) as u32 + CFA_PHASE_GUARD)
     }
 
-    /// Fit previews are sized from the visible image's physical display pixels
-    /// on every platform and quality level. The guard absorbs Bayer/X-Trans
-    /// phase rounding without allowing a one-pixel undersize at Max quality.
     pub fn proxy_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
         self.edge_for_scale(viewport_pixels, 1.0)
     }
 
-    /// Size a full-source proxy for an image fitted inside the available
-    /// viewport. This is used before the first painted image rectangle exists;
-    /// accounting for the crop/aspect ratio avoids treating phone letterbox
-    /// space as image pixels while still meeting the selected physical-DPI
-    /// density inside the photo.
     pub fn proxy_edge_for_fitted_source(
         self,
         viewport_pixels: [u32; 2],
@@ -159,9 +142,6 @@ impl PreviewQuality {
         self.proxy_edge().max(requested).min(source_edge)
     }
 
-    /// Detail crops include filtering support around the visible rectangle.
-    /// The 35% ceiling pays for that non-visible padding while the visible
-    /// region itself keeps exactly the same DPI scale as fit view.
     pub fn detail_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
         self.edge_for_scale(viewport_pixels, 1.35)
     }
@@ -1050,7 +1030,7 @@ mod transactional_pipeline_tests {
     fn preview_quality_levels_track_physical_viewport_density() {
         assert_eq!(
             PreviewQuality::Max.proxy_edge_for_viewport([3_000, 2_000]),
-            6_006
+            3_006
         );
         assert!(PreviewQuality::Max.detail_edge_for_viewport([3_200, 1_800]) >= 3_200 * 135 / 100);
         for quality in [
@@ -1064,7 +1044,7 @@ mod transactional_pipeline_tests {
     }
 
     #[test]
-    fn preview_quality_density_is_ordered_and_max_is_two_samples_per_pixel() {
+    fn preview_quality_density_is_ordered_and_max_matches_physical_pixels() {
         let viewport = [2_400, 1_600];
         let edges = [
             PreviewQuality::Low.proxy_edge_for_viewport(viewport),
@@ -1073,7 +1053,7 @@ mod transactional_pipeline_tests {
             PreviewQuality::Max.proxy_edge_for_viewport(viewport),
         ];
         assert!(edges.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(edges[3], 4_806);
+        assert_eq!(edges[3], 2_406);
     }
 
     #[test]
@@ -1085,9 +1065,7 @@ mod transactional_pipeline_tests {
             4_688,
             geometry,
         );
-        // two-sample margin plus its 1600px startup floor, rather than sizing
-        // from the unrelated 1500px-tall editor panel.
-        assert_eq!(edge, 1_600);
+        assert_eq!(edge, 1_280);
 
         let mut cropped = geometry;
         cropped.crop = [0.375, 0.0, 0.625, 1.0];

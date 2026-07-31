@@ -992,12 +992,21 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    fn preview_detail_is_current(&self) -> bool {
+        self.preview_detail
+            .as_ref()
+            .is_some_and(|detail| detail.revision == self.preview_revision)
+    }
+
+    pub(crate) fn preview_processing_pending(&self) -> bool {
+        self.preview_detail_pending_stage.is_some()
+            || self.navigation_pending_stage.is_some()
+            || (self.pending_stage.is_some()
+                && (self.preview_zoom <= DETAIL_ZOOM_START
+                    || !self.preview_detail_is_current()))
+    }
+
     pub(crate) fn note_preview_motion(&mut self) {
-        // Sidebar controls are laid out before the central preview. If an edit
-        // and a genuine navigation event land in the same frame, retain the
-        // edit as an urgent full detail rebuild. Clearing it here used to make
-        // slider output depend on whether an Android layout/gesture pass ran
-        // later in that frame.
         let edit_was_pending = self.preview_detail_pending_stage.is_some();
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.preview_detail_urgent = edit_was_pending;
@@ -1010,10 +1019,6 @@ impl AurawApp {
         }
     }
 
-    /// Queue processing for the full proxy and, while zoomed, both the visible
-    /// high-resolution crop and the tiny adjusted full-frame navigation proxy.
-    /// The normal full-frame proxy is still deferred until fit view, but zoom
-    /// and pan never fall back to an unedited/stale RAW rendition.
     pub(crate) fn queue_preview_processing(&mut self, stage: ProcessingStage) {
         self.pending_stage = Some(match self.pending_stage {
             Some(existing) => existing.min(stage),
@@ -1028,7 +1033,6 @@ impl AurawApp {
             self.preview_detail_urgent = true;
         }
 
-        // The low-resolution navigation proxy is useful only while zoomed.
         if self.preview_zoom > DETAIL_ZOOM_START {
             self.navigation_pending_stage = Some(match self.navigation_pending_stage {
                 Some(existing) => existing.min(stage),
@@ -1201,16 +1205,11 @@ impl AurawApp {
             self.retire_egui_texture(texture_id);
         }
 
-        // This marker is the transaction commit point.
         self.original_preview_rendered_state = Some(requested_state);
         self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn preview_base_pipeline(&self) -> Option<&RawGpuPipeline> {
-        // The navigation pipeline exists only to provide inexpensive full-frame
-        // tone statistics while a zoom crop is updating. It is intentionally
-        // tiny and must never become the image shown to the user: doing so made
-        // the transition from fit to 101% zoom look like a pixelated thumbnail.
         self.gpu_pipeline.as_ref()
     }
 
@@ -1233,8 +1232,6 @@ impl AurawApp {
         let fallback = self
             .preview_quality
             .proxy_edge_for_viewport(self.preview_viewport_pixels);
-        // Above fit, the detail pipeline owns visible-pixel density. The main
-        // proxy remains a stable full-frame navigation image.
         if self.preview_zoom > DETAIL_ZOOM_START {
             return self
                 .preview_raw
@@ -1291,21 +1288,14 @@ impl AurawApp {
         self.preview_viewport_pixels = viewport_pixels;
 
         if self.load_receiver.is_some() {
-            // The load request may already have captured the startup floor.
-            // Preserve this measurement so the post-load rebuild uses the real
-            // physical viewport rather than leaving the first preview blurry.
             self.preview_quality_dirty = true;
         }
 
-        // Every quality is a density relative to the physical display, not a
-        // fixed texture size. Rebuild only when the existing full-frame proxy
-        // is too small; shrinking a window can safely retain the sharper proxy.
         if let (Some(full_raw), Some(preview_raw)) =
             (self.loaded_raw.as_ref(), self.preview_raw.as_ref())
         {
             let target_edge = self.requested_preview_edge_for_source(full_raw);
             let current_edge = preview_raw.width.max(preview_raw.height);
-            // Up to five pixels can be consumed by X-Trans phase alignment.
             if current_edge.saturating_add(5) < target_edge {
                 self.preview_quality_dirty = true;
             }
@@ -1679,12 +1669,8 @@ impl AurawApp {
             return;
         }
 
-        let detail_is_current = self
-            .preview_detail
-            .as_ref()
-            .is_some_and(|detail| detail.revision == self.preview_revision);
+        let detail_is_current = self.preview_detail_is_current();
         if detail_is_current {
-            // Reuse the current detail crop for parameter-only updates.
             return;
         }
 
@@ -1700,20 +1686,18 @@ impl AurawApp {
             }
         }
 
-        // Avoid retrying every frame if allocation fails. A later zoom, edit,
-        // or quality change schedules a fresh attempt.
-        self.preview_motion_at = None;
-        self.preview_detail_urgent = false;
-        self.preview_detail_pending_stage = None;
-
         let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
             return;
         };
         let Some(render_state) = frame.wgpu_render_state() else {
+            self.egui_ctx.request_repaint();
             return;
         };
+
+        self.preview_motion_at = None;
+        self.preview_detail_urgent = false;
+        self.preview_detail_pending_stage = None;
         let visible = self.preview_visible_uv;
-        // Above fit view, always build the visible high-resolution detail crop.
 
         let cfa_period = match full_raw.cfa_kind {
             crate::pipeline::CfaKind::Bayer => 2,
@@ -2180,8 +2164,6 @@ impl AurawApp {
             .as_ref()
             .filter(|detail| detail.revision == self.preview_revision)
         else {
-            // advance_preview_detail will construct the current visible crop,
-            // immediately for edits and after the idle delay for navigation.
             return;
         };
         let Some(full_raw) = self.loaded_raw.as_ref() else {
@@ -2293,7 +2275,9 @@ impl AurawApp {
     fn advance_processing(&mut self, frame: &eframe::Frame) {
         if self.preview_zoom > DETAIL_ZOOM_START {
             self.advance_zoomed_processing(frame);
-            return;
+            if self.preview_detail_is_current() {
+                return;
+            }
         }
 
         let Some(stage) = self.pending_stage else {
