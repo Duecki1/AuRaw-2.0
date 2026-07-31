@@ -211,7 +211,10 @@ impl AurawApp {
         self.subject_job_document_id = request.document_id;
         self.subject_job_generation = request.generation;
         self.subject_download_progress = None;
-        self.subject_inferencing = request.model_path.exists() && request.vitmatte_path.exists();
+        self.subject_inferencing = crate::ai_masks::subject_models_are_verified(
+            &request.model_path,
+            &request.vitmatte_path,
+        );
         self.background_tasks
             .set_global_visible(id, !self.subject_inferencing);
         self.subject_receiver = Some(spawn_subject_mask(
@@ -246,9 +249,11 @@ impl AurawApp {
         self.object_job_target = Some(request.target);
         self.object_pending_target = None;
         self.object_download_progress = None;
-        self.object_inferencing = request.encoder_path.exists()
-            && request.decoder_path.exists()
-            && request.vitmatte_path.exists();
+        self.object_inferencing = crate::ai_masks::object_models_are_verified(
+            &request.encoder_path,
+            &request.decoder_path,
+            &request.vitmatte_path,
+        );
         self.background_tasks
             .set_global_visible(id, !self.object_inferencing);
         self.object_decoder_only = request.request.cache.is_some();

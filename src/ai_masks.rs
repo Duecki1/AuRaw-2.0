@@ -214,6 +214,20 @@ pub(crate) fn landscape_model_is_verified(path: &Path) -> bool {
     verify_landscape_model(path).is_ok()
 }
 
+pub(crate) fn subject_models_are_verified(birefnet: &Path, vitmatte: &Path) -> bool {
+    verify_model(birefnet).is_ok() && verify_vitmatte_model(vitmatte).is_ok()
+}
+
+pub(crate) fn object_models_are_verified(
+    encoder: &Path,
+    decoder: &Path,
+    vitmatte: &Path,
+) -> bool {
+    verify_sha256_hex(encoder, SAM21_ENCODER_SHA256_HEX, SAM21_ENCODER_MAX_BYTES).is_ok()
+        && verify_sha256_hex(decoder, SAM21_DECODER_SHA256_HEX, SAM21_DECODER_MAX_BYTES).is_ok()
+        && verify_vitmatte_model(vitmatte).is_ok()
+}
+
 fn download_pinned_landscape_model<F>(
     path: &Path,
     cancellation: &AtomicBool,

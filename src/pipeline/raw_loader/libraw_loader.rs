@@ -22,11 +22,12 @@ use std::os::unix::ffi::OsStrExt;
 const MAX_DCP_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DCP_SCAN_FILES: usize = 10_000;
 const MAX_DCP_SCAN_DEPTH: usize = 16;
-/// Conservative default only for RAWs that provide no usable DNG
-/// BaselineExposure. This is deliberately much smaller than the historical
-/// universal +0.7 EV renderer lift and is applied exactly once, before any
-/// user Exposure edit.
-const MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 0.25;
+/// Calibrated rendering exposure for proprietary RAWs that provide no usable
+/// DNG BaselineExposure. The former +0.25 EV fallback left the measured Sony
+/// reference about one stop below its camera-neutral Lightroom rendition.
+/// This metadata fallback is applied exactly once, before any user Exposure
+/// edit; DNGs and DCPs with explicit baseline values remain authoritative.
+const MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 1.25;
 
 fn valid_baseline_exposure(value: f32) -> Option<f32> {
     // LibRaw initializes a missing BaselineExposure to a finite sentinel below

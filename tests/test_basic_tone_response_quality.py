@@ -60,7 +60,7 @@ def display_black_toe(luma: float, amount: float) -> float:
     return luma * 2.0**offset
 
 
-def test_process_23_is_the_single_runtime_renderer() -> None:
+def test_process_25_is_the_single_runtime_renderer() -> None:
     assert "pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;" in BASIC
     assert "pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;" in BASIC
     assert "pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;" in BASIC
@@ -69,7 +69,10 @@ def test_process_23_is_the_single_runtime_renderer() -> None:
     assert "pub const EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 21;" in BASIC
     assert "pub const SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 22;" in BASIC
     assert "pub const LIGHTROOM_VIGNETTE_PROCESS_VERSION: u32 = 23;" in BASIC
-    assert "pub const CURRENT_PROCESS_VERSION: u32 = LIGHTROOM_VIGNETTE_PROCESS_VERSION;" in BASIC
+    assert "pub const AI_DENOISE_PROCESS_VERSION: u32 = 24;" in BASIC
+    assert "pub const AI_DENOISE_REMOSAIC_PROCESS_VERSION: u32 = 25;" in BASIC
+    assert "pub const LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION: u32 = 26;" in BASIC
+    assert "pub const CURRENT_PROCESS_VERSION: u32 = LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION;" in BASIC
     assert "const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16u;" in TONEMAP
     assert "const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17u;" in TONEMAP
     assert "const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18u;" in TONEMAP
@@ -219,21 +222,22 @@ def test_local_masks_scale_low_tone_strength_not_fully_adjusted_result() -> None
 
 
 def test_highlights_and_whites_use_lightroom_calibrated_ranges() -> None:
-    assert "signed_tone_range(highlights, 0.72, 0.60)" in TONEMAP
-    assert "percentiles.p005 - 0.40" in TONEMAP
-    assert "percentiles.p50 - 0.30" in TONEMAP
-    assert "percentiles.p50 + 0.40" in TONEMAP
+    assert "signed_tone_range(highlights, 1.35, 1.00)" in TONEMAP
+    assert "percentiles.p50 - 0.35" in TONEMAP
+    assert "percentiles.p95 + 0.45" in TONEMAP
+    assert "percentiles.p05 - 0.15" in TONEMAP
+    assert "percentiles.p50 + 0.55" in TONEMAP
     assert "fn lightroom_positive_whites_offset_ev" in TONEMAP
-    assert "return min(whites * 2.35, monotone_limit) * mask;" in TONEMAP
+    assert "return min(whites * 0.95, monotone_limit) * mask;" in TONEMAP
 
 
 def test_dehaze_endpoint_uses_bounded_ambient_relative_transfer() -> None:
     assert "let shaped_position = pow(ambient_position, 0.33);" in ADJUSTMENTS
     assert "let mid_position_hump = 0.30 * shaped_position * (1.0 - shaped_position);" in ADJUSTMENTS
     assert "mix(0.008, 0.012, haze_likelihood)" in ADJUSTMENTS
-    assert "exp2(-amount * 4.20 * tone_mask)" in ADJUSTMENTS
-    assert "haze * mix(0.115, 0.58, position_weight)" in ADJUSTMENTS
-    assert "haze * mix(0.76, 0.64, haze_likelihood)" in ADJUSTMENTS
+    assert "exp2(-amount * 0.90 * tone_mask)" in ADJUSTMENTS
+    assert "haze * mix(0.045, 0.23, position_weight)" in ADJUSTMENTS
+    assert "haze * mix(0.32, 0.27, haze_likelihood)" in ADJUSTMENTS
 
 
 def test_hdr_values_are_outside_shadow_and_black_toe_regions() -> None:
