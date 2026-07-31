@@ -157,7 +157,10 @@ pub struct MaskImage {
 
 impl MaskImage {
     pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
-        (pixels.len() == width as usize * height as usize).then(|| Self {
+        let pixel_count = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        (pixels.len() == pixel_count).then(|| Self {
             width,
             height,
             pixels: pixels.into(),
@@ -175,7 +178,11 @@ pub struct MaskRgbImage {
 
 impl MaskRgbImage {
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Option<Self> {
-        (rgba.len() == width as usize * height as usize * 4).then(|| Self {
+        let byte_count = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?
+            .checked_mul(4)?;
+        (rgba.len() == byte_count).then(|| Self {
             width,
             height,
             rgba: rgba.into(),
@@ -2510,5 +2517,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn mask_image_dimensions_are_checked_before_buffer_comparison() {
+        assert!(MaskImage::new(0, 0, Vec::new()).is_some());
+        assert!(MaskImage::new(2, 3, vec![0; 6]).is_some());
+        assert!(MaskImage::new(2, 3, vec![0; 5]).is_none());
+        assert!(MaskImage::new(u32::MAX, u32::MAX, Vec::new()).is_none());
+    }
+
+    #[test]
+    fn rgba_mask_image_dimensions_are_checked_before_buffer_comparison() {
+        assert!(MaskRgbImage::new(0, 0, Vec::new()).is_some());
+        assert!(MaskRgbImage::new(2, 3, vec![0; 24]).is_some());
+        assert!(MaskRgbImage::new(2, 3, vec![0; 23]).is_none());
+        assert!(MaskRgbImage::new(u32::MAX, u32::MAX, Vec::new()).is_none());
     }
 }

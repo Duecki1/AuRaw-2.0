@@ -219,6 +219,8 @@ const LIGHTROOM_COMPARISON_SUITE: &[(&str, Option<(&str, f32)>)] = &[
     ("baseline", None),
     ("exposure_plus1_25", Some(("exposure", 1.25))),
     ("exposure_minus1_25", Some(("exposure", -1.25))),
+    ("exposure_plus5", Some(("exposure", 5.0))),
+    ("exposure_minus5", Some(("exposure", -5.0))),
     ("contrast_plus100", Some(("contrast", 100.0))),
     ("contrast_minus100", Some(("contrast", -100.0))),
     ("highlights_plus100", Some(("highlights", 100.0))),

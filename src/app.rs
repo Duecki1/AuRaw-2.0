@@ -615,13 +615,23 @@ struct SubjectMaskTaskRequest {
 struct ObjectMaskTaskRequest {
     document_id: u64,
     generation: u64,
-    target: (usize, usize),
+    target: AiMaskTarget,
     encoder_path: PathBuf,
     decoder_path: PathBuf,
     vitmatte_path: PathBuf,
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
     request: ObjectMaskRequest,
+}
+
+struct InpaintTaskRequest {
+    document_id: u64,
+    generation: u64,
+    model_path: PathBuf,
+    runtime_path: Option<PathBuf>,
+    runtime_sha256: Option<String>,
+    request: InpaintRequest,
+    dabs: Vec<BrushDab>,
 }
 
 enum BackgroundAction {
@@ -828,7 +838,7 @@ pub struct AurawApp {
     object_generation: u64,
     object_job_generation: u64,
     object_job_document_id: u64,
-    object_job_target: Option<(usize, usize)>,
+    object_job_target: Option<AiMaskTarget>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
     pub(crate) inpaint_brush_size: f32,
     pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,
@@ -987,7 +997,10 @@ include!("app/eframe_impl.rs");
 
 #[cfg(test)]
 mod transactional_pipeline_tests {
-    use super::{collect_pipeline_update_results, PreviewQuality};
+    use super::{
+        collect_pipeline_update_results, AiMaskTarget, AurawApp, BackgroundTaskManager, MaskGeometry,
+        MaskKind, MaskStack, TaskKind, TaskProgress, TaskStatus, PreviewQuality,
+    };
 
     #[test]
     #[cfg(not(target_os = "android"))]
@@ -1076,5 +1089,50 @@ mod transactional_pipeline_tests {
         }
         assert!(retry.is_ok());
         assert_eq!(rendered_revision, Some(requested_revision));
+    }
+
+    #[test]
+    fn ai_mask_result_target_survives_reordering_but_not_replacement() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Object);
+        let target = AiMaskTarget {
+            mask_index: 0,
+            component_index: 0,
+            kind: MaskKind::Object,
+            geometry: stack.masks[0].components[0].geometry.clone(),
+        };
+        stack.add_component(MaskKind::Brush, crate::pipeline::MaskCombineMode::Add);
+        assert_eq!(stack.move_submask_component(0, 0, 0, 2), Some((0, 1)));
+        assert_eq!(
+            AurawApp::resolve_ai_mask_target_in_stack(&stack, &target),
+            Ok((0, 1))
+        );
+
+        stack.masks[0].components[1].kind = MaskKind::Brush;
+        stack.masks[0].components[1].geometry = MaskGeometry::for_kind(MaskKind::Brush);
+        let error = AurawApp::resolve_ai_mask_target_in_stack(&stack, &target).unwrap_err();
+        assert!(error.contains("changed type"));
+    }
+
+    #[test]
+                document_id: 1,
+                generation: 1,
+            },
+            TaskKind::ObjectMask {
+                document_id: 1,
+                generation: 1,
+            },
+        ];
+        for kind in kinds {
+            let mut tasks = BackgroundTaskManager::default();
+            let id = tasks.start_nonblocking(
+                kind,
+                "Generating mask",
+                TaskProgress::indeterminate("Running inference"),
+                true,
+            );
+            assert!(tasks.fail(id, "inference failed"));
+            assert_eq!(tasks.snapshot(id).unwrap().status, TaskStatus::Failed);
+        }
     }
 }

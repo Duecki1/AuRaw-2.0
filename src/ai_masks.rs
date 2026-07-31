@@ -63,6 +63,16 @@ static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLo
     Ok(())
 }
 
+pub(crate) fn object_models_are_verified(
+    encoder: &Path,
+    decoder: &Path,
+    vitmatte: &Path,
+) -> bool {
+    verify_sha256_hex(encoder, SAM21_ENCODER_SHA256_HEX, SAM21_ENCODER_MAX_BYTES).is_ok()
+        && verify_sha256_hex(decoder, SAM21_DECODER_SHA256_HEX, SAM21_DECODER_MAX_BYTES).is_ok()
+        && verify_vitmatte_model(vitmatte).is_ok()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Letterbox {
     width: u32,

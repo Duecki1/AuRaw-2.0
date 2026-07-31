@@ -18,6 +18,7 @@ fn main() {
         "src/shaders/noise.wgsl",
         "src/shaders/noise_ca_finish.wgsl",
         "src/shaders/color.wgsl",
+        "src/shaders/color_denoise.wgsl",
         "src/shaders/highlights.wgsl",
         "src/shaders/highlight_lch_pass.wgsl",
         "src/shaders/basic_adjustments.wgsl",

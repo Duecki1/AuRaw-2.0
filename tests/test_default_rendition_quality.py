@@ -20,8 +20,8 @@ def test_global_exposure_has_no_unconditional_backend_lift() -> None:
     assert "self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV" in BASIC
 
 
-def test_metadata_default_exposure_is_resolved_once_with_conservative_fallback() -> None:
-    assert "MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 0.25" in RAW_LOADER
+def test_metadata_default_exposure_is_resolved_once_with_calibrated_fallback() -> None:
+    assert "MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 1.25" in RAW_LOADER
     assert "fn valid_baseline_exposure" in RAW_LOADER
     assert "value.is_finite() && value > -999.0" in RAW_LOADER
     assert "fn resolve_default_exposure_ev" in RAW_LOADER
@@ -52,13 +52,13 @@ def test_default_view_transform_uses_scene_headroom_shoulder_and_gamut_aware_chr
 
 def test_contrast_is_a_protected_scene_ev_s_curve() -> None:
     tonemap = read_source_tree(Path("src/shaders/tonemap.wgsl"))
-    assert "let contrast_pivot_ev = tone_percentiles().p50 - 0.45" in tonemap
+    assert "let contrast_pivot_ev = tone_percentiles().p50 + 0.12" in tonemap
     assert "let toe_distance_ev = max(-relative_ev, 0.0)" in tonemap
     assert "let shoulder_distance_ev = max(relative_ev, 0.0)" in tonemap
     assert "let toe_midtone_width_ev = 1.65" in tonemap
     assert "let shoulder_midtone_width_ev = 1.85" in tonemap
-    assert "let toe_endpoint = select(1.70, 2.60, amount >= 0.0)" in tonemap
-    assert "let shoulder_endpoint = select(0.95, 1.35, amount >= 0.0)" in tonemap
+    assert "let toe_endpoint = select(1.70, 5.80, amount >= 0.0)" in tonemap
+    assert "let shoulder_endpoint = select(0.95, 0.85, amount >= 0.0)" in tonemap
     assert "1 - 1.70*ln(2)/1.65 = 0.286" in tonemap
     assert "1 - 0.95*ln(2)/1.85 = 0.644" in tonemap
     assert "scene_ev * contrast_power" not in tonemap
