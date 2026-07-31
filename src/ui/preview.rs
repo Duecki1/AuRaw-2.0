@@ -18,14 +18,26 @@ pub struct Preview;
 
 impl Preview {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        let Some((texture_id, pipeline_width, pipeline_height)) =
-            app.preview_base_pipeline().and_then(|pipeline| {
-                pipeline
-                    .egui_texture_id
-                    .map(|texture_id| (texture_id, pipeline.width, pipeline.height))
-            })
-        else {
-            if app.gpu_pipeline.is_some() {
+        let available = ui.available_size();
+        let base_pipeline = app.preview_base_pipeline().and_then(|pipeline| {
+            pipeline
+                .egui_texture_id
+                .map(|texture_id| (texture_id, pipeline.width, pipeline.height))
+        });
+        // Measure the panel before a pipeline exists. A RAW can otherwise finish
+        // loading from the small startup proxy before Max quality ever learns
+        // the phone/monitor's physical pixel dimensions. Once an image exists,
+        // the more exact visible-image measurement below replaces this bound.
+        if base_pipeline.is_none() && available.x > 0.0 && available.y > 0.0 {
+            let pixels_per_point = ui.ctx().pixels_per_point();
+            app.set_preview_viewport_pixels([
+                (available.x * pixels_per_point).round().max(1.0) as u32,
+                (available.y * pixels_per_point).round().max(1.0) as u32,
+            ]);
+        }
+
+        let Some((texture_id, pipeline_width, pipeline_height)) = base_pipeline else {
+            if app.preview_is_preparing() {
                 ui.centered_and_justified(|ui| {
                     ui.spinner();
                     ui.label("Preparing preview…");
@@ -41,7 +53,6 @@ impl Preview {
             return;
         };
 
-        let available = ui.available_size();
         if available.x <= 0.0 || available.y <= 0.0 || pipeline_height == 0 {
             return;
         }

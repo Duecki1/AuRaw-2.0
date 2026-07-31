@@ -49,20 +49,17 @@ impl Settings {
             ComboBox::from_label("Preview quality")
                 .selected_text(app.preview_quality.label())
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Fast, "Fast");
-                    ui.selectable_value(
-                        &mut app.preview_quality,
-                        PreviewQuality::Balanced,
-                        "Balanced",
-                    );
+                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Low, "Low");
+                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Medium, "Medium");
                     ui.selectable_value(&mut app.preview_quality, PreviewQuality::High, "High");
+                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Max, "Max");
                 });
             if app.preview_quality != previous_quality {
                 app.preview_quality_changed();
             }
             ui.add(
                 egui::Label::new(
-                    "Controls the normal proxy and zoom detail. High matches the visible image's physical monitor pixels so fit view stays sharp across display DPI and window sizes.",
+                    "All levels follow the preview's physical screen size: Low 50%, Medium 67%, High 84%, and Max one rendered pixel per display pixel. Zoom detail keeps the same density.",
                 )
                 .wrap(),
             );

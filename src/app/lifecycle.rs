@@ -1851,7 +1851,6 @@ impl AurawApp {
             min: [0.0, 0.0],
             max: [1.0, 1.0],
         };
-        self.preview_viewport_pixels = [1, 1];
         self.preview_motion_at = None;
         self.preview_touch_navigation_active = false;
         self.preview_revision = self.preview_revision.wrapping_add(1);
@@ -2713,7 +2712,6 @@ impl AurawApp {
                     min: [0.0, 0.0],
                     max: [1.0, 1.0],
                 };
-                self.preview_viewport_pixels = [1, 1];
                 self.preview_motion_at = None;
                 self.preview_touch_navigation_active = false;
                 self.preview_revision = self.preview_revision.wrapping_add(1);
