@@ -45,6 +45,10 @@ const MASKFORMER_SIZE_DIVISOR: u32 = 32;
 const MASKFORMER_CLASS_OUTPUT_COUNT: usize = 151;
 const MASKFORMER_MAX_QUERIES: usize = 256;
 const ADE20K_CLASS_COUNT: usize = 150;
+// Discard only numerically insignificant query/class pairs. MaskFormer class
+// probabilities are normally sparse; keeping them sparse avoids evaluating all
+// 150 classes for every query and pixel while preserving semantic argmaxes.
+const MASKFORMER_CLASS_PROBABILITY_EPSILON: f32 = 1e-5;
 const VITMATTE_MAX_EDGE_DESKTOP: u32 = 1280;
 const VITMATTE_MAX_EDGE_ANDROID: u32 = 768;
 const VITMATTE_SIZE_DIVISOR: u32 = 32;
@@ -88,7 +92,11 @@ pub struct SubjectMaskResult {
 
 #[derive(Debug)]
 pub enum LandscapeMaskEvent {
-    DownloadProgress { downloaded: u64, total: u64 },
+    DownloadProgress {
+        label: &'static str,
+        downloaded: u64,
+        total: u64,
+    },
     Inferencing,
     Finished(Result<LandscapeMaskResult, String>),
 }
@@ -102,6 +110,7 @@ pub struct LandscapeMaskResult {
 
 pub struct LandscapeMaskWorkerRequest {
     pub model_path: PathBuf,
+    pub vitmatte_path: PathBuf,
     pub allow_download: bool,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
@@ -117,6 +126,7 @@ pub fn spawn_landscape_mask(
 ) -> mpsc::Receiver<LandscapeMaskEvent> {
     let LandscapeMaskWorkerRequest {
         model_path,
+        vitmatte_path,
         allow_download,
         runtime_path,
         runtime_sha256,
@@ -138,14 +148,37 @@ pub fn spawn_landscape_mask(
                         allow_download,
                         &cancellation,
                         |downloaded, total| {
-                            let _ = worker_sender
-                                .send(LandscapeMaskEvent::DownloadProgress { downloaded, total });
+                            let _ = worker_sender.send(LandscapeMaskEvent::DownloadProgress {
+                                label: "MaskFormer landscape model",
+                                downloaded,
+                                total,
+                            });
                         },
                     )?;
+                    if allow_download {
+                        ensure_vitmatte_model(
+                            &vitmatte_path,
+                            &cancellation,
+                            |downloaded, total| {
+                                let _ = worker_sender.send(
+                                    LandscapeMaskEvent::DownloadProgress {
+                                        label: "ViTMatte edge-refinement model",
+                                        downloaded,
+                                        total,
+                                    },
+                                );
+                            },
+                        )?;
+                    } else {
+                        verify_vitmatte_model(&vitmatte_path).context(
+                            "the pinned ViTMatte landscape refiner is unavailable or invalid; consent to its download again",
+                        )?;
+                    }
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(LandscapeMaskEvent::Inferencing);
                     infer_landscape(
                         &model_path,
+                        &vitmatte_path,
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
                         width,
@@ -226,6 +259,10 @@ fn verify_landscape_model(path: &Path) -> Result<()> {
 
 pub(crate) fn landscape_model_is_verified(path: &Path) -> bool {
     verify_landscape_model(path).is_ok()
+}
+
+pub(crate) fn vitmatte_model_is_verified(path: &Path) -> bool {
+    verify_vitmatte_model(path).is_ok()
 }
 
 #[cfg(test)]
@@ -1125,6 +1162,7 @@ impl MaskFormerInputLayout {
 
 fn infer_landscape(
     model_path: &Path,
+    vitmatte_path: &Path,
     runtime_path: Option<&Path>,
     runtime_sha256: Option<&str>,
     width: u32,
@@ -1200,7 +1238,17 @@ fn infer_landscape(
         run_landscape_session(session, input, category, layout)?
     };
 
-    let mask = resize_probability_u8(&probabilities, output_width, output_height, width, height);
+    let coarse_mask =
+        resize_probability_u8(&probabilities, output_width, output_height, width, height);
+    let mask = refine_mask_with_vitmatte(
+        vitmatte_path,
+        image.as_raw(),
+        width,
+        height,
+        &coarse_mask,
+        1.0,
+    )
+    .context("refine landscape edges with ViTMatte")?;
     anyhow::ensure!(
         mask.len() == width as usize * height as usize,
         "MaskFormer output resize produced an invalid mask"
@@ -1248,7 +1296,7 @@ fn run_landscape_session(
         "landscape category contains an invalid ADE20K class"
     );
 
-    let query_weights = (0..queries)
+    let query_class_probabilities = (0..queries)
         .map(|query| {
             let logits = &class_logits[query * MASKFORMER_CLASS_OUTPUT_COUNT
                 ..(query + 1) * MASKFORMER_CLASS_OUTPUT_COUNT];
@@ -1257,40 +1305,80 @@ fn run_landscape_session(
                 .iter()
                 .map(|logit| (*logit - maximum).exp())
                 .sum::<f32>();
-            let foreground = logits[..ADE20K_CLASS_COUNT]
-                .iter()
-                .map(|logit| (*logit - maximum).exp())
-                .sum::<f32>();
-            let selected = class_ids
-                .iter()
-                .map(|class| (logits[*class] - maximum).exp())
-                .sum::<f32>();
             anyhow::ensure!(
                 denominator.is_finite() && denominator > 0.0,
                 "MaskFormer class-query softmax is invalid"
             );
-            Ok((selected / denominator, foreground / denominator))
+            Ok(logits[..ADE20K_CLASS_COUNT]
+                .iter()
+                .enumerate()
+                .filter_map(|(class, logit)| {
+                    let probability = (*logit - maximum).exp() / denominator;
+                    (probability >= MASKFORMER_CLASS_PROBABILITY_EPSILON)
+                        .then_some((class, probability))
+                })
+                .collect::<Vec<_>>())
         })
-        .collect::<Result<Vec<(f32, f32)>>>()?;
+        .collect::<Result<Vec<Vec<(usize, f32)>>>>()?;
 
-    let padded_probabilities = (0..plane)
+    let padded_probabilities = maskformer_semantic_category_mask(
+        mask_logits,
+        plane,
+        &query_class_probabilities,
+        class_ids,
+    );
+    crop_maskformer_probabilities(&padded_probabilities, width, height, layout)
+}
+
+fn maskformer_semantic_category_mask(
+    mask_logits: &[f32],
+    plane: usize,
+    query_class_probabilities: &[Vec<(usize, f32)>],
+    selected_class_ids: &[usize],
+) -> Vec<f32> {
+    (0..plane)
         .into_par_iter()
         .map(|pixel| {
-            let mut selected = 0.0f32;
-            let mut foreground = 0.0f32;
-            for (query, &(selected_weight, foreground_weight)) in query_weights.iter().enumerate() {
+            let mut semantic_scores = [0.0f32; ADE20K_CLASS_COUNT];
+            for (query, class_probabilities) in query_class_probabilities.iter().enumerate() {
                 let mask_probability = sigmoid_probability(mask_logits[query * plane + pixel]);
-                selected += selected_weight * mask_probability;
-                foreground += foreground_weight * mask_probability;
+                for &(class, class_probability) in class_probabilities {
+                    semantic_scores[class] += class_probability * mask_probability;
+                }
             }
-            if foreground.is_finite() && foreground > f32::EPSILON {
-                (selected / foreground).clamp(0.0, 1.0)
-            } else {
-                0.0
+
+            // Start with MaskFormer's reference semantic scores by combining
+            // query-class and query-mask probabilities. Compare the strongest
+            // selected class with the strongest competing class individually;
+            // summing a broad AuRaw category first would unfairly favor groups
+            // that contain more ADE20K labels.
+            let (best_selected, best_other) = semantic_scores.iter().copied().enumerate().fold(
+                (0.0f32, 0.0f32),
+                |(selected, other), (class, score)| {
+                    if !score.is_finite() || score <= 0.0 {
+                        (selected, other)
+                    } else if selected_class_ids.contains(&class) {
+                        (selected.max(score), other)
+                    } else {
+                        (selected, other.max(score))
+                    }
+                },
+            );
+            let total = best_selected + best_other;
+            if total <= f32::EPSILON {
+                return 0.0;
             }
+
+            // Keep a soft boundary for full-resolution upsampling and
+            // ViTMatte, but require both relative class dominance and useful
+            // absolute confidence. This avoids forcing an arbitrary landscape
+            // label onto out-of-domain objects while retaining a calibrated
+            // uncertain band around real semantic boundaries.
+            let competition = best_selected / total;
+            let confidence = best_selected.clamp(0.0, 1.0).sqrt();
+            (competition * confidence).clamp(0.0, 1.0)
         })
-        .collect::<Vec<_>>();
-    crop_maskformer_probabilities(&padded_probabilities, width, height, layout)
+        .collect()
 }
 
 fn validate_maskformer_class_output_shape(shape: &[i64], logits_len: usize) -> Result<usize> {
@@ -3812,6 +3900,65 @@ mod landscape_mask_tests {
     }
 
     #[test]
+    fn maskformer_resolves_a_class_before_grouping_landscape_categories() {
+        let queries = 3;
+        let mut class_logits = vec![-30.0f32; queries * MASKFORMER_CLASS_OUTPUT_COUNT];
+        let set_probability = |logits: &mut [f32], query, class, probability: f32| {
+            logits[query * MASKFORMER_CLASS_OUTPUT_COUNT + class] = probability.ln();
+        };
+
+        // Sky has the strongest individual semantic score. Two different
+        // architecture classes have a larger combined score, which must not
+        // let the much broader Architecture group steal the pixel.
+        set_probability(&mut class_logits, 0, 2, 0.9);
+        set_probability(&mut class_logits, 0, 12, 0.1);
+        set_probability(&mut class_logits, 1, 0, 0.6);
+        set_probability(&mut class_logits, 1, 20, 0.4);
+        set_probability(&mut class_logits, 2, 1, 0.6);
+        set_probability(&mut class_logits, 2, 126, 0.4);
+
+        let query_classes = (0..queries)
+            .map(|query| {
+                let logits = &class_logits[query * MASKFORMER_CLASS_OUTPUT_COUNT
+                    ..(query + 1) * MASKFORMER_CLASS_OUTPUT_COUNT];
+                let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let denominator = logits
+                    .iter()
+                    .map(|logit| (*logit - maximum).exp())
+                    .sum::<f32>();
+                logits[..ADE20K_CLASS_COUNT]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(class, logit)| {
+                        let probability = (*logit - maximum).exp() / denominator;
+                        (probability >= MASKFORMER_CLASS_PROBABILITY_EPSILON)
+                            .then_some((class, probability))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mask_logits = vec![10.0; queries];
+
+        let sky = maskformer_semantic_category_mask(
+            &mask_logits,
+            1,
+            &query_classes,
+            LandscapeCategory::Sky.ade20k_class_ids(),
+        );
+        let architecture = maskformer_semantic_category_mask(
+            &mask_logits,
+            1,
+            &query_classes,
+            LandscapeCategory::Architecture.ade20k_class_ids(),
+        );
+        assert!(sky[0] > 0.5, "strongest sky class should select the pixel");
+        assert!(
+            architecture[0] < 0.5,
+            "two weaker architecture classes must not win by category size"
+        );
+    }
+
+    #[test]
     fn landscape_worker_cannot_download_without_explicit_authorization() {
         let missing = std::env::temp_dir().join(format!(
             "auraw-missing-maskformer-{}-{}.onnx",
@@ -3828,13 +3975,15 @@ mod landscape_mask_tests {
     }
 
     #[test]
-    #[ignore = "manual integration probe requiring AURAW_TEST_MASKFORMER and AURAW_TEST_ORT"]
+    #[ignore = "manual integration probe requiring AURAW_TEST_MASKFORMER, AURAW_TEST_VITMATTE, and AURAW_TEST_ORT"]
     fn pinned_maskformer_runs_through_onnx_runtime() {
         let model = PathBuf::from(std::env::var_os("AURAW_TEST_MASKFORMER").unwrap());
+        let vitmatte = PathBuf::from(std::env::var_os("AURAW_TEST_VITMATTE").unwrap());
         let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
         let sha256 = sha256_file_hex(&runtime).unwrap();
         let result = infer_landscape(
             &model,
+            &vitmatte,
             Some(&runtime),
             Some(&sha256),
             32,
@@ -3845,6 +3994,36 @@ mod landscape_mask_tests {
         .unwrap();
         assert_eq!((result.width, result.height), (32, 24));
         assert_eq!(result.mask.len(), 32 * 24);
+    }
+
+    #[test]
+    #[ignore = "manual integration probe requiring AURAW_TEST_VITMATTE and AURAW_TEST_ORT"]
+    fn pinned_vitmatte_refines_a_landscape_boundary() {
+        let vitmatte = PathBuf::from(std::env::var_os("AURAW_TEST_VITMATTE").unwrap());
+        let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
+        let sha256 = sha256_file_hex(&runtime).unwrap();
+        initialize_runtime(Some(&runtime), Some(&sha256)).unwrap();
+
+        let width = 64;
+        let height = 64;
+        let mut rgba = vec![255u8; width * height * 4];
+        let mut coarse = vec![0u8; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let index = y * width + x;
+                let value = if x < width / 2 { 48 } else { 208 };
+                rgba[index * 4] = value;
+                rgba[index * 4 + 1] = value;
+                rgba[index * 4 + 2] = value;
+                coarse[index] = if x < width / 2 { 255 } else { 0 };
+            }
+        }
+
+        let refined =
+            refine_mask_with_vitmatte(&vitmatte, &rgba, width as u32, height as u32, &coarse, 1.0)
+                .unwrap();
+        assert_eq!(refined.len(), coarse.len());
+        assert!(refined.iter().any(|value| (1..=254).contains(value)));
     }
 }
 

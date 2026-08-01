@@ -292,12 +292,14 @@ impl AurawApp {
         self.landscape_pending_target = None;
         self.landscape_download_progress = None;
         self.landscape_inferencing =
-            crate::ai_masks::landscape_model_is_verified(&request.model_path);
+            crate::ai_masks::landscape_model_is_verified(&request.model_path)
+                && crate::ai_masks::vitmatte_model_is_verified(&request.vitmatte_path);
         self.background_tasks
             .set_global_visible(id, !self.landscape_inferencing);
         self.landscape_receiver = Some(spawn_landscape_mask(
             LandscapeMaskWorkerRequest {
                 model_path: request.model_path,
+                vitmatte_path: request.vitmatte_path,
                 allow_download: request.allow_download,
                 runtime_path: request.runtime_path,
                 runtime_sha256: request.runtime_sha256,

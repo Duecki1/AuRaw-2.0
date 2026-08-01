@@ -155,6 +155,11 @@ def test_landscape_masks_have_persisted_categories_and_explicit_generation() -> 
     assert "class_queries_logits" in ai
     assert "masks_queries_logits" in ai
     assert "MaskFormerInputLayout" in ai
+    assert "maskformer_semantic_category_mask" in ai
+    assert "let mut semantic_scores = [0.0f32; ADE20K_CLASS_COUNT]" in ai
+    assert "let competition = best_selected / total" in ai
+    assert "refine landscape edges with ViTMatte" in ai
+    assert "vitmatte_path" in ai
     assert "resize_probability_u8" in ai
 
 

@@ -579,7 +579,9 @@ impl AurawApp {
                 continue;
             }
             let path = self.landscape_model_path();
-            if crate::ai_masks::landscape_model_is_verified(&path) {
+            if crate::ai_masks::landscape_model_is_verified(&path)
+                && crate::ai_masks::vitmatte_model_is_verified(&self.vitmatte_model_path())
+            {
                 self.start_landscape_worker(mask_index, component_index, path, false);
             } else {
                 self.landscape_pending_target = Some((mask_index, component_index));
@@ -1052,7 +1054,9 @@ impl AurawApp {
             return;
         }
         let path = self.landscape_model_path();
-        if crate::ai_masks::landscape_model_is_verified(&path) {
+        if crate::ai_masks::landscape_model_is_verified(&path)
+            && crate::ai_masks::vitmatte_model_is_verified(&self.vitmatte_model_path())
+        {
             self.start_landscape_worker(mask_index, component_index, path, false);
         } else {
             self.landscape_pending_target = Some((mask_index, component_index));
@@ -1076,8 +1080,9 @@ impl AurawApp {
                 Some("The preview could not be prepared for landscape selection.".to_owned());
             return;
         };
-        let needs_download =
-            !crate::ai_masks::landscape_model_is_verified(&model_path);
+        let vitmatte_path = self.vitmatte_model_path();
+        let needs_download = !crate::ai_masks::landscape_model_is_verified(&model_path)
+            || !crate::ai_masks::vitmatte_model_is_verified(&vitmatte_path);
         if needs_download && !allow_download {
             self.landscape_pending_target = Some((mask_index, component_index));
             self.landscape_consent_open = true;
@@ -1118,6 +1123,7 @@ impl AurawApp {
             target,
             source,
             model_path,
+            vitmatte_path,
             allow_download,
             runtime_path,
             runtime_sha256,
@@ -1182,19 +1188,23 @@ impl AurawApp {
         let mut finished = None;
         for event in events {
             match event {
-                LandscapeMaskEvent::DownloadProgress { downloaded, total } => {
+                LandscapeMaskEvent::DownloadProgress {
+                    label,
+                    downloaded,
+                    total,
+                } => {
                     self.landscape_download_progress = Some((downloaded, total));
                     self.landscape_inferencing = false;
                     self.background_tasks.set_global_visible(task_id, true);
                     self.background_tasks
-                        .rename(task_id, "Downloading landscape-mask model");
+                        .rename(task_id, format!("Downloading {label}"));
                     self.update_background_progress(
                         Some(task_id),
                         TaskProgress::units(
                             downloaded,
                             total,
                             Some("bytes".to_owned()),
-                            "Downloading MaskFormer landscape model",
+                            format!("Downloading {label}"),
                         )
                         .with_detail(format!(
                             "{:.1} / {:.1} MB",
@@ -2106,16 +2116,16 @@ impl AurawApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label("Landscape masks use MaskFormer with a Swin-Base backbone trained on ADE20K to identify sky, vegetation, architecture, ground, water, and mountains.");
+                ui.label("Landscape masks use MaskFormer with a Swin-Base backbone for the coarse ADE20K selection, then ViTMatte refines the uncertain full-resolution boundary against the original image.");
                 ui.label(format!(
-                    "The first use downloads {:.1} MB and stores the ONNX model in AuRaw's cache.",
-                    LANDSCAPE_MODEL_BYTES as f64 / 1_000_000.0
+                    "The first use downloads up to {:.1} MB and stores both ONNX models in AuRaw's cache. The shared ViTMatte model is reused when already installed.",
+                    (LANDSCAPE_MODEL_BYTES + VITMATTE_MODEL_BYTES) as f64 / 1_000_000.0
                 ));
-                ui.label("The upstream MaskFormer project is licensed under CC BY-NC 4.0, which permits noncommercial use with attribution. Continue only if that restriction fits your use.");
+                ui.label("Model licenses: MaskFormer CC BY-NC 4.0 (noncommercial use with attribution); ViTMatte Apache-2.0. Continue only if the MaskFormer restriction fits your use.");
                 ui.label("Inference is local. No photograph or selected category is uploaded.");
                 ui.label("When you continue, your device connects directly to Hugging Face. It receives connection data such as your IP address and request time under its privacy policy. AuRaw sends no account identifier or telemetry.");
                 ui.label(format!(
-                    "AuRaw accepts only the pinned file after its exact size and SHA-256 ({}) are verified.",
+                    "AuRaw accepts only the pinned model files after exact size and SHA-256 verification (MaskFormer {}).",
                     &crate::ai_masks::LANDSCAPE_MODEL_SHA256_HEX[..12]
                 ));
                 ui.horizontal_wrapped(|ui| {
@@ -2132,6 +2142,11 @@ impl AurawApp {
                     ui.hyperlink_to(
                         "Model card",
                         "https://huggingface.co/onnx-community/maskformer-swin-base-ade",
+                    );
+                    ui.separator();
+                    ui.hyperlink_to(
+                        "ViTMatte model and license",
+                        "https://huggingface.co/hustvl/vitmatte-small-composition-1k",
                     );
                 });
                 #[cfg(not(target_os = "android"))]

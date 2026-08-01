@@ -647,6 +647,7 @@ struct LandscapeMaskTaskRequest {
     target: AiMaskTarget,
     source: MaskRgbImage,
     model_path: PathBuf,
+    vitmatte_path: PathBuf,
     allow_download: bool,
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
