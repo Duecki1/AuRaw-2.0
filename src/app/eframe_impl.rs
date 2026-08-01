@@ -74,6 +74,7 @@ impl eframe::App for AurawApp {
 
         self.drive_background_tasks(frame);
         self.poll_load_worker(frame);
+        self.poll_preview_rebuild_worker(frame);
         #[cfg(not(target_os = "android"))]
         self.sync_display_color_management(ui.ctx(), frame);
         #[cfg(not(target_os = "android"))]
@@ -200,19 +201,13 @@ impl eframe::App for AurawApp {
         self.apply_pending_preview_quality(frame);
         self.sync_original_preview(frame);
         if !self.original_preview_requested {
-            // Keep the tiny full-frame navigation proxy current before rendering a
-            // visible high-resolution crop. Detail Dehaze/adaptive-tone output can
-            // then inherit one stable set of full-image statistics while panning.
             self.advance_navigation_preview(frame);
             self.advance_preview_detail(frame);
             self.advance_processing(frame);
         }
         self.refresh_status();
 
-        if self.preview_detail_pending_stage.is_some()
-            || self.navigation_pending_stage.is_some()
-            || (self.preview_zoom <= DETAIL_ZOOM_START && self.pending_stage.is_some())
-        {
+        if self.preview_processing_pending() {
             ui.ctx().request_repaint();
         }
         if self.has_background_tasks()
@@ -220,6 +215,7 @@ impl eframe::App for AurawApp {
             || self.export_publish_pending
             || self.inpaint_receiver.is_some()
             || self.ai_denoise_receiver.is_some()
+            || self.preview_rebuild_receiver.is_some()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }

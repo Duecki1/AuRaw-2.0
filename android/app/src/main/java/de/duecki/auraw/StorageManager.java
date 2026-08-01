@@ -271,7 +271,7 @@ final class StorageManager {
     }
 
     /**
-     * Returns a persistent private PNG path for an unedited RAW thumbnail. The
+     * Returns a persistent private JPEG path for an unedited RAW thumbnail. The
      * RAW identity is part of the key, so replacing a MediaStore item never
      * reuses pixels from the older file.
      */
@@ -283,17 +283,31 @@ final class StorageManager {
         return thumbnailCachePath(
                 "raw\n" + uriText + "\n" + bytes + "\n" + modifiedSeconds
                         + "\n" + maximumEdge,
-                ".raw.png").getAbsolutePath();
+                ".raw.jpg").getAbsolutePath();
     }
 
     /** Edited thumbnails are validated by Rust against the exact sidecar bytes. */
     String developedThumbnailCachePath(String uriText) throws Exception {
-        return thumbnailCachePath("developed\n" + uriText, ".developed.png").getAbsolutePath();
+        return thumbnailCachePath("developed\n" + uriText, ".developed.jpg").getAbsolutePath();
+    }
+
+    /** Clears regenerable RAW and edited library previews from both cache generations. */
+    void clearThumbnailCache() {
+        clearThumbnailCacheDirectory(persistentThumbnailCacheDirectory());
+        clearThumbnailCacheDirectory(
+                new File(activity.getCacheDir(), "library-thumbnails"));
+    }
+
+    long thumbnailCacheSizeBytes() {
+        long persistent = thumbnailCacheDirectorySize(persistentThumbnailCacheDirectory());
+        long legacy = thumbnailCacheDirectorySize(
+                new File(activity.getCacheDir(), "library-thumbnails"));
+        return persistent > Long.MAX_VALUE - legacy ? Long.MAX_VALUE : persistent + legacy;
     }
 
     /**
      * Slow compatibility fallback for providers/LibRaw builds that cannot seek
-     * through /proc/self/fd. The first successful decode is cached as PNG, so
+     * through /proc/self/fd. The first successful decode is cached as JPEG, so
      * this full RAW copy is not repeated when the library is reopened.
      */
     String materializeRawLibraryThumbnail(String uriText, String displayName)
@@ -795,7 +809,7 @@ final class StorageManager {
     }
 
     /**
-     * Thumbnail PNGs are regenerable, but keeping them in no-backup app storage
+     * Thumbnail JPEGs are regenerable, but keeping them in no-backup app storage
      * prevents Android's cache scavenger from discarding the whole library
      * between launches. They still disappear when app data is cleared or the
      * app is uninstalled, and the bounded LRU below prevents unbounded growth.
@@ -806,6 +820,41 @@ final class StorageManager {
             throw new IllegalStateException("Could not create the persistent thumbnail cache");
         }
         return directory;
+    }
+
+    private static void clearThumbnailCacheDirectory(File directory) {
+        if (!directory.exists()) {
+            return;
+        }
+        File[] entries = directory.listFiles();
+        if (entries == null) {
+            throw new IllegalStateException(
+                    "Could not inspect thumbnail cache " + directory);
+        }
+        for (File entry : entries) {
+            if (!entry.isFile() || (!entry.delete() && entry.exists())) {
+                throw new IllegalStateException(
+                        "Could not clear thumbnail cache entry " + entry);
+            }
+        }
+    }
+
+    private static long thumbnailCacheDirectorySize(File directory) {
+        if (!directory.isDirectory()) {
+            return 0L;
+        }
+        File[] entries = directory.listFiles();
+        if (entries == null) {
+            return 0L;
+        }
+        long total = 0L;
+        for (File entry : entries) {
+            long bytes = entry.isDirectory()
+                    ? thumbnailCacheDirectorySize(entry)
+                    : Math.max(0L, entry.length());
+            total = total > Long.MAX_VALUE - bytes ? Long.MAX_VALUE : total + bytes;
+        }
+        return total;
     }
 
     /** Lazily preserves cache entries written by releases that used getCacheDir(). */
@@ -846,7 +895,17 @@ final class StorageManager {
     }
 
     private static void trimThumbnailCache(File directory) {
-        File[] thumbnails = directory.listFiles((parent, name) -> name.endsWith(".png"));
+        // PNG cache entries from older builds are intentionally discarded, not decoded.
+        File[] legacyPngs = directory.listFiles(
+                (parent, name) -> name.endsWith(".png")
+                        || name.endsWith(".png.fingerprint"));
+        if (legacyPngs != null) {
+            for (File legacyPng : legacyPngs) {
+                deleteCacheFile(legacyPng);
+            }
+        }
+
+        File[] thumbnails = directory.listFiles((parent, name) -> name.endsWith(".jpg"));
         if (thumbnails != null && thumbnails.length > MAX_THUMBNAIL_CACHE_ENTRIES) {
             Arrays.sort(
                     thumbnails,
@@ -857,9 +916,9 @@ final class StorageManager {
             }
         }
 
-        // A crash between the PNG and fingerprint writes may leave an orphan.
+        // A crash between the JPEG and fingerprint writes may leave an orphan.
         File[] fingerprints = directory.listFiles(
-                (parent, name) -> name.endsWith(".developed.png.fingerprint"));
+                (parent, name) -> name.endsWith(".developed.jpg.fingerprint"));
         if (fingerprints == null) {
             return;
         }

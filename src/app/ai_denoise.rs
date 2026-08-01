@@ -1,6 +1,5 @@
 use super::AurawApp;
 use crate::ai_denoise::{AiDenoiseEvent, RAWNIND_PACKAGE_BYTES};
-use crate::pipeline::ProcessingStage;
 use eframe::egui;
 use std::{
     path::PathBuf,
@@ -12,6 +11,22 @@ use std::{
 };
 
 impl AurawApp {
+    fn discard_ai_preview_caches(&mut self) {
+        for texture_id in [
+            self.preview_detail
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+            self.preview_navigation
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.retire_egui_texture(texture_id);
+        }
+    }
+
     fn rawnind_model_dir(&self) -> PathBuf {
         #[cfg(target_os = "android")]
         {
@@ -26,23 +41,79 @@ impl AurawApp {
         }
     }
 
+    fn rawnind_result_cache_dir(&self) -> PathBuf {
+        #[cfg(target_os = "android")]
+        {
+            self.android_app
+                .internal_data_path()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("ai-denoise-results-v2")
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let model_dir = self.rawnind_model_dir();
+            model_dir
+                .parent()
+                .and_then(std::path::Path::parent)
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("ai-denoise-results-v2")
+        }
+    }
+
+    pub(crate) fn rawnind_result_cache_path_for_target(
+        &self,
+        target: &crate::sidecar::SidecarTarget,
+    ) -> PathBuf {
+        let identity = match target {
+            crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+                format!("desktop:{}", raw_path.display())
+            }
+            #[cfg(target_os = "android")]
+            crate::sidecar::SidecarTarget::Android { raw_uri, .. } => {
+                format!("android:{raw_uri}")
+            }
+        };
+        crate::ai_denoise::result_cache_path(&self.rawnind_result_cache_dir(), &identity)
+    }
+
+    fn rawnind_result_cache_path(&self) -> Option<PathBuf> {
+        self.sidecar_target
+            .as_ref()
+            .map(|target| self.rawnind_result_cache_path_for_target(target))
+    }
+
     pub(crate) fn set_ai_denoise_enabled(&mut self, enabled: bool, frame: &eframe::Frame) {
         if !enabled {
             self.ai_denoise_consent_open = false;
             if let Some(cancellation) = &self.ai_denoise_cancellation {
                 cancellation.store(true, Ordering::Release);
             }
-            self.exposure.ai_denoise_enabled = false;
-            self.mark_pipeline_dirty();
-            return;
-        }
-        if self.ai_denoise_receiver.is_some() || self.loaded_raw.is_none() {
-            return;
-        }
-        #[cfg(not(target_os = "android"))]
-        if !self.validate_onnx_runtime_for_ai() {
+            let changed = self.exposure.ai_denoise_enabled;
             self.exposure.ai_denoise_enabled = false;
             self.target_exposure.ai_denoise_enabled = false;
+            // Bayer AI denoise now supplies the pipeline's CFA texture. A
+            // normal stage update cannot swap that immutable source texture,
+            // so disabling it must rebuild the preview from the original RAW.
+            self.preview_quality_dirty = true;
+            self.discard_ai_preview_caches();
+            self.pending_stage = None;
+            self.preview_detail_pending_stage = None;
+            self.navigation_pending_stage = None;
+            if changed {
+                self.note_edit_changed();
+            }
+            self.egui_ctx.request_repaint();
+            return;
+        }
+        if self.ai_denoise_receiver.is_some() {
+            return;
+        }
+        if self.loaded_raw.is_none() {
+            self.exposure.ai_denoise_enabled = false;
+            self.target_exposure.ai_denoise_enabled = false;
+            self.notice = Some("Open a RAW image before enabling AI denoise.".to_owned());
+            self.egui_ctx.request_repaint();
             return;
         }
         if self
@@ -53,20 +124,28 @@ impl AurawApp {
             self.exposure.ai_denoise_enabled = true;
             self.note_edit_changed();
             self.preview_quality_dirty = true;
-            self.preview_detail = None;
-            self.preview_navigation = None;
+            self.discard_ai_preview_caches();
+            return;
+        }
+        let saved_result_exists = self
+            .rawnind_result_cache_path()
+            .is_some_and(|path| path.is_file());
+        #[cfg(not(target_os = "android"))]
+        if !saved_result_exists && !self.validate_onnx_runtime_for_ai() {
+            self.exposure.ai_denoise_enabled = false;
+            self.target_exposure.ai_denoise_enabled = false;
             return;
         }
         let model_dir = self.rawnind_model_dir();
-        if crate::ai_denoise::models_are_verified(&model_dir) {
-            self.start_ai_denoise(frame);
+        if saved_result_exists || crate::ai_denoise::models_are_verified(&model_dir) {
+            self.start_ai_denoise(frame, false);
         } else {
             self.ai_denoise_consent_open = true;
             self.egui_ctx.request_repaint();
         }
     }
 
-    fn start_ai_denoise(&mut self, frame: &eframe::Frame) {
+    fn start_ai_denoise(&mut self, frame: &eframe::Frame, allow_model_download: bool) {
         if self.ai_denoise_receiver.is_some() {
             return;
         }
@@ -74,23 +153,73 @@ impl AurawApp {
             self.notice = Some("Open a RAW image before enabling AI denoise.".to_owned());
             return;
         };
+        let result_cache_path = self.rawnind_result_cache_path();
+        let saved_result_exists = result_cache_path
+            .as_ref()
+            .is_some_and(|path| path.is_file());
         #[cfg(not(target_os = "android"))]
-        if !self.validate_onnx_runtime_for_ai() {
+        if !saved_result_exists && !self.validate_onnx_runtime_for_ai() {
             self.exposure.ai_denoise_enabled = false;
             return;
+        }
+        #[cfg(target_os = "android")]
+        if !saved_result_exists {
+            if let Err(error) = crate::ai_masks::initialize_runtime(None, None) {
+                self.exposure.ai_denoise_enabled = false;
+                self.target_exposure.ai_denoise_enabled = false;
+                self.notice = Some(format!(
+                    "Could not initialize Android AI denoise: {error:#}"
+                ));
+                crate::diagnostics::record(format!(
+                    "Android RawNIND runtime initialization failed before worker start: {error:#}"
+                ));
+                self.egui_ctx.request_repaint();
+                return;
+            }
         }
         let Some(render_state) = frame.wgpu_render_state() else {
             self.notice = Some("AI denoise requires AuRaw's wgpu renderer.".to_owned());
             self.exposure.ai_denoise_enabled = false;
+            self.target_exposure.ai_denoise_enabled = false;
             return;
         };
         raw.clear_ai_denoised_image();
-        // Bayer follows darktable's remosaic-then-demosaic contract using one
-        // temporary high-quality GPU tile pipeline. Release optional zoom and
-        // navigation pipelines first so the fixed GPU resource budget remains
-        // available while the modal operation is running.
-        self.preview_detail = None;
-        self.preview_navigation = None;
+        // RawNIND's tensors and the full-resolution blended CFA have a large
+        // temporary memory peak. Release disposable preview graphs while the
+        // worker runs so Android does not retain display-sized GPU surfaces on
+        // top of that peak. Bayer inference itself no longer needs a GPU
+        // demosaic pipeline.
+        #[cfg(target_os = "android")]
+        {
+            // Keeping a DPI-sized preview resident alongside ONNX Runtime's
+            // tensors can exceed the mobile process budget. Retire every
+            // preview texture and rebuild it after every success, failure, or
+            // cancellation path below.
+            let previous_pipeline = {
+                let mut renderer = render_state.renderer.write();
+                self.take_preview_pipeline_and_release_textures(&mut renderer)
+            };
+            drop(previous_pipeline);
+        }
+        #[cfg(not(target_os = "android"))]
+        for texture_id in [
+            self.preview_detail
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+            self.preview_navigation
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.retire_egui_texture(texture_id);
+        }
+        self.pending_stage = None;
+        self.preview_detail_pending_stage = None;
+        self.navigation_pending_stage = None;
+        self.preview_detail_urgent = false;
+        self.preview_quality_dirty = false;
         let cancellation = Arc::new(AtomicBool::new(false));
         let receiver = crate::ai_denoise::spawn_rawnind_denoise(
             self.rawnind_model_dir(),
@@ -117,16 +246,42 @@ impl AurawApp {
             raw,
             Some(render_state.device.clone()),
             Some(render_state.queue.clone()),
+            result_cache_path,
+            allow_model_download,
             Arc::clone(&cancellation),
         );
         self.ai_denoise_consent_open = false;
         self.ai_denoise_receiver = Some(receiver);
         self.ai_denoise_download_progress = None;
-        self.ai_denoise_apply_progress = Some(("Preparing RawNIND models", 0, 0));
+        self.ai_denoise_apply_progress = Some((
+            if saved_result_exists {
+                "Restoring saved AI denoise"
+            } else {
+                "Preparing RawNIND models"
+            },
+            0,
+            0,
+        ));
         self.ai_denoise_cancellation = Some(cancellation);
         self.ai_denoise_job_document_id = self.sidecar_generation;
+        let changed = !self.exposure.ai_denoise_enabled;
         self.exposure.ai_denoise_enabled = true;
-        self.mark_pipeline_dirty();
+        self.target_exposure.ai_denoise_enabled = true;
+        if changed {
+            // This is the semantic toggle transaction. Persist it once here;
+            // reopening an already-enabled sidecar reaches this path with
+            // `changed == false` and therefore does not create another edit.
+            self.note_edit_changed();
+        }
+        crate::diagnostics::record(format!(
+            "RawNIND worker started for document {} on {}",
+            self.ai_denoise_job_document_id,
+            if cfg!(target_os = "android") {
+                "Android"
+            } else {
+                "desktop"
+            }
+        ));
         self.egui_ctx.request_repaint();
     }
 
@@ -175,6 +330,16 @@ impl AurawApp {
         if stale {
             return;
         }
+        // A model result changes the scene source. Cancellation and failure
+        // also need a rebuild on Android because start_ai_denoise deliberately
+        // released the preview. Keep this one terminal transaction for every
+        // path so the UI can never remain blank after the worker exits.
+        self.preview_quality_dirty = true;
+        self.discard_ai_preview_caches();
+        self.pending_stage = None;
+        self.preview_detail_pending_stage = None;
+        self.navigation_pending_stage = None;
+        self.preview_detail_urgent = false;
         match result {
             Ok(image) if self.exposure.ai_denoise_enabled => {
                 let install = self
@@ -187,32 +352,34 @@ impl AurawApp {
                         // Rebuild every proxy from the full native model result.
                         // Ordinary stage invalidation cannot retrofit a new scene
                         // source into already-allocated GPU pipelines.
-                        self.preview_quality_dirty = true;
-                        self.preview_detail = None;
-                        self.preview_navigation = None;
-                        self.pending_stage = None;
-                        self.preview_detail_pending_stage = None;
-                        self.navigation_pending_stage = None;
                         self.notice = Some(
                             "AI denoise applied locally. Standard denoise values were preserved."
                                 .to_owned(),
                         );
                     }
                     Err(error) => {
+                        let changed = self.exposure.ai_denoise_enabled;
                         self.exposure.ai_denoise_enabled = false;
+                        self.target_exposure.ai_denoise_enabled = false;
+                        if changed {
+                            self.note_edit_changed();
+                        }
                         self.notice = Some(format!("Could not install AI denoise: {error:#}"));
-                        self.queue_preview_processing(ProcessingStage::Raw);
                     }
                 }
             }
             Ok(_) => {
                 // The user cancelled after the final tile was already running.
-                self.queue_preview_processing(ProcessingStage::Raw);
+                self.exposure.ai_denoise_enabled = false;
+                self.target_exposure.ai_denoise_enabled = false;
             }
             Err(error) => {
+                let changed = self.exposure.ai_denoise_enabled;
                 self.exposure.ai_denoise_enabled = false;
-                self.target_exposure.ai_denoise_enabled = true;
-                self.mark_pipeline_dirty();
+                self.target_exposure.ai_denoise_enabled = false;
+                if changed {
+                    self.note_edit_changed();
+                }
                 if !error.contains("cancelled") {
                     self.notice = Some(format!("AI denoise failed: {error}"));
                 }
@@ -237,9 +404,19 @@ impl AurawApp {
             && self.ai_denoise_receiver.is_none()
             && self.loaded_raw.is_some()
         {
-            // A sidecar persists intent, never derived pixels. Reopening a RAW
-            // therefore reuses an installed verified model or asks before the
-            // first network transfer on this device.
+            if self
+                .loaded_raw
+                .as_ref()
+                .is_some_and(|raw| raw.ai_denoised_image().is_some())
+            {
+                self.target_exposure.ai_denoise_enabled = true;
+                crate::diagnostics::record(
+                    "Restored the persisted AI-denoise scene without rerunning RawNIND",
+                );
+                return;
+            }
+            // The sidecar retains intent. A missing, stale, or corrupt derived
+            // cache is safely rebuilt from the original sensor mosaic.
             self.set_ai_denoise_enabled(true, frame);
         }
     }
@@ -288,7 +465,7 @@ impl AurawApp {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Consent, download and apply").clicked() {
-                        self.start_ai_denoise(frame);
+                        self.start_ai_denoise(frame, true);
                     }
                     if ui.button("Cancel").clicked() {
                         self.ai_denoise_consent_open = false;

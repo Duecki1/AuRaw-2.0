@@ -275,9 +275,8 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
         // monotone through the midtones. The former transmission range
         // (down to 0.22) subtracted 20-78% of A and drove broad, ordinary
         // midtones to black. Keep physical veil subtraction near one percent
-        // of global ambient, then apply a measured ambient-relative tone mask:
-        // ~4 EV in the deepest visible shadows, ~1 EV in lower midtones, and
-        // almost no displacement at airlight.
+        // of global ambient, then use a restrained ambient-relative mask that
+        // supplies about 1 EV in lower midtones and fades near airlight.
         let ambient_position = clamp(center_lum / max(airlight_luma, 1e-6), 0.0, 1.0);
         let shaped_position = pow(ambient_position, 0.33);
         let mid_position_hump = 0.30 * shaped_position * (1.0 - shaped_position);
@@ -291,7 +290,7 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
         let luminance_gain = clamp(physical_lum / max(center_lum, 1e-6), 0.0, 2.0);
         let hue_safe = rgb * luminance_gain;
         var restored = mix(hue_safe, physical, 0.30 + 0.16 * haze_likelihood);
-        restored = restored * exp2(-amount * 4.20 * tone_mask);
+        restored = restored * exp2(-amount * 0.90 * tone_mask);
 
         let local_detail = clamp(center_ev - broad_ev, -1.2, 1.2);
         restored = restored * exp2(amount * local_detail * 0.12);
@@ -299,7 +298,7 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
         let chroma = length(lab.yz);
         let content_saturation = clamp(chroma / max(0.045 + 0.38 * lab.x, 0.06), 0.0, 1.0);
         let chroma_boost = 1.0
-            + amount * (1.30 + 1.00 * tone_mask)
+            + amount * (0.30 + 0.22 * tone_mask)
                 * (1.0 - 0.10 * content_saturation);
         return perceptual_gamut_compress_nonnegative_rec2020(
             SRGB_TO_REC2020 * oklab_to_linear_srgb(
@@ -317,10 +316,10 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let haze = -amount;
     let ambient_position = clamp(center_lum / max(airlight_luma, 1e-6), 0.0, 1.0);
     let position_weight = pow(ambient_position, 0.35);
-    let haze_mix = clamp(haze * mix(0.115, 0.58, position_weight), 0.0, 0.62);
+    let haze_mix = clamp(haze * mix(0.045, 0.23, position_weight), 0.0, 0.30);
     let hazed = mix(rgb, airlight, haze_mix);
     let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * hazed);
-    let desaturation = 1.0 - haze * mix(0.76, 0.64, haze_likelihood);
+    let desaturation = 1.0 - haze * mix(0.32, 0.27, haze_likelihood);
     return perceptual_gamut_compress_nonnegative_rec2020(
         SRGB_TO_REC2020 * oklab_to_linear_srgb(
             vec3<f32>(lab.x, lab.yz * desaturation),

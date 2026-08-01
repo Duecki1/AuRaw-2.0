@@ -49,20 +49,17 @@ impl Settings {
             ComboBox::from_label("Preview quality")
                 .selected_text(app.preview_quality.label())
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Fast, "Fast");
-                    ui.selectable_value(
-                        &mut app.preview_quality,
-                        PreviewQuality::Balanced,
-                        "Balanced",
-                    );
+                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Low, "Low");
+                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Medium, "Medium");
                     ui.selectable_value(&mut app.preview_quality, PreviewQuality::High, "High");
+                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Max, "Max");
                 });
             if app.preview_quality != previous_quality {
                 app.preview_quality_changed();
             }
             ui.add(
                 egui::Label::new(
-                    "Controls the normal proxy and zoom detail. High matches the visible image's physical monitor pixels so fit view stays sharp across display DPI and window sizes.",
+                    "All levels follow the preview's physical screen size: Low 50%, Medium 67%, High 84%, and Max one rendered pixel per display pixel. Zoom detail keeps the same density.",
                 )
                 .wrap(),
             );
@@ -108,7 +105,7 @@ impl Settings {
                     .text("Thumbnail workers"),
                 )
                 .on_hover_text(
-                    "Parallel background thumbnail decoders. More workers fill the library faster but use more CPU and memory. Full RAW loading remains exclusive.",
+                    "Concurrent background thumbnail jobs, including embedded previews, preview-less RAW fallback renders, and edited-thumbnail rebuilding.",
                 )
                 .changed()
             {
@@ -116,10 +113,30 @@ impl Settings {
             }
             ui.add(
                 egui::Label::new(
-                    "Changing this restarts the current library thumbnail queue. The setting is saved across restarts.",
+                    "Higher values fill the library faster, but preview-less and edited jobs may unpack a full sensor and use substantial memory. Changing this restarts the current queue; the setting is saved across restarts.",
                 )
                 .wrap(),
             );
+
+            ui.separator();
+            ui.strong("Thumbnail cache");
+            ui.add(
+                egui::Label::new(
+                    "Delete generated library previews and rebuild them from the RAW files and saved edits.",
+                )
+                .wrap(),
+            );
+            let cache_size = app.thumbnail_cache_size_label();
+            ui.horizontal(|ui| {
+                if ui.button("Clear thumbnail cache").clicked() {
+                    app.clear_thumbnail_cache();
+                }
+                ui.label(
+                    egui::RichText::new(cache_size)
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
         });
 
         #[cfg(not(target_os = "android"))]

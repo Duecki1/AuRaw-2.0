@@ -6,6 +6,8 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 AI = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+RAWNIND = (ROOT / "src/ai_denoise.rs").read_text(encoding="utf-8")
+APP_RAWNIND = (ROOT / "src/app/ai_denoise.rs").read_text(encoding="utf-8")
 APP = read_source_tree(ROOT / "src/app.rs")
 RAW = read_source_tree(ROOT / "src/pipeline/raw_loader.rs")
 COLOR_PROFILE = read_source_tree(ROOT / "src/pipeline/color_profile.rs")
@@ -50,6 +52,42 @@ def test_downloaded_model_is_size_and_sha256_pinned() -> None:
     assert "consent to its download again" in AI
 
 
+def test_large_ai_model_hashing_stays_off_the_ui_thread() -> None:
+    subject_request = APP[
+        APP.index("pub(crate) fn request_subject_mask"):
+        APP.index("fn start_subject_worker")
+    ]
+    object_request = APP[
+        APP.index("pub(crate) fn request_object_mask"):
+        APP.index("fn start_object_worker")
+    ]
+    runtime = (ROOT / "src/app/background_task_runtime.rs").read_text(encoding="utf-8")
+    subject_start = runtime[
+        runtime.index("fn start_subject_mask_task"):
+        runtime.index("fn start_object_mask_task")
+    ]
+    object_start = runtime[
+        runtime.index("fn start_object_mask_task"):
+    ]
+
+    assert "subject_models_are_verified" not in subject_request
+    assert "object_models_are_verified" not in object_request
+    assert "subject_models_are_verified" not in subject_start
+    assert "object_models_are_verified" not in object_start
+    assert ".is_file()" in subject_request
+    assert ".is_file()" in object_request
+    assert ".is_file()" in subject_start
+    assert ".is_file()" in object_start
+
+    # Exact size/SHA verification remains mandatory in the worker before use.
+    subject_worker = AI[AI.index("pub fn spawn_subject_mask"):AI.index("pub fn spawn_object_mask")]
+    object_worker = AI[AI.index("pub fn spawn_object_mask"):AI.index("fn infer_object_mask")]
+    assert "ensure_model(" in subject_worker
+    assert "ensure_vitmatte_model(" in subject_worker
+    assert "ensure_sam_model(" in object_worker
+    assert "ensure_vitmatte_model(" in object_worker
+
+
 def test_desktop_requires_runtime_before_model_download() -> None:
     assert "validate_onnx_runtime_for_ai" in APP
     request = APP[APP.index("pub(crate) fn request_subject_mask"):APP.index("fn start_subject_worker")]
@@ -57,6 +95,33 @@ def test_desktop_requires_runtime_before_model_download() -> None:
     ]
     )
     assert '"Consent, download and continue"' in consent
+
+
+def test_android_rawnind_starts_visibly_and_releases_preview_gpu_memory() -> None:
+    start = APP_RAWNIND[
+        APP_RAWNIND.index("fn start_ai_denoise"):
+        APP_RAWNIND.index("pub(crate) fn poll_ai_denoise_worker")
+    ]
+    assert "crate::ai_masks::initialize_runtime(None, None)" in start
+    assert "take_preview_pipeline_and_release_textures" in start
+    assert "self.ai_denoise_receiver = Some(receiver)" in start
+    assert "self.ai_denoise_apply_progress = Some" in start
+    worker = RAWNIND[
+        RAWNIND.index("pub fn spawn_rawnind_denoise"):
+        RAWNIND.index("fn ensure_not_cancelled")
+    ]
+    assert 'phase: "Checking RawNIND models"' in worker
+    assert 'phase: "Starting AI runtime"' in worker
+
+
+def test_rawnind_restores_preview_after_every_terminal_result() -> None:
+    poll = APP_RAWNIND[
+        APP_RAWNIND.index("pub(crate) fn poll_ai_denoise_worker"):
+        APP_RAWNIND.index("pub(crate) fn abandon_ai_denoise_worker")
+    ]
+    assert "self.preview_quality_dirty = true" in poll
+    assert poll.index("self.preview_quality_dirty = true") < poll.index("match result")
+    assert "self.target_exposure.ai_denoise_enabled = false" in poll
 
 
 def test_windows_runtime_is_isolated_and_uses_safe_cpu_fallback() -> None:

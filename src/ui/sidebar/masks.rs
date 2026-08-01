@@ -14,6 +14,16 @@ fn mask_creation_icon() -> &'static str {
     egui_phosphor::regular::PLUS
 }
 
+fn mask_strip_scroll_source() -> egui::scroll_area::ScrollSource {
+    if cfg!(target_os = "android") {
+        // Force content-drag scrolling for touch and stylus input. Card widgets
+        // intentionally use click-only sense on Android so they cannot steal it.
+        egui::scroll_area::ScrollSource::ALL
+    } else {
+        egui::scroll_area::ScrollSource::default()
+    }
+}
+
 #[derive(Clone, Debug)]
 enum MaskRenameTarget {
     Group(usize),
@@ -411,6 +421,7 @@ impl Sidebar {
                 MaskStripOrientation::Horizontal => {
                     egui::ScrollArea::horizontal()
                         .id_salt("vertical-mask-card-strip")
+                        .scroll_source(mask_strip_scroll_source())
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -420,6 +431,7 @@ impl Sidebar {
                 MaskStripOrientation::Vertical => {
                     egui::ScrollArea::vertical()
                         .id_salt("horizontal-mask-card-strip")
+                        .scroll_source(mask_strip_scroll_source())
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -1875,7 +1887,14 @@ impl Sidebar {
 
         let size = card_size.card_size();
         let image_edge = card_size.image_edge();
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        let thumbnail_sense = if cfg!(target_os = "android") {
+            // A drag anywhere on a card belongs to the enclosing strip on
+            // touch devices. Desktop retains drag-to-reorder for submasks.
+            egui::Sense::click()
+        } else {
+            egui::Sense::click_and_drag()
+        };
+        let (rect, response) = ui.allocate_exact_size(size, thumbnail_sense);
         let visuals = ui.visuals();
         let fill = if selected {
             visuals.selection.bg_fill.gamma_multiply(0.24)
@@ -1960,7 +1979,7 @@ impl Sidebar {
             MaskKind::Subject | MaskKind::Background => app.request_subject_mask(frame),
             MaskKind::Object => {
                 if let Err(error) = app.capture_mask_source(frame) {
-                    app.status = error;
+                    app.report_ai_mask_error(error);
                 }
             }
             MaskKind::LuminanceRange | MaskKind::ColorRange => {

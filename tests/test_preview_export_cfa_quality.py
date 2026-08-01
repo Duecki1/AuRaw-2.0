@@ -5,16 +5,15 @@ PROCESSING = (ROOT / "src/pipeline/processing.rs").read_text(encoding="utf-8")
 LENSFUN = (ROOT / "src/pipeline/lensfun.rs").read_text(encoding="utf-8")
 
 
-def test_preview_proxy_co_sites_every_cfa_phase_in_one_source_macrocell() -> None:
-    assert "let macro_y0 = y + (py / cfa_period) * scale * cfa_period;" in PROCESSING
-    assert "let macro_x0 = x + (px / cfa_period) * scale * cfa_period;" in PROCESSING
-    assert "let first_sy = macro_y0 + output_phase_y;" in PROCESSING
-    assert "let first_sx = macro_x0 + output_phase_x;" in PROCESSING
-    assert "step_by(cfa_period as usize)" in PROCESSING
+def test_preview_proxy_preserves_cfa_phase_with_local_source_footprints() -> None:
+    assert "proportional_partition(py, region_height, height)" in PROCESSING
+    assert "proportional_partition(px, region_width, width)" in PROCESSING
+    assert "let phase_x = (x + output_phase_x).min(raw.width - 1);" in PROCESSING
+    assert "let phase_y = (y + output_phase_y).min(raw.height - 1);" in PROCESSING
     assert "raw.color_indices[index] == cfa" in PROCESSING
     proxy_body = PROCESSING[PROCESSING.index("pub fn build_region_proxy") : PROCESSING.index("fn nearest_cfa_sample")]
-    assert "let source_x0 = x + px * scale;" not in proxy_body
-    assert "let source_y0 = y + py * scale;" not in proxy_body
+    assert "source_macro_width" not in proxy_body
+    assert "source_macro_height" not in proxy_body
 
 
 def test_lensfun_bayer_warp_uses_subpixel_same_phase_interpolation() -> None:

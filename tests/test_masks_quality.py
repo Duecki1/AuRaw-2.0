@@ -87,15 +87,29 @@ def test_local_adjustments_are_scene_linear_and_mask_weighted() -> None:
 
 
 def test_ai_and_range_masks_use_a_stable_unedited_raw_reference() -> None:
-    capture = APP[APP.index("pub(crate) fn capture_mask_source"):APP.index("pub(crate) fn request_subject_mask")]
-    assert "loaded_raw" in capture
-    assert "ExposureParams::scene_referred_default()" in capture
-    assert "MaskStack::default()" in capture
-    assert "RawGpuPipeline::new_headless_reusing_programs" in capture
-    assert "reference_pipeline.read_output_region_blocking" not in capture  # formatted as a chained call
-    assert "let rgba = reference_pipeline" in capture
-    assert "live edited output texture" in capture
-    assert "source_edge" in capture and "3072" in capture and "2048" in capture
+    capture = APP[
+        APP.index('#[cfg(target_os = "android")]\n    fn capture_mask_source_from_active_preview'):
+        APP.index("pub(crate) fn request_subject_mask")
+    ]
+    android = capture[
+        capture.index("fn capture_mask_source_from_active_preview"):
+        capture.index("pub(crate) fn capture_mask_source")
+    ]
+    assert "preview_raw" in android
+    assert "gpu_pipeline" in android
+    assert "ExposureParams::scene_referred_default()" in android
+    assert "MaskStack::default()" in android
+    assert "pipeline.recompute" in android
+    assert "pipeline.read_output_region_blocking" in android
+    assert "restore_params" in android
+    assert "target_exposure" in android
+    assert "RawGpuPipeline::new_" not in android
+
+    desktop = capture[capture.index('#[cfg(not(target_os = "android"))]'):]
+    assert "loaded_raw" in desktop
+    assert "ProxySpec { max_edge: 3072 }" in desktop
+    assert "RawGpuPipeline::new_headless_reusing_program_template" in desktop
+    assert "let rgba = reference_pipeline" in desktop
 
 
 def test_brush_input_and_rasterization_avoid_progressive_slowdown() -> None:
@@ -186,7 +200,11 @@ def test_object_masks_always_run_vitmatte_fine_edge_refinement() -> None:
     assert "ViTMatte object-edge refinement failed; using the cleaned SAM mask" in infer
     assert "if request.detailed_edges" not in infer
     request = app[app.index("pub(crate) fn request_object_mask"):app.index("fn start_object_worker")]
-    assert "let vitmatte_ready = self.vitmatte_model_path().exists();" in request
+    assert "encoder.is_file()" in request
+    assert "decoder.is_file()" in request
+    assert "self.vitmatte_model_path().is_file()" in request
+    assert "crate::ai_masks::object_models_are_verified(" not in request
+    assert "verify_vitmatte_model(vitmatte).is_ok()" in verified
 
 
 def test_all_canvas_brushes_keep_constant_screen_size_across_zoom() -> None:

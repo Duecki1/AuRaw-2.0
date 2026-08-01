@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = read_source_tree(ROOT / "src/app.rs")
 SLIDER = (ROOT / "src/ui/components/adjustment_slider.rs").read_text(encoding="utf-8")
 SIDEBAR = read_source_tree(ROOT / "src/ui/sidebar.rs")
+MASKS = (ROOT / "src/ui/sidebar/masks.rs").read_text(encoding="utf-8")
 SETTINGS = (ROOT / "src/ui/settings.rs").read_text(encoding="utf-8")
 
 
@@ -43,6 +44,19 @@ def test_vertical_masks_use_thumbnail_strip_for_groups_and_submasks() -> None:
     assert "rasterize_component_layer(" in SIDEBAR
     assert '"BASE"' in SIDEBAR
     assert "selected_mask_before" in SIDEBAR
+
+
+def test_android_mask_strips_claim_touch_drags_instead_of_cards() -> None:
+    assert "fn mask_strip_scroll_source()" in MASKS
+    assert "egui::scroll_area::ScrollSource::ALL" in MASKS
+    assert MASKS.count(".scroll_source(mask_strip_scroll_source())") == 2
+    thumbnail = MASKS[
+        MASKS.index("fn mask_thumbnail_card"):
+        MASKS.index("fn prepare_content_mask")
+    ]
+    assert 'if cfg!(target_os = "android")' in thumbnail
+    assert "egui::Sense::click()" in thumbnail
+    assert "egui::Sense::click_and_drag()" in thumbnail
 
 
 def test_settings_width_and_text_wrap_follow_screen_layout() -> None:

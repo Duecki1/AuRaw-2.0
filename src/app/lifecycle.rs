@@ -320,6 +320,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            preview_program_template: None,
             retired_egui_textures: Vec::new(),
             preview_quality: performance.preview_quality,
             preview_zoom: 1.0,
@@ -338,6 +339,7 @@ impl AurawApp {
             navigation_pending_stage: None,
             preview_detail_urgent: false,
             preview_quality_dirty: false,
+            preview_rebuild_receiver: None,
             original_preview_exposure: exposure,
             original_preview_requested: false,
             original_preview_rendered_state: None,
@@ -349,6 +351,8 @@ impl AurawApp {
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
+            thumbnail_cache_size: None,
+            thumbnail_cache_size_receiver: None,
             #[cfg(not(target_os = "android"))]
             display_color_management: performance.display_color_management,
             #[cfg(not(target_os = "android"))]
@@ -579,6 +583,7 @@ impl AurawApp {
             loaded_raw: None,
             preview_raw: None,
             gpu_pipeline: None,
+            preview_program_template: None,
             retired_egui_textures: Vec::new(),
             gpu_preview_prewarm_receiver,
             gpu_export_prewarm: Some(gpu_export_prewarm),
@@ -599,6 +604,7 @@ impl AurawApp {
             navigation_pending_stage: None,
             preview_detail_urgent: false,
             preview_quality_dirty: false,
+            preview_rebuild_receiver: None,
             original_preview_exposure: exposure,
             original_preview_requested: false,
             original_preview_rendered_state: None,
@@ -614,6 +620,8 @@ impl AurawApp {
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
+            thumbnail_cache_size: None,
+            thumbnail_cache_size_receiver: None,
             #[cfg(not(target_os = "android"))]
             display_color_management: performance.display_color_management,
             #[cfg(not(target_os = "android"))]
@@ -1230,6 +1238,91 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn thumbnail_cache_size_label(&mut self) -> String {
+        let update = self
+            .thumbnail_cache_size_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match update {
+            Some(Ok(result)) => {
+                if let Err(error) = &result {
+                    log::warn!("could not measure thumbnail cache: {error}");
+                }
+                self.thumbnail_cache_size = Some(result);
+                self.thumbnail_cache_size_receiver = None;
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.thumbnail_cache_size = Some(Err(
+                    "thumbnail cache size worker stopped unexpectedly".to_owned(),
+                ));
+                self.thumbnail_cache_size_receiver = None;
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+
+        if self.thumbnail_cache_size.is_none() && self.thumbnail_cache_size_receiver.is_none() {
+            let (sender, receiver) = mpsc::channel();
+            let repaint = self.egui_ctx.clone();
+            #[cfg(target_os = "android")]
+            let android_app = self.android_app.clone();
+            let spawn = std::thread::Builder::new()
+                .name("auraw-thumbnail-cache-size".to_owned())
+                .spawn(move || {
+                    #[cfg(not(target_os = "android"))]
+                    let result = crate::thumbnail_cache::desktop_thumbnail_cache_size_bytes();
+                    #[cfg(target_os = "android")]
+                    let result = crate::android::thumbnail_cache_size_bytes(&android_app);
+                    let _ = sender.send(result);
+                    repaint.request_repaint();
+                });
+            match spawn {
+                Ok(_) => self.thumbnail_cache_size_receiver = Some(receiver),
+                Err(error) => {
+                    self.thumbnail_cache_size =
+                        Some(Err(format!("could not start cache size worker: {error}")));
+                }
+            }
+        }
+
+        match self.thumbnail_cache_size.as_ref() {
+            Some(Ok(0)) => "0 MB used".to_owned(),
+            Some(Ok(bytes)) if *bytes < 100_000 => "<0.1 MB used".to_owned(),
+            Some(Ok(bytes)) => format!("{:.1} MB used", *bytes as f64 / 1_000_000.0),
+            Some(Err(_)) => "Size unavailable".to_owned(),
+            None => "Calculating size…".to_owned(),
+        }
+    }
+
+    pub(crate) fn clear_thumbnail_cache(&mut self) {
+        self.thumbnail_cache_size = None;
+        self.thumbnail_cache_size_receiver = None;
+        self.library.prepare_for_thumbnail_cache_clear();
+        let decode_gate = self.library.decode_gate();
+        let result = match decode_gate.write() {
+            Ok(_decode_guard) => {
+                #[cfg(not(target_os = "android"))]
+                let cleared = crate::thumbnail_cache::clear_desktop_thumbnail_cache();
+                #[cfg(target_os = "android")]
+                let cleared = crate::android::clear_thumbnail_cache(&self.android_app);
+                cleared
+            }
+            Err(_) => Err("thumbnail decode gate was poisoned".to_owned()),
+        };
+
+        match result {
+            Ok(()) => {
+                self.thumbnail_cache_size = Some(Ok(0));
+                self.notice = Some("Thumbnail cache cleared. Rebuilding previews…".to_owned());
+                self.library.refresh(&self.egui_ctx);
+            }
+            Err(error) => {
+                self.notice = Some(format!("Could not clear thumbnail cache: {error}"));
+                self.library
+                    .set_status("Could not clear the thumbnail cache.");
+            }
+        }
+    }
+
     pub(crate) fn set_adjustment_copy_settings(&mut self, settings: AdjustmentCopySettings) {
         if self.adjustment_copy_settings == settings {
             return;
@@ -1712,12 +1805,17 @@ impl AurawApp {
         // receivers alive so their terminal events can be drained safely.
         self.cancel_document_bound_background_tasks();
         self.abandon_ai_denoise_worker();
+        // A DPI rebuild belongs to the outgoing document. Dropping the
+        // receiver lets its worker dispose the result instead of installing it
+        // over the newly opened RAW.
+        self.preview_rebuild_receiver = None;
         let sidecar_generation = self.begin_sidecar_open();
         // Reuse compiled GPU programs across RAW opens; retire the old texture IDs for next-frame cleanup.
         let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
             self.take_preview_pipeline_and_release_textures(&mut renderer)
         };
+        let retained_preview_program_template = self.preview_program_template.clone();
         #[cfg(target_os = "android")]
         let export_active_while_opening = self.export_receiver.is_some();
         #[cfg(target_os = "android")]
@@ -1731,11 +1829,12 @@ impl AurawApp {
         self.image_status = format!("Loading {label}…");
         let initial_exposure = self.new_image_exposure();
         let preview_quality_setting = self.preview_quality;
-        let preview_proxy_edge_setting =
-            preview_quality_setting.proxy_edge_for_viewport(self.preview_viewport_pixels);
+        let preview_viewport_pixels_setting = self.preview_viewport_pixels;
         let camera_profile_mode = self.camera_profile_mode;
         let camera_profile_folder = self.camera_profile_folder.clone();
         let last_camera_profile = self.last_camera_profile.clone();
+        let ai_denoise_cache_path =
+            self.rawnind_result_cache_path_for_target(&sidecar_target);
         self.original_preview_exposure = initial_exposure;
         self.original_preview_requested = false;
         self.original_preview_rendered_state = None;
@@ -1800,7 +1899,6 @@ impl AurawApp {
             min: [0.0, 0.0],
             max: [1.0, 1.0],
         };
-        self.preview_viewport_pixels = [1, 1];
         self.preview_motion_at = None;
         self.preview_touch_navigation_active = false;
         self.preview_revision = self.preview_revision.wrapping_add(1);
@@ -2097,8 +2195,62 @@ impl AurawApp {
                         "Lensfun catalog/correction prepared in {:.3}s",
                         lens_started.elapsed().as_secs_f64()
                     ));
+                    if rendered_exposure.ai_denoise_enabled {
+                        if full_raw.ai_denoised_image().is_none() {
+                            let cache_started = Instant::now();
+                            match crate::ai_denoise::load_result_cache(
+                                &ai_denoise_cache_path,
+                                &full_raw,
+                            ) {
+                                Ok(Some(image)) => {
+                                    full_raw.set_ai_denoised_image(image).map_err(|error| {
+                                        format!(
+                                            "could not install saved AI-denoise result: {error:#}"
+                                        )
+                                    })?;
+                                    crate::diagnostics::record(format!(
+                                        "AI-denoise result cache restored in {:.3}s from {}",
+                                        cache_started.elapsed().as_secs_f64(),
+                                        ai_denoise_cache_path.display()
+                                    ));
+                                }
+                                Ok(None) => crate::diagnostics::record(
+                                    "AI-denoise result cache miss; RawNIND will run after open",
+                                ),
+                                Err(error) => {
+                                    log::warn!(
+                                        "discarding invalid AI-denoise result cache {}: {error:#}",
+                                        ai_denoise_cache_path.display()
+                                    );
+                                    crate::diagnostics::record(format!(
+                                        "AI-denoise result cache rejected: {error:#}"
+                                    ));
+                                    if let Err(remove_error) =
+                                        std::fs::remove_file(&ai_denoise_cache_path)
+                                    {
+                                        if remove_error.kind() != std::io::ErrorKind::NotFound {
+                                            log::warn!(
+                                                "could not remove invalid AI-denoise cache {}: {remove_error}",
+                                                ai_denoise_cache_path.display()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Decoded RAWs are reused in-process. Do not retain a
+                        // previous document's large derived scene when the
+                        // current sidecar has AI denoise disabled.
+                        full_raw.clear_ai_denoised_image();
+                    }
                     let preview_spec = ProxySpec {
-                        max_edge: preview_proxy_edge_setting,
+                        max_edge: preview_quality_setting.proxy_edge_for_fitted_source(
+                            preview_viewport_pixels_setting,
+                            full_raw.width,
+                            full_raw.height,
+                            geometry,
+                        ),
                     };
                     let proxy_started = Instant::now();
                     let preview_raw =
@@ -2126,7 +2278,9 @@ impl AurawApp {
                     #[cfg(target_os = "android")]
                     let mut startup_gpu_prewarm_template = None;
                     #[cfg(target_os = "android")]
-                    if reusable_preview_pipeline.is_none() {
+                    if reusable_preview_pipeline.is_none()
+                        && retained_preview_program_template.is_none()
+                    {
                         if let Some(receiver) = startup_gpu_prewarm_receiver {
                             let wait_started = Instant::now();
                             match receiver.recv() {
@@ -2144,15 +2298,25 @@ impl AurawApp {
                             }
                         }
                     }
-                    #[cfg(target_os = "android")]
                     let reusable_program_template = reusable_preview_pipeline
                         .as_ref()
-                        .or(startup_gpu_prewarm_template.as_ref());
-                    #[cfg(not(target_os = "android"))]
-                    let reusable_program_template = reusable_preview_pipeline.as_ref();
+                        .map(RawGpuPipeline::program_template)
+                        .or(retained_preview_program_template)
+                        .or_else(|| {
+                            #[cfg(target_os = "android")]
+                            {
+                                startup_gpu_prewarm_template
+                                    .as_ref()
+                                    .map(RawGpuPipeline::program_template)
+                            }
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                None
+                            }
+                        });
                     let pipeline_started = Instant::now();
-                    let pipeline = if let Some(template) = reusable_program_template {
-                        match RawGpuPipeline::new_headless_reusing_programs(
+                    let pipeline = if let Some(template) = reusable_program_template.as_ref() {
+                        match RawGpuPipeline::new_headless_reusing_program_template(
                             &device,
                             &queue,
                             &preview_raw,
@@ -2634,6 +2798,7 @@ impl AurawApp {
                 self.original_raw = Some(loaded.original_raw);
                 self.loaded_raw = Some(loaded.full_raw);
                 self.preview_raw = Some(loaded.preview_raw);
+                self.preview_program_template = Some(loaded.pipeline.program_template());
                 self.gpu_pipeline = Some(loaded.pipeline);
                 self.exposure = loaded.rendered_exposure;
                 self.geometry = loaded.geometry.sanitized();
@@ -2662,7 +2827,6 @@ impl AurawApp {
                     min: [0.0, 0.0],
                     max: [1.0, 1.0],
                 };
-                self.preview_viewport_pixels = [1, 1];
                 self.preview_motion_at = None;
                 self.preview_touch_navigation_active = false;
                 self.preview_revision = self.preview_revision.wrapping_add(1);
