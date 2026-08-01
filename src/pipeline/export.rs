@@ -657,9 +657,10 @@ fn resolved_export_tile_spec(
     } else {
         tile_spec.halo.max(required_halo)
     };
-    if cfg!(target_os = "android") && tile_spec.core_edge == 768 && tile_spec.halo <= 192 {
-        tile_spec.core_edge = 1024;
-    }
+    // Do not enlarge the caller's tile. Android deliberately requests a 768 px
+    // core so full-resolution mask atlases and the tile pipeline fit together
+    // inside the mobile GPU budget. Promoting common edits to 1024 px made
+    // masked exports exceed that budget before the first tile was rendered.
     bounded_tile_spec(tile_spec, source_width)
 }
 
@@ -3628,11 +3629,13 @@ mod tests {
     use super::{
         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
         encode_srgb_row_with_format, export_to_destination, publish_completed_export,
-        stitch_linear_tile_into_band, validate_export_dimensions, ExportMetadata, ExportResizeMode,
-        ExportRowFormat, ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO,
-        MAX_EXPORT_EDGE,
+        resolved_export_tile_spec, stitch_linear_tile_into_band, validate_export_dimensions,
+        ExportMetadata, ExportResizeMode, ExportRowFormat, ExportSettings, GeometryResampler,
+        LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
     };
-    use crate::pipeline::{ExportTile, GeometryTransform, IccOutputTransform};
+    use crate::pipeline::{
+        ExportTile, ExposureParams, GeometryTransform, IccOutputTransform, MaskStack, TileSpec,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3858,6 +3861,23 @@ mod tests {
         let bounded = bounded_tile_spec(requested, MAX_EXPORT_EDGE).unwrap();
         assert!(bounded.core_edge <= requested.core_edge);
         assert!(bounded.core_edge >= 64);
+    }
+
+    #[test]
+    fn resolving_export_halo_never_enlarges_the_requested_tile() {
+        let requested = TileSpec {
+            core_edge: 768,
+            halo: EXPORT_TILE_HALO,
+        };
+        let resolved = resolved_export_tile_spec(
+            requested,
+            &ExposureParams::scene_referred_default(),
+            &MaskStack::default(),
+            8_640,
+        )
+        .unwrap();
+        assert_eq!(resolved.core_edge, requested.core_edge);
+        assert!(resolved.halo <= requested.halo);
     }
 
     #[test]
