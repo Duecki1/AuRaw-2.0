@@ -1,25 +1,92 @@
 use crate::file_ops::{replace_file, sync_parent_directory};
 use crate::pipeline::RawThumbnail;
+use image::codecs::jpeg::JpegEncoder;
 use image::ImageFormat;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{Cursor, Write};
+use std::io::Write;
 use std::path::Path;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 #[cfg(not(target_os = "android"))]
 use std::time::UNIX_EPOCH;
 
-const RAW_THUMBNAIL_SUFFIX: &str = ".auraw-raw-thumb.png";
+const RAW_THUMBNAIL_SUFFIX: &str = ".auraw-raw-thumb.jpg";
 const RAW_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-raw-thumb.fingerprint";
 pub(crate) const DESKTOP_THUMBNAIL_CACHE_DIR: &str = "library-thumbnails";
 const LEGACY_THUMBNAIL_CACHE_DIR: &str = ".auraw-cache";
+pub(crate) const THUMBNAIL_JPEG_QUALITY: u8 = 88;
 const MAX_CACHED_THUMBNAIL_EDGE: u32 = 8192;
 const MAX_CACHED_THUMBNAIL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CACHED_THUMBNAIL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_CACHED_THUMBNAIL_PIXELS: u64 = MAX_CACHED_THUMBNAIL_DECODE_BYTES / 4;
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+struct RenderedThumbnailLimiter {
+    state: Mutex<RenderedThumbnailLimiterState>,
+    available: Condvar,
+}
+
+struct RenderedThumbnailLimiterState {
+    limit: usize,
+    active: usize,
+}
+
+pub(crate) struct RenderedThumbnailPermit {
+    limiter: &'static RenderedThumbnailLimiter,
+}
+
+static RENDERED_THUMBNAIL_LIMITER: OnceLock<RenderedThumbnailLimiter> = OnceLock::new();
+
+fn rendered_thumbnail_limiter() -> &'static RenderedThumbnailLimiter {
+    RENDERED_THUMBNAIL_LIMITER.get_or_init(|| RenderedThumbnailLimiter {
+        state: Mutex::new(RenderedThumbnailLimiterState {
+            limit: 1,
+            active: 0,
+        }),
+        available: Condvar::new(),
+    })
+}
+
+pub(crate) fn set_rendered_thumbnail_worker_limit(limit: usize) {
+    let limiter = rendered_thumbnail_limiter();
+    let mut state = limiter
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.limit = limit.max(1);
+    limiter.available.notify_all();
+}
+
+pub(crate) fn acquire_rendered_thumbnail_worker() -> RenderedThumbnailPermit {
+    let limiter = rendered_thumbnail_limiter();
+    let mut state = limiter
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while state.active >= state.limit {
+        state = limiter
+            .available
+            .wait(state)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    state.active += 1;
+    RenderedThumbnailPermit { limiter }
+}
+
+impl Drop for RenderedThumbnailPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .limiter
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = state.active.saturating_sub(1);
+        self.limiter.available.notify_one();
+    }
+}
 
 pub(crate) fn downscale_to_fit(
     image: image::DynamicImage,
@@ -75,7 +142,7 @@ fn accepted_thumbnail_layout(width: u32, height: u32) -> Result<(u64, u64, u64),
     Ok((pixels, row_bytes, decoded_bytes))
 }
 
-pub(crate) fn load_png(path: &Path, maximum_edge: u32) -> Result<Option<RawThumbnail>, String> {
+pub(crate) fn load_jpeg(path: &Path, maximum_edge: u32) -> Result<Option<RawThumbnail>, String> {
     if maximum_edge == 0 {
         return Err("thumbnail edge must be non-zero".to_owned());
     }
@@ -94,7 +161,7 @@ pub(crate) fn load_png(path: &Path, maximum_edge: u32) -> Result<Option<RawThumb
         return Ok(None);
     }
 
-    // Inspect the PNG header before any pixel allocation. Cache files, including
+    // Inspect the JPEG header before any pixel allocation. Cache files, including
     // legacy sibling caches, are untrusted and may contain a tiny compressed
     // payload advertising hostile dimensions.
     let dimensions = image::ImageReader::with_format(
@@ -107,7 +174,7 @@ pub(crate) fn load_png(path: &Path, maximum_edge: u32) -> Result<Option<RawThumb
                 ))
             }
         },
-        ImageFormat::Png,
+        ImageFormat::Jpeg,
     )
     .into_dimensions();
     let (source_width, source_height) = match dimensions {
@@ -132,7 +199,7 @@ pub(crate) fn load_png(path: &Path, maximum_edge: u32) -> Result<Option<RawThumb
         }
     };
     let mut reader =
-        image::ImageReader::with_format(std::io::BufReader::new(file), ImageFormat::Png);
+        image::ImageReader::with_format(std::io::BufReader::new(file), ImageFormat::Jpeg);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_CACHED_THUMBNAIL_EDGE);
     limits.max_image_height = Some(MAX_CACHED_THUMBNAIL_EDGE);
@@ -173,7 +240,7 @@ pub(crate) fn load_png(path: &Path, maximum_edge: u32) -> Result<Option<RawThumb
     }))
 }
 
-pub(crate) fn save_png(path: &Path, thumbnail: &RawThumbnail) -> Result<(), String> {
+pub(crate) fn save_jpeg(path: &Path, thumbnail: &RawThumbnail) -> Result<(), String> {
     if thumbnail.width == 0
         || thumbnail.height == 0
         || thumbnail.width > MAX_CACHED_THUMBNAIL_EDGE
@@ -197,11 +264,13 @@ pub(crate) fn save_png(path: &Path, thumbnail: &RawThumbnail) -> Result<(), Stri
     let image =
         image::RgbaImage::from_raw(thumbnail.width, thumbnail.height, thumbnail.rgba.clone())
             .ok_or_else(|| "thumbnail has an invalid RGBA layout".to_owned())?;
-    let mut encoded = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(image)
-        .write_to(&mut encoded, ImageFormat::Png)
+    let image = image::DynamicImage::ImageRgba8(image).to_rgb8();
+    let image = image::DynamicImage::ImageRgb8(image);
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, THUMBNAIL_JPEG_QUALITY)
+        .encode_image(&image)
         .map_err(|error| format!("could not encode thumbnail cache: {error}"))?;
-    if u64::try_from(encoded.get_ref().len()).unwrap_or(u64::MAX) > MAX_CACHED_THUMBNAIL_BYTES {
+    if u64::try_from(encoded.len()).unwrap_or(u64::MAX) > MAX_CACHED_THUMBNAIL_BYTES {
         return Err("encoded thumbnail exceeds the cache size limit".to_owned());
     }
     if let Some(parent) = path.parent() {
@@ -212,7 +281,7 @@ pub(crate) fn save_png(path: &Path, thumbnail: &RawThumbnail) -> Result<(), Stri
             )
         })?;
     }
-    write_bytes_atomic(path, encoded.get_ref()).map_err(|error| {
+    write_bytes_atomic(path, &encoded).map_err(|error| {
         format!(
             "could not write thumbnail cache {}: {error}",
             path.display()
@@ -277,7 +346,7 @@ pub(crate) fn load_desktop_raw_thumbnail(
         }
     }
     remove_legacy_raw_thumbnail_cache(raw_path);
-    load_png(&cache_path, maximum_edge)
+    load_jpeg(&cache_path, maximum_edge)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -288,7 +357,7 @@ pub(crate) fn save_desktop_raw_thumbnail(
     let expected = desktop_raw_stamp(raw_path)?;
     let cache_path = desktop_raw_thumbnail_path(raw_path);
     let fingerprint_path = desktop_raw_thumbnail_fingerprint_path(raw_path);
-    save_png(&cache_path, thumbnail)?;
+    save_jpeg(&cache_path, thumbnail)?;
     write_bytes_atomic(&fingerprint_path, format!("{expected}\n").as_bytes()).map_err(|error| {
         format!(
             "could not write RAW thumbnail fingerprint {}: {error}",
@@ -326,7 +395,7 @@ fn migrate_legacy_desktop_raw_thumbnail(raw_path: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let thumbnail = match load_png(&legacy_cache, MAX_CACHED_THUMBNAIL_EDGE) {
+    let thumbnail = match load_jpeg(&legacy_cache, MAX_CACHED_THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => thumbnail,
         Ok(None) | Err(_) => {
             remove_legacy_raw_thumbnail_cache(raw_path);
@@ -365,6 +434,74 @@ pub(crate) fn desktop_thumbnail_cache_root() -> PathBuf {
     desktop_platform_cache_root()
         .join("auraw")
         .join(DESKTOP_THUMBNAIL_CACHE_DIR)
+}
+
+/// Removes every generated library preview. Both unedited RAW thumbnails and
+/// edited renditions live below this private, app-owned directory and can be
+/// rebuilt from the RAW plus its sidecar.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn clear_desktop_thumbnail_cache() -> Result<(), String> {
+    let root = desktop_thumbnail_cache_root();
+    match fs::remove_dir_all(&root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "could not clear thumbnail cache {}: {error}",
+            root.display()
+        )),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn desktop_thumbnail_cache_size_bytes() -> Result<u64, String> {
+    directory_size_bytes(&desktop_thumbnail_cache_root())
+}
+
+#[cfg(not(target_os = "android"))]
+fn directory_size_bytes(root: &Path) -> Result<u64, String> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut total = 0_u64;
+    while let Some(directory) = directories.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect thumbnail cache {}: {error}",
+                    directory.display()
+                ))
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "could not read thumbnail cache entry in {}: {error}",
+                    directory.display()
+                )
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                format!(
+                    "could not inspect thumbnail cache entry {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            if file_type.is_dir() {
+                directories.push(entry.path());
+            } else if file_type.is_file() {
+                let bytes = entry
+                    .metadata()
+                    .map_err(|error| {
+                        format!(
+                            "could not inspect thumbnail cache entry {}: {error}",
+                            entry.path().display()
+                        )
+                    })?
+                    .len();
+                total = total.saturating_add(bytes);
+            }
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(all(not(target_os = "android"), windows))]
@@ -530,15 +667,14 @@ mod tests {
     }
 
     #[test]
-    fn oversized_png_dimensions_are_rejected_before_decode() {
-        const OVERSIZED_PNG: &[u8] = &[
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 1, 134, 160, 0, 1,
-            134, 160, 8, 6, 0, 0, 0, 168, 82, 11, 200, 0, 0, 0, 8, 73, 68, 65, 84, 120, 156, 3, 0,
-            0, 0, 0, 1, 72, 6, 137, 210, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    fn oversized_jpeg_dimensions_are_rejected_before_decode() {
+        const OVERSIZED_JPEG: &[u8] = &[
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x27, 0x10, 0x27, 0x10, 0x03, 0x01, 0x11,
+            0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xd9,
         ];
-        let path = temporary_test_path("oversized.png");
-        fs::write(&path, OVERSIZED_PNG).unwrap();
-        assert!(load_png(&path, 512).unwrap().is_none());
+        let path = temporary_test_path("oversized.jpg");
+        fs::write(&path, OVERSIZED_JPEG).unwrap();
+        assert!(load_jpeg(&path, 512).unwrap().is_none());
         assert!(!path.exists());
     }
 
@@ -551,37 +687,57 @@ mod tests {
     #[test]
     fn truncated_and_malformed_cache_entries_are_recoverable_misses() {
         for (index, bytes) in [
-            &b"not a png"[..],
-            &b"\x89PNG\r\n\x1a\n"[..],
-            &b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"[..],
+            &b"not a jpeg"[..],
+            &b"\xff\xd8"[..],
+            &b"\xff\xd8\xff\xc0\x00\x11"[..],
         ]
         .into_iter()
         .enumerate()
         {
-            let path = temporary_test_path(&format!("malformed-{index}.png"));
+            let path = temporary_test_path(&format!("malformed-{index}.jpg"));
             fs::write(&path, bytes).unwrap();
-            assert!(load_png(&path, 512).unwrap().is_none());
+            assert!(load_jpeg(&path, 512).unwrap().is_none());
             assert!(!path.exists());
         }
     }
 
     #[test]
-    fn normal_cache_entry_still_round_trips() {
-        let path = temporary_test_path("normal.png");
+    fn png_cache_entry_is_not_loaded_as_jpeg() {
+        let path = temporary_test_path("legacy-png.jpg");
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]));
+        image
+            .save_with_format(&path, ImageFormat::Png)
+            .expect("test PNG should encode");
+
+        assert!(load_jpeg(&path, 512).unwrap().is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn normal_jpeg_cache_entry_round_trips_with_bounded_loss() {
+        let path = temporary_test_path("normal.jpg");
         let thumbnail = RawThumbnail {
-            width: 2,
-            height: 2,
-            rgba: vec![
-                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 127, 127, 127, 255,
-            ],
+            width: 16,
+            height: 16,
+            rgba: [40, 80, 120, 255].repeat(16 * 16),
         };
-        save_png(&path, &thumbnail).unwrap();
-        let loaded = load_png(&path, 512)
+        save_jpeg(&path, &thumbnail).unwrap();
+        assert!(fs::read(&path).unwrap().starts_with(&[0xff, 0xd8]));
+        let loaded = load_jpeg(&path, 512)
             .unwrap()
             .expect("normal cache should load");
         assert_eq!(loaded.width, thumbnail.width);
         assert_eq!(loaded.height, thumbnail.height);
-        assert_eq!(loaded.rgba, thumbnail.rgba);
+        for (actual, expected) in loaded
+            .rgba
+            .chunks_exact(4)
+            .zip(thumbnail.rgba.chunks_exact(4))
+        {
+            for channel in 0..3 {
+                assert!(actual[channel].abs_diff(expected[channel]) <= 3);
+            }
+            assert_eq!(actual[3], 255);
+        }
         let _ = fs::remove_file(path);
     }
 
@@ -596,7 +752,7 @@ mod tests {
         let legacy_fingerprint =
             legacy_sibling_cache_path_for_raw(&raw, RAW_THUMBNAIL_FINGERPRINT_SUFFIX);
         fs::create_dir_all(legacy_cache.parent().unwrap()).unwrap();
-        fs::write(&legacy_cache, b"malformed png").unwrap();
+        fs::write(&legacy_cache, b"malformed jpeg").unwrap();
         fs::write(&legacy_fingerprint, desktop_raw_stamp(&raw).unwrap()).unwrap();
 
         assert!(load_desktop_raw_thumbnail(&raw, 512).unwrap().is_none());
@@ -613,5 +769,18 @@ mod tests {
         assert!(cache.starts_with(desktop_thumbnail_cache_root()));
         assert!(cache.to_string_lossy().ends_with(RAW_THUMBNAIL_SUFFIX));
         assert_ne!(cache.parent(), raw.parent());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn thumbnail_cache_size_counts_nested_cache_files() {
+        let root = temporary_test_path("size");
+        let nested = root.join("ab");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("one.jpg"), b"123").unwrap();
+        fs::write(nested.join("two.fingerprint"), b"12345").unwrap();
+
+        assert_eq!(directory_size_bytes(&root).unwrap(), 8);
+        fs::remove_dir_all(root).unwrap();
     }
 }

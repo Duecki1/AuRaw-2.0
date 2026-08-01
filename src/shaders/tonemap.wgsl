@@ -267,22 +267,21 @@ fn lightroom_positive_whites_offset_ev(
         return 0.0;
     }
 
-    // Lightroom Whites +100 is a broad hump rather than a highlights-only
-    // selector: it rises through the darkest decile, peaks in the lower
-    // midtones, then retains roughly one third of its authority in the top
-    // percent. This measured shape also remains monotone because the descending
-    // side is capped from its complete transition width.
+    // The 16-bit Lightroom endpoint is a broad but restrained hump: nearly
+    // neutral in the bottom decile, strongest from upper midtones into diffuse
+    // white, then rolling away from the clipped endpoint. The previous 20%
+    // floor and 2.35 EV request turned Whites into a second Exposure control.
     let rise = tone_smoothstep(
-        percentiles.p005 - 0.35,
-        percentiles.p50 - 0.60,
+        percentiles.p05 - 0.15,
+        percentiles.p50 + 0.55,
         low_ev,
     );
-    let fall_start = percentiles.p50 - 0.80;
+    let fall_start = percentiles.p50 + 0.10;
     let fall_end = percentiles.p995 + 0.60;
-    let fall = 1.0 - 0.67 * tone_smoothstep(fall_start, fall_end, low_ev);
-    let mask = (0.20 + 0.80 * rise) * fall;
-    let monotone_limit = 0.90 * max(fall_end - fall_start, 0.25) / (1.5 * 0.67);
-    return min(whites * 2.35, monotone_limit) * mask;
+    let fall = 1.0 - 0.35 * tone_smoothstep(fall_start, fall_end, low_ev);
+    let mask = (0.025 + 0.975 * rise) * fall;
+    let monotone_limit = 0.90 * max(fall_end - fall_start, 0.25) / (1.5 * 0.35);
+    return min(whites * 0.95, monotone_limit) * mask;
 }
 
 fn signed_tone_range(value: f32, negative_ev: f32, positive_ev: f32) -> f32 {
@@ -400,15 +399,14 @@ fn apply_local_basic_tone_values_with_low_strength(
     } else {
         shadow_ev = lightroom_shadow_offset_ev(shadows, masks.y, percentiles);
     }
-    let current_highlight_mask = select(
-        tone_smoothstep(
-            percentiles.p005 - 0.10,
-            percentiles.p50 + 0.40,
+    // Both signs are highlight controls, not broad midtone exposure. The old
+    // process-18 selector reached full strength below the median; the aligned
+    // high-bit-depth response stays gentle there and peaks in the top decile.
+    let current_highlight_mask = 0.10 + 0.90 * tone_smoothstep(
+            percentiles.p50 - 0.35,
+            percentiles.p95 + 0.45,
             guide_ev,
-        ),
-        masks.z,
-        highlights >= 0.0,
-    );
+        );
     let highlight_mask = select(
         masks.z,
         current_highlight_mask,
@@ -416,7 +414,7 @@ fn apply_local_basic_tone_values_with_low_strength(
     );
     let highlight_ev = select(
         signed_tone_range(highlights, 1.90, 1.15),
-        signed_tone_range(highlights, 0.72, 0.60),
+        signed_tone_range(highlights, 1.35, 1.00),
         params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     ) * highlight_mask;
     let negative_white_range = select(
@@ -471,23 +469,23 @@ fn apply_basic_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
 
     let luminance = safe_luma(rgb);
     let scene_ev = log2(luminance / SCENE_MIDDLE_GREY);
-    let contrast_pivot_ev = tone_percentiles().p50 - 0.45;
+    let contrast_pivot_ev = tone_percentiles().p50 + 0.12;
     let relative_ev = scene_ev - contrast_pivot_ev;
 
     // Contrast is a protected S-curve in scene EV rather than a global EV
     // multiplier. Near middle grey the exponential responses are steep, so
     // the slider changes midtone slope decisively. Toward the ends they
-    // asymptotically cap the displacement. Isolated Lightroom endpoints need
-    // about -2.60/+1.35 EV at +100; the inverse endpoint is gentler on both
-    // sides to retain a strict monotonicity margin.
+    // asymptotically cap the displacement. The 16-bit endpoint has a decisive
+    // black-end anchor but a protected highlight shoulder; the inverse endpoint
+    // remains gentler on both sides to retain a strict monotonicity margin.
     let toe_distance_ev = max(-relative_ev, 0.0);
     let shoulder_distance_ev = max(relative_ev, 0.0);
     let toe_midtone_width_ev = 1.65;
     let shoulder_midtone_width_ev = 1.85;
     let toe_response = 1.0 - exp2(-toe_distance_ev / toe_midtone_width_ev);
     let shoulder_response = 1.0 - exp2(-shoulder_distance_ev / shoulder_midtone_width_ev);
-    let toe_endpoint = select(1.70, 2.60, amount >= 0.0);
-    let shoulder_endpoint = select(0.95, 1.35, amount >= 0.0);
+    let toe_endpoint = select(1.70, 5.80, amount >= 0.0);
+    let shoulder_endpoint = select(0.95, 0.85, amount >= 0.0);
     let signed_protected_shape =
         shoulder_response * shoulder_endpoint - toe_response * toe_endpoint;
 

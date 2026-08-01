@@ -11,14 +11,17 @@ RESOURCES = (ROOT / "src/pipeline/gpu/resources.rs").read_text(encoding="utf-8")
 MIB = 1024 * 1024
 
 
-def preview_persistent_bytes(edge: int, mask_edge: int, tone_scale: int = 8) -> int:
-    """Analytical square-preview reference for resources.rs persistent entries."""
-    pixels = edge * edge
+def preview_persistent_bytes(
+    width: int, height: int, mask_edge: int, tone_scale: int = 8
+) -> int:
+    """Analytical preview reference for resources.rs persistent entries."""
+    pixels = width * height
     # CFA R16 + color R8 + black R32 + reconstructed R32 + six RGBA16 work
     # textures + RGBA8 output + RGBA16 inpaint.
     full_frame = pixels * (2 + 1 + 4 + 4 + 6 * 8 + 4 + 8)
-    tone_edge = math.ceil(edge / tone_scale)
-    tone_guides = 2 * tone_edge * tone_edge * 4
+    tone_width = math.ceil(width / tone_scale)
+    tone_height = math.ceil(height / tone_scale)
+    tone_guides = 2 * tone_width * tone_height * 4
     mask_atlas = mask_edge * mask_edge * 32 * 2
     # Profile/params/histogram/stats are small and alignment-dependent. One MiB
     # per pipeline is deliberately conservative for this admission reference.
@@ -38,14 +41,21 @@ def test_global_gpu_reservation_counts_resident_not_repeated_transient_peaks() -
 
 
 def test_android_zoom_working_set_fits_resident_budget() -> None:
-    assert "(Self::Balanced, true) => 1152" in APP
-    assert "(Self::High, true) => 1280" in APP
+    assert "Self::Low => 0.50" in APP
+    assert "Self::Medium => 0.67" in APP
+    assert "Self::High => 0.84" in APP
+    assert "Self::Max => 1.00" in APP
+    assert "cfg!(target_os = \"android\")" not in APP[
+        APP.index("impl PreviewQuality"):APP.index("pub(crate) struct PreviewDetail")
+    ]
     assert 'if cfg!(target_os = "android") { 384 } else { 1024 }' in PROCESSING
 
-    high_main = preview_persistent_bytes(1600, 1024)
-    high_detail = preview_persistent_bytes(1280, 384)
-    navigation = preview_persistent_bytes(384, 256)
-    assert high_main + high_detail + navigation < 384 * MIB
+    # Max on a 1440px-wide, 3:2 image: the fit proxy is one physical pixel per
+    # display pixel and the detail case includes the full 35% support ceiling.
+    max_main = preview_persistent_bytes(1446, 964, 1024)
+    max_detail = preview_persistent_bytes(1950, 1300, 384)
+    navigation = preview_persistent_bytes(384, 256, 256)
+    assert max_main + max_detail + navigation < 384 * MIB
 
 
 def test_zoom_detail_uses_dedicated_mask_atlas() -> None:

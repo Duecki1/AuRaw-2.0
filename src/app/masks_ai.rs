@@ -1,4 +1,72 @@
 impl AurawApp {
+    fn capture_ai_mask_target(
+        &self,
+        mask_index: usize,
+        component_index: usize,
+    ) -> Option<AiMaskTarget> {
+        let component = self
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))?;
+        Some(AiMaskTarget {
+            mask_index,
+            component_index,
+            kind: component.kind,
+            geometry: component.geometry.clone(),
+        })
+    }
+
+    /// Resolve against the captured component content instead of trusting a
+    /// stale vector index. A unique match survives a reorder; no match and
+    /// duplicate matches are both unsafe to apply.
+    fn resolve_ai_mask_target(
+        &self,
+        target: &AiMaskTarget,
+    ) -> std::result::Result<(usize, usize), String> {
+        Self::resolve_ai_mask_target_in_stack(&self.masks, target)
+    }
+
+    fn resolve_ai_mask_target_in_stack(
+        stack: &MaskStack,
+        target: &AiMaskTarget,
+    ) -> std::result::Result<(usize, usize), String> {
+        let matches = stack
+            .masks
+            .iter()
+            .enumerate()
+            .flat_map(|(mask_index, mask)| {
+                mask.components
+                    .iter()
+                    .enumerate()
+                    .map(move |(component_index, component)| (mask_index, component_index, component))
+            })
+            .filter(|(_, _, component)| {
+                component.kind == target.kind && component.geometry == target.geometry
+            })
+            .map(|(mask_index, component_index, _)| (mask_index, component_index))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [location] => Ok(*location),
+            [] => {
+                let message = match stack.masks.get(target.mask_index) {
+                    None => "The target mask was deleted before inference completed.",
+                    Some(mask) if mask.components.get(target.component_index).is_none() => {
+                        "The target mask component was deleted before inference completed."
+                    }
+                    Some(mask)
+                        if mask.components[target.component_index].kind != target.kind =>
+                    {
+                        "The target component changed type before inference completed."
+                    }
+                    Some(_) => "The target component changed before inference completed.",
+                };
+                Err(message.to_owned())
+            }
+            _ => Err("The target component is ambiguous after editing; the stale result was discarded.".to_owned()),
+        }
+    }
+
     pub(crate) fn mark_mask_adjustments_dirty(&mut self) {
         self.note_mask_edit_changed();
         if self.gpu_pipeline.is_none() {
@@ -163,6 +231,48 @@ impl AurawApp {
             || self.landscape_consent_open
     }
 
+    /// A failed task remains in the background-task list until the user
+    /// dismisses its details, but it must no longer own the AI-mask request
+    /// slot. Likewise, an ID whose task was already removed cannot be allowed
+    /// to block all future mask requests.
+    fn recover_terminal_ai_mask_task_owners(&mut self) {
+        let stale_subject = self.subject_receiver.is_none()
+            && self.subject_task_id.is_some_and(|id| {
+                self.background_tasks
+                    .snapshot(id)
+                    .is_none_or(|task| task.status == TaskStatus::Failed)
+            });
+        if stale_subject {
+            if let Some(id) = self.subject_task_id {
+                self.clear_ai_mask_task_owner(id);
+            }
+        }
+
+        let stale_object = self.object_receiver.is_none()
+            && self.object_task_id.is_some_and(|id| {
+                self.background_tasks
+                    .snapshot(id)
+                    .is_none_or(|task| task.status == TaskStatus::Failed)
+            });
+        if stale_object {
+            if let Some(id) = self.object_task_id {
+                self.clear_ai_mask_task_owner(id);
+            }
+        }
+
+        let stale_landscape = self.landscape_receiver.is_none()
+            && self.landscape_task_id.is_some_and(|id| {
+                self.background_tasks
+                    .snapshot(id)
+                    .is_none_or(|task| task.status == TaskStatus::Failed)
+            });
+        if stale_landscape {
+            if let Some(id) = self.landscape_task_id {
+                self.clear_ai_mask_task_owner(id);
+            }
+        }
+    }
+
     pub(crate) fn ai_masks_need_update(&self) -> bool {
         self.ai_masks_need_update && !self.masks.masks.is_empty()
     }
@@ -316,7 +426,19 @@ impl AurawApp {
         }
     }
 
+    fn ai_runtime_ready(&mut self) -> bool {
+        #[cfg(target_os = "android")]
+        {
+            true
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.validate_onnx_runtime_for_ai()
+        }
+    }
+
     pub(crate) fn request_update_all_ai_masks(&mut self, frame: &eframe::Frame) {
+        self.recover_terminal_ai_mask_task_owners();
         if self.ai_mask_update_busy() {
             self.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
@@ -390,7 +512,7 @@ impl AurawApp {
 
         if update_subject {
             let path = self.birefnet_model_path();
-            if path.exists() && self.vitmatte_model_path().exists() {
+            if path.is_file() && self.vitmatte_model_path().is_file() {
                 self.start_subject_worker(path);
             } else {
                 self.subject_consent_open = true;
@@ -435,8 +557,7 @@ impl AurawApp {
             }
 
             let (encoder, decoder) = self.sam21_model_paths();
-            let vitmatte_ready = self.vitmatte_model_path().exists();
-            if encoder.exists() && decoder.exists() && vitmatte_ready {
+            if encoder.is_file() && decoder.is_file() && self.vitmatte_model_path().is_file() {
                 self.start_object_worker(mask_index, component_index, encoder, decoder);
             } else {
                 self.object_pending_target = Some((mask_index, component_index));
@@ -511,90 +632,156 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    #[cfg(target_os = "android")]
+    fn capture_mask_source_from_active_preview(
+        &self,
+        frame: &eframe::Frame,
+    ) -> Result<MaskRgbImage, String> {
+        let render_state = frame
+            .wgpu_render_state()
+            .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
+        let raw = self
+            .preview_raw
+            .as_ref()
+            .ok_or_else(|| "The preview image is not available yet.".to_owned())?;
+        let pipeline = self
+            .gpu_pipeline
+            .as_ref()
+            .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
+
+        // The expanded processing graph no longer reliably leaves enough of
+        // Android's GPU budget for a second full RawGpuPipeline. Render the
+        // canonical unedited source through the already-resident preview graph,
+        // read it back, then restore the current edited preview before this UI
+        // frame is painted. This is also the path used while reconstructing
+        // saved range-mask sources during image load.
+        let reference_exposure = ExposureParams::scene_referred_default();
+        let reference_masks = MaskStack::default();
+        let reference_params = GpuParams::new(&reference_exposure, &reference_masks, raw);
+        pipeline.recompute(&render_state.queue, &render_state.device, &reference_params);
+
+        let readback = pipeline.read_output_region_blocking(
+            &render_state.device,
+            &render_state.queue,
+            0,
+            0,
+            pipeline.width,
+            pipeline.height,
+        );
+
+        // `recompute` updates the complete graph, so restore exactly the state
+        // the user should see even when the readback failed. A failure must not
+        // leave the preview displaying the neutral AI-mask rendition.
+        let restore_params = if self.original_preview_requested {
+            GpuParams::new(&self.original_preview_exposure, &reference_masks, raw)
+                .with_vignette_geometry(self.geometry)
+        } else {
+            GpuParams::new(&self.target_exposure, &self.masks, raw)
+                .with_vignette_geometry(self.geometry)
+        };
+        pipeline.recompute(&render_state.queue, &render_state.device, &restore_params);
+
+        let rgba = readback
+            .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
+        MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
+            .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())
+    }
+
     pub(crate) fn capture_mask_source(&mut self, frame: &eframe::Frame) -> Result<(), String> {
         if self.mask_source_cache.is_some() {
             return Ok(());
         }
-        let render_state = frame
-            .wgpu_render_state()
-            .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let program_template = self
-            .gpu_pipeline
-            .as_ref()
-            .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
-        let full_raw = self
-            .loaded_raw
-            .as_ref()
-            .ok_or_else(|| "The original RAW is not available.".to_owned())?;
-        let source_edge = if cfg!(target_os = "android") {
-            2048
-        } else {
-            3072
-        };
-        let raw = if full_raw.width.max(full_raw.height) <= source_edge {
-            Arc::clone(full_raw)
-        } else {
-            Arc::new(build_proxy(
-                full_raw,
-                ProxySpec {
-                    max_edge: source_edge,
-                },
-            ))
-        };
 
-        // Subject, Object, and range classifiers must be stable when the user changes
-        // Exposure, Color, Effects, curves, grading, or local masks. Render a
-        // fresh canonical rendition from the unedited RAW proxy instead of
-        // reading the live edited output texture. Camera white balance,
-        // profile color, demosaic, and lens-corrected geometry are retained so
-        // the model sees a natural image that remains pixel-aligned with the
-        // preview and export. A dedicated 2048/3072-edge proxy preserves much
-        // finer boundary guidance than the 1024px model input while keeping
-        // inference memory bounded and independent of Preview Quality.
-        let reference_exposure = ExposureParams::scene_referred_default();
-        let reference_masks = MaskStack::default();
-        let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
-        let reference_pipeline = RawGpuPipeline::new_headless_reusing_programs(
-            &render_state.device,
-            &render_state.queue,
-            &raw,
-            &params,
-            ProcessingQuality::Preview,
-            program_template,
-        )
-        .map_err(|error| format!("Could not prepare the original RAW for masking: {error:#}"))?;
-        reference_pipeline
-            .update_inpaint_layer(
-                &render_state.queue,
-                self.inpaint_layer.as_ref(),
-                0,
-                0,
-                raw.width,
-                raw.height,
-            )
-            .map_err(|error| format!("Could not prepare erased pixels for masking: {error:#}"))?;
-        reference_pipeline.recompute(&render_state.queue, &render_state.device, &params);
-        let rgba = reference_pipeline
-            .read_output_region_blocking(
+        #[cfg(target_os = "android")]
+        {
+            let source = self.capture_mask_source_from_active_preview(frame)?;
+            self.mask_source_cache = Some(source);
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let render_state = frame
+                .wgpu_render_state()
+                .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
+            let program_template = self
+                .gpu_pipeline
+                .as_ref()
+                .map(RawGpuPipeline::program_template)
+                .or_else(|| self.preview_program_template.clone())
+                .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
+            let full_raw = self
+                .loaded_raw
+                .as_ref()
+                .ok_or_else(|| "The original RAW is not available.".to_owned())?;
+            let raw = if full_raw.width.max(full_raw.height) <= 3072 {
+                Arc::clone(full_raw)
+            } else {
+                Arc::new(build_proxy(
+                    full_raw,
+                    ProxySpec { max_edge: 3072 },
+                ))
+            };
+
+            let reference_exposure = ExposureParams::scene_referred_default();
+            let reference_masks = MaskStack::default();
+            let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
+            let reference_pipeline = RawGpuPipeline::new_headless_reusing_program_template(
                 &render_state.device,
                 &render_state.queue,
-                0,
-                0,
+                &raw,
+                &params,
+                ProcessingQuality::Preview,
+                &program_template,
+            )
+            .map_err(|error| {
+                format!("Could not prepare the original RAW for masking: {error:#}")
+            })?;
+            reference_pipeline
+                .update_inpaint_layer(
+                    &render_state.queue,
+                    self.inpaint_layer.as_ref(),
+                    0,
+                    0,
+                    raw.width,
+                    raw.height,
+                )
+                .map_err(|error| {
+                    format!("Could not prepare erased pixels for masking: {error:#}")
+                })?;
+            reference_pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            let rgba = reference_pipeline
+                .read_output_region_blocking(
+                    &render_state.device,
+                    &render_state.queue,
+                    0,
+                    0,
+                    reference_pipeline.width,
+                    reference_pipeline.height,
+                )
+                .map_err(|error| {
+                    format!("Could not read the original RAW for masking: {error:#}")
+                })?;
+            let source = MaskRgbImage::new(
                 reference_pipeline.width,
                 reference_pipeline.height,
+                rgba,
             )
-            .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
-        let source = MaskRgbImage::new(
-            reference_pipeline.width,
-            reference_pipeline.height,
-            rgba,
-        )
-        .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
-        self.mask_source_cache = Some(source);
-        Ok(())
+            .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
+            self.mask_source_cache = Some(source);
+            Ok(())
+        }
+    }
+
+    pub(crate) fn report_ai_mask_error(&mut self, error: String) {
+        self.notice = Some(error.clone());
+        self.object_error_dialog = Some(error);
+        self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
+        self.object_error_dialog = None;
+        self.recover_terminal_ai_mask_task_owners();
         if let Some(mask) = self.subject_mask_cache.clone() {
             self.apply_subject_mask(mask);
             return;
@@ -604,12 +791,12 @@ impl AurawApp {
             return;
         }
         if let Err(error) = self.capture_mask_source(frame) {
-            self.notice = Some(error);
+            self.report_ai_mask_error(error);
             return;
         }
         let path = self.birefnet_model_path();
         let vitmatte = self.vitmatte_model_path();
-        if path.exists() && vitmatte.exists() {
+        if path.is_file() && vitmatte.is_file() {
             self.start_subject_worker(path);
         } else {
             self.subject_consent_open = true;
@@ -652,7 +839,11 @@ impl AurawApp {
         }) {
             self.start_subject_mask_task(task_id, request);
         } else {
-            let needs_download = !request.model_path.exists() || !request.vitmatte_path.exists();
+            // Full SHA-256 verification belongs in the worker. Hashing the
+            // 328 MB subject model set here blocks Android's UI thread long
+            // enough to look like a hung mask operation.
+            let needs_download =
+                !request.model_path.is_file() || !request.vitmatte_path.is_file();
             if needs_download {
                 let task_id = self.enqueue_background_action(
                     TaskKind::SubjectMask {
@@ -779,7 +970,6 @@ impl AurawApp {
         let cancelled = self.background_task_cancelled(task_id);
         let stale = self.subject_job_document_id != self.sidecar_generation
             || self.subject_job_generation != self.subject_generation;
-        let failed_during_inference = self.subject_inferencing;
         self.subject_receiver = None;
         self.subject_task_id = None;
         self.subject_download_progress = None;
@@ -815,19 +1005,19 @@ impl AurawApp {
                 }
                 self.continue_ai_mask_update();
             }
-        } else if cancelled || stale {
-            self.finish_background_task(task_id);
-        } else if succeeded {
+        } else if cancelled || succeeded {
             self.finish_background_task(task_id);
         } else {
             let message = error_message
-                .unwrap_or_else(|| "Subject selection did not produce a mask.".to_owned());
+                .unwrap_or_else(|| {
+                    if stale {
+                        "Subject selection became stale before inference completed.".to_owned()
+                    } else {
+                        "Subject selection did not produce a mask.".to_owned()
+                    }
+                });
             self.notice = Some(message.clone());
-            if failed_during_inference {
-                self.finish_background_task(task_id);
-            } else {
-                self.fail_background_task(task_id, message);
-            }
+            self.fail_background_task(task_id, message);
         }
         self.egui_ctx.request_repaint();
     }
@@ -838,6 +1028,8 @@ impl AurawApp {
         mask_index: usize,
         component_index: usize,
     ) {
+        self.object_error_dialog = None;
+        self.recover_terminal_ai_mask_task_owners();
         if self.landscape_task_id.is_some() || self.landscape_receiver.is_some() {
             self.notice = Some("Wait for the current landscape mask to finish.".to_owned());
             return;
@@ -862,7 +1054,7 @@ impl AurawApp {
             return;
         }
         if let Err(error) = self.capture_mask_source(frame) {
-            self.notice = Some(error);
+            self.report_ai_mask_error(error);
             return;
         }
         let path = self.landscape_model_path();
@@ -922,10 +1114,14 @@ impl AurawApp {
 
         self.landscape_generation = self.landscape_generation.wrapping_add(1);
         let generation = self.landscape_generation;
+        let Some(target) = self.capture_ai_mask_target(mask_index, component_index) else {
+            self.notice = Some("The selected landscape mask is no longer available.".to_owned());
+            return;
+        };
         let request = LandscapeMaskTaskRequest {
             document_id: self.sidecar_generation,
             generation,
-            target: (mask_index, component_index),
+            target,
             source,
             model_path,
             allow_download,
@@ -1040,14 +1236,13 @@ impl AurawApp {
             return;
         };
 
-        let target = self.landscape_job_target;
+        let target = self.landscape_job_target.clone();
         let job_category = self.landscape_job_category;
         let updating_all = self.ai_mask_update_active && target.is_some();
         let library_task = self.library_ai_mask_refresh_task_id == Some(task_id);
         let cancelled = self.background_task_cancelled(task_id);
         let stale = self.landscape_job_document_id != self.sidecar_generation
             || self.landscape_job_generation != self.landscape_generation;
-        let failed_during_inference = self.landscape_inferencing;
         self.landscape_receiver = None;
         self.landscape_task_id = None;
         self.landscape_download_progress = None;
@@ -1059,33 +1254,45 @@ impl AurawApp {
         let mut error_message = None;
         if !cancelled && !stale {
             match (target, job_category, result) {
-                (Some((mask_index, component_index)), Some(expected_category), Ok(result)) => {
-                    let mask_image =
-                        MaskImage::new(result.width, result.height, result.mask);
-                    let applied = self
-                        .masks
-                        .masks
-                        .get_mut(mask_index)
-                        .and_then(|mask| mask.components.get_mut(component_index))
-                        .is_some_and(|component| {
-                            if let MaskGeometry::Landscape { mask, category, .. } =
-                                &mut component.geometry
-                            {
-                                if *category == expected_category {
-                                    *mask = mask_image;
-                                    return mask.is_some();
-                                }
+                (Some(target), Some(expected_category), Ok(result)) => {
+                    let location = self.resolve_ai_mask_target(&target);
+                    let mask_image = MaskImage::new(result.width, result.height, result.mask);
+                    match (location, mask_image) {
+                        (_, None) => {
+                            error_message = Some(
+                                "Landscape selection returned malformed dimensions or pixel data."
+                                    .to_owned(),
+                            );
+                        }
+                        (Err(error), Some(_)) => error_message = Some(error),
+                        (Ok((mask_index, component_index)), Some(mask_image)) => {
+                            let applied = self
+                                .masks
+                                .masks
+                                .get_mut(mask_index)
+                                .and_then(|mask| mask.components.get_mut(component_index))
+                                .is_some_and(|component| {
+                                    if let MaskGeometry::Landscape { mask, category, .. } =
+                                        &mut component.geometry
+                                    {
+                                        if *category == expected_category {
+                                            *mask = Some(mask_image);
+                                            return true;
+                                        }
+                                    }
+                                    false
+                                });
+                            if applied {
+                                self.mark_mask_geometry_dirty(mask_index);
+                                self.blink_selected_component();
+                                succeeded = true;
+                            } else {
+                                error_message = Some(
+                                    "The target component changed type before inference completed."
+                                        .to_owned(),
+                                );
                             }
-                            false
-                        });
-                    if applied {
-                        self.mark_mask_geometry_dirty(mask_index);
-                        self.blink_selected_component();
-                        succeeded = true;
-                    } else {
-                        error_message = Some(
-                            "Landscape selection changed before inference completed.".to_owned(),
-                        );
+                        }
                     }
                 }
                 (_, _, Ok(_)) => {}
@@ -1105,19 +1312,19 @@ impl AurawApp {
                 }
                 self.continue_ai_mask_update();
             }
-        } else if cancelled || stale {
-            self.finish_background_task(task_id);
-        } else if succeeded {
+        } else if cancelled || succeeded {
             self.finish_background_task(task_id);
         } else {
             let message = error_message
-                .unwrap_or_else(|| "Landscape selection did not produce a mask.".to_owned());
+                .unwrap_or_else(|| {
+                    if stale {
+                        "Landscape selection became stale before inference completed.".to_owned()
+                    } else {
+                        "Landscape selection did not produce a mask.".to_owned()
+                    }
+                });
             self.notice = Some(message.clone());
-            if failed_during_inference {
-                self.finish_background_task(task_id);
-            } else {
-                self.fail_background_task(task_id, message);
-            }
+            self.fail_background_task(task_id, message);
         }
         self.egui_ctx.request_repaint();
     }
@@ -1174,6 +1381,7 @@ impl AurawApp {
 
     pub(crate) fn request_object_mask(&mut self, mask_index: usize, component_index: usize) {
         self.object_error_dialog = None;
+        self.recover_terminal_ai_mask_task_owners();
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
             return;
@@ -1197,15 +1405,14 @@ impl AurawApp {
             return;
         }
         if self.mask_source_cache.is_none() {
-            self.notice = Some(
+            self.report_ai_mask_error(
                 "The original image source is not ready for object selection. Re-open the Object mask or create it again."
                     .to_owned(),
             );
             return;
         }
         let (encoder, decoder) = self.sam21_model_paths();
-        let vitmatte_ready = self.vitmatte_model_path().exists();
-        if encoder.exists() && decoder.exists() && vitmatte_ready {
+        if encoder.is_file() && decoder.is_file() && self.vitmatte_model_path().is_file() {
             self.start_object_worker(mask_index, component_index, encoder, decoder);
         } else {
             self.object_pending_target = Some((mask_index, component_index));
@@ -1303,10 +1510,14 @@ impl AurawApp {
         let runtime_path = None;
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
+        let Some(target) = self.capture_ai_mask_target(mask_index, component_index) else {
+            self.notice = Some("The selected object mask is no longer available.".to_owned());
+            return;
+        };
         let request = ObjectMaskTaskRequest {
             document_id: self.sidecar_generation,
             generation,
-            target: (mask_index, component_index),
+            target,
             encoder_path,
             decoder_path,
             vitmatte_path: self.vitmatte_model_path(),
@@ -1318,9 +1529,12 @@ impl AurawApp {
         if let Some(task_id) = library_task {
             self.start_object_mask_task(task_id, request);
         } else {
-            let needs_download = !request.encoder_path.exists()
-                || !request.decoder_path.exists()
-                || !request.vitmatte_path.exists();
+            // The object worker verifies every model before loading it.
+            // Keep this UI-thread decision metadata-only on Android/mobile
+            // storage instead of synchronously hashing the complete model set.
+            let needs_download = !request.encoder_path.is_file()
+                || !request.decoder_path.is_file()
+                || !request.vitmatte_path.is_file();
             if needs_download {
                 let task_id = self.enqueue_background_action(
                     TaskKind::ObjectMask {
@@ -1452,42 +1666,53 @@ impl AurawApp {
         let mut error_message = None;
         if !cancelled && !stale {
             match (target, result) {
-                (Some((mask_index, component_index)), Ok(result)) => {
+                (Some(target), Ok(result)) => {
                     let crate::ai_masks::ObjectMaskResult {
                         width,
                         height,
                         mask: pixels,
                         cache,
                     } = result;
+                    let location = self.resolve_ai_mask_target(&target);
                     let mask = MaskImage::new(width, height, pixels);
-                    let applied = if let (Some(mask), Some(component)) = (
-                        mask,
-                        self.masks
-                            .masks
-                            .get_mut(mask_index)
-                            .and_then(|local| local.components.get_mut(component_index)),
-                    ) {
-                        if let crate::pipeline::MaskGeometry::Object {
-                            mask: generated_mask,
-                            ..
-                        } = &mut component.geometry
-                        {
-                            *generated_mask = Some(mask);
-                            true
-                        } else {
-                            false
+                    match (location, mask) {
+                        (_, None) => {
+                            error_message = Some(
+                                "Object selection returned malformed dimensions or pixel data."
+                                    .to_owned(),
+                            );
                         }
-                    } else {
-                        false
-                    };
-                    if applied {
-                        self.object_cache = Some(((mask_index, component_index), cache));
-                        self.mark_mask_geometry_dirty(mask_index);
-                        self.blink_selected_component();
-                        succeeded = true;
-                    } else {
-                        error_message =
-                            Some("Object selection returned an invalid mask image.".to_owned());
+                        (Err(error), Some(_)) => error_message = Some(error),
+                        (Ok((mask_index, component_index)), Some(mask)) => {
+                            let applied = self
+                                .masks
+                                .masks
+                                .get_mut(mask_index)
+                                .and_then(|local| local.components.get_mut(component_index))
+                                .is_some_and(|component| {
+                                    if let MaskGeometry::Object {
+                                        mask: generated_mask,
+                                        ..
+                                    } = &mut component.geometry
+                                    {
+                                        *generated_mask = Some(mask);
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                });
+                            if applied {
+                                self.object_cache = Some(((mask_index, component_index), cache));
+                                self.mark_mask_geometry_dirty(mask_index);
+                                self.blink_selected_component();
+                                succeeded = true;
+                            } else {
+                                error_message = Some(
+                                    "The target component changed type before inference completed."
+                                        .to_owned(),
+                                );
+                            }
+                        }
                     }
                 }
                 (_, Ok(_)) => {}
@@ -1523,7 +1748,13 @@ impl AurawApp {
             self.finish_background_task(task_id);
         } else {
             let message = error_message
-                .unwrap_or_else(|| "Object selection did not produce a mask.".to_owned());
+                .unwrap_or_else(|| {
+                    if stale {
+                        "Object selection became stale before inference completed.".to_owned()
+                    } else {
+                        "Object selection did not produce a mask.".to_owned()
+                    }
+                });
             self.notice = Some(message.clone());
             if failed_during_inference {
                 self.object_error_dialog = Some(message);
@@ -1799,7 +2030,9 @@ impl AurawApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Consent, download and continue").clicked() {
+                        if ui.button("Consent, download and continue").clicked()
+                            && self.ai_runtime_ready()
+                        {
                             self.subject_consent_open = false;
                             self.start_subject_worker(self.birefnet_model_path());
                         }
@@ -1916,7 +2149,9 @@ impl AurawApp {
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Consent, download and continue").clicked() {
+                    if ui.button("Consent, download and continue").clicked()
+                        && self.ai_runtime_ready()
+                    {
                         self.landscape_consent_open = false;
                         if let Some((mask_index, component_index)) =
                             self.landscape_pending_target.take()
@@ -2037,7 +2272,9 @@ impl AurawApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Consent, download and continue").clicked() {
+                        if ui.button("Consent, download and continue").clicked()
+                            && self.ai_runtime_ready()
+                        {
                             self.object_consent_open = false;
                             if let Some((mask_index, component_index)) = self.object_pending_target.take() {
                                 let (encoder, decoder) = self.sam21_model_paths();
@@ -2114,7 +2351,7 @@ impl AurawApp {
 
         if let Some(message) = self.object_error_dialog.clone() {
             let mut close = false;
-            crate::ui::responsive_popup(egui::Window::new("Object mask failed"), ctx, 420.0)
+            crate::ui::responsive_popup(egui::Window::new("AI mask failed"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(true)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)

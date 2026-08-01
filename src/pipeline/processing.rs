@@ -124,9 +124,9 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         lens_geometry: (x == 0 && y == 0 && width == raw.width && height == raw.height)
             .then(|| raw.lens_geometry.clone())
             .flatten(),
-        ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(
-            crop_ai_denoised(raw, x, y, width, height),
-        )),
+        ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(crop_ai_denoised(
+            raw, x, y, width, height,
+        ))),
     }
 }
 
@@ -187,23 +187,14 @@ pub fn build_region_proxy(
     let mut raw_pixels = vec![0u16; len];
     let mut color_indices = vec![0u8; len];
     let mut black_levels_per_pixel = vec![0.0f32; len];
-    let source_macro_width = region_width.div_ceil(cfa_period);
-    let source_macro_height = region_height.div_ceil(cfa_period);
-    let output_macro_width = width.div_ceil(cfa_period);
-    let output_macro_height = height.div_ceil(cfa_period);
     let proportional_partition = |output_index: u32, source_count: u32, output_count: u32| {
         let start =
             (u64::from(output_index) * u64::from(source_count) / u64::from(output_count)) as u32;
-        let end = (u64::from(output_index + 1) * u64::from(source_count)
-            / u64::from(output_count)) as u32;
+        let end = (u64::from(output_index + 1) * u64::from(source_count) / u64::from(output_count))
+            as u32;
         (start, end.max(start + 1).min(source_count))
     };
 
-    // One complete output CFA cell summarizes one shared source macrocell.
-    // Each output phase averages only matching source photosites in that macrocell,
-    // keeping R/G/B measurements co-sited before demosaic. Proportional macrocell
-    // boundaries permit arbitrary output dimensions instead of quantizing every
-    // preview to a coarse integer sensor-decimation factor.
     raw_pixels
         .par_chunks_mut(row_stride)
         .zip(color_indices.par_chunks_mut(row_stride))
@@ -212,25 +203,24 @@ pub fn build_region_proxy(
         .for_each(|(py, ((raw_row, cfa_row), black_row))| {
             let py = py as u32;
             let output_phase_y = py % cfa_period;
-            let output_macro_y = py / cfa_period;
-            let (source_macro_y0, source_macro_y1) =
-                proportional_partition(output_macro_y, source_macro_height, output_macro_height);
-            let macro_y0 = y + source_macro_y0 * cfa_period;
-            let macro_y1 = (y + source_macro_y1 * cfa_period).min(y + region_height);
+            let (source_y0, source_y1) =
+                proportional_partition(py, region_height, height);
+            let footprint_y0 = y + source_y0;
+            let footprint_y1 = (y + source_y1).min(y + region_height);
 
             for px in 0..width {
                 let output_phase_x = px % cfa_period;
-                let output_macro_x = px / cfa_period;
-                let (source_macro_x0, source_macro_x1) =
-                    proportional_partition(output_macro_x, source_macro_width, output_macro_width);
-                let macro_x0 = x + source_macro_x0 * cfa_period;
-                let macro_x1 = (x + source_macro_x1 * cfa_period).min(x + region_width);
-                let center_x =
-                    (macro_x0 + (macro_x1.saturating_sub(macro_x0)) / 2).min(raw.width - 1);
-                let center_y =
-                    (macro_y0 + (macro_y1.saturating_sub(macro_y0)) / 2).min(raw.height - 1);
+                let (source_x0, source_x1) =
+                    proportional_partition(px, region_width, width);
+                let footprint_x0 = x + source_x0;
+                let footprint_x1 = (x + source_x1).min(x + region_width);
+                let center_x = (footprint_x0
+                    + (footprint_x1.saturating_sub(footprint_x0)) / 2)
+                    .min(raw.width - 1);
+                let center_y = (footprint_y0
+                    + (footprint_y1.saturating_sub(footprint_y0)) / 2)
+                    .min(raw.height - 1);
 
-                // Preserve the source region's CFA phase for detail crops.
                 let phase_x = (x + output_phase_x).min(raw.width - 1);
                 let phase_y = (y + output_phase_y).min(raw.height - 1);
                 let phase_index = (phase_y * raw.width + phase_x) as usize;
@@ -240,12 +230,9 @@ pub fn build_region_proxy(
                 let mut black_sum = 0.0f64;
                 let mut count = 0u32;
 
-                // Parallelize rows without changing per-photosite accumulation order.
-                let first_sy = macro_y0 + output_phase_y;
-                let first_sx = macro_x0 + output_phase_x;
-                for sy in (first_sy..macro_y1).step_by(cfa_period as usize) {
+                for sy in footprint_y0..footprint_y1 {
                     let row = sy * raw.width;
-                    for sx in (first_sx..macro_x1).step_by(cfa_period as usize) {
+                    for sx in footprint_x0..footprint_x1 {
                         let index = (row + sx) as usize;
                         if raw.color_indices[index] == cfa {
                             pixel_sum += u64::from(raw.raw_pixels[index]);
@@ -307,9 +294,15 @@ pub fn build_region_proxy(
             && region_height == raw.height)
             .then(|| raw.lens_geometry.clone())
             .flatten(),
-        ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(
-            proxy_ai_denoised(raw, x, y, region_width, region_height, width, height),
-        )),
+        ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(proxy_ai_denoised(
+            raw,
+            x,
+            y,
+            region_width,
+            region_height,
+            width,
+            height,
+        ))),
     }
 }
 
@@ -350,6 +343,20 @@ fn crop_ai_denoised(
     height: u32,
 ) -> Option<super::AiDenoisedImage> {
     let source = raw.ai_denoised_image()?;
+    if let Some(source_cfa) = source.bayer_cfa() {
+        let elements = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|count| usize::try_from(count).ok())?;
+        let mut raw_cfa16 = Vec::new();
+        raw_cfa16.try_reserve_exact(elements).ok()?;
+        for row in y..y + height {
+            let start = (row * raw.width + x) as usize;
+            let end = start + width as usize;
+            raw_cfa16.extend_from_slice(&source_cfa[start..end]);
+        }
+        return super::AiDenoisedImage::new_bayer_cfa(width, height, raw_cfa16).ok();
+    }
+    let source_rgb = source.camera_rgb16f()?;
     let elements = u64::from(width)
         .checked_mul(u64::from(height))?
         .checked_mul(3)
@@ -359,7 +366,7 @@ fn crop_ai_denoised(
     for row in y..y + height {
         let start = ((row * raw.width + x) * 3) as usize;
         let end = start + width as usize * 3;
-        rgb16f.extend_from_slice(&source.rgb16f[start..end]);
+        rgb16f.extend_from_slice(&source_rgb[start..end]);
     }
     super::AiDenoisedImage::new(width, height, rgb16f).ok()
 }
@@ -374,6 +381,65 @@ fn proxy_ai_denoised(
     output_height: u32,
 ) -> Option<super::AiDenoisedImage> {
     let source = raw.ai_denoised_image()?;
+    if let Some(source_cfa) = source.bayer_cfa() {
+        let elements = u64::from(output_width)
+            .checked_mul(u64::from(output_height))
+            .and_then(|count| usize::try_from(count).ok())?;
+        let mut raw_cfa16 = vec![0u16; elements];
+        let partition = |output_index: u32, source_count: u32, output_count: u32| {
+            let start = (u64::from(output_index) * u64::from(source_count)
+                / u64::from(output_count)) as u32;
+            let end = (u64::from(output_index + 1) * u64::from(source_count)
+                / u64::from(output_count)) as u32;
+            (start, end.max(start + 1).min(source_count))
+        };
+        raw_cfa16
+            .par_chunks_mut(output_width as usize)
+            .enumerate()
+            .for_each(|(output_y, row)| {
+                let output_y = output_y as u32;
+                let phase_y = output_y % 2;
+                let (source_y0, source_y1) =
+                    partition(output_y, region_height, output_height);
+                let footprint_y0 = y + source_y0;
+                let footprint_y1 = (y + source_y1).min(y + region_height);
+                for output_x in 0..output_width {
+                    let phase_x = output_x % 2;
+                    let (source_x0, source_x1) =
+                        partition(output_x, region_width, output_width);
+                    let footprint_x0 = x + source_x0;
+                    let footprint_x1 = (x + source_x1).min(x + region_width);
+                    let phase_index = (((y + phase_y).min(raw.height - 1) * raw.width)
+                        + (x + phase_x).min(raw.width - 1))
+                        as usize;
+                    let cfa = raw.color_indices[phase_index];
+                    let mut sum = 0u64;
+                    let mut count = 0u64;
+                    for source_y in footprint_y0..footprint_y1 {
+                        for source_x in footprint_x0..footprint_x1 {
+                            let source_index = (source_y * raw.width + source_x) as usize;
+                            if raw.color_indices[source_index] == cfa {
+                                sum += u64::from(source_cfa[source_index]);
+                                count += 1;
+                            }
+                        }
+                    }
+                    row[output_x as usize] = if count > 0 {
+                        (sum / count) as u16
+                    } else {
+                        let center_x = (footprint_x0
+                            + footprint_x1.saturating_sub(footprint_x0) / 2)
+                            .min(raw.width - 1);
+                        let center_y = (footprint_y0
+                            + footprint_y1.saturating_sub(footprint_y0) / 2)
+                            .min(raw.height - 1);
+                        source_cfa[nearest_cfa_sample(raw, center_x, center_y, cfa, 2)]
+                    };
+                }
+            });
+        return super::AiDenoisedImage::new_bayer_cfa(output_width, output_height, raw_cfa16).ok();
+    }
+    let source_rgb = source.camera_rgb16f()?;
     let elements = u64::from(output_width)
         .checked_mul(u64::from(output_height))?
         .checked_mul(3)
@@ -384,17 +450,16 @@ fn proxy_ai_denoised(
         .par_chunks_mut(output_width as usize * 3)
         .enumerate()
         .for_each(|(output_y, row)| {
-            let source_y0 =
-                y + ((output_y as u64 * u64::from(region_height)) / u64::from(output_height))
-                    as u32;
+            let source_y0 = y
+                + ((output_y as u64 * u64::from(region_height)) / u64::from(output_height)) as u32;
             let source_y1 = y
                 + (((output_y as u64 + 1) * u64::from(region_height))
                     .div_ceil(u64::from(output_height))) as u32;
             let source_y1 = source_y1.min(y + region_height).max(source_y0 + 1);
             for output_x in 0..output_width {
                 let source_x0 = x
-                    + ((u64::from(output_x) * u64::from(region_width))
-                        / u64::from(output_width)) as u32;
+                    + ((u64::from(output_x) * u64::from(region_width)) / u64::from(output_width))
+                        as u32;
                 let source_x1 = x
                     + ((u64::from(output_x + 1) * u64::from(region_width))
                         .div_ceil(u64::from(output_width))) as u32;
@@ -406,7 +471,7 @@ fn proxy_ai_denoised(
                         let index = ((source_y * raw.width + source_x) * 3) as usize;
                         for channel in 0..3 {
                             sum[channel] +=
-                                f64::from(f16::from_bits(source.rgb16f[index + channel]).to_f32());
+                                f64::from(f16::from_bits(source_rgb[index + channel]).to_f32());
                         }
                         count += 1;
                     }
@@ -421,11 +486,33 @@ fn proxy_ai_denoised(
     super::AiDenoisedImage::new(output_width, output_height, rgb16f).ok()
 }
 
-fn padded_tile_ai_denoised(
-    raw: &LoadedRaw,
-    tile: ExportTile,
-) -> Option<super::AiDenoisedImage> {
+fn padded_tile_ai_denoised(raw: &LoadedRaw, tile: ExportTile) -> Option<super::AiDenoisedImage> {
     let source = raw.ai_denoised_image()?;
+    if let Some(source_cfa) = source.bayer_cfa() {
+        let elements = u64::from(tile.padded_width)
+            .checked_mul(u64::from(tile.padded_height))
+            .and_then(|count| usize::try_from(count).ok())?;
+        let mut raw_cfa16 = vec![0u16; elements];
+        let max_x = i64::from(raw.width.saturating_sub(1));
+        let max_y = i64::from(raw.height.saturating_sub(1));
+        for local_y in 0..tile.padded_height {
+            let source_y =
+                (i64::from(tile.global_origin_y) + i64::from(local_y)).clamp(0, max_y) as u32;
+            for local_x in 0..tile.padded_width {
+                let source_x =
+                    (i64::from(tile.global_origin_x) + i64::from(local_x)).clamp(0, max_x) as u32;
+                raw_cfa16[(local_y * tile.padded_width + local_x) as usize] =
+                    source_cfa[(source_y * raw.width + source_x) as usize];
+            }
+        }
+        return super::AiDenoisedImage::new_bayer_cfa(
+            tile.padded_width,
+            tile.padded_height,
+            raw_cfa16,
+        )
+        .ok();
+    }
+    let source_rgb = source.camera_rgb16f()?;
     let elements = u64::from(tile.padded_width)
         .checked_mul(u64::from(tile.padded_height))?
         .checked_mul(3)
@@ -440,10 +527,9 @@ fn padded_tile_ai_denoised(
             let source_x =
                 (i64::from(tile.global_origin_x) + i64::from(local_x)).clamp(0, max_x) as u32;
             let source_index = ((source_y * raw.width + source_x) * 3) as usize;
-            let destination_index =
-                ((local_y * tile.padded_width + local_x) * 3) as usize;
+            let destination_index = ((local_y * tile.padded_width + local_x) * 3) as usize;
             rgb16f[destination_index..destination_index + 3]
-                .copy_from_slice(&source.rgb16f[source_index..source_index + 3]);
+                .copy_from_slice(&source_rgb[source_index..source_index + 3]);
         }
     }
     super::AiDenoisedImage::new(tile.padded_width, tile.padded_height, rgb16f).ok()
@@ -855,37 +941,20 @@ mod tests {
 
     #[test]
     fn ai_denoise_cache_tracks_crop_proxy_and_export_tile_geometry() {
-        use half::f16;
-
         let raw = test_raw(4, 2);
-        let rgb16f = (0..8)
-            .flat_map(|pixel| {
-                let value = f16::from_f32(pixel as f32).to_bits();
-                [value; 3]
-            })
-            .collect();
-        raw.set_ai_denoised_image(AiDenoisedImage::new(4, 2, rgb16f).unwrap())
+        let raw_cfa16 = (0..8).map(|pixel| pixel as u16).collect();
+        raw.set_ai_denoised_image(AiDenoisedImage::new_bayer_cfa(4, 2, raw_cfa16).unwrap())
             .unwrap();
 
         let crop = crop_raw(&raw, 1, 0, 2, 2)
             .ai_denoised_image()
             .expect("crop retains aligned AI output");
-        let cropped_values = crop
-            .rgb16f
-            .chunks_exact(3)
-            .map(|pixel| f16::from_bits(pixel[0]).to_f32())
-            .collect::<Vec<_>>();
-        assert_eq!(cropped_values, vec![1.0, 2.0, 5.0, 6.0]);
+        assert_eq!(crop.raw_cfa16.as_ref(), &[1, 2, 5, 6]);
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 2 })
             .ai_denoised_image()
             .expect("proxy derives AI output");
-        let proxy_values = proxy
-            .rgb16f
-            .chunks_exact(3)
-            .map(|pixel| f16::from_bits(pixel[0]).to_f32())
-            .collect::<Vec<_>>();
-        assert_eq!(proxy_values, vec![0.5, 2.5, 4.5, 6.5]);
+        assert_eq!(proxy.raw_cfa16.as_ref(), &[0, 2, 4, 6]);
 
         let tile = extract_padded_tile(
             &raw,
@@ -904,11 +973,8 @@ mod tests {
         )
         .ai_denoised_image()
         .expect("export tile retains aligned AI output");
-        assert_eq!(f16::from_bits(tile.rgb16f[0]).to_f32(), 0.0);
-        assert_eq!(
-            f16::from_bits(tile.rgb16f[tile.rgb16f.len() - 3]).to_f32(),
-            7.0
-        );
+        assert_eq!(tile.raw_cfa16[0], 0);
+        assert_eq!(tile.raw_cfa16[tile.raw_cfa16.len() - 1], 7);
     }
 
     #[test]
@@ -1135,8 +1201,8 @@ mod tests {
     #[test]
     fn fractional_xtrans_proxy_keeps_complete_six_by_six_phases() {
         let pattern = vec![
-            0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1,
-            2, 1, 2, 0, 1, 0, 0, 1, 0,
+            0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1,
+            2, 0, 1, 0, 0, 1, 0,
         ];
         let mut raw = test_raw(98, 66);
         raw.cfa_kind = CfaKind::XTrans;
@@ -1154,5 +1220,27 @@ mod tests {
             .flat_map(|y| (0..6).map(move |x| proxy_cfa[(y * proxy_width + x) as usize]))
             .collect::<Vec<_>>();
         assert_eq!(first_period, pattern);
+    }
+
+    #[test]
+    fn xtrans_proxy_filters_each_output_pixel_not_a_whole_six_pixel_macrocell() {
+        let pattern = vec![
+            0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1,
+            2, 1, 2, 0, 1, 0, 0, 1, 0,
+        ];
+        let mut raw = test_raw(120, 120);
+        raw.cfa_kind = CfaKind::XTrans;
+        raw.color_indices = CompactPixelMap::repeating(120, 120, 6, 6, pattern);
+        raw.raw_pixels = (0..120)
+            .flat_map(|_| (0..120).map(|x| (x * 100) as u16))
+            .collect();
+
+        let proxy = build_proxy(&raw, ProxySpec { max_edge: 60 });
+        // A 2:1 reduction maps the first six output pixels across source
+        // columns 0..12. They must retain that spatial progression. The old
+        // macrocell implementation averaged all twelve columns into every one
+        // of these samples, which is the sixfold blur seen in Fuji previews.
+        assert!(proxy.raw_pixels[0] <= 200, "left sample was over-blurred");
+        assert!(proxy.raw_pixels[5] >= 900, "right sample was over-blurred");
     }
 }

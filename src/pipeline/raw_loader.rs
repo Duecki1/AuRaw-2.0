@@ -215,6 +215,13 @@ impl<T> CompactPixelMap<T> {
     pub fn iter(&self) -> CompactPixelMapIter<'_, T> {
         CompactPixelMapIter { map: self, next: 0 }
     }
+
+    /// Compact backing storage used when fingerprinting runtime-derived data.
+    /// Including the stored shape distinguishes a dense map from a repeating
+    /// map without materializing either map at full image resolution.
+    pub(crate) fn storage_parts(&self) -> (u32, u32, &[T]) {
+        (self.storage_width, self.storage_height, &self.values)
+    }
 }
 
 impl<T: Copy> CompactPixelMap<T> {
@@ -374,18 +381,22 @@ pub(crate) struct CaptureMetadata {
     pub artist: String,
 }
 
-/// Cached RawNIND output in the same white-balanced camera-RGB domain as the
-/// ordinary demosaic stage. Samples are interleaved RGB IEEE-754 half floats.
-/// Sidecars persist only the model toggle; this derived cache is always
-/// rebuildable from the original sensor mosaic.
+/// Cached RawNIND output. Bayer models are retained as a denoised CFA mosaic
+/// in the original sensor code-value domain, so highlight reconstruction and
+/// demosaic remain full-frame, edit-dependent pipeline stages. The linear
+/// model used for X-Trans remains interleaved camera-RGB IEEE-754 half floats.
+/// Exactly one payload is populated. Sidecars persist only the model toggle;
+/// this derived cache is always rebuildable from the original sensor mosaic.
 #[derive(Clone, Debug)]
 pub struct AiDenoisedImage {
     pub width: u32,
     pub height: u32,
     pub rgb16f: Arc<[u16]>,
+    pub raw_cfa16: Arc<[u16]>,
 }
 
 impl AiDenoisedImage {
+    /// Constructs a linear camera-RGB result (currently the X-Trans path).
     pub(crate) fn new(width: u32, height: u32, rgb16f: Vec<u16>) -> Result<Self> {
         let expected = u64::from(width)
             .checked_mul(u64::from(height))
@@ -401,17 +412,57 @@ impl AiDenoisedImage {
             width,
             height,
             rgb16f: rgb16f.into(),
+            raw_cfa16: Arc::from([]),
         })
     }
 
+    /// Constructs a Bayer result in the source RAW's code-value domain.
+    pub(crate) fn new_bayer_cfa(width: u32, height: u32, raw_cfa16: Vec<u16>) -> Result<Self> {
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| usize::try_from(pixels).ok())
+            .context("AI-denoise Bayer dimensions overflow")?;
+        anyhow::ensure!(
+            width > 0 && height > 0 && raw_cfa16.len() == expected,
+            "AI-denoise Bayer image has {} values, expected {expected} for {width}x{height}",
+            raw_cfa16.len()
+        );
+        Ok(Self {
+            width,
+            height,
+            rgb16f: Arc::from([]),
+            raw_cfa16: raw_cfa16.into(),
+        })
+    }
+
+    pub(crate) fn bayer_cfa(&self) -> Option<&[u16]> {
+        (!self.raw_cfa16.is_empty()).then_some(self.raw_cfa16.as_ref())
+    }
+
+    pub(crate) fn camera_rgb16f(&self) -> Option<&[u16]> {
+        (!self.rgb16f.is_empty()).then_some(self.rgb16f.as_ref())
+    }
+
+    pub(crate) fn payload(&self) -> &[u16] {
+        if let Some(raw_cfa) = self.bayer_cfa() {
+            raw_cfa
+        } else {
+            self.rgb16f.as_ref()
+        }
+    }
+
     pub(crate) fn is_valid_for(&self, width: u32, height: u32) -> bool {
-        self.width == width
-            && self.height == height
-            && u64::from(width)
-                .checked_mul(u64::from(height))
-                .and_then(|pixels| pixels.checked_mul(3))
-                .and_then(|elements| usize::try_from(elements).ok())
-                .is_some_and(|expected| self.rgb16f.len() == expected)
+        if self.width != width || self.height != height {
+            return false;
+        }
+        let Some(pixels) = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| usize::try_from(pixels).ok())
+        else {
+            return false;
+        };
+        (self.raw_cfa16.len() == pixels && self.rgb16f.is_empty())
+            || (self.rgb16f.len() == pixels.saturating_mul(3) && self.raw_cfa16.is_empty())
     }
 }
 
@@ -482,6 +533,10 @@ impl LoadedRaw {
             self.width,
             self.height
         );
+        anyhow::ensure!(
+            matches!(self.cfa_kind, CfaKind::Bayer) == image.bayer_cfa().is_some(),
+            "AI-denoise payload type does not match the RAW CFA"
+        );
         let mut cached = self
             .ai_denoised
             .write()
@@ -522,6 +577,41 @@ impl LoadedRaw {
             .as_ref()
             .map(|model| model.base_cct)
             .filter(|temperature| temperature.is_finite() && *temperature > 0.0)
+    }
+
+    /// RawNIND's published Bayer weights were trained with a D65/daylight
+    /// white balance. Return camera-channel multipliers normalized to green,
+    /// falling back to the as-shot multipliers when a colour matrix is absent.
+    pub(crate) fn rawnind_daylight_white_balance(&self) -> [f32; 3] {
+        #[cfg(libraw_available)]
+        if let Some(model) = &self.white_balance_model {
+            if let Some(daylight) = libraw_loader::daylight_white_balance(model) {
+                return daylight;
+            }
+        }
+
+        let green = [self.wb_coeffs[1], self.wb_coeffs[3]]
+            .into_iter()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .fold((0.0, 0u32), |(sum, count), value| (sum + value, count + 1));
+        let green = if green.1 > 0 {
+            green.0 / green.1 as f32
+        } else {
+            1.0
+        };
+        let normalize = |value: f32| {
+            let value = value / green.max(1e-8);
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                1.0
+            }
+        };
+        [
+            normalize(self.wb_coeffs[0]),
+            1.0,
+            normalize(self.wb_coeffs[2]),
+        ]
     }
 
     /// Returns the camera-to-working transform and DCP blend for a relative

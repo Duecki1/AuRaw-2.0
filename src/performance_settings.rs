@@ -341,18 +341,30 @@ mod tests {
     }
 
     #[test]
-    fn older_settings_default_preview_quality_to_balanced() {
+    fn older_settings_default_preview_quality_to_medium() {
         let settings: PerformanceSettings =
             serde_json::from_str(r#"{"version":2,"raw_cache_files":1,"thumbnail_workers":1}"#)
                 .expect("legacy settings should remain readable");
 
-        assert_eq!(
-            settings.preview_quality,
-            crate::app::PreviewQuality::Balanced
-        );
+        assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
         assert_eq!(
             settings.adjustment_copy_settings,
             crate::sidecar::AdjustmentCopySettings::default()
         );
+    }
+
+    #[test]
+    fn legacy_preview_quality_names_migrate_without_resetting_settings() {
+        for (legacy, expected) in [
+            ("fast", crate::app::PreviewQuality::Low),
+            ("balanced", crate::app::PreviewQuality::Medium),
+            ("high", crate::app::PreviewQuality::High),
+        ] {
+            let json = format!(
+                r#"{{"version":6,"raw_cache_files":1,"thumbnail_workers":1,"preview_quality":"{legacy}"}}"#
+            );
+            let settings: PerformanceSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(settings.preview_quality, expected);
+        }
     }
 }

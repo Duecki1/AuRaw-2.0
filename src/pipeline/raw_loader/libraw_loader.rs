@@ -22,11 +22,12 @@ use std::os::unix::ffi::OsStrExt;
 const MAX_DCP_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DCP_SCAN_FILES: usize = 10_000;
 const MAX_DCP_SCAN_DEPTH: usize = 16;
-/// Conservative default only for RAWs that provide no usable DNG
-/// BaselineExposure. This is deliberately much smaller than the historical
-/// universal +0.7 EV renderer lift and is applied exactly once, before any
-/// user Exposure edit.
-const MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 0.25;
+/// Calibrated rendering exposure for proprietary RAWs that provide no usable
+/// DNG BaselineExposure. The former +0.25 EV fallback left the measured Sony
+/// reference about one stop below its camera-neutral Lightroom rendition.
+/// This metadata fallback is applied exactly once, before any user Exposure
+/// edit; DNGs and DCPs with explicit baseline values remain authoritative.
+const MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 1.25;
 
 fn valid_baseline_exposure(value: f32) -> Option<f32> {
     // LibRaw initializes a missing BaselineExposure to a finite sentinel below
@@ -62,8 +63,6 @@ const MAX_THUMBNAIL_SOURCE_EDGE: u32 = 65_535;
 const MAX_THUMBNAIL_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_THUMBNAIL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
-#[cfg(target_os = "android")]
-static ANDROID_PROCESSED_THUMBNAIL_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(target_os = "android")]
 const MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS: u64 = MAX_SENSOR_PIXELS;
 
@@ -439,18 +438,18 @@ fn validate_embedded_thumbnail_metadata(
 }
 
 fn load_processed_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
-    #[cfg(target_os = "android")]
-    let _android_memory_gate = ANDROID_PROCESSED_THUMBNAIL_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A half-size LibRaw render still unpacks the sensor. Share the user-set
+    // heavy-thumbnail limit with edited thumbnail rebuilding so their combined
+    // CPU and memory pressure stays predictable.
+    let _render_permit = crate::thumbnail_cache::acquire_rendered_thumbnail_worker();
     let ctx = open_libraw(path)?;
     #[cfg(target_os = "android")]
     {
         // Even half-size dcraw processing first unpacks the full sensor. The
-        // memory gate above prevents multiple preview-less RAWs from taking
-        // this path concurrently. Permit the same sensor safety ceiling as a
-        // normal Android RAW decode so imported modern-camera files can still
-        // receive a library preview when their embedded preview is unsupported.
+        // worker limiter above bounds how many preview-less RAWs can take this
+        // path concurrently. Permit the same sensor safety ceiling as a normal
+        // Android RAW decode so imported modern-camera files can still receive
+        // a library preview when their embedded preview is unsupported.
         let sizes = unsafe { &(*ctx.raw).rawdata.sizes };
         let sensor_pixels = u64::from(sizes.raw_width)
             .checked_mul(u64::from(sizes.raw_height))
@@ -1884,6 +1883,47 @@ fn camera_to_working_matrix(
     Ok((matrix, weight, Some(model)))
 }
 
+/// Camera multipliers for a D65 illuminant, normalized to green. RawNIND's
+/// Bayer training preprocessing uses this daylight convention independently
+/// from the photograph's as-shot white balance.
+pub(super) fn daylight_white_balance(model: &CameraWhiteBalanceModel) -> Option<[f32; 3]> {
+    let xyz_to_camera = match &model.color {
+        CameraColorModel::Dng {
+            endpoints,
+            analog_balance,
+        } => {
+            let target = interpolate_endpoints(endpoints, endpoint_weight(endpoints, 6504.0));
+            multiply_4x4_4x3(
+                multiply_4x4(*analog_balance, target.calibration),
+                target.color_matrix,
+            )
+        }
+        CameraColorModel::Matrix { xyz_to_camera } => *xyz_to_camera,
+    };
+    let physical = multiply_4x3_vector(xyz_to_camera, D65_XYZ);
+    let mut sums = [0.0f32; 3];
+    let mut counts = [0u32; 3];
+    for (index, response) in physical.into_iter().enumerate() {
+        let Some(channel) = logical_rgb_channel(model.cdesc, index) else {
+            continue;
+        };
+        if response.is_finite() && response > 1e-8 {
+            sums[channel] += response;
+            counts[channel] += 1;
+        }
+    }
+    let response = std::array::from_fn(|channel| {
+        (counts[channel] > 0).then(|| sums[channel] / counts[channel] as f32)
+    });
+    let [Some(red), Some(green), Some(blue)] = response else {
+        return None;
+    };
+    let wb = [green / red, 1.0, green / blue];
+    wb.into_iter()
+        .all(|value| value.is_finite() && value > 0.0)
+        .then_some(wb)
+}
+
 fn parsed_camera_color_model(
     profile: &DcpProfile,
     color: &ffi::libraw_colordata_t,
@@ -2924,11 +2964,12 @@ fn check_libraw(err: i32, action: &str) -> Result<()> {
 mod tests {
     use super::{
         adjusted_camera_transform, apply_resolved_default_exposure, black_levels, cam_to_working,
-        canonical_cfa_map, canonicalize_f32x4, cfa_kind_from_filters, effective_black_level,
-        identity_4x4, load_raw_thumbnail, matching_thumbnail_orientation, oriented_source_pos,
-        resolve_default_exposure_ev, valid_baseline_exposure, validate_embedded_thumbnail_metadata,
-        white_balance, white_levels, CameraColorModel, CameraProfile, CameraWhiteBalanceModel,
-        CfaKind, DngColorEndpoint, MAX_EMBEDDED_THUMBNAIL_BYTES,
+        canonical_cfa_map, canonicalize_f32x4, cfa_kind_from_filters, daylight_white_balance,
+        effective_black_level, identity_4x4, load_raw_thumbnail, matching_thumbnail_orientation,
+        oriented_source_pos, resolve_default_exposure_ev, valid_baseline_exposure,
+        validate_embedded_thumbnail_metadata, white_balance, white_levels, CameraColorModel,
+        CameraProfile, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint,
+        MAX_EMBEDDED_THUMBNAIL_BYTES,
         MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
     };
 
@@ -3060,6 +3101,27 @@ mod tests {
 
         let (tinted, _) = adjusted_camera_transform(&model, 20.0, 20.0).unwrap();
         assert_ne!(warmer, tinted);
+    }
+
+    #[test]
+    fn rawnind_daylight_white_balance_uses_d65_camera_response() {
+        let model = CameraWhiteBalanceModel {
+            base_wb: [2.0, 1.0, 1.5, 1.0],
+            cdesc: RGBG,
+            base_cct: 4_500.0,
+            color: CameraColorModel::Matrix {
+                xyz_to_camera: [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 0.0],
+                ],
+            },
+        };
+        let wb = daylight_white_balance(&model).unwrap();
+        assert!((wb[0] - 1.0 / super::D65_XYZ[0]).abs() < 1e-6);
+        assert_eq!(wb[1], 1.0);
+        assert!((wb[2] - 1.0 / super::D65_XYZ[2]).abs() < 1e-6);
     }
 
     #[test]

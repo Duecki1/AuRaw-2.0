@@ -36,7 +36,29 @@ def test_headless_exporter_and_comparator_cover_the_same_isolated_endpoints() ->
 
 def test_comparison_is_relative_to_each_renderers_own_baseline() -> None:
     source = COMPARATOR.read_text(encoding="utf-8")
-    assert 'args.auraw_dir / "baseline.png"' in source
-    assert 'args.lightroom_dir / "Adobe Color.jpg"' in source
-    assert "auraw_delta = luma_delta_ev(auraw_base" in source
-    assert "lightroom_delta = luma_delta_ev(lightroom_base" in source
+    assert "args.auraw_dir / args.auraw_baseline" in source
+    assert "args.lightroom_dir / args.lightroom_baseline" in source
+    assert "luma_delta_ev(auraw_base, auraw_edit" in source
+    assert "luma_delta_ev(lightroom_base, lightroom_edit" in source
+    assert "baseline_luma_quantiles(auraw_base, SRGB_LUMA)" in source
+    assert "baseline_luma_quantiles(lightroom_base, ADOBE_RGB_LUMA)" in source
+
+
+def test_comparison_preserves_tiff_precision_and_uses_the_supplied_profiles() -> None:
+    source = COMPARATOR.read_text(encoding="utf-8")
+    assert 'dtype="<u2"' in source
+    assert "65535.0" in source
+    assert "ADOBE_RGB_GAMMA" in source
+    assert "ADOBE_RGB_LUMA" in source
+    assert '"Camera NT.tif"' in source
+    assert '"Vibration -100.tif"' in source
+    assert "--lightroom-crop" in source
+    assert "--auraw-crop" in source
+
+
+def test_extreme_exposure_headroom_is_in_both_suites() -> None:
+    comparator = COMPARATOR.read_text(encoding="utf-8")
+    exporter = EXPORTER.read_text(encoding="utf-8")
+    for endpoint in ("exposure_plus5", "exposure_minus5"):
+        assert endpoint in comparator
+        assert endpoint in exporter

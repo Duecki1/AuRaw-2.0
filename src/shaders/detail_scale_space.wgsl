@@ -59,8 +59,19 @@ fn apply_texture_and_clarity_values(
     let shadow_noise = 1.0 - signal_gate;
     let texture_threshold = mix(0.028, 0.006, signal_gate) * mix(1.0, 1.65, shadow_noise);
     let positive_texture = soft_detail_threshold(texture_band_ev, texture_threshold);
-    let negative_texture = clamp(texture_band_ev, -0.24, 0.24);
-    let selected_texture = select(negative_texture, positive_texture, texture >= 0.0);
+    var negative_texture_base_ev = fine_base_ev;
+    if texture < 0.0 {
+        // Lightroom's negative endpoint smooths a wider surface band than its
+        // positive microcontrast control. The lower range weight follows
+        // surface variation while continuing to reject hard silhouettes.
+        negative_texture_base_ev = bilateral_log_luminance(
+            pos,
+            3,
+            presence_step(1.65, 5),
+            3.0,
+        );
+    }
+    let negative_texture = clamp(center_ev - negative_texture_base_ev, -0.32, 0.32);
 
     let midtone_gate = smoothstep(-7.0, -2.25, center_ev)
         * (1.0 - 0.74 * smoothstep(0.9, 3.6, center_ev));
@@ -84,14 +95,25 @@ fn apply_texture_and_clarity_values(
         clarity > 0.0,
     );
 
-    // Positive texture is intentionally more conservative than the previous
-    // implementation because final-size output sharpening now owns delivery
-    // crispness. Creative controls should shape surfaces, not compensate export.
-    let texture_strength = select(1.55, 2.10, texture >= 0.0)
-        * mix(0.88, 1.12, abs(texture));
-    let clarity_strength = select(1.90, 2.62, clarity >= 0.0)
+    // Positive Texture amplifies the thresholded surface band. Negative
+    // Texture is deliberately a convex move toward its bilateral base rather
+    // than a signed high-pass gain: a multiplier above one crosses the base
+    // and turns smoothing into inverted texture at the -100 endpoint.
+    let positive_texture_strength = 7.50 * mix(0.88, 1.12, texture);
+    var texture_ev = texture
+        * positive_texture
+        * positive_texture_strength
+        * mix(0.72, 1.0, signal_gate);
+    if texture < 0.0 {
+        let smoothing = min(
+            (-texture) * 0.70 * mix(0.72, 1.0, signal_gate),
+            0.90,
+        );
+        texture_ev = -negative_texture * smoothing;
+    }
+
+    let clarity_strength = select(1.55, 5.40, clarity >= 0.0)
         * mix(0.90, 1.10, abs(clarity));
-    let texture_ev = texture * selected_texture * texture_strength * mix(0.72, 1.0, signal_gate);
     let clarity_ev = clarity * selected_clarity * clarity_strength * midtone_gate * halo_guard;
     let delta_ev = clamp(texture_ev + clarity_ev + positive_clarity_tone, -1.90, 1.20);
     // Scalar detail gain preserves RGB ratios. Keep already-nonnegative

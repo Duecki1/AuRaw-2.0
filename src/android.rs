@@ -406,7 +406,7 @@ pub fn load_library_thumbnail(
     maximum_edge: u32,
 ) -> Result<crate::pipeline::RawThumbnail, String> {
     let cache_path = raw_thumbnail_cache_path(app, uri, bytes, modified_seconds, maximum_edge)?;
-    match crate::thumbnail_cache::load_png(&cache_path, maximum_edge) {
+    match crate::thumbnail_cache::load_jpeg(&cache_path, maximum_edge) {
         Ok(Some(thumbnail)) => return Ok(thumbnail),
         Ok(None) => {}
         Err(error) => log::warn!("discarding Android RAW thumbnail cache: {error}"),
@@ -420,7 +420,7 @@ pub fn load_library_thumbnail(
                 "direct Android RAW thumbnail extraction failed; retrying from private cache: {direct_error}"
             );
             let temporary = materialize_library_thumbnail(app, uri, display_name)?;
-            let result = crate::pipeline::load_raw_embedded_thumbnail(&temporary, maximum_edge)
+            let result = crate::pipeline::load_raw_thumbnail(&temporary, maximum_edge)
                 .map_err(|error| format!("{error:#}"));
             if let Err(error) = fs::remove_file(&temporary) {
                 log::warn!(
@@ -431,10 +431,37 @@ pub fn load_library_thumbnail(
             result?
         }
     };
-    if let Err(error) = crate::thumbnail_cache::save_png(&cache_path, &thumbnail) {
+    if let Err(error) = crate::thumbnail_cache::save_jpeg(&cache_path, &thumbnail) {
         log::warn!("could not persist Android RAW thumbnail: {error}");
     }
     Ok(thumbnail)
+}
+
+pub fn clear_thumbnail_cache(app: &AndroidApp) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("clearThumbnailCache"),
+            jni::jni_sig!(() -> void),
+            &[],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not clear Android thumbnail cache: {error:#}"))
+}
+
+pub fn thumbnail_cache_size_bytes(app: &AndroidApp) -> Result<u64, String> {
+    let bytes = with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("thumbnailCacheSizeBytes"),
+            jni::jni_sig!(() -> i64),
+            &[],
+        )?
+        .j()
+    })
+    .map_err(|error| format!("could not measure Android thumbnail cache: {error:#}"))?;
+    u64::try_from(bytes).map_err(|_| "Android returned a negative thumbnail cache size".to_owned())
 }
 
 pub fn load_library_display_dimensions(app: &AndroidApp, uri: &str) -> Result<[u32; 2], String> {
@@ -489,7 +516,7 @@ fn load_library_thumbnail_from_fd(
     // transferred sole ownership to Rust. `File` closes it exactly once.
     let descriptor = unsafe { File::from_raw_fd(fd) };
     let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
-    let result = crate::pipeline::load_raw_embedded_thumbnail(&path, maximum_edge)
+    let result = crate::pipeline::load_raw_thumbnail(&path, maximum_edge)
         .map_err(|error| format!("{error:#}"));
     drop(descriptor);
     result
@@ -594,7 +621,7 @@ pub fn load_developed_thumbnail_cache(
         let _ = fs::remove_file(&fingerprint_path);
         return Ok(None);
     }
-    crate::thumbnail_cache::load_png(&cache_path, maximum_edge)
+    crate::thumbnail_cache::load_jpeg(&cache_path, maximum_edge)
 }
 
 pub fn save_developed_thumbnail_cache(
@@ -612,7 +639,7 @@ pub fn save_developed_thumbnail_cache(
     let fingerprint = fingerprint?;
     let cache_path = developed_thumbnail_cache_path(app, raw_uri)?;
     let fingerprint_path = developed_thumbnail_fingerprint_path(&cache_path);
-    crate::thumbnail_cache::save_png(&cache_path, thumbnail)?;
+    crate::thumbnail_cache::save_jpeg(&cache_path, thumbnail)?;
     crate::thumbnail_cache::write_bytes_atomic(
         &fingerprint_path,
         format!(

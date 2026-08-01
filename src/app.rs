@@ -7,19 +7,19 @@ use crate::inpainting::{
     inpaint_capture_rect, inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintRequest,
     PreparedInpaintSource, LAMA_EDGE, LAMA_MODEL_BYTES,
 };
+#[cfg(target_os = "android")]
+use crate::pipeline::GpuProgramPrewarm;
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_jpeg_export_with_program_prewarm,
-    spawn_tiled_png_export_with_program_prewarm,
+    spawn_tiled_jpeg_export_with_program_prewarm, spawn_tiled_png_export_with_program_prewarm,
     spawn_tiled_tiff_export_with_program_prewarm, BrushDab, BrushMode, CameraProfileMode,
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
     GpuParams, InpaintLayer, InpaintStroke, LandscapeCategory, LensfunCatalog, LensfunLens,
     LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality,
-    ProcessingStage, ProxySpec, RawGpuPipeline, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate, TileSpec, EXPORT_TILE_HALO,
+    MAX_LOCAL_MASKS,
 };
-#[cfg(target_os = "android")]
-use crate::pipeline::GpuProgramPrewarm;
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
     LensEditState as SidecarLensEditState,
@@ -38,8 +38,8 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-mod background_tasks;
 mod ai_denoise;
+mod background_tasks;
 use background_tasks::{
     BackgroundTaskManager, CancelTaskResult, TaskId, TaskKind, TaskProgress, TaskProgressValue,
     TaskSnapshot, TaskStatus,
@@ -67,86 +67,88 @@ pub(crate) struct AndroidOriginalHold {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PreviewQuality {
-    Fast,
+    #[serde(alias = "fast")]
+    Low,
+    #[serde(alias = "balanced")]
     #[default]
-    Balanced,
+    Medium,
     High,
+    Max,
 }
 
 impl PreviewQuality {
+    pub const fn pixel_scale(self) -> f32 {
+        match self {
+            Self::Low => 0.50,
+            Self::Medium => 0.67,
+            Self::High => 0.84,
+            Self::Max => 1.00,
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Fast => "Fast",
-            Self::Balanced => "Balanced",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
             Self::High => "High",
+            Self::Max => "Max",
         }
     }
 
     pub const fn proxy_edge(self) -> u32 {
-        match (self, cfg!(target_os = "android")) {
-            (Self::Fast, true) => 960,
-            (Self::Balanced, true) => 1280,
-            (Self::High, true) => 1600,
-            (Self::Fast, false) => 1280,
-            (Self::Balanced, false) => 2048,
-            (Self::High, false) => 2560,
+        match self {
+            Self::Low => 640,
+            Self::Medium => 800,
+            Self::High => 1024,
+            Self::Max => 1280,
         }
     }
 
-    /// Full-frame High previews track the physical pixel length of the visible
-    /// image, so moving the window between monitors cannot leave a 1x fit view
-    /// backed by an undersized texture. The small guard band absorbs Bayer and
-    /// X-Trans phase alignment in the RAW proxy reducer.
+    fn edge_for_scale(self, viewport_pixels: [u32; 2], support_scale: f32) -> u32 {
+        const CFA_PHASE_GUARD: u32 = 6;
+        let viewport_edge = viewport_pixels[0].max(viewport_pixels[1]).max(1) as f64;
+        let requested = (viewport_edge * f64::from(self.pixel_scale() * support_scale)).ceil();
+        self.proxy_edge()
+            .max(requested.min(f64::from(u32::MAX - CFA_PHASE_GUARD)) as u32 + CFA_PHASE_GUARD)
+    }
+
     pub fn proxy_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
-        let base = self.proxy_edge();
-        if self != Self::High || cfg!(target_os = "android") {
-            return base;
-        }
-        base.max(viewport_pixels[0].max(viewport_pixels[1]).saturating_add(6))
+        self.edge_for_scale(viewport_pixels, 1.0)
     }
 
-    pub const fn detail_edge(self) -> u32 {
-        match (self, cfg!(target_os = "android")) {
-            // Zoom detail coexists with the full preview and navigation proxy.
-            // The hybrid branch's additional scene/display working textures make
-            // the former 1600/2048 limits exceed the Android GPU budget before a
-            // crop can be shown. These still meet or exceed common phone viewport
-            // resolution while leaving room for inpainting's 512px work surface.
-            (Self::Fast, true) => 960,
-            (Self::Balanced, true) => 1152,
-            (Self::High, true) => 1280,
-            (Self::Fast, false) => 1920,
-            (Self::Balanced, false) => 2560,
-            (Self::High, false) => 3072,
-        }
+    pub fn proxy_edge_for_fitted_source(
+        self,
+        viewport_pixels: [u32; 2],
+        source_width: u32,
+        source_height: u32,
+        geometry: GeometryTransform,
+    ) -> u32 {
+        const CFA_PHASE_GUARD: u32 = 6;
+        let source_width = source_width.max(1);
+        let source_height = source_height.max(1);
+        let source_edge = source_width.max(source_height);
+        let (display_width, display_height) =
+            geometry.crop_pixel_dimensions(source_width, source_height);
+        let fit_scale = (f64::from(viewport_pixels[0].max(1))
+            / f64::from(display_width.max(1)))
+        .min(
+            f64::from(viewport_pixels[1].max(1)) / f64::from(display_height.max(1)),
+        );
+        let requested = (f64::from(source_edge)
+            * fit_scale
+            * f64::from(self.pixel_scale()))
+        .ceil()
+        .min(f64::from(u32::MAX - CFA_PHASE_GUARD)) as u32
+            + CFA_PHASE_GUARD;
+        self.proxy_edge().max(requested).min(source_edge)
     }
 
-    /// A zoom crop contains processing support outside the visible rectangle.
-    /// Allow enough additional texture resolution for that padding while
-    /// retaining the established minimum for High-quality detail previews.
     pub fn detail_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
-        let base = self.detail_edge();
-        if self != Self::High || cfg!(target_os = "android") {
-            return base;
-        }
-        let viewport_edge = u64::from(viewport_pixels[0].max(viewport_pixels[1]));
-        let dpi_edge = viewport_edge
-            .saturating_mul(5)
-            .div_ceil(4)
-            .saturating_add(6)
-            .min(u64::from(u32::MAX)) as u32;
-        base.max(dpi_edge)
+        self.edge_for_scale(viewport_pixels, 1.35)
     }
 
     pub const fn detail_pixel_scale(self) -> f32 {
-        match (self, cfg!(target_os = "android")) {
-            (Self::Fast, true) => 0.75,
-            (Self::Balanced, true) => 1.00,
-            (Self::High, true) => 1.35,
-            (Self::Fast, false) => 0.90,
-            (Self::Balanced, false) => 1.20,
-            (Self::High, false) => 1.50,
-        }
+        self.pixel_scale()
     }
 }
 
@@ -350,6 +352,18 @@ struct LoadedPreview {
     sidecar_needs_rewrite: bool,
     selected_camera_profile: Option<PathBuf>,
     geometry: GeometryTransform,
+}
+
+struct PreparedPreviewRebuild {
+    source_raw: Arc<LoadedRaw>,
+    preview_raw: Arc<LoadedRaw>,
+    quality: PreviewQuality,
+    requested_edge: u32,
+    ai_enabled: bool,
+}
+
+enum PreviewRebuildEvent {
+    Finished(Result<PreparedPreviewRebuild, String>),
 }
 
 enum LoadEvent {
@@ -616,7 +630,7 @@ struct SubjectMaskTaskRequest {
 struct ObjectMaskTaskRequest {
     document_id: u64,
     generation: u64,
-    target: (usize, usize),
+    target: AiMaskTarget,
     encoder_path: PathBuf,
     decoder_path: PathBuf,
     vitmatte_path: PathBuf,
@@ -628,13 +642,25 @@ struct ObjectMaskTaskRequest {
 struct LandscapeMaskTaskRequest {
     document_id: u64,
     generation: u64,
-    target: (usize, usize),
+    target: AiMaskTarget,
     source: MaskRgbImage,
     model_path: PathBuf,
     allow_download: bool,
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
     category: LandscapeCategory,
+}
+
+/// A content-aware mask result must be matched to the component that started
+/// the request, not merely to the slot it occupied at that time.  Reordering
+/// is allowed while inference runs, so the snapshot is deliberately compared
+/// before applying a result.  Ambiguous duplicate snapshots are discarded.
+#[derive(Clone, Debug, PartialEq)]
+struct AiMaskTarget {
+    mask_index: usize,
+    component_index: usize,
+    kind: MaskKind,
+    geometry: MaskGeometry,
 }
 
 struct InpaintTaskRequest {
@@ -670,6 +696,10 @@ pub struct AurawApp {
     pub loaded_raw: Option<Arc<LoadedRaw>>,
     pub preview_raw: Option<Arc<LoadedRaw>>,
     pub gpu_pipeline: Option<RawGpuPipeline>,
+    // Compiled preview programs are tiny compared with an image-sized render
+    // graph. Retain them independently so replacing or temporarily releasing
+    // a preview never forces Android to compile the full graph again.
+    preview_program_template: Option<RawGpuProgramTemplate>,
     // Native preview texture IDs cannot be freed during `App::ui`: egui may
     // already have emitted meshes that reference them for the current frame.
     // Retire them now and remove them from the renderer at the start of the
@@ -693,6 +723,7 @@ pub struct AurawApp {
     navigation_pending_stage: Option<ProcessingStage>,
     preview_detail_urgent: bool,
     preview_quality_dirty: bool,
+    preview_rebuild_receiver: Option<mpsc::Receiver<PreviewRebuildEvent>>,
     pub(crate) original_preview_exposure: ExposureParams,
     pub(crate) original_preview_requested: bool,
     original_preview_rendered_state: Option<(bool, u64)>,
@@ -704,6 +735,8 @@ pub struct AurawApp {
     raw_cache: VecDeque<CachedRawDecode>,
     raw_cache_limit: usize,
     performance_settings_path: Option<PathBuf>,
+    thumbnail_cache_size: Option<Result<u64, String>>,
+    thumbnail_cache_size_receiver: Option<mpsc::Receiver<Result<u64, String>>>,
     #[cfg(not(target_os = "android"))]
     pub(crate) display_color_management: bool,
     #[cfg(not(target_os = "android"))]
@@ -854,7 +887,7 @@ pub struct AurawApp {
     object_generation: u64,
     object_job_generation: u64,
     object_job_document_id: u64,
-    object_job_target: Option<(usize, usize)>,
+    object_job_target: Option<AiMaskTarget>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
     landscape_consent_open: bool,
     landscape_pending_target: Option<(usize, usize)>,
@@ -864,7 +897,7 @@ pub struct AurawApp {
     landscape_generation: u64,
     landscape_job_generation: u64,
     landscape_job_document_id: u64,
-    landscape_job_target: Option<(usize, usize)>,
+    landscape_job_target: Option<AiMaskTarget>,
     landscape_job_category: Option<LandscapeCategory>,
 
     pub(crate) inpaint_brush_size: f32,
@@ -954,6 +987,10 @@ impl AurawApp {
             // Keep thumbnail decoding from competing with Develop rendering.
             self.library.prepare_for_develop();
         }
+        if tab == AppTab::Settings {
+            self.thumbnail_cache_size = None;
+            self.thumbnail_cache_size_receiver = None;
+        }
         self.active_tab = tab;
         #[cfg(target_os = "android")]
         crate::android::set_back_navigation_active(tab != AppTab::Library);
@@ -985,6 +1022,9 @@ impl AurawApp {
         _renderer: &mut eframe::egui_wgpu::Renderer,
     ) -> Option<RawGpuPipeline> {
         let pipeline = self.gpu_pipeline.take();
+        if let Some(pipeline) = pipeline.as_ref() {
+            self.preview_program_template = Some(pipeline.program_template());
+        }
         if let Some(texture_id) = pipeline
             .as_ref()
             .and_then(|pipeline| pipeline.egui_texture_id)
@@ -1024,34 +1064,63 @@ include!("app/eframe_impl.rs");
 
 #[cfg(test)]
 mod transactional_pipeline_tests {
-    use super::{collect_pipeline_update_results, PreviewQuality};
+    use super::{
+        collect_pipeline_update_results, AiMaskTarget, AurawApp, BackgroundTaskManager,
+        MaskGeometry, MaskKind, MaskStack, PreviewQuality, TaskKind, TaskProgress, TaskStatus,
+    };
+    use crate::pipeline::GeometryTransform;
 
     #[test]
     #[cfg(not(target_os = "android"))]
-    fn high_preview_quality_tracks_physical_viewport_density() {
+    fn preview_quality_levels_track_physical_viewport_density() {
         assert_eq!(
-            PreviewQuality::High.proxy_edge_for_viewport([3_000, 2_000]),
+            PreviewQuality::Max.proxy_edge_for_viewport([3_000, 2_000]),
             3_006
         );
-        assert_eq!(
-            PreviewQuality::High.proxy_edge_for_viewport([1_920, 1_080]),
-            PreviewQuality::High.proxy_edge()
-        );
-        assert!(
-            PreviewQuality::High.detail_edge_for_viewport([3_200, 1_800])
-                >= 3_200 * 5 / 4
-        );
+        assert!(PreviewQuality::Max.detail_edge_for_viewport([3_200, 1_800]) >= 3_200 * 135 / 100);
+        for quality in [
+            PreviewQuality::Low,
+            PreviewQuality::Medium,
+            PreviewQuality::High,
+            PreviewQuality::Max,
+        ] {
+            assert!(quality.proxy_edge_for_viewport([3_840, 2_160]) > quality.proxy_edge());
+        }
     }
 
     #[test]
-    fn balanced_preview_quality_keeps_its_performance_bound() {
-        assert_eq!(
-            PreviewQuality::Balanced.proxy_edge_for_viewport([7_680, 4_320]),
-            PreviewQuality::Balanced.proxy_edge()
+    fn preview_quality_density_is_ordered_and_max_matches_physical_pixels() {
+        let viewport = [2_400, 1_600];
+        let edges = [
+            PreviewQuality::Low.proxy_edge_for_viewport(viewport),
+            PreviewQuality::Medium.proxy_edge_for_viewport(viewport),
+            PreviewQuality::High.proxy_edge_for_viewport(viewport),
+            PreviewQuality::Max.proxy_edge_for_viewport(viewport),
+        ];
+        assert!(edges.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(edges[3], 2_406);
+    }
+
+    #[test]
+    fn fitted_preview_density_excludes_phone_letterbox_space() {
+        let geometry = GeometryTransform::default();
+        let edge = PreviewQuality::Max.proxy_edge_for_fitted_source(
+            [720, 1_500],
+            7_028,
+            4_688,
+            geometry,
         );
-        assert_eq!(
-            PreviewQuality::Balanced.detail_edge_for_viewport([7_680, 4_320]),
-            PreviewQuality::Balanced.detail_edge()
+        assert_eq!(edge, 1_280);
+
+        let mut cropped = geometry;
+        cropped.crop = [0.375, 0.0, 0.625, 1.0];
+        assert!(
+            PreviewQuality::Max.proxy_edge_for_fitted_source(
+                [720, 1_500],
+                7_028,
+                4_688,
+                cropped,
+            ) > edge
         );
     }
 
@@ -1113,5 +1182,57 @@ mod transactional_pipeline_tests {
         }
         assert!(retry.is_ok());
         assert_eq!(rendered_revision, Some(requested_revision));
+    }
+
+    #[test]
+    fn ai_mask_result_target_survives_reordering_but_not_replacement() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Object);
+        let target = AiMaskTarget {
+            mask_index: 0,
+            component_index: 0,
+            kind: MaskKind::Object,
+            geometry: stack.masks[0].components[0].geometry.clone(),
+        };
+        stack.add_component(MaskKind::Brush, crate::pipeline::MaskCombineMode::Add);
+        assert_eq!(stack.move_submask_component(0, 0, 0, 2), Some((0, 1)));
+        assert_eq!(
+            AurawApp::resolve_ai_mask_target_in_stack(&stack, &target),
+            Ok((0, 1))
+        );
+
+        stack.masks[0].components[1].kind = MaskKind::Brush;
+        stack.masks[0].components[1].geometry = MaskGeometry::for_kind(MaskKind::Brush);
+        let error = AurawApp::resolve_ai_mask_target_in_stack(&stack, &target).unwrap_err();
+        assert!(error.contains("changed type"));
+    }
+
+    #[test]
+    fn subject_landscape_and_object_errors_remain_failed_tasks() {
+        let kinds = [
+            TaskKind::SubjectMask {
+                document_id: 1,
+                generation: 1,
+            },
+            TaskKind::LandscapeMask {
+                document_id: 1,
+                generation: 1,
+            },
+            TaskKind::ObjectMask {
+                document_id: 1,
+                generation: 1,
+            },
+        ];
+        for kind in kinds {
+            let mut tasks = BackgroundTaskManager::default();
+            let id = tasks.start_nonblocking(
+                kind,
+                "Generating mask",
+                TaskProgress::indeterminate("Running inference"),
+                true,
+            );
+            assert!(tasks.fail(id, "inference failed"));
+            assert_eq!(tasks.snapshot(id).unwrap().status, TaskStatus::Failed);
+        }
     }
 }

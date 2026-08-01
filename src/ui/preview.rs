@@ -14,18 +14,34 @@ use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui};
 const MIN_PREVIEW_ZOOM: f32 = 0.70;
 const MAX_PREVIEW_ZOOM: f32 = 32.0;
 
+fn physical_pixels_per_point(ctx: &egui::Context) -> f32 {
+    let native = ctx.input(|input| input.viewport().native_pixels_per_point);
+    native
+        .unwrap_or_else(|| ctx.pixels_per_point())
+        .max(ctx.pixels_per_point())
+        .max(0.1)
+}
+
 pub struct Preview;
 
 impl Preview {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        let Some((texture_id, pipeline_width, pipeline_height)) =
-            app.preview_base_pipeline().and_then(|pipeline| {
-                pipeline
-                    .egui_texture_id
-                    .map(|texture_id| (texture_id, pipeline.width, pipeline.height))
-            })
-        else {
-            if app.gpu_pipeline.is_some() {
+        let available = ui.available_size();
+        let base_pipeline = app.preview_base_pipeline().and_then(|pipeline| {
+            pipeline
+                .egui_texture_id
+                .map(|texture_id| (texture_id, pipeline.width, pipeline.height))
+        });
+        if base_pipeline.is_none() && available.x > 0.0 && available.y > 0.0 {
+            let pixels_per_point = physical_pixels_per_point(ui.ctx());
+            app.set_preview_viewport_pixels([
+                (available.x * pixels_per_point).round().max(1.0) as u32,
+                (available.y * pixels_per_point).round().max(1.0) as u32,
+            ]);
+        }
+
+        let Some((texture_id, pipeline_width, pipeline_height)) = base_pipeline else {
+            if app.preview_is_preparing() {
                 ui.centered_and_justified(|ui| {
                     ui.spinner();
                     ui.label("Preparing preview…");
@@ -41,7 +57,6 @@ impl Preview {
             return;
         };
 
-        let available = ui.available_size();
         if available.x <= 0.0 || available.y <= 0.0 || pipeline_height == 0 {
             return;
         }
@@ -215,16 +230,14 @@ impl Preview {
 
         image_rect = zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
         let visible_screen = outer_rect.intersect(image_rect);
-        let pixels_per_point = ui.ctx().pixels_per_point();
+        let pixels_per_point = physical_pixels_per_point(ui.ctx());
         let viewport_pixels = [
             (visible_screen.width() * pixels_per_point).round().max(1.0) as u32,
             (visible_screen.height() * pixels_per_point)
                 .round()
                 .max(1.0) as u32,
         ];
-        if app.set_preview_viewport_pixels(viewport_pixels) {
-            moved = true;
-        }
+        app.set_preview_viewport_pixels(viewport_pixels);
         let visible_uv = if crop_preview {
             crop_workspace_visible_source_uv(
                 image_rect,
@@ -261,7 +274,7 @@ impl Preview {
         };
         if preview_uv_changed(app.preview_visible_uv, visible_uv) {
             app.preview_visible_uv = visible_uv;
-            moved = true;
+            app.preview_source_region_changed();
         }
         if moved {
             app.note_preview_motion();
@@ -381,8 +394,14 @@ impl Preview {
             outer_rect.left_top() + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
             format!(
-                "{:.0}% · pinch/scroll zoom · drag pan · double-tap/click fit",
-                app.preview_zoom * 100.0
+                "{:.1}% · pinch/scroll zoom · drag pan · double-tap/click fit",
+                ((image_rect.width() * physical_pixels_per_point(ui.ctx())
+                    / geometry_width.max(1) as f32)
+                    .min(
+                        image_rect.height() * physical_pixels_per_point(ui.ctx())
+                            / geometry_height.max(1) as f32,
+                    )
+                    * 100.0)
             ),
             egui::FontId::proportional(11.0),
             Color32::from_white_alpha(180),

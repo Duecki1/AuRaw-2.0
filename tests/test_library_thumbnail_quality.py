@@ -19,11 +19,12 @@ def test_desktop_library_scan_is_strictly_non_recursive() -> None:
 
 
 def test_developed_thumbnails_are_cached_and_sidecar_invalidated() -> None:
-    assert 'DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png"' in SIDECAR
+    assert 'DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg"' in SIDECAR
     assert "developed_thumbnail_cache_is_fresh" in SIDECAR
     assert "desktop_sidecar_fingerprint" in SIDECAR
     assert "save_developed_thumbnail_cache" in SIDECAR
-    assert "atomic_write(&cache_path" in SIDECAR
+    assert "save_jpeg(&cache_path" in SIDECAR
+    assert "load_jpeg(&cache_path" in SIDECAR
     assert "sidecar changed while its thumbnail" in SIDECAR
 
 
@@ -37,9 +38,9 @@ def test_saved_gpu_preview_refreshes_the_visible_library_entry() -> None:
     assert "self.poll_developed_thumbnail(frame);" in EFRAME
 
 
-def test_library_prefers_cached_developed_thumbnail_over_embedded_raw_preview() -> None:
+def test_library_prefers_cached_developed_thumbnail_over_unedited_raw_preview() -> None:
     cache = LIBRARY.index("load_developed_thumbnail_cache")
-    raw = LIBRARY.index("load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)", cache)
+    raw = LIBRARY.index("load_raw_thumbnail(path, THUMBNAIL_EDGE)", cache)
     assert cache < raw
     assert "developed_thumbnail && !loaded.developed" in LIBRARY
 
@@ -47,8 +48,8 @@ def test_library_prefers_cached_developed_thumbnail_over_embedded_raw_preview() 
 def test_uncached_edited_library_cards_render_raw_plus_sidecar_before_fallbacks() -> None:
     render = LIBRARY.index("render_uncached_developed_thumbnail")
     raw_cache = LIBRARY.index("load_desktop_raw_thumbnail", render)
-    embedded = LIBRARY.index("load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)", raw_cache)
-    assert render < raw_cache < embedded
+    unedited = LIBRARY.index("load_raw_thumbnail(path, THUMBNAIL_EDGE)", raw_cache)
+    assert render < raw_cache < unedited
     assert "load_raw_file_with_profile_selection" in LIBRARY
     assert "RawGpuPipeline::new_headless_with_quality" in LIBRARY
     assert "save_developed_thumbnail_cache" in LIBRARY
