@@ -29,6 +29,13 @@ fn native_options() -> eframe::NativeOptions {
         ..Default::default()
     };
 
+    // Keep only one frame queued so Android presents the newest gesture state
+    // on the next vsync instead of building up several frames of input latency.
+    #[cfg(target_os = "android")]
+    {
+        options.wgpu_options.surface = eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY;
+    }
+
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
         setup.device_descriptor = std::sync::Arc::new(|adapter| {
             let info = adapter.get_info();

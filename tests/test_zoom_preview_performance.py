@@ -1,6 +1,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+LIB = (ROOT / "src/lib.rs").read_text(encoding="utf-8")
 APP = (ROOT / "src/app.rs").read_text(encoding="utf-8")
 PROCESSING_EXPORT = (ROOT / "src/app/processing_export.rs").read_text(encoding="utf-8")
 PROCESSING = (ROOT / "src/pipeline/processing.rs").read_text(encoding="utf-8")
@@ -104,6 +105,47 @@ def test_android_detail_crop_waits_until_pinch_navigation_ends() -> None:
     ]
     assert "if self.preview_touch_navigation_active" in detail
     assert "both fingers are lifted" in detail
+
+
+def test_android_touch_gestures_repaint_at_the_surface_cadence() -> None:
+    touch_repaint = PREVIEW[
+        PREVIEW.index("let (multi_touch, any_touches)"):
+        PREVIEW.index("if multi_touch.is_some()")
+    ]
+    assert '#[cfg(target_os = "android")]' in touch_repaint
+    assert "if any_touches" in touch_repaint
+    assert "ui.ctx().request_repaint();" in touch_repaint
+    assert "surface cadence" in touch_repaint
+
+
+def test_one_finger_pan_resumes_without_waiting_for_the_pinch_latch_to_clear() -> None:
+    pan = PREVIEW[
+        PREVIEW.index("let pan_with_primary"):
+        PREVIEW.index("let pan_with_middle")
+    ]
+    assert "multi_touch.is_none()" in pan
+    assert "!touch_navigation" not in pan
+
+
+def test_android_surface_uses_a_single_frame_low_latency_queue() -> None:
+    low_latency = LIB[
+        LIB.index("// Keep only one frame queued"):
+        LIB.index("if let eframe::egui_wgpu::WgpuSetup::CreateNew")
+    ]
+    assert '#[cfg(target_os = "android")]' in low_latency
+    assert "eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY" in low_latency
+    assert "several frames of input latency" in low_latency
+
+
+def test_viewport_motion_does_not_redispatch_the_raw_compute_graph() -> None:
+    motion = PROCESSING_EXPORT[
+        PROCESSING_EXPORT.index("pub(crate) fn note_preview_motion"):
+        PROCESSING_EXPORT.index("pub(crate) fn queue_preview_processing")
+    ]
+    assert "rendered_content_was_current" in motion
+    assert "self.original_preview_rendered_state =" in motion
+    assert "Some((self.original_preview_requested, self.preview_revision))" in motion
+    assert "panning and pinching do not change developed pixels" in motion
 
 
 def test_no_zoom_phase_can_flash_the_tiny_navigation_proxy() -> None:

@@ -1057,6 +1057,7 @@ pub(super) fn texture_size(width: u32, height: u32) -> wgpu::Extent3d {
 #[cfg(test)]
 mod resource_plan_tests {
     use super::*;
+    use crate::pipeline::masks::MASK_ATLAS_EDGE_EXPORT_ANDROID;
 
     fn input() -> GpuResourcePlanInput {
         GpuResourcePlanInput {
@@ -1129,6 +1130,35 @@ mod resource_plan_tests {
         let plan = build_gpu_resource_plan(input()).unwrap();
         assert!(validate_gpu_resource_plan(&plan, plan.admitted_gpu_bytes).is_ok());
         assert!(validate_gpu_resource_plan(&plan, plan.admitted_gpu_bytes - 1).is_err());
+    }
+
+    #[test]
+    fn android_masked_export_fits_at_the_default_tile_size() {
+        let plan_for_core = |core_edge: u32| {
+            let mut export = input();
+            let halo = 192u32;
+            export.width = core_edge + 2 * halo;
+            export.height = export.width;
+            export.quality = ProcessingQuality::High;
+            export.tone_scale = 8;
+            export.mask_atlas_edge = MASK_ATLAS_EDGE_EXPORT_ANDROID;
+            // Six layers reproduce the 48 MiB mask atlas from the failing S25
+            // export while keeping the test independent of a particular RAW.
+            export.mask_layers = 6;
+            build_gpu_resource_plan(export).unwrap()
+        };
+
+        let default_android_tile = plan_for_core(768);
+        let enlarged_tile = plan_for_core(1024);
+        assert!(validate_gpu_resource_plan(
+            &default_android_tile,
+            ANDROID_GPU_WORKING_SET_LIMIT_BYTES
+        )
+        .is_ok());
+        assert!(
+            validate_gpu_resource_plan(&enlarged_tile, ANDROID_GPU_WORKING_SET_LIMIT_BYTES)
+                .is_err()
+        );
     }
 
     #[test]

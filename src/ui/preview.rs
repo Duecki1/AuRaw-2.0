@@ -141,6 +141,13 @@ impl Preview {
                 input.any_touches(),
             )
         });
+        #[cfg(target_os = "android")]
+        if any_touches {
+            // NativeActivity is event-driven, while Android may batch motion
+            // samples. Keep navigation repainting at the surface cadence until
+            // the last finger lifts so intermediate pinch/pan states stay fluid.
+            ui.ctx().request_repaint();
+        }
         if multi_touch.is_some() {
             app.preview_touch_navigation_active = true;
         } else if !any_touches {
@@ -165,7 +172,9 @@ impl Preview {
             );
             image_rect =
                 zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
+        }
 
+        if multi_touch.is_some() {
             // A second finger switches a mask gesture into viewport navigation.
             // Roll back any pending mask stroke and prevent this frame from painting.
             if app.sidebar_tab == SidebarTab::Masks {
@@ -206,7 +215,11 @@ impl Preview {
             }
         }
 
-        let pan_with_primary = !touch_navigation
+        // Once a pinch drops back to one finger, resume ordinary panning
+        // immediately. `touch_navigation` deliberately stays latched until all
+        // fingers lift so brush/crop gestures cannot restart halfway through a
+        // pinch, but that latch must not freeze the viewport itself.
+        let pan_with_primary = multi_touch.is_none()
             && !original_hold_tracking
             && !brush_canvas
             && app.sidebar_tab != SidebarTab::Crop
@@ -278,13 +291,7 @@ impl Preview {
         }
         if moved {
             app.note_preview_motion();
-            // Android's NativeActivity loop is event driven. Asking for the next
-            // frame explicitly keeps high-frequency touch samples flowing at the
-            // display cadence instead of waiting for another platform wake-up.
-            #[cfg(target_os = "android")]
-            ui.ctx().request_repaint();
         }
-
         let painter = ui.painter_at(outer_rect);
         if crop_preview {
             paint_crop_workspace_texture(

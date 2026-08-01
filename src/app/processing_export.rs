@@ -1011,7 +1011,17 @@ impl AurawApp {
 
     pub(crate) fn note_preview_motion(&mut self) {
         let edit_was_pending = self.preview_detail_pending_stage.is_some();
+        let rendered_content_was_current = self.original_preview_rendered_state
+            == Some((self.original_preview_requested, self.preview_revision));
         self.preview_revision = self.preview_revision.wrapping_add(1);
+        // `preview_revision` also invalidates the viewport-specific detail crop,
+        // but panning and pinching do not change developed pixels. Carry the
+        // rendered-content marker forward so `sync_original_preview` does not
+        // dispatch the full RAW compute graph for every navigation sample.
+        if rendered_content_was_current {
+            self.original_preview_rendered_state =
+                Some((self.original_preview_requested, self.preview_revision));
+        }
         self.preview_detail_urgent = edit_was_pending;
         self.preview_motion_at = Some(Instant::now());
         if edit_was_pending {
