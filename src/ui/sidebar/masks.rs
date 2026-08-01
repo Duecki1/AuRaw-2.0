@@ -1979,7 +1979,7 @@ impl Sidebar {
             MaskKind::Subject | MaskKind::Background => app.request_subject_mask(frame),
             MaskKind::Object => {
                 if let Err(error) = app.capture_mask_source(frame) {
-                    app.status = error;
+                    app.report_ai_mask_error(error);
                 }
             }
             MaskKind::LuminanceRange | MaskKind::ColorRange => {
