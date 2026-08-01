@@ -204,6 +204,7 @@ impl AurawApp {
 
     fn start_subject_mask_task(&mut self, id: TaskId, request: SubjectMaskTaskRequest) {
         let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
+            self.clear_ai_mask_task_owner(id);
             self.fail_background_task(id, "Subject-mask task lost its cancellation state.");
             return;
         };
@@ -239,6 +240,7 @@ impl AurawApp {
 
     fn start_object_mask_task(&mut self, id: TaskId, request: ObjectMaskTaskRequest) {
         let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
+            self.clear_ai_mask_task_owner(id);
             self.fail_background_task(id, "Object-mask task lost its cancellation state.");
             return;
         };
@@ -278,6 +280,7 @@ impl AurawApp {
 
     fn start_landscape_mask_task(&mut self, id: TaskId, request: LandscapeMaskTaskRequest) {
         let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
+            self.clear_ai_mask_task_owner(id);
             self.fail_background_task(id, "Landscape-mask task lost its cancellation state.");
             return;
         };
@@ -809,12 +812,14 @@ impl AurawApp {
                     }
                 }
             }
-            CancelTaskResult::DismissedFailure | CancelTaskResult::NotFound => {}
+            CancelTaskResult::DismissedFailure => self.clear_ai_mask_task_owner(id),
+            CancelTaskResult::NotFound => {}
         }
         self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn dismiss_background_task_failure(&mut self, id: TaskId) {
+        self.clear_ai_mask_task_owner(id);
         self.background_tasks.dismiss_failure(id);
     }
 
@@ -830,6 +835,35 @@ impl AurawApp {
     fn fail_background_task(&mut self, id: TaskId, error: impl Into<String>) {
         self.background_tasks.fail(id, error);
         self.egui_ctx.request_repaint();
+    }
+
+    /// Release app-level ownership when an AI task never reached a live worker
+    /// or when a terminal task was retained only for its failure details.
+    /// Keeping these IDs after the receiver is gone makes every later request
+    /// look busy and suppresses both consent and progress dialogs.
+    fn clear_ai_mask_task_owner(&mut self, id: TaskId) {
+        if self.subject_task_id == Some(id) {
+            self.subject_task_id = None;
+            self.subject_receiver = None;
+            self.subject_download_progress = None;
+            self.subject_inferencing = false;
+        }
+        if self.object_task_id == Some(id) {
+            self.object_task_id = None;
+            self.object_receiver = None;
+            self.object_download_progress = None;
+            self.object_inferencing = false;
+            self.object_decoder_only = false;
+            self.object_job_target = None;
+        }
+        if self.landscape_task_id == Some(id) {
+            self.landscape_task_id = None;
+            self.landscape_receiver = None;
+            self.landscape_download_progress = None;
+            self.landscape_inferencing = false;
+            self.landscape_job_target = None;
+            self.landscape_job_category = None;
+        }
     }
 
     fn update_background_progress(&mut self, id: Option<TaskId>, progress: TaskProgress) {
