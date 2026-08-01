@@ -271,7 +271,7 @@ final class StorageManager {
     }
 
     /**
-     * Returns a persistent private PNG path for an unedited RAW thumbnail. The
+     * Returns a persistent private JPEG path for an unedited RAW thumbnail. The
      * RAW identity is part of the key, so replacing a MediaStore item never
      * reuses pixels from the older file.
      */
@@ -283,12 +283,12 @@ final class StorageManager {
         return thumbnailCachePath(
                 "raw\n" + uriText + "\n" + bytes + "\n" + modifiedSeconds
                         + "\n" + maximumEdge,
-                ".raw.png").getAbsolutePath();
+                ".raw.jpg").getAbsolutePath();
     }
 
     /** Edited thumbnails are validated by Rust against the exact sidecar bytes. */
     String developedThumbnailCachePath(String uriText) throws Exception {
-        return thumbnailCachePath("developed\n" + uriText, ".developed.png").getAbsolutePath();
+        return thumbnailCachePath("developed\n" + uriText, ".developed.jpg").getAbsolutePath();
     }
 
     /** Clears regenerable RAW and edited library previews from both cache generations. */
@@ -300,7 +300,7 @@ final class StorageManager {
 
     /**
      * Slow compatibility fallback for providers/LibRaw builds that cannot seek
-     * through /proc/self/fd. The first successful decode is cached as PNG, so
+     * through /proc/self/fd. The first successful decode is cached as JPEG, so
      * this full RAW copy is not repeated when the library is reopened.
      */
     String materializeRawLibraryThumbnail(String uriText, String displayName)
@@ -802,7 +802,7 @@ final class StorageManager {
     }
 
     /**
-     * Thumbnail PNGs are regenerable, but keeping them in no-backup app storage
+     * Thumbnail JPEGs are regenerable, but keeping them in no-backup app storage
      * prevents Android's cache scavenger from discarding the whole library
      * between launches. They still disappear when app data is cleared or the
      * app is uninstalled, and the bounded LRU below prevents unbounded growth.
@@ -870,7 +870,17 @@ final class StorageManager {
     }
 
     private static void trimThumbnailCache(File directory) {
-        File[] thumbnails = directory.listFiles((parent, name) -> name.endsWith(".png"));
+        // PNG cache entries from older builds are intentionally discarded, not decoded.
+        File[] legacyPngs = directory.listFiles(
+                (parent, name) -> name.endsWith(".png")
+                        || name.endsWith(".png.fingerprint"));
+        if (legacyPngs != null) {
+            for (File legacyPng : legacyPngs) {
+                deleteCacheFile(legacyPng);
+            }
+        }
+
+        File[] thumbnails = directory.listFiles((parent, name) -> name.endsWith(".jpg"));
         if (thumbnails != null && thumbnails.length > MAX_THUMBNAIL_CACHE_ENTRIES) {
             Arrays.sort(
                     thumbnails,
@@ -881,9 +891,9 @@ final class StorageManager {
             }
         }
 
-        // A crash between the PNG and fingerprint writes may leave an orphan.
+        // A crash between the JPEG and fingerprint writes may leave an orphan.
         File[] fingerprints = directory.listFiles(
-                (parent, name) -> name.endsWith(".developed.png.fingerprint"));
+                (parent, name) -> name.endsWith(".developed.jpg.fingerprint"));
         if (fingerprints == null) {
             return;
         }

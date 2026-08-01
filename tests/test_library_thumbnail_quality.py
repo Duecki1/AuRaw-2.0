@@ -19,11 +19,12 @@ def test_desktop_library_scan_is_strictly_non_recursive() -> None:
 
 
 def test_developed_thumbnails_are_cached_and_sidecar_invalidated() -> None:
-    assert 'DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png"' in SIDECAR
+    assert 'DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg"' in SIDECAR
     assert "developed_thumbnail_cache_is_fresh" in SIDECAR
     assert "desktop_sidecar_fingerprint" in SIDECAR
     assert "save_developed_thumbnail_cache" in SIDECAR
-    assert "atomic_write(&cache_path" in SIDECAR
+    assert "save_jpeg(&cache_path" in SIDECAR
+    assert "load_jpeg(&cache_path" in SIDECAR
     assert "sidecar changed while its thumbnail" in SIDECAR
 
 
