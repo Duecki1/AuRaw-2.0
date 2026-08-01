@@ -100,17 +100,31 @@ pub struct LandscapeMaskResult {
     pub mask: Vec<u8>,
 }
 
+pub struct LandscapeMaskWorkerRequest {
+    pub model_path: PathBuf,
+    pub allow_download: bool,
+    pub runtime_path: Option<PathBuf>,
+    pub runtime_sha256: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub category: LandscapeCategory,
+}
+
 pub fn spawn_landscape_mask(
-    model_path: PathBuf,
-    allow_download: bool,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-    category: LandscapeCategory,
+    request: LandscapeMaskWorkerRequest,
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<LandscapeMaskEvent> {
+    let LandscapeMaskWorkerRequest {
+        model_path,
+        allow_download,
+        runtime_path,
+        runtime_sha256,
+        width,
+        height,
+        rgba,
+        category,
+    } = request;
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
     let spawn = std::thread::Builder::new()
@@ -214,15 +228,15 @@ pub(crate) fn landscape_model_is_verified(path: &Path) -> bool {
     verify_landscape_model(path).is_ok()
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn subject_models_are_verified(birefnet: &Path, vitmatte: &Path) -> bool {
     verify_model(birefnet).is_ok() && verify_vitmatte_model(vitmatte).is_ok()
 }
 
-pub(crate) fn object_models_are_verified(
-    encoder: &Path,
-    decoder: &Path,
-    vitmatte: &Path,
-) -> bool {
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn object_models_are_verified(encoder: &Path, decoder: &Path, vitmatte: &Path) -> bool {
     verify_sha256_hex(encoder, SAM21_ENCODER_SHA256_HEX, SAM21_ENCODER_MAX_BYTES).is_ok()
         && verify_sha256_hex(decoder, SAM21_DECODER_SHA256_HEX, SAM21_DECODER_MAX_BYTES).is_ok()
         && verify_vitmatte_model(vitmatte).is_ok()
@@ -340,16 +354,29 @@ impl Letterbox {
     }
 }
 
+pub struct SubjectMaskWorkerRequest {
+    pub model_path: PathBuf,
+    pub vitmatte_path: PathBuf,
+    pub runtime_path: Option<PathBuf>,
+    pub runtime_sha256: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 pub fn spawn_subject_mask(
-    model_path: PathBuf,
-    vitmatte_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
+    request: SubjectMaskWorkerRequest,
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<SubjectMaskEvent> {
+    let SubjectMaskWorkerRequest {
+        model_path,
+        vitmatte_path,
+        runtime_path,
+        runtime_sha256,
+        width,
+        height,
+        rgba,
+    } = request;
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
     let spawn = std::thread::Builder::new()
@@ -1436,11 +1463,7 @@ fn restore_from_letterbox(
         .collect())
 }
 
-fn ensure_vitmatte_model<F>(
-    path: &Path,
-    cancellation: &AtomicBool,
-    mut progress: F,
-) -> Result<()>
+fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, mut progress: F) -> Result<()>
 where
     F: FnMut(u64, u64),
 {

@@ -27,7 +27,8 @@ class DcpProfileSelectionTests(unittest.TestCase):
         self.assertIn('selected_profile: Option<&Path>', loader)
         self.assertIn('pub struct CameraProfileCandidate', raw_loader)
         self.assertIn('profile.camera_calibration_signature = raw_camera_signature', loader)
-        self.assertIn('automatic fallback to camera matrix', loader)
+        self.assertIn('automatic default to embedded camera matrix', loader)
+        self.assertIn('mode.prefers_external_dcp()', loader)
 
     def test_develop_view_offers_dropdown_when_camera_has_multiple_profiles(self) -> None:
         sidebar = read_source_tree(Path("src/ui/sidebar/navigation.rs"))

@@ -291,7 +291,7 @@ impl Settings {
 
             let description = match app.camera_profile_mode {
                     CameraProfileMode::Automatic => {
-                        "Automatic prefers a camera-matched DCP from the folder below, then an embedded DNG/DCP profile, then the camera matrix."
+                        "Automatic uses the RAW's embedded camera matrix by default. A DCP chosen for an individual image remains explicit."
                     }
                     CameraProfileMode::DcpProfiles => {
                         "Use DCP profiles searches the folder below for this camera. If no safe match exists, AuRaw falls back to the camera matrix."

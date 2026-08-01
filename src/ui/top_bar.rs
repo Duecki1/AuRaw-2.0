@@ -164,9 +164,7 @@ impl TopBar {
                             .add_enabled_ui(app.can_save_edits(), |ui| {
                                 ui.add_sized(
                                     egui::vec2(32.0, 26.0),
-                                    egui::Button::new(
-                                        egui::RichText::new(save_icon).size(14.3),
-                                    ),
+                                    egui::Button::new(egui::RichText::new(save_icon).size(14.3)),
                                 )
                             })
                             .inner

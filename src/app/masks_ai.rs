@@ -317,13 +317,7 @@ impl AurawApp {
     /// Find masks that can be regenerated from their semantic component or
     /// saved prompt data. A pasted/stale mask may intentionally have no cached
     /// generated bitmap, so `mask: Some(_)` must not be required here.
-    fn generated_ai_mask_targets(
-        &self,
-    ) -> (
-        bool,
-        VecDeque<(usize, usize)>,
-        VecDeque<(usize, usize)>,
-    ) {
+    fn generated_ai_mask_targets(&self) -> GeneratedAiMaskTargets {
         let mut subject = false;
         let mut objects = VecDeque::new();
         let mut landscapes = VecDeque::new();
@@ -696,7 +690,7 @@ impl AurawApp {
         {
             let source = self.capture_mask_source_from_active_preview(frame)?;
             self.mask_source_cache = Some(source);
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(target_os = "android"))]
@@ -1544,7 +1538,7 @@ impl AurawApp {
                     "Downloading object-mask model",
                     TaskProgress::indeterminate("Waiting for earlier background work…"),
                     true,
-                    BackgroundAction::ObjectMask(request),
+                    BackgroundAction::ObjectMask(Box::new(request)),
                 );
                 self.object_task_id = Some(task_id);
             } else {

@@ -624,6 +624,7 @@ impl AurawApp {
                 generation,
                 original_raw,
                 selection,
+                #[cfg(target_os = "android")]
                 preview_quality: self.preview_quality,
                 preview_proxy_edge,
                 cached_raws,
@@ -716,7 +717,9 @@ impl AurawApp {
                         full_raw,
                         preview_raw,
                         applied_label,
+                        #[cfg(target_os = "android")]
                         selection: request.selection,
+                        #[cfg(target_os = "android")]
                         preview_quality: request.preview_quality,
                     })
                 })();
@@ -1057,6 +1060,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn toggle_original_preview(&mut self) {
         self.set_original_preview_requested(!self.original_preview_requested);
     }
@@ -2611,7 +2615,7 @@ impl AurawApp {
             format!("Exporting {display_name}"),
             TaskProgress::indeterminate("Waiting for earlier background work…"),
             true,
-            BackgroundAction::SingleExport(request),
+            BackgroundAction::SingleExport(Box::new(request)),
         );
         Some(task_id)
     }
@@ -2767,9 +2771,8 @@ impl AurawApp {
                 if batch.cancel_requested {
                     None
                 } else {
-                    batch.pending.pop_front().map(|job| {
+                    batch.pending.pop_front().inspect(|job| {
                         batch.current = Some(job.clone());
-                        job
                     })
                 }
             };

@@ -663,11 +663,7 @@ fn resolved_export_tile_spec(
     bounded_tile_spec(tile_spec, source_width)
 }
 
-fn export_to_destination<F>(
-    destination: &Path,
-    cancellation: &AtomicBool,
-    export: F,
-) -> Result<()>
+fn export_to_destination<F>(destination: &Path, cancellation: &AtomicBool, export: F) -> Result<()>
 where
     F: FnOnce(&Path) -> Result<()>,
 {
@@ -694,10 +690,7 @@ where
 }
 
 fn ensure_export_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
-    anyhow::ensure!(
-        !cancellation.load(Ordering::Acquire),
-        "export cancelled"
-    );
+    anyhow::ensure!(!cancellation.load(Ordering::Acquire), "export cancelled");
     Ok(())
 }
 
@@ -3635,9 +3628,9 @@ mod tests {
     use super::{
         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
         encode_srgb_row_with_format, export_to_destination, publish_completed_export,
-        stitch_linear_tile_into_band, validate_export_dimensions, ExportMetadata,
-        ExportResizeMode, ExportRowFormat,
-        ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
+        stitch_linear_tile_into_band, validate_export_dimensions, ExportMetadata, ExportResizeMode,
+        ExportRowFormat, ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO,
+        MAX_EXPORT_EDGE,
     };
     use crate::pipeline::{ExportTile, GeometryTransform, IccOutputTransform};
     use std::sync::atomic::{AtomicBool, Ordering};

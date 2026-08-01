@@ -25,11 +25,8 @@ impl AurawApp {
             if selected == root {
                 return Some(std::path::PathBuf::from("."));
             }
-            selected
-                .strip_prefix(root)
-                .ok()
-                .filter(|relative| !relative.as_os_str().is_empty())
-                .map(std::path::Path::to_path_buf)
+            let relative = selected.strip_prefix(root).ok()?;
+            (!relative.as_os_str().is_empty()).then(|| relative.to_path_buf())
         });
         SidecarEditState {
             exposure: self.exposure,

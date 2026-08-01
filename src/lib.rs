@@ -1,5 +1,5 @@
-mod ai_masks;
 mod ai_denoise;
+mod ai_masks;
 #[cfg(target_os = "android")]
 mod android;
 mod app;

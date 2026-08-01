@@ -50,7 +50,7 @@ impl AurawApp {
                 #[cfg(target_os = "android")]
                 let direct_path = crate::android::is_direct_export_path(&request.path)
                     .then(|| request.path.clone());
-                if let Err(error) = self.start_export_task(id, request, frame) {
+                if let Err(error) = self.start_export_task(id, *request, frame) {
                     #[cfg(target_os = "android")]
                     if let Some(path) = direct_path {
                         crate::android::cancel_direct_export(&self.android_app, &path);
@@ -68,7 +68,7 @@ impl AurawApp {
                 self.start_lens_correction_task(id, request)
             }
             BackgroundAction::SubjectMask(request) => self.start_subject_mask_task(id, request),
-            BackgroundAction::ObjectMask(request) => self.start_object_mask_task(id, request),
+            BackgroundAction::ObjectMask(request) => self.start_object_mask_task(id, *request),
             BackgroundAction::LandscapeMask(request) => {
                 self.start_landscape_mask_task(id, request)
             }
@@ -133,8 +133,6 @@ impl AurawApp {
             completed: 0,
             failures: Vec::new(),
             cancel_requested: false,
-            format,
-            settings: settings.clone(),
         });
         self.library_batch_export_task_id = Some(id);
         self.library_batch_export_tile_progress = None;
@@ -218,13 +216,15 @@ impl AurawApp {
         self.background_tasks
             .set_global_visible(id, !self.subject_inferencing);
         self.subject_receiver = Some(spawn_subject_mask(
-            request.model_path,
-            request.vitmatte_path,
-            request.runtime_path,
-            request.runtime_sha256,
-            request.source.width,
-            request.source.height,
-            request.source.rgba.to_vec(),
+            SubjectMaskWorkerRequest {
+                model_path: request.model_path,
+                vitmatte_path: request.vitmatte_path,
+                runtime_path: request.runtime_path,
+                runtime_sha256: request.runtime_sha256,
+                width: request.source.width,
+                height: request.source.height,
+                rgba: request.source.rgba.to_vec(),
+            },
             cancellation,
         ));
         self.background_tasks.update_progress(
@@ -296,14 +296,16 @@ impl AurawApp {
         self.background_tasks
             .set_global_visible(id, !self.landscape_inferencing);
         self.landscape_receiver = Some(spawn_landscape_mask(
-            request.model_path,
-            request.allow_download,
-            request.runtime_path,
-            request.runtime_sha256,
-            request.source.width,
-            request.source.height,
-            request.source.rgba.to_vec(),
-            request.category,
+            LandscapeMaskWorkerRequest {
+                model_path: request.model_path,
+                allow_download: request.allow_download,
+                runtime_path: request.runtime_path,
+                runtime_sha256: request.runtime_sha256,
+                width: request.source.width,
+                height: request.source.height,
+                rgba: request.source.rgba.to_vec(),
+                category: request.category,
+            },
             cancellation,
         ));
         self.background_tasks.update_progress(
@@ -738,6 +740,8 @@ impl AurawApp {
                             if self.export_task_id == Some(id) {
                                 self.export_task_id = None;
                             }
+                            #[cfg(not(target_os = "android"))]
+                            let _ = request;
                             #[cfg(target_os = "android")]
                             if crate::android::is_direct_export_path(&request.path) {
                                 crate::android::cancel_direct_export(&self.android_app, &request.path);

@@ -13,9 +13,13 @@ use std::sync::{Condvar, Mutex, OnceLock};
 #[cfg(not(target_os = "android"))]
 use std::time::UNIX_EPOCH;
 
+#[cfg(any(not(target_os = "android"), test))]
 const RAW_THUMBNAIL_SUFFIX: &str = ".auraw-raw-thumb.jpg";
+#[cfg(any(not(target_os = "android"), test))]
 const RAW_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-raw-thumb.fingerprint";
+#[cfg(any(not(target_os = "android"), test))]
 pub(crate) const DESKTOP_THUMBNAIL_CACHE_DIR: &str = "library-thumbnails";
+#[cfg(any(not(target_os = "android"), test))]
 const LEGACY_THUMBNAIL_CACHE_DIR: &str = ".auraw-cache";
 pub(crate) const THUMBNAIL_JPEG_QUALITY: u8 = 88;
 const MAX_CACHED_THUMBNAIL_EDGE: u32 = 8192;

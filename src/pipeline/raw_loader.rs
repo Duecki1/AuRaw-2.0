@@ -18,8 +18,8 @@ pub enum CameraProfileMode {
     /// Use a matching external DCP from the configured folder, otherwise
     /// fall back to the camera matrix without using an embedded DCP.
     DcpProfiles,
-    /// Prefer a matching external DCP, then an embedded DNG/DCP profile, then
-    /// fall back to the camera matrix.
+    /// Use the embedded camera matrix unless an external DCP was explicitly
+    /// selected for the image.
     #[default]
     Automatic,
 }
@@ -39,6 +39,10 @@ impl CameraProfileMode {
             Self::DcpProfiles => "dcp",
             Self::Automatic => "auto",
         }
+    }
+
+    pub(crate) const fn prefers_external_dcp(self) -> bool {
+        matches!(self, Self::DcpProfiles)
     }
 }
 
@@ -769,9 +773,16 @@ mod libraw_loader;
 #[cfg(all(test, libraw_available))]
 mod tests {
     use super::{
-        CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, CompactPixelMap,
-        LoadedRaw, GLOBAL_TEMPERATURE_LIMIT,
+        CameraColorModel, CameraProfile, CameraProfileMode, CameraWhiteBalanceModel, CfaKind,
+        CompactPixelMap, LoadedRaw, GLOBAL_TEMPERATURE_LIMIT,
     };
+
+    #[test]
+    fn automatic_profile_mode_defaults_to_the_embedded_matrix() {
+        assert!(!CameraProfileMode::Automatic.prefers_external_dcp());
+        assert!(!CameraProfileMode::MatrixOnly.prefers_external_dcp());
+        assert!(CameraProfileMode::DcpProfiles.prefers_external_dcp());
+    }
 
     fn raw_with_white_balance_model() -> LoadedRaw {
         LoadedRaw {

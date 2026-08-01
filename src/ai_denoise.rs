@@ -60,6 +60,7 @@ pub enum AiDenoiseEvent {
     Finished(Result<AiDenoisedImage, String>),
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn model_cache_dir() -> PathBuf {
     #[cfg(target_os = "android")]
     {
@@ -997,8 +998,8 @@ fn infer_bayer(
         let cfa = raw.color_indices[index] as usize;
         let black = raw.black_levels_per_pixel[index];
         let white = raw.white_levels[cfa].max(black + 1.0);
-        let original = ((f32::from(raw.raw_pixels[index]) - black) / (white - black))
-            .clamp(0.0, 1.0);
+        let original =
+            ((f32::from(raw.raw_pixels[index]) - black) / (white - black)).clamp(0.0, 1.0);
         let distance = clip_distance[index];
         let proximity = if distance <= CLIP_CORE_RADIUS {
             1.0
@@ -1827,9 +1828,11 @@ mod tests {
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 1600 });
         let (device, queue) = test_wgpu_device();
         let render = |exposure_stops: f32, ai_enabled: bool| {
-            let mut exposure = ExposureParams::default();
-            exposure.exposure = exposure_stops;
-            exposure.ai_denoise_enabled = ai_enabled;
+            let exposure = ExposureParams {
+                exposure: exposure_stops,
+                ai_denoise_enabled: ai_enabled,
+                ..ExposureParams::default()
+            };
             let params = GpuParams::new(&exposure, &MaskStack::default(), &proxy);
             let pipeline = RawGpuPipeline::new_headless_with_quality(
                 &device,
