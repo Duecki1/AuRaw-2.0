@@ -367,6 +367,22 @@ pub(crate) fn desktop_thumbnail_cache_root() -> PathBuf {
         .join(DESKTOP_THUMBNAIL_CACHE_DIR)
 }
 
+/// Removes every generated library preview. Both unedited RAW thumbnails and
+/// edited renditions live below this private, app-owned directory and can be
+/// rebuilt from the RAW plus its sidecar.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn clear_desktop_thumbnail_cache() -> Result<(), String> {
+    let root = desktop_thumbnail_cache_root();
+    match fs::remove_dir_all(&root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "could not clear thumbnail cache {}: {error}",
+            root.display()
+        )),
+    }
+}
+
 #[cfg(all(not(target_os = "android"), windows))]
 fn desktop_platform_cache_root() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")

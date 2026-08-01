@@ -16,7 +16,7 @@ def test_unedited_desktop_thumbnails_are_persisted() -> None:
     assert ".auraw-raw-thumb.png" in THUMBNAIL_CACHE
     assert "load_desktop_raw_thumbnail" in LIBRARY
     assert "save_desktop_raw_thumbnail" in LIBRARY
-    assert LIBRARY.index("load_desktop_raw_thumbnail") < LIBRARY.index("load_raw_embedded_thumbnail(path")
+    assert LIBRARY.index("load_desktop_raw_thumbnail") < LIBRARY.index("load_raw_thumbnail(path")
 
 
 def test_android_thumbnail_cache_survives_refresh_restart_and_cache_scavenging() -> None:
@@ -31,15 +31,18 @@ def test_android_thumbnail_cache_survives_refresh_restart_and_cache_scavenging()
     assert "materializeRawLibraryThumbnail" in STORAGE
 
 
-def test_library_unedited_thumbnails_never_unpack_sensor_pixels() -> None:
-    assert "load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)" in LIBRARY
+def test_library_unedited_thumbnails_prefer_embedded_preview_then_render_fallback() -> None:
+    assert "load_raw_thumbnail(path, THUMBNAIL_EDGE)" in LIBRARY
     desktop_loader = LIBRARY[
         LIBRARY.index("fn load_desktop_library_thumbnail"):
         LIBRARY.index("fn load_android_library_thumbnail")
     ]
-    assert "load_raw_thumbnail(path" not in desktop_loader
-    assert "load_raw_embedded_thumbnail(&path, maximum_edge)" in ANDROID
-    assert "load_raw_embedded_thumbnail(&temporary, maximum_edge)" in ANDROID
+    assert "load_raw_thumbnail(path, THUMBNAIL_EDGE)" in desktop_loader
+    assert "load_raw_thumbnail(&path, maximum_edge)" in ANDROID
+    assert "load_raw_thumbnail(&temporary, maximum_edge)" in ANDROID
+    fallback = RAW[RAW.index("pub fn load_raw_thumbnail"):RAW.index("fn open_libraw")]
+    assert fallback.index("load_embedded_thumbnail") < fallback.index("load_processed_thumbnail")
+    assert "PROCESSED_THUMBNAIL_GATE" in RAW
 
 
 def test_android_embedded_previews_are_not_blocked_by_full_sensor_pixel_budget() -> None:
@@ -107,8 +110,21 @@ def test_android_import_picker_supports_single_and_batch_selection() -> None:
 
 
 def test_android_previewless_raw_fallback_handles_modern_sensors_serially() -> None:
-    assert "ANDROID_PROCESSED_THUMBNAIL_GATE" in RAW
+    assert "PROCESSED_THUMBNAIL_GATE" in RAW
     assert "MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS: u64 = MAX_SENSOR_PIXELS" in RAW
     assert "MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 64 * 1024 * 1024" in RAW
     fallback = RAW[RAW.index("fn load_processed_thumbnail"):RAW.index("fn embedded_thumbnail_orientation")]
-    assert fallback.index("ANDROID_PROCESSED_THUMBNAIL_GATE") < fallback.index("open_libraw(path)")
+    assert fallback.index("PROCESSED_THUMBNAIL_GATE") < fallback.index("open_libraw(path)")
+
+
+def test_failed_thumbnail_attempts_retry_and_cache_can_be_cleared() -> None:
+    assert '"Preview unavailable"' not in LIBRARY
+    assert "thumbnail_retry_after" in LIBRARY
+    assert "request_repaint_after(delay)" in LIBRARY
+    assert "Clear thumbnail cache" in SETTINGS
+    assert "clear_desktop_thumbnail_cache" in THUMBNAIL_CACHE
+    assert "prepare_for_thumbnail_cache_clear" in LIBRARY
+    assert "clear_thumbnail_cache" in APP
+    assert "clearThumbnailCache" in ANDROID
+    assert "clearThumbnailCache" in ACTIVITY
+    assert "clearThumbnailCacheDirectory" in STORAGE
