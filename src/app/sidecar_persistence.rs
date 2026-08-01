@@ -20,13 +20,17 @@ fn sidecar_interaction_active(ctx: &egui::Context) -> bool {
 
 impl AurawApp {
     pub(super) fn capture_sidecar_edit_state(&self) -> SidecarEditState {
-        let camera_profile = self
-            .selected_camera_profile
-            .as_ref()
-            .zip(self.camera_profile_folder.as_ref())
-            .and_then(|(selected, root)| selected.strip_prefix(root).ok())
-            .filter(|relative| !relative.as_os_str().is_empty())
-            .map(std::path::Path::to_path_buf);
+        let camera_profile = self.selected_camera_profile.as_ref().and_then(|selected| {
+            let root = self.camera_profile_folder.as_ref()?;
+            if selected == root {
+                return Some(std::path::PathBuf::from("."));
+            }
+            selected
+                .strip_prefix(root)
+                .ok()
+                .filter(|relative| !relative.as_os_str().is_empty())
+                .map(std::path::Path::to_path_buf)
+        });
         SidecarEditState {
             exposure: self.exposure,
             geometry: self.geometry.sanitized(),

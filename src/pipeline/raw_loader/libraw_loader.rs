@@ -152,9 +152,7 @@ pub fn load_raw_file_with_profile_selection(
     };
 
     let external_profiles_started = Instant::now();
-    let mut matches = match mode {
-        CameraProfileMode::MatrixOnly => Vec::new(),
-        CameraProfileMode::DcpProfiles | CameraProfileMode::Automatic => profile_folder
+    let mut matches = profile_folder
             .map(|folder| find_matching_dcp_profiles(folder, &camera_make, &camera_model))
             .transpose()
             .unwrap_or_else(|error| {
@@ -166,8 +164,7 @@ pub fn load_raw_file_with_profile_selection(
                 }
                 None
             })
-            .unwrap_or_default(),
-    };
+            .unwrap_or_default();
     crate::diagnostics::record(format!(
         "External camera-profile lookup finished in {:.3}s",
         external_profiles_started.elapsed().as_secs_f64()
@@ -193,8 +190,11 @@ pub fn load_raw_file_with_profile_selection(
             camera_make, camera_model
         ));
     }
-    let external_profile =
-        explicitly_selected.or_else(|| (!matches.is_empty()).then(|| matches.remove(0)));
+    let external_profile = if mode == CameraProfileMode::MatrixOnly {
+        None
+    } else {
+        explicitly_selected.or_else(|| (!matches.is_empty()).then(|| matches.remove(0)))
+    };
 
     let (selected_profile_path, selected_profile) = if let Some(mut candidate) = external_profile {
         candidate.profile.camera_calibration_signature = raw_camera_signature;

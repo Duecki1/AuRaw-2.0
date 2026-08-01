@@ -246,25 +246,22 @@ impl Sidebar {
             .or_else(|| raw.camera_profile.name.clone())
             .unwrap_or_else(|| "Camera matrix".to_owned());
 
-        if candidates.len() == 1 {
-            ui.horizontal_wrapped(|ui| {
-                ui.strong("Camera profile");
-                ui.label(&active_name);
-            });
-            ui.separator();
-            return;
-        }
-
         let previous = app.selected_camera_profile.clone();
         let mut selection = previous.clone();
-        let selected_text = previous
+        let embedded_matrix_selected = previous
+            .as_ref()
+            .zip(app.camera_profile_folder.as_ref())
+            .is_some_and(|(selected, root)| selected == root);
+        let selected_text = embedded_matrix_selected
+            .then_some("Embedded Matrix".to_owned())
+            .or_else(|| previous
             .as_ref()
             .and_then(|selected| {
                 candidates
                     .iter()
                     .find(|candidate| candidate.path == *selected)
                     .map(|candidate| candidate.name.clone())
-            })
+            }))
             .unwrap_or_else(|| format!("Automatic — {active_name}"));
 
         ui.horizontal(|ui| {
@@ -275,6 +272,14 @@ impl Sidebar {
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut selection, None, "Automatic (recommended)")
                         .on_hover_text("Use AuRaw's preferred matching profile for this camera.");
+                    if let Some(root) = app.camera_profile_folder.as_ref() {
+                        ui.selectable_value(
+                            &mut selection,
+                            Some(root.clone()),
+                            "Embedded Matrix",
+                        )
+                        .on_hover_text("Use the RAW's embedded camera matrix without a DCP profile.");
+                    }
                     ui.separator();
                     for candidate in &candidates {
                         ui.selectable_value(
