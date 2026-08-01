@@ -71,7 +71,6 @@ Local inference uses Microsoft ONNX Runtime through the Rust `ort` bindings. ONN
 
 ## ViTMatte
 
-Subject and Not Subject masks use ViTMatte Small (Composition-1k) as a second-stage alpha-matting refiner after BiRefNet. Object masks use the same refiner automatically after SAM 2.1 selection. AuRaw derives a conservative trimap from the coarse mask and applies ViTMatte only in the uncertain boundary band, preserving known foreground/background interiors.
 
 AuRaw downloads the ONNX export from the `Xenova/vitmatte-small-composition-1k` Hugging Face repository only after the existing AI-model download consent. The exact file is pinned by size and SHA-256 before use. The upstream `hustvl/vitmatte-small-composition-1k` model is licensed under the Apache License 2.0.
 

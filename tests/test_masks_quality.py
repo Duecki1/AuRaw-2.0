@@ -148,6 +148,9 @@ def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
     assert "ADE20K_CLASS_COUNT: usize = 150" in ai
     assert "class_queries_logits" in ai
     assert "masks_queries_logits" in ai
+    assert "let mut semantic_scores = [0.0f32; ADE20K_CLASS_COUNT]" in ai
+    assert "let competition = best_selected / total" in ai
+    assert "vitmatte_path" in ai
     assert "resize_probability_u8" in ai
 
 

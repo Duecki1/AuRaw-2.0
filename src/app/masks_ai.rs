@@ -546,6 +546,8 @@ impl AurawApp {
             if !valid {
                 continue;
             }
+                && crate::ai_masks::vitmatte_model_is_verified(&self.vitmatte_model_path())
+            {
             } else {
                 self.egui_ctx.request_repaint();
             }
@@ -997,14 +999,20 @@ impl AurawApp {
         let mut finished = None;
         for event in events {
             match event {
+                    label,
+                    downloaded,
+                    total,
+                } => {
                     self.background_tasks.set_global_visible(task_id, true);
                     self.background_tasks
+                        .rename(task_id, format!("Downloading {label}"));
                     self.update_background_progress(
                         Some(task_id),
                         TaskProgress::units(
                             downloaded,
                             total,
                             Some("bytes".to_owned()),
+                            format!("Downloading {label}"),
                         )
                         .with_detail(format!(
                             "{:.1} / {:.1} MB",

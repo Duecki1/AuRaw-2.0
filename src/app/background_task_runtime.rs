@@ -275,8 +275,10 @@ impl AurawApp {
         );
         self.egui_ctx.request_repaint();
     }
+                && crate::ai_masks::vitmatte_model_is_verified(&request.vitmatte_path);
         self.background_tasks
                 model_path: request.model_path,
+                vitmatte_path: request.vitmatte_path,
                 allow_download: request.allow_download,
                 runtime_path: request.runtime_path,
                 runtime_sha256: request.runtime_sha256,

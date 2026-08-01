@@ -34,7 +34,8 @@ pub const VITMATTE_MODEL_BYTES: u64 = 103_885_865;
 pub const VITMATTE_MODEL_URL: &str = "https://huggingface.co/Xenova/vitmatte-small-composition-1k/resolve/5e04250c42d7a03dc125b13adb415a47584ec60b/onnx/model.onnx";
 pub const VITMATTE_MODEL_SHA256_HEX: &str =
     "bf28d2e0be2c073286e88d60ad649d7123da2749a2d99133fd1098d5887e0225";
-const VITMATTE_MAX_EDGE_DESKTOP: u32 = 1280;
+// probabilities are normally sparse; keeping them sparse avoids evaluating all
+// 150 classes for every query and pixel while preserving semantic argmaxes.
 const VITMATTE_MAX_EDGE_ANDROID: u32 = 768;
 const VITMATTE_SIZE_DIVISOR: u32 = 32;
 
@@ -50,6 +51,9 @@ static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(not(target_os = "android"))]
 type RuntimeProbeResult = (PathBuf, String);
+#[cfg(not(target_os = "android"))]
+static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
+
 ", path.display()))?;
     anyhow::ensure!(
         metadata.len()
@@ -58,6 +62,12 @@ type RuntimeProbeResult = (PathBuf, String);
     anyhow::ensure!(
     );
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn subject_models_are_verified(birefnet: &Path, vitmatte: &Path) -> bool {
+    verify_model(birefnet).is_ok() && verify_vitmatte_model(vitmatte).is_ok()
 }
 
 #[cfg(test)]
@@ -3236,6 +3246,54 @@ fn resize_f32(
     }
 
     #[test]
+        let set_probability = |logits: &mut [f32], query, class, probability: f32| {
+        };
+
+        // Sky has the strongest individual semantic score. Two different
+        // architecture classes have a larger combined score, which must not
+        // let the much broader Architecture group steal the pixel.
+        set_probability(&mut class_logits, 0, 2, 0.9);
+        set_probability(&mut class_logits, 0, 12, 0.1);
+        set_probability(&mut class_logits, 1, 0, 0.6);
+        set_probability(&mut class_logits, 1, 20, 0.4);
+        set_probability(&mut class_logits, 2, 1, 0.6);
+        set_probability(&mut class_logits, 2, 126, 0.4);
+
+        let query_classes = (0..queries)
+            .map(|query| {
+                let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let denominator = logits
+                    .iter()
+                    .map(|logit| (*logit - maximum).exp())
+                    .sum::<f32>();
+                logits[..ADE20K_CLASS_COUNT]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(class, logit)| {
+                        let probability = (*logit - maximum).exp() / denominator;
+                            .then_some((class, probability))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mask_logits = vec![10.0; queries];
+
+            &mask_logits,
+            1,
+            &query_classes::Sky.ade20k_class_ids(),
+        );
+            &mask_logits,
+            1,
+            &query_classes::Architecture.ade20k_class_ids(),
+        );
+        assert!(sky[0] > 0.5, "strongest sky class should select the pixel");
+        assert!(
+            architecture[0] < 0.5,
+            "two weaker architecture classes must not win by category size"
+        );
+    }
+
+    #[test]
 -{}.onnx",
             std::process::id(),
             SystemTime::now()
@@ -3249,9 +3307,11 @@ fn resize_f32(
     }
 
     #[test]
+        let vitmatte = PathBuf::from(std::env::var_os("AURAW_TEST_VITMATTE").unwrap());
         let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
         let sha256 = sha256_file_hex(&runtime).unwrap();
             &model,
+            &vitmatte,
             Some(&runtime),
             Some(&sha256),
             32,
@@ -3261,6 +3321,34 @@ fn resize_f32(
         .unwrap();
         assert_eq!((result.width, result.height), (32, 24));
         assert_eq!(result.mask.len(), 32 * 24);
+    }
+
+    #[test]
+    #[ignore = "manual integration probe requiring AURAW_TEST_VITMATTE and AURAW_TEST_ORT"]
+        let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
+        let sha256 = sha256_file_hex(&runtime).unwrap();
+        initialize_runtime(Some(&runtime), Some(&sha256)).unwrap();
+
+        let width = 64;
+        let height = 64;
+        let mut rgba = vec![255u8; width * height * 4];
+        let mut coarse = vec![0u8; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let index = y * width + x;
+                let value = if x < width / 2 { 48 } else { 208 };
+                rgba[index * 4] = value;
+                rgba[index * 4 + 1] = value;
+                rgba[index * 4 + 2] = value;
+                coarse[index] = if x < width / 2 { 255 } else { 0 };
+            }
+        }
+
+        let refined =
+            refine_mask_with_vitmatte(&vitmatte, &rgba, width as u32, height as u32, &coarse, 1.0)
+                .unwrap();
+        assert_eq!(refined.len(), coarse.len());
+        assert!(refined.iter().any(|value| (1..=254).contains(value)));
     }
 }
 
