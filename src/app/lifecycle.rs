@@ -367,6 +367,8 @@ impl AurawApp {
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
+            thumbnail_cache_size: None,
+            thumbnail_cache_size_receiver: None,
             #[cfg(not(target_os = "android"))]
             display_color_management: performance.display_color_management,
             #[cfg(not(target_os = "android"))]
@@ -646,6 +648,8 @@ impl AurawApp {
             raw_cache: VecDeque::new(),
             raw_cache_limit: performance.raw_cache_files,
             performance_settings_path,
+            thumbnail_cache_size: None,
+            thumbnail_cache_size_receiver: None,
             #[cfg(not(target_os = "android"))]
             display_color_management: performance.display_color_management,
             #[cfg(not(target_os = "android"))]
@@ -1274,7 +1278,64 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn thumbnail_cache_size_label(&mut self) -> String {
+        let update = self
+            .thumbnail_cache_size_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match update {
+            Some(Ok(result)) => {
+                if let Err(error) = &result {
+                    log::warn!("could not measure thumbnail cache: {error}");
+                }
+                self.thumbnail_cache_size = Some(result);
+                self.thumbnail_cache_size_receiver = None;
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.thumbnail_cache_size = Some(Err(
+                    "thumbnail cache size worker stopped unexpectedly".to_owned(),
+                ));
+                self.thumbnail_cache_size_receiver = None;
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+
+        if self.thumbnail_cache_size.is_none() && self.thumbnail_cache_size_receiver.is_none() {
+            let (sender, receiver) = mpsc::channel();
+            let repaint = self.egui_ctx.clone();
+            #[cfg(target_os = "android")]
+            let android_app = self.android_app.clone();
+            let spawn = std::thread::Builder::new()
+                .name("auraw-thumbnail-cache-size".to_owned())
+                .spawn(move || {
+                    #[cfg(not(target_os = "android"))]
+                    let result = crate::thumbnail_cache::desktop_thumbnail_cache_size_bytes();
+                    #[cfg(target_os = "android")]
+                    let result = crate::android::thumbnail_cache_size_bytes(&android_app);
+                    let _ = sender.send(result);
+                    repaint.request_repaint();
+                });
+            match spawn {
+                Ok(_) => self.thumbnail_cache_size_receiver = Some(receiver),
+                Err(error) => {
+                    self.thumbnail_cache_size =
+                        Some(Err(format!("could not start cache size worker: {error}")));
+                }
+            }
+        }
+
+        match self.thumbnail_cache_size.as_ref() {
+            Some(Ok(0)) => "0 MB used".to_owned(),
+            Some(Ok(bytes)) if *bytes < 100_000 => "<0.1 MB used".to_owned(),
+            Some(Ok(bytes)) => format!("{:.1} MB used", *bytes as f64 / 1_000_000.0),
+            Some(Err(_)) => "Size unavailable".to_owned(),
+            None => "Calculating size…".to_owned(),
+        }
+    }
+
     pub(crate) fn clear_thumbnail_cache(&mut self) {
+        self.thumbnail_cache_size = None;
+        self.thumbnail_cache_size_receiver = None;
         self.library.prepare_for_thumbnail_cache_clear();
         let decode_gate = self.library.decode_gate();
         let result = match decode_gate.write() {
@@ -1290,12 +1351,14 @@ impl AurawApp {
 
         match result {
             Ok(()) => {
+                self.thumbnail_cache_size = Some(Ok(0));
                 self.notice = Some("Thumbnail cache cleared. Rebuilding previews…".to_owned());
                 self.library.refresh(&self.egui_ctx);
             }
             Err(error) => {
                 self.notice = Some(format!("Could not clear thumbnail cache: {error}"));
-                self.library.set_status("Could not clear the thumbnail cache.");
+                self.library
+                    .set_status("Could not clear the thumbnail cache.");
             }
         }
     }

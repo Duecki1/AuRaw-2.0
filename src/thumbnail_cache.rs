@@ -452,6 +452,58 @@ pub(crate) fn clear_desktop_thumbnail_cache() -> Result<(), String> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+pub(crate) fn desktop_thumbnail_cache_size_bytes() -> Result<u64, String> {
+    directory_size_bytes(&desktop_thumbnail_cache_root())
+}
+
+#[cfg(not(target_os = "android"))]
+fn directory_size_bytes(root: &Path) -> Result<u64, String> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut total = 0_u64;
+    while let Some(directory) = directories.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect thumbnail cache {}: {error}",
+                    directory.display()
+                ))
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "could not read thumbnail cache entry in {}: {error}",
+                    directory.display()
+                )
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                format!(
+                    "could not inspect thumbnail cache entry {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            if file_type.is_dir() {
+                directories.push(entry.path());
+            } else if file_type.is_file() {
+                let bytes = entry
+                    .metadata()
+                    .map_err(|error| {
+                        format!(
+                            "could not inspect thumbnail cache entry {}: {error}",
+                            entry.path().display()
+                        )
+                    })?
+                    .len();
+                total = total.saturating_add(bytes);
+            }
+        }
+    }
+    Ok(total)
+}
+
 #[cfg(all(not(target_os = "android"), windows))]
 fn desktop_platform_cache_root() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -717,5 +769,18 @@ mod tests {
         assert!(cache.starts_with(desktop_thumbnail_cache_root()));
         assert!(cache.to_string_lossy().ends_with(RAW_THUMBNAIL_SUFFIX));
         assert_ne!(cache.parent(), raw.parent());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn thumbnail_cache_size_counts_nested_cache_files() {
+        let root = temporary_test_path("size");
+        let nested = root.join("ab");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("one.jpg"), b"123").unwrap();
+        fs::write(nested.join("two.fingerprint"), b"12345").unwrap();
+
+        assert_eq!(directory_size_bytes(&root).unwrap(), 8);
+        fs::remove_dir_all(root).unwrap();
     }
 }

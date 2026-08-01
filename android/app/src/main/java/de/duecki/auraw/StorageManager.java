@@ -298,6 +298,13 @@ final class StorageManager {
                 new File(activity.getCacheDir(), "library-thumbnails"));
     }
 
+    long thumbnailCacheSizeBytes() {
+        long persistent = thumbnailCacheDirectorySize(persistentThumbnailCacheDirectory());
+        long legacy = thumbnailCacheDirectorySize(
+                new File(activity.getCacheDir(), "library-thumbnails"));
+        return persistent > Long.MAX_VALUE - legacy ? Long.MAX_VALUE : persistent + legacy;
+    }
+
     /**
      * Slow compatibility fallback for providers/LibRaw builds that cannot seek
      * through /proc/self/fd. The first successful decode is cached as JPEG, so
@@ -830,6 +837,24 @@ final class StorageManager {
                         "Could not clear thumbnail cache entry " + entry);
             }
         }
+    }
+
+    private static long thumbnailCacheDirectorySize(File directory) {
+        if (!directory.isDirectory()) {
+            return 0L;
+        }
+        File[] entries = directory.listFiles();
+        if (entries == null) {
+            return 0L;
+        }
+        long total = 0L;
+        for (File entry : entries) {
+            long bytes = entry.isDirectory()
+                    ? thumbnailCacheDirectorySize(entry)
+                    : Math.max(0L, entry.length());
+            total = total > Long.MAX_VALUE - bytes ? Long.MAX_VALUE : total + bytes;
+        }
+        return total;
     }
 
     /** Lazily preserves cache entries written by releases that used getCacheDir(). */

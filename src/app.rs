@@ -735,6 +735,8 @@ pub struct AurawApp {
     raw_cache: VecDeque<CachedRawDecode>,
     raw_cache_limit: usize,
     performance_settings_path: Option<PathBuf>,
+    thumbnail_cache_size: Option<Result<u64, String>>,
+    thumbnail_cache_size_receiver: Option<mpsc::Receiver<Result<u64, String>>>,
     #[cfg(not(target_os = "android"))]
     pub(crate) display_color_management: bool,
     #[cfg(not(target_os = "android"))]
@@ -984,6 +986,10 @@ impl AurawApp {
         if self.active_tab == AppTab::Library && tab != AppTab::Library {
             // Keep thumbnail decoding from competing with Develop rendering.
             self.library.prepare_for_develop();
+        }
+        if tab == AppTab::Settings {
+            self.thumbnail_cache_size = None;
+            self.thumbnail_cache_size_receiver = None;
         }
         self.active_tab = tab;
         #[cfg(target_os = "android")]

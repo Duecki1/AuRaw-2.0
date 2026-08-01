@@ -450,6 +450,20 @@ pub fn clear_thumbnail_cache(app: &AndroidApp) -> Result<(), String> {
     .map_err(|error| format!("could not clear Android thumbnail cache: {error:#}"))
 }
 
+pub fn thumbnail_cache_size_bytes(app: &AndroidApp) -> Result<u64, String> {
+    let bytes = with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("thumbnailCacheSizeBytes"),
+            jni::jni_sig!(() -> i64),
+            &[],
+        )?
+        .j()
+    })
+    .map_err(|error| format!("could not measure Android thumbnail cache: {error:#}"))?;
+    u64::try_from(bytes).map_err(|_| "Android returned a negative thumbnail cache size".to_owned())
+}
+
 pub fn load_library_display_dimensions(app: &AndroidApp, uri: &str) -> Result<[u32; 2], String> {
     let uri_string = uri.to_owned();
     let fd = with_activity(app, |env, activity| {
