@@ -23,7 +23,7 @@ impl ScreenLayout {
             Self::Horizontal => {
                 (viewport.x * 0.28).clamp(Self::MIN_HORIZONTAL_SIDEBAR_WIDTH, 460.0)
             }
-            Self::Vertical => (viewport.y * 0.34).clamp(Self::MIN_VERTICAL_SIDEBAR_HEIGHT, 480.0),
+            Self::Vertical => (viewport.y * 0.40).clamp(Self::MIN_VERTICAL_SIDEBAR_HEIGHT, 480.0),
         }
     }
 }

@@ -87,6 +87,25 @@ def test_navigation_proxy_is_full_frame_but_intentionally_very_low_resolution() 
     assert "navigation_dirty_mask_layers" in APP
 
 
+def test_plain_zoom_does_not_eagerly_build_a_second_full_frame_pipeline() -> None:
+    navigation = PROCESSING_EXPORT[
+        PROCESSING_EXPORT.index("fn advance_navigation_preview"):
+        PROCESSING_EXPORT.index("pub(crate) fn mark_pipeline_dirty")
+    ]
+    assert "let zoomed = self.preview_zoom > DETAIL_ZOOM_START;" in navigation
+    assert "zoomed && (self.preview_navigation.is_some() || should_update)" in navigation
+    assert "Eager creation here caused a visible hitch" in navigation
+
+
+def test_android_detail_crop_waits_until_pinch_navigation_ends() -> None:
+    detail = PROCESSING_EXPORT[
+        PROCESSING_EXPORT.index("fn advance_preview_detail"):
+        PROCESSING_EXPORT.index("fn advance_navigation_preview")
+    ]
+    assert "if self.preview_touch_navigation_active" in detail
+    assert "both fingers are lifted" in detail
+
+
 def test_no_zoom_phase_can_flash_the_tiny_navigation_proxy() -> None:
     preview_base = PROCESSING_EXPORT[
         PROCESSING_EXPORT.index("pub(crate) fn preview_base_pipeline"):

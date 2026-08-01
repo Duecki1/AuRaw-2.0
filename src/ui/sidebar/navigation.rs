@@ -12,43 +12,286 @@ impl Sidebar {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
 
         if layout == ScreenLayout::Vertical {
-            let previous_sidebar_tab = app.sidebar_tab;
-            egui::ScrollArea::horizontal()
-                .id_salt("develop-sidebar-tabs")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (tab, label) in [
-                            (SidebarTab::Adjustments, "Adjustments"),
-                            (SidebarTab::Crop, "Crop"),
-                            (SidebarTab::Masks, "Masks"),
-                            (SidebarTab::Inpainting, "Inpainting"),
-                            (SidebarTab::Export, "Export"),
-                        ] {
-                            ui.selectable_value(&mut app.sidebar_tab, tab, label);
-                        }
-                    });
-                });
-            Self::finish_sidebar_tab_change(app, previous_sidebar_tab);
-            ui.add_space(2.0);
-            ui.separator();
-        } else {
-            ui.horizontal(|ui| {
-                ui.heading(match app.sidebar_tab {
-                    SidebarTab::Adjustments => "Edit",
-                    SidebarTab::Crop => "Crop & Straighten",
-                    SidebarTab::Masks => "Masking",
-                    SidebarTab::Inpainting => "Remove & Heal",
-                    SidebarTab::Export => "Export",
-                });
-            });
-            ui.add_space(3.0);
-            ui.separator();
+            Self::show_vertical_mobile_shell(ui, app, frame);
+            return;
         }
 
-        if layout == ScreenLayout::Vertical {
-            Self::show_vertical_section_tabs(ui, app);
+        ui.horizontal(|ui| {
+            ui.heading(match app.sidebar_tab {
+                SidebarTab::Adjustments => "Edit",
+                SidebarTab::Crop => "Crop & Straighten",
+                SidebarTab::Masks => "Masking",
+                SidebarTab::Inpainting => "Remove & Heal",
+                SidebarTab::Export => "Export",
+            });
+        });
+        ui.add_space(3.0);
+        ui.separator();
+
+        Self::show_sidebar_content(ui, app, layout, frame);
+    }
+
+    fn show_vertical_mobile_shell(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+        if !app.expert_mode
+            && matches!(
+                app.adjustment_section,
+                AdjustmentSection::AdvancedRendering | AdjustmentSection::Raw
+            )
+        {
+            app.adjustment_section = AdjustmentSection::Light;
         }
+
+        // The order here is intentional. Bottom panels consume their space in
+        // call order: the primary tool rail is attached to the screen edge, the
+        // current tool's categories sit directly above it, and the scrollable
+        // controls receive all remaining height. This mirrors mobile darkroom
+        // apps while preserving the desktop sidebar's tool/category hierarchy.
+        egui::Panel::bottom("develop_portrait_primary_tabs")
+            .resizable(false)
+            .exact_size(62.0)
+            .frame(Self::mobile_navigation_frame(ui))
+            .show(ui, |ui| Self::show_mobile_primary_tabs(ui, app));
+
+        if matches!(app.sidebar_tab, SidebarTab::Adjustments | SidebarTab::Masks) {
+            egui::Panel::bottom("develop_portrait_context_tabs")
+                .resizable(false)
+                .exact_size(58.0)
+                .frame(Self::mobile_navigation_frame(ui))
+                .show(ui, |ui| Self::show_mobile_context_tabs(ui, app));
+        }
+
+        // A central panel is required after nested edge panels so the scroll area
+        // is constrained to their remainder. Without it, ScrollArea measures its
+        // full contents against the outer resizable panel and can make the mobile
+        // sheet expand far beyond its requested default height.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(egui::Margin::same(0)))
+            .show(ui, |ui| {
+                Self::show_sidebar_content(ui, app, ScreenLayout::Vertical, frame)
+            });
+    }
+
+    fn mobile_navigation_frame(ui: &Ui) -> egui::Frame {
+        egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(0, 2))
+            .stroke(egui::Stroke::NONE)
+    }
+
+    fn paint_mobile_navigation_separators(ui: &Ui) {
+        let rect = ui.max_rect();
+        let stroke = egui::Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        );
+        ui.painter().hline(rect.x_range(), rect.top(), stroke);
+        ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
+    }
+
+    fn show_mobile_primary_tabs(ui: &mut Ui, app: &mut AurawApp) {
+        use egui_phosphor::regular;
+
+        Self::paint_mobile_navigation_separators(ui);
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let previous = app.sidebar_tab;
+        let item_width = (ui.available_width() / 5.0).max(1.0);
+        ui.horizontal(|ui| {
+            for (tab, icon, label, tooltip) in [
+                (
+                    SidebarTab::Adjustments,
+                    regular::SLIDERS_HORIZONTAL,
+                    "Edit",
+                    "Edit adjustments",
+                ),
+                (SidebarTab::Crop, regular::CROP, "Crop", "Crop and straighten"),
+                (SidebarTab::Masks, regular::SELECTION, "Mask", "Masking"),
+                (
+                    SidebarTab::Inpainting,
+                    regular::BANDAIDS,
+                    "Heal",
+                    "Remove and heal",
+                ),
+                (SidebarTab::Export, regular::EXPORT, "Export", "Export"),
+            ] {
+                if Self::mobile_icon_tab(
+                    ui,
+                    icon,
+                    label,
+                    app.sidebar_tab == tab,
+                    egui::vec2(item_width, 56.0),
+                    tooltip,
+                )
+                .clicked()
+                {
+                    app.sidebar_tab = tab;
+                }
+            }
+        });
+        Self::finish_sidebar_tab_change(app, previous);
+    }
+
+    fn show_mobile_context_tabs(ui: &mut Ui, app: &mut AurawApp) {
+        use egui_phosphor::regular;
+
+        Self::paint_mobile_navigation_separators(ui);
+        egui::ScrollArea::horizontal()
+            .id_salt("develop-portrait-context-tabs")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 1.0;
+                ui.horizontal(|ui| match app.sidebar_tab {
+                    SidebarTab::Adjustments => {
+                        for (section, icon, label, width) in [
+                            (AdjustmentSection::Light, regular::SUN, "Light", 58.0),
+                            (
+                                AdjustmentSection::ToneCurve,
+                                regular::WAVE_SINE,
+                                "Curve",
+                                58.0,
+                            ),
+                            (AdjustmentSection::Color, regular::DROP, "Color", 58.0),
+                            (
+                                AdjustmentSection::ColorGrading,
+                                regular::CIRCLES_THREE,
+                                "Grading",
+                                64.0,
+                            ),
+                            (AdjustmentSection::Detail, regular::APERTURE, "Detail", 58.0),
+                            (AdjustmentSection::Effects, regular::SPARKLE, "Effects", 60.0),
+                            (
+                                AdjustmentSection::ColorMixer,
+                                regular::SWATCHES,
+                                "Mixer",
+                                58.0,
+                            ),
+                            (AdjustmentSection::Optics, regular::EYE, "Optics", 58.0),
+                        ] {
+                            if Self::mobile_icon_tab(
+                                ui,
+                                icon,
+                                label,
+                                app.adjustment_section == section,
+                                egui::vec2(width, 52.0),
+                                label,
+                            )
+                            .clicked()
+                            {
+                                app.adjustment_section = section;
+                            }
+                        }
+                        if app.expert_mode {
+                            for (section, icon, label, width) in [
+                                (
+                                    AdjustmentSection::AdvancedRendering,
+                                    regular::SLIDERS,
+                                    "Advanced",
+                                    72.0,
+                                ),
+                                (AdjustmentSection::Raw, regular::IMAGE, "Raw", 54.0),
+                            ] {
+                                if Self::mobile_icon_tab(
+                                    ui,
+                                    icon,
+                                    label,
+                                    app.adjustment_section == section,
+                                    egui::vec2(width, 52.0),
+                                    label,
+                                )
+                                .clicked()
+                                {
+                                    app.adjustment_section = section;
+                                }
+                            }
+                        }
+                    }
+                    SidebarTab::Masks => {
+                        for (section, icon, label, width) in [
+                            (MaskSection::Properties, regular::SELECTION, "Mask", 58.0),
+                            (MaskSection::Light, regular::SUN, "Light", 58.0),
+                            (MaskSection::ToneCurve, regular::WAVE_SINE, "Curve", 58.0),
+                            (MaskSection::Color, regular::DROP, "Color", 58.0),
+                            (
+                                MaskSection::ColorGrading,
+                                regular::CIRCLES_THREE,
+                                "Grading",
+                                64.0,
+                            ),
+                            (MaskSection::Effects, regular::SPARKLE, "Effects", 60.0),
+                            (MaskSection::ColorMixer, regular::SWATCHES, "Mixer", 58.0),
+                        ] {
+                            if Self::mobile_icon_tab(
+                                ui,
+                                icon,
+                                label,
+                                app.mask_section == section,
+                                egui::vec2(width, 52.0),
+                                label,
+                            )
+                            .clicked()
+                            {
+                                app.mask_section = section;
+                            }
+                        }
+                    }
+                    SidebarTab::Crop | SidebarTab::Inpainting | SidebarTab::Export => {}
+                });
+            });
+    }
+
+    fn mobile_icon_tab(
+        ui: &mut Ui,
+        icon: &str,
+        label: &str,
+        selected: bool,
+        size: egui::Vec2,
+        tooltip: &str,
+    ) -> egui::Response {
+        use egui::{Align2, FontId, Sense};
+
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let painter = ui.painter_at(rect);
+        let visuals = ui.visuals();
+        let tile_width = if size.y > 54.0 { 56.0 } else { 50.0 };
+        let tile = egui::Rect::from_center_size(
+            rect.center(),
+            egui::vec2(size.x.min(tile_width), size.y - 4.0),
+        );
+        if selected {
+            painter.rect_filled(tile, 6.0, visuals.selection.bg_fill);
+        } else if response.hovered() || response.highlighted() {
+            painter.rect_filled(tile, 6.0, visuals.widgets.hovered.bg_fill);
+        }
+
+        let color = if selected {
+            visuals.selection.stroke.color
+        } else if response.hovered() {
+            visuals.widgets.hovered.fg_stroke.color
+        } else {
+            visuals.weak_text_color()
+        };
+        painter.text(
+            egui::pos2(rect.center().x, rect.top() + size.y * 0.35),
+            Align2::CENTER_CENTER,
+            icon,
+            FontId::proportional((size.y * 0.38).clamp(19.0, 23.0)),
+            color,
+        );
+        painter.text(
+            egui::pos2(rect.center().x, rect.bottom() - size.y * 0.19),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(if size.y > 54.0 { 10.5 } else { 9.5 }),
+            color,
+        );
+        response.on_hover_text(tooltip)
+    }
+
+    fn show_sidebar_content(
+        ui: &mut Ui,
+        app: &mut AurawApp,
+        layout: ScreenLayout,
+        frame: &eframe::Frame,
+    ) {
 
         let sidebar_scroll_source = if slider_scroll_locked(ui.ctx()) {
             egui::scroll_area::ScrollSource::NONE
@@ -119,6 +362,20 @@ impl Sidebar {
         // height, so `Align::Center` vertically centers the button and stretches the
         // whole Develop panel after the title row was removed.
         ui.horizontal(|ui| {
+            if layout == ScreenLayout::Vertical {
+                ui.strong(match app.adjustment_section {
+                    AdjustmentSection::Light => "Light",
+                    AdjustmentSection::ToneCurve => "Tone Curve",
+                    AdjustmentSection::Color => "Color",
+                    AdjustmentSection::ColorGrading => "Color Grading",
+                    AdjustmentSection::Detail => "Detail",
+                    AdjustmentSection::Effects => "Effects",
+                    AdjustmentSection::ColorMixer => "Color Mixer",
+                    AdjustmentSection::Optics => "Optics",
+                    AdjustmentSection::AdvancedRendering => "Advanced Rendering",
+                    AdjustmentSection::Raw => "Raw",
+                });
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
                     ui,
@@ -310,81 +567,6 @@ impl Sidebar {
         if selection != previous {
             app.select_camera_profile_for_current(selection, frame);
         }
-    }
-
-    fn show_vertical_section_tabs(ui: &mut Ui, app: &mut AurawApp) {
-        match app.sidebar_tab {
-            SidebarTab::Adjustments => {
-                if !app.expert_mode
-                    && matches!(
-                        app.adjustment_section,
-                        AdjustmentSection::AdvancedRendering | AdjustmentSection::Raw
-                    )
-                {
-                    app.adjustment_section = AdjustmentSection::Light;
-                }
-                Self::show_adjustment_tabs(ui, app);
-            }
-            SidebarTab::Masks => Self::show_mask_tabs(ui, app),
-            SidebarTab::Crop | SidebarTab::Inpainting | SidebarTab::Export => {}
-        }
-    }
-
-    fn show_adjustment_tabs(ui: &mut Ui, app: &mut AurawApp) {
-        egui::ScrollArea::horizontal()
-            .id_salt("adjustment-section-tabs")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (section, label) in [
-                        (AdjustmentSection::Light, "Light"),
-                        (AdjustmentSection::ToneCurve, "Tone Curve"),
-                        (AdjustmentSection::Color, "Color"),
-                        (AdjustmentSection::ColorGrading, "Color Grading"),
-                        (AdjustmentSection::Detail, "Detail"),
-                        (AdjustmentSection::Effects, "Effects"),
-                        (AdjustmentSection::ColorMixer, "Color Mixer"),
-                        (AdjustmentSection::Optics, "Optics"),
-                    ] {
-                        ui.selectable_value(&mut app.adjustment_section, section, label);
-                    }
-                    if app.expert_mode {
-                        ui.selectable_value(
-                            &mut app.adjustment_section,
-                            AdjustmentSection::AdvancedRendering,
-                            "Advanced",
-                        );
-                        ui.selectable_value(
-                            &mut app.adjustment_section,
-                            AdjustmentSection::Raw,
-                            "Raw",
-                        );
-                    }
-                });
-            });
-        ui.separator();
-    }
-
-    fn show_mask_tabs(ui: &mut Ui, app: &mut AurawApp) {
-        egui::ScrollArea::horizontal()
-            .id_salt("mask-section-tabs")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (section, label) in [
-                        (MaskSection::Properties, "Mask Properties"),
-                        (MaskSection::Light, "Light"),
-                        (MaskSection::ToneCurve, "Tone Curve"),
-                        (MaskSection::Color, "Color"),
-                        (MaskSection::ColorGrading, "Color Grading"),
-                        (MaskSection::Effects, "Effects"),
-                        (MaskSection::ColorMixer, "Color Mixer"),
-                    ] {
-                        ui.selectable_value(&mut app.mask_section, section, label);
-                    }
-                });
-            });
-        ui.separator();
     }
 
     fn adjustment_section(

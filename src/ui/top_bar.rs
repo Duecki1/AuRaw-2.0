@@ -17,7 +17,8 @@ impl TopBar {
             size,
             egui::Button::new(
                 egui::RichText::new(egui_phosphor::regular::ARROW_LEFT).size(size.y * 0.55),
-            ),
+            )
+            .frame(false),
         )
         .on_hover_text("Back to Library")
     }
@@ -36,7 +37,9 @@ impl TopBar {
         };
         ui.add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new(icon).size(size.y * 0.55)).min_size(size),
+            egui::Button::new(egui::RichText::new(icon).size(size.y * 0.55))
+                .min_size(size)
+                .frame(!cfg!(target_os = "android")),
         )
         .on_hover_text(hover_text)
     }
@@ -46,6 +49,32 @@ impl TopBar {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             app.show_global_task_control(ui);
+
+            let save_tooltip = if app.sidecar_save_in_progress() {
+                "Saving non-destructive edits…"
+            } else if app.sidecar_save_succeeded_recently() {
+                "Edits saved"
+            } else {
+                "Save non-destructive edits"
+            };
+            let save_icon = if app.sidecar_save_succeeded_recently() {
+                egui_phosphor::regular::CHECK
+            } else {
+                egui_phosphor::regular::FLOPPY_DISK
+            };
+            let save_response = ui
+                .add_enabled_ui(app.can_save_edits(), |ui| {
+                    ui.add_sized(
+                        egui::vec2(42.0, 36.0),
+                        egui::Button::new(egui::RichText::new(save_icon).size(19.8)).frame(false),
+                    )
+                })
+                .inner
+                .on_hover_text(save_tooltip);
+            if save_response.clicked() {
+                app.save_edits_now();
+            }
+
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 if Self::back_icon_button(ui, egui::vec2(42.0, 36.0)).clicked() {
                     app.activate_tab(AppTab::Library);
@@ -71,30 +100,6 @@ impl TopBar {
                 .clicked()
                 {
                     app.redo_edit();
-                }
-                let save_tooltip = if app.sidecar_save_in_progress() {
-                    "Saving non-destructive edits…"
-                } else if app.sidecar_save_succeeded_recently() {
-                    "Edits saved"
-                } else {
-                    "Save non-destructive edits"
-                };
-                let save_icon = if app.sidecar_save_succeeded_recently() {
-                    egui_phosphor::regular::CHECK
-                } else {
-                    egui_phosphor::regular::FLOPPY_DISK
-                };
-                let save_response = ui
-                    .add_enabled_ui(app.can_save_edits(), |ui| {
-                        ui.add_sized(
-                            egui::vec2(42.0, 36.0),
-                            egui::Button::new(egui::RichText::new(save_icon).size(19.8)),
-                        )
-                    })
-                    .inner
-                    .on_hover_text(save_tooltip);
-                if save_response.clicked() {
-                    app.save_edits_now();
                 }
             });
         });

@@ -278,6 +278,11 @@ impl Preview {
         }
         if moved {
             app.note_preview_motion();
+            // Android's NativeActivity loop is event driven. Asking for the next
+            // frame explicitly keeps high-frequency touch samples flowing at the
+            // display cadence instead of waiting for another platform wake-up.
+            #[cfg(target_os = "android")]
+            ui.ctx().request_repaint();
         }
 
         let painter = ui.painter_at(outer_rect);
@@ -390,6 +395,7 @@ impl Preview {
             );
         }
 
+        #[cfg(not(target_os = "android"))]
         painter.text(
             outer_rect.left_top() + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
