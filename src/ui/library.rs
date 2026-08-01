@@ -47,8 +47,8 @@ const THUMBNAIL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const THUMBNAIL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
-pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 16;
-pub(crate) const MAX_ANDROID_THUMBNAIL_WORKERS: usize = 4;
+pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 8;
+pub(crate) const MAX_ANDROID_THUMBNAIL_WORKERS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum LibrarySortOrder {
@@ -320,6 +320,8 @@ impl LibraryState {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn new_with_workers(context: &egui::Context, workers: usize) -> Self {
         let _ = context;
+        let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
+        crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
         Self {
             location: None,
             folder: None,
@@ -334,7 +336,7 @@ impl LibraryState {
             catalog_ready: false,
             status: "Open a folder to build your RAW library.".to_owned(),
             usage_clock: 0,
-            thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
+            thumbnail_workers,
             sort_order: LibrarySortOrder::default(),
             selected_sources: HashSet::new(),
             selection_mode: false,
@@ -364,6 +366,8 @@ impl LibraryState {
             log::warn!("{error}");
             "Android/media/de.duecki.auraw/.library".to_owned()
         });
+        let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
+        crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
         let mut state = Self {
             location: Some(location),
             android_app,
@@ -378,7 +382,7 @@ impl LibraryState {
             catalog_ready: false,
             status: String::new(),
             usage_clock: 0,
-            thumbnail_workers: workers.clamp(1, maximum_thumbnail_worker_count()),
+            thumbnail_workers,
             sort_order: LibrarySortOrder::default(),
             selected_sources: HashSet::new(),
             selection_mode: false,
@@ -485,6 +489,7 @@ impl LibraryState {
             return;
         }
         self.thumbnail_workers = workers;
+        crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(workers);
         if self.location.is_some() {
             self.refresh(context);
         }
@@ -1377,9 +1382,6 @@ static DEVELOPED_THUMBNAIL_GPU: OnceLock<Result<Mutex<DevelopedThumbnailGpu>, St
     OnceLock::new();
 
 #[cfg(not(target_os = "android"))]
-static DEVELOPED_THUMBNAIL_RENDER_GATE: Mutex<()> = Mutex::new(());
-
-#[cfg(not(target_os = "android"))]
 fn developed_thumbnail_gpu() -> Result<&'static Mutex<DevelopedThumbnailGpu>, String> {
     let initialized = DEVELOPED_THUMBNAIL_GPU.get_or_init(|| {
         let instance = eframe::wgpu::Instance::default();
@@ -1490,15 +1492,14 @@ fn render_uncached_developed_thumbnail(
     let sidecar_fingerprint = crate::sidecar::desktop_sidecar_fingerprint(path)?
         .ok_or_else(|| "edit sidecar disappeared before thumbnail rendering".to_owned())?;
 
-    // Full RAW decoding and the separate headless GPU are deliberately
-    // serialized. Embedded previews can still decode concurrently, while
-    // uncached edited cards avoid multiplying the larger sensor/GPU budget.
-    let _render_guard = DEVELOPED_THUMBNAIL_RENDER_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Edited rebuilds and preview-less RAW fallbacks share the same user-set
+    // concurrency budget because both unpack full sensors. The headless GPU
+    // phase below remains serialized on its device while RAW preparation for
+    // other edited cards can proceed concurrently.
+    let _render_permit = crate::thumbnail_cache::acquire_rendered_thumbnail_worker();
 
     // A different worker may have completed the cache while this request was
-    // waiting for the render gate.
+    // waiting for a rendered-thumbnail permit.
     if let Some(thumbnail) = crate::sidecar::load_developed_thumbnail_cache(path, maximum_edge)? {
         return Ok(Some(thumbnail));
     }

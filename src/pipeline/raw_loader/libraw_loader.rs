@@ -63,11 +63,6 @@ const MAX_THUMBNAIL_SOURCE_EDGE: u32 = 65_535;
 const MAX_THUMBNAIL_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_THUMBNAIL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
-// A half-size LibRaw render still has to unpack the sensor before it can make
-// the small output image. Keep this fallback serial on every platform so a
-// folder containing several preview-less RAWs cannot multiply that memory
-// cost across all thumbnail workers.
-static PROCESSED_THUMBNAIL_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(target_os = "android")]
 const MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS: u64 = MAX_SENSOR_PIXELS;
 
@@ -443,17 +438,18 @@ fn validate_embedded_thumbnail_metadata(
 }
 
 fn load_processed_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
-    let _memory_gate = PROCESSED_THUMBNAIL_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A half-size LibRaw render still unpacks the sensor. Share the user-set
+    // heavy-thumbnail limit with edited thumbnail rebuilding so their combined
+    // CPU and memory pressure stays predictable.
+    let _render_permit = crate::thumbnail_cache::acquire_rendered_thumbnail_worker();
     let ctx = open_libraw(path)?;
     #[cfg(target_os = "android")]
     {
         // Even half-size dcraw processing first unpacks the full sensor. The
-        // memory gate above prevents multiple preview-less RAWs from taking
-        // this path concurrently. Permit the same sensor safety ceiling as a
-        // normal Android RAW decode so imported modern-camera files can still
-        // receive a library preview when their embedded preview is unsupported.
+        // worker limiter above bounds how many preview-less RAWs can take this
+        // path concurrently. Permit the same sensor safety ceiling as a normal
+        // Android RAW decode so imported modern-camera files can still receive
+        // a library preview when their embedded preview is unsupported.
         let sizes = unsafe { &(*ctx.raw).rawdata.sizes };
         let sensor_pixels = u64::from(sizes.raw_width)
             .checked_mul(u64::from(sizes.raw_height))
