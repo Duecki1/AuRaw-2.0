@@ -2,9 +2,9 @@ use crate::app::{AppTab, AurawApp};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::{
     apply_lensfun_correction, build_proxy, compose_inpaint_strokes, is_supported_raw_path,
-    lensfun_catalog, load_raw_display_dimensions, load_raw_embedded_thumbnail,
-    load_raw_file_with_profile_selection, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry,
-    MaskRgbImage, MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
+    lensfun_catalog, load_raw_display_dimensions, load_raw_file_with_profile_selection,
+    load_raw_thumbnail, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage,
+    MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
 };
 use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
@@ -26,9 +26,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(target_os = "android"))]
 use std::sync::OnceLock;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
-use std::time::Duration;
 #[cfg(not(target_os = "android"))]
 use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 const THUMBNAIL_EDGE: u32 = 512;
 const MAX_LIBRARY_FILES: usize = 20_000;
@@ -44,6 +44,7 @@ const ANDROID_RESIDENT_THUMBNAIL_CACHE_LIMIT: usize = 72;
 const ANDROID_DEVELOP_TEXTURE_CACHE_LIMIT: usize = 10;
 const THUMBNAIL_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const THUMBNAIL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(8);
+const THUMBNAIL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
 pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 16;
@@ -174,6 +175,8 @@ pub(crate) struct LibraryEntry {
     /// because a preview texture finishes loading.
     layout_size: Option<[u32; 2]>,
     thumbnail_error: Option<String>,
+    thumbnail_failures: u8,
+    thumbnail_retry_after: Option<Instant>,
     thumbnail_queued: bool,
     developed_thumbnail: bool,
     last_used: u64,
@@ -502,6 +505,29 @@ impl LibraryState {
         Arc::clone(&self.decode_gate)
     }
 
+    /// Cancels the current generation and drops every in-memory preview before
+    /// the platform cache directory is cleared. The caller takes the shared
+    /// decode gate's writer lock before deleting files, then calls `refresh`.
+    pub(crate) fn prepare_for_thumbnail_cache_clear(&mut self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.event_receiver = None;
+        self.request_sender = None;
+        self.scanning = false;
+        self.usage_clock = 0;
+        for entry in &mut self.entries {
+            entry.texture = None;
+            entry.resident_thumbnail = None;
+            entry.texture_is_resident = false;
+            entry.thumbnail_size = None;
+            entry.thumbnail_error = None;
+            entry.thumbnail_failures = 0;
+            entry.thumbnail_retry_after = None;
+            entry.thumbnail_queued = false;
+            entry.developed_thumbnail = false;
+            entry.last_used = 0;
+        }
+    }
+
     fn resume_thumbnail_decoding(&self) {
         self.decoding_paused.store(false, Ordering::Release);
     }
@@ -658,6 +684,8 @@ impl LibraryState {
         for entry in &mut self.entries {
             entry.thumbnail_queued = false;
             entry.thumbnail_error = None;
+            entry.thumbnail_failures = 0;
+            entry.thumbnail_retry_after = None;
         }
         self.scanning = true;
         self.catalog_ready = !self.entries.is_empty();
@@ -917,11 +945,22 @@ impl LibraryState {
                             self.entries[index].resident_thumbnail = Some(resident_thumbnail);
                             self.entries[index].texture_is_resident = false;
                             self.entries[index].thumbnail_error = None;
+                            self.entries[index].thumbnail_failures = 0;
+                            self.entries[index].thumbnail_retry_after = None;
                             self.entries[index].developed_thumbnail = developed;
                         }
                         Err(error) => {
                             if !self.entries[index].developed_thumbnail {
-                                self.entries[index].thumbnail_error = Some(error);
+                                let entry = &mut self.entries[index];
+                                entry.thumbnail_failures =
+                                    entry.thumbnail_failures.saturating_add(1);
+                                let exponent =
+                                    u32::from(entry.thumbnail_failures.saturating_sub(1).min(5));
+                                let delay = Duration::from_secs(1_u64 << exponent)
+                                    .min(THUMBNAIL_RETRY_MAX_DELAY);
+                                entry.thumbnail_error = Some(error);
+                                entry.thumbnail_retry_after = Some(Instant::now() + delay);
+                                context.request_repaint_after(delay);
                             }
                         }
                     }
@@ -973,11 +1012,18 @@ impl LibraryState {
         // A full GPU texture needs no work. A resident fallback remains visible
         // while we opportunistically queue the full thumbnail again, so revisiting
         // an evicted card never falls back to the loading placeholder.
-        if (entry.texture.is_some() && !entry.texture_is_resident)
-            || entry.thumbnail_error.is_some()
-            || entry.thumbnail_queued
-        {
+        if entry.texture.is_some() && !entry.texture_is_resident || entry.thumbnail_queued {
             return;
+        }
+        if entry.thumbnail_error.is_some() {
+            if entry
+                .thumbnail_retry_after
+                .is_some_and(|retry_after| Instant::now() < retry_after)
+            {
+                return;
+            }
+            entry.thumbnail_error = None;
+            entry.thumbnail_retry_after = None;
         }
         let request = ThumbnailRequest {
             generation,
@@ -1062,6 +1108,8 @@ impl LibraryState {
         entry.texture_is_resident = false;
         entry.thumbnail_size = None;
         entry.thumbnail_error = None;
+        entry.thumbnail_failures = 0;
+        entry.thumbnail_retry_after = None;
         entry.thumbnail_queued = false;
         entry.developed_thumbnail = false;
     }
@@ -1089,6 +1137,8 @@ impl LibraryState {
         self.entries[index].resident_thumbnail = Some(resident_thumbnail);
         self.entries[index].texture_is_resident = false;
         self.entries[index].thumbnail_error = None;
+        self.entries[index].thumbnail_failures = 0;
+        self.entries[index].thumbnail_retry_after = None;
         self.entries[index].thumbnail_queued = false;
         self.entries[index].developed_thumbnail = true;
     }
@@ -1220,6 +1270,8 @@ fn new_library_entry(info: LibraryFileInfo) -> LibraryEntry {
         thumbnail_size: None,
         layout_size,
         thumbnail_error: None,
+        thumbnail_failures: 0,
+        thumbnail_retry_after: None,
         thumbnail_queued: false,
         developed_thumbnail: false,
         last_used: 0,
@@ -1622,8 +1674,11 @@ fn load_desktop_library_thumbnail(
         ),
     }
 
-    let thumbnail = load_raw_embedded_thumbnail(path, THUMBNAIL_EDGE)
-        .map_err(|error| format!("embedded RAW preview unavailable: {error:#}"))?;
+    // Prefer the camera-generated JPEG/bitmap, but a missing or unsupported
+    // embedded preview must never make an otherwise valid RAW card permanent.
+    // `load_raw_thumbnail` falls back to LibRaw's half-size sensor render.
+    let thumbnail = load_raw_thumbnail(path, THUMBNAIL_EDGE)
+        .map_err(|error| format!("could not render a RAW preview: {error:#}"))?;
     if let Err(error) = crate::thumbnail_cache::save_desktop_raw_thumbnail(path, &thumbnail) {
         log::warn!(
             "could not persist RAW thumbnail cache for {}: {error}",
@@ -3813,7 +3868,7 @@ fn thumbnail_tile(
             rect.center(),
             Align2::CENTER_CENTER,
             if entry.thumbnail_error.is_some() {
-                "Preview unavailable"
+                "Retrying preview…"
             } else if entry.thumbnail_queued {
                 "Loading preview…"
             } else {

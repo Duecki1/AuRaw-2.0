@@ -1234,6 +1234,32 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn clear_thumbnail_cache(&mut self) {
+        self.library.prepare_for_thumbnail_cache_clear();
+        let decode_gate = self.library.decode_gate();
+        let result = match decode_gate.write() {
+            Ok(_decode_guard) => {
+                #[cfg(not(target_os = "android"))]
+                let cleared = crate::thumbnail_cache::clear_desktop_thumbnail_cache();
+                #[cfg(target_os = "android")]
+                let cleared = crate::android::clear_thumbnail_cache(&self.android_app);
+                cleared
+            }
+            Err(_) => Err("thumbnail decode gate was poisoned".to_owned()),
+        };
+
+        match result {
+            Ok(()) => {
+                self.notice = Some("Thumbnail cache cleared. Rebuilding previews…".to_owned());
+                self.library.refresh(&self.egui_ctx);
+            }
+            Err(error) => {
+                self.notice = Some(format!("Could not clear thumbnail cache: {error}"));
+                self.library.set_status("Could not clear the thumbnail cache.");
+            }
+        }
+    }
+
     pub(crate) fn set_adjustment_copy_settings(&mut self, settings: AdjustmentCopySettings) {
         if self.adjustment_copy_settings == settings {
             return;

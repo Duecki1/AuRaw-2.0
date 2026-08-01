@@ -117,6 +117,18 @@ impl Settings {
                 )
                 .wrap(),
             );
+
+            ui.separator();
+            ui.strong("Thumbnail cache");
+            ui.add(
+                egui::Label::new(
+                    "Delete generated library previews and rebuild them from the RAW files and saved edits.",
+                )
+                .wrap(),
+            );
+            if ui.button("Clear thumbnail cache").clicked() {
+                app.clear_thumbnail_cache();
+            }
         });
 
         #[cfg(not(target_os = "android"))]

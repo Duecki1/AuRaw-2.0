@@ -291,6 +291,13 @@ final class StorageManager {
         return thumbnailCachePath("developed\n" + uriText, ".developed.png").getAbsolutePath();
     }
 
+    /** Clears regenerable RAW and edited library previews from both cache generations. */
+    void clearThumbnailCache() {
+        clearThumbnailCacheDirectory(persistentThumbnailCacheDirectory());
+        clearThumbnailCacheDirectory(
+                new File(activity.getCacheDir(), "library-thumbnails"));
+    }
+
     /**
      * Slow compatibility fallback for providers/LibRaw builds that cannot seek
      * through /proc/self/fd. The first successful decode is cached as PNG, so
@@ -806,6 +813,23 @@ final class StorageManager {
             throw new IllegalStateException("Could not create the persistent thumbnail cache");
         }
         return directory;
+    }
+
+    private static void clearThumbnailCacheDirectory(File directory) {
+        if (!directory.exists()) {
+            return;
+        }
+        File[] entries = directory.listFiles();
+        if (entries == null) {
+            throw new IllegalStateException(
+                    "Could not inspect thumbnail cache " + directory);
+        }
+        for (File entry : entries) {
+            if (!entry.isFile() || (!entry.delete() && entry.exists())) {
+                throw new IllegalStateException(
+                        "Could not clear thumbnail cache entry " + entry);
+            }
+        }
     }
 
     /** Lazily preserves cache entries written by releases that used getCacheDir(). */
