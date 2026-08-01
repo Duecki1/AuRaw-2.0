@@ -105,7 +105,7 @@ impl Settings {
                     .text("Thumbnail workers"),
                 )
                 .on_hover_text(
-                    "Parallel background thumbnail decoders. More workers fill the library faster but use more CPU and memory. Full RAW loading remains exclusive.",
+                    "Concurrent background thumbnail jobs, including embedded previews, preview-less RAW fallback renders, and edited-thumbnail rebuilding.",
                 )
                 .changed()
             {
@@ -113,7 +113,7 @@ impl Settings {
             }
             ui.add(
                 egui::Label::new(
-                    "Changing this restarts the current library thumbnail queue. The setting is saved across restarts.",
+                    "Higher values fill the library faster, but preview-less and edited jobs may unpack a full sensor and use substantial memory. Changing this restarts the current queue; the setting is saved across restarts.",
                 )
                 .wrap(),
             );

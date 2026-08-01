@@ -42,7 +42,7 @@ def test_library_unedited_thumbnails_prefer_embedded_preview_then_render_fallbac
     assert "load_raw_thumbnail(&temporary, maximum_edge)" in ANDROID
     fallback = RAW[RAW.index("pub fn load_raw_thumbnail"):RAW.index("fn open_libraw")]
     assert fallback.index("load_embedded_thumbnail") < fallback.index("load_processed_thumbnail")
-    assert "PROCESSED_THUMBNAIL_GATE" in RAW
+    assert "acquire_rendered_thumbnail_worker" in RAW
 
 
 def test_android_embedded_previews_are_not_blocked_by_full_sensor_pixel_budget() -> None:
@@ -59,9 +59,11 @@ def test_performance_defaults_and_controls_are_exposed() -> None:
         re.DOTALL,
     )
     assert "Decoded RAW cache" in SETTINGS
-    assert "Thumbnail workers" in SETTINGS
+    assert SETTINGS.count('.text("Thumbnail workers")') == 1
+    assert "Rendered thumbnail workers" not in SETTINGS
     assert "default_thumbnail_worker_count" in LIBRARY
     assert "run_thumbnail_workers" in LIBRARY
+    assert "set_rendered_thumbnail_worker_limit(workers)" in LIBRARY
     assert ".read()" in LIBRARY and "decode_gate" in LIBRARY
     assert ".write()" in APP and "decode_gate" in APP
 
@@ -70,6 +72,10 @@ def test_performance_settings_are_persistent_on_both_platforms() -> None:
     assert "performance_settings_path" in APP
     assert "performanceSettingsPath" in ACTIVITY
     assert "performance.json" in (ROOT / "src/performance_settings.rs").read_text()
+    assert "thumbnail_workers" in APP
+    assert "thumbnail_workers" in (ROOT / "src/performance_settings.rs").read_text()
+    assert "rendered_thumbnail_workers" not in APP
+    assert "rendered_thumbnail_workers" not in (ROOT / "src/performance_settings.rs").read_text()
 
 
 def test_desktop_last_library_folder_is_restored() -> None:
@@ -109,12 +115,14 @@ def test_android_import_picker_supports_single_and_batch_selection() -> None:
     assert "materializeLibraryRaw" not in STORAGE
 
 
-def test_android_previewless_raw_fallback_handles_modern_sensors_serially() -> None:
-    assert "PROCESSED_THUMBNAIL_GATE" in RAW
+def test_previewless_and_edited_raws_share_the_thumbnail_worker_limit() -> None:
+    assert "acquire_rendered_thumbnail_worker" in RAW
+    assert "acquire_rendered_thumbnail_worker" in LIBRARY
+    assert "set_rendered_thumbnail_worker_limit" in LIBRARY
     assert "MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS: u64 = MAX_SENSOR_PIXELS" in RAW
     assert "MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 64 * 1024 * 1024" in RAW
     fallback = RAW[RAW.index("fn load_processed_thumbnail"):RAW.index("fn embedded_thumbnail_orientation")]
-    assert fallback.index("PROCESSED_THUMBNAIL_GATE") < fallback.index("open_libraw(path)")
+    assert fallback.index("acquire_rendered_thumbnail_worker") < fallback.index("open_libraw(path)")
 
 
 def test_failed_thumbnail_attempts_retry_and_cache_can_be_cleared() -> None:

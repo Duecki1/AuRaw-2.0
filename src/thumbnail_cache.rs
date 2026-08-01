@@ -8,6 +8,7 @@ use std::path::Path;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 #[cfg(not(target_os = "android"))]
 use std::time::UNIX_EPOCH;
 
@@ -20,6 +21,70 @@ const MAX_CACHED_THUMBNAIL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CACHED_THUMBNAIL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_CACHED_THUMBNAIL_PIXELS: u64 = MAX_CACHED_THUMBNAIL_DECODE_BYTES / 4;
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+struct RenderedThumbnailLimiter {
+    state: Mutex<RenderedThumbnailLimiterState>,
+    available: Condvar,
+}
+
+struct RenderedThumbnailLimiterState {
+    limit: usize,
+    active: usize,
+}
+
+pub(crate) struct RenderedThumbnailPermit {
+    limiter: &'static RenderedThumbnailLimiter,
+}
+
+static RENDERED_THUMBNAIL_LIMITER: OnceLock<RenderedThumbnailLimiter> = OnceLock::new();
+
+fn rendered_thumbnail_limiter() -> &'static RenderedThumbnailLimiter {
+    RENDERED_THUMBNAIL_LIMITER.get_or_init(|| RenderedThumbnailLimiter {
+        state: Mutex::new(RenderedThumbnailLimiterState {
+            limit: 1,
+            active: 0,
+        }),
+        available: Condvar::new(),
+    })
+}
+
+pub(crate) fn set_rendered_thumbnail_worker_limit(limit: usize) {
+    let limiter = rendered_thumbnail_limiter();
+    let mut state = limiter
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.limit = limit.max(1);
+    limiter.available.notify_all();
+}
+
+pub(crate) fn acquire_rendered_thumbnail_worker() -> RenderedThumbnailPermit {
+    let limiter = rendered_thumbnail_limiter();
+    let mut state = limiter
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while state.active >= state.limit {
+        state = limiter
+            .available
+            .wait(state)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    state.active += 1;
+    RenderedThumbnailPermit { limiter }
+}
+
+impl Drop for RenderedThumbnailPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .limiter
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = state.active.saturating_sub(1);
+        self.limiter.available.notify_one();
+    }
+}
 
 pub(crate) fn downscale_to_fit(
     image: image::DynamicImage,
