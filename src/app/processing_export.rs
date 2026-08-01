@@ -1663,6 +1663,12 @@ impl AurawApp {
             self.preview_detail_urgent = false;
             return;
         }
+        // Building and installing a detail crop is intentionally deferred until
+        // both fingers are lifted. A stationary pause during a pinch must not run
+        // CPU proxy preparation and GPU pipeline setup on the UI thread.
+        if self.preview_touch_navigation_active {
+            return;
+        }
         if self.active_tab != AppTab::Develop
             || self.preview_quality_dirty
             || self.lens_correction_dirty
@@ -1980,8 +1986,13 @@ impl AurawApp {
         if self.ai_denoise_receiver.is_some() {
             return;
         }
-        let should_exist = self.preview_zoom > DETAIL_ZOOM_START;
+        let zoomed = self.preview_zoom > DETAIL_ZOOM_START;
         let should_update = self.navigation_pending_stage.is_some();
+        // The normal preview is already a complete full-frame fallback while the
+        // user only zooms or pans. Create the tiny navigation pipeline lazily when
+        // an actual edit needs its fast full-frame update, then retain it until fit.
+        // Eager creation here caused a visible hitch on the first pinch frame.
+        let should_exist = zoomed && (self.preview_navigation.is_some() || should_update);
         if !should_exist && !should_update {
             // Release the navigation proxy when fit view is stable.
             if frame.wgpu_render_state().is_some() {

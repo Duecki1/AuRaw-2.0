@@ -20,6 +20,19 @@ def test_touch_sliders_are_direction_locked_and_scroll_area_friendly() -> None:
     assert "Slider::new" not in SLIDER
 
 
+def test_android_sliders_use_compact_unboxed_photographic_styling() -> None:
+    assert '#[cfg(target_os = "android")]\nconst VALUE_FIELD_WIDTH: f32 = 60.0;' in SLIDER
+    assert '#[cfg(target_os = "android")]\nconst TRACK_HEIGHT: f32 = 2.0;' in SLIDER
+    assert 'format!("{value:+.decimals$}")' in SLIDER
+    android_track = SLIDER[
+        SLIDER.index('#[cfg(target_os = "android")]\n    {', SLIDER.index("let painter = ui.painter();")):
+        SLIDER.index('#[cfg(not(target_os = "android"))]', SLIDER.index("let painter = ui.painter();"))
+    ]
+    assert "weak_text_color().gamma_multiply(0.72)" in android_track
+    assert "circle_filled(handle_center, HANDLE_RADIUS, ui.visuals().panel_fill)" in android_track
+    assert "selection.bg_fill" not in android_track.split("circle_stroke", 1)[0]
+
+
 def test_vertical_adjustments_use_second_level_tabs() -> None:
     assert "pub enum AdjustmentSection" in APP
     for name in (
@@ -31,7 +44,8 @@ def test_vertical_adjustments_use_second_level_tabs() -> None:
         "ColorMixer",
     ):
         assert f"AdjustmentSection::{name}" in SIDEBAR
-    assert 'id_salt("adjustment-section-tabs")' in SIDEBAR
+    assert 'id_salt("develop-portrait-context-tabs")' in SIDEBAR
+    assert "show_mobile_context_tabs" in SIDEBAR
     assert "if layout == ScreenLayout::Vertical" in SIDEBAR
     assert "match app.adjustment_section" in SIDEBAR
 
@@ -146,8 +160,8 @@ def test_slider_drag_freezes_sidebar_and_settings_scrolling() -> None:
 def test_vertical_mask_details_use_adjustment_style_tabs() -> None:
     assert "pub enum MaskSection" in APP
     assert "Properties" in APP
-    assert 'id_salt("mask-section-tabs")' in SIDEBAR
-    assert '(MaskSection::Properties, "Mask Properties")' in SIDEBAR
+    assert 'id_salt("develop-portrait-context-tabs")' in SIDEBAR
+    assert '(MaskSection::Properties, regular::SELECTION, "Mask", 58.0)' in SIDEBAR
     for name in (
         "Light",
         "ToneCurve",
@@ -162,27 +176,44 @@ def test_vertical_mask_details_use_adjustment_style_tabs() -> None:
 
 
 def test_vertical_section_tabs_stay_above_scrolling_content() -> None:
-    show_start = SIDEBAR.index("pub fn show(")
-    fixed_tabs = SIDEBAR.index("Self::show_vertical_section_tabs(ui, app);", show_start)
-    content_scroll = SIDEBAR.index('id_salt("develop-sidebar-content")', show_start)
-    assert fixed_tabs < content_scroll
+    shell_start = SIDEBAR.index("fn show_vertical_mobile_shell")
+    primary_tabs = SIDEBAR.index('Panel::bottom("develop_portrait_primary_tabs")', shell_start)
+    context_tabs = SIDEBAR.index('Panel::bottom("develop_portrait_context_tabs")', shell_start)
+    content_scroll = SIDEBAR.index('id_salt("develop-sidebar-content")', shell_start)
+    assert primary_tabs < context_tabs < content_scroll
 
-    vertical_tabs = SIDEBAR[
-        SIDEBAR.index("fn show_vertical_section_tabs"):SIDEBAR.index("fn show_adjustment_tabs")
+    context_body = SIDEBAR[
+        SIDEBAR.index("fn show_mobile_context_tabs"):SIDEBAR.index("fn mobile_icon_tab")
     ]
-    assert "Self::show_adjustment_tabs(ui, app);" in vertical_tabs
-    assert "SidebarTab::Masks => Self::show_mask_tabs(ui, app)" in vertical_tabs
+    assert "SidebarTab::Adjustments =>" in context_body
+    assert "SidebarTab::Masks =>" in context_body
 
     adjustment_body = SIDEBAR[
-        SIDEBAR.index("fn show_adjustments"):SIDEBAR.index("fn show_vertical_section_tabs")
+        SIDEBAR.index("fn show_adjustments"):SIDEBAR.index("fn show_camera_profile_selector")
     ]
     mask_details = SIDEBAR[
         SIDEBAR.index("fn show_masks_vertical_details"):SIDEBAR.index(
             "fn show_vertical_mask_properties"
         )
     ]
-    assert "show_adjustment_tabs" not in adjustment_body
-    assert "show_mask_tabs" not in mask_details
+    assert "show_mobile_context_tabs" not in adjustment_body
+    assert "show_mobile_context_tabs" not in mask_details
+
+
+def test_mobile_navigation_has_horizontal_separators_without_side_borders() -> None:
+    frame = SIDEBAR[
+        SIDEBAR.index("fn mobile_navigation_frame"):SIDEBAR.index(
+            "fn paint_mobile_navigation_separators"
+        )
+    ]
+    separators = SIDEBAR[
+        SIDEBAR.index("fn paint_mobile_navigation_separators"):SIDEBAR.index(
+            "fn show_mobile_primary_tabs"
+        )
+    ]
+    assert ".stroke(egui::Stroke::NONE)" in frame
+    assert separators.count(".hline(") == 2
+    assert ".vline(" not in separators
 
 
 def test_horizontal_masks_use_the_portrait_editor_with_a_left_vertical_strip() -> None:
@@ -203,7 +234,7 @@ def test_horizontal_masks_use_the_portrait_editor_with_a_left_vertical_strip() -
 def test_horizontal_mask_sidebar_hides_tabs_and_uses_collapsible_sections() -> None:
     show = SIDEBAR[SIDEBAR.index("pub fn show("):SIDEBAR.index("fn show_adjustments")]
     assert "else if app.sidebar_tab == SidebarTab::Masks" not in show
-    assert show.count("Self::show_vertical_section_tabs(ui, app);") == 1
+    assert show.count("Self::show_vertical_mobile_shell(ui, app, frame);") == 1
 
     mask_body = SIDEBAR[
         SIDEBAR.index("fn show_masks("):SIDEBAR.index("pub(crate) fn show_vertical_mask_strip")
@@ -220,7 +251,7 @@ def test_horizontal_mask_sidebar_hides_tabs_and_uses_collapsible_sections() -> N
     assert 'ui.strong("Local Adjustments")' in desktop_details
     for label in ("Light", "Tone Curve", "Color", "Color Grading", "Effects", "Color Mixer"):
         assert f'"{label}"' in desktop_details
-    assert "show_mask_tabs" not in desktop_details
+    assert "show_mobile_context_tabs" not in desktop_details
 
 
 def test_preview_supports_touch_pinch_zoom_and_two_finger_pan() -> None:

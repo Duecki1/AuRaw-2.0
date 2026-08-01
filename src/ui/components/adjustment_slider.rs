@@ -1,19 +1,41 @@
-use eframe::egui::{
-    self, Align, Align2, DragValue, FontId, Layout, RichText, Sense, Stroke, StrokeKind, Ui,
-};
+use eframe::egui::{self, Align, Align2, DragValue, FontId, Layout, RichText, Sense, Stroke, Ui};
 use std::ops::RangeInclusive;
 
+#[cfg(not(target_os = "android"))]
 const VALUE_FIELD_WIDTH: f32 = 72.0;
+#[cfg(target_os = "android")]
+const VALUE_FIELD_WIDTH: f32 = 60.0;
+#[cfg(not(target_os = "android"))]
 const HEADER_HEIGHT: f32 = 24.0;
+#[cfg(target_os = "android")]
+const HEADER_HEIGHT: f32 = 22.0;
+#[cfg(not(target_os = "android"))]
 const SLIDER_HEIGHT: f32 = 28.0;
+#[cfg(target_os = "android")]
+const SLIDER_HEIGHT: f32 = 24.0;
+#[cfg(not(target_os = "android"))]
 const TRACK_HEIGHT: f32 = 4.0;
+#[cfg(target_os = "android")]
+const TRACK_HEIGHT: f32 = 2.0;
+#[cfg(not(target_os = "android"))]
 const HANDLE_RADIUS: f32 = 7.0;
+#[cfg(target_os = "android")]
+const HANDLE_RADIUS: f32 = 8.0;
 const HANDLE_TOUCH_RADIUS: f32 = 18.0;
 const TRACK_DRAG_THRESHOLD: f32 = 8.0;
 const HANDLE_DRAG_THRESHOLD: f32 = 2.0;
+#[cfg(not(target_os = "android"))]
 const LABEL_SIZE: f32 = 12.5;
+#[cfg(target_os = "android")]
+const LABEL_SIZE: f32 = 12.0;
+#[cfg(not(target_os = "android"))]
 const CONTROL_GAP: f32 = 4.0;
+#[cfg(target_os = "android")]
+const CONTROL_GAP: f32 = 2.0;
+#[cfg(not(target_os = "android"))]
 const ROW_BOTTOM_SPACE: f32 = 7.0;
+#[cfg(target_os = "android")]
+const ROW_BOTTOM_SPACE: f32 = 3.0;
 
 fn slider_scroll_lock_id() -> egui::Id {
     egui::Id::new("auraw-adjustment-slider-scroll-lock")
@@ -95,30 +117,25 @@ where
                         changed |= set_numeric(value, reset_value, decimals);
                     }
 
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        Layout::right_to_left(Align::Center),
-                        |ui| {
-                            let mut value_response = if ui.input(|input| input.has_touch_screen()) {
-                                touch_value_field(ui, (*value).to_f64(), decimals)
-                            } else {
-                                let response = ui.add_sized(
-                                    [VALUE_FIELD_WIDTH, HEADER_HEIGHT],
-                                    DragValue::new(value)
-                                        .range(range.clone())
-                                        .speed(speed)
-                                        .fixed_decimals(decimals),
-                                );
-                                changed |= response.changed();
-                                response
-                            };
-                            value_response =
-                                value_response.on_hover_text(reset_tooltip(hover_text));
-                            if value_response.double_clicked() {
-                                changed |= set_numeric(value, reset_value, decimals);
-                            }
-                        },
-                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let mut value_response = if ui.input(|input| input.has_touch_screen()) {
+                            touch_value_field(ui, (*value).to_f64(), decimals)
+                        } else {
+                            let response = ui.add_sized(
+                                [VALUE_FIELD_WIDTH, HEADER_HEIGHT],
+                                DragValue::new(value)
+                                    .range(range.clone())
+                                    .speed(speed)
+                                    .fixed_decimals(decimals),
+                            );
+                            changed |= response.changed();
+                            response
+                        };
+                        value_response = value_response.on_hover_text(reset_tooltip(hover_text));
+                        if value_response.double_clicked() {
+                            changed |= set_numeric(value, reset_value, decimals);
+                        }
+                    });
                 },
             );
 
@@ -144,13 +161,33 @@ fn touch_value_field(ui: &mut Ui, value: f64, decimals: usize) -> egui::Response
         ui.allocate_exact_size(egui::vec2(VALUE_FIELD_WIDTH, HEADER_HEIGHT), Sense::click());
     let visuals = ui.style().interact(&response);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 3.0, visuals.bg_fill);
-    painter.rect_stroke(rect, 3.0, visuals.bg_stroke, StrokeKind::Inside);
+    #[cfg(not(target_os = "android"))]
+    {
+        painter.rect_filled(rect, 3.0, visuals.bg_fill);
+        painter.rect_stroke(rect, 3.0, visuals.bg_stroke, egui::StrokeKind::Inside);
+    }
+    let formatted = if cfg!(target_os = "android") && value > 0.0 {
+        format!("{value:+.decimals$}")
+    } else {
+        format!("{value:.decimals$}")
+    };
     painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        format!("{value:.decimals$}"),
-        FontId::monospace(12.0),
+        if cfg!(target_os = "android") {
+            rect.right_center()
+        } else {
+            rect.center()
+        },
+        if cfg!(target_os = "android") {
+            Align2::RIGHT_CENTER
+        } else {
+            Align2::CENTER_CENTER
+        },
+        formatted,
+        if cfg!(target_os = "android") {
+            FontId::proportional(12.0)
+        } else {
+            FontId::monospace(12.0)
+        },
         visuals.fg_stroke.color,
     );
     response
@@ -274,7 +311,9 @@ where
         || handle_response.is_pointer_button_down_on()
         || (track_response.is_pointer_button_down_on()
             && pointer.0.is_some_and(|origin| rect.contains(origin)));
+    #[cfg(not(target_os = "android"))]
     let hovered = track_response.hovered() || handle_response.hovered();
+    #[cfg(not(target_os = "android"))]
     let widget_visuals = if active {
         &ui.visuals().widgets.active
     } else if hovered {
@@ -284,26 +323,50 @@ where
     };
 
     let painter = ui.painter();
-    painter.rect_filled(
-        track_rect,
-        TRACK_HEIGHT * 0.5,
-        ui.visuals().widgets.inactive.bg_fill,
-    );
-    let fill_rect = egui::Rect::from_min_max(
-        track_rect.left_top(),
-        egui::pos2(handle_x, track_rect.bottom()),
-    );
-    painter.rect_filled(
-        fill_rect,
-        TRACK_HEIGHT * 0.5,
-        ui.visuals().selection.bg_fill,
-    );
-    painter.circle_filled(handle_center, HANDLE_RADIUS, widget_visuals.bg_fill);
-    painter.circle_stroke(
-        handle_center,
-        HANDLE_RADIUS,
-        Stroke::new(1.0, widget_visuals.fg_stroke.color),
-    );
+    #[cfg(target_os = "android")]
+    {
+        painter.rect_filled(
+            track_rect,
+            TRACK_HEIGHT * 0.5,
+            ui.visuals().weak_text_color().gamma_multiply(0.72),
+        );
+        painter.circle_filled(handle_center, HANDLE_RADIUS, ui.visuals().panel_fill);
+        painter.circle_stroke(
+            handle_center,
+            HANDLE_RADIUS,
+            Stroke::new(
+                if active { 2.0 } else { 1.5 },
+                if active {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().weak_text_color()
+                },
+            ),
+        );
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        painter.rect_filled(
+            track_rect,
+            TRACK_HEIGHT * 0.5,
+            ui.visuals().widgets.inactive.bg_fill,
+        );
+        let fill_rect = egui::Rect::from_min_max(
+            track_rect.left_top(),
+            egui::pos2(handle_x, track_rect.bottom()),
+        );
+        painter.rect_filled(
+            fill_rect,
+            TRACK_HEIGHT * 0.5,
+            ui.visuals().selection.bg_fill,
+        );
+        painter.circle_filled(handle_center, HANDLE_RADIUS, widget_visuals.bg_fill);
+        painter.circle_stroke(
+            handle_center,
+            HANDLE_RADIUS,
+            Stroke::new(1.0, widget_visuals.fg_stroke.color),
+        );
+    }
 
     let combined = track_response
         .union(handle_response)
