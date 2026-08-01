@@ -1004,12 +1004,16 @@ impl AurawApp {
             return;
         };
         if let Some(selected) = selection.as_ref() {
+            let embedded_matrix = self
+                .camera_profile_folder
+                .as_ref()
+                .is_some_and(|root| selected == root);
             let is_available = self.loaded_raw.as_ref().is_some_and(|raw| {
                 raw.available_camera_profiles
                     .iter()
                     .any(|candidate| candidate.path == *selected)
             });
-            if !is_available {
+            if !embedded_matrix && !is_available {
                 self.notice = Some(
                     "That DCP is no longer available for the current camera. Refresh the profile folder and reopen the RAW."
                         .to_owned(),
@@ -1971,9 +1975,13 @@ impl AurawApp {
                                     .camera_profile
                                     .as_ref()
                                     .and_then(|relative| {
-                                        camera_profile_folder
-                                            .as_ref()
-                                            .map(|root| root.join(relative))
+                                        camera_profile_folder.as_ref().map(|root| {
+                                            if relative == std::path::Path::new(".") {
+                                                root.clone()
+                                            } else {
+                                                root.join(relative)
+                                            }
+                                        })
                                     }),
                                 loaded.edits.camera_profile.is_some(),
                             ),
@@ -1988,15 +1996,26 @@ impl AurawApp {
                             Err(_) => (None, false),
                         },
                     };
+                let embedded_matrix_selected = requested_camera_profile
+                    .as_ref()
+                    .zip(camera_profile_folder.as_ref())
+                    .is_some_and(|(selected, root)| selected == root);
+                let effective_camera_profile_mode = if embedded_matrix_selected {
+                    CameraProfileMode::MatrixOnly
+                } else {
+                    camera_profile_mode
+                };
                 let decode_started = Instant::now();
                 let decoded: anyhow::Result<Arc<LoadedRaw>> = match cached_original_raw {
                     Some(raw) => Ok(raw),
                     None => match decode_gate.write() {
                         Ok(_decode_guard) => load_raw_file_with_profile_selection(
                             &path,
-                            camera_profile_mode,
+                            effective_camera_profile_mode,
                             camera_profile_folder.as_deref(),
-                            requested_camera_profile.as_deref(),
+                            (!embedded_matrix_selected)
+                                .then_some(requested_camera_profile.as_deref())
+                                .flatten(),
                         )
                         .map(Arc::new),
                         Err(_) => Err(anyhow::anyhow!("RAW decode gate was poisoned")),
@@ -2113,14 +2132,17 @@ impl AurawApp {
                         rendered_exposure.highlight_method,
                         rendered_masks.masks.len(),
                     ));
-                    let selected_camera_profile = requested_camera_profile
+                    let selected_camera_profile = embedded_matrix_selected
+                        .then(|| camera_profile_folder.clone())
+                        .flatten()
+                        .or_else(|| requested_camera_profile
                         .clone()
                         .filter(|requested| {
                             original_raw
                                 .camera_profile_source
                                 .as_ref()
                                 .is_some_and(|applied| applied == requested)
-                        });
+                        }));
                     if requested_profile_from_sidecar
                         && requested_camera_profile.is_some()
                         && selected_camera_profile.is_none()
