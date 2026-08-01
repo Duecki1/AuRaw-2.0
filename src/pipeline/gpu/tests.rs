@@ -12,6 +12,13 @@ use super::{
 use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
 use eframe::wgpu;
 
+fn gpu_resource_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("GPU resource test lock poisoned")
+}
+
 fn shader_module(name: &str, source: &str) -> naga::Module {
     naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|error| panic!("{name} did not parse: {error}"))
@@ -1158,6 +1165,8 @@ fn assert_masked_pixels_change(
 fn assert_local_tone_scheduling_case(case: LocalToneSchedulingCase) {
     use std::sync::{Mutex, OnceLock};
 
+    let _gpu_guard = gpu_resource_test_guard();
+
     // This assertion remains active even on GPU-less CI and directly guards
     // the scheduler regression that originally made these controls silent.
     let raw = local_mask_scheduling_fixture(8, 8);
@@ -1232,6 +1241,7 @@ fn masked_curves_are_independently_scheduled_in_preview_and_export() {
 
 #[test]
 fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
+    let _gpu_guard = gpu_resource_test_guard();
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use eframe::wgpu;
 
@@ -1401,6 +1411,7 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
 
 #[test]
 fn reused_gpu_program_layouts_match_fresh_glow_for_bayer_and_xtrans() {
+    let _gpu_guard = gpu_resource_test_guard();
     use super::{ExposureParams, ProcessingQuality, RawGpuPipeline};
     use crate::pipeline::{
         build_proxy, crop_raw, load_raw_file, HighlightReconstructionMethod, MaskStack, ProxySpec,
@@ -1540,6 +1551,7 @@ fn reused_gpu_program_layouts_match_fresh_glow_for_bayer_and_xtrans() {
 
 #[test]
 fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
+    let _gpu_guard = gpu_resource_test_guard();
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use crate::pipeline::{HighlightReconstructionMethod, MaskStack};
     use eframe::wgpu;
@@ -2004,6 +2016,7 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
 
 #[test]
 fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
+    let _gpu_guard = gpu_resource_test_guard();
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use eframe::wgpu;
 
@@ -2134,6 +2147,7 @@ fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
 
 #[test]
 fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
+    let _gpu_guard = gpu_resource_test_guard();
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use eframe::wgpu;
 

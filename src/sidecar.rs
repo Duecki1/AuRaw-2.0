@@ -21,6 +21,7 @@ pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg";
 #[cfg(not(target_os = "android"))]
+#[cfg(any(not(target_os = "android"), test))]
 pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str = crate::thumbnail_cache::DESKTOP_THUMBNAIL_CACHE_DIR;
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-thumb.fingerprint";

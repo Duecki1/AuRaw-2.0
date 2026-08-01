@@ -216,9 +216,7 @@ pub fn clear_camera_profile_folder_picker_location(app: &AndroidApp) -> Result<(
         )?;
         Ok(())
     })
-    .map_err(|error| {
-        format!("could not clear Android's camera-profile picker location: {error:#}")
-    })
+    .map_err(|error| format!("could not clear Android's camera-profile picker location: {error:#}"))
 }
 
 pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
@@ -904,9 +902,10 @@ pub fn update_background_task_notification(
         queued_count: i32::try_from(queued_count).unwrap_or(i32::MAX),
     };
     if let Ok(current) = TASK_NOTIFICATION_STATE.lock() {
-        if let Some(current) = current.as_ref().filter(|current| {
-            current.activity_key == activity_key
-        }) {
+        if let Some(current) = current
+            .as_ref()
+            .filter(|current| current.activity_key == activity_key)
+        {
             if current.payload == payload {
                 return Ok(());
             }
@@ -914,8 +913,7 @@ pub fn update_background_task_notification(
                 && current.payload.phase == payload.phase
                 && current.payload.indeterminate == payload.indeterminate
                 && current.payload.queued_count == payload.queued_count;
-            if same_operation
-                && current.posted_at.elapsed() < TASK_NOTIFICATION_MIN_UPDATE_INTERVAL
+            if same_operation && current.posted_at.elapsed() < TASK_NOTIFICATION_MIN_UPDATE_INTERVAL
             {
                 return Ok(());
             }

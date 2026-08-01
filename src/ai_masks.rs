@@ -50,9 +50,6 @@ static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(not(target_os = "android"))]
 type RuntimeProbeResult = (PathBuf, String);
-#[cfg(not(target_os = "android"))]
-static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
-
 ", path.display()))?;
     anyhow::ensure!(
         metadata.len()
@@ -63,15 +60,7 @@ static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLo
     Ok(())
 }
 
-pub(crate) fn object_models_are_verified(
-    encoder: &Path,
-    decoder: &Path,
-    vitmatte: &Path,
-) -> bool {
-    verify_sha256_hex(encoder, SAM21_ENCODER_SHA256_HEX, SAM21_ENCODER_MAX_BYTES).is_ok()
-        && verify_sha256_hex(decoder, SAM21_DECODER_SHA256_HEX, SAM21_DECODER_MAX_BYTES).is_ok()
-        && verify_vitmatte_model(vitmatte).is_ok()
-}
+#[cfg(test)]
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Letterbox {
@@ -96,16 +85,29 @@ impl Letterbox {
     }
 }
 
+pub struct SubjectMaskWorkerRequest {
+    pub model_path: PathBuf,
+    pub vitmatte_path: PathBuf,
+    pub runtime_path: Option<PathBuf>,
+    pub runtime_sha256: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 pub fn spawn_subject_mask(
-    model_path: PathBuf,
-    vitmatte_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
+    request: SubjectMaskWorkerRequest,
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<SubjectMaskEvent> {
+    let SubjectMaskWorkerRequest {
+        model_path,
+        vitmatte_path,
+        runtime_path,
+        runtime_sha256,
+        width,
+        height,
+        rgba,
+    } = request;
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
     let spawn = std::thread::Builder::new()
@@ -915,11 +917,7 @@ fn restore_from_letterbox(
         .collect())
 }
 
-fn ensure_vitmatte_model<F>(
-    path: &Path,
-    cancellation: &AtomicBool,
-    mut progress: F,
-) -> Result<()>
+fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, mut progress: F) -> Result<()>
 where
     F: FnMut(u64, u64),
 {

@@ -203,22 +203,18 @@ pub fn build_region_proxy(
         .for_each(|(py, ((raw_row, cfa_row), black_row))| {
             let py = py as u32;
             let output_phase_y = py % cfa_period;
-            let (source_y0, source_y1) =
-                proportional_partition(py, region_height, height);
+            let (source_y0, source_y1) = proportional_partition(py, region_height, height);
             let footprint_y0 = y + source_y0;
             let footprint_y1 = (y + source_y1).min(y + region_height);
 
             for px in 0..width {
                 let output_phase_x = px % cfa_period;
-                let (source_x0, source_x1) =
-                    proportional_partition(px, region_width, width);
+                let (source_x0, source_x1) = proportional_partition(px, region_width, width);
                 let footprint_x0 = x + source_x0;
                 let footprint_x1 = (x + source_x1).min(x + region_width);
-                let center_x = (footprint_x0
-                    + (footprint_x1.saturating_sub(footprint_x0)) / 2)
+                let center_x = (footprint_x0 + (footprint_x1.saturating_sub(footprint_x0)) / 2)
                     .min(raw.width - 1);
-                let center_y = (footprint_y0
-                    + (footprint_y1.saturating_sub(footprint_y0)) / 2)
+                let center_y = (footprint_y0 + (footprint_y1.saturating_sub(footprint_y0)) / 2)
                     .min(raw.height - 1);
 
                 let phase_x = (x + output_phase_x).min(raw.width - 1);
@@ -399,14 +395,12 @@ fn proxy_ai_denoised(
             .for_each(|(output_y, row)| {
                 let output_y = output_y as u32;
                 let phase_y = output_y % 2;
-                let (source_y0, source_y1) =
-                    partition(output_y, region_height, output_height);
+                let (source_y0, source_y1) = partition(output_y, region_height, output_height);
                 let footprint_y0 = y + source_y0;
                 let footprint_y1 = (y + source_y1).min(y + region_height);
                 for output_x in 0..output_width {
                     let phase_x = output_x % 2;
-                    let (source_x0, source_x1) =
-                        partition(output_x, region_width, output_width);
+                    let (source_x0, source_x1) = partition(output_x, region_width, output_width);
                     let footprint_x0 = x + source_x0;
                     let footprint_x1 = (x + source_x1).min(x + region_width);
                     let phase_index = (((y + phase_y).min(raw.height - 1) * raw.width)
@@ -1225,8 +1219,8 @@ mod tests {
     #[test]
     fn xtrans_proxy_filters_each_output_pixel_not_a_whole_six_pixel_macrocell() {
         let pattern = vec![
-            0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1,
-            2, 1, 2, 0, 1, 0, 0, 1, 0,
+            0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1, 2, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 2, 1, 2, 1,
+            2, 0, 1, 0, 0, 1, 0,
         ];
         let mut raw = test_raw(120, 120);
         raw.cfa_kind = CfaKind::XTrans;

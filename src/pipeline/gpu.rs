@@ -1376,6 +1376,7 @@ pub(crate) struct GpuProgramPrewarm {
 }
 
 impl GpuProgramPrewarm {
+    #[cfg(target_os = "android")]
     pub(crate) fn new() -> Self {
         Self {
             result: Mutex::new(None),
@@ -1383,6 +1384,7 @@ impl GpuProgramPrewarm {
         }
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn publish(&self, result: std::result::Result<RawGpuProgramTemplate, String>) {
         let Ok(mut slot) = self.result.lock() else {
             return;
@@ -1533,6 +1535,7 @@ impl RawGpuPipeline {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn into_program_template(self) -> RawGpuProgramTemplate {
         RawGpuProgramTemplate {
             cfa_kind: self.cfa_kind,
@@ -1575,6 +1578,7 @@ impl RawGpuPipeline {
     /// tiny synthetic RAW. The returned pipeline is retained only as a program
     /// template, allowing tiled export to clone already-compiled pipeline
     /// handles while allocating its own image-sized resources and mask atlas.
+    #[cfg(target_os = "android")]
     pub(crate) fn prewarm_export_program_template_with_cache(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

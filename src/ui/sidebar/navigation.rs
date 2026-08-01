@@ -68,6 +68,7 @@ impl Sidebar {
             });
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn show_desktop_tool_rail(ui: &mut Ui, app: &mut AurawApp) {
         use crate::ui::icons::{icon_toggle_button, UiIcon};
 
@@ -244,7 +245,7 @@ impl Sidebar {
                     .map(|candidate| candidate.name.clone())
             })
             .or_else(|| raw.camera_profile.name.clone())
-            .unwrap_or_else(|| "Camera matrix".to_owned());
+            .unwrap_or_else(|| "Embedded Matrix".to_owned());
 
         let previous = app.selected_camera_profile.clone();
         let mut selection = previous.clone();
@@ -271,7 +272,7 @@ impl Sidebar {
                 .width(ui.available_width().max(140.0))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut selection, None, "Automatic (recommended)")
-                        .on_hover_text("Use AuRaw's preferred matching profile for this camera.");
+                        .on_hover_text("Use the RAW's embedded camera matrix by default.");
                     if let Some(root) = app.camera_profile_folder.as_ref() {
                         ui.selectable_value(
                             &mut selection,
@@ -291,12 +292,15 @@ impl Sidebar {
                     }
                 });
         });
+        let profile_count = if candidates.len() == 1 {
+            "1 matching DCP profile".to_owned()
+        } else {
+            format!("{} matching DCP profiles", candidates.len())
+        };
         ui.label(
             egui::RichText::new(format!(
-                "{} matching DCP profiles found for {} {}.",
-                candidates.len(),
-                raw.camera_make,
-                raw.camera_model
+                "{profile_count} found for {} {}.",
+                raw.camera_make, raw.camera_model
             ))
             .size(11.0)
             .color(ui.visuals().weak_text_color()),

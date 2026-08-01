@@ -124,16 +124,18 @@ pub fn load_raw_file_with_profile_selection(
     unsafe { validate_opened_raw_geometry(&ctx) }?;
 
     let profile_metadata_started = Instant::now();
-    let embedded_profile = match mode {
-        CameraProfileMode::MatrixOnly | CameraProfileMode::DcpProfiles => None,
-        CameraProfileMode::Automatic => read_optional_profile(path),
+    let embedded_profile_metadata = match mode {
+        CameraProfileMode::MatrixOnly => None,
+        CameraProfileMode::Automatic | CameraProfileMode::DcpProfiles => {
+            read_optional_profile(path)
+        }
     };
     let raw_camera_signature = match mode {
-        CameraProfileMode::Automatic => embedded_profile
+        CameraProfileMode::Automatic => embedded_profile_metadata
             .as_ref()
             .and_then(|profile| profile.camera_calibration_signature.clone()),
         CameraProfileMode::DcpProfiles => {
-            read_optional_profile(path).and_then(|profile| profile.camera_calibration_signature)
+            embedded_profile_metadata.and_then(|profile| profile.camera_calibration_signature)
         }
         CameraProfileMode::MatrixOnly => None,
     };
@@ -153,18 +155,18 @@ pub fn load_raw_file_with_profile_selection(
 
     let external_profiles_started = Instant::now();
     let mut matches = profile_folder
-            .map(|folder| find_matching_dcp_profiles(folder, &camera_make, &camera_model))
-            .transpose()
-            .unwrap_or_else(|error| {
-                if let Some(folder) = profile_folder {
-                    log::warn!(
-                        "could not search DCP profile folder {}: {error:#}",
-                        folder.display()
-                    );
-                }
-                None
-            })
-            .unwrap_or_default();
+        .map(|folder| find_matching_dcp_profiles(folder, &camera_make, &camera_model))
+        .transpose()
+        .unwrap_or_else(|error| {
+            if let Some(folder) = profile_folder {
+                log::warn!(
+                    "could not search DCP profile folder {}: {error:#}",
+                    folder.display()
+                );
+            }
+            None
+        })
+        .unwrap_or_default();
     crate::diagnostics::record(format!(
         "External camera-profile lookup finished in {:.3}s",
         external_profiles_started.elapsed().as_secs_f64()
@@ -193,7 +195,9 @@ pub fn load_raw_file_with_profile_selection(
     let external_profile = if mode == CameraProfileMode::MatrixOnly {
         None
     } else {
-        explicitly_selected.or_else(|| (!matches.is_empty()).then(|| matches.remove(0)))
+        explicitly_selected.or_else(|| {
+            (mode.prefers_external_dcp() && !matches.is_empty()).then(|| matches.remove(0))
+        })
     };
 
     let (selected_profile_path, selected_profile) = if let Some(mut candidate) = external_profile {
@@ -206,37 +210,27 @@ pub fn load_raw_file_with_profile_selection(
         ));
         (Some(candidate.path), Some(candidate.profile))
     } else {
-        let profile = match (mode, embedded_profile) {
-            (CameraProfileMode::Automatic, Some(profile)) => {
+        match mode {
+            CameraProfileMode::Automatic => {
                 crate::diagnostics::record(format!(
-                    "Camera profile: embedded DNG/DCP profile for {} {}",
+                    "Camera profile: automatic default to embedded camera matrix for {} {}",
                     camera_make, camera_model
                 ));
-                Some(profile)
             }
-            (CameraProfileMode::DcpProfiles, _) => {
+            CameraProfileMode::DcpProfiles => {
                 crate::diagnostics::record(format!(
                     "Camera profile: no matching external DCP for {} {}; using camera matrix",
                     camera_make, camera_model
                 ));
-                None
             }
-            (CameraProfileMode::Automatic, None) => {
-                crate::diagnostics::record(format!(
-                    "Camera profile: automatic fallback to camera matrix for {} {}",
-                    camera_make, camera_model
-                ));
-                None
-            }
-            (CameraProfileMode::MatrixOnly, _) => {
+            CameraProfileMode::MatrixOnly => {
                 crate::diagnostics::record(format!(
                     "Camera profile: matrix-only for {} {}",
                     camera_make, camera_model
                 ));
-                None
             }
-        };
-        (None, profile)
+        }
+        (None, None)
     };
 
     // SAFETY: the context is valid and exclusively owned by this worker.
@@ -1575,10 +1569,10 @@ fn oriented_source_pos(
 
 fn cdesc4(iparams: &ffi::libraw_iparams_t) -> [u8; 4] {
     [
-        iparams.cdesc[0] as u8,
-        iparams.cdesc[1] as u8,
-        iparams.cdesc[2] as u8,
-        iparams.cdesc[3] as u8,
+        c_char_as_u8(iparams.cdesc[0]),
+        c_char_as_u8(iparams.cdesc[1]),
+        c_char_as_u8(iparams.cdesc[2]),
+        c_char_as_u8(iparams.cdesc[3]),
     ]
 }
 
@@ -2929,9 +2923,19 @@ fn c_array_to_string(value: &[c_char]) -> String {
         .iter()
         .copied()
         .take_while(|value| *value != 0)
-        .map(|value| value as u8)
+        .map(c_char_as_u8)
         .collect();
     String::from_utf8_lossy(&bytes).trim().to_owned()
+}
+
+#[cfg(target_os = "android")]
+fn c_char_as_u8(value: c_char) -> u8 {
+    value
+}
+
+#[cfg(not(target_os = "android"))]
+fn c_char_as_u8(value: c_char) -> u8 {
+    value as u8
 }
 
 fn finite_positive_or_zero(value: f32) -> f32 {
@@ -2969,8 +2973,7 @@ mod tests {
         oriented_source_pos, resolve_default_exposure_ev, valid_baseline_exposure,
         validate_embedded_thumbnail_metadata, white_balance, white_levels, CameraColorModel,
         CameraProfile, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint,
-        MAX_EMBEDDED_THUMBNAIL_BYTES,
-        MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
+        MAX_EMBEDDED_THUMBNAIL_BYTES, MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
     };
 
     const RGBG: [u8; 4] = *b"RGBG";

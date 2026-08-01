@@ -3,10 +3,15 @@ use egui_phosphor::regular;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiIcon {
+    #[cfg(not(target_os = "android"))]
     Adjustments,
+    #[cfg(not(target_os = "android"))]
     Crop,
+    #[cfg(not(target_os = "android"))]
     Mask,
+    #[cfg(not(target_os = "android"))]
     Heal,
+    #[cfg(not(target_os = "android"))]
     Export,
     RotateLeft,
     RotateRight,
@@ -15,10 +20,15 @@ pub enum UiIcon {
 impl UiIcon {
     fn glyph(self) -> &'static str {
         match self {
+            #[cfg(not(target_os = "android"))]
             Self::Adjustments => regular::SLIDERS_HORIZONTAL,
+            #[cfg(not(target_os = "android"))]
             Self::Crop => regular::CROP,
+            #[cfg(not(target_os = "android"))]
             Self::Mask => regular::SELECTION,
+            #[cfg(not(target_os = "android"))]
             Self::Heal => regular::BANDAIDS,
+            #[cfg(not(target_os = "android"))]
             Self::Export => regular::EXPORT,
             Self::RotateLeft => regular::ARROW_COUNTER_CLOCKWISE,
             Self::RotateRight => regular::ARROW_CLOCKWISE,

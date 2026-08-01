@@ -1,6 +1,6 @@
 use crate::ai_masks::{
-    spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent, ObjectMaskRequest, SubjectMaskEvent,
-    BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
+    spawn_object_mask, spawn_subject_mask, ObjectInferenceCache, ObjectMaskEvent, ObjectMaskRequest,
+    SubjectMaskEvent, SubjectMaskWorkerRequest, BIREFNET_MODEL_BYTES, SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
 use crate::inpainting::{
     inpaint_capture_rect, inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintRequest,
@@ -128,16 +128,11 @@ impl PreviewQuality {
         let source_edge = source_width.max(source_height);
         let (display_width, display_height) =
             geometry.crop_pixel_dimensions(source_width, source_height);
-        let fit_scale = (f64::from(viewport_pixels[0].max(1))
-            / f64::from(display_width.max(1)))
-        .min(
-            f64::from(viewport_pixels[1].max(1)) / f64::from(display_height.max(1)),
-        );
-        let requested = (f64::from(source_edge)
-            * fit_scale
-            * f64::from(self.pixel_scale()))
-        .ceil()
-        .min(f64::from(u32::MAX - CFA_PHASE_GUARD)) as u32
+        let fit_scale = (f64::from(viewport_pixels[0].max(1)) / f64::from(display_width.max(1)))
+            .min(f64::from(viewport_pixels[1].max(1)) / f64::from(display_height.max(1)));
+        let requested = (f64::from(source_edge) * fit_scale * f64::from(self.pixel_scale()))
+            .ceil()
+            .min(f64::from(u32::MAX - CFA_PHASE_GUARD)) as u32
             + CFA_PHASE_GUARD;
         self.proxy_edge().max(requested).min(source_edge)
     }
@@ -373,7 +368,9 @@ struct PreparedLensCorrection {
     full_raw: Arc<LoadedRaw>,
     preview_raw: Arc<LoadedRaw>,
     applied_label: Option<String>,
+    #[cfg(target_os = "android")]
     selection: Option<LensfunLens>,
+    #[cfg(target_os = "android")]
     preview_quality: PreviewQuality,
 }
 
@@ -517,6 +514,7 @@ struct LibraryBatchExportJob {
 struct LibraryAdjustmentClipboard {
     edits: SidecarEditState,
     settings: AdjustmentCopySettings,
+    #[cfg(not(target_os = "android"))]
     source_label: String,
 }
 
@@ -563,7 +561,9 @@ struct LibraryBatchExportState {
     completed: usize,
     failures: Vec<String>,
     cancel_requested: bool,
+    #[cfg(target_os = "android")]
     format: ExportFormat,
+    #[cfg(target_os = "android")]
     settings: ExportSettings,
 }
 
@@ -611,6 +611,7 @@ struct LensCorrectionTaskRequest {
     generation: u64,
     original_raw: Arc<LoadedRaw>,
     selection: Option<LensfunLens>,
+    #[cfg(target_os = "android")]
     preview_quality: PreviewQuality,
     preview_proxy_edge: u32,
     cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
@@ -638,6 +639,21 @@ struct ObjectMaskTaskRequest {
     request: ObjectMaskRequest,
 }
 
+#[cfg(target_os = "android")]
+type AndroidAdjustmentPasteResult = (Vec<(String, String)>, Vec<(String, String)>, Vec<String>);
+
+/// A content-aware mask result must be matched to the component that started
+/// the request, not merely to the slot it occupied at that time.  Reordering
+/// is allowed while inference runs, so the snapshot is deliberately compared
+/// before applying a result.  Ambiguous duplicate snapshots are discarded.
+#[derive(Clone, Debug, PartialEq)]
+struct AiMaskTarget {
+    mask_index: usize,
+    component_index: usize,
+    kind: MaskKind,
+    geometry: MaskGeometry,
+}
+
 struct InpaintTaskRequest {
     document_id: u64,
     generation: u64,
@@ -649,7 +665,7 @@ struct InpaintTaskRequest {
 }
 
 enum BackgroundAction {
-    SingleExport(ExportTaskRequest),
+    SingleExport(Box<ExportTaskRequest>),
     LibraryBatchExport {
         jobs: VecDeque<LibraryBatchExportJob>,
         settings: ExportSettings,
@@ -657,7 +673,7 @@ enum BackgroundAction {
     },
     LensCorrection(LensCorrectionTaskRequest),
     SubjectMask(SubjectMaskTaskRequest),
-    ObjectMask(ObjectMaskTaskRequest),
+    ObjectMask(Box<ObjectMaskTaskRequest>),
     Inpainting(InpaintTaskRequest),
     LibraryAiMaskRefresh {
         jobs: VecDeque<LibraryAiMaskRefreshJob>,
@@ -916,6 +932,7 @@ pub struct AurawApp {
     pending_android_profile_reload: Option<(Option<PathBuf>, SidecarEditState)>,
 }
 
+#[cfg(any(not(target_os = "android"), test))]
 fn collect_pipeline_update_results(
     operation: &'static str,
     updates: Vec<(&'static str, anyhow::Result<()>)>,
@@ -1065,23 +1082,15 @@ mod transactional_pipeline_tests {
     #[test]
     fn fitted_preview_density_excludes_phone_letterbox_space() {
         let geometry = GeometryTransform::default();
-        let edge = PreviewQuality::Max.proxy_edge_for_fitted_source(
-            [720, 1_500],
-            7_028,
-            4_688,
-            geometry,
-        );
+        let edge =
+            PreviewQuality::Max.proxy_edge_for_fitted_source([720, 1_500], 7_028, 4_688, geometry);
         assert_eq!(edge, 1_280);
 
         let mut cropped = geometry;
         cropped.crop = [0.375, 0.0, 0.625, 1.0];
         assert!(
-            PreviewQuality::Max.proxy_edge_for_fitted_source(
-                [720, 1_500],
-                7_028,
-                4_688,
-                cropped,
-            ) > edge
+            PreviewQuality::Max.proxy_edge_for_fitted_source([720, 1_500], 7_028, 4_688, cropped,)
+                > edge
         );
     }
 

@@ -67,6 +67,7 @@ impl Sidebar {
     // 42 px tool buttons plus balanced outside breathing room. The panel frame
     // also contributes its normal inset, so this prevents selected buttons from
     // visually touching the rail's left/right edges.
+    #[cfg(not(target_os = "android"))]
     pub(crate) const DESKTOP_TOOL_RAIL_WIDTH: f32 = 60.0;
     const MASK_THUMBNAIL_EDGE: u32 = 64;
     pub(crate) const VERTICAL_MASK_STRIP_HEIGHT: f32 = 92.0;

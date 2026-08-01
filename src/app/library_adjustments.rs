@@ -3,6 +3,7 @@ impl AurawApp {
         self.adjustment_clipboard.is_some()
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn copied_adjustments_source_label(&self) -> Option<&str> {
         self.adjustment_clipboard
             .as_ref()
@@ -10,9 +11,12 @@ impl AurawApp {
     }
 
     fn install_adjustment_clipboard(&mut self, edits: SidecarEditState, source_label: String) {
+        #[cfg(target_os = "android")]
+        drop(source_label);
         self.adjustment_clipboard = Some(LibraryAdjustmentClipboard {
             edits,
             settings: self.adjustment_copy_settings,
+            #[cfg(not(target_os = "android"))]
             source_label,
         });
     }
@@ -379,7 +383,7 @@ impl AurawApp {
         targets: &[(String, String)],
         mode: AdjustmentPasteMode,
         frame: &eframe::Frame,
-    ) -> (Vec<(String, String)>, Vec<(String, String)>, Vec<String>) {
+    ) -> AndroidAdjustmentPasteResult {
         let Some(clipboard) = self.adjustment_clipboard.clone() else {
             return (
                 Vec::new(),
@@ -727,10 +731,9 @@ impl AurawApp {
                 } else {
                     state.pending.pop_front()
                 })
-                .map(|job| {
+                .inspect(|job| {
                     state.current = Some(job.clone());
                     state.phase = LibraryAiMaskRefreshPhase::Loading;
-                    job
                 })
             };
 

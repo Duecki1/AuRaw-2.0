@@ -17,22 +17,10 @@ impl TaskId {
 pub(crate) enum TaskKind {
     SingleExport,
     LibraryBatchExport,
-    LensCorrection {
-        document_id: u64,
-        generation: u64,
-    },
-    SubjectMask {
-        document_id: u64,
-        generation: u64,
-    },
-    ObjectMask {
-        document_id: u64,
-        generation: u64,
-    },
-    Inpainting {
-        document_id: u64,
-        generation: u64,
-    },
+    LensCorrection { document_id: u64, generation: u64 },
+    SubjectMask { document_id: u64, generation: u64 },
+    ObjectMask { document_id: u64, generation: u64 },
+    Inpainting { document_id: u64, generation: u64 },
     LibraryAiMaskRefresh,
 }
 
@@ -324,6 +312,7 @@ impl BackgroundTaskManager {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn global_current_snapshot(&self) -> Option<TaskSnapshot> {
         self.active_task(true).map(Self::snapshot_from_task)
     }
@@ -333,9 +322,8 @@ impl BackgroundTaskManager {
     ) -> (Option<TaskSnapshot>, usize) {
         let primary = self.active_task(true).or_else(|| {
             self.queue.iter().find_map(|id| {
-                self.task(*id).filter(|task| {
-                    task.global_visible && task.status == TaskStatus::Queued
-                })
+                self.task(*id)
+                    .filter(|task| task.global_visible && task.status == TaskStatus::Queued)
             })
         });
         let displayed_queued = if primary.is_some_and(|task| task.status == TaskStatus::Queued) {
@@ -409,9 +397,8 @@ impl BackgroundTaskManager {
         self.queue
             .iter()
             .filter(|id| {
-                self.task(**id).is_some_and(|task| {
-                    task.status == TaskStatus::Queued && task.global_visible
-                })
+                self.task(**id)
+                    .is_some_and(|task| task.status == TaskStatus::Queued && task.global_visible)
             })
             .count()
     }
@@ -419,9 +406,10 @@ impl BackgroundTaskManager {
     pub(crate) fn has_visible_tasks(&self) -> bool {
         self.queued_count() > 0
             || self.has_failures()
-            || self.tasks.iter().any(|task| {
-                matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
-            })
+            || self
+                .tasks
+                .iter()
+                .any(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling))
     }
 
     pub(crate) fn has_global_visible_tasks(&self) -> bool {
@@ -462,9 +450,8 @@ impl BackgroundTaskManager {
         task.progress = progress;
         if task.status == TaskStatus::Cancelling {
             task.progress.phase = "Cancelling…".to_owned();
-            task.progress.detail = Some(
-                "The current safe phase may finish before the task stops.".to_owned(),
-            );
+            task.progress.detail =
+                Some("The current safe phase may finish before the task stops.".to_owned());
         }
         true
     }
@@ -497,9 +484,8 @@ impl BackgroundTaskManager {
                 if let Some(task) = self.task_mut(id) {
                     task.status = TaskStatus::Cancelling;
                     task.progress.phase = "Cancelling…".to_owned();
-                    task.progress.detail = Some(
-                        "The current safe phase may finish before the task stops.".to_owned(),
-                    );
+                    task.progress.detail =
+                        Some("The current safe phase may finish before the task stops.".to_owned());
                     task.cancellation.store(true, Ordering::Release);
                 }
                 CancelTaskResult::CancellationRequested
@@ -653,7 +639,10 @@ mod tests {
         let mut manager = BackgroundTaskManager::default();
         let first = queued(&mut manager, "first");
         let second = queued(&mut manager, "second");
-        assert_eq!(manager.request_cancel(second), CancelTaskResult::RemovedQueued);
+        assert_eq!(
+            manager.request_cancel(second),
+            CancelTaskResult::RemovedQueued
+        );
         assert!(manager.snapshot(second).is_none());
         assert_eq!(manager.start_next(), Some(first));
         assert_eq!(manager.queued_count(), 0);
@@ -731,7 +720,10 @@ mod tests {
         );
 
         assert!(removed.is_empty());
-        assert_eq!(manager.snapshot(old).unwrap().status, TaskStatus::Cancelling);
+        assert_eq!(
+            manager.snapshot(old).unwrap().status,
+            TaskStatus::Cancelling
+        );
         assert!(token.load(Ordering::Acquire));
         assert_eq!(manager.snapshot(new).unwrap().status, TaskStatus::Queued);
         assert_eq!(manager.queued_count(), 1);
@@ -785,11 +777,13 @@ mod tests {
             true,
         );
         assert_eq!(manager.current_id(), Some(export));
-        assert_eq!(manager.snapshot(inference).unwrap().status, TaskStatus::Running);
-        assert!(manager.update_progress(
-            inference,
-            TaskProgress::indeterminate("Still inferencing")
-        ));
+        assert_eq!(
+            manager.snapshot(inference).unwrap().status,
+            TaskStatus::Running
+        );
+        assert!(
+            manager.update_progress(inference, TaskProgress::indeterminate("Still inferencing"))
+        );
         assert!(manager.complete(inference));
         assert_eq!(manager.current_id(), Some(export));
     }
@@ -802,11 +796,11 @@ mod tests {
         assert_eq!(manager.start_next(), Some(download));
         assert!(manager.release_current(download));
         assert_eq!(manager.start_next(), Some(export));
-        assert!(manager.update_progress(
-            download,
-            TaskProgress::indeterminate("Inferencing")
-        ));
-        assert_eq!(manager.snapshot(download).unwrap().status, TaskStatus::Running);
+        assert!(manager.update_progress(download, TaskProgress::indeterminate("Inferencing")));
+        assert_eq!(
+            manager.snapshot(download).unwrap().status,
+            TaskStatus::Running
+        );
         assert_eq!(manager.current_id(), Some(export));
     }
 
@@ -874,5 +868,4 @@ mod tests {
         assert_eq!(primary.unwrap().id, visible);
         assert_eq!(waiting, 0);
     }
-
 }
