@@ -13,7 +13,9 @@ RAW = (ROOT / "src/pipeline/raw_loader/libraw_loader.rs").read_text()
 
 
 def test_unedited_desktop_thumbnails_are_persisted() -> None:
-    assert ".auraw-raw-thumb.png" in THUMBNAIL_CACHE
+    assert ".auraw-raw-thumb.jpg" in THUMBNAIL_CACHE
+    assert ".auraw-raw-thumb.png" not in THUMBNAIL_CACHE
+    assert "THUMBNAIL_JPEG_QUALITY: u8 = 88" in THUMBNAIL_CACHE
     assert "load_desktop_raw_thumbnail" in LIBRARY
     assert "save_desktop_raw_thumbnail" in LIBRARY
     assert LIBRARY.index("load_desktop_raw_thumbnail") < LIBRARY.index("load_raw_thumbnail(path")
@@ -26,8 +28,10 @@ def test_android_thumbnail_cache_survives_refresh_restart_and_cache_scavenging()
     assert "migrateLegacyThumbnailCacheEntry" in STORAGE
     assert "MAX_THUMBNAIL_CACHE_ENTRIES" in STORAGE
     assert "deleteThumbnailCacheEntry" in STORAGE
-    assert "load_png(&cache_path" in ANDROID
-    assert "save_png(&cache_path" in ANDROID
+    assert "load_jpeg(&cache_path" in ANDROID
+    assert "save_jpeg(&cache_path" in ANDROID
+    assert 'name.endsWith(".jpg")' in STORAGE
+    assert 'name.endsWith(".png")' in STORAGE
     assert "materializeRawLibraryThumbnail" in STORAGE
 
 

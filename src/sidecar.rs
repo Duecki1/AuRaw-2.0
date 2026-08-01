@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-#[cfg(not(target_os = "android"))]
-use std::io::Cursor;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +19,7 @@ pub const SIDECAR_SCHEMA_VERSION: u32 = 4;
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0004;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
-pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.png";
+pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str = crate::thumbnail_cache::DESKTOP_THUMBNAIL_CACHE_DIR;
 #[cfg(not(target_os = "android"))]
@@ -425,24 +423,21 @@ pub fn load_developed_thumbnail_cache(
         return Ok(None);
     }
     let cache_path = developed_thumbnail_path_for_raw(raw_path);
-    let image = match image::open(&cache_path) {
-        Ok(image) => image,
+    match crate::thumbnail_cache::load_jpeg(&cache_path, maximum_edge) {
+        Ok(Some(thumbnail)) => Ok(Some(thumbnail)),
+        Ok(None) => {
+            let _ = fs::remove_file(developed_thumbnail_fingerprint_path_for_raw(raw_path));
+            Ok(None)
+        }
         Err(error) => {
             let _ = fs::remove_file(&cache_path);
             let _ = fs::remove_file(developed_thumbnail_fingerprint_path_for_raw(raw_path));
-            return Err(format!(
+            Err(format!(
                 "could not decode developed thumbnail {}: {error}",
                 cache_path.display()
-            ));
+            ))
         }
-    };
-    let image = crate::thumbnail_cache::downscale_to_fit(image, maximum_edge).to_rgba8();
-    let (width, height) = image.dimensions();
-    Ok(Some(RawThumbnail {
-        width,
-        height,
-        rgba: image.into_raw(),
-    }))
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -529,24 +524,9 @@ pub fn save_developed_thumbnail_cache(
     if desktop_sidecar_fingerprint(raw_path)? != Some(expected_sidecar_fingerprint) {
         return Err("edit sidecar changed while its thumbnail was rendering".to_owned());
     }
-    let image =
-        image::RgbaImage::from_raw(thumbnail.width, thumbnail.height, thumbnail.rgba.clone())
-            .ok_or_else(|| "developed thumbnail has an invalid byte count".to_owned())?;
-    let mut encoded = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(image)
-        .write_to(&mut encoded, image::ImageFormat::Png)
-        .map_err(|error| format!("could not encode developed thumbnail: {error}"))?;
     let cache_path = developed_thumbnail_path_for_raw(raw_path);
     let fingerprint_path = developed_thumbnail_fingerprint_path_for_raw(raw_path);
-    if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "could not create developed thumbnail cache {}: {error}",
-                parent.display()
-            )
-        })?;
-    }
-    atomic_write(&cache_path, encoded.get_ref()).map_err(|error| {
+    crate::thumbnail_cache::save_jpeg(&cache_path, thumbnail).map_err(|error| {
         format!(
             "could not cache developed thumbnail {}: {error}",
             cache_path.display()
@@ -618,7 +598,7 @@ fn migrate_legacy_developed_thumbnail_cache(raw_path: &Path) -> Result<(), Strin
         return Ok(());
     }
 
-    let thumbnail = match crate::thumbnail_cache::load_png(&legacy_cache, 8192) {
+    let thumbnail = match crate::thumbnail_cache::load_jpeg(&legacy_cache, 8192) {
         Ok(Some(thumbnail)) => thumbnail,
         Ok(None) | Err(_) => {
             remove_legacy_developed_thumbnail_cache(raw_path);
@@ -2301,9 +2281,9 @@ mod tests {
         fs::write(sidecar_path_for_raw(&raw), b"edit-one").unwrap();
         let fingerprint = desktop_sidecar_fingerprint(&raw).unwrap().unwrap();
         let thumbnail = RawThumbnail {
-            width: 2,
-            height: 1,
-            rgba: vec![10, 20, 30, 255, 40, 50, 60, 255],
+            width: 16,
+            height: 16,
+            rgba: [10, 20, 30, 255].repeat(16 * 16),
         };
 
         let cache_path = save_developed_thumbnail_cache(&raw, &thumbnail, fingerprint).unwrap();
@@ -2314,7 +2294,16 @@ mod tests {
             .expect("developed thumbnail cache should load");
         assert_eq!(loaded.width, thumbnail.width);
         assert_eq!(loaded.height, thumbnail.height);
-        assert_eq!(loaded.rgba, thumbnail.rgba);
+        for (actual, expected) in loaded
+            .rgba
+            .chunks_exact(4)
+            .zip(thumbnail.rgba.chunks_exact(4))
+        {
+            for channel in 0..3 {
+                assert!(actual[channel].abs_diff(expected[channel]) <= 3);
+            }
+            assert_eq!(actual[3], 255);
+        }
 
         fs::write(sidecar_path_for_raw(&raw), b"edit-two").unwrap();
         assert!(!developed_thumbnail_cache_is_fresh(&raw).unwrap());

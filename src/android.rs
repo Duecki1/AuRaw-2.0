@@ -406,7 +406,7 @@ pub fn load_library_thumbnail(
     maximum_edge: u32,
 ) -> Result<crate::pipeline::RawThumbnail, String> {
     let cache_path = raw_thumbnail_cache_path(app, uri, bytes, modified_seconds, maximum_edge)?;
-    match crate::thumbnail_cache::load_png(&cache_path, maximum_edge) {
+    match crate::thumbnail_cache::load_jpeg(&cache_path, maximum_edge) {
         Ok(Some(thumbnail)) => return Ok(thumbnail),
         Ok(None) => {}
         Err(error) => log::warn!("discarding Android RAW thumbnail cache: {error}"),
@@ -431,7 +431,7 @@ pub fn load_library_thumbnail(
             result?
         }
     };
-    if let Err(error) = crate::thumbnail_cache::save_png(&cache_path, &thumbnail) {
+    if let Err(error) = crate::thumbnail_cache::save_jpeg(&cache_path, &thumbnail) {
         log::warn!("could not persist Android RAW thumbnail: {error}");
     }
     Ok(thumbnail)
@@ -607,7 +607,7 @@ pub fn load_developed_thumbnail_cache(
         let _ = fs::remove_file(&fingerprint_path);
         return Ok(None);
     }
-    crate::thumbnail_cache::load_png(&cache_path, maximum_edge)
+    crate::thumbnail_cache::load_jpeg(&cache_path, maximum_edge)
 }
 
 pub fn save_developed_thumbnail_cache(
@@ -625,7 +625,7 @@ pub fn save_developed_thumbnail_cache(
     let fingerprint = fingerprint?;
     let cache_path = developed_thumbnail_cache_path(app, raw_uri)?;
     let fingerprint_path = developed_thumbnail_fingerprint_path(&cache_path);
-    crate::thumbnail_cache::save_png(&cache_path, thumbnail)?;
+    crate::thumbnail_cache::save_jpeg(&cache_path, thumbnail)?;
     crate::thumbnail_cache::write_bytes_atomic(
         &fingerprint_path,
         format!(
