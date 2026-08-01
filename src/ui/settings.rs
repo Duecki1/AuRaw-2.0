@@ -126,9 +126,17 @@ impl Settings {
                 )
                 .wrap(),
             );
-            if ui.button("Clear thumbnail cache").clicked() {
-                app.clear_thumbnail_cache();
-            }
+            let cache_size = app.thumbnail_cache_size_label();
+            ui.horizontal(|ui| {
+                if ui.button("Clear thumbnail cache").clicked() {
+                    app.clear_thumbnail_cache();
+                }
+                ui.label(
+                    egui::RichText::new(cache_size)
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
         });
 
         #[cfg(not(target_os = "android"))]

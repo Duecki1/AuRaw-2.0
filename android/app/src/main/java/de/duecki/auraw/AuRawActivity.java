@@ -284,9 +284,8 @@ public final class AuRawActivity extends NativeActivity {
     public String developedThumbnailCachePath(String uriText) throws Exception {
         return storageManager.developedThumbnailCachePath(uriText);
     }
-    public void clearThumbnailCache() {
-        storageManager.clearThumbnailCache();
-    }
+    public void clearThumbnailCache() { storageManager.clearThumbnailCache(); }
+    public long thumbnailCacheSizeBytes() { return storageManager.thumbnailCacheSizeBytes(); }
     public String materializeRawLibraryThumbnail(String uriText, String displayName)
             throws Exception {
         return storageManager.materializeRawLibraryThumbnail(uriText, displayName);

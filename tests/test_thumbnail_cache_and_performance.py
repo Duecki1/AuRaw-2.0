@@ -129,6 +129,25 @@ def test_previewless_and_edited_raws_share_the_thumbnail_worker_limit() -> None:
     assert fallback.index("acquire_rendered_thumbnail_worker") < fallback.index("open_libraw(path)")
 
 
+def test_thumbnail_workers_build_the_entire_catalog_and_prioritize_visible_cards() -> None:
+    assert "ThumbnailWorkQueue::new(generation, &files)" in LIBRARY
+    assert "background: files" in LIBRARY
+    assert "display_priority: false" in LIBRARY
+    assert "display_priority: true" in LIBRARY
+    assert "initial_completed" in LIBRARY
+    assert "builds every preview in the background" in LIBRARY
+
+
+def test_thumbnail_cache_size_is_reported_on_both_platforms() -> None:
+    assert "desktop_thumbnail_cache_size_bytes" in THUMBNAIL_CACHE
+    assert "thumbnailCacheSizeBytes" in STORAGE
+    assert "thumbnailCacheSizeBytes" in ACTIVITY
+    assert "thumbnail_cache_size_bytes" in ANDROID
+    assert "thumbnail_cache_size_label" in APP
+    assert "MB used" in APP
+    assert "let cache_size = app.thumbnail_cache_size_label()" in SETTINGS
+
+
 def test_failed_thumbnail_attempts_retry_and_cache_can_be_cleared() -> None:
     assert '"Preview unavailable"' not in LIBRARY
     assert "thumbnail_retry_after" in LIBRARY
