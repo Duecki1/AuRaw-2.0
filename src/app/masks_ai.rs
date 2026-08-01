@@ -632,84 +632,111 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    #[cfg(target_os = "android")]
+    fn capture_mask_source_from_active_preview(
+        &self,
+        frame: &eframe::Frame,
+    ) -> Result<MaskRgbImage, String> {
+        let render_state = frame
+            .wgpu_render_state()
+            .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
+        let raw = self
+            .preview_raw
+            .as_ref()
+            .ok_or_else(|| "The preview image is not available yet.".to_owned())?;
+        let pipeline = self
+            .gpu_pipeline
+            .as_ref()
+            .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
+
+        // The expanded processing graph no longer reliably leaves enough of
+        // Android's GPU budget for a second full RawGpuPipeline. Render the
+        // canonical unedited source through the already-resident preview graph,
+        // read it back, then restore the current edited preview before this UI
+        // frame is painted. This is also the path used while reconstructing
+        // saved range-mask sources during image load.
+        let reference_exposure = ExposureParams::scene_referred_default();
+        let reference_masks = MaskStack::default();
+        let reference_params = GpuParams::new(&reference_exposure, &reference_masks, raw);
+        pipeline.recompute(&render_state.queue, &render_state.device, &reference_params);
+
+        let readback = pipeline.read_output_region_blocking(
+            &render_state.device,
+            &render_state.queue,
+            0,
+            0,
+            pipeline.width,
+            pipeline.height,
+        );
+
+        // `recompute` updates the complete graph, so restore exactly the state
+        // the user should see even when the readback failed. A failure must not
+        // leave the preview displaying the neutral AI-mask rendition.
+        let restore_params = if self.original_preview_requested {
+            GpuParams::new(&self.original_preview_exposure, &reference_masks, raw)
+                .with_vignette_geometry(self.geometry)
+        } else {
+            GpuParams::new(&self.target_exposure, &self.masks, raw)
+                .with_vignette_geometry(self.geometry)
+        };
+        pipeline.recompute(&render_state.queue, &render_state.device, &restore_params);
+
+        let rgba = readback
+            .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
+        MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
+            .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())
+    }
+
     pub(crate) fn capture_mask_source(&mut self, frame: &eframe::Frame) -> Result<(), String> {
         if self.mask_source_cache.is_some() {
             return Ok(());
         }
-        let render_state = frame
-            .wgpu_render_state()
-            .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let program_template = self
-            .gpu_pipeline
-            .as_ref()
-            .map(RawGpuPipeline::program_template)
-            .or_else(|| self.preview_program_template.clone())
-            .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
-        let full_raw = self
-            .loaded_raw
-            .as_ref()
-            .ok_or_else(|| "The original RAW is not available.".to_owned())?;
 
-        // A DPI-sized Android preview can coexist poorly with a second 2048px
-        // render graph under the fixed mobile GPU budget. The ONNX models use
-        // at most a 1024px image (and ViTMatte uses 768px on Android), so only
-        // reduce this canonical source proxy when the larger graph cannot be
-        // admitted instead of failing the complete AI-mask operation.
-        const ANDROID_SOURCE_EDGES: &[u32] = &[2048, 1536, 1280, 1024];
-        const DESKTOP_SOURCE_EDGES: &[u32] = &[3072];
-        let source_edges = if cfg!(target_os = "android") {
-            ANDROID_SOURCE_EDGES
-        } else {
-            DESKTOP_SOURCE_EDGES
-        };
-        let mut last_budget_error = None;
+        #[cfg(target_os = "android")]
+        {
+            let source = self.capture_mask_source_from_active_preview(frame)?;
+            self.mask_source_cache = Some(source);
+            return Ok(());
+        }
 
-        for &source_edge in source_edges {
-            let raw = if full_raw.width.max(full_raw.height) <= source_edge {
+        #[cfg(not(target_os = "android"))]
+        {
+            let render_state = frame
+                .wgpu_render_state()
+                .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
+            let program_template = self
+                .gpu_pipeline
+                .as_ref()
+                .map(RawGpuPipeline::program_template)
+                .or_else(|| self.preview_program_template.clone())
+                .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
+            let full_raw = self
+                .loaded_raw
+                .as_ref()
+                .ok_or_else(|| "The original RAW is not available.".to_owned())?;
+            let raw = if full_raw.width.max(full_raw.height) <= 3072 {
                 Arc::clone(full_raw)
             } else {
                 Arc::new(build_proxy(
                     full_raw,
-                    ProxySpec {
-                        max_edge: source_edge,
-                    },
+                    ProxySpec { max_edge: 3072 },
                 ))
             };
 
-            // Subject, Object, and range classifiers must be stable when the
-            // user changes edits. Render a fresh canonical rendition from the
-            // unedited RAW proxy while retaining camera color, demosaic, and
-            // lens-corrected geometry for model quality and pixel alignment.
             let reference_exposure = ExposureParams::scene_referred_default();
             let reference_masks = MaskStack::default();
             let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
-            let reference_pipeline = match RawGpuPipeline::new_headless_reusing_program_template(
+            let reference_pipeline = RawGpuPipeline::new_headless_reusing_program_template(
                 &render_state.device,
                 &render_state.queue,
                 &raw,
                 &params,
                 ProcessingQuality::Preview,
                 &program_template,
-            ) {
-                Ok(pipeline) => pipeline,
-                Err(error)
-                    if cfg!(target_os = "android")
-                        && error
-                            .to_string()
-                            .contains("GPU pipelines already reserve") =>
-                {
-                    crate::diagnostics::record(format!(
-                        "Canonical AI-mask source at {source_edge}px exceeded the Android GPU coexistence budget; retrying smaller: {error:#}"
-                    ));
-                    last_budget_error = Some(error);
-                    continue;
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "Could not prepare the original RAW for masking: {error:#}"
-                    ));
-                }
-            };
+            )
+            .map_err(|error| {
+                format!("Could not prepare the original RAW for masking: {error:#}")
+            })?;
             reference_pipeline
                 .update_inpaint_layer(
                     &render_state.queue,
@@ -742,18 +769,18 @@ impl AurawApp {
             )
             .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
             self.mask_source_cache = Some(source);
-            return Ok(());
+            Ok(())
         }
+    }
 
-        let detail = last_budget_error
-            .map(|error| format!("{error:#}"))
-            .unwrap_or_else(|| "unknown GPU budget failure".to_owned());
-        Err(format!(
-            "Could not prepare the original RAW for masking within Android's GPU budget: {detail}"
-        ))
+    pub(crate) fn report_ai_mask_error(&mut self, error: String) {
+        self.notice = Some(error.clone());
+        self.object_error_dialog = Some(error);
+        self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
+        self.object_error_dialog = None;
         self.recover_terminal_ai_mask_task_owners();
         if let Some(mask) = self.subject_mask_cache.clone() {
             self.apply_subject_mask(mask);
@@ -764,7 +791,7 @@ impl AurawApp {
             return;
         }
         if let Err(error) = self.capture_mask_source(frame) {
-            self.notice = Some(error);
+            self.report_ai_mask_error(error);
             return;
         }
         let path = self.birefnet_model_path();
@@ -1001,6 +1028,7 @@ impl AurawApp {
         mask_index: usize,
         component_index: usize,
     ) {
+        self.object_error_dialog = None;
         self.recover_terminal_ai_mask_task_owners();
         if self.landscape_task_id.is_some() || self.landscape_receiver.is_some() {
             self.notice = Some("Wait for the current landscape mask to finish.".to_owned());
@@ -1026,7 +1054,7 @@ impl AurawApp {
             return;
         }
         if let Err(error) = self.capture_mask_source(frame) {
-            self.notice = Some(error);
+            self.report_ai_mask_error(error);
             return;
         }
         let path = self.landscape_model_path();
@@ -1377,7 +1405,7 @@ impl AurawApp {
             return;
         }
         if self.mask_source_cache.is_none() {
-            self.notice = Some(
+            self.report_ai_mask_error(
                 "The original image source is not ready for object selection. Re-open the Object mask or create it again."
                     .to_owned(),
             );
@@ -2323,7 +2351,7 @@ impl AurawApp {
 
         if let Some(message) = self.object_error_dialog.clone() {
             let mut close = false;
-            crate::ui::responsive_popup(egui::Window::new("Object mask failed"), ctx, 420.0)
+            crate::ui::responsive_popup(egui::Window::new("AI mask failed"), ctx, 420.0)
                 .collapsible(false)
                 .resizable(true)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)

@@ -88,16 +88,29 @@ def test_local_adjustments_are_scene_linear_and_mask_weighted() -> None:
 
 
 def test_ai_and_range_masks_use_a_stable_unedited_raw_reference() -> None:
-    capture = APP[APP.index("pub(crate) fn capture_mask_source"):APP.index("pub(crate) fn request_subject_mask")]
-    assert "loaded_raw" in capture
-    assert "ExposureParams::scene_referred_default()" in capture
-    assert "MaskStack::default()" in capture
-    assert "RawGpuPipeline::new_headless_reusing_program_template" in capture
-    assert "reference_pipeline.read_output_region_blocking" not in capture  # formatted as a chained call
-    assert "let rgba = reference_pipeline" in capture
-    assert "ANDROID_SOURCE_EDGES: &[u32] = &[2048, 1536, 1280, 1024]" in capture
-    assert "DESKTOP_SOURCE_EDGES: &[u32] = &[3072]" in capture
-    assert "GPU pipelines already reserve" in capture
+    capture = APP[
+        APP.index('#[cfg(target_os = "android")]\n    fn capture_mask_source_from_active_preview'):
+        APP.index("pub(crate) fn request_subject_mask")
+    ]
+    android = capture[
+        capture.index("fn capture_mask_source_from_active_preview"):
+        capture.index("pub(crate) fn capture_mask_source")
+    ]
+    assert "preview_raw" in android
+    assert "gpu_pipeline" in android
+    assert "ExposureParams::scene_referred_default()" in android
+    assert "MaskStack::default()" in android
+    assert "pipeline.recompute" in android
+    assert "pipeline.read_output_region_blocking" in android
+    assert "restore_params" in android
+    assert "target_exposure" in android
+    assert "RawGpuPipeline::new_" not in android
+
+    desktop = capture[capture.index('#[cfg(not(target_os = "android"))]'):]
+    assert "loaded_raw" in desktop
+    assert "ProxySpec { max_edge: 3072 }" in desktop
+    assert "RawGpuPipeline::new_headless_reusing_program_template" in desktop
+    assert "let rgba = reference_pipeline" in desktop
 
 
 def test_brush_input_and_rasterization_avoid_progressive_slowdown() -> None:
