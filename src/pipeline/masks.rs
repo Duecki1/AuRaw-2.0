@@ -1496,6 +1496,8 @@ fn shape_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32, 
     let grow = grow.clamp(-1.0, 1.0);
     let feather = feather.clamp(0.0, 1.0);
     if grow.abs() <= 1e-5 && feather <= 1e-5 {
+        mask.par_iter_mut()
+            .for_each(|value| *value = f32::from(*value >= 0.5));
         return;
     }
 
@@ -2437,6 +2439,24 @@ mod tests {
         let layer = stack.rasterize_layer(0, 2, 1, 2, 1);
         assert_eq!(layer, [0, 255]);
     }
+
+    #[test]
+    fn zero_feather_object_mask_does_not_leak_subthreshold_probabilities() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Object);
+        if let MaskGeometry::Object { mask, feather, .. } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = MaskImage::new(5, 1, vec![0, 32, 127, 128, 255]);
+            *feather = 0.0;
+        } else {
+            panic!("object mask used unexpected geometry");
+        }
+
+        let layer = stack.rasterize_layer(0, 5, 1, 5, 1);
+        assert_eq!(layer, [0, 0, 0, 255, 255]);
+    }
+
     #[test]
     fn inpaint_patches_remain_sparse_and_full_resolution() {
         use half::f16;
