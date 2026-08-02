@@ -75,3 +75,22 @@ def test_library_sort_dropdown_supports_date_name_and_size_orders() -> None:
         assert label in LIBRARY
     assert "self.sort_entries();" in LIBRARY
     assert "self.rebuild_entry_indices();" in LIBRARY
+
+
+def test_library_thumbnail_size_dropdown_is_shared_and_defaults_to_medium() -> None:
+    performance = (ROOT / "src/performance_settings.rs").read_text(encoding="utf-8")
+    assert 'ComboBox::from_id_salt("library-thumbnail-size")' in LIBRARY
+    assert "enum LibraryThumbnailSize" in LIBRARY
+    for variant, label in (
+        ("Small", "Small"),
+        ("Medium", "Average"),
+        ("Large", "Huge"),
+        ("Enormous", "Enourmous"),
+    ):
+        assert f'Self::{variant} => "{label}"' in LIBRARY
+    assert "Self::Small => 1.0" in LIBRARY
+    assert "Self::Medium => 1.25" in LIBRARY
+    assert "Self::Large => 1.5" in LIBRARY
+    assert "Self::Enormous => 1.75" in LIBRARY
+    assert "library_thumbnail_size" in performance
+    assert "LibraryThumbnailSize::default()" in performance

@@ -287,6 +287,7 @@ impl AurawApp {
         let performance_settings_path = crate::performance_settings::desktop_path();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         let last_library_folder = performance.last_library_folder.clone();
+        let last_library_selected_folder = performance.last_library_selected_folder.clone();
         let mut camera_profile_folder = performance.camera_profile_folder.clone();
         let mut camera_profile_folder_label = performance.camera_profile_folder_label.clone();
         if performance.camera_profile_auto_detect
@@ -345,7 +346,11 @@ impl AurawApp {
             original_preview_rendered_state: None,
             android_original_hold: None,
             exposure,
-            library: LibraryState::new_with_workers(ctx, performance.thumbnail_workers),
+            library: LibraryState::new_with_workers(
+                ctx,
+                performance.thumbnail_workers,
+                performance.library_thumbnail_size,
+            ),
             adjustment_copy_settings: performance.adjustment_copy_settings,
             adjustment_clipboard: None,
             raw_cache: VecDeque::new(),
@@ -523,7 +528,8 @@ impl AurawApp {
             ai_denoise_resume_pending: false,
         };
         if let Some(folder) = last_library_folder.filter(|folder| folder.is_dir()) {
-            app.library.open_folder(folder, ctx);
+            app.library
+                .restore_folder(folder, last_library_selected_folder, ctx);
         }
         app
     }
@@ -614,6 +620,7 @@ impl AurawApp {
                 android_app.clone(),
                 &cc.egui_ctx,
                 performance.thumbnail_workers,
+                performance.library_thumbnail_size,
             ),
             adjustment_copy_settings: performance.adjustment_copy_settings,
             adjustment_clipboard: None,
@@ -1335,6 +1342,23 @@ impl AurawApp {
         self.persist_performance_settings();
     }
 
+    pub(crate) fn set_library_thumbnail_size(
+        &mut self,
+        thumbnail_size: crate::ui::library::LibraryThumbnailSize,
+    ) {
+        if self.library.set_thumbnail_size(thumbnail_size) {
+            self.persist_performance_settings();
+            self.egui_ctx.request_repaint();
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn select_library_folder(&mut self, folder: PathBuf) {
+        if self.library.select_folder(folder, &self.egui_ctx) {
+            self.persist_performance_settings();
+        }
+    }
+
     #[cfg(not(target_os = "android"))]
     pub(crate) fn set_display_color_management(&mut self, enabled: bool) {
         if self.display_color_management == enabled {
@@ -1650,6 +1674,7 @@ impl AurawApp {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.raw_cache_limit,
             thumbnail_workers: self.library.thumbnail_worker_count(),
+            library_thumbnail_size: self.library.thumbnail_size(),
             preview_quality: self.preview_quality,
             camera_profile_mode: self.camera_profile_mode,
             camera_profile_folder: self.camera_profile_folder.clone(),
@@ -1665,6 +1690,11 @@ impl AurawApp {
             last_library_folder: self
                 .library
                 .root_folder()
+                .map(|folder| folder.to_path_buf()),
+            #[cfg(not(target_os = "android"))]
+            last_library_selected_folder: self
+                .library
+                .folder()
                 .map(|folder| folder.to_path_buf()),
             ..Default::default()
         };

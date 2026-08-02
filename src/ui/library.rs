@@ -83,6 +83,39 @@ impl LibrarySortOrder {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LibraryThumbnailSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+    Enormous,
+}
+
+impl LibraryThumbnailSize {
+    const ALL: [Self; 4] = [Self::Small, Self::Medium, Self::Large, Self::Enormous];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Medium => "Average",
+            Self::Large => "Huge",
+            Self::Enormous => "Enourmous",
+        }
+    }
+
+    const fn scale(self) -> f32 {
+        match self {
+            // Small deliberately preserves AuRaw's previous gallery size.
+            Self::Small => 1.0,
+            Self::Medium => 1.25,
+            Self::Large => 1.5,
+            Self::Enormous => 1.75,
+        }
+    }
+}
+
 pub(crate) fn default_thumbnail_worker_count() -> usize {
     if cfg!(target_os = "android") {
         1
@@ -382,6 +415,7 @@ pub(crate) struct LibraryState {
     usage_clock: u64,
     thumbnail_workers: usize,
     sort_order: LibrarySortOrder,
+    thumbnail_size: LibraryThumbnailSize,
     selected_sources: HashSet<LibrarySource>,
     selection_mode: bool,
     #[cfg(not(target_os = "android"))]
@@ -396,11 +430,19 @@ pub(crate) struct LibraryState {
 impl LibraryState {
     #[cfg(all(not(target_os = "android"), test))]
     pub(crate) fn new(context: &egui::Context) -> Self {
-        Self::new_with_workers(context, default_thumbnail_worker_count())
+        Self::new_with_workers(
+            context,
+            default_thumbnail_worker_count(),
+            LibraryThumbnailSize::default(),
+        )
     }
 
     #[cfg(not(target_os = "android"))]
-    pub(crate) fn new_with_workers(context: &egui::Context, workers: usize) -> Self {
+    pub(crate) fn new_with_workers(
+        context: &egui::Context,
+        workers: usize,
+        thumbnail_size: LibraryThumbnailSize,
+    ) -> Self {
         let _ = context;
         let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
@@ -424,6 +466,7 @@ impl LibraryState {
             usage_clock: 0,
             thumbnail_workers,
             sort_order: LibrarySortOrder::default(),
+            thumbnail_size,
             selected_sources: HashSet::new(),
             selection_mode: false,
             file_action_receiver: None,
@@ -439,6 +482,7 @@ impl LibraryState {
         android_app: android_activity::AndroidApp,
         context: &egui::Context,
         workers: usize,
+        thumbnail_size: LibraryThumbnailSize,
     ) -> Self {
         let location = crate::android::library_location(&android_app).unwrap_or_else(|error| {
             log::warn!("{error}");
@@ -462,6 +506,7 @@ impl LibraryState {
             usage_clock: 0,
             thumbnail_workers,
             sort_order: LibrarySortOrder::default(),
+            thumbnail_size,
             selected_sources: HashSet::new(),
             selection_mode: false,
             export_dialog: None,
@@ -551,6 +596,18 @@ impl LibraryState {
 
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
         self.thumbnail_workers
+    }
+
+    pub(crate) fn thumbnail_size(&self) -> LibraryThumbnailSize {
+        self.thumbnail_size
+    }
+
+    pub(crate) fn set_thumbnail_size(&mut self, thumbnail_size: LibraryThumbnailSize) -> bool {
+        if self.thumbnail_size == thumbnail_size {
+            return false;
+        }
+        self.thumbnail_size = thumbnail_size;
+        true
     }
 
     fn set_sort_order(&mut self, sort_order: LibrarySortOrder) {
@@ -754,13 +811,38 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn open_folder(&mut self, folder: PathBuf, context: &egui::Context) {
+        self.open_folder_at(folder.clone(), folder, context);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn restore_folder(
+        &mut self,
+        root: PathBuf,
+        selected: Option<PathBuf>,
+        context: &egui::Context,
+    ) {
+        let selected = selected
+            .filter(|folder| folder.is_dir() && folder.starts_with(&root))
+            .unwrap_or_else(|| root.clone());
+        self.open_folder_at(root, selected, context);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn open_folder_at(&mut self, root: PathBuf, folder: PathBuf, context: &egui::Context) {
         let folder_changed = self.folder.as_ref() != Some(&folder);
-        self.root_folder = Some(folder.clone());
+        self.root_folder = Some(root.clone());
         self.location = Some(folder.display().to_string());
         self.folder = Some(folder.clone());
-        self.folder_tree = Some(LibraryFolderNode::empty(folder.clone()));
+        self.folder_tree = Some(LibraryFolderNode::empty(root.clone()));
         self.expanded_folders.clear();
-        self.expanded_folders.insert(folder);
+        let mut ancestor = Some(folder.as_path());
+        while let Some(path) = ancestor.filter(|path| path.starts_with(&root)) {
+            self.expanded_folders.insert(path.to_path_buf());
+            if path == root {
+                break;
+            }
+            ancestor = path.parent();
+        }
         self.folder_sidebar_open = true;
         if folder_changed {
             self.entries.clear();
@@ -772,12 +854,12 @@ impl LibraryState {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn select_folder(&mut self, folder: PathBuf, context: &egui::Context) {
+    pub(crate) fn select_folder(&mut self, folder: PathBuf, context: &egui::Context) -> bool {
         let Some(root) = self.root_folder.as_ref() else {
-            return;
+            return false;
         };
         if !folder.starts_with(root) || self.folder.as_ref() == Some(&folder) {
-            return;
+            return false;
         }
 
         self.location = Some(folder.display().to_string());
@@ -787,6 +869,7 @@ impl LibraryState {
         self.clear_selection();
         self.catalog_ready = false;
         self.refresh(context);
+        true
     }
 
     pub(crate) fn refresh(&mut self, context: &egui::Context) {
@@ -2745,7 +2828,7 @@ impl Library {
         ui.separator();
 
         let mut requested_folder = None;
-        let tree_height = (ui.available_height() - 38.0).max(32.0);
+        let tree_height = ui.available_height().max(32.0);
         {
             let tree = app.library.folder_tree.as_ref();
             let selected_folder = app.library.folder.as_deref();
@@ -2774,18 +2857,7 @@ impl Library {
         }
 
         if let Some(folder) = requested_folder {
-            app.library.select_folder(folder, ui.ctx());
-        }
-
-        ui.separator();
-        if ui
-            .add_sized(
-                egui::vec2(ui.available_width(), 28.0),
-                egui::Button::new("Open Top Folder…"),
-            )
-            .clicked()
-        {
-            app.open_library_folder_dialog();
+            app.select_library_folder(folder);
         }
     }
 
@@ -2808,7 +2880,11 @@ impl Library {
             .map(|entry| (entry.info.source.clone(), entry.info.name.clone()))
             .collect::<Vec<_>>();
 
+        let compact_header = ui.available_width() < 520.0;
         ui.horizontal(|ui| {
+            if compact_header {
+                ui.spacing_mut().item_spacing.x = 4.0;
+            }
             #[cfg(not(target_os = "android"))]
             if !app.library.folder_sidebar_open()
                 && crate::ui::icons::phosphor_icon_button(
@@ -2873,7 +2949,18 @@ impl Library {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 #[cfg(target_os = "android")]
-                if ui.button("Settings").clicked() {
+                if (if compact_header {
+                    crate::ui::icons::phosphor_icon_button(
+                        ui,
+                        egui_phosphor::regular::GEAR,
+                        egui::vec2(30.0, 26.0),
+                        "Settings",
+                    )
+                } else {
+                    ui.button("Settings")
+                })
+                .clicked()
+                {
                     app.activate_tab(AppTab::Settings);
                 }
 
@@ -2904,13 +2991,28 @@ impl Library {
                 let mut selected_sort = app.library.sort_order;
                 egui::ComboBox::from_id_salt("library-sort-order")
                     .selected_text(selected_sort.label())
-                    .width(128.0)
+                    .width(if compact_header { 96.0 } else { 128.0 })
                     .show_ui(ui, |ui| {
                         for sort_order in LibrarySortOrder::ALL {
                             ui.selectable_value(&mut selected_sort, sort_order, sort_order.label());
                         }
                     });
                 app.library.set_sort_order(selected_sort);
+
+                let mut selected_size = app.library.thumbnail_size();
+                egui::ComboBox::from_id_salt("library-thumbnail-size")
+                    .selected_text(selected_size.label())
+                    .width(if compact_header { 68.0 } else { 88.0 })
+                    .show_ui(ui, |ui| {
+                        for thumbnail_size in LibraryThumbnailSize::ALL {
+                            ui.selectable_value(
+                                &mut selected_size,
+                                thumbnail_size,
+                                thumbnail_size.label(),
+                            );
+                        }
+                    });
+                app.set_library_thumbnail_size(selected_size);
             });
         });
 
@@ -2957,7 +3059,7 @@ impl Library {
                 available_height,
                 ui.ctx().pixels_per_point(),
                 cfg!(target_os = "android"),
-            );
+            ) * app.library.thumbnail_size().scale();
             let (placements, grid_height) = justified_thumbnail_layout(
                 &app.library.entries,
                 available,
@@ -4509,8 +4611,8 @@ mod tests {
         elide_middle, format_file_size, import_raw_into_folder, justified_thumbnail_layout,
         loaded_library_thumbnail, make_resident_thumbnail, new_library_entry,
         run_thumbnail_workers, scan_folder, scan_folder_tree, scan_folder_with_limit,
-        LibraryFileInfo, LibraryState, RawImportOutcome, ScanEvent, ThumbnailRequest,
-        ThumbnailWorker, TouchThumbnailAction, ANDROID_LIBRARY_IMPORT_FAB_EDGE,
+        LibraryFileInfo, LibraryState, LibraryThumbnailSize, RawImportOutcome, ScanEvent,
+        ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction, ANDROID_LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     use std::collections::HashSet;
@@ -4537,6 +4639,18 @@ mod tests {
     fn desktop_selection_toggle_label_matches_the_next_action() {
         assert_eq!(desktop_selection_toggle_label(false), "Select");
         assert_eq!(desktop_selection_toggle_label(true), "Cancel");
+    }
+
+    #[test]
+    fn thumbnail_size_defaults_to_average_with_small_preserving_the_old_scale() {
+        assert_eq!(
+            LibraryThumbnailSize::default(),
+            LibraryThumbnailSize::Medium
+        );
+        assert_eq!(LibraryThumbnailSize::Small.scale(), 1.0);
+        assert_eq!(LibraryThumbnailSize::Medium.scale(), 1.25);
+        assert_eq!(LibraryThumbnailSize::Large.scale(), 1.5);
+        assert_eq!(LibraryThumbnailSize::Enormous.scale(), 1.75);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -4721,6 +4835,34 @@ mod tests {
         library.open_folder(root.clone(), &context);
         assert_eq!(library.root_folder(), Some(root.as_path()));
         assert_eq!(library.folder(), Some(root.as_path()));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn restoring_a_library_reopens_and_reveals_its_selected_subfolder() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-restore-{}-{nonce}",
+            std::process::id()
+        ));
+        let parent = root.join("year");
+        let selected = parent.join("shoot");
+        fs::create_dir_all(&selected).unwrap();
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+
+        library.restore_folder(root.clone(), Some(selected.clone()), &context);
+
+        assert_eq!(library.root_folder(), Some(root.as_path()));
+        assert_eq!(library.folder(), Some(selected.as_path()));
+        assert!(library.expanded_folders.contains(&root));
+        assert!(library.expanded_folders.contains(&parent));
+        assert!(library.expanded_folders.contains(&selected));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_os = "android"))]

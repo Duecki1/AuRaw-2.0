@@ -40,3 +40,13 @@ def test_action_icons_do_not_use_custom_painter_geometry() -> None:
     assert "egui_phosphor::regular::DOTS_THREE_VERTICAL" in UI_MOD
     assert "Draw the overflow mark geometrically" not in UI_MOD
     assert "egui_phosphor::regular::PLUS" in LIBRARY
+
+
+def test_folder_picker_lives_only_in_the_desktop_top_bar() -> None:
+    folder_sidebar = LIBRARY[
+        LIBRARY.index("pub(crate) fn show_folder_sidebar"):
+        LIBRARY.index("pub fn show(", LIBRARY.index("pub(crate) fn show_folder_sidebar"))
+    ]
+    assert "Open Top Folder" not in folder_sidebar
+    assert 'ui.button("Open Folder")' in TOP_BAR
+    assert 'ui.button("Open Top Folder…")' not in TOP_BAR

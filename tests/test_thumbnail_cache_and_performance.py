@@ -86,9 +86,12 @@ def test_desktop_last_library_folder_is_restored() -> None:
     lifecycle = (ROOT / "src/app/lifecycle.rs").read_text()
     performance = (ROOT / "src/performance_settings.rs").read_text()
     assert "last_library_folder" in performance
+    assert "last_library_selected_folder" in performance
     assert 'cfg(not(target_os = "android"))' in performance
     assert "last_library_folder.filter(|folder| folder.is_dir())" in lifecycle
-    assert "app.library.open_folder(folder, ctx)" in lifecycle
+    assert ".restore_folder(folder, last_library_selected_folder, ctx)" in lifecycle
+    assert "last_library_selected_folder: self" in lifecycle
+    assert "app.select_library_folder(folder);" in LIBRARY
     # LibraryState has a native test proving the selected folder is recorded synchronously.
 
 

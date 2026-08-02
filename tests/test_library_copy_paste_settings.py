@@ -28,7 +28,7 @@ def test_copy_setting_defaults_and_migration_are_explicit() -> None:
     assert "camera_profile: true" in default_block
     assert "masks: true" in default_block
     assert "ai_masks: true" in default_block
-    assert "const SETTINGS_VERSION: u32 = 6" in PERFORMANCE
+    assert "const SETTINGS_VERSION: u32 = 7" in PERFORMANCE
     assert "self.adjustment_copy_settings.ai_masks = self.adjustment_copy_settings.masks" in PERFORMANCE
 
 
