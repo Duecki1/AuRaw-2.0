@@ -69,7 +69,7 @@ impl Sidebar {
     // visually touching the rail's left/right edges.
     #[cfg(not(target_os = "android"))]
     pub(crate) const DESKTOP_TOOL_RAIL_WIDTH: f32 = 60.0;
-    const MASK_THUMBNAIL_EDGE: u32 = 64;
+    #[cfg(target_os = "android")]
     pub(crate) const VERTICAL_MASK_STRIP_HEIGHT: f32 = 92.0;
     pub(crate) const HORIZONTAL_MASK_STRIP_WIDTH: f32 = 92.0;
 }

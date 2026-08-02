@@ -143,6 +143,11 @@ impl eframe::App for AurawApp {
                     }
 
                     #[cfg(target_os = "android")]
+                        .resizable(false)
+                        .show(ui, |ui| {
+                        });
+
+                    #[cfg(target_os = "android")]
                     egui::Panel::right("develop_sidebar_right")
                         .resizable(true)
                         .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)

@@ -343,6 +343,45 @@ impl Sidebar {
         Self::finish_sidebar_tab_change(app, previous);
     }
 
+    #[cfg(target_os = "android")]
+
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let previous = app.sidebar_tab;
+        ui.vertical_centered(|ui| {
+            for (tab, icon, label, tooltip) in [
+                (
+                    SidebarTab::Adjustments,
+                    regular::SLIDERS_HORIZONTAL,
+                    "Edit",
+                    "Edit adjustments",
+                ),
+                (SidebarTab::Crop, regular::CROP, "Crop", "Crop and straighten"),
+                (SidebarTab::Masks, regular::SELECTION, "Mask", "Masking"),
+                (
+                    SidebarTab::Inpainting,
+                    regular::BANDAIDS,
+                    "Heal",
+                    "Remove and heal",
+                ),
+                (SidebarTab::Export, regular::EXPORT, "Export", "Export"),
+            ] {
+                if Self::mobile_icon_tab(
+                    ui,
+                    icon,
+                    label,
+                    app.sidebar_tab == tab,
+                    egui::vec2(56.0, 56.0),
+                    tooltip,
+                )
+                .clicked()
+                {
+                    app.sidebar_tab = tab;
+                }
+            }
+        });
+        Self::finish_sidebar_tab_change(app, previous);
+    }
+
     fn finish_sidebar_tab_change(app: &mut AurawApp, previous: SidebarTab) {
         if previous == SidebarTab::Crop && app.sidebar_tab != SidebarTab::Crop {
             app.crop_drag = None;
