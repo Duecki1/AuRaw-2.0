@@ -332,7 +332,7 @@ fn show_raw_drop_overlay(ui: &egui::Ui, folder: Option<&std::path::Path>) {
         || "Open a library folder before dropping RAW files".to_owned(),
         |folder| {
             format!(
-                "Drop RAW files to import them into\n{}",
+                "Drop RAW files to import them into\n{}\n\nFolders are copied here too",
                 folder.display()
             )
         },

@@ -346,6 +346,7 @@ struct LibraryAiMaskRefreshPrompt {
 #[cfg(not(target_os = "android"))]
 struct RawImportResult {
     imported: Vec<PathBuf>,
+    imported_folders: Vec<PathBuf>,
     already_present: usize,
     ignored: usize,
     failures: Vec<String>,
@@ -355,6 +356,96 @@ struct RawImportResult {
 enum RawImportOutcome {
     Imported(PathBuf),
     AlreadyPresent,
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibraryFolderClipboardMode {
+    Copy,
+    Cut,
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LibraryFolderClipboard {
+    path: PathBuf,
+    mode: LibraryFolderClipboardMode,
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LibraryFolderDrag(PathBuf);
+
+#[cfg(not(target_os = "android"))]
+enum LibraryFolderOperation {
+    Create {
+        root: PathBuf,
+        parent: PathBuf,
+        name: String,
+    },
+    Copy {
+        root: PathBuf,
+        source: PathBuf,
+        destination_parent: PathBuf,
+    },
+    Move {
+        root: PathBuf,
+        source: PathBuf,
+        destination_parent: PathBuf,
+        new_name: Option<String>,
+    },
+    Delete {
+        root: PathBuf,
+        target: PathBuf,
+    },
+}
+
+#[cfg(not(target_os = "android"))]
+enum LibraryFolderOperationResult {
+    Created(PathBuf),
+    Copied {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Moved {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Deleted(PathBuf),
+}
+
+#[cfg(not(target_os = "android"))]
+struct LibraryFolderOperationCompletion {
+    root: PathBuf,
+    result: Result<LibraryFolderOperationResult, String>,
+}
+
+#[cfg(not(target_os = "android"))]
+enum LibraryFolderUiAction {
+    New(PathBuf),
+    Copy(PathBuf),
+    Cut(PathBuf),
+    Paste(PathBuf),
+    Rename(PathBuf),
+    Delete(PathBuf),
+    Move {
+        source: PathBuf,
+        destination_parent: PathBuf,
+    },
+    Refresh,
+}
+
+#[cfg(not(target_os = "android"))]
+enum LibraryFolderNameDialogKind {
+    Create { parent: PathBuf },
+    Rename { source: PathBuf },
+}
+
+#[cfg(not(target_os = "android"))]
+struct LibraryFolderNameDialog {
+    kind: LibraryFolderNameDialogKind,
+    name: String,
+    error: Option<String>,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -422,6 +513,14 @@ pub(crate) struct LibraryState {
     file_action_receiver: Option<mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
     #[cfg(not(target_os = "android"))]
     raw_import_receiver: Option<mpsc::Receiver<RawImportResult>>,
+    #[cfg(not(target_os = "android"))]
+    folder_operation_receiver: Option<mpsc::Receiver<LibraryFolderOperationCompletion>>,
+    #[cfg(not(target_os = "android"))]
+    folder_clipboard: Option<LibraryFolderClipboard>,
+    #[cfg(not(target_os = "android"))]
+    folder_name_dialog: Option<LibraryFolderNameDialog>,
+    #[cfg(not(target_os = "android"))]
+    folder_delete_confirmation: Option<PathBuf>,
     export_dialog: Option<LibraryExportDialog>,
     adjustment_paste_dialog: Option<LibraryAdjustmentPasteDialog>,
     ai_mask_refresh_prompt: Option<LibraryAiMaskRefreshPrompt>,
@@ -471,6 +570,10 @@ impl LibraryState {
             selection_mode: false,
             file_action_receiver: None,
             raw_import_receiver: None,
+            folder_operation_receiver: None,
+            folder_clipboard: None,
+            folder_name_dialog: None,
+            folder_delete_confirmation: None,
             export_dialog: None,
             adjustment_paste_dialog: None,
             ai_mask_refresh_prompt: None,
@@ -690,7 +793,139 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     fn file_action_in_progress(&self) -> bool {
-        self.file_action_receiver.is_some() || self.raw_import_receiver.is_some()
+        self.file_action_receiver.is_some()
+            || self.raw_import_receiver.is_some()
+            || self.folder_operation_receiver.is_some()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn start_folder_operation(
+        &mut self,
+        operation: LibraryFolderOperation,
+        context: &egui::Context,
+    ) {
+        if self.file_action_in_progress() {
+            self.status = "Another library file action is still running.".to_owned();
+            return;
+        }
+
+        let status = folder_operation_progress_status(&operation);
+        let operation_root = match &operation {
+            LibraryFolderOperation::Create { root, .. }
+            | LibraryFolderOperation::Copy { root, .. }
+            | LibraryFolderOperation::Move { root, .. }
+            | LibraryFolderOperation::Delete { root, .. } => root.clone(),
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.folder_operation_receiver = Some(receiver);
+        self.status = status;
+        let repaint = context.clone();
+        let spawn = std::thread::Builder::new()
+            .name("auraw-library-folder-operation".to_owned())
+            .spawn(move || {
+                let result = run_folder_operation(operation);
+                let _ = sender.send(LibraryFolderOperationCompletion {
+                    root: operation_root,
+                    result,
+                });
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.folder_operation_receiver = None;
+            self.status = format!("Could not start folder operation: {error}");
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn apply_folder_operation_result(
+        &mut self,
+        result: LibraryFolderOperationResult,
+        context: &egui::Context,
+    ) {
+        match result {
+            LibraryFolderOperationResult::Created(path) => {
+                if let Some(parent) = path.parent() {
+                    self.expanded_folders.insert(parent.to_path_buf());
+                }
+                self.status = format!("Created folder {}", path.display());
+            }
+            LibraryFolderOperationResult::Copied {
+                source,
+                destination,
+            } => {
+                if let Some(parent) = destination.parent() {
+                    self.expanded_folders.insert(parent.to_path_buf());
+                }
+                self.status = format!("Copied {} to {}", source.display(), destination.display());
+            }
+            LibraryFolderOperationResult::Moved {
+                source,
+                destination,
+            } => {
+                if let Some(folder) = self.folder.as_mut() {
+                    if let Ok(suffix) = folder.strip_prefix(&source) {
+                        *folder = destination.join(suffix);
+                        self.location = Some(folder.display().to_string());
+                    }
+                }
+                let remapped_expanded = self
+                    .expanded_folders
+                    .drain()
+                    .map(|folder| {
+                        folder
+                            .strip_prefix(&source)
+                            .map(|suffix| destination.join(suffix))
+                            .unwrap_or(folder)
+                    })
+                    .collect();
+                self.expanded_folders = remapped_expanded;
+                if let Some(parent) = destination.parent() {
+                    self.expanded_folders.insert(parent.to_path_buf());
+                }
+                if self.folder_clipboard.as_ref().is_some_and(|clipboard| {
+                    clipboard.mode == LibraryFolderClipboardMode::Cut && clipboard.path == source
+                }) {
+                    self.folder_clipboard = None;
+                } else if let Some(clipboard) = self.folder_clipboard.as_mut() {
+                    if let Ok(suffix) = clipboard.path.strip_prefix(&source) {
+                        clipboard.path = destination.join(suffix);
+                    }
+                }
+                self.status = format!("Moved {} to {}", source.display(), destination.display());
+            }
+            LibraryFolderOperationResult::Deleted(path) => {
+                if let Some(folder) = self.folder.as_ref() {
+                    if folder.starts_with(&path) {
+                        let root = self.root_folder.as_deref();
+                        let fallback = path
+                            .parent()
+                            .filter(|parent| root.is_some_and(|root| parent.starts_with(root)))
+                            .map(Path::to_path_buf)
+                            .or_else(|| self.root_folder.clone());
+                        self.folder = fallback;
+                        self.location = self
+                            .folder
+                            .as_ref()
+                            .map(|folder| folder.display().to_string());
+                        self.entries.clear();
+                        self.entry_indices.clear();
+                        self.clear_selection();
+                        self.catalog_ready = false;
+                    }
+                }
+                self.expanded_folders
+                    .retain(|folder| !folder.starts_with(&path));
+                if self
+                    .folder_clipboard
+                    .as_ref()
+                    .is_some_and(|clipboard| clipboard.path.starts_with(&path))
+                {
+                    self.folder_clipboard = None;
+                }
+                self.status = format!("Deleted folder {}", path.display());
+            }
+        }
+        self.refresh(context);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -755,6 +990,10 @@ impl LibraryState {
             self.status = "Open a library folder before dropping RAW files.".to_owned();
             return;
         };
+        let Some(root_folder) = self.root_folder.clone() else {
+            self.status = "Open a top-level library folder before dropping items.".to_owned();
+            return;
+        };
         if source_paths.is_empty() {
             return;
         }
@@ -772,15 +1011,35 @@ impl LibraryState {
             .name("auraw-library-drop-import".to_owned())
             .spawn(move || {
                 let mut imported = Vec::new();
+                let mut imported_folders = Vec::new();
                 let mut already_present = 0usize;
                 let mut ignored = 0usize;
                 let mut failures = Vec::new();
                 let mut seen_sources = HashSet::new();
 
+                if let Err(error) = canonical_library_directory(&root_folder, &folder, true) {
+                    let _ = sender.send(RawImportResult {
+                        imported,
+                        imported_folders,
+                        already_present,
+                        ignored,
+                        failures: vec![error],
+                    });
+                    repaint.request_repaint();
+                    return;
+                }
+
                 for source in source_paths {
                     let source_key = fs::canonicalize(&source).unwrap_or_else(|_| source.clone());
                     if !seen_sources.insert(source_key) {
                         ignored += 1;
+                        continue;
+                    }
+                    if source.is_dir() {
+                        match import_folder_into_library(&source, &folder) {
+                            Ok(destination) => imported_folders.push(destination),
+                            Err(error) => failures.push(error),
+                        }
                         continue;
                     }
                     if !source.is_file() || !is_supported_raw_path(&source) {
@@ -797,6 +1056,7 @@ impl LibraryState {
 
                 let _ = sender.send(RawImportResult {
                     imported,
+                    imported_folders,
                     already_present,
                     ignored,
                     failures,
@@ -830,6 +1090,12 @@ impl LibraryState {
     #[cfg(not(target_os = "android"))]
     fn open_folder_at(&mut self, root: PathBuf, folder: PathBuf, context: &egui::Context) {
         let folder_changed = self.folder.as_ref() != Some(&folder);
+        let root_changed = self.root_folder.as_ref() != Some(&root);
+        if root_changed {
+            self.folder_clipboard = None;
+            self.folder_name_dialog = None;
+            self.folder_delete_confirmation = None;
+        }
         self.root_folder = Some(root.clone());
         self.location = Some(folder.display().to_string());
         self.folder = Some(folder.clone());
@@ -1043,7 +1309,7 @@ impl LibraryState {
         match imported {
             Some(Ok(result)) => {
                 self.raw_import_receiver = None;
-                if !result.imported.is_empty() {
+                if !result.imported.is_empty() || !result.imported_folders.is_empty() {
                     self.refresh(context);
                 }
                 self.status = raw_import_status(&result);
@@ -1083,6 +1349,38 @@ impl LibraryState {
                 Some(Err(mpsc::TryRecvError::Disconnected)) => {
                     self.file_action_receiver = None;
                     self.status = "The library file operation stopped unexpectedly.".to_owned();
+                }
+                Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+            }
+
+            let folder_completed = self
+                .folder_operation_receiver
+                .as_ref()
+                .map(mpsc::Receiver::try_recv);
+            match folder_completed {
+                Some(Ok(completion)) => {
+                    self.folder_operation_receiver = None;
+                    if self.root_folder.as_ref() != Some(&completion.root) {
+                        self.status = match completion.result {
+                            Ok(_) => format!(
+                                "Folder operation completed in the previous library root {}.",
+                                completion.root.display()
+                            ),
+                            Err(error) => error,
+                        };
+                    } else {
+                        match completion.result {
+                            Ok(result) => self.apply_folder_operation_result(result, context),
+                            Err(error) => {
+                                self.refresh(context);
+                                self.status = error;
+                            }
+                        }
+                    }
+                }
+                Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                    self.folder_operation_receiver = None;
+                    self.status = "The folder operation stopped unexpectedly.".to_owned();
                 }
                 Some(Err(mpsc::TryRecvError::Empty)) | None => {}
             }
@@ -2446,6 +2744,314 @@ fn same_existing_file(left: &Path, right: &Path) -> bool {
 }
 
 #[cfg(not(target_os = "android"))]
+fn validate_folder_name(name: &str) -> Result<OsString, String> {
+    if name.is_empty() || name.trim() != name {
+        return Err("Folder names cannot be empty or start/end with whitespace.".to_owned());
+    }
+    let path = Path::new(name);
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(component)) = components.next() else {
+        return Err("Enter a single folder name, without a path.".to_owned());
+    };
+    if components.next().is_some() {
+        return Err("Enter a single folder name, without a path.".to_owned());
+    }
+    Ok(component.to_os_string())
+}
+
+#[cfg(not(target_os = "android"))]
+fn canonical_library_directory(
+    root: &Path,
+    path: &Path,
+    allow_root: bool,
+) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(root)
+        .map_err(|error| format!("Could not resolve library root {}: {error}", root.display()))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Could not inspect folder {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("{} is not a real folder", path.display()));
+    }
+    let resolved = fs::canonicalize(path)
+        .map_err(|error| format!("Could not resolve folder {}: {error}", path.display()))?;
+    if !resolved.starts_with(&root) {
+        return Err(format!(
+            "Refusing to operate outside the library root: {}",
+            path.display()
+        ));
+    }
+    if !allow_root && resolved == root {
+        return Err(
+            "The top-level library folder cannot be moved, renamed, or deleted.".to_owned(),
+        );
+    }
+    Ok(resolved)
+}
+
+#[cfg(not(target_os = "android"))]
+fn path_entry_exists(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != io::ErrorKind::NotFound,
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn unique_folder_destination(parent: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    for number in 0..=10_000usize {
+        let file_name = if number == 0 {
+            OsString::from(name)
+        } else {
+            let mut copy_name = OsString::from(name);
+            if number == 1 {
+                copy_name.push(" copy");
+            } else {
+                copy_name.push(format!(" copy {number}"));
+            }
+            copy_name
+        };
+        let destination = parent.join(file_name);
+        if !path_entry_exists(&destination) {
+            return Ok(destination);
+        }
+    }
+    Err(format!(
+        "Could not find an unused folder name in {}",
+        parent.display()
+    ))
+}
+
+#[cfg(not(target_os = "android"))]
+fn copy_directory_create_new(source: &Path, destination: &Path) -> Result<(), String> {
+    let source_metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(format!("{} is not a real folder", source.display()));
+    }
+    let source_resolved = fs::canonicalize(source)
+        .map_err(|error| format!("Could not resolve {}: {error}", source.display()))?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| format!("{} has no parent folder", destination.display()))?;
+    let destination_parent_resolved = fs::canonicalize(destination_parent).map_err(|error| {
+        format!(
+            "Could not resolve destination {}: {error}",
+            destination_parent.display()
+        )
+    })?;
+    if destination_parent_resolved.starts_with(&source_resolved) {
+        return Err("A folder cannot be copied into itself or one of its subfolders.".to_owned());
+    }
+
+    fn copy_contents(source: &Path, destination: &Path) -> Result<(), String> {
+        for entry in fs::read_dir(source)
+            .map_err(|error| format!("Could not read {}: {error}", source.display()))?
+        {
+            let entry = entry.map_err(|error| {
+                format!("Could not read an entry in {}: {error}", source.display())
+            })?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("Could not inspect {}: {error}", source_path.display()))?;
+            if file_type.is_symlink() {
+                return Err(format!(
+                    "Refusing to follow symbolic link {} while copying a folder",
+                    source_path.display()
+                ));
+            }
+            if file_type.is_dir() {
+                fs::create_dir(&destination_path).map_err(|error| {
+                    format!("Could not create {}: {error}", destination_path.display())
+                })?;
+                copy_contents(&source_path, &destination_path)?;
+                if let Err(error) = crate::file_ops::sync_parent_directory(&destination_path) {
+                    log::warn!(
+                        "could not sync copied folder {}: {error}",
+                        destination_path.display()
+                    );
+                }
+            } else if file_type.is_file() {
+                copy_file_create_new(&source_path, &destination_path).map_err(|error| {
+                    format!("Could not copy {}: {error}", source_path.display())
+                })?;
+            } else {
+                return Err(format!(
+                    "Refusing to copy special filesystem entry {}",
+                    source_path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fs::create_dir(destination)
+        .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
+    if let Err(error) = copy_contents(source, destination) {
+        if let Err(cleanup_error) = fs::remove_dir_all(destination) {
+            return Err(format!(
+                "{error} Cleanup of incomplete folder {} also failed: {cleanup_error}",
+                destination.display()
+            ));
+        }
+        return Err(error);
+    }
+    if let Err(error) = crate::file_ops::sync_parent_directory(destination_parent) {
+        log::warn!(
+            "could not sync folder {} after copying {}: {error}",
+            destination_parent.display(),
+            destination.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn import_folder_into_library(source: &Path, folder: &Path) -> Result<PathBuf, String> {
+    let source_name = source
+        .file_name()
+        .ok_or_else(|| format!("{} has no folder name", source.display()))?;
+    let destination = unique_folder_destination(folder, source_name)?;
+    copy_directory_create_new(source, &destination).map_err(|error| {
+        format!(
+            "Could not import folder {} into {}: {error}",
+            source.display(),
+            folder.display()
+        )
+    })?;
+    Ok(destination)
+}
+
+#[cfg(not(target_os = "android"))]
+fn folder_operation_progress_status(operation: &LibraryFolderOperation) -> String {
+    match operation {
+        LibraryFolderOperation::Create { parent, .. } => {
+            format!("Creating a folder in {}…", parent.display())
+        }
+        LibraryFolderOperation::Copy { source, .. } => {
+            format!("Copying folder {}…", source.display())
+        }
+        LibraryFolderOperation::Move { source, .. } => {
+            format!("Moving folder {}…", source.display())
+        }
+        LibraryFolderOperation::Delete { target, .. } => {
+            format!("Deleting folder {}…", target.display())
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn run_folder_operation(
+    operation: LibraryFolderOperation,
+) -> Result<LibraryFolderOperationResult, String> {
+    match operation {
+        LibraryFolderOperation::Create { root, parent, name } => {
+            canonical_library_directory(&root, &parent, true)?;
+            let name = validate_folder_name(&name)?;
+            let destination = parent.join(name);
+            fs::create_dir(&destination).map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    format!("A folder named {} already exists.", destination.display())
+                } else {
+                    format!("Could not create folder {}: {error}", destination.display())
+                }
+            })?;
+            if let Err(error) = crate::file_ops::sync_parent_directory(&parent) {
+                log::warn!("could not sync folder {}: {error}", parent.display());
+            }
+            Ok(LibraryFolderOperationResult::Created(destination))
+        }
+        LibraryFolderOperation::Copy {
+            root,
+            source,
+            destination_parent,
+        } => {
+            canonical_library_directory(&root, &source, false)?;
+            canonical_library_directory(&root, &destination_parent, true)?;
+            let name = source
+                .file_name()
+                .ok_or_else(|| format!("{} has no folder name", source.display()))?;
+            let destination = unique_folder_destination(&destination_parent, name)?;
+            copy_directory_create_new(&source, &destination)?;
+            Ok(LibraryFolderOperationResult::Copied {
+                source,
+                destination,
+            })
+        }
+        LibraryFolderOperation::Move {
+            root,
+            source,
+            destination_parent,
+            new_name,
+        } => {
+            let source_resolved = canonical_library_directory(&root, &source, false)?;
+            let destination_parent_resolved =
+                canonical_library_directory(&root, &destination_parent, true)?;
+            if destination_parent_resolved.starts_with(&source_resolved) {
+                return Err(
+                    "A folder cannot be moved into itself or one of its subfolders.".to_owned(),
+                );
+            }
+            let name = match new_name {
+                Some(name) => validate_folder_name(&name)?,
+                None => source
+                    .file_name()
+                    .map(OsString::from)
+                    .ok_or_else(|| format!("{} has no folder name", source.display()))?,
+            };
+            let destination = destination_parent.join(name);
+            if destination == source {
+                return Err("The folder is already in that location.".to_owned());
+            }
+            if path_entry_exists(&destination) {
+                return Err(format!(
+                    "A folder named {} already exists; nothing was overwritten.",
+                    destination.display()
+                ));
+            }
+            fs::rename(&source, &destination).map_err(|error| {
+                format!(
+                    "Could not move {} to {}: {error}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+            if let Some(parent) = source.parent() {
+                if let Err(error) = crate::file_ops::sync_parent_directory(parent) {
+                    log::warn!("could not sync source folder {}: {error}", parent.display());
+                }
+            }
+            if let Err(error) = crate::file_ops::sync_parent_directory(&destination_parent) {
+                log::warn!(
+                    "could not sync destination folder {}: {error}",
+                    destination_parent.display()
+                );
+            }
+            Ok(LibraryFolderOperationResult::Moved {
+                source,
+                destination,
+            })
+        }
+        LibraryFolderOperation::Delete { root, target } => {
+            canonical_library_directory(&root, &target, false)?;
+            fs::remove_dir_all(&target).map_err(|error| {
+                format!("Could not delete folder {}: {error}", target.display())
+            })?;
+            if let Some(parent) = target.parent() {
+                if let Err(error) = crate::file_ops::sync_parent_directory(parent) {
+                    log::warn!(
+                        "could not sync folder {} after deletion: {error}",
+                        parent.display()
+                    );
+                }
+            }
+            Ok(LibraryFolderOperationResult::Deleted(target))
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn raw_import_status(result: &RawImportResult) -> String {
     let mut parts = Vec::new();
     if !result.imported.is_empty() {
@@ -2456,6 +3062,17 @@ fn raw_import_status(result: &RawImportResult) -> String {
                 "file"
             } else {
                 "files"
+            }
+        ));
+    }
+    if !result.imported_folders.is_empty() {
+        parts.push(format!(
+            "Imported {} {}",
+            result.imported_folders.len(),
+            if result.imported_folders.len() == 1 {
+                "folder"
+            } else {
+                "folders"
             }
         ));
     }
@@ -2474,7 +3091,7 @@ fn raw_import_status(result: &RawImportResult) -> String {
         parts.push(result.failures.join(" · "));
     }
     if parts.is_empty() {
-        "No RAW files were imported.".to_owned()
+        "No RAW files or folders were imported.".to_owned()
     } else {
         format!("{}.", parts.join("; "))
     }
@@ -2733,9 +3350,13 @@ fn show_library_batch_export_progress(ui: &mut Ui, app: &mut AurawApp) {
 fn show_library_folder_node(
     ui: &mut Ui,
     node: &LibraryFolderNode,
+    root_folder: &Path,
     selected_folder: Option<&Path>,
+    clipboard: Option<&LibraryFolderClipboard>,
+    action_in_progress: bool,
     expanded_folders: &mut HashSet<PathBuf>,
     requested_folder: &mut Option<PathBuf>,
+    requested_action: &mut Option<LibraryFolderUiAction>,
 ) {
     let has_children = !node.children.is_empty();
     let expanded = expanded_folders.contains(&node.path);
@@ -2777,15 +3398,113 @@ fn show_library_folder_node(
             } else {
                 egui_phosphor::regular::FOLDER
             };
-            if ui
-                .selectable_label(
-                    selected,
-                    egui::RichText::new(format!("{folder_icon}  {}", node.name)),
+            // Sensing both clicks and drags makes egui wait until the pointer
+            // crosses its real drag threshold. A simple press/release remains
+            // normal folder navigation and never creates a drag payload.
+            let response = ui
+                .add(
+                    egui::Button::selectable(
+                        selected,
+                        egui::RichText::new(format!("{folder_icon}  {}", node.name)),
+                    )
+                    .sense(Sense::click_and_drag()),
                 )
-                .on_hover_text(node.path.display().to_string())
-                .clicked()
-            {
+                .on_hover_text(format!(
+                    "{}\nDrag onto another folder to move",
+                    node.path.display()
+                ));
+            response.dnd_set_drag_payload(LibraryFolderDrag(node.path.clone()));
+            if response.clicked() {
                 *requested_folder = Some(node.path.clone());
+            }
+
+            let is_root = node.path == root_folder;
+            response.context_menu(|ui| {
+                let enabled = !action_in_progress;
+                if ui
+                    .add_enabled(enabled, egui::Button::new("New Folder…"))
+                    .clicked()
+                {
+                    *requested_action = Some(LibraryFolderUiAction::New(node.path.clone()));
+                    ui.close();
+                }
+
+                let clipboard_name = clipboard
+                    .and_then(|clipboard| clipboard.path.file_name())
+                    .map(|name| name.to_string_lossy());
+                let paste_label = clipboard_name.map_or_else(
+                    || "Paste Folder".to_owned(),
+                    |name| format!("Paste “{name}”"),
+                );
+                if ui
+                    .add_enabled(
+                        enabled && clipboard.is_some(),
+                        egui::Button::new(paste_label),
+                    )
+                    .clicked()
+                {
+                    *requested_action = Some(LibraryFolderUiAction::Paste(node.path.clone()));
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(enabled && !is_root, egui::Button::new("Copy Folder"))
+                    .clicked()
+                {
+                    *requested_action = Some(LibraryFolderUiAction::Copy(node.path.clone()));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(enabled && !is_root, egui::Button::new("Cut Folder"))
+                    .clicked()
+                {
+                    *requested_action = Some(LibraryFolderUiAction::Cut(node.path.clone()));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(enabled && !is_root, egui::Button::new("Rename Folder…"))
+                    .clicked()
+                {
+                    *requested_action = Some(LibraryFolderUiAction::Rename(node.path.clone()));
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(enabled && !is_root, egui::Button::new("Delete Folder…"))
+                    .clicked()
+                {
+                    *requested_action = Some(LibraryFolderUiAction::Delete(node.path.clone()));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Refresh Folders"))
+                    .clicked()
+                {
+                    *requested_action = Some(LibraryFolderUiAction::Refresh);
+                    ui.close();
+                }
+            });
+
+            if let Some(payload) = response.dnd_hover_payload::<LibraryFolderDrag>() {
+                let source = &payload.0;
+                let can_drop = !action_in_progress
+                    && source != root_folder
+                    && source != &node.path
+                    && !node.path.starts_with(source);
+                if can_drop {
+                    ui.painter().rect_stroke(
+                        response.rect.expand(2.0),
+                        3.0,
+                        Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                        StrokeKind::Outside,
+                    );
+                    if let Some(payload) = response.dnd_release_payload::<LibraryFolderDrag>() {
+                        *requested_action = Some(LibraryFolderUiAction::Move {
+                            source: payload.0.clone(),
+                            destination_parent: node.path.clone(),
+                        });
+                    }
+                }
             }
         });
 
@@ -2795,9 +3514,13 @@ fn show_library_folder_node(
                     show_library_folder_node(
                         ui,
                         child,
+                        root_folder,
                         selected_folder,
+                        clipboard,
+                        action_in_progress,
                         expanded_folders,
                         requested_folder,
+                        requested_action,
                     );
                 }
             });
@@ -2805,11 +3528,279 @@ fn show_library_folder_node(
     });
 }
 
+#[cfg(not(target_os = "android"))]
+fn apply_library_folder_ui_action(
+    app: &mut AurawApp,
+    action: LibraryFolderUiAction,
+    context: &egui::Context,
+) {
+    let Some(root) = app.library.root_folder.clone() else {
+        return;
+    };
+    match action {
+        LibraryFolderUiAction::New(parent) => {
+            app.library.folder_name_dialog = Some(LibraryFolderNameDialog {
+                kind: LibraryFolderNameDialogKind::Create { parent },
+                name: String::new(),
+                error: None,
+            });
+        }
+        LibraryFolderUiAction::Copy(path) => {
+            match canonical_library_directory(&root, &path, false) {
+                Ok(_) => {
+                    app.library.folder_clipboard = Some(LibraryFolderClipboard {
+                        path: path.clone(),
+                        mode: LibraryFolderClipboardMode::Copy,
+                    });
+                    app.library.status = format!(
+                        "Copied folder {}. Choose Paste Folder in a destination.",
+                        path.display()
+                    );
+                }
+                Err(error) => app.library.status = error,
+            }
+        }
+        LibraryFolderUiAction::Cut(path) => {
+            match canonical_library_directory(&root, &path, false) {
+                Ok(_) => {
+                    app.library.folder_clipboard = Some(LibraryFolderClipboard {
+                        path: path.clone(),
+                        mode: LibraryFolderClipboardMode::Cut,
+                    });
+                    app.library.status = format!(
+                        "Cut folder {}. Choose Paste Folder in a destination.",
+                        path.display()
+                    );
+                }
+                Err(error) => app.library.status = error,
+            }
+        }
+        LibraryFolderUiAction::Paste(destination_parent) => {
+            let Some(clipboard) = app.library.folder_clipboard.clone() else {
+                app.library.status = "Copy or cut a folder first.".to_owned();
+                return;
+            };
+            if clipboard.mode == LibraryFolderClipboardMode::Cut
+                && app
+                    .current_path
+                    .as_ref()
+                    .is_some_and(|path| path.starts_with(&clipboard.path))
+            {
+                app.library.status =
+                    "Open an image outside this folder before moving it.".to_owned();
+                return;
+            }
+            let operation = match clipboard.mode {
+                LibraryFolderClipboardMode::Copy => LibraryFolderOperation::Copy {
+                    root,
+                    source: clipboard.path,
+                    destination_parent,
+                },
+                LibraryFolderClipboardMode::Cut => LibraryFolderOperation::Move {
+                    root,
+                    source: clipboard.path,
+                    destination_parent,
+                    new_name: None,
+                },
+            };
+            app.library.start_folder_operation(operation, context);
+        }
+        LibraryFolderUiAction::Rename(source) => {
+            if app
+                .current_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(&source))
+            {
+                app.library.status =
+                    "Open an image outside this folder before renaming it.".to_owned();
+                return;
+            }
+            let Some(name) = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+            else {
+                app.library.status = "This folder name cannot be edited as text.".to_owned();
+                return;
+            };
+            app.library.folder_name_dialog = Some(LibraryFolderNameDialog {
+                kind: LibraryFolderNameDialogKind::Rename { source },
+                name,
+                error: None,
+            });
+        }
+        LibraryFolderUiAction::Delete(path) => {
+            app.library.folder_delete_confirmation = Some(path);
+        }
+        LibraryFolderUiAction::Move {
+            source,
+            destination_parent,
+        } => {
+            if app
+                .current_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(&source))
+            {
+                app.library.status =
+                    "Open an image outside this folder before moving it.".to_owned();
+                return;
+            }
+            app.library.start_folder_operation(
+                LibraryFolderOperation::Move {
+                    root,
+                    source,
+                    destination_parent,
+                    new_name: None,
+                },
+                context,
+            );
+        }
+        LibraryFolderUiAction::Refresh => app.library.refresh(context),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn show_library_folder_dialogs(ui: &mut Ui, app: &mut AurawApp) {
+    let mut close_name_dialog = false;
+    let mut name_operation = None;
+    if let Some(dialog) = app.library.folder_name_dialog.as_mut() {
+        let title = match dialog.kind {
+            LibraryFolderNameDialogKind::Create { .. } => "New folder",
+            LibraryFolderNameDialogKind::Rename { .. } => "Rename folder",
+        };
+        egui::Window::new(title)
+            .id(egui::Id::new("library-folder-name-dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label("Folder name");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut dialog.name)
+                        .desired_width(320.0)
+                        .id_source("library-folder-name-input"),
+                );
+                response.request_focus();
+                if let Some(error) = dialog.error.as_deref() {
+                    ui.label(
+                        egui::RichText::new(error)
+                            .small()
+                            .color(ui.visuals().error_fg_color),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close_name_dialog = true;
+                    }
+                    let enter = response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let confirm_label = match dialog.kind {
+                        LibraryFolderNameDialogKind::Create { .. } => "Create",
+                        LibraryFolderNameDialogKind::Rename { .. } => "Rename",
+                    };
+                    if ui.button(confirm_label).clicked() || enter {
+                        match validate_folder_name(&dialog.name) {
+                            Ok(_) => {
+                                let Some(root) = app.library.root_folder.clone() else {
+                                    close_name_dialog = true;
+                                    return;
+                                };
+                                name_operation = Some(match &dialog.kind {
+                                    LibraryFolderNameDialogKind::Create { parent } => {
+                                        LibraryFolderOperation::Create {
+                                            root,
+                                            parent: parent.clone(),
+                                            name: dialog.name.clone(),
+                                        }
+                                    }
+                                    LibraryFolderNameDialogKind::Rename { source } => {
+                                        let Some(parent) = source.parent() else {
+                                            dialog.error = Some(
+                                                "This folder has no parent folder.".to_owned(),
+                                            );
+                                            return;
+                                        };
+                                        LibraryFolderOperation::Move {
+                                            root,
+                                            source: source.clone(),
+                                            destination_parent: parent.to_path_buf(),
+                                            new_name: Some(dialog.name.clone()),
+                                        }
+                                    }
+                                });
+                                close_name_dialog = true;
+                            }
+                            Err(error) => dialog.error = Some(error),
+                        }
+                    }
+                });
+            });
+    }
+    if close_name_dialog {
+        app.library.folder_name_dialog = None;
+    }
+    if let Some(operation) = name_operation {
+        app.library.start_folder_operation(operation, ui.ctx());
+    }
+
+    let delete_target = app.library.folder_delete_confirmation.clone();
+    let mut close_delete = false;
+    let mut confirm_delete = false;
+    if let Some(target) = delete_target.as_ref() {
+        egui::Window::new("Delete folder?")
+            .id(egui::Id::new("library-folder-delete-confirmation"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!(
+                    "Delete {} and everything inside it?",
+                    target.display()
+                ));
+                ui.label(
+                    egui::RichText::new("This cannot be undone.")
+                        .strong()
+                        .color(ui.visuals().warn_fg_color),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close_delete = true;
+                    }
+                    if ui.button("Delete Folder").clicked() {
+                        confirm_delete = true;
+                        close_delete = true;
+                    }
+                });
+            });
+    }
+    if close_delete {
+        app.library.folder_delete_confirmation = None;
+    }
+    if confirm_delete {
+        if let (Some(root), Some(target)) = (app.library.root_folder.clone(), delete_target) {
+            if let Some(current) = app
+                .current_path
+                .clone()
+                .filter(|current| current.starts_with(&target))
+            {
+                app.detach_current_file_for_library_action(&current);
+                app.current_path = None;
+            }
+            app.library
+                .start_folder_operation(LibraryFolderOperation::Delete { root, target }, ui.ctx());
+        }
+    }
+}
+
 pub struct Library;
 
 impl Library {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn show_folder_sidebar(ui: &mut Ui, app: &mut AurawApp) {
+        let action_in_progress = app.library.file_action_in_progress();
+        let mut requested_action = None;
         ui.horizontal(|ui| {
             ui.strong("Folders");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2823,6 +3814,30 @@ impl Library {
                 {
                     app.library.set_folder_sidebar_open(false);
                 }
+                if crate::ui::icons::phosphor_icon_button_enabled(
+                    ui,
+                    app.library.root_folder.is_some() && !action_in_progress,
+                    egui_phosphor::regular::ARROW_CLOCKWISE,
+                    egui::vec2(28.0, 24.0),
+                    "Refresh folders",
+                )
+                .clicked()
+                {
+                    requested_action = Some(LibraryFolderUiAction::Refresh);
+                }
+                if crate::ui::icons::phosphor_icon_button_enabled(
+                    ui,
+                    app.library.folder.is_some() && !action_in_progress,
+                    egui_phosphor::regular::FOLDER_PLUS,
+                    egui::vec2(28.0, 24.0),
+                    "Create folder here",
+                )
+                .clicked()
+                {
+                    if let Some(folder) = app.library.folder.clone() {
+                        requested_action = Some(LibraryFolderUiAction::New(folder));
+                    }
+                }
             });
         });
         ui.separator();
@@ -2831,20 +3846,26 @@ impl Library {
         let tree_height = ui.available_height().max(32.0);
         {
             let tree = app.library.folder_tree.as_ref();
+            let root_folder = app.library.root_folder.as_deref();
             let selected_folder = app.library.folder.as_deref();
+            let clipboard = app.library.folder_clipboard.as_ref();
             let expanded_folders = &mut app.library.expanded_folders;
             egui::ScrollArea::both()
                 .max_height(tree_height)
                 .min_scrolled_height(tree_height)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if let Some(tree) = tree {
+                    if let (Some(tree), Some(root_folder)) = (tree, root_folder) {
                         show_library_folder_node(
                             ui,
                             tree,
+                            root_folder,
                             selected_folder,
+                            clipboard,
+                            action_in_progress,
                             expanded_folders,
                             &mut requested_folder,
+                            &mut requested_action,
                         );
                     } else {
                         ui.label(
@@ -2859,6 +3880,10 @@ impl Library {
         if let Some(folder) = requested_folder {
             app.select_library_folder(folder);
         }
+        if let Some(action) = requested_action {
+            apply_library_folder_ui_action(app, action, ui.ctx());
+        }
+        show_library_folder_dialogs(ui, app);
     }
 
     pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
@@ -4607,12 +5632,14 @@ mod tests {
     use super::LibrarySource;
     use super::{
         android_library_import_fab_rect, android_library_import_icon,
-        balanced_justified_row_ranges, desktop_selection_toggle_label, duplicate_raw_and_sidecar,
-        elide_middle, format_file_size, import_raw_into_folder, justified_thumbnail_layout,
-        loaded_library_thumbnail, make_resident_thumbnail, new_library_entry,
-        run_thumbnail_workers, scan_folder, scan_folder_tree, scan_folder_with_limit,
-        LibraryFileInfo, LibraryState, LibraryThumbnailSize, RawImportOutcome, ScanEvent,
-        ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction, ANDROID_LIBRARY_IMPORT_FAB_EDGE,
+        balanced_justified_row_ranges, copy_directory_create_new, desktop_selection_toggle_label,
+        duplicate_raw_and_sidecar, elide_middle, format_file_size, import_folder_into_library,
+        import_raw_into_folder, justified_thumbnail_layout, loaded_library_thumbnail,
+        make_resident_thumbnail, new_library_entry, run_folder_operation, run_thumbnail_workers,
+        scan_folder, scan_folder_tree, scan_folder_with_limit, validate_folder_name,
+        LibraryFileInfo, LibraryFolderOperation, LibraryState, LibraryThumbnailSize,
+        RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
+        ANDROID_LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     use std::collections::HashSet;
@@ -5186,6 +6213,120 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_names_are_single_safe_path_components() {
+        assert!(validate_folder_name("Photos 2026").is_ok());
+        for invalid in ["", " ", ".", "..", "../outside", "nested/folder", "/tmp"] {
+            assert!(
+                validate_folder_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        #[cfg(windows)]
+        assert!(validate_folder_name(r"nested\folder").is_err());
+    }
+
+    #[test]
+    fn recursive_folder_copy_never_overwrites_and_rejects_symlinks() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-folder-copy-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested").join("photo.dng"), b"raw").unwrap();
+
+        copy_directory_create_new(&source, &destination).unwrap();
+        assert_eq!(
+            fs::read(destination.join("nested").join("photo.dng")).unwrap(),
+            b"raw"
+        );
+        assert!(copy_directory_create_new(&source, &destination).is_err());
+
+        #[cfg(unix)]
+        {
+            let linked_source = root.join("linked-source");
+            let linked_destination = root.join("linked-destination");
+            fs::create_dir(&linked_source).unwrap();
+            std::os::unix::fs::symlink(&source, linked_source.join("link")).unwrap();
+            assert!(copy_directory_create_new(&linked_source, &linked_destination).is_err());
+            assert!(!linked_destination.exists());
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_operations_stay_inside_the_library_and_protect_the_root() {
+        let base = std::env::temp_dir().join(format!(
+            "auraw-library-folder-boundary-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("library");
+        let outside = base.join("outside");
+        let source = root.join("source");
+        let child = source.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir(&outside).unwrap();
+
+        assert!(run_folder_operation(LibraryFolderOperation::Create {
+            root: root.clone(),
+            parent: outside,
+            name: "escape".to_owned(),
+        })
+        .is_err());
+        assert!(run_folder_operation(LibraryFolderOperation::Delete {
+            root: root.clone(),
+            target: root.clone(),
+        })
+        .is_err());
+        assert!(run_folder_operation(LibraryFolderOperation::Move {
+            root: root.clone(),
+            source,
+            destination_parent: child,
+            new_name: None,
+        })
+        .is_err());
+        assert!(root.is_dir());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn dropped_folders_are_copied_recursively_with_unique_names() {
+        let base = std::env::temp_dir().join(format!(
+            "auraw-library-folder-import-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = base.join("source").join("shoot");
+        let library = base.join("library");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&library).unwrap();
+        fs::write(source.join("photo.CR3"), b"raw").unwrap();
+
+        let first = import_folder_into_library(&source, &library).unwrap();
+        let second = import_folder_into_library(&source, &library).unwrap();
+        assert_eq!(first.file_name().unwrap(), "shoot");
+        assert_eq!(second.file_name().unwrap(), "shoot copy");
+        assert_eq!(fs::read(first.join("photo.CR3")).unwrap(), b"raw");
+        assert_eq!(fs::read(second.join("photo.CR3")).unwrap(), b"raw");
+
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
