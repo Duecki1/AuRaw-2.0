@@ -7,6 +7,7 @@ SLIDER = (ROOT / "src/ui/components/adjustment_slider.rs").read_text(encoding="u
 SIDEBAR = read_source_tree(ROOT / "src/ui/sidebar.rs")
 MASKS = (ROOT / "src/ui/sidebar/masks.rs").read_text(encoding="utf-8")
 SETTINGS = (ROOT / "src/ui/settings.rs").read_text(encoding="utf-8")
+UI_MOD = (ROOT / "src/ui/mod.rs").read_text(encoding="utf-8")
 
 
 def test_touch_sliders_are_direction_locked_and_scroll_area_friendly() -> None:
@@ -71,6 +72,15 @@ def test_android_mask_strips_claim_touch_drags_instead_of_cards() -> None:
     assert 'if cfg!(target_os = "android")' in thumbnail
     assert "egui::Sense::click()" in thumbnail
     assert "egui::Sense::click_and_drag()" in thumbnail
+
+
+def test_android_mask_overflow_buttons_do_not_rewind_strip_layout() -> None:
+    overflow = UI_MOD[
+        UI_MOD.index("fn android_overflow_button("):
+        UI_MOD.index("pub(crate) fn android_overflow_menu")
+    ]
+    assert "ui.place(" in overflow
+    assert "ui.put(" not in overflow
 
 
 def test_settings_width_and_text_wrap_follow_screen_layout() -> None:
@@ -198,6 +208,29 @@ def test_vertical_section_tabs_stay_above_scrolling_content() -> None:
     ]
     assert "show_mobile_context_tabs" not in adjustment_body
     assert "show_mobile_context_tabs" not in mask_details
+
+
+def test_android_landscape_keeps_primary_tabs_on_the_right_edge() -> None:
+    eframe = (ROOT / "src/app/eframe_impl.rs").read_text(encoding="utf-8")
+    horizontal = eframe[
+        eframe.index("ScreenLayout::Horizontal => {"):
+        eframe.index("ScreenLayout::Vertical => {")
+    ]
+    rail = horizontal.index('Panel::right("develop_android_landscape_primary_tabs")')
+    sidebar = horizontal.index('Panel::right("develop_sidebar_right")', rail)
+
+    assert rail < sidebar
+    assert ".exact_size(Sidebar::ANDROID_LANDSCAPE_TOOL_RAIL_WIDTH)" in horizontal
+    assert "Sidebar::show_android_landscape_primary_tabs(ui, self)" in horizontal
+
+    landscape_tabs = SIDEBAR[
+        SIDEBAR.index("fn show_android_landscape_primary_tabs"):
+        SIDEBAR.index("fn finish_sidebar_tab_change")
+    ]
+    for tab in ("Adjustments", "Crop", "Masks", "Inpainting", "Export"):
+        assert f"SidebarTab::{tab}" in landscape_tabs
+    assert "mobile_icon_tab" in landscape_tabs
+    assert "egui::vec2(56.0, 56.0)" in landscape_tabs
 
 
 def test_mobile_navigation_has_horizontal_separators_without_side_borders() -> None:

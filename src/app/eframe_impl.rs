@@ -144,6 +144,14 @@ impl eframe::App for AurawApp {
                     }
 
                     #[cfg(target_os = "android")]
+                    egui::Panel::right("develop_android_landscape_primary_tabs")
+                        .resizable(false)
+                        .exact_size(Sidebar::ANDROID_LANDSCAPE_TOOL_RAIL_WIDTH)
+                        .show(ui, |ui| {
+                            Sidebar::show_android_landscape_primary_tabs(ui, self)
+                        });
+
+                    #[cfg(target_os = "android")]
                     egui::Panel::right("develop_sidebar_right")
                         .resizable(true)
                         .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)

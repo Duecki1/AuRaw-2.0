@@ -4121,14 +4121,23 @@ fn justified_thumbnail_layout(
         let item_count = row_aspects.len();
         let aspect_sum = row_aspects.iter().sum::<f32>();
         let gaps_width = gap * (item_count.saturating_sub(1) as f32);
-        let row_height =
+        let justified_height =
             ((available_width - gaps_width).max(1.0) / aspect_sum.max(f32::EPSILON)).max(1.0);
+        // A sparse row must not inflate a handful of thumbnails to fill the
+        // entire viewport. Keep such rows at the same responsive target height
+        // as a full gallery row and leave the unused space on the right. Rows
+        // that need to shrink still justify normally so they never overflow a
+        // narrow phone or window.
+        let row_is_justified = justified_height <= target_height;
+        let row_height = justified_height.min(target_height);
         let mut x = 0.0;
 
         for (row_offset, aspect) in row_aspects.iter().copied().enumerate() {
             // Give the final item the exact remaining width to absorb floating-
-            // point rounding and keep every row flush with the right edge.
-            let width = if row_offset + 1 == item_count {
+            // point rounding when this is a justified row. Sparse rows retain
+            // every thumbnail's natural aspect width instead of stretching the
+            // final item across all remaining space.
+            let width = if row_is_justified && row_offset + 1 == item_count {
                 (available_width - x).max(1.0)
             } else {
                 row_height * aspect
@@ -4594,6 +4603,45 @@ mod tests {
         assert!(row_sizes.len() >= 2);
         assert!(row_sizes.iter().all(|count| *count >= 4));
         assert!(row_sizes.iter().all(|count| *count <= 5));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn sparse_galleries_never_grow_above_the_responsive_target() {
+        for available_width in [320.0, 1024.0, 3440.0] {
+            for target_height in [120.0, 140.0, 270.0] {
+                for item_count in 1..=3 {
+                    let entries = (0..item_count)
+                        .map(|index| {
+                            new_library_entry(LibraryFileInfo {
+                                source: LibrarySource::File(PathBuf::from(format!(
+                                    "sparse-{available_width}-{target_height}-{index}.dng"
+                                ))),
+                                display_path: format!("sparse-{index}.dng"),
+                                name: format!("sparse-{index}.dng"),
+                                bytes: 1,
+                                dimensions_hint: Some([3, 2]),
+                                modified: None,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+
+                    let (placements, _) =
+                        justified_thumbnail_layout(&entries, available_width, target_height, 6.0);
+
+                    assert_eq!(placements.len(), item_count);
+                    assert!(placements
+                        .iter()
+                        .all(|rect| rect.height() <= target_height + 0.01));
+                    assert!(placements
+                        .iter()
+                        .all(|rect| rect.width() <= target_height * 1.5 + 0.01));
+                    assert!(placements
+                        .iter()
+                        .all(|rect| rect.right() <= available_width + 0.01));
+                }
+            }
+        }
     }
 
     #[cfg(not(target_os = "android"))]

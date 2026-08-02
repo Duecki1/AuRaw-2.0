@@ -42,6 +42,27 @@ fn android_overflow_button_rect(anchor_rect: eframe::egui::Rect, edge: f32) -> e
     )
 }
 
+#[cfg(any(target_os = "android", test))]
+fn android_overflow_button(
+    ui: &mut eframe::egui::Ui,
+    anchor_rect: eframe::egui::Rect,
+    edge: f32,
+) -> eframe::egui::Response {
+    use eframe::egui;
+
+    // This is an overlay inside an already allocated thumbnail card. `Ui::put`
+    // advances the parent's cursor to the overlay's bottom/right edge, which
+    // rewinds a vertical strip into the middle of the card and makes the next
+    // submask overlap it. `Ui::place` preserves the existing layout cursor.
+    ui.place(
+        android_overflow_button_rect(anchor_rect, edge),
+        egui::Button::new(
+            egui::RichText::new(egui_phosphor::regular::DOTS_THREE_VERTICAL).size(edge * 0.52),
+        )
+        .corner_radius((edge * 0.22).clamp(3.0, 7.0)),
+    )
+}
+
 #[cfg(target_os = "android")]
 pub(crate) fn android_overflow_menu<R>(
     ui: &mut eframe::egui::Ui,
@@ -50,15 +71,9 @@ pub(crate) fn android_overflow_menu<R>(
     edge: f32,
     add_contents: impl FnOnce(&mut eframe::egui::Ui) -> R,
 ) -> eframe::egui::Response {
-    use eframe::egui::{self, Popup};
+    use eframe::egui::Popup;
 
-    let response = ui.put(
-        android_overflow_button_rect(anchor_rect, edge),
-        egui::Button::new(
-            egui::RichText::new(egui_phosphor::regular::DOTS_THREE_VERTICAL).size(edge * 0.52),
-        )
-        .corner_radius((edge * 0.22).clamp(3.0, 7.0)),
-    );
+    let response = android_overflow_button(ui, anchor_rect, edge);
     Popup::menu(&response).show(add_contents);
 
     response.on_hover_text("More actions")
@@ -81,7 +96,7 @@ pub(crate) fn mask_component_color(index: usize) -> eframe::egui::Color32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{android_overflow_button_rect, ANDROID_OVERFLOW_INSET};
+    use super::{android_overflow_button, android_overflow_button_rect, ANDROID_OVERFLOW_INSET};
     use eframe::egui;
 
     #[test]
@@ -94,5 +109,25 @@ mod tests {
         assert_eq!(button.top(), anchor.top() + ANDROID_OVERFLOW_INSET);
         assert!(anchor.contains(button.min));
         assert!(anchor.contains(button.max));
+    }
+
+    #[test]
+    fn android_overflow_button_does_not_rewind_vertical_layout() {
+        egui::__run_test_ui(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let (card_rect, _) =
+                ui.allocate_exact_size(egui::vec2(68.0, 72.0), egui::Sense::click());
+            let next_position = ui.next_widget_position();
+
+            let overflow = android_overflow_button(ui, card_rect, 22.0);
+
+            assert_eq!(ui.next_widget_position(), next_position);
+            assert!(card_rect.contains(overflow.rect.min));
+            assert!(card_rect.contains(overflow.rect.max));
+
+            let (submask_rect, _) =
+                ui.allocate_exact_size(egui::vec2(56.0, 62.0), egui::Sense::click());
+            assert!(submask_rect.top() >= card_rect.bottom());
+        });
     }
 }
