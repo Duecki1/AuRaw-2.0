@@ -244,6 +244,11 @@ enum ScanEvent {
         warning_count: usize,
         truncated: bool,
     },
+    #[cfg(not(target_os = "android"))]
+    FolderTree {
+        generation: u64,
+        tree: LibraryFolderNode,
+    },
     Thumbnail {
         generation: u64,
         source: LibrarySource,
@@ -319,6 +324,31 @@ enum RawImportOutcome {
     AlreadyPresent,
 }
 
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LibraryFolderNode {
+    path: PathBuf,
+    name: String,
+    children: Vec<Self>,
+}
+
+#[cfg(not(target_os = "android"))]
+impl LibraryFolderNode {
+    fn empty(path: PathBuf) -> Self {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.display().to_string());
+        Self {
+            path,
+            name,
+            children: Vec::new(),
+        }
+    }
+}
+
 #[cfg(target_os = "android")]
 #[derive(Clone)]
 struct LibraryAiMaskRefreshPrompt {
@@ -329,6 +359,14 @@ pub(crate) struct LibraryState {
     location: Option<String>,
     #[cfg(not(target_os = "android"))]
     folder: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    root_folder: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    folder_tree: Option<LibraryFolderNode>,
+    #[cfg(not(target_os = "android"))]
+    expanded_folders: HashSet<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    folder_sidebar_open: bool,
     #[cfg(target_os = "android")]
     android_app: android_activity::AndroidApp,
     entries: Vec<LibraryEntry>,
@@ -369,6 +407,10 @@ impl LibraryState {
         Self {
             location: None,
             folder: None,
+            root_folder: None,
+            folder_tree: None,
+            expanded_folders: HashSet::new(),
+            folder_sidebar_open: true,
             entries: Vec::new(),
             entry_indices: HashMap::new(),
             event_receiver: None,
@@ -490,6 +532,21 @@ impl LibraryState {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn folder(&self) -> Option<&Path> {
         self.folder.as_deref()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn root_folder(&self) -> Option<&Path> {
+        self.root_folder.as_deref()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn folder_sidebar_open(&self) -> bool {
+        self.folder_sidebar_open
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn set_folder_sidebar_open(&mut self, open: bool) {
+        self.folder_sidebar_open = open;
     }
 
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
@@ -698,13 +755,37 @@ impl LibraryState {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn open_folder(&mut self, folder: PathBuf, context: &egui::Context) {
         let folder_changed = self.folder.as_ref() != Some(&folder);
+        self.root_folder = Some(folder.clone());
         self.location = Some(folder.display().to_string());
-        self.folder = Some(folder);
+        self.folder = Some(folder.clone());
+        self.folder_tree = Some(LibraryFolderNode::empty(folder.clone()));
+        self.expanded_folders.clear();
+        self.expanded_folders.insert(folder);
+        self.folder_sidebar_open = true;
         if folder_changed {
             self.entries.clear();
             self.entry_indices.clear();
+            self.clear_selection();
             self.catalog_ready = false;
         }
+        self.refresh(context);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn select_folder(&mut self, folder: PathBuf, context: &egui::Context) {
+        let Some(root) = self.root_folder.as_ref() else {
+            return;
+        };
+        if !folder.starts_with(root) || self.folder.as_ref() == Some(&folder) {
+            return;
+        }
+
+        self.location = Some(folder.display().to_string());
+        self.folder = Some(folder);
+        self.entries.clear();
+        self.entry_indices.clear();
+        self.clear_selection();
+        self.catalog_ready = false;
         self.refresh(context);
     }
 
@@ -742,10 +823,34 @@ impl LibraryState {
                 self.status = "Open a folder to build your RAW library.".to_owned();
                 return;
             };
+            let Some(root_folder) = self.root_folder.clone() else {
+                self.event_receiver = None;
+                self.request_sender = None;
+                self.scanning = false;
+                self.status = "Open a top-level folder to build your RAW library.".to_owned();
+                return;
+            };
             self.status = format!("Scanning {}…", folder.display());
             std::thread::Builder::new()
                 .name("auraw-library".to_owned())
                 .spawn(move || {
+                    let tree_sender = event_sender.clone();
+                    let tree_repaint = repaint.clone();
+                    let tree_cancellation = Arc::clone(&cancellation);
+                    let tree_worker = std::thread::Builder::new()
+                        .name("auraw-library-folders".to_owned())
+                        .spawn(move || {
+                            if let Some(tree) = scan_folder_tree(&root_folder, || {
+                                tree_cancellation.load(Ordering::Acquire) != generation
+                            }) {
+                                let _ =
+                                    tree_sender.send(ScanEvent::FolderTree { generation, tree });
+                                tree_repaint.request_repaint();
+                            }
+                        });
+                    if let Err(error) = tree_worker {
+                        log::warn!("could not start the library folder scanner: {error}");
+                    }
                     let scan = match scan_folder(&folder, || {
                         cancellation.load(Ordering::Acquire) != generation
                     }) {
@@ -917,6 +1022,12 @@ impl LibraryState {
             };
 
             match event {
+                #[cfg(not(target_os = "android"))]
+                ScanEvent::FolderTree { generation, tree }
+                    if generation == self.generation.load(Ordering::Acquire) =>
+                {
+                    self.folder_tree = Some(tree);
+                }
                 ScanEvent::Catalog {
                     generation,
                     files,
@@ -2535,9 +2646,149 @@ fn show_library_batch_export_progress(ui: &mut Ui, app: &mut AurawApp) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn show_library_folder_node(
+    ui: &mut Ui,
+    node: &LibraryFolderNode,
+    selected_folder: Option<&Path>,
+    expanded_folders: &mut HashSet<PathBuf>,
+    requested_folder: &mut Option<PathBuf>,
+) {
+    let has_children = !node.children.is_empty();
+    let expanded = expanded_folders.contains(&node.path);
+    let selected = selected_folder == Some(node.path.as_path());
+
+    ui.push_id(&node.path, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if has_children {
+                let caret = if expanded {
+                    egui_phosphor::regular::CARET_DOWN
+                } else {
+                    egui_phosphor::regular::CARET_RIGHT
+                };
+                if ui
+                    .add_sized(
+                        egui::vec2(20.0, 22.0),
+                        egui::Button::new(egui::RichText::new(caret).size(12.0)).frame(false),
+                    )
+                    .on_hover_text(if expanded {
+                        "Collapse folder"
+                    } else {
+                        "Expand folder"
+                    })
+                    .clicked()
+                {
+                    if expanded {
+                        expanded_folders.remove(&node.path);
+                    } else {
+                        expanded_folders.insert(node.path.clone());
+                    }
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 22.0));
+            }
+
+            let folder_icon = if expanded && has_children {
+                egui_phosphor::regular::FOLDER_OPEN
+            } else {
+                egui_phosphor::regular::FOLDER
+            };
+            if ui
+                .selectable_label(
+                    selected,
+                    egui::RichText::new(format!("{folder_icon}  {}", node.name)),
+                )
+                .on_hover_text(node.path.display().to_string())
+                .clicked()
+            {
+                *requested_folder = Some(node.path.clone());
+            }
+        });
+
+        if expanded {
+            ui.indent("children", |ui| {
+                for child in &node.children {
+                    show_library_folder_node(
+                        ui,
+                        child,
+                        selected_folder,
+                        expanded_folders,
+                        requested_folder,
+                    );
+                }
+            });
+        }
+    });
+}
+
 pub struct Library;
 
 impl Library {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn show_folder_sidebar(ui: &mut Ui, app: &mut AurawApp) {
+        ui.horizontal(|ui| {
+            ui.strong("Folders");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if crate::ui::icons::phosphor_icon_button(
+                    ui,
+                    egui_phosphor::regular::X,
+                    egui::vec2(28.0, 24.0),
+                    "Close folder sidebar",
+                )
+                .clicked()
+                {
+                    app.library.set_folder_sidebar_open(false);
+                }
+            });
+        });
+        ui.separator();
+
+        let mut requested_folder = None;
+        let tree_height = (ui.available_height() - 38.0).max(32.0);
+        {
+            let tree = app.library.folder_tree.as_ref();
+            let selected_folder = app.library.folder.as_deref();
+            let expanded_folders = &mut app.library.expanded_folders;
+            egui::ScrollArea::both()
+                .max_height(tree_height)
+                .min_scrolled_height(tree_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if let Some(tree) = tree {
+                        show_library_folder_node(
+                            ui,
+                            tree,
+                            selected_folder,
+                            expanded_folders,
+                            &mut requested_folder,
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Open a top-level folder to browse its hierarchy.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
+                });
+        }
+
+        if let Some(folder) = requested_folder {
+            app.library.select_folder(folder, ui.ctx());
+        }
+
+        ui.separator();
+        if ui
+            .add_sized(
+                egui::vec2(ui.available_width(), 28.0),
+                egui::Button::new("Open Top Folder…"),
+            )
+            .clicked()
+        {
+            app.open_library_folder_dialog();
+        }
+    }
+
     pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         app.library.resume_thumbnail_decoding();
         app.library.poll(ui.ctx());
@@ -2558,6 +2809,19 @@ impl Library {
             .collect::<Vec<_>>();
 
         ui.horizontal(|ui| {
+            #[cfg(not(target_os = "android"))]
+            if !app.library.folder_sidebar_open()
+                && crate::ui::icons::phosphor_icon_button(
+                    ui,
+                    egui_phosphor::regular::SIDEBAR_SIMPLE,
+                    egui::vec2(32.0, 26.0),
+                    "Open folder sidebar",
+                )
+                .clicked()
+            {
+                app.library.set_folder_sidebar_open(true);
+            }
+
             #[cfg(target_os = "android")]
             if !selected_android_items.is_empty() {
                 ui.strong(format!("{} selected", selected_android_items.len()));
@@ -2663,11 +2927,11 @@ impl Library {
         if app.library.location.is_none() {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading("Choose a photo folder");
-                    ui.label("AuRaw shows RAW files directly inside the selected folder, builds every preview in the background, and prioritizes visible rows.");
+                    ui.heading("Choose your top-level photo folder");
+                    ui.label("AuRaw builds a folder hierarchy in the desktop sidebar. Select any folder there to show the RAW files directly inside the selected folder.");
                     ui.add_space(8.0);
                     #[cfg(not(target_os = "android"))]
-                    if ui.button("Open Folder…").clicked() {
+                    if ui.button("Open Top Folder…").clicked() {
                         app.open_library_folder_dialog();
                     }
                 });
@@ -4042,6 +4306,68 @@ impl Ord for RankedLibraryFile {
 type FolderScan = (Vec<LibraryFileInfo>, usize, bool);
 
 #[cfg(not(target_os = "android"))]
+fn scan_folder_tree(root: &Path, is_cancelled: impl Fn() -> bool) -> Option<LibraryFolderNode> {
+    fn visit(path: PathBuf, is_cancelled: &impl Fn() -> bool) -> Option<LibraryFolderNode> {
+        if is_cancelled() {
+            return None;
+        }
+
+        let mut node = LibraryFolderNode::empty(path.clone());
+        let entries = match std::fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                log::warn!(
+                    "could not read library folder hierarchy at {}: {error}",
+                    path.display()
+                );
+                return Some(node);
+            }
+        };
+
+        for entry in entries {
+            if is_cancelled() {
+                return None;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    log::warn!("could not read a library folder entry: {error}");
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    log::warn!("could not inspect {}: {error}", entry.path().display());
+                    continue;
+                }
+            };
+            // Directory symlinks are not followed, so a cycle cannot make the
+            // desktop folder hierarchy recurse forever.
+            if !file_type.is_dir() {
+                continue;
+            }
+            if let Some(child) = visit(entry.path(), is_cancelled) {
+                node.children.push(child);
+            } else {
+                return None;
+            }
+        }
+
+        node.children.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        Some(node)
+    }
+
+    visit(root.to_path_buf(), &is_cancelled)
+}
+
+#[cfg(not(target_os = "android"))]
 fn scan_folder(
     folder: &Path,
     is_cancelled: impl Fn() -> bool,
@@ -4173,9 +4499,9 @@ mod tests {
         balanced_justified_row_ranges, desktop_selection_toggle_label, duplicate_raw_and_sidecar,
         elide_middle, format_file_size, import_raw_into_folder, justified_thumbnail_layout,
         loaded_library_thumbnail, make_resident_thumbnail, new_library_entry,
-        run_thumbnail_workers, scan_folder, scan_folder_with_limit, LibraryFileInfo, LibraryState,
-        RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
-        ANDROID_LIBRARY_IMPORT_FAB_EDGE,
+        run_thumbnail_workers, scan_folder, scan_folder_tree, scan_folder_with_limit,
+        LibraryFileInfo, LibraryState, RawImportOutcome, ScanEvent, ThumbnailRequest,
+        ThumbnailWorker, TouchThumbnailAction, ANDROID_LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     use std::collections::HashSet;
@@ -4315,6 +4641,67 @@ mod tests {
         library.open_folder(root.clone(), &context);
 
         assert_eq!(library.folder(), Some(root.as_path()));
+        assert_eq!(library.root_folder(), Some(root.as_path()));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_subfolder_navigation_keeps_the_chosen_root() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-navigation-{}-{nonce}",
+            std::process::id()
+        ));
+        let nested = root.join("year").join("shoot");
+        let outside = root.with_extension("outside");
+
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+        library.open_folder(root.clone(), &context);
+        library.select_folder(nested.clone(), &context);
+
+        assert_eq!(library.root_folder(), Some(root.as_path()));
+        assert_eq!(library.folder(), Some(nested.as_path()));
+
+        library.select_folder(outside.clone(), &context);
+        assert_eq!(library.root_folder(), Some(root.as_path()));
+        assert_eq!(library.folder(), Some(nested.as_path()));
+
+        library.open_folder(root.clone(), &context);
+        assert_eq!(library.root_folder(), Some(root.as_path()));
+        assert_eq!(library.folder(), Some(root.as_path()));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_folder_tree_contains_nested_directories_and_ignores_symlinks() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("auraw-library-tree-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(root.join("Zulu").join("Nested")).unwrap();
+        fs::create_dir_all(root.join("alpha")).unwrap();
+        fs::write(root.join("not-a-folder.dng"), b"raw").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, root.join("Zulu").join("cycle")).unwrap();
+
+        let tree = scan_folder_tree(&root, || false).expect("folder tree");
+        let child_names = tree
+            .children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(child_names, ["alpha", "Zulu"]);
+        assert_eq!(tree.children[1].children[0].name, "Nested");
+        #[cfg(unix)]
+        assert_eq!(tree.children[1].children.len(), 1);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_os = "android"))]
