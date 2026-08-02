@@ -181,6 +181,16 @@ impl eframe::App for AurawApp {
             }
         }
 
+        #[cfg(not(target_os = "android"))]
+        if self.active_tab == AppTab::Library && self.library.folder_sidebar_open() {
+            egui::Panel::left("library_folder_sidebar")
+                .resizable(true)
+                .min_size(180.0)
+                .max_size((viewport_size.x * 0.45).max(180.0))
+                .default_size(260.0)
+                .show(ui, |ui| Library::show_folder_sidebar(ui, self));
+        }
+
         let _central = egui::CentralPanel::default().show(ui, |ui| match self.active_tab {
             AppTab::Library => Library::show(ui, self, frame),
             AppTab::Develop => Preview::show(ui, self, frame),

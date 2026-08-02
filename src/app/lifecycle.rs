@@ -1662,7 +1662,10 @@ impl AurawApp {
             display_profile_override: self.display_profile_override.clone(),
             adjustment_copy_settings: self.adjustment_copy_settings,
             #[cfg(not(target_os = "android"))]
-            last_library_folder: self.library.folder().map(|folder| folder.to_path_buf()),
+            last_library_folder: self
+                .library
+                .root_folder()
+                .map(|folder| folder.to_path_buf()),
             ..Default::default()
         };
         let Some(settings_path) = self.performance_settings_path.as_deref() else {

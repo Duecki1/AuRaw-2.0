@@ -125,7 +125,8 @@ impl TopBar {
                     }
 
                     ui.separator();
-                    if app.active_tab == AppTab::Library && ui.button("Open Folder…").clicked() {
+                    if app.active_tab == AppTab::Library && ui.button("Open Top Folder…").clicked()
+                    {
                         app.open_library_folder_dialog();
                     }
 
