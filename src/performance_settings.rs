@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 6;
+const SETTINGS_VERSION: u32 = 7;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -13,6 +13,8 @@ pub(crate) struct PerformanceSettings {
     pub(crate) raw_cache_files: usize,
     #[serde(default = "default_thumbnail_workers")]
     pub(crate) thumbnail_workers: usize,
+    #[serde(default)]
+    pub(crate) library_thumbnail_size: crate::ui::library::LibraryThumbnailSize,
     #[serde(default)]
     pub(crate) preview_quality: crate::app::PreviewQuality,
     #[serde(default)]
@@ -42,6 +44,11 @@ pub(crate) struct PerformanceSettings {
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_library_folder: Option<PathBuf>,
+    /// Folder selected inside `last_library_folder`'s hierarchy. Keeping this
+    /// separate preserves the top-level tree while reopening its last view.
+    #[cfg(not(target_os = "android"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_library_selected_folder: Option<PathBuf>,
 }
 
 const fn settings_version() -> u32 {
@@ -71,6 +78,7 @@ impl Default for PerformanceSettings {
             version: SETTINGS_VERSION,
             raw_cache_files: default_raw_cache_files(),
             thumbnail_workers: default_thumbnail_workers(),
+            library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::default(),
             preview_quality: crate::app::PreviewQuality::default(),
             camera_profile_mode: CameraProfileMode::default(),
             camera_profile_folder: None,
@@ -84,6 +92,8 @@ impl Default for PerformanceSettings {
             adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings::default(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
+            #[cfg(not(target_os = "android"))]
+            last_library_selected_folder: None,
         }
     }
 }
@@ -258,6 +268,7 @@ mod tests {
             version: 99,
             raw_cache_files: usize::MAX,
             thumbnail_workers: 0,
+            library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Large,
             preview_quality: crate::app::PreviewQuality::High,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
             camera_profile_folder: Some(PathBuf::from("profiles")),
@@ -279,6 +290,8 @@ mod tests {
             },
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
+            #[cfg(not(target_os = "android"))]
+            last_library_selected_folder: None,
         }
         .sanitized();
         assert_eq!(settings.version, SETTINGS_VERSION);
@@ -287,6 +300,10 @@ mod tests {
             crate::app::maximum_raw_cache_limit()
         );
         assert_eq!(settings.thumbnail_workers, 1);
+        assert_eq!(
+            settings.library_thumbnail_size,
+            crate::ui::library::LibraryThumbnailSize::Large
+        );
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::High);
         assert_eq!(settings.camera_profile_mode, CameraProfileMode::DcpProfiles);
         assert_eq!(
@@ -348,9 +365,42 @@ mod tests {
 
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
         assert_eq!(
+            settings.library_thumbnail_size,
+            crate::ui::library::LibraryThumbnailSize::Medium
+        );
+        assert_eq!(
             settings.adjustment_copy_settings,
             crate::sidecar::AdjustmentCopySettings::default()
         );
+    }
+
+    #[test]
+    fn library_view_preferences_round_trip() {
+        let mut settings = PerformanceSettings {
+            library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Enormous,
+            ..Default::default()
+        };
+        #[cfg(not(target_os = "android"))]
+        {
+            settings.last_library_folder = Some(PathBuf::from("photos"));
+            settings.last_library_selected_folder = Some(PathBuf::from("photos/2026/trip"));
+        }
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: PerformanceSettings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            restored.library_thumbnail_size,
+            crate::ui::library::LibraryThumbnailSize::Enormous
+        );
+        #[cfg(not(target_os = "android"))]
+        {
+            assert_eq!(restored.last_library_folder, Some(PathBuf::from("photos")));
+            assert_eq!(
+                restored.last_library_selected_folder,
+                Some(PathBuf::from("photos/2026/trip"))
+            );
+        }
     }
 
     #[test]
