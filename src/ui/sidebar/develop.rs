@@ -176,7 +176,7 @@ impl Sidebar {
                 -100.0..=100.0,
                 0,
                 1.0,
-                Some("Maps -100%..+100% to darktable's sigmoid contrast around middle gray."),
+                Some("Maps -100%..+100% to darktable's normal sigmoid contrast range, 0.7..3.0 around its 1.5 default."),
             );
             changed |= adjustment_slider(
                 ui,

@@ -604,10 +604,13 @@ impl LoadedRaw {
             return [0.0; 3];
         }
 
-        // Match darktable's mask storage exactly: the logical dimensions use
-        // integer division by three, while each channel plane is padded to an
-        // eight-element boundary. Partial sensor-edge superpixels consequently
-        // address the zero-filled padding in the same way as opposed.c.
+        // Match darktable's mask storage: the logical dimensions use integer
+        // division by three, and `_raw_to_cmap` still maps partial right/bottom
+        // sensor edges into zero-filled padding. darktable describes this as an
+        // over-allocation for every width/height combination. Its rounded-area
+        // formula alone is one element too short when a logical dimension is
+        // already eight-aligned, so explicitly include the largest mapped raw
+        // index in each independent channel plane.
         let mask_width = width / 3;
         let mask_height = height / 3;
         if mask_width == 0 || mask_height == 0 {
@@ -615,7 +618,10 @@ impl LoadedRaw {
         }
         let aligned_mask_width = mask_width.div_ceil(8) * 8;
         let aligned_mask_height = mask_height.div_ceil(8) * 8;
-        let mask_size = aligned_mask_width.saturating_mul(aligned_mask_height);
+        let aligned_mask_area = aligned_mask_width.saturating_mul(aligned_mask_height);
+        let last_raw_mask_index = ((height - 1) / 3) * mask_width + (width - 1) / 3;
+        let required_mask_size = (last_raw_mask_index + 1).div_ceil(8) * 8;
+        let mask_size = aligned_mask_area.max(required_mask_size);
         let mut clipped_mask = vec![false; 3 * mask_size];
         let clip = 0.987 * clip_threshold.max(0.01);
 
@@ -1109,6 +1115,30 @@ mod tests {
         let opposed_root = 0.5 * (0.6f32.cbrt() + 0.4f32.cbrt());
         let expected_red = 0.8 - opposed_root * opposed_root * opposed_root;
         assert!((chroma[0] - expected_red).abs() < 0.005, "{chroma:?}");
+        assert!(chroma.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn inpaint_opposed_chrominance_pads_partial_three_pixel_edge_blocks() {
+        // Bayer preview proxies are phase-aligned to two pixels, not three.
+        // A 26-pixel row therefore has two photosites beyond its eight complete
+        // 3x3 blocks. With an already eight-aligned mask width, those pixels
+        // previously indexed exactly one element past the blue mask plane. The
+        // padded edge remains part of darktable's full-frame chroma scan.
+        const WIDTH: u32 = 26;
+        const HEIGHT: u32 = 24;
+        let mut raw = raw_with_white_balance_model();
+        raw.width = WIDTH;
+        raw.height = HEIGHT;
+        raw.raw_pixels = vec![1_000; (WIDTH * HEIGHT) as usize];
+        raw.color_indices =
+            CompactPixelMap::dense(WIDTH, HEIGHT, vec![2; (WIDTH * HEIGHT) as usize]);
+        raw.black_levels_per_pixel = CompactPixelMap::repeating(WIDTH, HEIGHT, 1, 1, vec![0.0]);
+        raw.white_levels = [10_000.0; 4];
+        raw.wb_coeffs = [1.0; 4];
+        raw.opposed_chroma_cache = Default::default();
+
+        let chroma = raw.inpaint_opposed_chroma(0.0, 1.0, false);
         assert!(chroma.iter().all(|value| value.is_finite()));
     }
 }

@@ -11,7 +11,7 @@ SIDEBAR = (ROOT / "src/ui/sidebar/develop.rs").read_text(encoding="utf-8")
 
 def test_all_supported_edits_migrate_to_inpaint_opposed() -> None:
     assert "pub const INPAINT_OPPOSED_PROCESS_VERSION: u32 = 29;" in BASIC
-    assert "pub const CURRENT_PROCESS_VERSION: u32 = PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION;" in BASIC
+    assert "pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION;" in BASIC
     assert "self.highlight_method = HighlightReconstructionMethod::InpaintOpposed;" in BASIC
     assert "#[serde(other)]" in BASIC
 

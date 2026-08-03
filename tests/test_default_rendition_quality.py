@@ -62,7 +62,10 @@ def test_basic_contrast_is_the_darktable_sigmoid_middle_grey_slope() -> None:
     assert "let raw_selection_flags = u32::from(exposure.ai_denoise_enabled) << 1;" in GPU
     assert "pub const SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 30;" in BASIC
     assert "pub const PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 31;" in BASIC
+    assert "pub const PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 32;" in BASIC
     assert "fn sigmoid_contrast_from_percent" in BASIC
+    assert "DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN: f32 = 0.7" in BASIC
+    assert "DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX: f32 = 3.0" in BASIC
     assert "self.contrast = percent_from_sigmoid_contrast" in BASIC
 
 

@@ -267,7 +267,13 @@ pub const SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 30;
 /// it internally to darktable's sigmoid slope, and adopts darktable's default
 /// per-channel sigmoid colour processing.
 pub const PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 31;
-pub const CURRENT_PROCESS_VERSION: u32 = PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION;
+/// Process 32 calibrates the photographic Basic Contrast endpoints to
+/// darktable's 0.7..3.0 sigmoid slider soft range around its 1.5 default,
+/// rather than the module's technical 0.1..10.0 hard limits.
+pub const PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 32;
+pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION;
+const DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN: f32 = 0.7;
+const DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX: f32 = 3.0;
 /// Kelvin limits presented by the global white-balance control. These match
 /// darktable's physical temperature control rather than exposing our internal
 /// reciprocal-temperature offset.
@@ -309,7 +315,8 @@ pub struct ExposureParams {
     /// Scene-linear exposure in stops, applied before local/color processing.
     pub exposure: f32,
     /// User-facing global contrast in the -100..100 domain. The renderer maps
-    /// it to darktable's 0.1..10 sigmoid middle-grey slope; zero maps to 1.5.
+    /// it to darktable's 0.7..3.0 sigmoid middle-grey contrast slider soft
+    /// slope; zero maps to 1.5.
     #[serde(default)]
     pub contrast: f32,
     /// darktable-compatible sigmoid scene-to-display transform.
@@ -413,25 +420,33 @@ pub(crate) fn sigmoid_contrast_from_percent(contrast: f32) -> f32 {
     } else {
         0.0
     };
+    // Preserve AuRaw's centered percentage UI while matching darktable's
+    // normal sigmoid slider: -100 -> 0.7, 0 -> 1.5, +100 -> 3.0. Interpolate
+    // the slope geometrically on each side because contrast is multiplicative.
+    // Darktable's 0.1..10 hard limits remain available only through expert
+    // entry there and produced brittle, near-binary output at AuRaw's endpoint.
     let default = SigmoidParams::default().contrast;
     if amount >= 0.0 {
-        default * (10.0 / default).powf(amount)
+        default * (DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX / default).powf(amount)
     } else {
-        default * (0.1 / default).powf(-amount)
+        default * (DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN / default).powf(-amount)
     }
 }
 
 fn percent_from_sigmoid_contrast(sigmoid_contrast: f32) -> f32 {
     let default = SigmoidParams::default().contrast;
     let slope = if sigmoid_contrast.is_finite() {
-        sigmoid_contrast.clamp(0.1, 10.0)
+        sigmoid_contrast.clamp(
+            DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN,
+            DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX,
+        )
     } else {
         default
     };
     let percent = if slope >= default {
-        100.0 * (slope / default).ln() / (10.0 / default).ln()
+        100.0 * (slope / default).ln() / (DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX / default).ln()
     } else {
-        -100.0 * (slope / default).ln() / (0.1 / default).ln()
+        -100.0 * (slope / default).ln() / (DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN / default).ln()
     };
     percent.clamp(-100.0, 100.0)
 }
@@ -443,7 +458,10 @@ fn combined_legacy_sigmoid_contrast(sigmoid_contrast: f32, contrast: f32) -> f32
         SigmoidParams::default().contrast
     };
     let default = SigmoidParams::default().contrast;
-    (base * sigmoid_contrast_from_percent(contrast) / default).clamp(0.1, 10.0)
+    (base * sigmoid_contrast_from_percent(contrast) / default).clamp(
+        DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN,
+        DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX,
+    )
 }
 
 impl ExposureParams {
@@ -454,7 +472,8 @@ impl ExposureParams {
             self.contrast = percent_from_sigmoid_contrast(effective);
         } else if source_process_version == SIGMOID_CONTRAST_PROCESS_VERSION {
             // Process 30 briefly exposed darktable's backend 0.1..10 value in
-            // the Basic UI. Convert it back into the public percentage domain.
+            // the Basic UI. Convert it into the photographic percentage range;
+            // expert values outside 0.7..3.0 land on the nearest endpoint.
             self.contrast = percent_from_sigmoid_contrast(self.sigmoid.contrast);
         }
         if source_process_version <= SIGMOID_CONTRAST_PROCESS_VERSION {
@@ -601,7 +620,8 @@ mod tests {
         temperature_offset_from_kelvin, DemosaicMode, ExposureParams,
         HighlightReconstructionMethod, PointCurve, CURRENT_PROCESS_VERSION,
         INPAINT_OPPOSED_PROCESS_VERSION, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
-        MAX_TEMPERATURE_KELVIN, MIN_TEMPERATURE_KELVIN, SIGMOID_CONTRAST_PROCESS_VERSION,
+        MAX_TEMPERATURE_KELVIN, MIN_TEMPERATURE_KELVIN, PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION,
+        SIGMOID_CONTRAST_PROCESS_VERSION,
     };
     use crate::pipeline::{SigmoidColorProcessing, SigmoidParams};
 
@@ -744,15 +764,17 @@ mod tests {
     }
 
     #[test]
-    fn contrast_percent_endpoints_map_to_darktable_sigmoid_slopes() {
-        for (percent, expected) in [(-100.0, 0.1), (0.0, 1.5), (100.0, 10.0)] {
+    fn contrast_percent_endpoints_map_to_photographic_darktable_slopes() {
+        for (percent, expected) in [(-100.0, 0.7), (0.0, 1.5), (100.0, 3.0)] {
             assert!((sigmoid_contrast_from_percent(percent) - expected).abs() < 1e-5);
         }
+        assert!((sigmoid_contrast_from_percent(-50.0) - 1.024_695).abs() < 1e-5);
+        assert!((sigmoid_contrast_from_percent(50.0) - 2.121_320_2).abs() < 1e-5);
     }
 
     #[test]
     fn process_thirty_direct_contrast_migrates_back_to_percent() {
-        for (slope, expected_percent) in [(0.1, -100.0), (1.5, 0.0), (10.0, 100.0)] {
+        for (slope, expected_percent) in [(0.7, -100.0), (1.5, 0.0), (3.0, 100.0)] {
             let mut exposure = ExposureParams {
                 process_version: SIGMOID_CONTRAST_PROCESS_VERSION,
                 ..ExposureParams::default()
@@ -767,6 +789,32 @@ mod tests {
                 SigmoidColorProcessing::PerChannel
             );
         }
+    }
+
+    #[test]
+    fn process_thirty_extreme_module_limits_clamp_to_basic_endpoints() {
+        for (slope, expected_percent) in [(0.1, -100.0), (10.0, 100.0)] {
+            let mut exposure = ExposureParams {
+                process_version: SIGMOID_CONTRAST_PROCESS_VERSION,
+                ..ExposureParams::default()
+            };
+            exposure.sigmoid.contrast = slope;
+            exposure.migrate_to_current_process();
+            assert_eq!(exposure.contrast, expected_percent);
+        }
+    }
+
+    #[test]
+    fn process_thirty_one_keeps_the_visible_percent_and_adopts_the_new_curve() {
+        let mut exposure = ExposureParams {
+            process_version: PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION,
+            contrast: 100.0,
+            ..ExposureParams::default()
+        };
+        exposure.migrate_to_current_process();
+        assert_eq!(exposure.process_version, CURRENT_PROCESS_VERSION);
+        assert_eq!(exposure.contrast, 100.0);
+        assert_eq!(sigmoid_contrast_from_percent(exposure.contrast), 3.0);
     }
 
     #[test]

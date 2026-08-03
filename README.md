@@ -50,9 +50,11 @@ sidecars sit beside the source file; Android sidecars are hidden siblings of
 the imported RAW inside AuRaw's `.library` folder.
 
 The Basic **Contrast** control keeps its familiar -100% to +100% range, with 0%
-neutral, and maps that range internally to darktable's 0.1–10.0 sigmoid
-middle-grey slope (default 1.5). Sidecars from earlier AuRaw processes migrate
-to this percentage-backed parameter when opened.
+neutral, and maps to darktable's normal sigmoid slider range: -100% is 0.7, 0%
+is the 1.5 default, and +100% is 3.0. Darktable's wider
+0.1–10.0 expert limits are deliberately not used as Basic-slider endpoints.
+Sidecars from earlier AuRaw processes migrate to this percentage-backed
+parameter when opened.
 
 ## DCP camera profiles
 
