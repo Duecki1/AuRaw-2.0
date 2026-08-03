@@ -299,16 +299,146 @@ impl Sidebar {
     fn show_color(
         ui: &mut Ui,
         exposure: &mut ExposureParams,
-        as_shot_temperature: Option<f32>,
+        raw: Option<&LoadedRaw>,
+        white_balance_picker_active: &mut bool,
         foldable: bool,
     ) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Color", true, foldable, |ui| {
-            if let Some(base_kelvin) = as_shot_temperature {
-                let mut kelvin = crate::pipeline::temperature_kelvin_from_offset(
-                    base_kelvin,
-                    exposure.temperature,
-                );
+            if let Some(raw) = raw.filter(|raw| raw.as_shot_white_balance().is_some()) {
+                let presets = raw.camera_white_balance_presets();
+                let matches_current = |candidate: (f32, f32)| {
+                    (candidate.0 - exposure.temperature).abs() < 0.01
+                        && (candidate.1 - exposure.tint).abs() < 0.01
+                };
+                let selection = if *white_balance_picker_active {
+                    "from image area".to_owned()
+                } else if exposure.temperature.abs() < 1e-5 && exposure.tint.abs() < 1e-5 {
+                    "as shot".to_owned()
+                } else if raw
+                    .white_balance_offsets_from_temperature_tint(6504.0, 1.0)
+                    .is_some_and(|candidate| matches_current(candidate))
+                {
+                    "camera reference (D65)".to_owned()
+                } else if let Some(preset) = presets.iter().find(|preset| {
+                    raw.white_balance_offsets_from_coefficients(preset.coefficients)
+                        .is_some_and(|candidate| matches_current(candidate))
+                }) {
+                    preset.name.clone()
+                } else if let Some(temperature) =
+                    [2500.0, 3200.0, 4500.0, 6000.0, 8500.0]
+                        .into_iter()
+                        .find(|temperature| {
+                            raw.white_balance_offsets_from_temperature_tint(*temperature, 1.0)
+                                .is_some_and(|candidate| matches_current(candidate))
+                        })
+                {
+                    format!("{temperature:.0}K")
+                } else {
+                    "user modified".to_owned()
+                };
+                ui.horizontal(|ui| {
+                    let picker_width = 34.0;
+                    egui::ComboBox::from_id_salt("global-white-balance-preset")
+                        .selected_text(selection)
+                        .width((ui.available_width() - picker_width).max(120.0))
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(false, "as shot").clicked() {
+                                exposure.temperature = 0.0;
+                                exposure.tint = 0.0;
+                                *white_balance_picker_active = false;
+                                changed = true;
+                            }
+                            if ui.selectable_label(false, "from image area").clicked() {
+                                *white_balance_picker_active = true;
+                            }
+                            ui.label(
+                                egui::RichText::new("reference")
+                                    .strong()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            if ui.selectable_label(false, "camera reference (D65)").clicked() {
+                                if let Some((temperature, tint)) = raw
+                                    .white_balance_offsets_from_temperature_tint(6504.0, 1.0)
+                                {
+                                    exposure.temperature = temperature;
+                                    exposure.tint = tint;
+                                    *white_balance_picker_active = false;
+                                    changed = true;
+                                }
+                            }
+                            if !presets.is_empty() {
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} {}",
+                                        raw.camera_make, raw.camera_model
+                                    ))
+                                    .strong(),
+                                );
+                                for preset in &presets {
+                                    if ui.selectable_label(false, &preset.name).clicked() {
+                                        if let Some((temperature, tint)) = raw
+                                            .white_balance_offsets_from_coefficients(
+                                                preset.coefficients,
+                                            )
+                                        {
+                                            exposure.temperature = temperature;
+                                            exposure.tint = tint;
+                                            *white_balance_picker_active = false;
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new("fixed temperature")
+                                    .strong()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            for temperature in [2500.0, 3200.0, 4500.0, 6000.0, 8500.0] {
+                                if ui
+                                    .selectable_label(false, format!("{temperature:.0}K"))
+                                    .clicked()
+                                {
+                                    if let Some((temperature, tint)) = raw
+                                        .white_balance_offsets_from_temperature_tint(
+                                            temperature,
+                                            1.0,
+                                        )
+                                    {
+                                        exposure.temperature = temperature;
+                                        exposure.tint = tint;
+                                        *white_balance_picker_active = false;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        });
+                    let picker = ui
+                        .add_sized(
+                            [picker_width, 24.0],
+                            egui::Button::new(egui_phosphor::regular::EYEDROPPER)
+                                .selected(*white_balance_picker_active),
+                        )
+                        .on_hover_text("Pick a neutral gray or white area in the image");
+                    if picker.clicked() {
+                        *white_balance_picker_active = !*white_balance_picker_active;
+                    }
+                });
+                if *white_balance_picker_active {
+                    ui.label(
+                        egui::RichText::new("Drag over a neutral area in the image")
+                            .size(11.5)
+                            .color(ui.visuals().selection.bg_fill),
+                    );
+                }
+
+                let (mut kelvin, mut tint) = raw
+                    .white_balance_temperature_tint(exposure.temperature, exposure.tint)
+                    .expect("white-balance model was checked above");
+                let base_kelvin = raw.as_shot_temperature_kelvin().unwrap_or(kelvin);
                 let kelvin_changed = ui
                     // The slider's double-click reset is cached by widget id.
                     // Include this image's neutral so loading another camera
@@ -329,10 +459,33 @@ impl Sidebar {
                 if kelvin_changed {
                     exposure.temperature =
                         crate::pipeline::temperature_offset_from_kelvin(base_kelvin, kelvin);
+                    *white_balance_picker_active = false;
+                    changed = true;
+                }
+                let base_tint = raw.as_shot_white_balance().map_or(tint, |value| value.1);
+                let tint_changed = ui
+                    .push_id(base_tint.to_bits(), |ui| {
+                        adjustment_slider(
+                            ui,
+                            "Tint",
+                            &mut tint,
+                            MIN_WHITE_BALANCE_TINT..=MAX_WHITE_BALANCE_TINT,
+                            3,
+                            0.005,
+                            Some("darktable-compatible absolute camera tint; the as-shot value is the reset value."),
+                        )
+                    })
+                    .inner;
+                if tint_changed {
+                    // The UI exposes the absolute value; &mut exposure.tint remains
+                    // a camera-relative sidecar offset so zero always means as shot.
+                    exposure.tint = crate::pipeline::white_balance_tint_offset(base_tint, tint);
+                    *white_balance_picker_active = false;
                     changed = true;
                 }
             } else {
-                ui.label("Temperature");
+                *white_balance_picker_active = false;
+                ui.label("White balance");
                 ui.label(
                     egui::RichText::new(
                         "Unavailable: this image has no usable white-balance metadata",
@@ -341,15 +494,6 @@ impl Sidebar {
                     .color(ui.visuals().weak_text_color()),
                 );
             }
-            changed |= adjustment_slider(
-                ui,
-                "Tint",
-                &mut exposure.tint,
-                -100.0..=100.0,
-                0,
-                1.0,
-                Some("Relative green-magenta adaptation."),
-            );
             changed |= adjustment_slider(
                 ui,
                 "Vibrance",

@@ -271,7 +271,10 @@ pub const PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 31;
 /// darktable's 0.7..3.0 sigmoid slider soft range around its 1.5 default,
 /// rather than the module's technical 0.1..10.0 hard limits.
 pub const PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 32;
-pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION;
+/// Process 33 makes global white balance use darktable's camera-coefficient
+/// temperature/tint model and applies the selected multipliers before demosaic.
+pub const DARKTABLE_WHITE_BALANCE_PROCESS_VERSION: u32 = 33;
+pub const CURRENT_PROCESS_VERSION: u32 = DARKTABLE_WHITE_BALANCE_PROCESS_VERSION;
 const DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN: f32 = 0.7;
 const DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX: f32 = 3.0;
 /// Kelvin limits presented by the global white-balance control. These match
@@ -279,6 +282,17 @@ const DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX: f32 = 3.0;
 /// reciprocal-temperature offset.
 pub const MIN_TEMPERATURE_KELVIN: f32 = 1_901.0;
 pub const MAX_TEMPERATURE_KELVIN: f32 = 25_000.0;
+/// Hard limits used by darktable's temperature module for its absolute tint
+/// ratio. Unlike a zero-centred creative tint control, the camera's as-shot
+/// value is normally close to (but not necessarily exactly) 1.0.
+pub const MIN_WHITE_BALANCE_TINT: f32 = 0.135;
+pub const MAX_WHITE_BALANCE_TINT: f32 = 2.326;
+/// The serialized edit remains relative to the as-shot camera neutral so a
+/// zero-valued sidecar still means "as shot" for every camera. One internal
+/// unit is one hundredth of darktable's absolute tint ratio.
+pub const WHITE_BALANCE_TINT_OFFSET_SCALE: f32 = 100.0;
+pub const GLOBAL_TINT_OFFSET_LIMIT: f32 =
+    (MAX_WHITE_BALANCE_TINT - MIN_WHITE_BALANCE_TINT) * WHITE_BALANCE_TINT_OFFSET_SCALE;
 /// Maximum serialized mired displacement. This covers the complete Kelvin UI
 /// range for every as-shot neutral inside that range.
 pub const GLOBAL_TEMPERATURE_LIMIT: f32 = 500.0;
@@ -295,6 +309,17 @@ pub fn temperature_offset_from_kelvin(base_kelvin: f32, target_kelvin: f32) -> f
     let target = target_kelvin.clamp(MIN_TEMPERATURE_KELVIN, MAX_TEMPERATURE_KELVIN);
     (1_000_000.0 / base - 1_000_000.0 / target)
         .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT)
+}
+
+pub fn white_balance_tint_from_offset(base_tint: f32, offset: f32) -> f32 {
+    (base_tint + offset / WHITE_BALANCE_TINT_OFFSET_SCALE)
+        .clamp(MIN_WHITE_BALANCE_TINT, MAX_WHITE_BALANCE_TINT)
+}
+
+pub fn white_balance_tint_offset(base_tint: f32, target_tint: f32) -> f32 {
+    ((target_tint.clamp(MIN_WHITE_BALANCE_TINT, MAX_WHITE_BALANCE_TINT) - base_tint)
+        * WHITE_BALANCE_TINT_OFFSET_SCALE)
+        .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT)
 }
 /// Extended Color Mixer hue range. Values through +/-100 retain the original
 /// response for sidecar compatibility, while the extra travel allows stronger
@@ -323,7 +348,8 @@ pub struct ExposureParams {
     pub sigmoid: SigmoidParams,
     /// Relative metadata-aware white balance. Temperature is serialized as an
     /// internal mired displacement but presented to users in Kelvin; tint is a
-    /// Planckian-normal Duv displacement. Zero preserves the as-shot neutral.
+    /// relative encoding of darktable's absolute camera-derived tint ratio.
+    /// Zero preserves the as-shot neutral for both controls.
     pub temperature: f32,
     pub tint: f32,
     pub saturation: f32,

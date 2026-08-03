@@ -4,6 +4,7 @@ use super::{
     CameraProfileMode, CameraWhiteBalanceModel, CfaKind, CompactPixelMap, DngColorEndpoint,
     LoadedRaw, RawThumbnail, MAX_RAW_FILE_BYTES, MAX_SENSOR_EDGE, MAX_SENSOR_PIXELS,
 };
+use crate::pipeline::basicadj::{temperature_kelvin_from_offset, white_balance_tint_from_offset};
 use crate::pipeline::color_profile::{DcpMatrixSet, DcpProfile};
 use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
@@ -2012,108 +2013,156 @@ pub(super) fn adjusted_camera_transform(
     model: &CameraWhiteBalanceModel,
     temperature: f32,
     tint: f32,
-) -> Option<([[f32; 4]; 3], f32)> {
-    // The global temperature control is a physical mired displacement:
-    // positive values select a higher-CCT white and therefore render the
-    // scene warmer. Tint is Duv normal to the Planckian locus. Neither
-    // control contains camera-channel coefficients.
-    let base_mired = 1_000_000.0 / model.base_cct.max(1.0);
-    let target_mired = (base_mired - temperature).clamp(20.0, 666.666_7);
-    let target_cct = 1_000_000.0 / target_mired;
-    let base_white = planckian_white_xyz(model.base_cct, 0.0)?;
-    // Positive UI tint moves toward magenta; negative moves toward green.
-    let target_white = planckian_white_xyz(target_cct, tint * 0.000_5)?;
-    let base_neutral = camera_neutral(model.base_wb);
+) -> Option<([f32; 4], [[f32; 4]; 3], f32)> {
+    // darktable's temperature module does not apply a generic RGB colour cast.
+    // It converts the absolute Kelvin/tint pair through the camera matrix into
+    // sensor-channel multipliers. Keep AuRaw's serialized values relative to
+    // the as-shot neutral, but use the same absolute controls and coefficient
+    // path for rendering.
+    let (base_cct, base_tint) =
+        temperature_tint_from_coefficients(model, model.base_wb).unwrap_or((model.base_cct, 1.0));
+    let target_cct = temperature_kelvin_from_offset(base_cct, temperature);
+    let target_tint = white_balance_tint_from_offset(base_tint, tint);
+    let target_wb = temperature_tint_to_coefficients(model, target_cct, target_tint)?;
 
     match &model.color {
         CameraColorModel::Dng {
             endpoints,
             analog_balance,
         } => {
-            let base_weight = endpoint_weight(endpoints, model.base_cct);
             let target_weight = endpoint_weight(endpoints, target_cct);
-            let base_profile = interpolate_endpoints(endpoints, base_weight);
             let target_profile = interpolate_endpoints(endpoints, target_weight);
-            let base_xyz_to_camera = multiply_4x4_4x3(
-                multiply_4x4(*analog_balance, base_profile.calibration),
-                base_profile.color_matrix,
-            );
-            let target_xyz_to_camera = multiply_4x4_4x3(
-                multiply_4x4(*analog_balance, target_profile.calibration),
-                target_profile.color_matrix,
-            );
-            let predicted_base = multiply_4x3_vector(base_xyz_to_camera, base_white);
-            let predicted_target = multiply_4x3_vector(target_xyz_to_camera, target_white);
-            let target_neutral = neutral_from_camera_ratio(
-                base_neutral,
-                predicted_base,
-                predicted_target,
-                model.cdesc,
-            )?;
-            let target_wb = target_neutral.map(|value| 1.0 / value.max(1e-8));
             let transform = dng_camera_to_working(
                 target_profile,
                 *analog_balance,
                 target_wb,
-                model.base_wb,
+                target_wb,
                 model.cdesc,
             )
             .ok()?;
-            Some((transform, target_weight))
+            let canonical = canonicalize_f32x4(target_wb, canonical_cfa_map(model.cdesc).ok()?);
+            Some((canonical, transform, target_weight))
         }
         CameraColorModel::Matrix { xyz_to_camera } => {
-            let predicted_base = multiply_4x3_vector(*xyz_to_camera, base_white);
-            let predicted_target = multiply_4x3_vector(*xyz_to_camera, target_white);
-            let target_neutral = neutral_from_camera_ratio(
-                base_neutral,
-                predicted_base,
-                predicted_target,
-                model.cdesc,
-            )?;
-            let target_wb = target_neutral.map(|value| 1.0 / value.max(1e-8));
-            let mut physical = camera_to_working_physical(*xyz_to_camera);
-            for column in 0..4 {
-                let relative_gain = target_wb[column] / model.base_wb[column].max(1e-8);
-                for row in &mut physical {
-                    row[column] *= relative_gain;
-                }
-            }
-            Some((fold_physical_camera_planes(physical, model.cdesc), 0.0))
+            let physical = camera_to_working_physical(*xyz_to_camera);
+            let canonical = canonicalize_f32x4(target_wb, canonical_cfa_map(model.cdesc).ok()?);
+            Some((
+                canonical,
+                fold_physical_camera_planes(physical, model.cdesc),
+                0.0,
+            ))
         }
     }
 }
 
-fn neutral_from_camera_ratio(
-    base: [f32; 4],
-    predicted_base: [f32; 4],
-    predicted_target: [f32; 4],
-    cdesc: [u8; 4],
+/// Fixed XYZ-to-camera matrix used by darktable's temperature/tint UI. DNG
+/// profile interpolation still follows the selected Kelvin value in the final
+/// render transform; it must not make the meaning of the controls themselves
+/// shift while the user drags them.
+fn white_balance_xyz_to_camera(model: &CameraWhiteBalanceModel) -> [[f32; 3]; 4] {
+    match &model.color {
+        CameraColorModel::Dng {
+            endpoints,
+            analog_balance,
+        } => {
+            let reference = interpolate_endpoints(endpoints, endpoint_weight(endpoints, 6504.0));
+            multiply_4x4_4x3(
+                multiply_4x4(*analog_balance, reference.calibration),
+                reference.color_matrix,
+            )
+        }
+        CameraColorModel::Matrix { xyz_to_camera } => *xyz_to_camera,
+    }
+}
+
+fn darktable_temperature_xyz(temperature: f32) -> Option<[f32; 3]> {
+    let t = temperature.clamp(1_901.0, 25_000.0);
+    let [x, y] = if t < 4_000.0 {
+        planckian_xy(t)?
+    } else {
+        // CIE D-series daylight locus. darktable synthesizes the equivalent
+        // daylight spectrum above 4000 K rather than continuing along the
+        // black-body locus, which is particularly visible beyond 8000 K.
+        let x = if t <= 7_000.0 {
+            -4.607e9 / t.powi(3) + 2.9678e6 / t.powi(2) + 0.09911e3 / t + 0.244_063
+        } else {
+            -2.0064e9 / t.powi(3) + 1.9018e6 / t.powi(2) + 0.24748e3 / t + 0.237_04
+        };
+        let y = -3.0 * x * x + 2.87 * x - 0.275;
+        [x, y]
+    };
+    (x.is_finite() && y.is_finite() && y > 1e-10).then_some([x / y, 1.0, (1.0 - x - y) / y])
+}
+
+fn darktable_temperature_tint_xyz(temperature: f32, tint: f32) -> Option<[f32; 3]> {
+    let mut xyz = darktable_temperature_xyz(temperature)?;
+    xyz[1] /= tint.clamp(0.135, 2.326);
+    Some(xyz)
+}
+
+pub(super) fn temperature_tint_to_coefficients(
+    model: &CameraWhiteBalanceModel,
+    temperature: f32,
+    tint: f32,
 ) -> Option<[f32; 4]> {
-    let mut out = [0.0; 4];
+    let camera = multiply_4x3_vector(
+        white_balance_xyz_to_camera(model),
+        darktable_temperature_tint_xyz(temperature, tint)?,
+    );
+    let mut coefficients = [1.0; 4];
     for index in 0..4 {
-        if logical_rgb_channel(cdesc, index).is_none() {
-            out[index] = base[index];
-            continue;
-        }
-        // Three-channel DNG matrices commonly leave the fourth physical
-        // row at zero even when LibRaw reports RGBG in cdesc. It is an
-        // inactive coordinate, not a failed WB calculation.
-        if predicted_base[index].abs() < 1e-8 && predicted_target[index].abs() < 1e-8 {
-            out[index] = base[index];
-            continue;
-        }
-        if predicted_base[index].abs() < 1e-8
-            || !predicted_base[index].is_finite()
-            || !predicted_target[index].is_finite()
-        {
-            return None;
-        }
-        out[index] = base[index] * predicted_target[index] / predicted_base[index];
-        if !out[index].is_finite() || out[index] <= 1e-8 {
+        if logical_rgb_channel(model.cdesc, index).is_none() {
+            coefficients[index] = model.base_wb[index];
+        } else if camera[index].is_finite() && camera[index] > 1e-8 {
+            coefficients[index] = 1.0 / camera[index];
+        } else if index == 3 && matches!(model.cdesc[index] as char, 'G' | 'g') {
+            coefficients[index] = coefficients[1];
+        } else {
             return None;
         }
     }
-    Some(out)
+    Some(white_balance(coefficients, model.cdesc))
+}
+
+pub(super) fn temperature_tint_from_coefficients(
+    model: &CameraWhiteBalanceModel,
+    coefficients: [f32; 4],
+) -> Option<(f32, f32)> {
+    let mut camera_neutral = [0.0; 4];
+    for index in 0..4 {
+        let coefficient = coefficients[index];
+        camera_neutral[index] = if coefficient.is_finite() && coefficient > 1e-8 {
+            1.0 / coefficient
+        } else {
+            0.0
+        };
+    }
+    let camera_to_xyz = pseudoinverse(white_balance_xyz_to_camera(model));
+    let xyz = multiply_3x4_vector(camera_to_xyz, camera_neutral);
+    if xyz[0].abs() <= 1e-10 || !xyz.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let target_ratio = xyz[2] / xyz[0];
+    let mut low = 1_901.0f32;
+    let mut high = 25_000.0f32;
+    while high - low > 0.25 {
+        let midpoint = 0.5 * (low + high);
+        let reference = darktable_temperature_xyz(midpoint)?;
+        if reference[2] / reference[0] > target_ratio {
+            high = midpoint;
+        } else {
+            low = midpoint;
+        }
+    }
+    let temperature = 0.5 * (low + high);
+    let reference = darktable_temperature_xyz(temperature)?;
+    let xyz_y_over_x = xyz[1] / xyz[0];
+    if xyz_y_over_x.abs() <= 1e-10 {
+        return None;
+    }
+    let tint = ((reference[1] / reference[0]) / xyz_y_over_x).clamp(0.135, 2.326);
+    Some((temperature, tint))
 }
 
 fn endpoint_weight(endpoints: &[DngColorEndpoint; 2], cct: f32) -> f32 {
@@ -2136,29 +2185,6 @@ fn interpolate_endpoints(endpoints: &[DngColorEndpoint; 2], weight: f32) -> Inte
     }
 }
 
-fn planckian_white_xyz(cct: f32, duv: f32) -> Option<[f32; 3]> {
-    let t = cct.clamp(1667.0, 25_000.0);
-    let [x, y] = planckian_xy(t)?;
-    let uv = xy_to_uv([x, y])?;
-    let low = locus_uv((t * 0.99).max(1667.0))?;
-    let high = locus_uv((t * 1.01).min(25_000.0))?;
-    let tangent = [high[0] - low[0], high[1] - low[1]];
-    let length = (tangent[0] * tangent[0] + tangent[1] * tangent[1]).sqrt();
-    if length <= 1e-10 {
-        return None;
-    }
-    let mut normal = [-tangent[1] / length, tangent[0] / length];
-    if normal[1] < 0.0 {
-        normal = [-normal[0], -normal[1]];
-    }
-    uv_to_xyz([uv[0] + normal[0] * duv, uv[1] + normal[1] * duv])
-}
-
-fn locus_uv(cct: f32) -> Option<[f32; 2]> {
-    let xyz = planckian_xy(cct)?;
-    xy_to_uv(xyz)
-}
-
 fn planckian_xy(cct: f32) -> Option<[f32; 2]> {
     let t = cct.clamp(1667.0, 25_000.0);
     let x = if t <= 4000.0 {
@@ -2174,21 +2200,6 @@ fn planckian_xy(cct: f32) -> Option<[f32; 2]> {
         3.081_758 * x.powi(3) - 5.873_387 * x.powi(2) + 3.751_129_9 * x - 0.370_014_8
     };
     (x.is_finite() && y.is_finite() && x > 0.0 && y > 0.0).then_some([x, y])
-}
-
-fn xy_to_uv(xy: [f32; 2]) -> Option<[f32; 2]> {
-    let denominator = -2.0 * xy[0] + 12.0 * xy[1] + 3.0;
-    (denominator.abs() > 1e-10).then_some([4.0 * xy[0] / denominator, 6.0 * xy[1] / denominator])
-}
-
-fn uv_to_xyz(uv: [f32; 2]) -> Option<[f32; 3]> {
-    let denominator = 2.0 * uv[0] - 8.0 * uv[1] + 4.0;
-    if denominator.abs() <= 1e-10 {
-        return None;
-    }
-    let x = 3.0 * uv[0] / denominator;
-    let y = 2.0 * uv[1] / denominator;
-    (x.is_finite() && y.is_finite() && y > 1e-10).then_some([x / y, 1.0, (1.0 - x - y) / y])
 }
 
 fn interpolated_parsed_dng_profile(
@@ -3097,13 +3108,13 @@ mod tests {
             },
         };
 
-        let (cooler, cooler_weight) = adjusted_camera_transform(&model, -20.0, 0.0).unwrap();
-        let (warmer, warmer_weight) = adjusted_camera_transform(&model, 20.0, 0.0).unwrap();
+        let (_, cooler, cooler_weight) = adjusted_camera_transform(&model, -20.0, 0.0).unwrap();
+        let (_, warmer, warmer_weight) = adjusted_camera_transform(&model, 20.0, 0.0).unwrap();
         assert!(warmer_weight > cooler_weight);
         assert!(warmer.iter().flatten().all(|value| value.is_finite()));
         assert_ne!(cooler, warmer);
 
-        let (tinted, _) = adjusted_camera_transform(&model, 20.0, 20.0).unwrap();
+        let (_, tinted, _) = adjusted_camera_transform(&model, 20.0, 20.0).unwrap();
         assert_ne!(warmer, tinted);
     }
 

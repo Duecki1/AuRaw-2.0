@@ -2180,6 +2180,31 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn apply_white_balance_area(&mut self, area: [[f32; 2]; 2]) -> bool {
+        let result = self.loaded_raw.as_ref().and_then(|raw| {
+            raw.white_balance_offsets_from_area(
+                area[0],
+                area[1],
+                self.exposure.black_point,
+            )
+        });
+        self.white_balance_picker_active = false;
+        self.white_balance_picker_drag = None;
+        let Some((temperature, tint)) = result else {
+            self.notice = Some(
+                "Could not estimate white balance there. Choose a brighter, unclipped neutral area."
+                    .to_owned(),
+            );
+            self.egui_ctx.request_repaint();
+            return false;
+        };
+        self.exposure.temperature = temperature;
+        self.exposure.tint = tint;
+        self.notice = Some("White balance sampled from the selected image area.".to_owned());
+        self.mark_pipeline_dirty();
+        true
+    }
+
     fn advance_zoomed_processing(&mut self, frame: &eframe::Frame) {
         let Some(stage) = self.preview_detail_pending_stage else {
             return;
@@ -3466,6 +3491,8 @@ impl AurawApp {
     pub(crate) fn reset_develop_adjustments(&mut self) {
         let previous = self.exposure;
         self.exposure = ExposureParams::scene_referred_default();
+        self.white_balance_picker_active = false;
+        self.white_balance_picker_drag = None;
 
         // Highlight reconstruction is an application-level processing preference,
         // not one of the Lightroom-style Develop adjustments.

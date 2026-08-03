@@ -1,7 +1,11 @@
-use super::basicadj::{ExposureParams, GLOBAL_TEMPERATURE_LIMIT};
+use super::basicadj::{
+    temperature_kelvin_from_offset, temperature_offset_from_kelvin, white_balance_tint_from_offset,
+    white_balance_tint_offset, ExposureParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT,
+};
 use super::color_profile::CameraProfile;
 use super::geometry::LensGeometryMap;
 use super::noise::NoiseProfile;
+use super::white_balance_presets::WhiteBalancePreset;
 #[cfg(not(libraw_available))]
 use anyhow::anyhow;
 use anyhow::{Context, Result};
@@ -800,10 +804,170 @@ impl LoadedRaw {
     /// Estimated as-shot scene illuminant temperature used as the neutral point
     /// for the user-facing Kelvin control.
     pub fn as_shot_temperature_kelvin(&self) -> Option<f32> {
-        self.white_balance_model
-            .as_ref()
-            .map(|model| model.base_cct)
-            .filter(|temperature| temperature.is_finite() && *temperature > 0.0)
+        self.as_shot_white_balance().map(|value| value.0)
+    }
+
+    /// darktable-compatible absolute temperature and tint values derived from
+    /// the actual as-shot camera multipliers. Tint deliberately does not start
+    /// at zero: it reflects the camera matrix and capture metadata.
+    pub fn as_shot_white_balance(&self) -> Option<(f32, f32)> {
+        #[cfg(libraw_available)]
+        {
+            let model = self.white_balance_model.as_ref()?;
+            libraw_loader::temperature_tint_from_coefficients(model, model.base_wb)
+                .or(Some((model.base_cct, 1.0)))
+        }
+        #[cfg(not(libraw_available))]
+        {
+            None
+        }
+    }
+
+    pub fn white_balance_temperature_tint(
+        &self,
+        temperature_offset: f32,
+        tint_offset: f32,
+    ) -> Option<(f32, f32)> {
+        let (base_temperature, base_tint) = self.as_shot_white_balance()?;
+        Some((
+            temperature_kelvin_from_offset(base_temperature, temperature_offset),
+            white_balance_tint_from_offset(base_tint, tint_offset),
+        ))
+    }
+
+    pub fn white_balance_offsets_from_temperature_tint(
+        &self,
+        temperature: f32,
+        tint: f32,
+    ) -> Option<(f32, f32)> {
+        let (base_temperature, base_tint) = self.as_shot_white_balance()?;
+        Some((
+            temperature_offset_from_kelvin(base_temperature, temperature),
+            white_balance_tint_offset(base_tint, tint),
+        ))
+    }
+
+    pub fn camera_white_balance_presets(&self) -> Vec<WhiteBalancePreset> {
+        super::white_balance_presets::for_camera(&self.camera_make, &self.camera_model)
+    }
+
+    fn physical_white_balance_coefficients(&self, logical: [f32; 4]) -> Option<[f32; 4]> {
+        let model = self.white_balance_model.as_ref()?;
+        let mut physical = model.base_wb;
+        for (index, descriptor) in model.cdesc.iter().enumerate() {
+            physical[index] = match *descriptor as char {
+                'R' | 'r' => logical[0],
+                'G' | 'g' => logical[1],
+                'B' | 'b' => logical[2],
+                _ => model.base_wb[index],
+            };
+        }
+        Some(physical)
+    }
+
+    pub fn white_balance_offsets_from_coefficients(
+        &self,
+        logical_coefficients: [f32; 4],
+    ) -> Option<(f32, f32)> {
+        #[cfg(libraw_available)]
+        {
+            let model = self.white_balance_model.as_ref()?;
+            let physical = self.physical_white_balance_coefficients(logical_coefficients)?;
+            let (temperature, tint) =
+                libraw_loader::temperature_tint_from_coefficients(model, physical)?;
+            self.white_balance_offsets_from_temperature_tint(temperature, tint)
+        }
+        #[cfg(not(libraw_available))]
+        {
+            let _ = logical_coefficients;
+            None
+        }
+    }
+
+    /// Samples an area of the sensor before white balance and returns relative
+    /// temperature/tint edits. Each CFA plane is black-level corrected before
+    /// averaging; reciprocal channel means then make the selected area neutral,
+    /// matching darktable's image-area picker.
+    pub fn white_balance_offsets_from_area(
+        &self,
+        first: [f32; 2],
+        second: [f32; 2],
+        black_point: f32,
+    ) -> Option<(f32, f32)> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        let mut min = [first[0].min(second[0]), first[1].min(second[1])];
+        let mut max = [first[0].max(second[0]), first[1].max(second[1])];
+        let minimum_u = (12.0 / self.width as f32).min(0.08);
+        let minimum_v = (12.0 / self.height as f32).min(0.08);
+        if max[0] - min[0] < minimum_u {
+            let center = 0.5 * (min[0] + max[0]);
+            min[0] = center - 0.5 * minimum_u;
+            max[0] = center + 0.5 * minimum_u;
+        }
+        if max[1] - min[1] < minimum_v {
+            let center = 0.5 * (min[1] + max[1]);
+            min[1] = center - 0.5 * minimum_v;
+            max[1] = center + 0.5 * minimum_v;
+        }
+        min = min.map(|value| value.clamp(0.0, 1.0));
+        max = max.map(|value| value.clamp(0.0, 1.0));
+        let x0 = (min[0] * self.width as f32).floor() as u32;
+        let y0 = (min[1] * self.height as f32).floor() as u32;
+        let x1 = ((max[0] * self.width as f32).ceil() as u32)
+            .max(x0 + 1)
+            .min(self.width);
+        let y1 = ((max[1] * self.height as f32).ceil() as u32)
+            .max(y0 + 1)
+            .min(self.height);
+
+        // Keep a full-frame picker bounded on very large RAWs. An odd stride
+        // that is not divisible by three walks every Bayer and X-Trans phase
+        // instead of repeatedly landing on one CFA colour.
+        const MAX_PICKER_SAMPLES: f64 = 262_144.0;
+        let area_pixels = f64::from(x1 - x0) * f64::from(y1 - y0);
+        let mut stride = (area_pixels / MAX_PICKER_SAMPLES).sqrt().ceil().max(1.0) as usize;
+        while stride % 2 == 0 || stride % 3 == 0 {
+            stride += 1;
+        }
+
+        let mut sums = [0.0f64; 4];
+        let mut counts = [0u64; 4];
+        for y in (y0..y1).step_by(stride) {
+            for x in (x0..x1).step_by(stride) {
+                let index = y as usize * self.width as usize + x as usize;
+                let channel = usize::from(self.color_indices[index].min(3));
+                let metadata_black = self.black_levels_per_pixel[index];
+                let white = self.white_levels[channel].max(metadata_black + 1.0);
+                let sensor_range = (white - metadata_black).max(1.0);
+                let calibrated_black = (metadata_black
+                    + black_point.clamp(-0.25, 0.25) * sensor_range)
+                    .clamp(0.0, white - 1.0);
+                let value = (f32::from(self.raw_pixels[index]) - calibrated_black)
+                    / (white - calibrated_black);
+                // Ignore nearly black and clipped samples; neither contains
+                // reliable chromatic information for a neutral estimate.
+                if value.is_finite() && (0.001..0.98).contains(&value) {
+                    sums[channel] += f64::from(value);
+                    counts[channel] += 1;
+                }
+            }
+        }
+        let mean = |channel: usize| {
+            (counts[channel] > 0).then(|| (sums[channel] / counts[channel] as f64) as f32)
+        };
+        let red = mean(0)?;
+        let blue = mean(2)?;
+        let greens = [mean(1), mean(3)].into_iter().flatten().collect::<Vec<_>>();
+        if greens.is_empty() {
+            return None;
+        }
+        let green = greens.iter().sum::<f32>() / greens.len() as f32;
+        if red <= 1e-6 || green <= 1e-6 || blue <= 1e-6 {
+            return None;
+        }
+        self.white_balance_offsets_from_coefficients([green / red, 1.0, green / blue, 1.0])
     }
 
     /// RawNIND's published Bayer weights were trained with a D65/daylight
@@ -843,27 +1007,35 @@ impl LoadedRaw {
 
     /// Returns the camera-to-working transform and DCP blend for a relative
     /// global white-balance edit. Temperature is expressed as a reciprocal-
-    /// temperature (mired) displacement; tint is a Planckian-locus-normal Duv
-    /// displacement. Both are converted through the selected camera matrices.
-    pub(crate) fn adjusted_camera_transform(
+    /// temperature (mired) displacement and tint as a relative encoding of
+    /// darktable's absolute tint ratio. Both become camera-channel coefficients.
+    pub(crate) fn adjusted_white_balance_and_camera_transform(
         &self,
         temperature: f32,
         tint: f32,
-    ) -> ([[f32; 4]; 3], f32) {
+    ) -> ([f32; 4], [[f32; 4]; 3], f32) {
         if temperature.abs() < 1e-6 && tint.abs() < 1e-6 {
-            return (self.cam_to_srgb, self.camera_profile.interpolation_weight);
+            return (
+                self.wb_coeffs,
+                self.cam_to_srgb,
+                self.camera_profile.interpolation_weight,
+            );
         }
         #[cfg(libraw_available)]
         if let Some(model) = &self.white_balance_model {
             if let Some(adjusted) = libraw_loader::adjusted_camera_transform(
                 model,
                 temperature.clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
-                tint.clamp(-100.0, 100.0),
+                tint.clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
             ) {
                 return adjusted;
             }
         }
-        (self.cam_to_srgb, self.camera_profile.interpolation_weight)
+        (
+            self.wb_coeffs,
+            self.cam_to_srgb,
+            self.camera_profile.interpolation_weight,
+        )
     }
 }
 
@@ -996,8 +1168,8 @@ mod libraw_loader;
 #[cfg(all(test, libraw_available))]
 mod tests {
     use super::{
-        CameraColorModel, CameraProfile, CameraProfileMode, CameraWhiteBalanceModel, CfaKind,
-        CompactPixelMap, LoadedRaw, GLOBAL_TEMPERATURE_LIMIT,
+        temperature_offset_from_kelvin, CameraColorModel, CameraProfile, CameraProfileMode,
+        CameraWhiteBalanceModel, CfaKind, CompactPixelMap, LoadedRaw, GLOBAL_TEMPERATURE_LIMIT,
     };
 
     #[test]
@@ -1057,22 +1229,78 @@ mod tests {
     #[test]
     fn extended_temperature_range_reaches_beyond_the_old_hundred_mired_clamp() {
         let raw = raw_with_white_balance_model();
-        let positive_hundred = raw.adjusted_camera_transform(100.0, 0.0).0;
-        let positive_limit = raw
-            .adjusted_camera_transform(GLOBAL_TEMPERATURE_LIMIT, 0.0)
-            .0;
-        let negative_hundred = raw.adjusted_camera_transform(-100.0, 0.0).0;
-        let negative_limit = raw
-            .adjusted_camera_transform(-GLOBAL_TEMPERATURE_LIMIT, 0.0)
-            .0;
+        let base = raw.as_shot_temperature_kelvin().unwrap();
+        let at_8000 = temperature_offset_from_kelvin(base, 8_000.0);
+        let at_25000 = temperature_offset_from_kelvin(base, 25_000.0);
+        let at_3200 = temperature_offset_from_kelvin(base, 3_200.0);
+        let at_1901 = temperature_offset_from_kelvin(base, 1_901.0);
 
-        assert_ne!(positive_hundred, positive_limit);
-        assert_ne!(negative_hundred, negative_limit);
+        assert_ne!(
+            raw.adjusted_white_balance_and_camera_transform(at_8000, 0.0)
+                .0,
+            raw.adjusted_white_balance_and_camera_transform(at_25000, 0.0)
+                .0,
+        );
+        assert_ne!(
+            raw.adjusted_white_balance_and_camera_transform(at_3200, 0.0)
+                .0,
+            raw.adjusted_white_balance_and_camera_transform(at_1901, 0.0)
+                .0,
+        );
         assert_eq!(
-            positive_limit,
-            raw.adjusted_camera_transform(GLOBAL_TEMPERATURE_LIMIT + 50.0, 0.0)
+            raw.adjusted_white_balance_and_camera_transform(at_25000, 0.0)
+                .0,
+            raw.adjusted_white_balance_and_camera_transform(GLOBAL_TEMPERATURE_LIMIT + 50.0, 0.0,)
                 .0
         );
+    }
+
+    #[test]
+    fn image_area_picker_recovers_camera_coefficients_from_raw_cfa_samples() {
+        const WIDTH: u32 = 24;
+        const HEIGHT: u32 = 24;
+        const WHITE: f32 = 10_000.0;
+        let mut raw = raw_with_white_balance_model();
+        let desired_offsets = raw
+            .white_balance_offsets_from_temperature_tint(6_000.0, 1.0)
+            .unwrap();
+        let desired = raw
+            .adjusted_white_balance_and_camera_transform(desired_offsets.0, desired_offsets.1)
+            .0;
+
+        raw.width = WIDTH;
+        raw.height = HEIGHT;
+        raw.white_levels = [WHITE; 4];
+        raw.black_levels_per_pixel = CompactPixelMap::repeating(WIDTH, HEIGHT, 1, 1, vec![0.0]);
+        let mut colors = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        let mut pixels = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let channel = match (x % 2, y % 2) {
+                    (0, 0) => 0,
+                    (1, 0) => 1,
+                    (0, 1) => 3,
+                    _ => 2,
+                };
+                colors.push(channel);
+                pixels.push(((0.35 / desired[channel as usize]) * WHITE).round() as u16);
+            }
+        }
+        raw.color_indices = CompactPixelMap::dense(WIDTH, HEIGHT, colors);
+        raw.raw_pixels = pixels;
+
+        let sampled_offsets = raw
+            .white_balance_offsets_from_area([0.1, 0.1], [0.9, 0.9], 0.0)
+            .unwrap();
+        let sampled = raw
+            .adjusted_white_balance_and_camera_transform(sampled_offsets.0, sampled_offsets.1)
+            .0;
+        for channel in [0, 1, 2] {
+            assert!(
+                (sampled[channel] - desired[channel]).abs() < 0.015,
+                "sampled={sampled:?}, desired={desired:?}"
+            );
+        }
     }
 
     #[test]

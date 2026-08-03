@@ -217,7 +217,8 @@ def test_global_white_balance_rebuilds_camera_and_dcp_transforms() -> None:
     gpu = read_source_tree(ROOT / "src/pipeline/gpu.rs")
     profile = (ROOT / "src/shaders/profile.wgsl").read_text(encoding="utf-8")
     assert "apply_camera_temperature_tint" not in basic
-    assert "raw.adjusted_camera_transform(" in gpu
+    assert "adjusted_white_balance_and_camera_transform(" in gpu
+    assert "wb: white_balance" in gpu
     assert "profile_layout.flags[3] = profile_weight" in gpu
     assert "bitcast<f32>(params.profile_flags.w)" in profile
     matrix = adjustments.index("cam_to_working(camera_rgb)")

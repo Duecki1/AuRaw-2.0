@@ -118,10 +118,20 @@ impl Preview {
         if interaction_rect.width() <= 0.0 || interaction_rect.height() <= 0.0 {
             interaction_rect = outer_rect;
         }
-        let brush_canvas = matches!(app.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting);
+        let white_balance_canvas = app.sidebar_tab == SidebarTab::Adjustments
+            && app.adjustment_section == crate::app::AdjustmentSection::Color
+            && app.white_balance_picker_active;
+        if !white_balance_canvas {
+            app.white_balance_picker_drag = None;
+        }
+        let brush_canvas = matches!(app.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting)
+            || white_balance_canvas;
         let interaction_id = match app.sidebar_tab {
             SidebarTab::Masks => ui.id().with("develop-preview-mask-interaction"),
             SidebarTab::Inpainting => ui.id().with("develop-preview-inpaint-interaction"),
+            SidebarTab::Adjustments if white_balance_canvas => {
+                ui.id().with("develop-preview-white-balance-interaction")
+            }
             _ => ui.id().with("develop-preview-interaction"),
         };
         let interaction_sense = if brush_canvas {
@@ -187,6 +197,8 @@ impl Preview {
                 app.last_inpaint_brush_point = None;
                 app.inpaint_stroke_texture = None;
                 app.inpaint_stroke_texture_key = None;
+            } else if white_balance_canvas {
+                app.white_balance_picker_drag = None;
             }
         }
 
@@ -234,7 +246,7 @@ impl Preview {
             moved |= delta.length_sq() > 0.0;
         }
 
-        let fit_gesture = !touch_navigation && response.double_clicked();
+        let fit_gesture = !white_balance_canvas && !touch_navigation && response.double_clicked();
         if fit_gesture {
             app.preview_zoom = 1.0;
             app.preview_center = [0.5, 0.5];
@@ -455,6 +467,28 @@ impl Preview {
                 source_dimensions.1,
             );
 
+            if white_balance_canvas {
+                if !touch_navigation {
+                    Self::handle_white_balance_picker(
+                        ui,
+                        app,
+                        image_rect,
+                        visible_screen,
+                        source_dimensions.0,
+                        source_dimensions.1,
+                        &response,
+                    );
+                }
+                Self::paint_white_balance_picker(
+                    ui,
+                    app,
+                    image_rect,
+                    visible_screen,
+                    source_dimensions.0,
+                    source_dimensions.1,
+                );
+            }
+
             if app.sidebar_tab == SidebarTab::Masks {
                 if !touch_navigation && !fit_gesture {
                     Self::handle_mask_interaction(
@@ -481,6 +515,114 @@ impl Preview {
                 );
                 Self::paint_tool_hint(ui, app, visible_screen);
             }
+        }
+    }
+
+    fn handle_white_balance_picker(
+        ui: &Ui,
+        app: &mut AurawApp,
+        image_rect: Rect,
+        preview_rect: Rect,
+        source_width: u32,
+        source_height: u32,
+        response: &egui::Response,
+    ) {
+        let lens_geometry = app
+            .loaded_raw
+            .as_ref()
+            .and_then(|raw| raw.lens_geometry.clone());
+        let pointer = response
+            .interact_pointer_pos()
+            .filter(|position| preview_rect.contains(*position));
+        let (pressed, down, released) = ui.input(|input| {
+            (
+                input.pointer.primary_pressed(),
+                input.pointer.primary_down(),
+                input.pointer.primary_released(),
+            )
+        });
+        let pointer_uv = pointer.and_then(|position| {
+            editable_source_uv(final_geometry_screen_to_native_source(
+                image_rect,
+                app.geometry,
+                lens_geometry.as_deref(),
+                source_width,
+                source_height,
+                position,
+            ))
+        });
+
+        if pressed {
+            if let Some(uv) = pointer_uv {
+                app.white_balance_picker_drag = Some([uv, uv]);
+            }
+        } else if down {
+            if let (Some(area), Some(uv)) = (app.white_balance_picker_drag.as_mut(), pointer_uv) {
+                area[1] = uv;
+                ui.ctx().request_repaint();
+            }
+        }
+
+        if released {
+            if let Some(mut area) = app.white_balance_picker_drag.take() {
+                if let Some(uv) = pointer_uv {
+                    area[1] = uv;
+                }
+                app.apply_white_balance_area(area);
+            }
+        }
+    }
+
+    fn paint_white_balance_picker(
+        ui: &Ui,
+        app: &AurawApp,
+        image_rect: Rect,
+        preview_rect: Rect,
+        source_width: u32,
+        source_height: u32,
+    ) {
+        let painter = ui.painter_at(preview_rect);
+        painter.text(
+            preview_rect.left_top() + egui::vec2(12.0, 12.0),
+            egui::Align2::LEFT_TOP,
+            "Drag over a neutral gray or white area",
+            egui::FontId::proportional(13.0),
+            Color32::WHITE,
+        );
+        let Some(area) = app.white_balance_picker_drag else {
+            return;
+        };
+        let lens_geometry = app
+            .loaded_raw
+            .as_ref()
+            .and_then(|raw| raw.lens_geometry.as_deref());
+        let start = final_geometry_native_source_to_screen(
+            image_rect,
+            app.geometry,
+            lens_geometry,
+            source_width,
+            source_height,
+            area[0],
+        );
+        let current = final_geometry_native_source_to_screen(
+            image_rect,
+            app.geometry,
+            lens_geometry,
+            source_width,
+            source_height,
+            area[1],
+        );
+        let rect = Rect::from_two_pos(start, current).intersect(preview_rect);
+        if rect.width() > 0.0 && rect.height() > 0.0 {
+            painter.rect_filled(rect, 0.0, Color32::from_white_alpha(24));
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.5, Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        } else {
+            painter.circle_stroke(start, 6.0, Stroke::new(1.5, Color32::WHITE));
         }
     }
 

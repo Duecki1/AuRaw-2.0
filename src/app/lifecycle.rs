@@ -389,6 +389,8 @@ impl AurawApp {
             crop_drag: None,
             straighten_tool_active: false,
             straighten_drag: None,
+            white_balance_picker_active: false,
+            white_balance_picker_drag: None,
             geometry_revision: 0,
             adjustment_section: AdjustmentSection::default(),
             mask_section: MaskSection::default(),
@@ -660,6 +662,8 @@ impl AurawApp {
             crop_drag: None,
             straighten_tool_active: false,
             straighten_drag: None,
+            white_balance_picker_active: false,
+            white_balance_picker_drag: None,
             geometry_revision: 0,
             adjustment_section: AdjustmentSection::default(),
             mask_section: MaskSection::default(),
@@ -1856,6 +1860,8 @@ impl AurawApp {
         self.original_raw = None;
         self.loaded_raw = None;
         self.preview_raw = None;
+        self.white_balance_picker_active = false;
+        self.white_balance_picker_drag = None;
         self.current_path = None;
         self.current_label = None;
         self.selected_camera_profile = None;

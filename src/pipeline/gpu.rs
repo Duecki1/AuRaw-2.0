@@ -5,7 +5,7 @@ use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
     PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, CURRENT_PROCESS_VERSION,
-    GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
+    GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -697,6 +697,23 @@ fn rows4_from_matrix3(matrix: [[f32; 3]; 3]) -> [[f32; 4]; 3] {
     matrix.map(|row| [row[0], row[1], row[2], 0.0])
 }
 
+fn camera_transform_with_white_balance(
+    mut transform: [[f32; 4]; 3],
+    white_balance: [f32; 4],
+) -> [[f32; 4]; 3] {
+    let logical = [
+        white_balance[0],
+        0.5 * (white_balance[1] + white_balance[3]),
+        white_balance[2],
+    ];
+    for row in &mut transform {
+        for column in 0..3 {
+            row[column] *= logical[column];
+        }
+    }
+    transform
+}
+
 fn inpaint_neutral_to_current_transform(
     neutral: [[f32; 4]; 3],
     current: [[f32; 4]; 3],
@@ -759,14 +776,19 @@ impl GpuParams {
         full_width: u32,
         full_height: u32,
     ) -> Self {
-        let (camera_transform, profile_weight) = raw.adjusted_camera_transform(
-            exposure
-                .temperature
-                .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
-            exposure.tint.clamp(-100.0, 100.0),
+        let (white_balance, camera_transform, profile_weight) = raw
+            .adjusted_white_balance_and_camera_transform(
+                exposure
+                    .temperature
+                    .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
+                exposure
+                    .tint
+                    .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
+            );
+        let inpaint_wb_transform = inpaint_neutral_to_current_transform(
+            camera_transform_with_white_balance(raw.cam_to_srgb, raw.wb_coeffs),
+            camera_transform_with_white_balance(camera_transform, white_balance),
         );
-        let inpaint_wb_transform =
-            inpaint_neutral_to_current_transform(raw.cam_to_srgb, camera_transform);
         let mut profile_layout = raw.camera_profile.gpu_layout();
         profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
         let profile_stages = profile_layout.stages();
@@ -889,7 +911,9 @@ impl GpuParams {
             demosaic_mode: exposure.demosaic_mode.shader_value(),
             dual_threshold: exposure.dual_threshold.clamp(0.0, 100.0),
             frequency_chroma: exposure.frequency_chroma.clamp(0.0, 1.0),
-            tint: exposure.tint.clamp(-100.0, 100.0),
+            tint: exposure
+                .tint
+                .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
             basic_tone: [
                 exposure.highlights,
                 exposure.shadows,
@@ -935,13 +959,13 @@ impl GpuParams {
             ],
             noise_shot: canonicalize_green_noise(
                 std::array::from_fn(|channel| {
-                    raw.noise_profile.shot[channel] * raw.wb_coeffs[channel].max(0.0)
+                    raw.noise_profile.shot[channel] * white_balance[channel].max(0.0)
                 }),
                 raw.noise_profile.green2_present,
             ),
             noise_read: canonicalize_green_noise(
                 std::array::from_fn(|channel| {
-                    let wb = raw.wb_coeffs[channel].max(0.0);
+                    let wb = white_balance[channel].max(0.0);
                     raw.noise_profile.read[channel] * wb * wb
                 }),
                 raw.noise_profile.green2_present,
@@ -1094,7 +1118,7 @@ impl GpuParams {
             hsl_saturation_1,
             hsl_luminance_0,
             hsl_luminance_1,
-            wb: raw.wb_coeffs,
+            wb: white_balance,
             cam_to_srgb_0: camera_transform[0],
             cam_to_srgb_1: camera_transform[1],
             cam_to_srgb_2: camera_transform[2],
