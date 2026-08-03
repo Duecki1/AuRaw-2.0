@@ -144,8 +144,8 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
         assert rust_mapping in GPU, ui_field
         assert shader_use in ALL_SHADERS, ui_field
 
-    # Global WB is camera/profile metadata-driven on the CPU; its result reaches
-    # shaders through the live camera matrix and DCP interpolation weight.
+    # Global WB is camera/profile metadata-driven on the CPU. The live RAW
+    # multipliers change while the calibrated camera matrix stays fixed.
     compact_gpu = re.sub(r"\s+", "", GPU)
     assert "temperature_offset_from_kelvin" in SIDEBAR
     assert "exposure.temperature=" in re.sub(r"\s+", "", SIDEBAR)
