@@ -56,9 +56,9 @@ fn shared_highlight_clip() -> f32 {
 fn is_raw_clipped(pos: vec2<i32>) -> bool {
     let p = clamp_pos(pos);
     if params.highlight_options.x >= 1.5 {
-        // Guided reconstruction keeps a per-sensor-plane clipping mask before
-        // white balance.
-        return raw_sensor_at(p) >= 0.995 * max(params.highlight_clip, 0.01);
+        // darktable's inpaint-opposed method uses a 0.987 guard against each
+        // physical sensor plane's white point.
+        return raw_sensor_at(p) >= 0.987 * max(params.highlight_clip, 0.01);
     }
     return raw_camera_at(p) >= shared_highlight_clip();
 }

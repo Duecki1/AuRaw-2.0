@@ -6,6 +6,7 @@ use super::noise::NoiseProfile;
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ops::Index;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -517,9 +518,219 @@ pub struct LoadedRaw {
     /// Runtime-only derived output. Interior mutability lets a background
     /// worker publish it without cloning the much larger decoded RAW buffers.
     pub(crate) ai_denoised: Arc<RwLock<Option<AiDenoisedImage>>>,
+    /// Full-frame chrominance offsets used by darktable-compatible inpaint
+    /// opposed reconstruction, keyed by black point, clip threshold, and
+    /// whether the derived Bayer CFA is active. Export tiles share this cache
+    /// with their source so every tile uses one full-image measurement.
+    pub(crate) opposed_chroma_cache: OpposedChromaCache,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct OpposedChromaCacheKey {
+    black_point_bits: u32,
+    clip_threshold_bits: u32,
+    use_ai_cfa: bool,
+}
+
+pub(crate) type OpposedChromaCache = Arc<RwLock<HashMap<OpposedChromaCacheKey, [f32; 3]>>>;
+
 impl LoadedRaw {
+    fn opposed_sensor_value(&self, index: usize, black_point: f32, pixels: &[u16]) -> f32 {
+        let channel = usize::from(self.color_indices[index].min(3));
+        let raw = f32::from(pixels[index]);
+        let metadata_black = self.black_levels_per_pixel[index];
+        let white = self.white_levels[channel].max(metadata_black + 1.0);
+        let sensor_range = (white - metadata_black).max(1.0);
+        let black_offset = black_point.clamp(-0.25, 0.25) * sensor_range;
+        let calibrated_black = (metadata_black + black_offset).clamp(0.0, white - 1.0);
+        ((raw - calibrated_black) / (white - calibrated_black)).clamp(0.0, 4.0)
+    }
+
+    fn opposed_logical_color(&self, index: usize) -> usize {
+        match self.color_indices[index].min(3) {
+            0 => 0,
+            2 => 2,
+            _ => 1,
+        }
+    }
+
+    fn opposed_refavg(&self, row: usize, col: usize, black_point: f32, pixels: &[u16]) -> f32 {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let center = row * width + col;
+        let center_color = self.opposed_logical_color(center);
+        let mut means = [0.0f32; 3];
+        let mut counts = [0u32; 3];
+
+        // These bounds intentionally follow darktable's implementation,
+        // including its last-row/last-column exclusion at the sensor edge.
+        let row_end = (row + 2).min(height.saturating_sub(1));
+        let col_end = (col + 2).min(width.saturating_sub(1));
+        for sample_row in row.saturating_sub(1)..row_end {
+            for sample_col in col.saturating_sub(1)..col_end {
+                let index = sample_row * width + sample_col;
+                let physical = usize::from(self.color_indices[index].min(3));
+                let color = self.opposed_logical_color(index);
+                let value = self.opposed_sensor_value(index, black_point, pixels)
+                    * self.wb_coeffs[physical];
+                means[color] += value.max(0.0);
+                counts[color] += 1;
+            }
+        }
+        for color in 0..3 {
+            means[color] = if counts[color] == 0 {
+                0.0
+            } else {
+                (means[color] / counts[color] as f32).cbrt()
+            };
+        }
+        let opposed_root = match center_color {
+            0 => 0.5 * (means[1] + means[2]),
+            1 => 0.5 * (means[0] + means[2]),
+            _ => 0.5 * (means[0] + means[1]),
+        };
+        opposed_root * opposed_root * opposed_root
+    }
+
+    fn calculate_opposed_chroma(
+        &self,
+        black_point: f32,
+        clip_threshold: f32,
+        pixels: &[u16],
+    ) -> [f32; 3] {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        if width == 0 || height == 0 || pixels.len() != width.saturating_mul(height) {
+            return [0.0; 3];
+        }
+
+        // Match darktable's mask storage exactly: the logical dimensions use
+        // integer division by three, while each channel plane is padded to an
+        // eight-element boundary. Partial sensor-edge superpixels consequently
+        // address the zero-filled padding in the same way as opposed.c.
+        let mask_width = width / 3;
+        let mask_height = height / 3;
+        if mask_width == 0 || mask_height == 0 {
+            return [0.0; 3];
+        }
+        let aligned_mask_width = mask_width.div_ceil(8) * 8;
+        let aligned_mask_height = mask_height.div_ceil(8) * 8;
+        let mask_size = aligned_mask_width.saturating_mul(aligned_mask_height);
+        let mut clipped_mask = vec![false; 3 * mask_size];
+        let clip = 0.987 * clip_threshold.max(0.01);
+
+        // darktable leaves the last complete superpixel row and column clear.
+        for mask_row in 0..mask_height.saturating_sub(1) {
+            for mask_col in 0..mask_width.saturating_sub(1) {
+                let mask_index = mask_row * mask_width + mask_col;
+                for offset_y in 0..3 {
+                    let row = mask_row * 3 + offset_y;
+                    for offset_x in 0..3 {
+                        let col = mask_col * 3 + offset_x;
+                        let index = row * width + col;
+                        let physical = usize::from(self.color_indices[index].min(3));
+                        let color = self.opposed_logical_color(index);
+                        let value = self.opposed_sensor_value(index, black_point, pixels)
+                            * self.wb_coeffs[physical];
+                        let channel_clip = clip * self.wb_coeffs[physical];
+                        clipped_mask[color * mask_size + mask_index] |= value >= channel_clip;
+                    }
+                }
+            }
+        }
+
+        let mut nearby_mask = vec![false; 3 * mask_size];
+        for row in 0..mask_height {
+            for col in 0..mask_width {
+                let index = row * mask_width + col;
+                for color in 0..3 {
+                    let plane = color * mask_size;
+                    let safe = col >= 3
+                        && row >= 3
+                        && col < mask_width.saturating_sub(4)
+                        && row < mask_height.saturating_sub(4);
+                    let nearby = if safe {
+                        let mut dilated = false;
+                        'neighbours: for offset_y in -3isize..=3 {
+                            for offset_x in -3isize..=3 {
+                                if offset_x.abs() == 3 && offset_y.abs() == 3 {
+                                    continue;
+                                }
+                                let sample = (row as isize + offset_y) as usize * mask_width
+                                    + (col as isize + offset_x) as usize;
+                                if clipped_mask[plane + sample] {
+                                    dilated = true;
+                                    break 'neighbours;
+                                }
+                            }
+                        }
+                        dilated
+                    } else {
+                        clipped_mask[plane + index]
+                    };
+                    nearby_mask[plane + index] = nearby;
+                }
+            }
+        }
+
+        let mut sums = [0.0f32; 3];
+        let mut counts = [0.0f32; 3];
+        for row in 0..height {
+            for col in 0..width {
+                let index = row * width + col;
+                let physical = usize::from(self.color_indices[index].min(3));
+                let color = self.opposed_logical_color(index);
+                let value = self.opposed_sensor_value(index, black_point, pixels)
+                    * self.wb_coeffs[physical];
+                let channel_clip = clip * self.wb_coeffs[physical];
+                let mask_index = (row / 3) * mask_width + col / 3;
+                if nearby_mask[color * mask_size + mask_index]
+                    && value > 0.2 * channel_clip
+                    && value < channel_clip
+                {
+                    sums[color] += value - self.opposed_refavg(row, col, black_point, pixels);
+                    counts[color] += 1.0;
+                }
+            }
+        }
+
+        std::array::from_fn(|color| {
+            if counts[color] > 100.0 {
+                sums[color] / counts[color]
+            } else {
+                0.0
+            }
+        })
+    }
+
+    pub(crate) fn inpaint_opposed_chroma(
+        &self,
+        black_point: f32,
+        clip_threshold: f32,
+        use_ai_cfa: bool,
+    ) -> [f32; 3] {
+        let key = OpposedChromaCacheKey {
+            black_point_bits: black_point.clamp(-0.25, 0.25).to_bits(),
+            clip_threshold_bits: clip_threshold.max(0.01).to_bits(),
+            use_ai_cfa,
+        };
+        if let Ok(cache) = self.opposed_chroma_cache.read() {
+            if let Some(chroma) = cache.get(&key) {
+                return *chroma;
+            }
+        }
+        let ai_image = use_ai_cfa.then(|| self.ai_denoised_image()).flatten();
+        let pixels = ai_image
+            .as_ref()
+            .and_then(AiDenoisedImage::bayer_cfa)
+            .unwrap_or(self.raw_pixels.as_slice());
+        let chroma = self.calculate_opposed_chroma(black_point, clip_threshold, pixels);
+        if let Ok(mut cache) = self.opposed_chroma_cache.write() {
+            cache.insert(key, chroma);
+        }
+        chroma
+    }
+
     pub(crate) fn ai_denoised_image(&self) -> Option<AiDenoisedImage> {
         self.ai_denoised
             .read()
@@ -546,12 +757,18 @@ impl LoadedRaw {
             .write()
             .map_err(|_| anyhow::anyhow!("AI-denoise cache lock was poisoned"))?;
         *cached = Some(image);
+        if let Ok(mut chroma) = self.opposed_chroma_cache.write() {
+            chroma.retain(|key, _| !key.use_ai_cfa);
+        }
         Ok(())
     }
 
     pub(crate) fn clear_ai_denoised_image(&self) {
         if let Ok(mut cached) = self.ai_denoised.write() {
             *cached = None;
+        }
+        if let Ok(mut chroma) = self.opposed_chroma_cache.write() {
+            chroma.retain(|key, _| !key.use_ai_cfa);
         }
     }
 
@@ -827,6 +1044,7 @@ mod tests {
             }),
             lens_geometry: None,
             ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         }
     }
 
@@ -849,5 +1067,48 @@ mod tests {
             raw.adjusted_camera_transform(GLOBAL_TEMPERATURE_LIMIT + 50.0, 0.0)
                 .0
         );
+    }
+
+    #[test]
+    fn inpaint_opposed_chrominance_uses_darktable_cube_root_reference() {
+        const WIDTH: u32 = 96;
+        const HEIGHT: u32 = 96;
+        const WHITE: f32 = 10_000.0;
+        let mut raw = raw_with_white_balance_model();
+        raw.width = WIDTH;
+        raw.height = HEIGHT;
+        raw.wb_coeffs = [1.0; 4];
+        raw.white_levels = [WHITE; 4];
+        raw.white_balance_model = None;
+
+        let mut colors = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        let mut pixels = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        for row in 0..HEIGHT {
+            for col in 0..WIDTH {
+                let physical = match (col % 2, row % 2) {
+                    (0, 0) => 0,
+                    (1, 0) => 1,
+                    (0, 1) => 3,
+                    _ => 2,
+                };
+                colors.push(physical);
+                let logical = if physical == 3 { 1 } else { physical };
+                let mut value = [0.8, 0.6, 0.4][logical as usize];
+                if logical == 0 && (42..54).contains(&col) && (42..54).contains(&row) {
+                    value = 1.0;
+                }
+                pixels.push((value * WHITE).round() as u16);
+            }
+        }
+        raw.raw_pixels = pixels;
+        raw.color_indices = CompactPixelMap::dense(WIDTH, HEIGHT, colors);
+        raw.black_levels_per_pixel = CompactPixelMap::repeating(WIDTH, HEIGHT, 1, 1, vec![0.0]);
+        raw.opposed_chroma_cache = Default::default();
+
+        let chroma = raw.inpaint_opposed_chroma(0.0, 1.0, false);
+        let opposed_root = 0.5 * (0.6f32.cbrt() + 0.4f32.cbrt());
+        let expected_red = 0.8 - opposed_root * opposed_root * opposed_root;
+        assert!((chroma[0] - expected_red).abs() < 0.005, "{chroma:?}");
+        assert!(chroma.iter().all(|value| value.is_finite()));
     }
 }

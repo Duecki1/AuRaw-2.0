@@ -21,10 +21,12 @@ const CONTRAST_SLOPE_CALIBRATION: f32 = 0.9939394;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum SigmoidColorProcessing {
-    PerChannel,
-    /// Default: map luminance while preserving RGB ratios until the output
-    /// gamut boundary, which keeps bright saturated colors more photographic.
+    /// darktable default: apply the sigmoid per channel, then restore hue
+    /// according to `hue_preservation`.
     #[default]
+    PerChannel,
+    /// Map luminance while preserving RGB ratios until the output gamut
+    /// boundary.
     RgbRatio,
 }
 
@@ -64,7 +66,7 @@ impl Default for SigmoidParams {
             skew: 0.0,
             display_white_target: 100.0,
             display_black_target: 0.0152,
-            color_processing: SigmoidColorProcessing::RgbRatio,
+            color_processing: SigmoidColorProcessing::PerChannel,
             hue_preservation: 100.0,
         }
     }
@@ -259,7 +261,24 @@ pub(crate) fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
 
 #[cfg(test)]
 mod tests {
-    use super::{coefficients, generalized_loglogistic_sigmoid, SigmoidParams, MIDDLE_GREY};
+    use super::{
+        coefficients, generalized_loglogistic_sigmoid, SigmoidColorProcessing, SigmoidParams,
+        MIDDLE_GREY,
+    };
+
+    #[test]
+    fn defaults_match_darktable_sigmoid_controls() {
+        let defaults = SigmoidParams::default();
+        assert_eq!(defaults.contrast, 1.5);
+        assert_eq!(defaults.skew, 0.0);
+        assert_eq!(defaults.display_white_target, 100.0);
+        assert_eq!(defaults.display_black_target, 0.0152);
+        assert_eq!(
+            defaults.color_processing,
+            SigmoidColorProcessing::PerChannel
+        );
+        assert_eq!(defaults.hue_preservation, 100.0);
+    }
 
     #[test]
     fn default_coefficients_match_darktable_5_6_c_reference() {

@@ -1,10 +1,11 @@
+use super::basicadj::sigmoid_contrast_from_percent;
 use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
-    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
-    CURRENT_PROCESS_VERSION, GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
+    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, CURRENT_PROCESS_VERSION,
+    GLOBAL_TEMPERATURE_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -98,27 +99,8 @@ fn explicit_render_graph_contracts_are_contiguous() -> bool {
 const SHADER_HIGHLIGHTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",
-    include_str!("../shaders/highlights.wgsl"),
-    "\n",
-    include_str!("../shaders/highlight_lch_pass.wgsl")
+    include_str!("../shaders/highlights.wgsl")
 );
-
-// Ordered coarse-to-fine multiscale reconstruction stages. The quality value
-// in highlight_options.y enables a subset inside the shader, while disabled
-// stages still copy their input so ping-pong parity remains deterministic.
-const HIGHLIGHT_GUIDED_ENTRY_POINTS: [&str; 11] = [
-    "highlight_guided_16_a",
-    "highlight_guided_8_a",
-    "highlight_guided_4_a",
-    "highlight_guided_2_a",
-    "highlight_guided_1_a",
-    "highlight_guided_4_b",
-    "highlight_guided_2_b",
-    "highlight_guided_1_b",
-    "highlight_guided_2_c",
-    "highlight_guided_1_c",
-    "highlight_guided_1_d",
-];
 
 const COLOR_DENOISE_ENTRY_POINTS: [&str; 6] = [
     "color_denoise_scale_1",
@@ -138,44 +120,14 @@ pub enum ProcessingQuality {
     High,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HighlightWorkSlot {
-    A,
-    B,
-}
-
-fn highlight_stage_slots(index: usize) -> (HighlightWorkSlot, HighlightWorkSlot) {
-    if index.is_multiple_of(2) {
-        (HighlightWorkSlot::A, HighlightWorkSlot::B)
-    } else {
-        (HighlightWorkSlot::B, HighlightWorkSlot::A)
-    }
-}
-
-fn highlight_final_read_slot(stage_count: usize) -> HighlightWorkSlot {
-    if stage_count.is_multiple_of(2) {
-        HighlightWorkSlot::A
-    } else {
-        HighlightWorkSlot::B
-    }
-}
-
 fn expected_pass_count(cfa_kind: CfaKind) -> usize {
     let demosaic_passes = match cfa_kind {
         CfaKind::Bayer => 6,
         CfaKind::XTrans => 10,
     };
-    // Highlight prepare + guided stages + two finalize variants, followed by
-    // demosaic, six colour-denoise scales, four tone-analysis passes, and
-    // thirteen adjustment/output passes (pre-tone base, global tone, local
-    // tone, presence/color, stabilization copy, Glow extraction + five
-    // diffusion stages, creative composite, and final render).
-    1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len()
-        + 2
-        + demosaic_passes
-        + COLOR_DENOISE_ENTRY_POINTS.len()
-        + 4
-        + 13
+    // One highlight reconstruction pass, demosaic, six colour-denoise scales,
+    // four tone-analysis passes, and thirteen adjustment/output passes.
+    1 + demosaic_passes + COLOR_DENOISE_ENTRY_POINTS.len() + 4 + 13
 }
 
 const SHADER_BAYER_RCD_P1: &str = concat!(
@@ -541,7 +493,7 @@ pub struct GpuParams {
     profile_tone: [u32; 4],
     output_lut: [u32; 4],
     profile_flags: [u32; 4],
-    // Processing version, view-selection flags, user Exposure f32 bits, and
+    // Processing version, view/RAW-selection flags, user Exposure f32 bits, and
     // render-graph contract flags. Formula changes are process-versioned so
     // existing edits can stay on their historical stage ordering.
     process_info: [u32; 4],
@@ -685,7 +637,7 @@ fn color_grade_hue_turns(hue_degrees: f32) -> f32 {
 fn shader_highlight_method(cfa_kind: CfaKind, method: HighlightReconstructionMethod) -> f32 {
     match (cfa_kind, method) {
         (CfaKind::XTrans, HighlightReconstructionMethod::Lch) => {
-            HighlightReconstructionMethod::Guided.shader_value()
+            HighlightReconstructionMethod::InpaintOpposed.shader_value()
         }
         (_, method) => method.shader_value(),
     }
@@ -822,14 +774,14 @@ impl GpuParams {
             profile_stages.characterization.hue_sat_2,
             profile_layout.hue_sat_2
         );
-        let sigmoid = sigmoid_coefficients(exposure.sigmoid);
-        // Select the view transform, not an upstream tone stage. At default
-        // rendering settings a DCP ProfileToneCurve participates in the single
-        // DCP-aware view node. A customized Sigmoid replaces that view path
-        // entirely, avoiding ProfileToneCurve -> Sigmoid double tone in process
-        // 13+. Legacy process versions interpret the same flag as before.
-        let use_profile_base_tone =
-            raw.camera_profile.tone_curve.is_some() && exposure.sigmoid == SigmoidParams::default();
+        let mut sigmoid_params = exposure.sigmoid;
+        sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);
+        let sigmoid = sigmoid_coefficients(sigmoid_params);
+        // Process 31 always uses sigmoid as the single view transform. If the
+        // default 1.5 value selected a DCP ProfileToneCurve instead, the first
+        // Contrast movement would switch view operators and visibly jump rather
+        // than continuously changing darktable's middle-grey slope.
+        let raw_selection_flags = u32::from(exposure.ai_denoise_enabled) << 1;
         let mut mask_meta = [[0u32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_0 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
         let mut mask_adjust_1 = [[0.0f32; 4]; MAX_LOCAL_MASKS];
@@ -901,6 +853,16 @@ impl GpuParams {
         let (hsl_hue_0, hsl_hue_1) = split_eight(exposure.hsl_hue);
         let (hsl_saturation_0, hsl_saturation_1) = split_eight(exposure.hsl_saturation);
         let (hsl_luminance_0, hsl_luminance_1) = split_eight(exposure.hsl_luminance);
+        let highlight_method = shader_highlight_method(raw.cfa_kind, exposure.highlight_method);
+        let opposed_chroma = if highlight_method >= 1.5 {
+            raw.inpaint_opposed_chroma(
+                exposure.black_point,
+                exposure.highlight_clip,
+                exposure.ai_denoise_enabled,
+            )
+        } else {
+            [0.0; 3]
+        };
 
         Self {
             black_point: exposure.black_point,
@@ -946,12 +908,7 @@ impl GpuParams {
                 sigmoid.hue_preservation,
                 sigmoid.color_processing,
             ],
-            presence: [
-                exposure.texture,
-                exposure.clarity,
-                exposure.dehaze,
-                exposure.contrast.clamp(-100.0, 100.0),
-            ],
+            presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
             creative_effects: [
                 exposure.glow_amount.clamp(0.0, 100.0),
                 exposure.glow_radius.clamp(0.0, 100.0),
@@ -971,14 +928,10 @@ impl GpuParams {
                 exposure.sharpen_masking.clamp(0.0, 100.0),
             ],
             highlight_options: [
-                shader_highlight_method(raw.cfa_kind, exposure.highlight_method),
-                exposure.highlight_iterations.clamp(1, 4) as f32,
-                exposure.highlight_color_adaptation.clamp(0.0, 1.0),
-                if exposure.ai_denoise_enabled {
-                    1.0
-                } else {
-                    0.0
-                },
+                highlight_method,
+                opposed_chroma[0],
+                opposed_chroma[1],
+                opposed_chroma[2],
             ],
             noise_shot: canonicalize_green_noise(
                 std::array::from_fn(|channel| {
@@ -1166,7 +1119,7 @@ impl GpuParams {
             profile_flags: profile_layout.flags,
             process_info: [
                 CURRENT_PROCESS_VERSION,
-                u32::from(use_profile_base_tone),
+                raw_selection_flags,
                 exposure.exposure.to_bits(),
                 render_graph_flags(),
             ],
@@ -1299,8 +1252,8 @@ impl GpuParams {
         self
     }
 
-    fn needs_guided_highlight_passes(&self) -> bool {
-        self.highlight_options[0] >= 1.5 && self.highlight_reconstruction > 1e-6
+    fn uses_ai_denoise(&self) -> bool {
+        (self.process_info[1] & 2) != 0
     }
 
     fn needs_dual_demosaic_passes(&self) -> bool {
@@ -1424,10 +1377,6 @@ pub struct RawGpuPipeline {
     tone_prepare_pass_index: usize,
     tone_reduce_pass_index: usize,
     tone_stage_end: usize,
-    highlight_guided_start: usize,
-    highlight_guided_end: usize,
-    highlight_finalize_guided_index: usize,
-    highlight_finalize_direct_index: usize,
     demosaic_start_index: usize,
     demosaic_dual_start_index: usize,
     demosaic_dual_end_index: usize,
@@ -1659,6 +1608,7 @@ impl RawGpuPipeline {
             white_balance_model: None,
             lens_geometry: None,
             ai_denoised: Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         };
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
@@ -1940,7 +1890,8 @@ impl RawGpuPipeline {
         // on-demand conversion/readback peaks and the 20% safety margin are also
         // reserved before construction begins.
         let ai_image = raw.ai_denoised_image();
-        let ai_cfa = (params.highlight_options[3] >= 0.5)
+        let ai_cfa = params
+            .uses_ai_denoise()
             .then(|| ai_image.as_ref().and_then(AiDenoisedImage::bayer_cfa))
             .flatten();
         let has_ai_cfa = ai_cfa.is_some();
@@ -1953,9 +1904,7 @@ impl RawGpuPipeline {
         let color_texture = create_color_texture(device, queue, raw);
         let black_texture = create_black_texture(device, queue, raw);
 
-        // This is the raw-CFA output of the Ansel LCh reconstruction pass. It
-        // is deliberately separate from the demosaic scratch textures so all
-        // downstream samples see the same recovered sensor data.
+        // All demosaic stages sample this canonical reconstructed CFA.
         let reconstructed_raw_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw reconstructed raw CFA"),
             size,
@@ -1967,8 +1916,8 @@ impl RawGpuPipeline {
             view_formats: &[wgpu::TextureFormat::R32Float],
         });
 
-        // Ping-pong storage for the guided highlight passes. Each dispatch reads
-        // one texture through binding 13 and writes the other through binding 14.
+        // Shared demosaic work surfaces. Bayer dual mode and X-Trans reuse
+        // these after highlight reconstruction has written the canonical CFA.
         let highlight_work_a = create_float_work_texture(
             device,
             size,
@@ -2152,7 +2101,7 @@ impl RawGpuPipeline {
             texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
         ];
 
-        let demosaic_start_for_programs = 1 + HIGHLIGHT_GUIDED_ENTRY_POINTS.len() + 2;
+        let demosaic_start_for_programs = 1;
         let demosaic_high_pass_count = match raw.cfa_kind {
             CfaKind::Bayer => 3,
             CfaKind::XTrans => 7,
@@ -2179,12 +2128,6 @@ impl RawGpuPipeline {
                     storage_texture_entry(
                         3,
                         wgpu::TextureFormat::R32Float,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                    texture_entry(13, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        14,
-                        highlight_work_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
                 ],
@@ -2611,47 +2554,32 @@ impl RawGpuPipeline {
         let bgl_adjust_render =
             reused_layout(adjustment_prepare_for_programs + 12).unwrap_or(bgl_adjust_render);
 
-        let make_highlight_bind_group =
-            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_highlights,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: params_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&raw_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(&color_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 19,
-                            resource: wgpu::BindingResource::TextureView(&black_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 13,
-                            resource: wgpu::BindingResource::TextureView(read_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 14,
-                            resource: wgpu::BindingResource::TextureView(write_view),
-                        },
-                    ],
-                })
-            };
-
-        // Bind groups for the guided stages are created below together with
-        // their pipelines. Every stage alternates A/B, and a disabled quality
-        // stage performs an identity copy in WGSL to preserve the parity.
+        let bg_highlights = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg highlight reconstruction"),
+            layout: &bgl_highlights,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
+                },
+            ],
+        });
 
         let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg1"),
@@ -3462,11 +3390,9 @@ impl RawGpuPipeline {
             ],
         });
 
-        // Storage texture declarations are format-specific in WGSL. Generate
-        // the full-float variants once when High quality is selected. This now
-        // covers highlight reconstruction as well as demosaic/scene buffers.
-        let highlight_shader = work_shader_source(SHADER_HIGHLIGHTS, highlight_work_format)
-            .context("specialize highlight shader work format")?;
+        // Storage texture declarations are format-specific in the demosaic and
+        // scene shaders. Highlight reconstruction writes its fixed R32F CFA.
+        let highlight_shader = Cow::Borrowed(SHADER_HIGHLIGHTS);
         let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format)
             .context("specialize Bayer RCD pass 1 work format")?;
         let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format)
@@ -3585,89 +3511,14 @@ impl RawGpuPipeline {
 
         let mut passes = Vec::with_capacity(expected_pass_count(raw.cfa_kind));
 
-        // Prepare writes the initial RGB estimate and reliability into A.
+        // Reconstruct clipped photosites before every demosaic path.
         passes.push(Pass {
             pipeline: make_pipeline(
                 highlight_module.as_ref(),
-                "highlight_prepare",
+                "highlight_reconstruct",
                 &bgl_highlights,
             ),
-            bind_group: make_highlight_bind_group(
-                "bg highlight prepare",
-                &highlight_work_b_view,
-                &highlight_work_a_view,
-            ),
-            workgroups: image_workgroups,
-        });
-
-        // The multiscale solver ping-pongs through every declared stage.
-        // Guided passes are omitted entirely for Off/LCh/zero-strength edits.
-        let highlight_guided_start = passes.len();
-        for (index, entry) in HIGHLIGHT_GUIDED_ENTRY_POINTS.iter().enumerate() {
-            let (read_slot, write_slot) = highlight_stage_slots(index);
-            debug_assert_ne!(read_slot, write_slot);
-            let read_view = match read_slot {
-                HighlightWorkSlot::A => &highlight_work_a_view,
-                HighlightWorkSlot::B => &highlight_work_b_view,
-            };
-            let write_view = match write_slot {
-                HighlightWorkSlot::A => &highlight_work_a_view,
-                HighlightWorkSlot::B => &highlight_work_b_view,
-            };
-            let label = format!("bg {entry}");
-            passes.push(Pass {
-                pipeline: make_pipeline(highlight_module.as_ref(), entry, &bgl_highlights),
-                bind_group: make_highlight_bind_group(&label, read_view, write_view),
-                workgroups: image_workgroups,
-            });
-        }
-
-        let highlight_guided_end = passes.len();
-
-        // Prepare leaves the data in A. The guided final source is derived from
-        // the same parity helper used by the stage planner and covered by tests.
-        let final_read_slot = highlight_final_read_slot(HIGHLIGHT_GUIDED_ENTRY_POINTS.len());
-        let final_write_slot = match final_read_slot {
-            HighlightWorkSlot::A => HighlightWorkSlot::B,
-            HighlightWorkSlot::B => HighlightWorkSlot::A,
-        };
-        let final_read_view = match final_read_slot {
-            HighlightWorkSlot::A => &highlight_work_a_view,
-            HighlightWorkSlot::B => &highlight_work_b_view,
-        };
-        let final_write_view = match final_write_slot {
-            HighlightWorkSlot::A => &highlight_work_a_view,
-            HighlightWorkSlot::B => &highlight_work_b_view,
-        };
-        let highlight_finalize_guided_index = passes.len();
-        passes.push(Pass {
-            pipeline: make_pipeline(
-                highlight_module.as_ref(),
-                "highlight_finalize",
-                &bgl_highlights,
-            ),
-            bind_group: make_highlight_bind_group(
-                "bg highlight finalize guided",
-                final_read_view,
-                final_write_view,
-            ),
-            workgroups: image_workgroups,
-        });
-
-        // Off, LCh, and zero-strength guided modes finalize directly from the
-        // prepare texture. This avoids eleven full-frame copy dispatches.
-        let highlight_finalize_direct_index = passes.len();
-        passes.push(Pass {
-            pipeline: make_pipeline(
-                highlight_module.as_ref(),
-                "highlight_finalize",
-                &bgl_highlights,
-            ),
-            bind_group: make_highlight_bind_group(
-                "bg highlight finalize direct",
-                &highlight_work_a_view,
-                &highlight_work_b_view,
-            ),
+            bind_group: bg_highlights,
             workgroups: image_workgroups,
         });
 
@@ -4027,10 +3878,6 @@ impl RawGpuPipeline {
             tone_prepare_pass_index,
             tone_reduce_pass_index,
             tone_stage_end,
-            highlight_guided_start,
-            highlight_guided_end,
-            highlight_finalize_guided_index,
-            highlight_finalize_direct_index,
             demosaic_start_index,
             demosaic_dual_start_index,
             demosaic_dual_end_index,
@@ -4953,23 +4800,13 @@ impl RawGpuPipeline {
     }
 
     fn encode_raw_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
-        if self.has_ai_scene && params.highlight_options[3] >= 0.5 {
+        if self.has_ai_scene && params.uses_ai_denoise() {
             // The RawNIND result was uploaded directly into the camera-RGB
             // scene boundary. Tone analysis and the complete output stage,
             // including capture sharpening, still execute normally.
             return;
         }
         self.encode_pass(encoder, 0);
-        if params.needs_guided_highlight_passes() {
-            self.encode_pass_range(
-                encoder,
-                self.highlight_guided_start,
-                self.highlight_guided_end,
-            );
-            self.encode_pass(encoder, self.highlight_finalize_guided_index);
-        } else {
-            self.encode_pass(encoder, self.highlight_finalize_direct_index);
-        }
         self.encode_pass_range(
             encoder,
             self.demosaic_start_index,

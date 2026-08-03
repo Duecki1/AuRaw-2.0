@@ -12,7 +12,7 @@ input:
   hot_pixels: disabled
 highlight_reconstruction:
   enabled: true
-  method: guided-laplacians
+  method: inpaint-opposed
   clip: 1.0
 demosaic:
   bayer: rcd

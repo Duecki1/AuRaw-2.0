@@ -722,6 +722,7 @@ mod imp {
             white_balance_model: raw.white_balance_model.clone(),
             lens_geometry,
             ai_denoised: Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         })
     }
 

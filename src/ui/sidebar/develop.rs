@@ -176,7 +176,7 @@ impl Sidebar {
                 -100.0..=100.0,
                 0,
                 1.0,
-                Some("Expands or compresses tones around photographic middle gray."),
+                Some("Maps -100%..+100% to darktable's sigmoid contrast around middle gray."),
             );
             changed |= adjustment_slider(
                 ui,
@@ -727,15 +727,6 @@ impl Sidebar {
                 egui::RichText::new("darktable sigmoid view transform")
                     .strong()
                     .size(11.5),
-            );
-            changed |= adjustment_slider(
-                ui,
-                "View contrast",
-                &mut exposure.sigmoid.contrast,
-                0.1..=10.0,
-                3,
-                0.01,
-                Some("Advanced darktable sigmoid slope; separate from the Lightroom-style Contrast slider."),
             );
             changed |= adjustment_slider(
                 ui,

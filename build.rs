@@ -20,7 +20,6 @@ fn main() {
         "src/shaders/color.wgsl",
         "src/shaders/color_denoise.wgsl",
         "src/shaders/highlights.wgsl",
-        "src/shaders/highlight_lch_pass.wgsl",
         "src/shaders/basic_adjustments.wgsl",
         "src/shaders/tone_common.wgsl",
         "src/shaders/tone_analysis.wgsl",

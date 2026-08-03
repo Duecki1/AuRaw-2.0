@@ -92,7 +92,7 @@ def test_neutral_grading_is_an_exact_bypass_and_masks_are_layered() -> None:
 
 def test_final_render_pipeline_binds_mask_resources_for_local_grading() -> None:
     render_layout_start = GPU.index("let bgl_adjust_render = device.create_bind_group_layout")
-    render_layout_end = GPU.index("let make_highlight_bind_group", render_layout_start)
+    render_layout_end = GPU.index("let bg_highlights", render_layout_start)
     render_layout = GPU[render_layout_start:render_layout_end]
     assert "texture_array_entry(27" in render_layout
     assert "sampler_entry(28)" in render_layout

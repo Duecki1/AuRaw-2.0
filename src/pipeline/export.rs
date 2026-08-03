@@ -1042,6 +1042,19 @@ where
         "AI denoise is enabled but its full-resolution RawNIND result is not ready"
     );
     validate_export_dimensions(output_width, output_height)?;
+    // darktable's opposed chrominance is a whole-image measurement. Populate
+    // the source cache before padded tiles clone it so tile boundaries cannot
+    // change the reconstruction offset.
+    if exposure.highlight_method == crate::pipeline::HighlightReconstructionMethod::InpaintOpposed
+        || (raw.cfa_kind == CfaKind::XTrans
+            && exposure.highlight_method == crate::pipeline::HighlightReconstructionMethod::Lch)
+    {
+        raw.inpaint_opposed_chroma(
+            exposure.black_point,
+            exposure.highlight_clip,
+            exposure.ai_denoise_enabled,
+        );
+    }
     let plan = TilePlan::new(raw.width, raw.height, tile_spec);
     crate::diagnostics::record(format!(
         "Tiled export plan: source={}x{} requested_output={}x{} tiles={} core={} halo={} linear_row_stream=f32",

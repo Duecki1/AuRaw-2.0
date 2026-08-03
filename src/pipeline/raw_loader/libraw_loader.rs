@@ -1346,6 +1346,7 @@ unsafe fn loaded_raw_from_context(
         white_balance_model,
         lens_geometry: None,
         ai_denoised: Arc::new(std::sync::RwLock::new(None)),
+        opposed_chroma_cache: Default::default(),
     })
 }
 

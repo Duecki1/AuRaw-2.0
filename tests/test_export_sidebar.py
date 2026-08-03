@@ -99,16 +99,15 @@ def test_export_settings_are_defaulted_and_passed_to_worker() -> None:
 
 def test_export_halo_covers_cumulative_spatial_support() -> None:
     shader = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
-    highlight = (ROOT / "src/shaders/highlight_lch_pass.wgsl").read_text(encoding="utf-8")
+    highlight = (ROOT / "src/shaders/highlights.wgsl").read_text(encoding="utf-8")
     # Glow's five B3 stages accumulate steps 3+3+6+12+24 at maximum
     # resolution scale, with +/-2*step support in every stage.
     assert "2 * (3 + 3 + 6 + 12 + 24)" in shader
     assert "fn glow_diffuse_at" in shader
     assert "for (var ky = -2; ky <= 2; ky = ky + 1)" in shader
     assert "for (var kx = -2; kx <= 2; kx = kx + 1)" in shader
-    assert "2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 1 + 1)" in PROCESSING
-    for radius in (16, 8, 4, 2, 1):
-        assert f"run_highlight_guided_pass(gid, {radius}," in highlight
+    assert "HIGHLIGHT_RECONSTRUCTION_SUPPORT: u32 = 1" in PROCESSING
+    assert "fn inpaint_opposed_refavg" in highlight
     assert "const EXPORT_CUMULATIVE_SUPPORT" in PROCESSING
     assert "EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8" in PROCESSING
     assert 'TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 }' in PROCESSING

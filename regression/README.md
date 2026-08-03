@@ -61,7 +61,7 @@ A regeneration must reproduce the hashes already in `corpus.yaml`; otherwise upd
 - Ansel rolling release at commit `17343ac785c067be88b33ba141c5a80bdcaab1b6`.
 - A hashed, audited processing-history contract for each engine.
 
-The history contracts under `profiles/` enumerate active-area/orientation handling, camera white balance, guided highlight reconstruction, fixed Bayer and X-Trans demosaic choices, disabled denoise/creative modules, Rec.2020 working/output profiles, and float32 linear TIFF export. They are reviewable module-stack contracts, not invented version-dependent XMP parameter blobs. A reference-export wrapper must implement the contract in the pinned engine and should retain the engine-generated XMP/style beside the resulting baseline.
+The history contracts under `profiles/` enumerate active-area/orientation handling, camera white balance, inpaint-opposed highlight reconstruction, fixed Bayer and X-Trans demosaic choices, disabled denoise/creative modules, Rec.2020 working/output profiles, and float32 linear TIFF export. They are reviewable module-stack contracts, not invented version-dependent XMP parameter blobs. A reference-export wrapper must implement the contract in the pinned engine and should retain the engine-generated XMP/style beside the resulting baseline.
 
 Validate pins and history hashes without requiring either application:
 
