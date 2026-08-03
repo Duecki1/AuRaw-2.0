@@ -1005,10 +1005,12 @@ impl LoadedRaw {
         ]
     }
 
-    /// Returns the camera-to-working transform and DCP blend for a relative
-    /// global white-balance edit. Temperature is expressed as a reciprocal-
-    /// temperature (mired) displacement and tint as a relative encoding of
-    /// darktable's absolute tint ratio. Both become camera-channel coefficients.
+    /// Returns the RAW multipliers for a relative global white-balance edit.
+    /// Temperature is expressed as a reciprocal-temperature (mired)
+    /// displacement and tint as a relative encoding of darktable's absolute
+    /// tint ratio. Like darktable's white-balance module, the camera transform
+    /// and profile interpolation stay fixed while those sensor coefficients
+    /// change.
     pub(crate) fn adjusted_white_balance_and_camera_transform(
         &self,
         temperature: f32,
@@ -1023,12 +1025,16 @@ impl LoadedRaw {
         }
         #[cfg(libraw_available)]
         if let Some(model) = &self.white_balance_model {
-            if let Some(adjusted) = libraw_loader::adjusted_camera_transform(
+            if let Some(white_balance) = libraw_loader::adjusted_white_balance_coefficients(
                 model,
                 temperature.clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
                 tint.clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
             ) {
-                return adjusted;
+                return (
+                    white_balance,
+                    self.cam_to_srgb,
+                    self.camera_profile.interpolation_weight,
+                );
             }
         }
         (

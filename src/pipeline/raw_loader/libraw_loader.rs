@@ -2009,11 +2009,11 @@ fn estimate_cct_from_model(color: &CameraColorModel, wb: [f32; 4]) -> Option<f32
     xyz_to_cct(multiply_3x4_vector(pseudoinverse(xyz_to_camera), neutral))
 }
 
-pub(super) fn adjusted_camera_transform(
+pub(super) fn adjusted_white_balance_coefficients(
     model: &CameraWhiteBalanceModel,
     temperature: f32,
     tint: f32,
-) -> Option<([f32; 4], [[f32; 4]; 3], f32)> {
+) -> Option<[f32; 4]> {
     // darktable's temperature module does not apply a generic RGB colour cast.
     // It converts the absolute Kelvin/tint pair through the camera matrix into
     // sensor-channel multipliers. Keep AuRaw's serialized values relative to
@@ -2024,41 +2024,15 @@ pub(super) fn adjusted_camera_transform(
     let target_cct = temperature_kelvin_from_offset(base_cct, temperature);
     let target_tint = white_balance_tint_from_offset(base_tint, tint);
     let target_wb = temperature_tint_to_coefficients(model, target_cct, target_tint)?;
-
-    match &model.color {
-        CameraColorModel::Dng {
-            endpoints,
-            analog_balance,
-        } => {
-            let target_weight = endpoint_weight(endpoints, target_cct);
-            let target_profile = interpolate_endpoints(endpoints, target_weight);
-            let transform = dng_camera_to_working(
-                target_profile,
-                *analog_balance,
-                target_wb,
-                target_wb,
-                model.cdesc,
-            )
-            .ok()?;
-            let canonical = canonicalize_f32x4(target_wb, canonical_cfa_map(model.cdesc).ok()?);
-            Some((canonical, transform, target_weight))
-        }
-        CameraColorModel::Matrix { xyz_to_camera } => {
-            let physical = camera_to_working_physical(*xyz_to_camera);
-            let canonical = canonicalize_f32x4(target_wb, canonical_cfa_map(model.cdesc).ok()?);
-            Some((
-                canonical,
-                fold_physical_camera_planes(physical, model.cdesc),
-                0.0,
-            ))
-        }
-    }
+    Some(canonicalize_f32x4(
+        target_wb,
+        canonical_cfa_map(model.cdesc).ok()?,
+    ))
 }
 
-/// Fixed XYZ-to-camera matrix used by darktable's temperature/tint UI. DNG
-/// profile interpolation still follows the selected Kelvin value in the final
-/// render transform; it must not make the meaning of the controls themselves
-/// shift while the user drags them.
+/// Fixed XYZ-to-camera matrix used by darktable's temperature/tint UI. The
+/// final camera transform and DNG profile blend also remain fixed while the
+/// white-balance module changes its RAW multipliers.
 fn white_balance_xyz_to_camera(model: &CameraWhiteBalanceModel) -> [[f32; 3]; 4] {
     match &model.color {
         CameraColorModel::Dng {
@@ -2979,12 +2953,12 @@ fn check_libraw(err: i32, action: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjusted_camera_transform, apply_resolved_default_exposure, black_levels, cam_to_working,
-        canonical_cfa_map, canonicalize_f32x4, cfa_kind_from_filters, daylight_white_balance,
-        effective_black_level, identity_4x4, load_raw_thumbnail, matching_thumbnail_orientation,
-        oriented_source_pos, resolve_default_exposure_ev, valid_baseline_exposure,
-        validate_embedded_thumbnail_metadata, white_balance, white_levels, CameraColorModel,
-        CameraProfile, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint,
+        adjusted_white_balance_coefficients, apply_resolved_default_exposure, black_levels,
+        cam_to_working, canonical_cfa_map, canonicalize_f32x4, cfa_kind_from_filters,
+        daylight_white_balance, effective_black_level, identity_4x4, load_raw_thumbnail,
+        matching_thumbnail_orientation, oriented_source_pos, resolve_default_exposure_ev,
+        valid_baseline_exposure, validate_embedded_thumbnail_metadata, white_balance, white_levels,
+        CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint,
         MAX_EMBEDDED_THUMBNAIL_BYTES, MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
     };
 
@@ -3086,7 +3060,7 @@ mod tests {
     }
 
     #[test]
-    fn global_wb_reinterpolates_dual_illuminant_camera_data() {
+    fn global_wb_changes_coefficients_without_reinterpolating_camera_data() {
         let endpoint = |cct, red_scale, blue_scale| DngColorEndpoint {
             cct: Some(cct),
             color_matrix: [
@@ -3108,13 +3082,12 @@ mod tests {
             },
         };
 
-        let (_, cooler, cooler_weight) = adjusted_camera_transform(&model, -20.0, 0.0).unwrap();
-        let (_, warmer, warmer_weight) = adjusted_camera_transform(&model, 20.0, 0.0).unwrap();
-        assert!(warmer_weight > cooler_weight);
-        assert!(warmer.iter().flatten().all(|value| value.is_finite()));
+        let cooler = adjusted_white_balance_coefficients(&model, -20.0, 0.0).unwrap();
+        let warmer = adjusted_white_balance_coefficients(&model, 20.0, 0.0).unwrap();
+        assert!(warmer.iter().all(|value| value.is_finite()));
         assert_ne!(cooler, warmer);
 
-        let (_, tinted, _) = adjusted_camera_transform(&model, 20.0, 20.0).unwrap();
+        let tinted = adjusted_white_balance_coefficients(&model, 20.0, 20.0).unwrap();
         assert_ne!(warmer, tinted);
     }
 

@@ -750,7 +750,7 @@ fn profile_tables_preserve_value_channel_and_maximum_lookup() {
 }
 
 #[test]
-fn global_wb_changes_camera_transform_for_dng_metadata() {
+fn global_wb_changes_raw_multipliers_without_changing_the_camera_transform() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("regression/raw/synthetic-bayer.dng");
     let raw = crate::pipeline::load_raw_file(&path).unwrap();
@@ -765,9 +765,10 @@ fn global_wb_changes_camera_transform_for_dng_metadata() {
         ..crate::pipeline::ExposureParams::default()
     };
     let changed = super::GpuParams::new(&adjusted, &crate::pipeline::MaskStack::default(), &raw);
-    assert_ne!(neutral.cam_to_srgb_0, changed.cam_to_srgb_0);
-    assert_ne!(neutral.cam_to_srgb_1, changed.cam_to_srgb_1);
-    assert_ne!(neutral.cam_to_srgb_2, changed.cam_to_srgb_2);
+    assert_ne!(neutral.wb, changed.wb);
+    assert_eq!(neutral.cam_to_srgb_0, changed.cam_to_srgb_0);
+    assert_eq!(neutral.cam_to_srgb_1, changed.cam_to_srgb_1);
+    assert_eq!(neutral.cam_to_srgb_2, changed.cam_to_srgb_2);
 
     let tint_rendition = |tint| {
         let params = super::GpuParams::new(

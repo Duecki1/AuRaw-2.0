@@ -222,7 +222,7 @@ def test_libraw_preserves_non_utf8_unix_paths() -> None:
     assert "to_string_lossy" not in path_conversion
 
 
-def test_global_white_balance_rebuilds_camera_and_dcp_transforms() -> None:
+def test_global_white_balance_changes_raw_multipliers_before_the_fixed_camera_transform() -> None:
     adjustments = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
     tone = (ROOT / "src/shaders/tone_analysis.wgsl").read_text(encoding="utf-8")
     basic = (ROOT / "src/shaders/basic_adjustments.wgsl").read_text(encoding="utf-8")
@@ -232,6 +232,9 @@ def test_global_white_balance_rebuilds_camera_and_dcp_transforms() -> None:
     assert "adjusted_white_balance_and_camera_transform(" in gpu
     assert "wb: white_balance" in gpu
     assert "profile_layout.flags[3] = profile_weight" in gpu
+    assert "adjusted_white_balance_coefficients(" in RAW
+    assert "self.cam_to_srgb" in RAW
+    assert "self.camera_profile.interpolation_weight" in RAW
     assert "bitcast<f32>(params.profile_flags.w)" in profile
     matrix = adjustments.index("cam_to_working(camera_rgb)")
     hue_sat = adjustments.index("var rgb = apply_camera_characterization(scene_working_at(pos))")
