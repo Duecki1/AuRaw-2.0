@@ -49,6 +49,11 @@ storage I/O stay on a worker. Desktop
 sidecars sit beside the source file; Android sidecars are hidden siblings of
 the imported RAW inside AuRaw's `.library` folder.
 
+The Basic **Contrast** control keeps its familiar -100% to +100% range, with 0%
+neutral, and maps that range internally to darktable's 0.1–10.0 sigmoid
+middle-grey slope (default 1.5). Sidecars from earlier AuRaw processes migrate
+to this percentage-backed parameter when opened.
+
 ## DCP camera profiles
 
 Desktop builds can point **Settings > RAW color profiles > Camera profile folder**
@@ -185,7 +190,8 @@ adaptive controls do not change merely because the image is panned.
 The standard interface shows Light, Tone Curve, Color, Effects, and Color
 Mixer. Settings contains an **Expert mode** checkbox, disabled by default.
 Enabling it reveals the darktable sigmoid internals, RAW/demosaic controls, and
-highlight-reconstruction settings. The default point curve contains only its
+highlight-reconstruction settings. Inpaint opposed is the default for new RAWs
+and for supported edits loaded from older sidecars. The default point curve contains only its
 two endpoints; users add interior points explicitly.
 
 RGB channel curves permit ascending or descending output segments. Their

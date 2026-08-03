@@ -5,7 +5,7 @@ The YAML files in this directory are audited processing-history contracts. Each 
 A contract fixes:
 
 1. Active-area crop, orientation, black/white metadata, and camera white balance.
-2. Guided highlight reconstruction and fixed Bayer/X-Trans demosaic methods.
+2. Inpaint-opposed highlight reconstruction and fixed Bayer/X-Trans demosaic methods.
 3. Disabled denoise, creative tone/color, sharpening, and resize modules.
 4. Linear D65 Rec.2020 working/output color and float32 TIFF export.
 

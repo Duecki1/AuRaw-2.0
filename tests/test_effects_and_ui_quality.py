@@ -117,10 +117,10 @@ def test_expert_mode_is_disabled_by_default_and_gates_advanced_controls() -> Non
 
 
 def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
-    # Standard Lightroom-style controls.
+    # Standard Basic controls. Contrast is darktable's sigmoid slope.
     expected = {
         "exposure.exposure": ("exposure: exposure.exposure", "params.exposure"),
-        "exposure.contrast": ("exposure.contrast.clamp", "params.presence.w"),
+        "exposure.contrast": ("sigmoid_contrast_from_percent(exposure.contrast)", "params.sigmoid_power.x"),
         "exposure.highlights": ("exposure.highlights", "params.basic_tone.x"),
         "exposure.shadows": ("exposure.shadows", "params.basic_tone.y"),
         "exposure.whites": ("exposure.whites", "params.basic_tone.z"),
@@ -172,10 +172,9 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
         "ca_blue",
         "highlight_clip",
         "highlight_reconstruction",
-        "highlight_color_adaptation",
     ):
         assert f"exposure.{name}" in GPU
-        assert f"params.{name}" in ALL_SHADERS or name == "highlight_color_adaptation"
+        assert f"params.{name}" in ALL_SHADERS
 
 
 def test_revised_adjustment_formulas_increment_the_process_version() -> None:

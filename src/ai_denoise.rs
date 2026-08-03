@@ -1425,6 +1425,7 @@ fn reflected_raw_tile(raw: &LoadedRaw, origin_x: i32, origin_y: i32) -> Result<L
         white_balance_model: raw.white_balance_model.clone(),
         lens_geometry: None,
         ai_denoised: Arc::new(RwLock::new(None)),
+        opposed_chroma_cache: Default::default(),
     })
 }
 
@@ -1527,6 +1528,7 @@ mod tests {
             white_balance_model: None,
             lens_geometry: None,
             ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         }
     }
 

@@ -50,23 +50,25 @@ def test_default_view_transform_uses_scene_headroom_shoulder_and_gamut_aware_chr
     assert "peak <= knee" not in ADJUSTMENTS
 
 
-def test_contrast_is_a_protected_scene_ev_s_curve() -> None:
+def test_basic_contrast_is_the_darktable_sigmoid_middle_grey_slope() -> None:
     tonemap = read_source_tree(Path("src/shaders/tonemap.wgsl"))
-    assert "let contrast_pivot_ev = tone_percentiles().p50 + 0.12" in tonemap
-    assert "let toe_distance_ev = max(-relative_ev, 0.0)" in tonemap
-    assert "let shoulder_distance_ev = max(relative_ev, 0.0)" in tonemap
-    assert "let toe_midtone_width_ev = 1.65" in tonemap
-    assert "let shoulder_midtone_width_ev = 1.85" in tonemap
-    assert "let toe_endpoint = select(1.70, 5.80, amount >= 0.0)" in tonemap
-    assert "let shoulder_endpoint = select(0.95, 0.85, amount >= 0.0)" in tonemap
-    assert "1 - 1.70*ln(2)/1.65 = 0.286" in tonemap
-    assert "1 - 0.95*ln(2)/1.85 = 0.644" in tonemap
-    assert "scene_ev * contrast_power" not in tonemap
+    assert "fn apply_basic_contrast" not in tonemap
+    assert "fn apply_mask_contrast_value" in tonemap
+    assert "let pixel_average = max((rgb.r + rgb.g + rgb.b) / 3.0, 0.0)" in tonemap
+    assert "-pixel_average / (minimum - pixel_average)" in tonemap
+    assert "let contrast = finite_or(params.contrast, defaults.contrast).clamp(0.1, 10.0)" in SIGMOID
+    assert "let ref_slope = contrast * CONTRAST_SLOPE_CALIBRATION" in SIGMOID
+    assert "sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);" in GPU
+    assert "let raw_selection_flags = u32::from(exposure.ai_denoise_enabled) << 1;" in GPU
+    assert "pub const SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 30;" in BASIC
+    assert "pub const PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 31;" in BASIC
+    assert "fn sigmoid_contrast_from_percent" in BASIC
+    assert "self.contrast = percent_from_sigmoid_contrast" in BASIC
 
 
-def test_default_sigmoid_prefers_rgb_ratio_color_processing() -> None:
-    assert "color_processing: SigmoidColorProcessing::RgbRatio" in SIGMOID
-    assert "Default: map luminance while preserving RGB ratios" in SIGMOID
+def test_default_sigmoid_matches_darktable_per_channel_color_processing() -> None:
+    assert "#[default]\n    PerChannel" in SIGMOID
+    assert "darktable default: apply the sigmoid per channel" in SIGMOID
     assert "Camera/DNG default rendering exposure lives independently" in COMMON
 
 

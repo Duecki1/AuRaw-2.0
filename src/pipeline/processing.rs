@@ -53,8 +53,6 @@ fn raw_controls_changed(before: &ExposureParams, after: &ExposureParams) -> bool
         || before.highlight_method != after.highlight_method
         || before.highlight_clip != after.highlight_clip
         || before.highlight_reconstruction != after.highlight_reconstruction
-        || before.highlight_iterations != after.highlight_iterations
-        || before.highlight_color_adaptation != after.highlight_color_adaptation
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,6 +125,7 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(crop_ai_denoised(
             raw, x, y, width, height,
         ))),
+        opposed_chroma_cache: Default::default(),
     }
 }
 
@@ -299,6 +298,7 @@ pub fn build_region_proxy(
             width,
             height,
         ))),
+        opposed_chroma_cache: Default::default(),
     }
 }
 
@@ -532,11 +532,9 @@ fn padded_tile_ai_denoised(raw: &LoadedRaw, tile: ExportTile) -> Option<super::A
 /// Cumulative input support of every spatial stage used by an export tile.
 /// These are deliberately separate constants: taking only the maximum stage
 /// radius is incorrect when one spatial pass consumes another pass's output.
-const HIGHLIGHT_PREP_SUPPORT: u32 = 4;
-// The quality-4 guided sequence has radii 16+8+4+2+1+4+2+1+2+1+1 = 42.
-// Each pass also reads the outward sample at twice its radius, so its
-// dependency support accumulates to 84 pixels across the ping-pong chain.
-const HIGHLIGHT_GUIDED_SUPPORT: u32 = 2 * (16 + 8 + 4 + 2 + 1 + 4 + 2 + 1 + 2 + 1 + 1);
+// Inpaint opposed reads only the local 3x3 CFA cube. Its full-image
+// chrominance offsets are calculated before export tiling begins.
+const HIGHLIGHT_RECONSTRUCTION_SUPPORT: u32 = 1;
 // Conservative bound over the complete Bayer RCD and X-Trans Markesteijn-3
 // pass chains, including their final detail-recovery neighbourhoods.
 const DEMOSAIC_CHAIN_SUPPORT: u32 = 32;
@@ -558,8 +556,7 @@ const LOCAL_EFFECTS_SUPPORT: u32 = 28;
 // accumulates to 96 pixels from the extracted highlight source.
 const GLOW_SUPPORT: u32 = 96;
 const COLOR_MIXER_SUPPORT: u32 = 4;
-const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_PREP_SUPPORT
-    + HIGHLIGHT_GUIDED_SUPPORT
+const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_RECONSTRUCTION_SUPPORT
     + DEMOSAIC_CHAIN_SUPPORT
     + COLOR_DENOISE_SUPPORT_HIGH
     + TONE_GUIDE_SUPPORT
@@ -572,8 +569,7 @@ pub const EXPORT_TILE_HALO: u32 = EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8;
 
 /// Smallest safe export halo when optional spatial effects are neutral.
 /// Highlight reconstruction, demosaic, and the tone guide remain active.
-pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_PREP_SUPPORT
-    + HIGHLIGHT_GUIDED_SUPPORT
+pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_RECONSTRUCTION_SUPPORT
     + DEMOSAIC_CHAIN_SUPPORT
     + TONE_GUIDE_SUPPORT
     + COLOR_MIXER_SUPPORT)
@@ -585,8 +581,7 @@ pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_PREP_SUPPORT
 /// support radius. This is especially important on Android, where a 280 px
 /// halo around a 768 px core nearly triples the processed area.
 pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -> u32 {
-    let mut support = HIGHLIGHT_PREP_SUPPORT
-        + HIGHLIGHT_GUIDED_SUPPORT
+    let mut support = HIGHLIGHT_RECONSTRUCTION_SUPPORT
         + DEMOSAIC_CHAIN_SUPPORT
         + TONE_GUIDE_SUPPORT
         + COLOR_MIXER_SUPPORT;
@@ -747,6 +742,7 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
         // into one native raster before the deferred lens map is applied.
         lens_geometry: None,
         ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        opposed_chroma_cache: std::sync::Arc::clone(&raw.opposed_chroma_cache),
     };
     fill_padded_tile(raw, tile, &mut tile_raw);
     tile_raw
@@ -869,6 +865,7 @@ mod tests {
             white_balance_model: None,
             lens_geometry: None,
             ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         }
     }
 
@@ -1101,6 +1098,7 @@ mod tests {
             white_balance_model: None,
             lens_geometry: None,
             ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         };
 
         let cropped = crop_raw(&raw, 1, 1, 2, 2);
@@ -1166,6 +1164,7 @@ mod tests {
             white_balance_model: None,
             lens_geometry: None,
             ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         };
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 4 });

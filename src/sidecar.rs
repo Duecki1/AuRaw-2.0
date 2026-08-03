@@ -1405,7 +1405,6 @@ fn validate_exposure(exposure: &ExposureParams) -> Result<(), SidecarError> {
             exposure.ca_blue,
             exposure.highlight_clip,
             exposure.highlight_reconstruction,
-            exposure.highlight_color_adaptation,
             exposure.highlights,
             exposure.shadows,
             exposure.whites,

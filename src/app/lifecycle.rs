@@ -1780,14 +1780,10 @@ impl AurawApp {
         let previous = self.exposure;
         let mut exposure = ExposureParams::scene_referred_default();
 
-        // These controls are application-level reconstruction preferences.
-        // Creative and per-image calibration controls must not leak from the
-        // previously opened photograph into a new RAW.
-        exposure.highlight_method = previous.highlight_method;
+        // Every newly opened RAW starts with inpaint opposed. Threshold and
+        // LCh strength remain application-level expert preferences.
         exposure.highlight_clip = previous.highlight_clip;
         exposure.highlight_reconstruction = previous.highlight_reconstruction;
-        exposure.highlight_iterations = previous.highlight_iterations;
-        exposure.highlight_color_adaptation = previous.highlight_color_adaptation;
         exposure.demosaic_mode = previous.demosaic_mode;
         exposure.dual_threshold = previous.dual_threshold;
         exposure.frequency_chroma = previous.frequency_chroma;

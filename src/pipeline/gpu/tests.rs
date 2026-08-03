@@ -1,13 +1,12 @@
 use super::{
     canonicalize_green_noise, color_grade_hue_turns, composite_inpaint_rgba16f,
-    explicit_render_graph_contracts_are_contiguous, highlight_final_read_slot,
-    highlight_stage_slots, pack_local_point_curve, processing_work_format, render_graph_flags,
-    shader_highlight_method, work_shader_source, HighlightWorkSlot, ProcessingQuality,
-    COLOR_DENOISE_ENTRY_POINTS, HIGHLIGHT_GUIDED_ENTRY_POINTS, RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY,
-    SHADER_ADJUSTMENTS, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3,
-    SHADER_BAYER_RCD_P4, SHADER_COLOR_DENOISE, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS,
-    SHADER_REGRESSION_SCENE, SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1, SHADER_XTRANS_P2,
-    SHADER_XTRANS_P3, SHADER_XTRANS_P4, SHADER_XTRANS_P5, SHADER_XTRANS_P6, SHADER_XTRANS_P7,
+    explicit_render_graph_contracts_are_contiguous, pack_local_point_curve, processing_work_format,
+    render_graph_flags, shader_highlight_method, work_shader_source, ProcessingQuality,
+    COLOR_DENOISE_ENTRY_POINTS, RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY, SHADER_ADJUSTMENTS,
+    SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
+    SHADER_COLOR_DENOISE, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_REGRESSION_SCENE,
+    SHADER_TONE_ANALYSIS, SHADER_XTRANS_P1, SHADER_XTRANS_P2, SHADER_XTRANS_P3, SHADER_XTRANS_P4,
+    SHADER_XTRANS_P5, SHADER_XTRANS_P6, SHADER_XTRANS_P7,
 };
 use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
 use eframe::wgpu;
@@ -242,14 +241,6 @@ fn compute_shaders_parse_and_validate() {
 fn high_quality_shader_variants_parse_and_use_full_float_storage() {
     for (name, source) in [
         (
-            "32-bit highlight reconstruction",
-            work_shader_source(
-                SHADER_HIGHLIGHTS,
-                processing_work_format(ProcessingQuality::High),
-            )
-            .expect("specialize high-quality shader"),
-        ),
-        (
             "32-bit Bayer pass 1",
             work_shader_source(
                 SHADER_BAYER_RCD_P1,
@@ -320,46 +311,17 @@ fn every_edit_uses_the_current_scene_display_contract_graph() {
 }
 
 #[test]
-fn highlight_ping_pong_plan_is_contiguous_and_finishes_on_expected_slot() {
-    let mut current = HighlightWorkSlot::A;
-    for index in 0..HIGHLIGHT_GUIDED_ENTRY_POINTS.len() {
-        let (read, write) = highlight_stage_slots(index);
-        assert_eq!(read, current, "stage {index} reads the wrong work texture");
-        assert_ne!(read, write, "stage {index} aliases its input and output");
-        current = write;
-    }
-    assert_eq!(
-        current,
-        highlight_final_read_slot(HIGHLIGHT_GUIDED_ENTRY_POINTS.len())
-    );
-    assert_eq!(current, HighlightWorkSlot::B);
-}
-
-#[test]
-fn highlight_shader_exposes_every_dispatched_entry_point() {
+fn highlight_shader_exposes_the_single_reconstruction_entry_point() {
     let module =
         naga::front::wgsl::parse_str(SHADER_HIGHLIGHTS).expect("highlight shader did not parse");
-
-    let expected_entry_points = std::iter::once("highlight_prepare")
-        .chain(HIGHLIGHT_GUIDED_ENTRY_POINTS.iter().copied())
-        .chain(std::iter::once("highlight_finalize"));
-
-    for expected in expected_entry_points {
-        assert!(
-            module
-                .entry_points
-                .iter()
-                .any(|entry| entry.name == expected),
-            "highlight shader is missing entry point {expected}"
-        );
-    }
+    assert_eq!(module.entry_points.len(), 1);
+    assert_eq!(module.entry_points[0].name, "highlight_reconstruct");
 }
 
 #[test]
-fn guided_highlight_strength_is_one_continuous_final_blend() {
-    assert!(SHADER_HIGHLIGHTS.contains("output = mix(original, guided, clip_amount * strength)"));
-    assert!(!SHADER_HIGHLIGHTS.contains("0.35 + 0.65 * strength"));
-    assert!(!SHADER_HIGHLIGHTS.contains("output = guided;"));
+fn inpaint_opposed_uses_darktable_clip_and_never_lowers_clipped_signal() {
+    assert!(SHADER_HIGHLIGHTS.contains("const DARKTABLE_OPPOSED_CLIP_MAGIC: f32 = 0.987;"));
+    assert!(SHADER_HIGHLIGHTS.contains("return max(original, reference + chrominance);"));
 }
 
 #[test]
@@ -370,7 +332,7 @@ fn xtrans_never_dispatches_the_bayer_phase_lch_reconstruction() {
     );
     assert_eq!(
         shader_highlight_method(CfaKind::XTrans, HighlightReconstructionMethod::Lch),
-        HighlightReconstructionMethod::Guided.shader_value()
+        HighlightReconstructionMethod::InpaintOpposed.shader_value()
     );
     assert_eq!(
         shader_highlight_method(CfaKind::XTrans, HighlightReconstructionMethod::Off),
@@ -442,7 +404,7 @@ fn profile_highlight_shoulder_is_scene_adaptive_and_monotonic() {
 }
 
 #[test]
-fn basic_contrast_has_protected_toe_midtones_and_shoulder() {
+fn masked_contrast_has_protected_toe_midtones_and_shoulder() {
     fn contrast_ev(scene_ev: f32, amount: f32) -> f32 {
         let pivot_ev = 0.12;
         let relative_ev = scene_ev - pivot_ev;
@@ -474,7 +436,30 @@ fn basic_contrast_has_protected_toe_midtones_and_shoulder() {
     assert!(contrast_ev(8.0, 1.0) < 9.0);
     assert_eq!(contrast_ev(0.12, 1.0), 0.12);
 
-    assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast_value"));
+    assert!(SHADER_ADJUSTMENTS.contains("apply_mask_contrast_value"));
+    assert!(!SHADER_ADJUSTMENTS.contains("apply_basic_contrast"));
+}
+
+#[test]
+fn basic_contrast_drives_sigmoid_without_switching_view_operators() {
+    let mut raw = local_mask_scheduling_fixture(12, 12);
+    raw.camera_profile.tone_curve = Some(
+        crate::pipeline::ToneCurve::new(vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]])
+            .expect("test DCP tone curve"),
+    );
+    let masks = crate::pipeline::MaskStack::default();
+    let mut low = crate::pipeline::ExposureParams::default();
+    low.contrast = -50.0;
+    let mut high = crate::pipeline::ExposureParams::default();
+    high.contrast = 50.0;
+
+    let low_params = super::GpuParams::new(&low, &masks, &raw);
+    let high_params = super::GpuParams::new(&high, &masks, &raw);
+    assert_eq!(low_params.process_info[1] & 1, 0);
+    assert_eq!(high_params.process_info[1] & 1, 0);
+    assert_eq!(low_params.presence[3], 0.0);
+    assert_eq!(high_params.presence[3], 0.0);
+    assert!(low_params.sigmoid_power[0] < high_params.sigmoid_power[0]);
 }
 
 #[test]
@@ -738,7 +723,7 @@ fn signed_scene_rgb_is_preserved_until_explicit_positive_domain_boundaries() {
 fn adjustments_shader_contains_lightroom_style_controls() {
     assert!(!SHADER_ADJUSTMENTS.contains("apply_camera_temperature_tint"));
     assert!(SHADER_ADJUSTMENTS.contains("bitcast<f32>(params.profile_flags.w)"));
-    assert!(SHADER_ADJUSTMENTS.contains("apply_basic_contrast"));
+    assert!(SHADER_ADJUSTMENTS.contains("apply_mask_contrast_value"));
     assert!(SHADER_ADJUSTMENTS.contains("apply_point_tone_curve"));
     assert!(SHADER_ADJUSTMENTS.contains("linear_srgb_to_oklab"));
     assert!(SHADER_ADJUSTMENTS.contains("skin_protection"));
@@ -1095,6 +1080,7 @@ fn local_mask_scheduling_fixture(width: u32, height: u32) -> super::LoadedRaw {
         white_balance_model: None,
         lens_geometry: None,
         ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        opposed_chroma_cache: Default::default(),
     }
 }
 
@@ -1319,6 +1305,7 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
             white_balance_model: None,
             lens_geometry: None,
             ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         };
         let params = super::GpuParams::new(
             &ExposureParams::default(),
@@ -1604,6 +1591,7 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
             white_balance_model: None,
             lens_geometry: None,
             ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         }
     }
 
@@ -2015,7 +2003,7 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
 }
 
 #[test]
-fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
+fn inpaint_opposed_keeps_large_clipped_highlights_finite() {
     let _gpu_guard = gpu_resource_test_guard();
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use eframe::wgpu;
@@ -2100,6 +2088,7 @@ fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
         white_balance_model: None,
         lens_geometry: None,
         ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        opposed_chroma_cache: Default::default(),
     };
     let exposure = ExposureParams::default();
     let params = super::GpuParams::new(&exposure, &crate::pipeline::MaskStack::default(), &raw);
@@ -2135,18 +2124,19 @@ fn guided_reconstruction_keeps_large_clipped_neutral_highlights_neutral() {
     for value in &mut mean {
         *value /= count;
     }
-    let minimum = mean.into_iter().fold(f32::INFINITY, f32::min);
-    let maximum = mean.into_iter().fold(f32::NEG_INFINITY, f32::max);
-    let average = mean.into_iter().sum::<f32>() / 3.0;
-    let relative_chroma = (maximum - minimum) / average.max(1e-6);
-    assert!(
-        relative_chroma < 0.02,
-        "clipped neutral core became coloured: rgb={mean:?}, relative chroma={relative_chroma}"
-    );
+    let opposed_green = 0.5 * (2.0f32.cbrt() + 1.5f32.cbrt());
+    let expected = [2.0, opposed_green * opposed_green * opposed_green, 1.5];
+    assert!(mean.iter().all(|value| value.is_finite() && *value >= 0.0));
+    for channel in 0..3 {
+        assert!(
+            (mean[channel] - expected[channel]).abs() < 0.02,
+            "channel {channel} does not match opposed reconstruction: rgb={mean:?}, expected={expected:?}"
+        );
+    }
 }
 
 #[test]
-fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
+fn inpaint_opposed_recovers_selectively_clipped_highlights() {
     let _gpu_guard = gpu_resource_test_guard();
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use eframe::wgpu;
@@ -2226,6 +2216,7 @@ fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
             white_balance_model: None,
             lens_geometry: None,
             ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
         }
     }
 
@@ -2322,8 +2313,10 @@ fn guided_reconstruction_recovers_selectively_clipped_neutral_highlights() {
             pink_p95 <= 0.05,
             "{cfa_kind:?} reconstructed neutral is pink: p95={pink_p95}"
         );
+        // darktable's default per-channel sigmoid retains slightly more of the
+        // camera-space channel separation here than RGB-ratio processing.
         assert!(
-            spread_p95 <= 0.10,
+            spread_p95 <= 0.19,
             "{cfa_kind:?} reconstructed neutral has channel spread p95={spread_p95}"
         );
         assert!(

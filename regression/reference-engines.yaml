@@ -7,7 +7,7 @@ engines:
     version_command: [darktable-cli, --version]
     version_output_contains: 5.6.0
     history: profiles/darktable-5.6.0-linear-rec2020.yaml
-    history_sha256: c40701d0483163f6e86726c5fc630de158185fa497b6035ff6d5715e8797e18c
+    history_sha256: 2821b7013b6ad17693d047f1286397aeacb30a4b6f0413d59f42762d6e8b36dd
   ansel:
     version: 0.0.0+git.17343ac785c067be88b33ba141c5a80bdcaab1b6
     source_revision: 17343ac785c067be88b33ba141c5a80bdcaab1b6
@@ -15,4 +15,4 @@ engines:
     version_command: [ansel-cli, --version]
     version_output_contains: 17343ac
     history: profiles/ansel-17343ac785c067be88b33ba141c5a80bdcaab1b6-linear-rec2020.yaml
-    history_sha256: fdfb98d4627e29889122d78b28d95a9c34da700a26d3c2cd8bd5674b38c2cb58
+    history_sha256: 280609d2f01099f7233c42777e53297b1a84f461742fd2f2e2684b26eccfd965

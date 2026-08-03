@@ -29,7 +29,7 @@ struct Params {
     sigmoid_curve: vec4<f32>,
     // darktable sigmoid: film power, paper power, hue preservation, method.
     sigmoid_power: vec4<f32>,
-    // Texture, clarity, dehaze, Lightroom-style contrast.
+    // Texture, clarity, dehaze, reserved. Global contrast is sigmoid_power.x.
     presence: vec4<f32>,
     // Glow amount, radius, highlight threshold, capture-sharpen amount.
     creative_effects: vec4<f32>,
@@ -37,7 +37,7 @@ struct Params {
     vignette: vec4<f32>,
     // Vignette highlight protection, sharpen radius, detail, masking.
     vignette_options: vec4<f32>,
-    // Reconstruction method, guided passes, colour adaptation, reserved.
+    // Reconstruction method followed by inpaint-opposed RGB chrominance offsets.
     highlight_options: vec4<f32>,
     // Per-CFA-plane sensor noise model: variance = shot * signal + read.
     noise_shot: vec4<f32>,
@@ -103,9 +103,9 @@ struct Params {
     // HueSat encoding, LookTable encoding, default exposure EV bits, and the
     // live DCP dual-illuminant interpolation weight as f32 bits.
     profile_flags: vec4<u32>,
-    // x = processing-formula version. y bit 0 selects the DCP-aware default
-    // view transform instead of the configurable sigmoid. z stores user-facing
-    // Exposure as f32 bits. w is the render-graph contract bitfield; bit 0
+    // x = processing-formula version. y bit 0 is the retired DCP-view selector
+    // (always clear in Process 31); bit 1 selects the derived AI RAW. z stores
+    // user-facing Exposure as f32 bits. w is the render-graph contract bitfield; bit 0
     // enables explicit camera -> scene -> look -> view domain boundaries.
     // Camera/DNG default rendering exposure lives independently in profile_flags.z.
     process_info: vec4<u32>,

@@ -1035,7 +1035,7 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
                 params.mask_adjust_1[index].x,
                 0.0,
             );
-            adjusted = apply_basic_contrast_value(adjusted, params.mask_adjust_0[index].y);
+            adjusted = apply_mask_contrast_value(adjusted, params.mask_adjust_0[index].y);
             adjusted = apply_temperature_tint_values(
                 adjusted,
                 params.mask_adjust_1[index].z,
@@ -1053,7 +1053,7 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
                 params.mask_adjust_1[index].x,
                 params.mask_adjust_1[index].y,
             );
-            adjusted = apply_basic_contrast_value(adjusted, params.mask_adjust_0[index].y);
+            adjusted = apply_mask_contrast_value(adjusted, params.mask_adjust_0[index].y);
             adjusted = apply_temperature_tint_values(
                 adjusted,
                 params.mask_adjust_1[index].z,

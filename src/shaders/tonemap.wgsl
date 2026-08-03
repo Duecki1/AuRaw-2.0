@@ -461,7 +461,10 @@ fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     );
 }
 
-fn apply_basic_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
+// Local masks retain a bounded scene-EV contrast operator because a view
+// transform cannot be varied per pixel without breaking display mapping.
+// Global Basic Contrast is the actual sigmoid middle-grey slope instead.
+fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let amount = clamp(value / 100.0, -1.0, 1.0);
     if abs(amount) < 1e-6 {
         return rgb;
@@ -495,10 +498,6 @@ fn apply_basic_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let adjusted_ev = scene_ev + amount * signed_protected_shape;
     let adjusted_luminance = SCENE_MIDDLE_GREY * exp2(adjusted_ev);
     return rgb * clamp(adjusted_luminance / luminance, 0.0, 64.0);
-}
-
-fn apply_basic_contrast(rgb: vec3<f32>) -> vec3<f32> {
-    return apply_basic_contrast_value(rgb, params.presence.w);
 }
 
 // Curve 0 is the composite luminance curve; 1, 2 and 3 are R, G and B.
@@ -914,7 +913,7 @@ fn apply_display_blacks_toe_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
 }
 
 fn apply_lightroom_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
-    let basic = apply_basic_contrast(apply_local_basic_tone(rgb, pos));
+    let basic = apply_local_basic_tone(rgb, pos);
     return apply_rgb_point_curves(apply_point_tone_curve(basic));
 }
 
@@ -967,10 +966,18 @@ fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
 }
 
 fn desaturate_negative_values(rgb: vec3<f32>) -> vec3<f32> {
-    // Sigmoid variants require a positive domain. Use the same lightness- and
-    // hue-direction-preserving projection as the rest of the render graph so
-    // this safety boundary is explicit and consistent.
-    return gamut_project_nonnegative_rec2020(rgb);
+    // Exact darktable sigmoid projection: move a triplet with negative
+    // channels toward its non-negative arithmetic mean just far enough for the
+    // minimum channel to reach zero.
+    let pixel_average = max((rgb.r + rgb.g + rgb.b) / 3.0, 0.0);
+    let minimum = min(rgb.r, min(rgb.g, rgb.b));
+    let saturation_factor = select(
+        1.0,
+        -pixel_average / (minimum - pixel_average),
+        minimum < 0.0,
+    );
+    return vec3<f32>(pixel_average)
+        + saturation_factor * (rgb - vec3<f32>(pixel_average));
 }
 
 // Returns min, mid, max channel indices, matching darktable's seven cases.

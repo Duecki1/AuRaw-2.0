@@ -3472,8 +3472,6 @@ impl AurawApp {
         self.exposure.highlight_method = previous.highlight_method;
         self.exposure.highlight_clip = previous.highlight_clip;
         self.exposure.highlight_reconstruction = previous.highlight_reconstruction;
-        self.exposure.highlight_iterations = previous.highlight_iterations;
-        self.exposure.highlight_color_adaptation = previous.highlight_color_adaptation;
 
         // Demosaic selection is likewise a raw-processing preference rather
         // than a Develop adjustment. Resetting exposure/tone controls must not
@@ -3490,8 +3488,6 @@ impl AurawApp {
         self.exposure.highlight_method = defaults.highlight_method;
         self.exposure.highlight_clip = defaults.highlight_clip;
         self.exposure.highlight_reconstruction = defaults.highlight_reconstruction;
-        self.exposure.highlight_iterations = defaults.highlight_iterations;
-        self.exposure.highlight_color_adaptation = defaults.highlight_color_adaptation;
         self.mark_pipeline_dirty();
     }
 }

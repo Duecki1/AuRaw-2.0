@@ -60,7 +60,7 @@ def display_black_toe(luma: float, amount: float) -> float:
     return luma * 2.0**offset
 
 
-def test_process_25_is_the_single_runtime_renderer() -> None:
+def test_current_process_is_the_single_runtime_renderer() -> None:
     assert "pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;" in BASIC
     assert "pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;" in BASIC
     assert "pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;" in BASIC
@@ -74,7 +74,10 @@ def test_process_25_is_the_single_runtime_renderer() -> None:
     assert "pub const LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION: u32 = 26;" in BASIC
     assert "pub const AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION: u32 = 27;" in BASIC
     assert "pub const AI_DENOISE_CFA_CACHE_PROCESS_VERSION: u32 = 28;" in BASIC
-    assert "pub const CURRENT_PROCESS_VERSION: u32 = AI_DENOISE_CFA_CACHE_PROCESS_VERSION;" in BASIC
+    assert "pub const INPAINT_OPPOSED_PROCESS_VERSION: u32 = 29;" in BASIC
+    assert "pub const SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 30;" in BASIC
+    assert "pub const PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 31;" in BASIC
+    assert "pub const CURRENT_PROCESS_VERSION: u32 = PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION;" in BASIC
     assert "const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16u;" in TONEMAP
     assert "const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17u;" in TONEMAP
     assert "const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18u;" in TONEMAP

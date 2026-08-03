@@ -525,7 +525,7 @@ impl Settings {
                 .selected_text(match app.exposure.highlight_method {
                     HighlightReconstructionMethod::Off => "Off",
                     HighlightReconstructionMethod::Lch => "LCh (fast)",
-                    HighlightReconstructionMethod::Guided => "Guided (best quality)",
+                    HighlightReconstructionMethod::InpaintOpposed => "Inpaint opposed",
                 })
                 .show_ui(ui, |ui| {
                     changed |= ui
@@ -545,8 +545,8 @@ impl Settings {
                     changed |= ui
                         .selectable_value(
                             &mut app.exposure.highlight_method,
-                            HighlightReconstructionMethod::Guided,
-                            "Guided (best quality)",
+                            HighlightReconstructionMethod::InpaintOpposed,
+                            "Inpaint opposed",
                         )
                         .changed();
                 });
@@ -562,38 +562,15 @@ impl Settings {
                     0.01,
                     Some("Sensor-relative level at which a channel is treated as clipped."),
                 );
-                changed |= adjustment_slider(
-                    ui,
-                    "Reconstruction strength",
-                    &mut app.exposure.highlight_reconstruction,
-                    0.0..=1.0,
-                    2,
-                    0.01,
-                    Some("Blend between the original and reconstructed highlight."),
-                );
-
-                if app.exposure.highlight_method == HighlightReconstructionMethod::Guided {
-                    ui.separator();
-                    ui.strong("Guided reconstruction");
+                if app.exposure.highlight_method == HighlightReconstructionMethod::Lch {
                     changed |= adjustment_slider(
                         ui,
-                        "Iterations",
-                        &mut app.exposure.highlight_iterations,
-                        1..=4,
-                        0,
-                        1.0,
-                        Some(
-                            "More iterations propagate surrounding color farther into clipped regions.",
-                        ),
-                    );
-                    changed |= adjustment_slider(
-                        ui,
-                        "Color adaptation",
-                        &mut app.exposure.highlight_color_adaptation,
+                        "Reconstruction strength",
+                        &mut app.exposure.highlight_reconstruction,
                         0.0..=1.0,
                         2,
                         0.01,
-                        Some("Controls how strongly reconstructed highlights follow nearby color."),
+                        Some("Blend between the original and LCh-reconstructed highlight."),
                     );
                 }
             });
