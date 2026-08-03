@@ -300,6 +300,28 @@ mod tests {
     }
 
     #[test]
+    fn photographic_positive_endpoint_matches_darktable_5_6_c_reference() {
+        let c = coefficients(SigmoidParams {
+            contrast: 3.0,
+            ..SigmoidParams::default()
+        });
+        let expected = [
+            (c.white_target, 1.0),
+            (c.black_target, 0.000_152),
+            (c.paper_exposure, -4.738_282_7),
+            (c.film_fog, 0.017_425_638),
+            (c.film_power, 2.981_818_2),
+            (c.paper_power, 1.0),
+        ];
+        for (actual, reference) in expected {
+            assert!(
+                (actual - reference).abs() < 6e-6,
+                "darktable contrast-3 coefficient mismatch: {actual} != {reference}"
+            );
+        }
+    }
+
+    #[test]
     fn default_curve_pins_middle_grey_and_targets() {
         let c = coefficients(SigmoidParams::default());
         let black = generalized_loglogistic_sigmoid(
