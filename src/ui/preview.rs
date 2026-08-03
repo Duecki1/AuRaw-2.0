@@ -22,6 +22,10 @@ fn physical_pixels_per_point(ctx: &egui::Context) -> f32 {
         .max(0.1)
 }
 
+fn white_balance_picker_owns_canvas(sidebar_tab: SidebarTab, picker_active: bool) -> bool {
+    sidebar_tab == SidebarTab::Adjustments && picker_active
+}
+
 pub struct Preview;
 
 impl Preview {
@@ -118,9 +122,13 @@ impl Preview {
         if interaction_rect.width() <= 0.0 || interaction_rect.height() <= 0.0 {
             interaction_rect = outer_rect;
         }
-        let white_balance_canvas = app.sidebar_tab == SidebarTab::Adjustments
-            && app.adjustment_section == crate::app::AdjustmentSection::Color
-            && app.white_balance_picker_active;
+        // Desktop shows every adjustment category as an accordion, so its
+        // `adjustment_section` retains the mobile navigation selection and is
+        // not evidence that the Color accordion is closed. Once the eyedropper
+        // is armed it owns the Adjustments preview regardless of that mobile-
+        // only section state.
+        let white_balance_canvas =
+            white_balance_picker_owns_canvas(app.sidebar_tab, app.white_balance_picker_active);
         if !white_balance_canvas {
             app.white_balance_picker_drag = None;
         }
@@ -4230,4 +4238,22 @@ fn normalized_to_screen(rect: Rect, point: [f32; 2]) -> Pos2 {
         rect.left() + point[0] * rect.width(),
         rect.top() + point[1] * rect.height(),
     )
+}
+
+#[cfg(test)]
+mod white_balance_picker_tests {
+    use super::*;
+
+    #[test]
+    fn armed_picker_owns_the_adjustments_canvas_without_mobile_section_state() {
+        assert!(white_balance_picker_owns_canvas(
+            SidebarTab::Adjustments,
+            true
+        ));
+        assert!(!white_balance_picker_owns_canvas(
+            SidebarTab::Adjustments,
+            false
+        ));
+        assert!(!white_balance_picker_owns_canvas(SidebarTab::Crop, true));
+    }
 }
