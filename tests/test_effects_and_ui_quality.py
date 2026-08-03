@@ -110,10 +110,10 @@ def test_expert_mode_is_disabled_by_default_and_gates_advanced_controls() -> Non
     assert 'ui.checkbox(&mut app.expert_mode, "Expert mode")' in SETTINGS
     assert "if !app.expert_mode" in SETTINGS
     assert "if app.expert_mode" in SIDEBAR
-    gated = re.search(r"if app\.expert_mode \{(.+?)\n        \}", SIDEBAR, re.DOTALL)
-    assert gated is not None
-    assert "show_rendering" in gated.group(1)
-    assert "show_raw" in gated.group(1)
+    assert "AdjustmentSection::AdvancedRendering if app.expert_mode" in SIDEBAR
+    assert "AdjustmentSection::Raw if app.expert_mode" in SIDEBAR
+    assert "Self::show_rendering" in SIDEBAR
+    assert "Self::show_raw" in SIDEBAR
 
 
 def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
@@ -152,7 +152,8 @@ def test_every_exposed_slider_is_connected_to_gpu_processing() -> None:
     assert "&mut exposure.tint" in SIDEBAR
     for ui_field in ("exposure.temperature", "exposure.tint"):
         assert f"{ui_field}.clamp" in compact_gpu, ui_field
-    assert "raw.adjusted_camera_transform(" in GPU
+    assert "adjusted_white_balance_and_camera_transform(" in GPU
+    assert "wb: white_balance" in GPU
     assert "cam_to_working(camera_rgb)" in ALL_SHADERS
 
     # Color Mixer arrays, advanced rendering, and RAW expert controls.
@@ -198,7 +199,7 @@ def test_presence_and_color_controls_use_perceptual_bounded_mappings() -> None:
 def test_global_temperature_is_presented_as_metadata_aware_kelvin() -> None:
     assert "MIN_TEMPERATURE_KELVIN: f32 = 1_901.0" in BASIC
     assert "MAX_TEMPERATURE_KELVIN: f32 = 25_000.0" in BASIC
-    assert "temperature_kelvin_from_offset" in SIDEBAR
+    assert "white_balance_temperature_tint" in SIDEBAR
     assert "temperature_offset_from_kelvin" in SIDEBAR
     assert '"Temperature (K)"' in SIDEBAR
     assert "GLOBAL_TEMPERATURE_LIMIT" in GPU

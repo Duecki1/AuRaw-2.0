@@ -778,16 +778,24 @@ fn global_wb_changes_camera_transform_for_dng_metadata() {
             &crate::pipeline::MaskStack::default(),
             &raw,
         );
+        let wb = [
+            params.wb[0],
+            0.5 * (params.wb[1] + params.wb[3]),
+            params.wb[2],
+        ];
         [
-            params.cam_to_srgb_0[..3].iter().sum::<f32>(),
-            params.cam_to_srgb_1[..3].iter().sum::<f32>(),
-            params.cam_to_srgb_2[..3].iter().sum::<f32>(),
+            params.cam_to_srgb_0,
+            params.cam_to_srgb_1,
+            params.cam_to_srgb_2,
         ]
+        .map(|row| (0..3).map(|column| row[column] * wb[column]).sum::<f32>())
     };
-    let green = tint_rendition(-20.0);
-    let magenta = tint_rendition(20.0);
+    let lower_tint = tint_rendition(-20.0);
+    let higher_tint = tint_rendition(20.0);
     let magenta_axis = |rgb: [f32; 3]| (rgb[0] + rgb[2]) * 0.5 - rgb[1];
-    assert!(magenta_axis(magenta) > magenta_axis(green));
+    // darktable's control is an absolute Y divisor: larger displayed values
+    // move toward green, while smaller displayed values move toward magenta.
+    assert!(magenta_axis(higher_tint) < magenta_axis(lower_tint));
 }
 
 #[derive(Clone, Copy)]

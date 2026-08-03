@@ -177,6 +177,10 @@ impl Sidebar {
                             .clicked()
                             {
                                 app.adjustment_section = section;
+                                if section != AdjustmentSection::Color {
+                                    app.white_balance_picker_active = false;
+                                    app.white_balance_picker_drag = None;
+                                }
                             }
                         }
                         if app.expert_mode {
@@ -200,6 +204,8 @@ impl Sidebar {
                                 .clicked()
                                 {
                                     app.adjustment_section = section;
+                                    app.white_balance_picker_active = false;
+                                    app.white_balance_picker_drag = None;
                                 }
                             }
                         }
@@ -391,6 +397,10 @@ impl Sidebar {
             app.straighten_tool_active = false;
             app.straighten_drag = None;
         }
+        if app.sidebar_tab != SidebarTab::Adjustments {
+            app.white_balance_picker_active = false;
+            app.white_balance_picker_drag = None;
+        }
     }
 
     fn show_adjustments(
@@ -438,10 +448,7 @@ impl Sidebar {
         let mut changed = false;
         let mut lens_changed = false;
         let mut ai_denoise_request = None;
-        let as_shot_temperature = app
-            .original_raw
-            .as_ref()
-            .and_then(|raw| raw.as_shot_temperature_kelvin());
+        let white_balance_raw = app.loaded_raw.clone();
         if layout == ScreenLayout::Vertical {
             match app.adjustment_section {
                 AdjustmentSection::Light => {
@@ -456,7 +463,13 @@ impl Sidebar {
                     );
                 }
                 AdjustmentSection::Color => {
-                    changed |= Self::show_color(ui, &mut app.exposure, as_shot_temperature, false);
+                    changed |= Self::show_color(
+                        ui,
+                        &mut app.exposure,
+                        white_balance_raw.as_deref(),
+                        &mut app.white_balance_picker_active,
+                        false,
+                    );
                 }
                 AdjustmentSection::ColorGrading => {
                     changed |= Self::show_color_grading(
@@ -492,7 +505,13 @@ impl Sidebar {
         } else {
             changed |= Self::show_basic(ui, &mut app.exposure, true);
             changed |= Self::show_tone_curve(ui, &mut app.exposure, &mut app.tone_curve_tab, true);
-            changed |= Self::show_color(ui, &mut app.exposure, as_shot_temperature, true);
+            changed |= Self::show_color(
+                ui,
+                &mut app.exposure,
+                white_balance_raw.as_deref(),
+                &mut app.white_balance_picker_active,
+                true,
+            );
             changed |= Self::show_color_grading(
                 ui,
                 &mut app.exposure.color_grading,

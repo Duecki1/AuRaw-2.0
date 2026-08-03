@@ -781,6 +781,9 @@ pub struct AurawApp {
     pub(crate) crop_drag: Option<CropDragState>,
     pub(crate) straighten_tool_active: bool,
     pub(crate) straighten_drag: Option<StraightenDragState>,
+    pub(crate) white_balance_picker_active: bool,
+    /// Native-source UV start/current corners while the neutral-area picker is dragged.
+    pub(crate) white_balance_picker_drag: Option<[[f32; 2]; 2]>,
     pub(crate) geometry_revision: u64,
     pub adjustment_section: AdjustmentSection,
     pub mask_section: MaskSection,

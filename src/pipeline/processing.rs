@@ -20,19 +20,19 @@ impl ProcessingStage {
     }
 }
 
-/// Returns the earliest affected stage. RAW-space controls invalidate the
-/// cached demosaic result and every downstream stage. Global white balance
-/// invalidates tone analysis because it changes scene-working luminance;
-/// ordinary Develop controls only invalidate the final render.
+/// Returns the earliest affected stage. RAW-space controls, including global
+/// white balance, invalidate the cached demosaic result and every downstream
+/// stage. Ordinary Develop controls only invalidate the final render.
 pub fn affected_stage(before: &ExposureParams, after: &ExposureParams) -> Option<ProcessingStage> {
     if before == after {
         return None;
     }
 
-    if raw_controls_changed(before, after) {
+    if raw_controls_changed(before, after)
+        || before.temperature != after.temperature
+        || before.tint != after.tint
+    {
         Some(ProcessingStage::Raw)
-    } else if before.temperature != after.temperature || before.tint != after.tint {
-        Some(ProcessingStage::Tone)
     } else {
         Some(ProcessingStage::Output)
     }
@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn global_wb_invalidates_tone_analysis_and_output() {
+    fn global_wb_invalidates_raw_reconstruction_and_downstream_stages() {
         let before = ExposureParams::default();
         for after in [
             ExposureParams {
@@ -1018,7 +1018,7 @@ mod tests {
                 ..before
             },
         ] {
-            assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Tone));
+            assert_eq!(affected_stage(&before, &after), Some(ProcessingStage::Raw));
         }
     }
 

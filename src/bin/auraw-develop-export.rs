@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use auraw::pipeline::{
     crop_raw, export_mask_atlas_edge, load_raw_file, load_raw_file_with_dcp,
     spawn_tiled_png_export, DenoiseQuality, ExportEvent, ExportMetadata, ExportSettings,
-    ExposureParams, GeometryTransform, MaskStack, TileSpec,
+    ExposureParams, GeometryTransform, MaskStack, TileSpec, GLOBAL_TINT_OFFSET_LIMIT,
 };
 use eframe::wgpu;
 use std::env;
@@ -261,7 +261,7 @@ fn set_adjustment(exposure: &mut ExposureParams, name: &str, value: f32) -> Resu
         "vibrance" => exposure.vibrance = value.clamp(-100.0, 100.0),
         "saturation" => exposure.saturation = value.clamp(-100.0, 100.0),
         "temperature" => exposure.temperature = value.clamp(-500.0, 500.0),
-        "tint" => exposure.tint = value.clamp(-100.0, 100.0),
+        "tint" => exposure.tint = value.clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
         "luminance_denoise" => exposure.luminance_denoise = value.clamp(0.0, 100.0),
         "color_denoise" => exposure.chroma_denoise = value.clamp(0.0, 100.0) / 100.0,
         "denoise_detail" => exposure.denoise_detail = value.clamp(0.0, 100.0),
