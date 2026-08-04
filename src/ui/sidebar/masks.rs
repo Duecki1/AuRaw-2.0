@@ -1502,6 +1502,10 @@ impl Sidebar {
                 MaskGeometry::Brush {
                     size,
                     feather,
+                    opacity_enabled,
+                    opacity,
+                    overlap_enabled,
+                    stroke_starts,
                     dabs,
                 } => {
                     ui.horizontal(|ui| {
@@ -1526,6 +1530,36 @@ impl Sidebar {
                         0.01,
                         Some("Softness from the brush core to its edge."),
                     );
+                    ui.horizontal(|ui| {
+                        geometry_changed |= ui
+                            .checkbox(opacity_enabled, "Opacity")
+                            .on_hover_text(
+                                "Use the opacity setting for newly drawn brush and eraser strokes. \
+                                 Disabled strokes always use 100% opacity.",
+                            )
+                            .changed();
+                        geometry_changed |= ui
+                            .checkbox(overlap_enabled, "Overlapping")
+                            .on_hover_text(
+                                "Allow separate brush strokes to build opacity where they overlap. \
+                                 For example, 10% over 10% produces about 19% coverage.",
+                            )
+                            .changed();
+                    });
+                    ui.add_enabled_ui(*opacity_enabled, |ui| {
+                        geometry_changed |= adjustment_slider(
+                            ui,
+                            "Stroke opacity",
+                            opacity,
+                            0.0..=1.0,
+                            2,
+                            0.01,
+                            Some(
+                                "Controls only newly drawn brush and eraser strokes. Existing \
+                                 strokes and the whole-mask opacity are unchanged.",
+                            ),
+                        );
+                    });
                     if crate::ui::icons::phosphor_icon_button(
                         ui,
                         egui_phosphor::regular::ERASER,
@@ -1535,6 +1569,7 @@ impl Sidebar {
                     .clicked()
                     {
                         dabs.clear();
+                        stroke_starts.clear();
                         geometry_changed = true;
                     }
                     ui.small(format!("{} brush dabs", dabs.len()));

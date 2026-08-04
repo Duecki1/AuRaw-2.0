@@ -121,6 +121,21 @@ impl BrushMode {
             Self::Erase => "Eraser",
         }
     }
+
+    /// Returns the signed opacity captured by a newly emitted brush dab.
+    /// Positive values paint and negative values erase. Keeping this value on
+    /// each dab means later tool-setting changes never alter existing strokes.
+    pub fn dab_opacity(self, opacity_enabled: bool, opacity: f32) -> f32 {
+        let magnitude = if opacity_enabled {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        match self {
+            Self::Paint => magnitude,
+            Self::Erase => -magnitude,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -593,6 +608,20 @@ pub enum MaskGeometry {
         /// Radius as a fraction of the image's shorter edge.
         size: f32,
         feather: f32,
+        /// Whether newly drawn brush and eraser strokes use `opacity`.
+        /// Legacy sidecars default to full-strength strokes.
+        #[serde(default)]
+        opacity_enabled: bool,
+        #[serde(default = "default_brush_opacity")]
+        opacity: f32,
+        /// Whether separate recorded strokes build coverage where they overlap.
+        #[serde(default = "default_brush_overlap_enabled")]
+        overlap_enabled: bool,
+        /// Dab indexes that begin strokes recorded by overlap-aware versions.
+        /// Dabs before the first index are a legacy prefix and keep their exact
+        /// historical compositing behavior.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stroke_starts: Vec<usize>,
         dabs: Vec<BrushDab>,
     },
     Radial {
@@ -654,6 +683,14 @@ fn default_object_brush_size() -> f32 {
     0.055
 }
 
+fn default_brush_opacity() -> f32 {
+    1.0
+}
+
+fn default_brush_overlap_enabled() -> bool {
+    true
+}
+
 fn default_object_edge_refine() -> f32 {
     0.55
 }
@@ -664,6 +701,10 @@ impl MaskGeometry {
             MaskKind::Brush => Self::Brush {
                 size: 0.055,
                 feather: 0.55,
+                opacity_enabled: false,
+                opacity: default_brush_opacity(),
+                overlap_enabled: default_brush_overlap_enabled(),
+                stroke_starts: Vec::new(),
                 dabs: Vec::new(),
             },
             MaskKind::Radial => Self::Radial {
@@ -1323,9 +1364,20 @@ fn rasterize_component(
     image_height: u32,
 ) -> Vec<f32> {
     match &component.geometry {
-        MaskGeometry::Brush { dabs, .. } => {
-            rasterize_brush(width, height, image_width, image_height, dabs)
-        }
+        MaskGeometry::Brush {
+            overlap_enabled,
+            stroke_starts,
+            dabs,
+            ..
+        } => rasterize_recorded_brush(
+            width,
+            height,
+            image_width,
+            image_height,
+            dabs,
+            *overlap_enabled,
+            stroke_starts,
+        ),
         MaskGeometry::Radial {
             center,
             radius,
@@ -1795,40 +1847,7 @@ fn rasterize_brush(
         return vec![0.0; width as usize * height as usize];
     }
 
-    let image_min = image_width.min(image_height).max(1) as f32;
-    let mut specs = Vec::with_capacity(dabs.len());
-    for dab in dabs {
-        let radius_image = dab.size.clamp(f32::EPSILON, 0.5) * image_min;
-        let radius_x = radius_image * width as f32 / image_width.max(1) as f32;
-        let radius_y = radius_image * height as f32 / image_height.max(1) as f32;
-        let bbox_x = radius_x.ceil().max(1.0) as i32 + 1;
-        let bbox_y = radius_y.ceil().max(1.0) as i32 + 1;
-        let feather = dab.feather.clamp(0.0, 1.0);
-        // UV coordinates describe continuous image space; texel samples live
-        // at x + 0.5/y + 0.5. Keeping the center in continuous texel space
-        // makes even-sized atlases symmetric around a centered brush dab.
-        let center_x = dab.center[0] * width as f32;
-        let center_y = dab.center[1] * height as f32;
-        let min_x = (center_x.floor() as i32 - bbox_x).max(0);
-        let max_x = (center_x.ceil() as i32 + bbox_x).min(width as i32 - 1);
-        let min_y = (center_y.floor() as i32 - bbox_y).max(0);
-        let max_y = (center_y.ceil() as i32 + bbox_y).min(height as i32 - 1);
-        let antialias = (1.0 / radius_x.max(radius_y).max(1.0)).clamp(0.002, 0.25);
-        let inner = (1.0 - feather).clamp(0.0, 1.0 - antialias);
-        specs.push(BrushRasterSpec {
-            opacity: dab.opacity,
-            center_x,
-            center_y,
-            radius_x,
-            radius_y,
-            min_x,
-            max_x,
-            min_y,
-            max_y,
-            antialias,
-            inner,
-        });
-    }
+    let specs = brush_raster_specs(width, height, image_width, image_height, dabs);
 
     // Each row band is independent, so the expensive full-resolution atlas can
     // use all CPU cores while preserving the exact original dab order inside
@@ -1867,6 +1886,196 @@ fn rasterize_brush(
                             band[index] *= 1.0 - coverage * (-spec.opacity).clamp(0.0, 1.0);
                         }
                     }
+                }
+            }
+        });
+    out
+}
+
+fn brush_raster_specs(
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+    dabs: &[BrushDab],
+) -> Vec<BrushRasterSpec> {
+    let image_min = image_width.min(image_height).max(1) as f32;
+    let mut specs = Vec::with_capacity(dabs.len());
+    for dab in dabs {
+        let radius_image = dab.size.clamp(f32::EPSILON, 0.5) * image_min;
+        let radius_x = radius_image * width as f32 / image_width.max(1) as f32;
+        let radius_y = radius_image * height as f32 / image_height.max(1) as f32;
+        let bbox_x = radius_x.ceil().max(1.0) as i32 + 1;
+        let bbox_y = radius_y.ceil().max(1.0) as i32 + 1;
+        let feather = dab.feather.clamp(0.0, 1.0);
+        // UV coordinates describe continuous image space; texel samples live
+        // at x + 0.5/y + 0.5. Keeping the center in continuous texel space
+        // makes even-sized atlases symmetric around a centered brush dab.
+        let center_x = dab.center[0] * width as f32;
+        let center_y = dab.center[1] * height as f32;
+        let min_x = (center_x.floor() as i32 - bbox_x).max(0);
+        let max_x = (center_x.ceil() as i32 + bbox_x).min(width as i32 - 1);
+        let min_y = (center_y.floor() as i32 - bbox_y).max(0);
+        let max_y = (center_y.ceil() as i32 + bbox_y).min(height as i32 - 1);
+        let antialias = (1.0 / radius_x.max(radius_y).max(1.0)).clamp(0.002, 0.25);
+        let inner = (1.0 - feather).clamp(0.0, 1.0 - antialias);
+        specs.push(BrushRasterSpec {
+            opacity: dab.opacity,
+            center_x,
+            center_y,
+            radius_x,
+            radius_y,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            antialias,
+            inner,
+        });
+    }
+    specs
+}
+
+#[derive(Clone, Copy)]
+struct BrushStrokeGroup {
+    start: usize,
+    end: usize,
+    positive: bool,
+}
+
+fn recorded_brush_groups(
+    dabs: &[BrushDab],
+    stroke_starts: &[usize],
+) -> (usize, Vec<BrushStrokeGroup>) {
+    let mut starts = stroke_starts
+        .iter()
+        .copied()
+        .filter(|&start| start < dabs.len())
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    let Some(&legacy_end) = starts.first() else {
+        return (dabs.len(), Vec::new());
+    };
+
+    let mut groups = Vec::with_capacity(starts.len());
+    for (stroke_index, &stroke_start) in starts.iter().enumerate() {
+        let stroke_end = starts.get(stroke_index + 1).copied().unwrap_or(dabs.len());
+        let mut group_start = stroke_start;
+        let mut positive = dabs[group_start].opacity >= 0.0;
+        for dab_index in stroke_start + 1..stroke_end {
+            let next_positive = dabs[dab_index].opacity >= 0.0;
+            if next_positive != positive {
+                groups.push(BrushStrokeGroup {
+                    start: group_start - legacy_end,
+                    end: dab_index - legacy_end,
+                    positive,
+                });
+                group_start = dab_index;
+                positive = next_positive;
+            }
+        }
+        groups.push(BrushStrokeGroup {
+            start: group_start - legacy_end,
+            end: stroke_end - legacy_end,
+            positive,
+        });
+    }
+    (legacy_end, groups)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_recorded_brush(
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+    dabs: &[BrushDab],
+    overlap_enabled: bool,
+    stroke_starts: &[usize],
+) -> Vec<f32> {
+    if width == 0 || height == 0 || dabs.is_empty() {
+        return vec![0.0; width as usize * height as usize];
+    }
+
+    let (legacy_end, groups) = recorded_brush_groups(dabs, stroke_starts);
+    if groups.is_empty() {
+        // Sidecars created before stroke boundaries were recorded retain the
+        // exact historical per-dab compositing behavior.
+        return rasterize_brush(width, height, image_width, image_height, dabs);
+    }
+
+    let mut out = rasterize_brush(
+        width,
+        height,
+        image_width,
+        image_height,
+        &dabs[..legacy_end],
+    );
+    let specs = brush_raster_specs(
+        width,
+        height,
+        image_width,
+        image_height,
+        &dabs[legacy_end..],
+    );
+
+    // Collapse overlapping dabs within one pointer stroke to a single coverage
+    // field. Separate strokes can then alpha-build without a slow continuous
+    // stroke becoming opaque merely because its regularly spaced dabs overlap.
+    const ROW_BAND_HEIGHT: usize = 64;
+    let row_stride = width as usize;
+    out.par_chunks_mut(row_stride * ROW_BAND_HEIGHT)
+        .enumerate()
+        .for_each(|(band_index, band)| {
+            let band_start_y = band_index * ROW_BAND_HEIGHT;
+            let band_height = band.len() / row_stride;
+            let band_end_y = band_start_y + band_height - 1;
+            let mut stroke_coverage = vec![0.0f32; band.len()];
+            let mut touched = Vec::new();
+
+            for group in &groups {
+                for spec in &specs[group.start..group.end] {
+                    if spec.max_y < band_start_y as i32 || spec.min_y > band_end_y as i32 {
+                        continue;
+                    }
+                    let min_y = spec.min_y.max(band_start_y as i32);
+                    let max_y = spec.max_y.min(band_end_y as i32);
+                    for y in min_y..=max_y {
+                        let dy = (y as f32 + 0.5 - spec.center_y) / spec.radius_y.max(0.5);
+                        let row_offset = (y as usize - band_start_y) * row_stride;
+                        for x in spec.min_x..=spec.max_x {
+                            let dx = (x as f32 + 0.5 - spec.center_x) / spec.radius_x.max(0.5);
+                            let distance = (dx * dx + dy * dy).sqrt();
+                            if distance >= 1.0 + spec.antialias {
+                                continue;
+                            }
+                            let coverage =
+                                1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
+                            let alpha = coverage * spec.opacity.abs().clamp(0.0, 1.0);
+                            let index = row_offset + x as usize;
+                            if alpha > stroke_coverage[index] {
+                                if stroke_coverage[index] == 0.0 {
+                                    touched.push(index);
+                                }
+                                stroke_coverage[index] = alpha;
+                            }
+                        }
+                    }
+                }
+
+                for index in touched.drain(..) {
+                    let alpha = stroke_coverage[index];
+                    if group.positive {
+                        band[index] = if overlap_enabled {
+                            band[index] + alpha * (1.0 - band[index])
+                        } else {
+                            band[index].max(alpha)
+                        };
+                    } else {
+                        band[index] *= 1.0 - alpha;
+                    }
+                    stroke_coverage[index] = 0.0;
                 }
             }
         });
@@ -1985,6 +2194,94 @@ mod tests {
             stack.selected_component().unwrap().geometry,
             MaskGeometry::Brush { .. }
         ));
+    }
+
+    #[test]
+    fn brush_opacity_is_captured_only_when_enabled_for_paint_and_erase() {
+        assert_eq!(BrushMode::Paint.dab_opacity(false, 0.25), 1.0);
+        assert_eq!(BrushMode::Erase.dab_opacity(false, 0.25), -1.0);
+        assert_eq!(BrushMode::Paint.dab_opacity(true, 0.25), 0.25);
+        assert_eq!(BrushMode::Erase.dab_opacity(true, 0.25), -0.25);
+    }
+
+    #[test]
+    fn legacy_brush_geometry_defaults_to_full_strength_opacity() {
+        let geometry: MaskGeometry =
+            serde_json::from_str(r#"{"Brush":{"size":0.055,"feather":0.55,"dabs":[]}}"#).unwrap();
+        let MaskGeometry::Brush {
+            opacity_enabled,
+            opacity,
+            overlap_enabled,
+            stroke_starts,
+            ..
+        } = geometry
+        else {
+            panic!("legacy brush JSON must decode as brush geometry");
+        };
+        assert!(!opacity_enabled);
+        assert_eq!(opacity, 1.0);
+        assert!(overlap_enabled);
+        assert!(stroke_starts.is_empty());
+    }
+
+    #[test]
+    fn overlap_builds_between_strokes_but_not_between_dabs_in_one_stroke() {
+        let dabs = [
+            BrushDab {
+                center: [0.5, 0.5],
+                opacity: 0.1,
+                size: 0.2,
+                feather: 0.2,
+            },
+            BrushDab {
+                center: [0.5, 0.5],
+                opacity: 0.1,
+                size: 0.2,
+                feather: 0.2,
+            },
+        ];
+        let center = 16 * 32 + 16;
+
+        let one_stroke = rasterize_recorded_brush(32, 32, 100, 100, &dabs, true, &[0]);
+        assert!((one_stroke[center] - 0.1).abs() < 0.01);
+
+        let overlapping_strokes = rasterize_recorded_brush(32, 32, 100, 100, &dabs, true, &[0, 1]);
+        assert!((overlapping_strokes[center] - 0.19).abs() < 0.01);
+
+        let overlap_disabled = rasterize_recorded_brush(32, 32, 100, 100, &dabs, false, &[0, 1]);
+        assert!((overlap_disabled[center] - 0.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn eraser_opacity_builds_between_strokes_not_between_dabs() {
+        let dabs = [
+            BrushDab {
+                center: [0.5, 0.5],
+                opacity: 1.0,
+                size: 0.2,
+                feather: 0.2,
+            },
+            BrushDab {
+                center: [0.5, 0.5],
+                opacity: -0.1,
+                size: 0.2,
+                feather: 0.2,
+            },
+            BrushDab {
+                center: [0.5, 0.5],
+                opacity: -0.1,
+                size: 0.2,
+                feather: 0.2,
+            },
+        ];
+        let center = 16 * 32 + 16;
+
+        let one_eraser_stroke = rasterize_recorded_brush(32, 32, 100, 100, &dabs, true, &[0, 1]);
+        assert!((one_eraser_stroke[center] - 0.9).abs() < 0.01);
+
+        let two_eraser_strokes =
+            rasterize_recorded_brush(32, 32, 100, 100, &dabs, true, &[0, 1, 2]);
+        assert!((two_eraser_strokes[center] - 0.81).abs() < 0.01);
     }
 
     #[test]
@@ -2203,6 +2500,39 @@ mod tests {
         let layer = stack.rasterize_layer(0, 64, 64, 100, 100);
         assert!(layer[32 * 64 + 32] < 8);
         assert!(layer[32 * 64 + 40] > 200);
+    }
+
+    #[test]
+    fn partial_brush_and_eraser_dabs_change_only_stored_stroke_coverage() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Brush);
+        if let MaskGeometry::Brush { dabs, .. } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            dabs.push(BrushDab {
+                center: [0.5, 0.5],
+                size: 0.25,
+                feather: 0.2,
+                opacity: 0.4,
+            });
+        }
+        let painted = stack.rasterize_layer_coverage(0, 64, 64, 100, 100);
+        assert!((painted[32 * 64 + 32] - 0.4).abs() < 0.01);
+        assert_eq!(stack.masks[0].opacity, 1.0);
+
+        if let MaskGeometry::Brush { dabs, .. } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            dabs.push(BrushDab {
+                center: [0.5, 0.5],
+                size: 0.25,
+                feather: 0.2,
+                opacity: -0.5,
+            });
+        }
+        let erased = stack.rasterize_layer_coverage(0, 64, 64, 100, 100);
+        assert!((erased[32 * 64 + 32] - 0.2).abs() < 0.01);
+        assert_eq!(stack.masks[0].opacity, 1.0);
     }
 
     #[test]
