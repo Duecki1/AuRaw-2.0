@@ -263,6 +263,7 @@ impl eframe::App for AurawApp {
         self.show_subject_dialogs(ui.ctx());
         self.show_inpainting_dialogs(ui.ctx());
         self.show_ai_denoise_dialogs(ui.ctx(), frame);
+        self.show_sidecar_save_error_dialog(ui.ctx());
         self.show_background_task_detail_windows(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
         self.observe_edit_history(ui.ctx());
