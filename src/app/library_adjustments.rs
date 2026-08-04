@@ -63,6 +63,16 @@ impl AurawApp {
                 || self.lens_correction.selected_maker != merged.lens.maker
                 || self.lens_correction.selected_model != merged.lens.model);
 
+        if masks_changed || inpainting_changed {
+            crate::sidecar::preflight_mask_change(&merged.masks, &merged.inpainting).map_err(
+                |error| {
+                    format!(
+                        "Paste was not applied because the resulting edit could not be saved: {error}"
+                    )
+                },
+            )?;
+        }
+
         if adjustments_changed {
             self.exposure = merged.exposure;
             self.exposure.sanitize_tone_curves();

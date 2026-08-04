@@ -2,19 +2,21 @@ use crate::file_ops::{replace_file, sync_parent_directory};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
-    ExposureParams, GeometryTransform, InpaintStroke, MaskGeometry, MaskKind, MaskStack,
+    ExposureParams, GeometryTransform, InpaintStroke, MaskGeometry, MaskImage, MaskKind, MaskStack,
     CURRENT_PROCESS_VERSION, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 4;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 5;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0004;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
@@ -38,6 +40,12 @@ const MAX_OBJECT_STROKE_POINTS: usize = 1_000_000;
 const MAX_INPAINT_STROKES: usize = 4096;
 const MAX_INPAINT_DABS: usize = 1_000_000;
 const MAX_MASK_IMAGE_EDGE: u32 = 8192;
+const MAX_MASK_ASSET_REFS: usize = MAX_LOCAL_MASKS * MAX_MASK_COMPONENTS;
+const MAX_DECODED_MASK_ASSET_BYTES: u64 = if cfg!(target_os = "android") {
+    256 * 1024 * 1024
+} else {
+    512 * 1024 * 1024
+};
 const MAX_EDIT_NAME_BYTES: usize = 4096;
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -295,6 +303,281 @@ struct SidecarDocument {
     schema_version: u32,
     process_version: u32,
     edits: EditState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mask_assets: Vec<SidecarMaskAsset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mask_asset_refs: Vec<SidecarMaskAssetRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+struct SidecarMaskAsset {
+    width: u32,
+    height: u32,
+    #[serde(with = "base64_arc_bytes")]
+    png: Arc<[u8]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+struct SidecarMaskAssetRef {
+    mask_index: usize,
+    component_index: usize,
+    asset_index: usize,
+}
+
+mod base64_arc_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&base64::display::Base64Display::new(
+            bytes.as_ref(),
+            &base64::engine::general_purpose::STANDARD,
+        ))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map(Arc::from)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn generated_mask(geometry: &MaskGeometry) -> Option<&Option<MaskImage>> {
+    match geometry {
+        MaskGeometry::Ai { mask, .. }
+        | MaskGeometry::Landscape { mask, .. }
+        | MaskGeometry::Object { mask, .. } => Some(mask),
+        _ => None,
+    }
+}
+
+fn generated_mask_mut(geometry: &mut MaskGeometry) -> Option<&mut Option<MaskImage>> {
+    match geometry {
+        MaskGeometry::Ai { mask, .. }
+        | MaskGeometry::Landscape { mask, .. }
+        | MaskGeometry::Object { mask, .. } => Some(mask),
+        _ => None,
+    }
+}
+
+fn mask_image_fingerprint(image: &MaskImage) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    image.width.hash(&mut hasher);
+    image.height.hash(&mut hasher);
+    image.pixels.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn encode_mask_png(image: &MaskImage) -> Result<Arc<[u8]>, SidecarError> {
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, image.width, image.height);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Balanced);
+        let mut writer = encoder.write_header().map_err(|error| {
+            SidecarError::Invalid(format!("could not start mask PNG compression: {error}"))
+        })?;
+        writer.write_image_data(&image.pixels).map_err(|error| {
+            SidecarError::Invalid(format!("could not compress generated mask: {error}"))
+        })?;
+    }
+    Ok(encoded.into())
+}
+
+fn extract_mask_assets(
+    edits: &mut EditState,
+) -> Result<(Vec<SidecarMaskAsset>, Vec<SidecarMaskAssetRef>), SidecarError> {
+    let mut assets = Vec::<SidecarMaskAsset>::new();
+    let mut unique_images = Vec::<MaskImage>::new();
+    let mut buckets = HashMap::<u64, Vec<usize>>::new();
+    let mut references = Vec::new();
+    let mut decoded_asset_bytes = 0u64;
+    let mut encoded_asset_bytes = 0u64;
+
+    for (mask_index, mask) in Arc::make_mut(&mut edits.masks).masks.iter_mut().enumerate() {
+        for (component_index, component) in mask.components.iter_mut().enumerate() {
+            let Some(image) = generated_mask_mut(&mut component.geometry).and_then(Option::take)
+            else {
+                continue;
+            };
+            let fingerprint = mask_image_fingerprint(&image);
+            let existing = buckets.get(&fingerprint).and_then(|candidates| {
+                candidates
+                    .iter()
+                    .copied()
+                    .find(|index| unique_images[*index] == image)
+            });
+            let asset_index = if let Some(index) = existing {
+                index
+            } else {
+                let pixels = u64::try_from(image.pixels.len())
+                    .map_err(|_| SidecarError::TooLarge(u64::MAX))?;
+                decoded_asset_bytes = decoded_asset_bytes
+                    .checked_add(pixels)
+                    .ok_or(SidecarError::TooLarge(u64::MAX))?;
+                if decoded_asset_bytes > MAX_DECODED_MASK_ASSET_BYTES {
+                    return invalid("generated masks exceed the decoded asset memory safety limit");
+                }
+                let png = encode_mask_png(&image)?;
+                encoded_asset_bytes = encoded_asset_bytes
+                    .checked_add(base64_json_string_bytes(png.len())?)
+                    .ok_or(SidecarError::TooLarge(u64::MAX))?;
+                if encoded_asset_bytes > MAX_SIDECAR_BYTES {
+                    return Err(SidecarError::TooLarge(encoded_asset_bytes));
+                }
+                let index = assets.len();
+                assets.push(SidecarMaskAsset {
+                    width: image.width,
+                    height: image.height,
+                    png,
+                });
+                unique_images.push(image);
+                buckets.entry(fingerprint).or_default().push(index);
+                index
+            };
+            references.push(SidecarMaskAssetRef {
+                mask_index,
+                component_index,
+                asset_index,
+            });
+            if references.len() > MAX_MASK_ASSET_REFS {
+                return invalid("edit contains too many generated mask references");
+            }
+        }
+    }
+
+    Ok((assets, references))
+}
+
+fn decode_mask_png(asset: &SidecarMaskAsset) -> Result<MaskImage, SidecarError> {
+    let decoder = png::Decoder::new(Cursor::new(asset.png.as_ref()));
+    let mut reader = decoder.read_info().map_err(|error| {
+        SidecarError::Invalid(format!("could not read compressed mask PNG: {error}"))
+    })?;
+    let info = reader.info();
+    if info.width != asset.width
+        || info.height != asset.height
+        || info.color_type != png::ColorType::Grayscale
+        || info.bit_depth != png::BitDepth::Eight
+        || info.animation_control.is_some()
+    {
+        return invalid("compressed mask PNG metadata does not match its asset");
+    }
+
+    let expected = usize::try_from(asset.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(asset.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(SidecarError::TooLarge(u64::MAX))?;
+    let output_size = reader
+        .output_buffer_size()
+        .ok_or(SidecarError::TooLarge(u64::MAX))?;
+    if output_size != expected {
+        return invalid("compressed mask PNG does not contain one grayscale byte per pixel");
+    }
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(expected)
+        .map_err(|_| SidecarError::TooLarge(expected as u64))?;
+    pixels.resize(expected, 0);
+    let output = reader.next_frame(&mut pixels).map_err(|error| {
+        SidecarError::Invalid(format!("could not decompress generated mask: {error}"))
+    })?;
+    if output.width != asset.width
+        || output.height != asset.height
+        || output.color_type != png::ColorType::Grayscale
+        || output.bit_depth != png::BitDepth::Eight
+        || output.buffer_size() != expected
+    {
+        return invalid("decompressed mask PNG dimensions or format are invalid");
+    }
+    MaskImage::new(asset.width, asset.height, pixels)
+        .ok_or_else(|| SidecarError::Invalid("decompressed mask pixels are invalid".to_owned()))
+}
+
+fn restore_mask_assets(
+    edits: &mut EditState,
+    assets: &[SidecarMaskAsset],
+    references: &[SidecarMaskAssetRef],
+) -> Result<(), SidecarError> {
+    if assets.len() > MAX_MASK_ASSET_REFS || references.len() > MAX_MASK_ASSET_REFS {
+        return invalid("sidecar contains too many generated mask assets");
+    }
+
+    for mask in &edits.masks.masks {
+        for component in &mask.components {
+            if generated_mask(&component.geometry).is_some_and(Option::is_some) {
+                return invalid("current sidecar schema contains a legacy inline generated mask");
+            }
+        }
+    }
+
+    let mut decoded_bytes = 0u64;
+    for asset in assets {
+        let pixels = u64::from(asset.width)
+            .checked_mul(u64::from(asset.height))
+            .ok_or(SidecarError::TooLarge(u64::MAX))?;
+        let pixels_usize = usize::try_from(pixels).map_err(|_| SidecarError::TooLarge(pixels))?;
+        validate_image(asset.width, asset.height, pixels_usize, 1)?;
+        decoded_bytes = decoded_bytes
+            .checked_add(pixels)
+            .ok_or(SidecarError::TooLarge(u64::MAX))?;
+        if decoded_bytes > MAX_DECODED_MASK_ASSET_BYTES {
+            return invalid("compressed mask assets exceed the decoded memory safety limit");
+        }
+    }
+
+    let mut locations = HashSet::new();
+    let mut referenced_assets = vec![false; assets.len()];
+    for reference in references {
+        let Some(asset_referenced) = referenced_assets.get_mut(reference.asset_index) else {
+            return invalid("generated mask reference uses an invalid asset index");
+        };
+        let Some(component) = edits
+            .masks
+            .masks
+            .get(reference.mask_index)
+            .and_then(|mask| mask.components.get(reference.component_index))
+        else {
+            return invalid("generated mask reference uses an invalid component index");
+        };
+        if generated_mask(&component.geometry).is_none() {
+            return invalid("generated mask reference targets an incompatible component");
+        }
+        if !locations.insert((reference.mask_index, reference.component_index)) {
+            return invalid("sidecar contains duplicate references for a generated mask");
+        }
+        *asset_referenced = true;
+    }
+    if referenced_assets.iter().any(|referenced| !referenced) {
+        return invalid("sidecar contains an unreferenced generated mask asset");
+    }
+
+    let decoded = assets
+        .iter()
+        .map(decode_mask_png)
+        .collect::<Result<Vec<_>, _>>()?;
+    let masks = &mut Arc::make_mut(&mut edits.masks).masks;
+    for reference in references {
+        let component = &mut masks[reference.mask_index].components[reference.component_index];
+        let slot = generated_mask_mut(&mut component.geometry)
+            .ok_or_else(|| SidecarError::Invalid("generated mask target disappeared".to_owned()))?;
+        *slot = Some(decoded[reference.asset_index].clone());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -303,6 +586,9 @@ pub struct LoadedSidecar {
     /// True when an older supported schema or processing version was
     /// canonicalized in memory and should be rewritten on load.
     pub migrated: bool,
+    /// Storage-only schema rewrites must not opt an otherwise current edit into
+    /// processing migrations such as adaptive Detail defaults.
+    pub process_migrated: bool,
 }
 
 #[derive(Debug)]
@@ -666,7 +952,6 @@ pub fn remove_desktop_edits(raw_path: &Path) -> Result<bool, String> {
 
 pub fn encode(mut edits: EditState) -> Result<Vec<u8>, SidecarError> {
     validate_edit_state(&edits)?;
-    preflight_edit_size(&edits)?;
     if edits.exposure.process_version > CURRENT_PROCESS_VERSION {
         return Err(SidecarError::Unsupported(format!(
             "edit uses future processing version {} (this build supports {})",
@@ -675,11 +960,14 @@ pub fn encode(mut edits: EditState) -> Result<Vec<u8>, SidecarError> {
     }
     edits.exposure.migrate_to_current_process();
     validate_edit_state(&edits)?;
+    let (mask_assets, mask_asset_refs) = extract_mask_assets(&mut edits)?;
     let document = SidecarDocument {
         format: SIDECAR_FORMAT.to_owned(),
         schema_version: SIDECAR_SCHEMA_VERSION,
         process_version: edits.exposure.process_version,
         edits,
+        mask_assets,
+        mask_asset_refs,
     };
     let mut writer = CappedVec::new(MAX_SIDECAR_BYTES);
     serde_json::to_writer(&mut writer, &document).map_err(|error| {
@@ -721,8 +1009,23 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
         )));
     }
 
-    validate_edit_state(&document.edits)?;
     let original_schema = document.schema_version;
+    if original_schema == SIDECAR_SCHEMA_VERSION {
+        restore_mask_assets(
+            &mut document.edits,
+            &document.mask_assets,
+            &document.mask_asset_refs,
+        )?;
+    } else {
+        // TODO(pre-release cleanup): Remove this beta-only schema <= 4 inline-mask migration
+        // once AuRaw is published. It exists only so beta testers keep their edits and masks;
+        // `LoadedSidecar::migrated` immediately queues a schema-5 rewrite after opening the RAW.
+        if !document.mask_assets.is_empty() || !document.mask_asset_refs.is_empty() {
+            return invalid("legacy sidecar unexpectedly contains current mask assets");
+        }
+    }
+
+    validate_edit_state(&document.edits)?;
     let original_process = document.process_version;
     document.edits.exposure.migrate_to_current_process();
     let migrated_process = document.edits.exposure.process_version != original_process;
@@ -732,11 +1035,11 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     }
     validate_edit_state(&document.edits)?;
 
+    let process_migrated = original_process != CURRENT_PROCESS_VERSION || migrated_process;
     Ok(LoadedSidecar {
         edits: document.edits,
-        migrated: original_schema != SIDECAR_SCHEMA_VERSION
-            || original_process != CURRENT_PROCESS_VERSION
-            || migrated_process,
+        migrated: original_schema != SIDECAR_SCHEMA_VERSION || process_migrated,
+        process_migrated,
     })
 }
 
@@ -1212,9 +1515,9 @@ impl Write for CappedVec {
 
 /// Rejects an inpainting result before it becomes visible state when adding it
 /// would make the edit impossible to persist on the current platform. This is
-/// intentionally an allocation-free upper bound: the large raster payloads
-/// are measured from their lengths instead of being base64-encoded on the UI
-/// thread.
+/// intentionally a compression-independent upper bound: generated masks are
+/// content-deduplicated, then measured from their lengths instead of being PNG-
+/// compressed or Base64-encoded on the UI thread.
 pub(crate) fn preflight_inpaint_addition(
     masks: &MaskStack,
     existing: &[InpaintStroke],
@@ -1223,8 +1526,13 @@ pub(crate) fn preflight_inpaint_addition(
     preflight_inpaint_addition_with_limit(masks, existing, candidate, MAX_SIDECAR_BYTES)
 }
 
-fn preflight_edit_size(edits: &EditState) -> Result<(), SidecarError> {
-    let estimated = estimate_sidecar_bytes(&edits.masks, edits.inpainting.iter())?;
+/// Rejects a mask copy/duplicate before it becomes live state if even the
+/// conservative deduplicated asset bound could not fit beside current inpainting data.
+pub(crate) fn preflight_mask_change(
+    masks: &MaskStack,
+    inpainting: &[InpaintStroke],
+) -> Result<(), SidecarError> {
+    let estimated = estimate_sidecar_bytes(masks, inpainting)?;
     enforce_size_limit(estimated, MAX_SIDECAR_BYTES)
 }
 
@@ -1261,8 +1569,14 @@ fn estimate_sidecar_bytes<'a>(
     const BRUSH_DAB_HEADROOM: u64 = 256;
     const OBJECT_STROKE_HEADROOM: u64 = 128;
     const OBJECT_POINT_HEADROOM: u64 = 96;
+    // PNG adds scanline filters, chunks, and DEFLATE framing. The real schema-5
+    // encoder normally makes masks much smaller, but preflight deliberately uses
+    // a compression-independent upper bound so an accepted edit is always savable.
+    const MASK_PNG_FIXED_HEADROOM: u64 = 64 * 1024;
 
     let mut estimated = DOCUMENT_HEADROOM;
+    let mut unique_images = Vec::<&MaskImage>::new();
+    let mut image_buckets = HashMap::<u64, Vec<usize>>::new();
     for mask in &masks.masks {
         checked_add(&mut estimated, MASK_HEADROOM)?;
         checked_add(&mut estimated, escaped_json_string_bound(&mask.name)?)?;
@@ -1275,21 +1589,24 @@ fn estimate_sidecar_bytes<'a>(
                 }
                 MaskGeometry::Ai {
                     mask: Some(image), ..
-                } => checked_add(
-                    &mut estimated,
-                    base64_json_string_bytes(image.pixels.len())?,
-                )?,
-                MaskGeometry::Landscape {
+                }
+                | MaskGeometry::Landscape {
                     mask: Some(image), ..
-                } => checked_add(
+                } => add_unique_mask_asset_bound(
                     &mut estimated,
-                    base64_json_string_bytes(image.pixels.len())?,
+                    image,
+                    &mut unique_images,
+                    &mut image_buckets,
+                    MASK_PNG_FIXED_HEADROOM,
                 )?,
                 MaskGeometry::Object { mask, strokes, .. } => {
                     if let Some(image) = mask {
-                        checked_add(
+                        add_unique_mask_asset_bound(
                             &mut estimated,
-                            base64_json_string_bytes(image.pixels.len())?,
+                            image,
+                            &mut unique_images,
+                            &mut image_buckets,
+                            MASK_PNG_FIXED_HEADROOM,
                         )?;
                     }
                     checked_add_scaled(&mut estimated, strokes.len(), OBJECT_STROKE_HEADROOM)?;
@@ -1330,6 +1647,35 @@ fn estimate_sidecar_bytes<'a>(
         )?;
     }
     Ok(estimated)
+}
+
+fn add_unique_mask_asset_bound<'a>(
+    estimated: &mut u64,
+    image: &'a MaskImage,
+    unique_images: &mut Vec<&'a MaskImage>,
+    buckets: &mut HashMap<u64, Vec<usize>>,
+    fixed_headroom: u64,
+) -> Result<(), SidecarError> {
+    let fingerprint = mask_image_fingerprint(image);
+    if buckets.get(&fingerprint).is_some_and(|candidates| {
+        candidates
+            .iter()
+            .any(|index| *unique_images[*index] == *image)
+    }) {
+        return Ok(());
+    }
+
+    let index = unique_images.len();
+    unique_images.push(image);
+    buckets.entry(fingerprint).or_default().push(index);
+    let raw_bytes =
+        u64::try_from(image.pixels.len()).map_err(|_| SidecarError::TooLarge(u64::MAX))?;
+    let png_bound = raw_bytes
+        .checked_add(raw_bytes.div_ceil(64))
+        .and_then(|bytes| bytes.checked_add(fixed_headroom))
+        .ok_or(SidecarError::TooLarge(u64::MAX))?;
+    let png_bound = usize::try_from(png_bound).map_err(|_| SidecarError::TooLarge(png_bound))?;
+    checked_add(estimated, base64_json_string_bytes(png_bound)?)
 }
 
 fn checked_add(total: &mut u64, value: u64) -> Result<(), SidecarError> {
@@ -1852,6 +2198,117 @@ mod tests {
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits, edits);
         assert!(!loaded.migrated);
+        assert!(!loaded.process_migrated);
+    }
+
+    #[test]
+    fn generated_masks_are_deduplicated_compressed_and_copy_on_write_after_loading() {
+        let mut edits = sample_edits();
+        let mut masks = MaskStack::default();
+        masks.add_mask(MaskKind::Object);
+        let pixels = (0..64 * 64)
+            .map(|index| if index % 17 < 8 { 255 } else { 0 })
+            .collect::<Vec<_>>();
+        if let MaskGeometry::Object { mask, .. } = &mut masks.masks[0].components[0].geometry {
+            *mask = MaskImage::new(64, 64, pixels);
+        }
+        masks.masks.push(masks.masks[0].clone());
+        edits.masks = Arc::new(masks);
+
+        let encoded = encode(edits.clone()).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(document["schema_version"], SIDECAR_SCHEMA_VERSION);
+        assert_eq!(document["mask_assets"].as_array().unwrap().len(), 1);
+        assert_eq!(document["mask_asset_refs"].as_array().unwrap().len(), 2);
+        let compressed = document["mask_assets"][0]["png"].as_str().unwrap();
+        assert!(compressed.len() < base64_json_string_bytes(64 * 64).unwrap() as usize);
+        assert!(document
+            .pointer("/edits/masks/masks/0/components/0/geometry/Object/mask")
+            .unwrap()
+            .is_null());
+
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let mut restored = loaded.edits;
+        let restored_masks = Arc::make_mut(&mut restored.masks);
+        let [first_group, second_group, ..] = restored_masks.masks.as_mut_slice() else {
+            panic!("expected duplicated object-mask groups");
+        };
+        let MaskGeometry::Object {
+            mask: Some(first), ..
+        } = &mut first_group.components[0].geometry
+        else {
+            panic!("first object mask was not restored");
+        };
+        let MaskGeometry::Object {
+            mask: Some(second), ..
+        } = &mut second_group.components[0].geometry
+        else {
+            panic!("second object mask was not restored");
+        };
+        assert!(Arc::ptr_eq(&first.pixels, &second.pixels));
+        let unchanged = second.pixels[0];
+        Arc::make_mut(&mut first.pixels)[0] = unchanged ^ 0xff;
+        assert_eq!(second.pixels[0], unchanged);
+        assert!(!Arc::ptr_eq(&first.pixels, &second.pixels));
+    }
+
+    #[test]
+    fn beta_inline_mask_sidecar_migrates_to_asset_layout_without_losing_masks() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Subject);
+        if let MaskGeometry::Ai { mask, .. } = &mut masks.masks[1].components[0].geometry {
+            *mask = MaskImage::new(8, 8, vec![127; 8 * 8]);
+        }
+        let legacy = SidecarDocument {
+            format: SIDECAR_FORMAT.to_owned(),
+            schema_version: 4,
+            process_version: CURRENT_PROCESS_VERSION,
+            edits: edits.clone(),
+            mask_assets: Vec::new(),
+            mask_asset_refs: Vec::new(),
+        };
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+        assert!(legacy_bytes
+            .windows(b"\"pixels\"".len())
+            .any(|part| part == b"\"pixels\""));
+
+        let loaded = decode(&legacy_bytes).unwrap();
+        assert!(loaded.migrated);
+        assert!(!loaded.process_migrated);
+        assert_eq!(loaded.edits, edits);
+
+        let rewritten = encode(loaded.edits).unwrap();
+        let current: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(current["schema_version"], SIDECAR_SCHEMA_VERSION);
+        assert_eq!(current["mask_assets"].as_array().unwrap().len(), 1);
+        assert_eq!(current["mask_asset_refs"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn malformed_current_mask_assets_are_rejected() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Subject);
+        if let MaskGeometry::Ai { mask, .. } = &mut masks.masks[1].components[0].geometry {
+            *mask = MaskImage::new(8, 8, vec![255; 8 * 8]);
+        }
+        let encoded = encode(edits).unwrap();
+
+        let mut invalid_reference: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        invalid_reference["mask_asset_refs"][0]["asset_index"] = 99.into();
+        assert!(matches!(
+            decode(&serde_json::to_vec(&invalid_reference).unwrap()),
+            Err(SidecarError::Invalid(message)) if message.contains("asset index")
+        ));
+
+        let mut invalid_png: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        invalid_png["mask_assets"][0]["png"] = "AAAA".into();
+        assert!(matches!(
+            decode(&serde_json::to_vec(&invalid_png).unwrap()),
+            Err(SidecarError::Invalid(message)) if message.contains("mask PNG")
+        ));
     }
 
     #[test]
@@ -2009,6 +2466,8 @@ mod tests {
             schema_version: 1,
             process_version: CURRENT_PROCESS_VERSION,
             edits: sample_edits(),
+            mask_assets: Vec::new(),
+            mask_asset_refs: Vec::new(),
         };
         let mut value = serde_json::to_value(document).unwrap();
         value["edits"].as_object_mut().unwrap().remove("inpainting");
@@ -2031,6 +2490,8 @@ mod tests {
             schema_version: 2,
             process_version: CURRENT_PROCESS_VERSION,
             edits,
+            mask_assets: Vec::new(),
+            mask_asset_refs: Vec::new(),
         })
         .unwrap();
         let loaded = decode(&encoded).unwrap();
@@ -2047,6 +2508,8 @@ mod tests {
             schema_version: 0,
             process_version: 11,
             edits,
+            mask_assets: Vec::new(),
+            mask_asset_refs: Vec::new(),
         })
         .unwrap();
         let loaded = decode(&value).unwrap();
@@ -2055,6 +2518,7 @@ mod tests {
             CURRENT_PROCESS_VERSION
         );
         assert!(loaded.migrated);
+        assert!(loaded.process_migrated);
     }
 
     #[test]
@@ -2067,6 +2531,8 @@ mod tests {
             schema_version: SIDECAR_SCHEMA_VERSION,
             process_version: SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
             edits,
+            mask_assets: Vec::new(),
+            mask_asset_refs: Vec::new(),
         })
         .unwrap();
         let loaded = decode(&value).unwrap();
@@ -2086,6 +2552,8 @@ mod tests {
             schema_version: SIDECAR_SCHEMA_VERSION,
             process_version: LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
             edits,
+            mask_assets: Vec::new(),
+            mask_asset_refs: Vec::new(),
         })
         .unwrap();
         let loaded = decode(&value).unwrap();
@@ -2134,6 +2602,8 @@ mod tests {
             schema_version: SIDECAR_SCHEMA_VERSION + 1,
             process_version: CURRENT_PROCESS_VERSION,
             edits,
+            mask_assets: Vec::new(),
+            mask_asset_refs: Vec::new(),
         };
         assert!(matches!(
             decode(&serde_json::to_vec(&future).unwrap()),

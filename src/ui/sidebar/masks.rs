@@ -968,9 +968,17 @@ impl Sidebar {
             mask.adjustments.reset();
         }
         let insert_at = mask_index + 1;
-        app.masks.masks.insert(insert_at, mask);
-        app.masks.selected_mask = Some(insert_at);
-        app.masks.selected_component = Some(0);
+        let mut candidate = app.masks.clone();
+        candidate.masks.insert(insert_at, mask);
+        candidate.selected_mask = Some(insert_at);
+        candidate.selected_component = Some(0);
+        if let Err(error) =
+            crate::sidecar::preflight_mask_change(&candidate, &app.inpaint_strokes)
+        {
+            app.report_mask_persistence_limit("Mask-group copy", &error);
+            return false;
+        }
+        app.masks = candidate;
         app.mask_thumbnail_component_mask = None;
         app.mark_all_mask_layers_dirty();
         if let Some(kind) = app
@@ -1021,7 +1029,7 @@ impl Sidebar {
         mut component: MaskComponent,
         invert: bool,
     ) -> bool {
-        let Some(mask) = app.masks.masks.get_mut(mask_index) else {
+        let Some(mask) = app.masks.masks.get(mask_index) else {
             return false;
         };
         if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len()
@@ -1033,9 +1041,19 @@ impl Sidebar {
             component.invert = !component.invert;
         }
         let insert_at = component_index + 1;
-        mask.components.insert(insert_at, component);
-        app.masks.selected_mask = Some(mask_index);
-        app.masks.selected_component = Some(insert_at);
+        let mut candidate = app.masks.clone();
+        candidate.masks[mask_index]
+            .components
+            .insert(insert_at, component);
+        candidate.selected_mask = Some(mask_index);
+        candidate.selected_component = Some(insert_at);
+        if let Err(error) =
+            crate::sidecar::preflight_mask_change(&candidate, &app.inpaint_strokes)
+        {
+            app.report_mask_persistence_limit("Sub-mask copy", &error);
+            return false;
+        }
+        app.masks = candidate;
         app.mask_thumbnail_component_mask = None;
         app.mark_mask_geometry_dirty(mask_index);
         if let Some(kind) = app

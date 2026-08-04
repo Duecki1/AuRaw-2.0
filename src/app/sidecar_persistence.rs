@@ -19,6 +19,20 @@ fn sidecar_interaction_active(ctx: &egui::Context) -> bool {
 }
 
 impl AurawApp {
+    pub(crate) fn report_mask_persistence_limit(
+        &mut self,
+        action: &str,
+        error: &crate::sidecar::SidecarError,
+    ) {
+        let message = format!(
+            "{action} was not applied because the resulting edit could not be saved: {error}"
+        );
+        self.notice = Some(message.clone());
+        crate::diagnostics::record(&message);
+        log::warn!("{message}");
+        self.egui_ctx.request_repaint();
+    }
+
     fn report_sidecar_save_failure(&mut self, revision: Option<u64>, detail: impl AsRef<str>) {
         self.sidecar_save_feedback_until = None;
         if let Some(revision) = revision {
