@@ -1494,14 +1494,15 @@ impl Preview {
                     MaskGeometry::Brush {
                         size,
                         feather,
+                        opacity_enabled,
+                        opacity: brush_opacity,
+                        stroke_starts,
                         dabs,
+                        ..
                     },
                     MaskKind::Brush,
                 ) => {
-                    let opacity = match app.brush_mode {
-                        BrushMode::Paint => 1.0,
-                        BrushMode::Erase => -1.0,
-                    };
+                    let opacity = app.brush_mode.dab_opacity(*opacity_enabled, *brush_opacity);
                     let first_dab = app.last_brush_point.is_none();
                     let previous = app.last_brush_point.unwrap_or(uv);
                     let dx = uv[0] - previous[0];
@@ -1535,6 +1536,7 @@ impl Preview {
                     // changing a single mask pixel.
                     if first_dab {
                         if dabs.len() < 8192 {
+                            stroke_starts.push(dabs.len());
                             dabs.push(BrushDab {
                                 center: uv,
                                 opacity,

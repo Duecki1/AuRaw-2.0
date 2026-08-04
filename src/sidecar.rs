@@ -1244,13 +1244,26 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                 MaskGeometry::Brush {
                     size,
                     feather,
+                    opacity,
+                    stroke_starts,
                     dabs,
+                    ..
                 } => {
-                    finite("brush geometry", &[*size, *feather])?;
+                    finite("brush geometry", &[*size, *feather, *opacity])?;
                     bounded("brush size", *size, 0.0, 16.0)?;
                     bounded("brush feather", *feather, 0.0, 1.0)?;
+                    bounded("brush opacity", *opacity, 0.0, 1.0)?;
                     if dabs.len() > MAX_BRUSH_DABS {
                         return invalid("brush mask contains too many dabs");
+                    }
+                    let mut previous_start = None;
+                    for &start in stroke_starts {
+                        if start >= dabs.len()
+                            || previous_start.is_some_and(|previous| start <= previous)
+                        {
+                            return invalid("brush mask contains invalid stroke boundaries");
+                        }
+                        previous_start = Some(start);
                     }
                     for dab in dabs {
                         finite(
