@@ -2105,10 +2105,10 @@ impl AurawApp {
                         match loaded_sidecar {
                             Ok(Some(loaded)) => {
                                 let warning = loaded.migrated.then(|| {
-                                    "Loaded edits were migrated to the current processing version."
+                                    "Loaded edits were migrated to the current sidecar format."
                                         .to_owned()
                                 });
-                                let use_adaptive_detail_defaults = loaded.migrated
+                                let use_adaptive_detail_defaults = loaded.process_migrated
                                     && loaded
                                         .edits
                                         .exposure
