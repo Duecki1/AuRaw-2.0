@@ -1074,11 +1074,13 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                     source,
                     low,
                     high,
+                    grow,
                     feather,
                 } => {
-                    finite("luminance range mask", &[*low, *high, *feather])?;
+                    finite("luminance range mask", &[*low, *high, *grow, *feather])?;
                     bounded("luminance low", *low, -16.0, 16.0)?;
                     bounded("luminance high", *high, -16.0, 16.0)?;
+                    bounded("luminance grow", *grow, -1.0, 1.0)?;
                     bounded("luminance feather", *feather, 0.0, 16.0)?;
                     if let Some(image) = source {
                         validate_image(image.width, image.height, image.rgba.len(), 4)?;
@@ -1088,17 +1090,19 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
                     source,
                     sample,
                     tolerance,
+                    grow,
                     feather,
                     ..
                 } => {
                     finite(
                         "color range mask",
-                        &[sample[0], sample[1], sample[2], *tolerance, *feather],
+                        &[sample[0], sample[1], sample[2], *tolerance, *grow, *feather],
                     )?;
                     for value in sample {
                         bounded("color sample", *value, -16.0, 16.0)?;
                     }
                     bounded("color tolerance", *tolerance, 0.0, 16.0)?;
+                    bounded("color grow", *grow, -1.0, 1.0)?;
                     bounded("color feather", *feather, 0.0, 16.0)?;
                     if let Some(image) = source {
                         validate_image(image.width, image.height, image.rgba.len(), 4)?;
@@ -2198,6 +2202,7 @@ mod tests {
                 source: Some(source),
                 low: 0.2,
                 high: 0.8,
+                grow: 0.0,
                 feather: 0.15,
             },
         };
@@ -2271,6 +2276,7 @@ mod tests {
                 source: Some(source),
                 low: 0.2,
                 high: 0.8,
+                grow: 0.0,
                 feather: 0.15,
             },
         };

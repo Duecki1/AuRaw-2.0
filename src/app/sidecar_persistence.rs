@@ -19,6 +19,66 @@ fn sidecar_interaction_active(ctx: &egui::Context) -> bool {
 }
 
 impl AurawApp {
+    fn report_sidecar_save_failure(&mut self, revision: Option<u64>, detail: impl AsRef<str>) {
+        self.sidecar_save_feedback_until = None;
+        if let Some(revision) = revision {
+            self.sidecar_failed_revision = Some(revision);
+        }
+
+        let message = format!("Could not save edits: {}", detail.as_ref());
+        self.notice = Some(message.clone());
+        self.sidecar_save_error_dialog = Some(message.clone());
+        crate::diagnostics::record(format!("Edit save failed: {}", detail.as_ref()));
+        log::error!("{message}");
+        self.egui_ctx.request_repaint();
+    }
+
+    pub(super) fn show_sidecar_save_error_dialog(&mut self, ctx: &egui::Context) {
+        let Some(message) = self.sidecar_save_error_dialog.clone() else {
+            return;
+        };
+
+        let can_retry = self.can_save_edits()
+            && !self.sidecar_save_in_progress()
+            && self.sidecar_failed_revision == Some(self.edit_commit_revision());
+        let mut retry = false;
+        let mut close = false;
+        crate::ui::responsive_popup(egui::Window::new("Could not save edits"), ctx, 460.0)
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("AuRaw was unable to write the edit sidecar.");
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&message).monospace())
+                        .wrap()
+                        .selectable(true),
+                );
+                ui.add_space(6.0);
+                ui.small("This error was added to the log in Settings → Diagnostics.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_retry, egui::Button::new("Try again"))
+                        .clicked()
+                    {
+                        retry = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if retry {
+            self.sidecar_save_error_dialog = None;
+            self.save_edits_now();
+        } else if close {
+            self.sidecar_save_error_dialog = None;
+        }
+    }
+
     pub(super) fn capture_sidecar_edit_state(&self) -> SidecarEditState {
         let camera_profile = self.selected_camera_profile.as_ref().and_then(|selected| {
             let root = self.camera_profile_folder.as_ref()?;
@@ -384,10 +444,18 @@ impl AurawApp {
             }
             Err(error) => {
                 if job.generation == self.sidecar_generation {
-                    self.sidecar_failed_revision = Some(job.revision);
-                    self.notice = Some(format!("Could not start edit save worker: {error}"));
+                    self.report_sidecar_save_failure(
+                        Some(job.revision),
+                        format!("could not start the edit-save worker: {error}"),
+                    );
+                } else {
+                    self.report_sidecar_save_failure(
+                        None,
+                        format!(
+                            "could not start the edit-save worker for a previously opened RAW: {error}"
+                        ),
+                    );
                 }
-                self.egui_ctx.request_repaint();
             }
         }
     }
@@ -403,8 +471,15 @@ impl AurawApp {
                 let job = self.sidecar_in_flight.take();
                 self.sidecar_receiver = None;
                 if let Some(job) = job.filter(|job| job.generation == self.sidecar_generation) {
-                    self.sidecar_failed_revision = Some(job.revision);
-                    self.notice = Some("Edit save worker stopped unexpectedly.".to_owned());
+                    self.report_sidecar_save_failure(
+                        Some(job.revision),
+                        "the edit-save worker stopped unexpectedly",
+                    );
+                } else if job.is_some() {
+                    self.report_sidecar_save_failure(
+                        None,
+                        "the edit-save worker for a previously opened RAW stopped unexpectedly",
+                    );
                 }
                 None
             }
@@ -441,13 +516,14 @@ impl AurawApp {
                     }
                 }
                 Err(error) => {
-                    self.sidecar_save_feedback_until = None;
-                    self.sidecar_failed_revision = Some(event.job.revision);
-                    self.notice = Some(format!("Could not save edits: {error}"));
+                    self.report_sidecar_save_failure(Some(event.job.revision), error);
                 }
             }
         } else if let Err(error) = event.result {
-            log::warn!("sidecar save for an old RAW failed: {error}");
+            self.report_sidecar_save_failure(
+                None,
+                format!("saving a previously opened RAW failed: {error}"),
+            );
         }
     }
 
@@ -735,14 +811,28 @@ impl AurawApp {
             match receiver.recv_timeout(remaining) {
                 Ok(event) => self.finish_sidecar_save(event),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let job = self.sidecar_in_flight.take();
                     self.sidecar_receiver = None;
-                    self.sidecar_in_flight = None;
+                    let revision = job
+                        .filter(|job| job.generation == self.sidecar_generation)
+                        .map(|job| job.revision);
+                    self.report_sidecar_save_failure(
+                        revision,
+                        "the edit-save worker stopped unexpectedly while finishing the save",
+                    );
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
         }
         if self.sidecar_in_flight.is_some() || !self.sidecar_pending.is_empty() {
-            log::warn!("timed out while flushing the latest edit sidecar during shutdown");
+            let revision = self
+                .sidecar_in_flight
+                .filter(|job| job.generation == self.sidecar_generation)
+                .map(|job| job.revision);
+            self.report_sidecar_save_failure(
+                revision,
+                "timed out while finishing the edit save during shutdown",
+            );
         }
     }
 }

@@ -691,6 +691,8 @@ pub enum MaskGeometry {
         source: Option<MaskRgbImage>,
         low: f32,
         high: f32,
+        #[serde(default)]
+        grow: f32,
         feather: f32,
     },
     ColorRange {
@@ -698,6 +700,8 @@ pub enum MaskGeometry {
         source: Option<MaskRgbImage>,
         sample: [f32; 3],
         tolerance: f32,
+        #[serde(default)]
+        grow: f32,
         feather: f32,
         sampled: bool,
     },
@@ -756,12 +760,14 @@ impl MaskGeometry {
                 source: None,
                 low: 0.2,
                 high: 0.8,
+                grow: 0.0,
                 feather: 0.15,
             },
             MaskKind::ColorRange => Self::ColorRange {
                 source: None,
                 sample: [0.5; 3],
                 tolerance: 0.18,
+                grow: 0.0,
                 feather: 0.12,
                 sampled: false,
             },
@@ -1471,15 +1477,31 @@ fn rasterize_component(
             source: Some(source),
             low,
             high,
+            grow,
             feather,
-        } => rasterize_luminance_range(width, height, source, *low, *high, *feather),
+        } => {
+            let mut coverage =
+                rasterize_luminance_range(width, height, source, *low, *high, *feather);
+            if grow.abs() > 1e-5 {
+                shape_probability_mask(&mut coverage, width, height, *grow, 0.0);
+            }
+            coverage
+        }
         MaskGeometry::ColorRange {
             source: Some(source),
             sample,
             tolerance,
+            grow,
             feather,
             sampled: true,
-        } => rasterize_color_range(width, height, source, *sample, *tolerance, *feather),
+        } => {
+            let mut coverage =
+                rasterize_color_range(width, height, source, *sample, *tolerance, *feather);
+            if grow.abs() > 1e-5 {
+                shape_probability_mask(&mut coverage, width, height, *grow, 0.0);
+            }
+            coverage
+        }
         _ => vec![0.0; width as usize * height as usize],
     }
 }
@@ -2406,6 +2428,92 @@ mod tests {
         let color = stack.rasterize_layer(1, 2, 1, 2, 1);
         assert!(color[0] < 8);
         assert!(color[1] > 240);
+    }
+
+    #[test]
+    fn grow_expands_luminance_and_color_range_masks() {
+        let width = 64;
+        let height = 64;
+        let mut rgba = vec![0; width * height * 4];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        for y in 28..36 {
+            for x in 28..36 {
+                let index = (y * width + x) * 4;
+                rgba[index] = 255;
+            }
+        }
+        let source = MaskRgbImage::new(width as u32, height as u32, rgba).unwrap();
+        let covered = |coverage: Vec<u8>| coverage.iter().filter(|value| **value >= 128).count();
+
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::LuminanceRange);
+        if let MaskGeometry::LuminanceRange {
+            source: target,
+            low,
+            high,
+            grow,
+            feather,
+        } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *target = Some(source.clone());
+            *low = 0.15;
+            *high = 0.3;
+            *grow = 0.0;
+            *feather = 0.0;
+        }
+        let original_luminance = covered(stack.rasterize_layer(0, 64, 64, 64, 64));
+        if let MaskGeometry::LuminanceRange { grow, .. } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *grow = 0.5;
+        }
+        let grown_luminance = covered(stack.rasterize_layer(0, 64, 64, 64, 64));
+        assert!(grown_luminance > original_luminance);
+
+        stack.add_mask(MaskKind::ColorRange);
+        if let MaskGeometry::ColorRange {
+            source: target,
+            sample,
+            tolerance,
+            grow,
+            feather,
+            sampled,
+        } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *target = Some(source);
+            *sample = [1.0, 0.0, 0.0];
+            *tolerance = 0.05;
+            *grow = 0.0;
+            *feather = 0.0;
+            *sampled = true;
+        }
+        let original_color = covered(stack.rasterize_layer(1, 64, 64, 64, 64));
+        if let MaskGeometry::ColorRange { grow, .. } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *grow = 0.5;
+        }
+        let grown_color = covered(stack.rasterize_layer(1, 64, 64, 64, 64));
+        assert!(grown_color > original_color);
+    }
+
+    #[test]
+    fn missing_range_grow_values_default_to_zero() {
+        let luminance: MaskGeometry =
+            serde_json::from_str(r#"{"LuminanceRange":{"low":0.2,"high":0.8,"feather":0.15}}"#)
+                .unwrap();
+        assert!(matches!(
+            luminance,
+            MaskGeometry::LuminanceRange { grow: 0.0, .. }
+        ));
+
+        let color: MaskGeometry = serde_json::from_str(
+            r#"{"ColorRange":{"sample":[0.5,0.5,0.5],"tolerance":0.18,"feather":0.12,"sampled":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(color, MaskGeometry::ColorRange { grow: 0.0, .. }));
     }
 
     #[test]

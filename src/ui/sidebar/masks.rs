@@ -1712,6 +1712,7 @@ impl Sidebar {
                 MaskGeometry::LuminanceRange {
                     low,
                     high,
+                    grow,
                     feather,
                     ..
                 } => {
@@ -1735,6 +1736,15 @@ impl Sidebar {
                     );
                     geometry_changed |= adjustment_slider(
                         ui,
+                        "Grow",
+                        grow,
+                        -1.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Positive values expand the mask; negative values shrink it inward."),
+                    );
+                    geometry_changed |= adjustment_slider(
+                        ui,
                         "Range feather",
                         feather,
                         0.0..=1.0,
@@ -1745,6 +1755,7 @@ impl Sidebar {
                 }
                 MaskGeometry::ColorRange {
                     tolerance,
+                    grow,
                     feather,
                     sampled,
                     ..
@@ -1762,6 +1773,15 @@ impl Sidebar {
                         3,
                         0.005,
                         Some("Expands the selected color region in perceptual OkLab space."),
+                    );
+                    geometry_changed |= adjustment_slider(
+                        ui,
+                        "Grow",
+                        grow,
+                        -1.0..=1.0,
+                        2,
+                        0.01,
+                        Some("Positive values expand the mask; negative values shrink it inward."),
                     );
                     geometry_changed |= adjustment_slider(
                         ui,
