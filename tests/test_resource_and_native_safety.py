@@ -83,7 +83,7 @@ def test_large_ai_model_hashing_stays_off_the_ui_thread() -> None:
     subject_worker = AI[AI.index("pub fn spawn_subject_mask"):AI.index("pub fn spawn_object_mask")]
     object_worker = AI[AI.index("pub fn spawn_object_mask"):AI.index("fn infer_object_mask")]
     assert "ensure_model(" in subject_worker
-    assert "ensure_vitmatte_model(" in subject_worker
+    assert "ensure_vitmatte_model(" not in subject_worker
     assert "ensure_sam_model(" in object_worker
     assert "ensure_vitmatte_model(" in object_worker
 

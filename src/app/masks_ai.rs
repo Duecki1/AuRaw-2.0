@@ -1,3 +1,19 @@
+const AI_MASK_SOURCE_MAX_EDGE: u32 = 4096;
+const AI_MASK_SOURCE_MAX_PIXELS: u64 = 12_000_000;
+
+fn ai_mask_source_proxy_edge(width: u32, height: u32) -> u32 {
+    let longest = width.max(height).max(1);
+    let shortest = width.min(height).max(1);
+    let pixel_limited_edge = ((AI_MASK_SOURCE_MAX_PIXELS as f64 * longest as f64
+        / shortest as f64)
+        .sqrt()
+        .floor() as u32)
+        .max(1);
+    longest
+        .min(AI_MASK_SOURCE_MAX_EDGE)
+        .min(pixel_limited_edge)
+}
+
 impl AurawApp {
     fn capture_ai_mask_target(
         &self,
@@ -478,7 +494,7 @@ impl AurawApp {
 
         if update_subject {
             let path = self.birefnet_model_path();
-            if path.is_file() && self.vitmatte_model_path().is_file() {
+            if path.is_file() {
                 self.start_subject_worker(path);
             } else {
                 self.subject_consent_open = true;
@@ -670,25 +686,34 @@ impl AurawApp {
                 .loaded_raw
                 .as_ref()
                 .ok_or_else(|| "The original RAW is not available.".to_owned())?;
-            let raw = if full_raw.width.max(full_raw.height) <= 3072 {
+            let source_edge = ai_mask_source_proxy_edge(full_raw.width, full_raw.height);
+            let raw = if full_raw.width.max(full_raw.height) <= source_edge {
                 Arc::clone(full_raw)
             } else {
                 Arc::new(build_proxy(
                     full_raw,
-                    ProxySpec { max_edge: 3072 },
+                    ProxySpec {
+                        max_edge: source_edge,
+                    },
                 ))
             };
 
             let reference_exposure = ExposureParams::scene_referred_default();
             let reference_masks = MaskStack::default();
             let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
-            let reference_pipeline = RawGpuPipeline::new_headless_reusing_program_template(
+            // This graph renders an unmasked reference image for inference;
+            // reserving the normal 32-layer 2048px editing atlas wastes 256
+            // MiB and can reject an otherwise valid 4K capture on a 1.5 GiB
+            // GPU budget. An explicit atlas allocates one tiny unused layer.
+            let reference_pipeline =
+                RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
                 &render_state.device,
                 &render_state.queue,
                 &raw,
                 &params,
                 ProcessingQuality::Preview,
                 &program_template,
+                64,
             )
             .map_err(|error| {
                 format!("Could not prepare the original RAW for masking: {error:#}")
@@ -751,8 +776,7 @@ impl AurawApp {
             return;
         }
         let path = self.birefnet_model_path();
-        let vitmatte = self.vitmatte_model_path();
-        if path.is_file() && vitmatte.is_file() {
+        if path.is_file() {
             self.start_subject_worker(path);
         } else {
             self.subject_consent_open = true;
@@ -768,7 +792,6 @@ impl AurawApp {
                 Some("The preview could not be prepared for subject selection.".to_owned());
             return;
         };
-        let vitmatte_path = self.vitmatte_model_path();
         #[cfg(not(target_os = "android"))]
         let runtime_path = self.onnx_runtime_path.clone();
         #[cfg(not(target_os = "android"))]
@@ -785,7 +808,6 @@ impl AurawApp {
             generation,
             source,
             model_path,
-            vitmatte_path,
             runtime_path,
             runtime_sha256,
         };
@@ -796,10 +818,9 @@ impl AurawApp {
             self.start_subject_mask_task(task_id, request);
         } else {
             // Full SHA-256 verification belongs in the worker. Hashing the
-            // 328 MB subject model set here blocks Android's UI thread long
+            // large subject model here blocks Android's UI thread long
             // enough to look like a hung mask operation.
-            let needs_download =
-                !request.model_path.is_file() || !request.vitmatte_path.is_file();
+            let needs_download = !request.model_path.is_file();
             if needs_download {
                 let task_id = self.enqueue_background_action(
                     TaskKind::SubjectMask {
@@ -1737,4 +1758,16 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
+}
+
+#[cfg(test)]
+mod ai_mask_source_tests {
+    use super::ai_mask_source_proxy_edge;
+
+    #[test]
+    fn canonical_source_keeps_4k_for_three_by_two_but_caps_square_pixel_count() {
+        assert_eq!(ai_mask_source_proxy_edge(6000, 4000), 4096);
+        assert_eq!(ai_mask_source_proxy_edge(6000, 6000), 3464);
+        assert_eq!(ai_mask_source_proxy_edge(3000, 3000), 3000);
+    }
 }

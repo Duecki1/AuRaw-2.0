@@ -178,6 +178,16 @@ pub(crate) struct PreviewUvRect {
     pub max: [f32; 2],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OverlayRasterKey {
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub texture_width: u32,
+    pub texture_height: u32,
+}
+
 pub(crate) struct PreviewNavigation {
     pub pipeline: RawGpuPipeline,
     /// Very-low-resolution full-frame RAW proxy used as the adjusted backing
@@ -198,6 +208,7 @@ pub(crate) struct PreviewDetail {
     raw: Arc<LoadedRaw>,
     source_origin: [u32; 2],
     source_size: [u32; 2],
+    mask_source_region: [u32; 4],
     virtual_origin: [i32; 2],
     virtual_full_size: [u32; 2],
 }
@@ -622,7 +633,6 @@ struct SubjectMaskTaskRequest {
     generation: u64,
     source: MaskRgbImage,
     model_path: PathBuf,
-    vitmatte_path: PathBuf,
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
 }
@@ -783,7 +793,7 @@ pub struct AurawApp {
     mask_interaction_has_uncommitted_change: bool,
     pub(crate) mask_overlay_revision: u64,
     pub(crate) mask_overlay_texture: Option<egui::TextureHandle>,
-    pub(crate) mask_overlay_texture_key: Option<(usize, Option<usize>, u64, u32, u32)>,
+    pub(crate) mask_overlay_texture_key: Option<(usize, Option<usize>, u64, OverlayRasterKey)>,
     pub(crate) mask_overlay_blink: Option<(std::time::Instant, MaskOverlayBlink)>,
     pub(crate) mask_thumbnail_revision: u64,
     pub(crate) mask_thumbnail_group_textures: Vec<egui::TextureHandle>,
@@ -890,11 +900,11 @@ pub struct AurawApp {
     pub(crate) inpaint_texture_revision: u64,
     pub(crate) inpaint_texture_key: Option<u64>,
     pub(crate) inpaint_stroke_texture: Option<egui::TextureHandle>,
-    pub(crate) inpaint_stroke_texture_key: Option<(usize, u32, u32)>,
+    pub(crate) inpaint_stroke_texture_key: Option<(usize, OverlayRasterKey)>,
     pub(crate) inpaint_hovered_stroke: Option<usize>,
     pub(crate) inpaint_selected_stroke: Option<usize>,
     pub(crate) inpaint_focus_texture: Option<egui::TextureHandle>,
-    pub(crate) inpaint_focus_texture_key: Option<(usize, u64, u32, u32, bool)>,
+    pub(crate) inpaint_focus_texture_key: Option<(usize, u64, OverlayRasterKey, bool)>,
     inpaint_source_cache: Option<MaskRgbImage>,
     inpaint_pending_source: Option<PreparedInpaintSource>,
     inpaint_active_dabs: Option<Vec<crate::pipeline::BrushDab>>,

@@ -1521,7 +1521,7 @@ impl Sidebar {
                         0.0025,
                         Some("Brush stays the same size on screen; zoom in for finer image-space detail."),
                     );
-                    geometry_changed |= adjustment_slider(
+                    geometry_changed |= adjustment_slider_with_reset(
                         ui,
                         "Feather",
                         feather,
@@ -1529,6 +1529,7 @@ impl Sidebar {
                         2,
                         0.01,
                         Some("Softness from the brush core to its edge."),
+                        0.55,
                     );
                     ui.horizontal(|ui| {
                         geometry_changed |= ui
@@ -1575,7 +1576,7 @@ impl Sidebar {
                     ui.small(format!("{} brush dabs", dabs.len()));
                 }
                 MaskGeometry::Radial { feather, .. } => {
-                    geometry_changed |= adjustment_slider(
+                    geometry_changed |= adjustment_slider_with_reset(
                         ui,
                         "Feather",
                         feather,
@@ -1583,10 +1584,11 @@ impl Sidebar {
                         2,
                         0.01,
                         Some("Soft transition from the ellipse interior to its edge."),
+                        0.55,
                     );
                 }
                 MaskGeometry::Linear { feather, .. } => {
-                    geometry_changed |= adjustment_slider(
+                    geometry_changed |= adjustment_slider_with_reset(
                         ui,
                         "Feather",
                         feather,
@@ -1594,6 +1596,7 @@ impl Sidebar {
                         2,
                         0.01,
                         Some("Controls the width of the gradient transition."),
+                        1.0,
                     );
                 }
                 MaskGeometry::Ai {
@@ -1619,7 +1622,7 @@ impl Sidebar {
                         0.01,
                         Some("Positive values expand the mask; negative values shrink it inward."),
                     );
-                    geometry_changed |= adjustment_slider(
+                    geometry_changed |= adjustment_slider_with_reset(
                         ui,
                         "Feather",
                         feather,
@@ -1627,6 +1630,7 @@ impl Sidebar {
                         2,
                         0.01,
                         Some("Softens the BiRefNet subject boundary."),
+                        0.0,
                     );
                 }
                 MaskGeometry::Object {
@@ -1663,7 +1667,7 @@ impl Sidebar {
                         0.01,
                         Some("Positive values expand the mask; negative values shrink it inward."),
                     );
-                    geometry_changed |= adjustment_slider(
+                    geometry_changed |= adjustment_slider_with_reset(
                         ui,
                         "Mask feather",
                         feather,
@@ -1671,6 +1675,7 @@ impl Sidebar {
                         2,
                         0.01,
                         Some("Softens the final object mask after SAM selection."),
+                        0.0,
                     );
                     let refine_changed = adjustment_slider(
                         ui,
@@ -1745,7 +1750,7 @@ impl Sidebar {
                         0.01,
                         Some("Positive values expand the mask; negative values shrink it inward."),
                     );
-                    geometry_changed |= adjustment_slider(
+                    geometry_changed |= adjustment_slider_with_reset(
                         ui,
                         "Range feather",
                         feather,
@@ -1753,6 +1758,7 @@ impl Sidebar {
                         2,
                         0.01,
                         Some("Softens both luminance-range boundaries."),
+                        0.15,
                     );
                 }
                 MaskGeometry::ColorRange {
@@ -1785,7 +1791,7 @@ impl Sidebar {
                         0.01,
                         Some("Positive values expand the mask; negative values shrink it inward."),
                     );
-                    geometry_changed |= adjustment_slider(
+                    geometry_changed |= adjustment_slider_with_reset(
                         ui,
                         "Color feather",
                         feather,
@@ -1793,6 +1799,7 @@ impl Sidebar {
                         2,
                         0.01,
                         Some("Softens the color-distance cutoff."),
+                        0.12,
                     );
                 }
                 MaskGeometry::Placeholder => {

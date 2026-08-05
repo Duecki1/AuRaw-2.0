@@ -1,8 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::app::{
-    AurawApp, CropDragState, CropHandle, MaskDragState, MaskOverlayBlink, SidebarTab,
-    StraightenDragState,
+    AurawApp, CropDragState, CropHandle, MaskDragState, MaskOverlayBlink, OverlayRasterKey,
+    SidebarTab, StraightenDragState,
 };
 use crate::pipeline::{
     rasterize_inpaint_dabs_binary, BrushDab, BrushMode, GeometryTransform, LensGeometryMap,
@@ -1153,25 +1153,32 @@ impl Preview {
             .or(app.inpaint_selected_stroke)
             .filter(|index| *index < app.inpaint_strokes.len());
         if let Some(index) = focused_stroke {
-            let Some(pipeline) = app.gpu_pipeline.as_ref() else {
+            if app.gpu_pipeline.is_none() {
                 return;
-            };
+            }
             let hovered = app.inpaint_hovered_stroke == Some(index);
-            let max_edge = if cfg!(target_os = "android") {
-                384
-            } else {
-                512
-            };
-            let (width, height) =
-                source_overlay_texture_dimensions(pipeline.width, pipeline.height, max_edge);
-            let key = (index, app.inpaint_texture_revision, width, height, hovered);
+            let region = overlay_raster_region(
+                app.preview_visible_uv,
+                source_width,
+                source_height,
+                preview_rect,
+                physical_pixels_per_point(ui.ctx()),
+                2,
+            );
+            let key = (index, app.inpaint_texture_revision, region, hovered);
             if app.inpaint_focus_texture_key != Some(key) {
-                let coverage = rasterize_inpaint_dabs_binary(
-                    width,
-                    height,
-                    pipeline.width,
-                    pipeline.height,
+                let dabs = crop_overlay_dabs(
                     &app.inpaint_strokes[index].dabs,
+                    region,
+                    source_width,
+                    source_height,
+                );
+                let coverage = rasterize_inpaint_dabs_binary(
+                    region.texture_width,
+                    region.texture_height,
+                    region.source_width,
+                    region.source_height,
+                    &dabs,
                 );
                 let color = if hovered {
                     Color32::from_rgb(255, 190, 70)
@@ -1180,7 +1187,10 @@ impl Preview {
                 };
                 let rgba = coverage_rgba(coverage, color);
                 let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [width as usize, height as usize],
+                    [
+                        region.texture_width as usize,
+                        region.texture_height as usize,
+                    ],
                     &rgba,
                 );
                 if let Some(texture) = app.inpaint_focus_texture.as_mut() {
@@ -1206,7 +1216,7 @@ impl Preview {
                     source_width,
                     source_height,
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    [0.0, 0.0, 1.0, 1.0],
+                    overlay_source_uv(region, source_width, source_height),
                 );
             }
 
@@ -1243,28 +1253,34 @@ impl Preview {
         }
 
         if !app.inpaint_stroke.is_empty() {
-            let Some(pipeline) = app.gpu_pipeline.as_ref() else {
+            if app.gpu_pipeline.is_none() {
                 return;
-            };
-            let max_edge = if cfg!(target_os = "android") {
-                384
-            } else {
-                512
-            };
-            let (width, height) =
-                source_overlay_texture_dimensions(pipeline.width, pipeline.height, max_edge);
-            let key = (app.inpaint_stroke.len(), width, height);
+            }
+            let region = overlay_raster_region(
+                app.preview_visible_uv,
+                source_width,
+                source_height,
+                preview_rect,
+                physical_pixels_per_point(ui.ctx()),
+                2,
+            );
+            let key = (app.inpaint_stroke.len(), region);
             if app.inpaint_stroke_texture_key != Some(key) {
+                let dabs =
+                    crop_overlay_dabs(&app.inpaint_stroke, region, source_width, source_height);
                 let coverage = rasterize_inpaint_dabs_binary(
-                    width,
-                    height,
-                    pipeline.width,
-                    pipeline.height,
-                    &app.inpaint_stroke,
+                    region.texture_width,
+                    region.texture_height,
+                    region.source_width,
+                    region.source_height,
+                    &dabs,
                 );
                 let rgba = coverage_rgba(coverage, Color32::from_rgb(255, 94, 94));
                 let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [width as usize, height as usize],
+                    [
+                        region.texture_width as usize,
+                        region.texture_height as usize,
+                    ],
                     &rgba,
                 );
                 if let Some(texture) = app.inpaint_stroke_texture.as_mut() {
@@ -1290,7 +1306,7 @@ impl Preview {
                     source_width,
                     source_height,
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    [0.0, 0.0, 1.0, 1.0],
+                    overlay_source_uv(region, source_width, source_height),
                 );
             }
         }
@@ -2140,47 +2156,66 @@ impl Preview {
         source_width: u32,
         source_height: u32,
     ) {
-        let Some(pipeline) = app.gpu_pipeline.as_ref() else {
+        if app.gpu_pipeline.is_none() {
             return;
-        };
-        let max_edge = if cfg!(target_os = "android") {
-            384
-        } else {
-            512
-        };
-        let (width, height) =
-            source_overlay_texture_dimensions(pipeline.width, pipeline.height, max_edge);
+        }
+        let margin = app.masks.raster_margin_pixels_for_layer(
+            mask_index,
+            component_index,
+            source_width,
+            source_height,
+        );
+        let region = overlay_raster_region(
+            app.preview_visible_uv,
+            source_width,
+            source_height,
+            preview_rect,
+            physical_pixels_per_point(ui.ctx()),
+            margin,
+        );
         let key = (
             mask_index,
             component_index,
             app.mask_overlay_revision,
-            width,
-            height,
+            region,
         );
 
         if app.mask_overlay_texture_key != Some(key) {
+            let cropped_masks = app.masks.cropped_for_region(
+                region.source_x,
+                region.source_y,
+                region.source_width,
+                region.source_height,
+                source_width,
+                source_height,
+            );
             let rgba = if let Some(component_index) = component_index {
-                let coverage = app.masks.rasterize_component_layer(
+                let coverage = cropped_masks.rasterize_component_layer(
                     mask_index,
                     component_index,
-                    width,
-                    height,
-                    pipeline.width,
-                    pipeline.height,
+                    region.texture_width,
+                    region.texture_height,
+                    region.source_width,
+                    region.source_height,
                 );
                 coverage_rgba(coverage, mask_component_color(component_index))
             } else {
                 group_coverage_rgba(
-                    app,
+                    &cropped_masks,
                     mask_index,
-                    width,
-                    height,
-                    pipeline.width,
-                    pipeline.height,
+                    region.texture_width,
+                    region.texture_height,
+                    region.source_width,
+                    region.source_height,
                 )
             };
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [
+                    region.texture_width as usize,
+                    region.texture_height as usize,
+                ],
+                &rgba,
+            );
             if let Some(texture) = app.mask_overlay_texture.as_mut() {
                 texture.set(image, egui::TextureOptions::LINEAR);
             } else {
@@ -2206,7 +2241,7 @@ impl Preview {
                 source_width,
                 source_height,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                [0.0, 0.0, 1.0, 1.0],
+                overlay_source_uv(region, source_width, source_height),
             );
         }
     }
@@ -3010,19 +3045,93 @@ fn geometry_brush_radius_screen(
         .max(center_screen.distance(y_screen))
 }
 
-fn source_overlay_texture_dimensions(
+fn overlay_raster_region(
+    visible: crate::app::PreviewUvRect,
     source_width: u32,
     source_height: u32,
-    max_edge: u32,
-) -> (u32, u32) {
+    preview_rect: Rect,
+    pixels_per_point: f32,
+    margin_pixels: u32,
+) -> OverlayRasterKey {
     let source_width = source_width.max(1);
     let source_height = source_height.max(1);
-    let longest = source_width.max(source_height) as f32;
-    let scale = (max_edge.max(1) as f32 / longest).min(1.0);
-    (
-        (source_width as f32 * scale).round().max(1.0) as u32,
-        (source_height as f32 * scale).round().max(1.0) as u32,
-    )
+    let source_x0 = (visible.min[0].clamp(0.0, 1.0) * source_width as f32).floor() as u32;
+    let source_y0 = (visible.min[1].clamp(0.0, 1.0) * source_height as f32).floor() as u32;
+    let source_x1 = (visible.max[0].clamp(0.0, 1.0) * source_width as f32).ceil() as u32;
+    let source_y1 = (visible.max[1].clamp(0.0, 1.0) * source_height as f32).ceil() as u32;
+    let source_x = source_x0.saturating_sub(margin_pixels);
+    let source_y = source_y0.saturating_sub(margin_pixels);
+    let source_end_x = source_x1
+        .saturating_add(margin_pixels)
+        .clamp(source_x.saturating_add(1), source_width);
+    let source_end_y = source_y1
+        .saturating_add(margin_pixels)
+        .clamp(source_y.saturating_add(1), source_height);
+    let region_width = source_end_x - source_x;
+    let region_height = source_end_y - source_y;
+
+    // Match the physical viewport density while zoomed, but never invent more
+    // samples than the source region contains. Unlike the old fixed 512 px
+    // full-frame overlay, this gives a small visible crop its native source
+    // resolution and keeps a narrow brush stroke on the correct row/column.
+    let visible_width = source_x1.saturating_sub(source_x0).max(1) as f32;
+    let visible_height = source_y1.saturating_sub(source_y0).max(1) as f32;
+    let scale_x = (preview_rect.width().max(1.0) * pixels_per_point / visible_width).min(1.0);
+    let scale_y = (preview_rect.height().max(1.0) * pixels_per_point / visible_height).min(1.0);
+    let mut texture_width = (region_width as f32 * scale_x).ceil().max(1.0) as u32;
+    let mut texture_height = (region_height as f32 * scale_y).ceil().max(1.0) as u32;
+    let edge_limit = if cfg!(target_os = "android") {
+        2048
+    } else {
+        4096
+    };
+    let limit_scale = (edge_limit as f32 / texture_width.max(texture_height) as f32).min(1.0);
+    texture_width = (texture_width as f32 * limit_scale).floor().max(1.0) as u32;
+    texture_height = (texture_height as f32 * limit_scale).floor().max(1.0) as u32;
+
+    OverlayRasterKey {
+        source_x,
+        source_y,
+        source_width: region_width,
+        source_height: region_height,
+        texture_width,
+        texture_height,
+    }
+}
+
+fn overlay_source_uv(region: OverlayRasterKey, source_width: u32, source_height: u32) -> [f32; 4] {
+    let width = source_width.max(1) as f32;
+    let height = source_height.max(1) as f32;
+    [
+        region.source_x as f32 / width,
+        region.source_y as f32 / height,
+        (region.source_x + region.source_width) as f32 / width,
+        (region.source_y + region.source_height) as f32 / height,
+    ]
+}
+
+fn crop_overlay_dabs(
+    dabs: &[BrushDab],
+    region: OverlayRasterKey,
+    source_width: u32,
+    source_height: u32,
+) -> Vec<BrushDab> {
+    let full_width = source_width.max(1) as f32;
+    let full_height = source_height.max(1) as f32;
+    let region_width = region.source_width.max(1) as f32;
+    let region_height = region.source_height.max(1) as f32;
+    let image_scale = source_width.min(source_height).max(1) as f32
+        / region.source_width.min(region.source_height).max(1) as f32;
+    dabs.iter()
+        .map(|dab| BrushDab {
+            center: [
+                (dab.center[0] * full_width - region.source_x as f32) / region_width,
+                (dab.center[1] * full_height - region.source_y as f32) / region_height,
+            ],
+            size: dab.size * image_scale,
+            ..*dab
+        })
+        .collect()
 }
 
 fn crop_workspace_source_to_screen(
@@ -4068,7 +4177,7 @@ fn coverage_rgba(coverage: Vec<u8>, color: Color32) -> Vec<u8> {
 }
 
 fn group_coverage_rgba(
-    app: &AurawApp,
+    masks: &crate::pipeline::MaskStack,
     mask_index: usize,
     width: u32,
     height: u32,
@@ -4076,10 +4185,8 @@ fn group_coverage_rgba(
     image_height: u32,
 ) -> Vec<u8> {
     let final_coverage =
-        app.masks
-            .rasterize_layer(mask_index, width, height, image_width, image_height);
-    let component_count = app
-        .masks
+        masks.rasterize_layer(mask_index, width, height, image_width, image_height);
+    let component_count = masks
         .masks
         .get(mask_index)
         .map_or(0, |mask| mask.components.len());
@@ -4090,8 +4197,7 @@ fn group_coverage_rgba(
     let mut has_component = false;
 
     for component_index in 0..component_count {
-        let Some((combine, enabled, initialized)) = app
-            .masks
+        let Some((combine, enabled, initialized)) = masks
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -4109,7 +4215,7 @@ fn group_coverage_rgba(
             continue;
         }
 
-        let coverage = app.masks.rasterize_component_layer(
+        let coverage = masks.rasterize_component_layer(
             mask_index,
             component_index,
             width,
@@ -4257,5 +4363,51 @@ mod white_balance_picker_tests {
             false
         ));
         assert!(!white_balance_picker_owns_canvas(SidebarTab::Crop, true));
+    }
+
+    #[test]
+    fn zoom_overlay_uses_a_native_density_source_crop() {
+        let region = overlay_raster_region(
+            crate::app::PreviewUvRect {
+                min: [0.45, 0.40],
+                max: [0.55, 0.60],
+            },
+            6000,
+            4000,
+            Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0)),
+            1.0,
+            2,
+        );
+
+        assert_eq!(region.source_x, 2698);
+        assert_eq!(region.source_y, 1598);
+        assert_eq!(region.source_width, 604);
+        assert_eq!(region.source_height, 804);
+        // The visible crop contains only 600x800 native pixels, so zooming it
+        // to a larger viewport must retain those native samples rather than
+        // rasterizing the entire 6000px frame into a 512px overlay.
+        assert_eq!(region.texture_width, 604);
+        assert_eq!(region.texture_height, 804);
+    }
+
+    #[test]
+    fn cropped_inpaint_dab_keeps_its_source_pixel_radius() {
+        let region = OverlayRasterKey {
+            source_x: 2500,
+            source_y: 1500,
+            source_width: 1000,
+            source_height: 1000,
+            texture_width: 1000,
+            texture_height: 1000,
+        };
+        let dab = BrushDab {
+            center: [0.5, 0.5],
+            opacity: 1.0,
+            size: 0.01,
+            feather: 0.0,
+        };
+        let cropped = crop_overlay_dabs(&[dab], region, 6000, 4000);
+        assert_eq!(cropped[0].center, [0.5, 0.5]);
+        assert!((cropped[0].size - 0.04).abs() < 1e-6);
     }
 }

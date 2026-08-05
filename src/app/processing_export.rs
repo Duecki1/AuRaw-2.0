@@ -122,11 +122,58 @@ fn navigation_mask_edge() -> u32 {
 }
 
 fn detail_mask_edge() -> u32 {
-    // Detail and the full preview coexist while zooming. Reusing the full
-    // 1024/2048px, 32-layer atlas here duplicates 64/256 MiB before any image
-    // textures are counted. A dedicated atlas remains full-image normalized,
-    // but is sized for an interactive viewport rather than export.
-    if cfg!(target_os = "android") { 384 } else { 1024 }
+    // This atlas covers only the zoomed source region (plus the exact shaping
+    // halo), so it can match the viewport at much higher density without the
+    // enormous 32-layer allocation a full-frame 4K atlas would require.
+    if cfg!(target_os = "android") { 1024 } else { 2048 }
+}
+
+fn detail_mask_source_region(
+    masks: &MaskStack,
+    source_origin: [u32; 2],
+    source_size: [u32; 2],
+    full_width: u32,
+    full_height: u32,
+) -> [u32; 4] {
+    let full_width = full_width.max(1);
+    let full_height = full_height.max(1);
+    let margin = masks.raster_margin_pixels(full_width, full_height);
+    let x0 = source_origin[0].min(full_width - 1).saturating_sub(margin);
+    let y0 = source_origin[1].min(full_height - 1).saturating_sub(margin);
+    let x1 = source_origin[0]
+        .saturating_add(source_size[0])
+        .saturating_add(margin)
+        .clamp(x0 + 1, full_width);
+    let y1 = source_origin[1]
+        .saturating_add(source_size[1])
+        .saturating_add(margin)
+        .clamp(y0 + 1, full_height);
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
+fn mask_source_region_uv(region: [u32; 4], full_width: u32, full_height: u32) -> [f32; 4] {
+    let width = full_width.max(1) as f32;
+    let height = full_height.max(1) as f32;
+    [
+        region[0] as f32 / width,
+        region[1] as f32 / height,
+        region[0].saturating_add(region[2]) as f32 / width,
+        region[1].saturating_add(region[3]) as f32 / height,
+    ]
+}
+
+fn mask_region_texture_extent(region: [u32; 4], max_edge: u32) -> [u32; 2] {
+    let width = region[2].max(1);
+    let height = region[3].max(1);
+    let longest = width.max(height);
+    if longest <= max_edge {
+        return [width, height];
+    }
+    let scale = max_edge.max(1) as f64 / longest as f64;
+    [
+        ((width as f64 * scale).round() as u32).clamp(1, max_edge.max(1)),
+        ((height as f64 * scale).round() as u32).clamp(1, max_edge.max(1)),
+    ]
 }
 
 /// Start a detailed crop for every real zoom level above fit. The previous
@@ -1201,7 +1248,7 @@ impl AurawApp {
             .as_ref()
             .filter(|detail| detail.revision == self.preview_revision)
         {
-            let params = GpuParams::new_for_tile(
+            let mut params = GpuParams::new_for_tile(
                 exposure,
                 masks,
                 &detail.raw,
@@ -1211,6 +1258,19 @@ impl AurawApp {
                 detail.virtual_full_size[1],
             )
             .with_vignette_geometry(self.geometry);
+            if let Some(full_raw) = self.loaded_raw.as_ref() {
+                let mask_region = detail_mask_source_region(
+                    masks,
+                    detail.source_origin,
+                    detail.source_size,
+                    full_raw.width,
+                    full_raw.height,
+                );
+                params = params.with_mask_uv_rect_and_extent(
+                    mask_source_region_uv(mask_region, full_raw.width, full_raw.height),
+                    mask_region_texture_extent(mask_region, detail.pipeline.mask_atlas_edge()),
+                );
+            }
             detail
                 .pipeline
                 .recompute(&render_state.queue, &render_state.device, &params);
@@ -1337,6 +1397,42 @@ impl AurawApp {
                 layer_started.elapsed().as_secs_f64(),
                 raster_elapsed.as_secs_f64()
             ));
+        }
+        Ok(())
+    }
+
+    fn upload_detail_masks(
+        pipeline: &RawGpuPipeline,
+        queue: &wgpu::Queue,
+        masks: &MaskStack,
+        full_raw: &LoadedRaw,
+        region: [u32; 4],
+        dirty_layers: Option<&[bool; MAX_LOCAL_MASKS]>,
+    ) -> Result<(), String> {
+        let cropped = masks.cropped_for_region(
+            region[0],
+            region[1],
+            region[2],
+            region[3],
+            full_raw.width,
+            full_raw.height,
+        );
+        let edge = pipeline.mask_atlas_edge();
+        let extent = mask_region_texture_extent(region, edge);
+        for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {
+            if dirty_layers.is_some_and(|dirty| !dirty[layer]) {
+                continue;
+            }
+            let bytes = cropped.rasterize_layer_f16(
+                layer,
+                extent[0],
+                extent[1],
+                region[2],
+                region[3],
+            );
+            pipeline
+                .update_mask_layer_region(queue, layer, extent[0], extent[1], &bytes)
+                .map_err(|error| format!("Could not update zoomed local mask: {error:#}"))?;
         }
         Ok(())
     }
@@ -1783,6 +1879,13 @@ impl AurawApp {
             (x0 as f64 / full_raw.width as f64 * virtual_full_width as f64).round() as i32;
         let virtual_origin_y =
             (y0 as f64 / full_raw.height as f64 * virtual_full_height as f64).round() as i32;
+        let mask_region = detail_mask_source_region(
+            &self.masks,
+            [x0, y0],
+            [crop_width, crop_height],
+            full_raw.width,
+            full_raw.height,
+        );
         let params = GpuParams::new_for_tile(
             &self.target_exposure,
             &self.masks,
@@ -1792,7 +1895,11 @@ impl AurawApp {
             virtual_full_width,
             virtual_full_height,
         )
-        .with_vignette_geometry(self.geometry);
+        .with_vignette_geometry(self.geometry)
+        .with_mask_uv_rect_and_extent(
+            mask_source_region_uv(mask_region, full_raw.width, full_raw.height),
+            mask_region_texture_extent(mask_region, detail_mask_edge()),
+        );
         // Prefer the normal proxy whenever its tone statistics are still current.
         let normal_tone_is_current = !matches!(
             self.pending_stage,
@@ -1810,8 +1917,11 @@ impl AurawApp {
                 .map(|preview| &preview.pipeline)
                 .or(self.gpu_pipeline.as_ref())
         };
+        let required_mask_layers = self.masks.masks.len().max(1);
         if let Some(detail) = self.preview_detail.as_mut().filter(|detail| {
-            detail.pipeline.width == detail_raw.width && detail.pipeline.height == detail_raw.height
+            detail.pipeline.width == detail_raw.width
+                && detail.pipeline.height == detail_raw.height
+                && detail.pipeline.mask_layer_capacity() >= required_mask_layers
         }) {
             if let Err(error) = detail
                 .pipeline
@@ -1822,31 +1932,18 @@ impl AurawApp {
                 ));
                 return;
             }
-            // Re-rasterize masks only when their geometry changed.
-            if self.detail_dirty_mask_layers.iter().any(|dirty| *dirty) {
-                let edge = detail.pipeline.mask_atlas_edge();
-                for layer in 0..MAX_LOCAL_MASKS {
-                    if !self.detail_dirty_mask_layers[layer] {
-                        continue;
-                    }
-                    let bytes = self.masks.rasterize_layer_f16(
-                        layer,
-                        edge,
-                        edge,
-                        full_raw.width,
-                        full_raw.height,
-                    );
-                    if let Err(error) =
-                        detail
-                            .pipeline
-                            .update_mask_layer(&render_state.queue, layer, &bytes)
-                    {
-                        self.notice =
-                            Some(format!("Could not update the zoomed local mask: {error:#}"));
-                        return;
-                    }
-                    self.detail_dirty_mask_layers[layer] = false;
-                }
+            // The atlas is viewport-local. A moved crop therefore needs fresh
+            // mask pixels even when the underlying geometry did not change.
+            if let Err(error) = Self::upload_detail_masks(
+                &detail.pipeline,
+                &render_state.queue,
+                &self.masks,
+                &full_raw,
+                mask_region,
+                None,
+            ) {
+                self.notice = Some(error);
+                return;
             }
             detail.pipeline.dispatch_stage(
                 &render_state.queue,
@@ -1890,6 +1987,7 @@ impl AurawApp {
             detail.raw = Arc::clone(&detail_raw);
             detail.source_origin = [x0, y0];
             detail.source_size = [crop_width, crop_height];
+            detail.mask_source_region = mask_region;
             detail.virtual_origin = [virtual_origin_x, virtual_origin_y];
             detail.virtual_full_size = [virtual_full_width, virtual_full_height];
             self.detail_dirty_mask_layers.fill(false);
@@ -1926,11 +2024,13 @@ impl AurawApp {
             ));
             return;
         }
-        if let Err(error) = Self::upload_preview_masks(
+        if let Err(error) = Self::upload_detail_masks(
             &pipeline,
             &render_state.queue,
             &self.masks,
             &full_raw,
+            mask_region,
+            None,
         ) {
             self.notice = Some(error);
             return;
@@ -1985,6 +2085,7 @@ impl AurawApp {
             raw: detail_raw,
             source_origin: [x0, y0],
             source_size: [crop_width, crop_height],
+            mask_source_region: mask_region,
             virtual_origin: [virtual_origin_x, virtual_origin_y],
             virtual_full_size: [virtual_full_width, virtual_full_height],
         });
@@ -2023,6 +2124,17 @@ impl AurawApp {
         let Some(render_state) = frame.wgpu_render_state() else {
             return;
         };
+
+        let navigation_capacity_stale = self.preview_navigation.as_ref().is_some_and(|preview| {
+            preview.pipeline.mask_layer_capacity() < self.masks.masks.len().max(1)
+        });
+        if navigation_capacity_stale {
+            if let Some(old) = self.preview_navigation.take() {
+                if let Some(texture_id) = old.pipeline.egui_texture_id {
+                    self.retire_egui_texture(texture_id);
+                }
+            }
+        }
 
         if self.preview_navigation.is_none() {
             if !should_exist {
@@ -2216,6 +2328,19 @@ impl AurawApp {
         else {
             return;
         };
+        if detail.pipeline.mask_layer_capacity() < self.masks.masks.len().max(1) {
+            // Explicit-edge detail atlases allocate only active layers. Adding
+            // another mask invalidates that small texture and rebuilds just the
+            // detail pipeline on the next frame.
+            if let Some(detail) = self.preview_detail.as_mut() {
+                detail.revision = self.preview_revision.wrapping_sub(1);
+            }
+            self.preview_detail_pending_stage = None;
+            self.preview_detail_urgent = true;
+            self.preview_motion_at = Some(Instant::now());
+            self.egui_ctx.request_repaint();
+            return;
+        }
         let Some(full_raw) = self.loaded_raw.as_ref() else {
             self.preview_detail_pending_stage = None;
             return;
@@ -2227,6 +2352,13 @@ impl AurawApp {
         let detail_raw = Arc::clone(&detail.raw);
         let virtual_origin = detail.virtual_origin;
         let virtual_full_size = detail.virtual_full_size;
+        let mask_region = detail_mask_source_region(
+            &self.masks,
+            detail.source_origin,
+            detail.source_size,
+            full_raw.width,
+            full_raw.height,
+        );
         let params = GpuParams::new_for_tile(
             &self.target_exposure,
             &self.masks,
@@ -2236,7 +2368,11 @@ impl AurawApp {
             virtual_full_size[0],
             virtual_full_size[1],
         )
-        .with_vignette_geometry(self.geometry);
+        .with_vignette_geometry(self.geometry)
+        .with_mask_uv_rect_and_extent(
+            mask_source_region_uv(mask_region, full_raw.width, full_raw.height),
+            mask_region_texture_extent(mask_region, detail.pipeline.mask_atlas_edge()),
+        );
 
         let normal_tone_is_current = !matches!(
             self.pending_stage,
@@ -2260,30 +2396,21 @@ impl AurawApp {
         if stage == ProcessingStage::Output
             && self.detail_dirty_mask_layers.iter().any(|dirty| *dirty)
         {
-            let edge = detail.pipeline.mask_atlas_edge();
-            for layer in 0..MAX_LOCAL_MASKS {
-                if !self.detail_dirty_mask_layers[layer] {
-                    continue;
-                }
-                // Detail masks remain full-frame because the shader addresses full-image UVs.
-                let bytes = self.masks.rasterize_layer_f16(
-                    layer,
-                    edge,
-                    edge,
-                    full_raw.width,
-                    full_raw.height,
-                );
-                if let Err(error) =
-                    detail.pipeline.update_mask_layer(&render_state.queue, layer, &bytes)
-                {
-                    self.notice = Some(format!(
-                        "Could not update the zoomed local mask: {error:#}"
-                    ));
-                    self.preview_detail_pending_stage = None;
-                    return;
-                }
-                self.detail_dirty_mask_layers[layer] = false;
+            let region_changed = detail.mask_source_region != mask_region;
+            if let Err(error) = Self::upload_detail_masks(
+                &detail.pipeline,
+                &render_state.queue,
+                &self.masks,
+                full_raw,
+                mask_region,
+                (!region_changed).then_some(&self.detail_dirty_mask_layers),
+            ) {
+                self.notice = Some(error);
+                self.preview_detail_pending_stage = None;
+                return;
             }
+            detail.mask_source_region = mask_region;
+            self.detail_dirty_mask_layers.fill(false);
         }
 
         if stage == ProcessingStage::Output {

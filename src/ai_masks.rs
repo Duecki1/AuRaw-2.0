@@ -36,7 +36,7 @@ pub const VITMATTE_MODEL_SHA256_HEX: &str =
     "bf28d2e0be2c073286e88d60ad649d7123da2749a2d99133fd1098d5887e0225";
 // probabilities are normally sparse; keeping them sparse avoids evaluating all
 // 150 classes for every query and pixel while preserving semantic argmaxes.
-const VITMATTE_MAX_EDGE_ANDROID: u32 = 768;
+const VITMATTE_MAX_EDGE_ANDROID: u32 = 1024;
 const VITMATTE_SIZE_DIVISOR: u32 = 32;
 
 const MODEL_SIZE: u32 = 1024;
@@ -62,12 +62,6 @@ static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLo
     anyhow::ensure!(
     );
     Ok(())
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn subject_models_are_verified(birefnet: &Path, vitmatte: &Path) -> bool {
-    verify_model(birefnet).is_ok() && verify_vitmatte_model(vitmatte).is_ok()
 }
 
 #[cfg(test)]
@@ -97,7 +91,6 @@ impl Letterbox {
 
 pub struct SubjectMaskWorkerRequest {
     pub model_path: PathBuf,
-    pub vitmatte_path: PathBuf,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
     pub width: u32,
@@ -111,7 +104,6 @@ pub fn spawn_subject_mask(
 ) -> mpsc::Receiver<SubjectMaskEvent> {
     let SubjectMaskWorkerRequest {
         model_path,
-        vitmatte_path,
         runtime_path,
         runtime_sha256,
         width,
@@ -127,18 +119,10 @@ pub fn spawn_subject_mask(
                 (|| {
                     ensure_ai_not_cancelled(&cancellation)?;
                     ensure_model(&model_path, &worker_sender, &cancellation)?;
-                    ensure_vitmatte_model(&vitmatte_path, &cancellation, |downloaded, total| {
-                        let _ = worker_sender.send(SubjectMaskEvent::DownloadProgress {
-                            label: "ViTMatte edge-refinement model",
-                            downloaded,
-                            total,
-                        });
-                    })?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
                     infer_subject(
                         &model_path,
-                        &vitmatte_path,
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
                         width,
@@ -696,14 +680,13 @@ pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
 
 fn infer_subject(
     model_path: &Path,
-    vitmatte_path: &Path,
     runtime_path: Option<&Path>,
     runtime_sha256: Option<&str>,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
 ) -> Result<SubjectMaskResult> {
-    const MAX_SUBJECT_MASK_PIXELS: u64 = 16_000_000;
+    const MAX_SUBJECT_MASK_PIXELS: u64 = 17_000_000;
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .context("subject-mask input dimensions overflow")?;
@@ -757,7 +740,12 @@ fn infer_subject(
         run_subject_session(session, input)?
     };
 
-    let mut mask = restore_from_letterbox(
+    // BiRefNet is itself a high-resolution dichotomous segmentation model and
+    // its sigmoid output contains calibrated fractional coverage. Preserve it
+    // directly: forcing an independently trained composition matting model to
+    // replace every uncertain pixel caused semantic edge drift around hair,
+    // straw, fur, and similarly complex subject boundaries.
+    let mask = restore_from_letterbox(
         &logits,
         output_width,
         output_height,
@@ -765,8 +753,6 @@ fn infer_subject(
         width,
         height,
     )?;
-    mask = refine_mask_with_vitmatte(vitmatte_path, image.as_raw(), width, height, &mask, 1.0)
-        .context("refine subject edges with ViTMatte")?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -1505,7 +1491,7 @@ const SAM21_MASK_INPUT_SIZE: u32 = 256;
 const SAM21_MAX_PROMPTS: usize = 32;
 const SAM21_ENCODER_MAX_BYTES: u64 = 160_000_000;
 const SAM21_DECODER_MAX_BYTES: u64 = 32_000_000;
-const MAX_OBJECT_MASK_PIXELS: u64 = 16_000_000;
+const MAX_OBJECT_MASK_PIXELS: u64 = 17_000_000;
 
 #[cfg(not(target_os = "android"))]
 static SAM_ENCODER_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();

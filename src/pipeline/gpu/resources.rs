@@ -1162,6 +1162,24 @@ mod resource_plan_tests {
     }
 
     #[test]
+    fn unmasked_high_resolution_ai_captures_fit_with_a_tiny_atlas() {
+        for (width, height) in [(4096, 2731), (3464, 3464)] {
+            let mut capture = input();
+            capture.width = width;
+            capture.height = height;
+            capture.mask_atlas_edge = 64;
+            capture.mask_layers = 1;
+            let plan = build_gpu_resource_plan(capture).unwrap();
+
+            assert_eq!(entry_bytes(&plan, "local-mask atlas"), 64 * 64 * 2);
+            assert!(
+                validate_gpu_resource_plan(&plan, DESKTOP_GPU_WORKING_SET_LIMIT_BYTES).is_ok(),
+                "{width}x{height} AI capture exceeded the desktop GPU budget"
+            );
+        }
+    }
+
+    #[test]
     fn aggregate_pipeline_reservations_fail_before_crossing_budget() {
         let used = AtomicU64::new(0);
         assert!(reserve_gpu_bytes(&used, 1_000, 600).is_ok());
