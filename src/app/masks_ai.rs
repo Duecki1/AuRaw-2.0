@@ -800,6 +800,22 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    pub(crate) fn set_birefnet_quality(&mut self, quality: BiRefNetQuality) {
+        if self.birefnet_quality == quality {
+            return;
+        }
+        self.birefnet_quality = quality;
+        // A cached alpha belongs to the checkpoint that produced it. Keep the
+        // currently displayed mask until its replacement succeeds, but never
+        // let a request at the new tier reuse the previous tier's result.
+        self.subject_mask_cache = None;
+        self.subject_generation = self.subject_generation.wrapping_add(1);
+    }
+
+    pub(crate) fn birefnet_quality_change_enabled(&self) -> bool {
+        self.subject_task_id.is_none() && self.subject_receiver.is_none()
+    }
+
     pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
         self.object_error_dialog = None;
         self.recover_terminal_ai_mask_task_owners();
@@ -846,6 +862,7 @@ impl AurawApp {
         let request = SubjectMaskTaskRequest {
             document_id: self.sidecar_generation,
             generation,
+            quality: self.birefnet_quality,
             source,
             model_path,
             runtime_path,
@@ -969,7 +986,11 @@ impl AurawApp {
                     }
                     self.update_background_progress(
                         Some(task_id),
-                        TaskProgress::indeterminate("Running local subject-mask inference…"),
+                        TaskProgress::indeterminate(format!(
+                            "Running {} quality locally with {}…",
+                            self.birefnet_quality.label(),
+                            self.birefnet_quality.model().checkpoint
+                        )),
                     );
                 }
                 SubjectMaskEvent::Finished(result) => finished = Some(result),
@@ -1823,7 +1844,8 @@ impl AurawApp {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
             .unwrap_or_else(std::env::temp_dir);
-        root.join("auraw/models/birefnet-general-lite.onnx")
+        root.join("auraw/models")
+            .join(self.birefnet_quality.model().cache_filename)
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1989,7 +2011,8 @@ impl AurawApp {
         self.android_app
             .internal_data_path()
             .unwrap_or_else(std::env::temp_dir)
-            .join("models/birefnet-general-lite.onnx")
+            .join("models")
+            .join(self.birefnet_quality.model().cache_filename)
     }
 
     #[cfg(target_os = "android")]
@@ -2020,10 +2043,34 @@ impl AurawApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
+                    let mut quality = self.birefnet_quality;
+                    egui::ComboBox::from_label("Subject quality")
+                        .selected_text(quality.label())
+                        .show_ui(ui, |ui| {
+                            for option in BiRefNetQuality::ALL {
+                                ui.selectable_value(
+                                    &mut quality,
+                                    option,
+                                    option.label(),
+                                );
+                            }
+                        });
+                    if quality != self.birefnet_quality {
+                        self.set_birefnet_quality(quality);
+                    }
+                    let model = self.birefnet_quality.model();
+                    ui.label(format!(
+                        "{} quality uses {} with its native {} x {} input tensor.",
+                        self.birefnet_quality.label(),
+                        model.checkpoint,
+                        model.input_height,
+                        model.input_width
+                    ));
+                    ui.label(model.explanation);
                     ui.label("Subject masks use BiRefNet's calibrated soft selection directly. Not Subject is the exact inverse of the subject alpha.");
                     ui.label(format!(
                         "The first use downloads about {:.0} MB and stores the ONNX model in AuRaw's cache.",
-                        BIREFNET_MODEL_BYTES as f64 / 1_000_000.0
+                        model.bytes as f64 / 1_000_000.0
                     ));
                     ui.label("Model license: BiRefNet MIT. The model is optional and used only after this download.");
                     ui.label("Inference is local. No photograph is uploaded.");
@@ -2094,7 +2141,11 @@ impl AurawApp {
                     } else if self.subject_inferencing {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Running high-quality local subject selection…");
+                            ui.label(format!(
+                                "Running {} quality locally with {}…",
+                                self.birefnet_quality.label(),
+                                self.birefnet_quality.model().checkpoint
+                            ));
                         });
                     } else {
                         ui.spinner();

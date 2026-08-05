@@ -202,6 +202,28 @@ def test_ai_subject_preserves_birefnet_soft_output_without_vitmatte_drift() -> N
     assert "let mask = restore_from_letterbox(" in subject
     assert "Preserve it" in subject
 
+
+def test_birefnet_quality_selects_checkpoint_resolution_cache_and_ui_copy() -> None:
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    app = (ROOT / "src/app/masks_ai.rs").read_text(encoding="utf-8")
+    for tier in ("Low", "Medium", "High"):
+        assert f"Self::{tier} => BiRefNetModelSpec" in ai
+    assert 'checkpoint: "BiRefNet Lite-2K"' in ai
+    assert 'checkpoint: "BiRefNet HR"' in ai
+    assert "input_height: 2560" in ai
+    assert "input_width: 2048" in ai
+    assert 'cache_filename: "birefnet-lite-2k.onnx"' in ai
+    assert 'cache_filename: "birefnet-hr.onnx"' in ai
+    assert "model.input_height as usize" in ai
+    assert "model.input_width as usize" in ai
+    assert "cached_quality != quality" in ai
+    assert 'ComboBox::from_label("Subject quality")' in SIDEBAR
+    assert "birefnet_quality.model().explanation" in SIDEBAR
+    assert 'ComboBox::from_label("Subject quality")' in app
+    assert "self.set_birefnet_quality(quality)" in app
+    assert "self.birefnet_quality.model().cache_filename" in app
+    assert "model.bytes as f64" in app
+
 def test_mask_brushes_stay_on_image_but_geometry_handles_can_leave_preview() -> None:
     assert "let mut interaction_rect = if app.sidebar_tab == SidebarTab::Masks" in PREVIEW
     assert "let geometry_can_leave_image = matches!(kind, MaskKind::Radial | MaskKind::Linear)" in PREVIEW

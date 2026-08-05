@@ -1272,6 +1272,8 @@ impl Sidebar {
         let mut brush_mode = app.brush_mode;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
+        let mut birefnet_quality = app.birefnet_quality;
+        let birefnet_quality_change_enabled = app.birefnet_quality_change_enabled();
 
         {
             let mask = &mut app.masks.masks[mask_index];
@@ -1282,7 +1284,11 @@ impl Sidebar {
                     mask,
                     component_index,
                     &mut brush_mode,
-                    &mut request_subject,
+                    (
+                        &mut request_subject,
+                        &mut birefnet_quality,
+                        birefnet_quality_change_enabled,
+                    ),
                     &mut request_object,
                     &mut request_landscape,
                 );
@@ -1330,6 +1336,10 @@ impl Sidebar {
         app.tone_curve_tab = local_curve_tab;
         app.color_grade_tab = local_color_grade_tab;
         app.brush_mode = brush_mode;
+        if birefnet_quality != app.birefnet_quality {
+            app.set_birefnet_quality(birefnet_quality);
+            request_subject = true;
+        }
         if request_subject {
             app.request_subject_mask(frame);
         }
@@ -1377,6 +1387,8 @@ impl Sidebar {
         let mut brush_mode = app.brush_mode;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
+        let mut birefnet_quality = app.birefnet_quality;
+        let birefnet_quality_change_enabled = app.birefnet_quality_change_enabled();
 
         {
             let mask = &mut app.masks.masks[mask_index];
@@ -1387,7 +1399,11 @@ impl Sidebar {
                         mask,
                         component_index,
                         &mut brush_mode,
-                        &mut request_subject,
+                        (
+                            &mut request_subject,
+                            &mut birefnet_quality,
+                            birefnet_quality_change_enabled,
+                        ),
                         &mut request_object,
                         &mut request_landscape,
                     );
@@ -1433,6 +1449,10 @@ impl Sidebar {
         app.tone_curve_tab = local_curve_tab;
         app.color_grade_tab = local_color_grade_tab;
         app.brush_mode = brush_mode;
+        if birefnet_quality != app.birefnet_quality {
+            app.set_birefnet_quality(birefnet_quality);
+            request_subject = true;
+        }
         if request_subject {
             app.request_subject_mask(frame);
         }
@@ -1466,10 +1486,16 @@ impl Sidebar {
         mask: &mut crate::pipeline::LocalMask,
         component_index: usize,
         brush_mode: &mut BrushMode,
-        request_subject: &mut bool,
+        subject_controls: (
+            &mut bool,
+            &mut crate::ai_masks::BiRefNetQuality,
+            bool,
+        ),
         request_object: &mut bool,
         request_landscape: &mut bool,
     ) -> bool {
+        let (request_subject, birefnet_quality, birefnet_quality_change_enabled) =
+            subject_controls;
         let mut geometry_changed = adjustment_slider(
             ui,
             "Mask opacity",
@@ -1614,6 +1640,24 @@ impl Sidebar {
                     grow,
                     feather,
                 } => {
+                    ui.add_enabled_ui(birefnet_quality_change_enabled, |ui| {
+                        egui::ComboBox::from_label("Subject quality")
+                            .selected_text(birefnet_quality.label())
+                            .show_ui(ui, |ui| {
+                                for quality in crate::ai_masks::BiRefNetQuality::ALL {
+                                    ui.selectable_value(
+                                        birefnet_quality,
+                                        quality,
+                                        quality.label(),
+                                    );
+                                }
+                            });
+                    });
+                    ui.add(
+                        egui::Label::new(birefnet_quality.model().explanation)
+                            .wrap()
+                            .selectable(false),
+                    );
                     if generated_mask.is_none() {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -1622,6 +1666,8 @@ impl Sidebar {
                         if ui.button("Generate subject mask").clicked() {
                             *request_subject = true;
                         }
+                    } else if ui.button("Recalculate subject mask").clicked() {
+                        *request_subject = true;
                     }
                     geometry_changed |= adjustment_slider(
                         ui,

@@ -1,7 +1,7 @@
 use crate::ai_masks::{
-    spawn_landscape_mask, spawn_object_mask, spawn_subject_mask, LandscapeMaskEvent,
-    LandscapeMaskWorkerRequest, ObjectInferenceCache, ObjectMaskEvent, ObjectMaskRequest,
-    SubjectMaskEvent, SubjectMaskWorkerRequest, BIREFNET_MODEL_BYTES, LANDSCAPE_MODEL_BYTES,
+    spawn_landscape_mask, spawn_object_mask, spawn_subject_mask, BiRefNetQuality,
+    LandscapeMaskEvent, LandscapeMaskWorkerRequest, ObjectInferenceCache, ObjectMaskEvent,
+    ObjectMaskRequest, SubjectMaskEvent, SubjectMaskWorkerRequest, LANDSCAPE_MODEL_BYTES,
     SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
 use crate::inpainting::{
@@ -633,6 +633,7 @@ struct LensCorrectionTaskRequest {
 struct SubjectMaskTaskRequest {
     document_id: u64,
     generation: u64,
+    quality: BiRefNetQuality,
     source: MaskRgbImage,
     model_path: PathBuf,
     runtime_path: Option<PathBuf>,
@@ -819,6 +820,7 @@ pub struct AurawApp {
     pub(crate) mask_thumbnail_component_textures: Vec<egui::TextureHandle>,
     pub(crate) mask_source_cache: Option<MaskRgbImage>,
     pub(crate) subject_mask_cache: Option<MaskImage>,
+    pub(crate) birefnet_quality: BiRefNetQuality,
     pub(crate) ai_masks_need_update: bool,
     ai_mask_update_active: bool,
     ai_mask_update_subject_pending: bool,
