@@ -12,7 +12,11 @@ MIB = 1024 * 1024
 
 
 def preview_persistent_bytes(
-    width: int, height: int, mask_edge: int, tone_scale: int = 8
+    width: int,
+    height: int,
+    mask_edge: int,
+    tone_scale: int = 8,
+    mask_layers: int = 32,
 ) -> int:
     """Analytical preview reference for resources.rs persistent entries."""
     pixels = width * height
@@ -22,7 +26,7 @@ def preview_persistent_bytes(
     tone_width = math.ceil(width / tone_scale)
     tone_height = math.ceil(height / tone_scale)
     tone_guides = 2 * tone_width * tone_height * 4
-    mask_atlas = mask_edge * mask_edge * 32 * 2
+    mask_atlas = mask_edge * mask_edge * mask_layers * 2
     # Profile/params/histogram/stats are small and alignment-dependent. One MiB
     # per pipeline is deliberately conservative for this admission reference.
     fixed_buffers = MIB
@@ -48,12 +52,18 @@ def test_android_zoom_working_set_fits_resident_budget() -> None:
     assert "cfg!(target_os = \"android\")" not in APP[
         APP.index("impl PreviewQuality"):APP.index("pub(crate) struct PreviewDetail")
     ]
-    assert 'if cfg!(target_os = "android") { 384 } else { 1024 }' in PROCESSING
+    assert 'if cfg!(target_os = "android") { 1024 } else { 2048 }' in PROCESSING
+    assert "if mask_atlas_edge_override.is_some()" in (
+        ROOT / "src/pipeline/gpu.rs"
+    ).read_text(encoding="utf-8")
 
     # Max on a 1440px-wide, 3:2 image: the fit proxy is one physical pixel per
     # display pixel and the detail case includes the full 35% support ceiling.
     max_main = preview_persistent_bytes(1446, 964, 1024)
-    max_detail = preview_persistent_bytes(1950, 1300, 384)
+    # Explicit-edge detail pipelines allocate only the active mask layers. A
+    # fresh one-mask edit therefore gets a dense cropped atlas without paying
+    # for 31 unused 1024px layers.
+    max_detail = preview_persistent_bytes(1950, 1300, 1024, mask_layers=1)
     navigation = preview_persistent_bytes(384, 256, 256)
     assert max_main + max_detail + navigation < 384 * MIB
 

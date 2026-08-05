@@ -212,13 +212,13 @@ impl AurawApp {
         self.subject_download_progress = None;
         // The worker performs exact size and SHA-256 verification before
         // inference. Do not hash hundreds of megabytes on Android's UI thread.
-        self.subject_inferencing = request.model_path.is_file() && request.vitmatte_path.is_file();
+        self.subject_inferencing = request.model_path.is_file();
         self.background_tasks
             .set_global_visible(id, !self.subject_inferencing);
         self.subject_receiver = Some(spawn_subject_mask(
             SubjectMaskWorkerRequest {
+                quality: request.quality,
                 model_path: request.model_path,
-                vitmatte_path: request.vitmatte_path,
                 runtime_path: request.runtime_path,
                 runtime_sha256: request.runtime_sha256,
                 width: request.source.width,
@@ -230,9 +230,16 @@ impl AurawApp {
         self.background_tasks.update_progress(
             id,
             TaskProgress::indeterminate(if self.subject_inferencing {
-                "Running local subject-mask inference…"
+                format!(
+                    "Running {} quality locally with {}…",
+                    request.quality.label(),
+                    request.quality.model().checkpoint
+                )
             } else {
-                "Preparing model download…"
+                format!(
+                    "Preparing {} download…",
+                    request.quality.model().download_label
+                )
             }),
         );
         self.egui_ctx.request_repaint();

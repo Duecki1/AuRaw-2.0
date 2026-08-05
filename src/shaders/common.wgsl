@@ -110,8 +110,13 @@ struct Params {
     // Camera/DNG default rendering exposure lives independently in profile_flags.z.
     process_info: vec4<u32>,
     // Local adjustments. Each mask index maps directly to one layer in the
-    // normalized R8 array texture sampled by adjustments.wgsl. mask_meta.w is
-    // a feature bitset: bit 0 color mixer, bit 1 color grading.
+    // normalized R16F array texture sampled by adjustments.wgsl. y/z can hold
+    // packed UNORM16 min/max UV pairs for a viewport-local atlas and w enables
+    // that mapping. mask_meta.w is a feature bitset: bit 0 color mixer, bit 1
+    // color grading.
+    // x: active layers; y/z: optional source UV rectangle; w: 0 for a full
+    // image atlas, 0xffffffff for a full cropped atlas, or packed valid
+    // width/height when only its top-left texture region has been uploaded.
     mask_counts: vec4<u32>,
     mask_meta: array<vec4<u32>, 32>,
     // Exposure, contrast, highlights, shadows.

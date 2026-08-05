@@ -7,7 +7,9 @@ use crate::pipeline::{
     SigmoidColorProcessing, HSL_HUE_LIMIT, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
     MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
 };
-use crate::ui::components::adjustment_slider::{adjustment_slider, slider_scroll_locked};
+use crate::ui::components::adjustment_slider::{
+    adjustment_slider, adjustment_slider_with_reset, slider_scroll_locked,
+};
 use crate::ui::components::color_grading::color_grading_editor;
 use crate::ui::components::tone_curve_editor::tone_curve_editor;
 use crate::ui::layout::ScreenLayout;

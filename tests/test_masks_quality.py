@@ -66,7 +66,11 @@ def test_mask_atlas_is_shared_by_preview_and_export() -> None:
     assert "mark_mask_geometry_dirty" in APP
     assert "upload_mask_atlas" in EXPORT
     assert "rasterize_layer_f16" in EXPORT
-    assert "export_mask_atlas_edge(raw.width, raw.height)" in EXPORT
+    assert "first.padded_width.saturating_add(margin.saturating_mul(2))" in EXPORT
+    assert "tile_mask_source_region(" in EXPORT
+    assert "cropped_for_region(" in EXPORT
+    assert "with_mask_uv_rect_and_extent(" in EXPORT
+    assert "update_mask_layer_region" in EXPORT
     assert "MASK_ATLAS_EDGE_EXPORT_DESKTOP: u32 = 4096" in MASKS
     assert "MASK_ATLAS_EDGE_EXPORT_ANDROID: u32 = 2048" in MASKS
 
@@ -108,7 +112,9 @@ def test_ai_and_range_masks_use_a_stable_unedited_raw_reference() -> None:
 
     desktop = capture[capture.index('#[cfg(not(target_os = "android"))]'):]
     assert "loaded_raw" in desktop
-    assert "ProxySpec { max_edge: 3072 }" in desktop
+    assert "const AI_MASK_SOURCE_MAX_EDGE: u32 = 4096;" in APP
+    assert "const AI_MASK_SOURCE_MAX_PIXELS: u64 = 12_000_000;" in APP
+    assert "max_edge: source_edge" in desktop
     assert "RawGpuPipeline::new_headless_reusing_program_template" in desktop
     assert "let rgba = reference_pipeline" in desktop
 
@@ -133,6 +139,30 @@ def test_ai_subject_feather_is_resolution_relative_and_background_is_exact_compl
     assert "component.kind == MaskKind::Background" in MASKS
     assert "*value = 1.0 - *value" in MASKS
     assert "fixed 32-texel box blur" not in MASKS
+    assert 'Zero feather means "use' in MASKS
+    assert "*value = value.clamp(0.0, 1.0)" in MASKS
+    assert "centered on the original 0.5 contour" in MASKS
+
+
+def test_zoomed_overlays_and_adjustment_atlas_are_viewport_local() -> None:
+    processing = (ROOT / "src/app/processing_export.rs").read_text(encoding="utf-8")
+    assert "fn overlay_raster_region(" in PREVIEW
+    assert "cropped_for_region(" in PREVIEW
+    assert "physical_pixels_per_point(ui.ctx())" in PREVIEW
+    assert "source_overlay_texture_dimensions" not in PREVIEW
+    assert "fn detail_mask_source_region(" in processing
+    assert "upload_detail_masks(" in processing
+    assert "with_mask_uv_rect_and_extent(" in processing
+    assert "update_mask_layer_region" in processing
+    assert "params.mask_counts.w == 0u" in ADJUSTMENTS
+    assert "fn local_mask_texture_uv(" in ADJUSTMENTS
+
+
+def test_ai_feather_sliders_reset_to_creation_default() -> None:
+    assert "adjustment_slider_with_reset" in SIDEBAR
+    for label in ('"Feather"', '"Mask feather"'):
+        assert label in SIDEBAR
+    assert SIDEBAR.count("adjustment_slider_with_reset(") >= 8
 
 
 def test_ai_mask_resampling_is_bilinear_before_feathering() -> None:
@@ -165,12 +195,45 @@ def test_landscape_masks_have_persisted_categories_and_explicit_generation() -> 
 
 
 
-def test_ai_subject_edges_use_high_resolution_vitmatte_guidance() -> None:
+def test_ai_subject_preserves_birefnet_soft_output_without_vitmatte_drift() -> None:
     ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
     subject = ai[ai.index("fn infer_subject(") : ai.index("fn run_subject_session")]
-    assert "refine_mask_with_vitmatte(" in subject
-    assert "image.as_raw()" in subject
-    assert "width" in subject and "height" in subject
+    assert "refine_mask_with_vitmatte(" not in subject
+    assert "let mask = restore_birefnet_output(" in subject
+    assert "Preserve it" in subject
+
+
+def test_birefnet_uses_the_checkpoint_native_resize_without_letterboxing() -> None:
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    subject = ai[ai.index("fn infer_subject(") : ai.index("fn run_subject_session")]
+    assert "model.input_width," in subject
+    assert "model.input_height," in subject
+    assert "normalized_birefnet_input" in subject
+    assert "struct Letterbox" not in ai
+
+
+def test_birefnet_quality_selects_checkpoint_resolution_cache_and_ui_copy() -> None:
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    app = (ROOT / "src/app/masks_ai.rs").read_text(encoding="utf-8")
+    for tier in ("Low", "Medium", "High"):
+        assert f"Self::{tier} => BiRefNetModelSpec" in ai
+    assert 'checkpoint: "BiRefNet Lite-2K"' in ai
+    assert 'checkpoint: "BiRefNet HR"' in ai
+    assert "input_height: 2560" in ai
+    assert "input_width: 2048" in ai
+    assert 'cache_filename: "birefnet-lite-2k.onnx"' in ai
+    assert 'cache_filename: "birefnet-hr.onnx"' in ai
+    assert "model.input_height as usize" in ai
+    assert "model.input_width as usize" in ai
+    assert "cached_quality != quality" in ai
+    assert 'ComboBox::from_label("Subject quality")' in SIDEBAR
+    assert "birefnet_quality.model().explanation" in SIDEBAR
+    assert 'ComboBox::from_label("Subject quality")' in app
+    assert "self.set_birefnet_quality(quality)" in app
+    quality_setter = app[app.index("pub(crate) fn set_birefnet_quality(") : app.index("pub(crate) fn birefnet_quality_change_enabled")]
+    assert "self.persist_performance_settings();" in quality_setter
+    assert "self.birefnet_quality.model().cache_filename" in app
+    assert "model.bytes as f64" in app
 
 def test_mask_brushes_stay_on_image_but_geometry_handles_can_leave_preview() -> None:
     assert "let mut interaction_rect = if app.sidebar_tab == SidebarTab::Masks" in PREVIEW

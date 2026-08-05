@@ -39,11 +39,15 @@ def test_native_runtime_is_never_downloaded_or_archive_extracted() -> None:
 
 
 def test_downloaded_model_is_size_and_sha256_pinned() -> None:
-    assert "BIREFNET_MODEL_SHA256" in AI
-    assert "downloaded <= BIREFNET_MODEL_BYTES" in AI
+    for tier in ("LOW", "MEDIUM", "HIGH"):
+        assert f"BIREFNET_{tier}_MODEL_BYTES" in AI
+        assert f"BIREFNET_{tier}_MODEL_URL" in AI
+        assert f"BIREFNET_{tier}_MODEL_SHA256_HEX" in AI
+    assert "downloaded <= model.bytes" in AI
+    assert "digest == model.sha256_hex" in AI
     assert "create_new(true)" in AI
     assert "file.sync_all()" in AI
-    assert "verify_model(path)" in AI
+    assert "verify_model(quality, path)" in AI
     assert "VITMATTE_MODEL_SHA256_HEX" in AI
     assert "downloaded <= VITMATTE_MODEL_BYTES" in AI
     assert "verify_vitmatte_model(path)" in AI
@@ -87,7 +91,7 @@ def test_large_ai_model_hashing_stays_off_the_ui_thread() -> None:
     subject_worker = AI[AI.index("pub fn spawn_subject_mask"):AI.index("pub fn spawn_object_mask")]
     object_worker = AI[AI.index("pub fn spawn_object_mask"):AI.index("fn infer_object_mask")]
     assert "ensure_model(" in subject_worker
-    assert "ensure_vitmatte_model(" in subject_worker
+    assert "ensure_vitmatte_model(" not in subject_worker
     assert "ensure_sam_model(" in object_worker
     assert "ensure_vitmatte_model(" in object_worker
 

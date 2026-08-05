@@ -88,18 +88,68 @@ pub fn adjustment_slider<Num>(
 where
     Num: egui::emath::Numeric + Copy,
 {
+    adjustment_slider_impl(ui, label, value, range, decimals, speed, hover_text, None)
+}
+
+/// Adjustment slider with an explicit semantic reset value.
+///
+/// Most controls can remember the value they first displayed. Controls whose
+/// meaning changes while reusing the same sidebar slot (notably AI-mask
+/// feather) need an explicit reset so a deleted Brush's 0.55 default cannot be
+/// inherited by a newly created 0.0-feather AI mask.
+pub fn adjustment_slider_with_reset<Num>(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Num,
+    range: RangeInclusive<Num>,
+    decimals: usize,
+    speed: f64,
+    hover_text: Option<&str>,
+    reset_value: Num,
+) -> bool
+where
+    Num: egui::emath::Numeric + Copy,
+{
+    adjustment_slider_impl(
+        ui,
+        label,
+        value,
+        range,
+        decimals,
+        speed,
+        hover_text,
+        Some(reset_value.to_f64()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adjustment_slider_impl<Num>(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Num,
+    range: RangeInclusive<Num>,
+    decimals: usize,
+    speed: f64,
+    hover_text: Option<&str>,
+    explicit_reset_value: Option<f64>,
+) -> bool
+where
+    Num: egui::emath::Numeric + Copy,
+{
     let mut changed = false;
 
     ui.push_id(label, |ui| {
         let reset_id = ui.id().with("reset-value");
-        let reset_value = ui.data_mut(|data| {
-            if let Some(value) = data.get_temp::<f64>(reset_id) {
-                value
-            } else {
-                let value = (*value).to_f64();
-                data.insert_temp(reset_id, value);
-                value
-            }
+        let reset_value = explicit_reset_value.unwrap_or_else(|| {
+            ui.data_mut(|data| {
+                if let Some(value) = data.get_temp::<f64>(reset_id) {
+                    value
+                } else {
+                    let value = (*value).to_f64();
+                    data.insert_temp(reset_id, value);
+                    value
+                }
+            })
         });
         let control_width = ui.available_width().max(VALUE_FIELD_WIDTH + 96.0);
 
