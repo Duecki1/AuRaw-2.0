@@ -12,6 +12,13 @@ def _function(source: str, name: str, next_name: str) -> str:
     return source[start:end]
 
 
+def test_canonical_mask_capture_does_not_allocate_the_editing_mask_atlas() -> None:
+    capture = _function(MASKS, "pub(crate) fn capture_mask_source", "pub(crate) fn report_ai_mask_error")
+    assert "new_headless_reusing_program_template_with_mask_edge" in capture
+    assert "ProcessingQuality::Preview,\n                &program_template,\n                64," in capture
+    assert "ai_mask_source_proxy_edge(full_raw.width, full_raw.height)" in capture
+
+
 def test_runtime_probe_caches_only_successful_results() -> None:
     assert "type RuntimeProbeResult = (PathBuf, String);" in AI
     probe = _function(

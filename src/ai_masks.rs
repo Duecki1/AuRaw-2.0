@@ -49,8 +49,11 @@ const ADE20K_CLASS_COUNT: usize = 150;
 // probabilities are normally sparse; keeping them sparse avoids evaluating all
 // 150 classes for every query and pixel while preserving semantic argmaxes.
 const MASKFORMER_CLASS_PROBABILITY_EPSILON: f32 = 1e-5;
-const VITMATTE_MAX_EDGE_DESKTOP: u32 = 1280;
-const VITMATTE_MAX_EDGE_ANDROID: u32 = 768;
+// Keep enough native guidance for individual hair/fur strands. The previous
+// 1280/768 caps made ViTMatte's otherwise full-size alpha visibly stair-step
+// after it was enlarged to modern high-resolution RAW dimensions.
+const VITMATTE_MAX_EDGE_DESKTOP: u32 = 2048;
+const VITMATTE_MAX_EDGE_ANDROID: u32 = 1024;
 const VITMATTE_SIZE_DIVISOR: u32 = 32;
 
 const MODEL_SIZE: u32 = 1024;
@@ -267,12 +270,6 @@ pub(crate) fn vitmatte_model_is_verified(path: &Path) -> bool {
 
 #[cfg(test)]
 #[allow(dead_code)]
-pub(crate) fn subject_models_are_verified(birefnet: &Path, vitmatte: &Path) -> bool {
-    verify_model(birefnet).is_ok() && verify_vitmatte_model(vitmatte).is_ok()
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn object_models_are_verified(encoder: &Path, decoder: &Path, vitmatte: &Path) -> bool {
     verify_sha256_hex(encoder, SAM21_ENCODER_SHA256_HEX, SAM21_ENCODER_MAX_BYTES).is_ok()
         && verify_sha256_hex(decoder, SAM21_DECODER_SHA256_HEX, SAM21_DECODER_MAX_BYTES).is_ok()
@@ -393,7 +390,6 @@ impl Letterbox {
 
 pub struct SubjectMaskWorkerRequest {
     pub model_path: PathBuf,
-    pub vitmatte_path: PathBuf,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
     pub width: u32,
@@ -407,7 +403,6 @@ pub fn spawn_subject_mask(
 ) -> mpsc::Receiver<SubjectMaskEvent> {
     let SubjectMaskWorkerRequest {
         model_path,
-        vitmatte_path,
         runtime_path,
         runtime_sha256,
         width,
@@ -423,18 +418,10 @@ pub fn spawn_subject_mask(
                 (|| {
                     ensure_ai_not_cancelled(&cancellation)?;
                     ensure_model(&model_path, &worker_sender, &cancellation)?;
-                    ensure_vitmatte_model(&vitmatte_path, &cancellation, |downloaded, total| {
-                        let _ = worker_sender.send(SubjectMaskEvent::DownloadProgress {
-                            label: "ViTMatte edge-refinement model",
-                            downloaded,
-                            total,
-                        });
-                    })?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
                     infer_subject(
                         &model_path,
-                        &vitmatte_path,
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
                         width,
@@ -992,14 +979,13 @@ pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
 
 fn infer_subject(
     model_path: &Path,
-    vitmatte_path: &Path,
     runtime_path: Option<&Path>,
     runtime_sha256: Option<&str>,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
 ) -> Result<SubjectMaskResult> {
-    const MAX_SUBJECT_MASK_PIXELS: u64 = 16_000_000;
+    const MAX_SUBJECT_MASK_PIXELS: u64 = 17_000_000;
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .context("subject-mask input dimensions overflow")?;
@@ -1053,7 +1039,12 @@ fn infer_subject(
         run_subject_session(session, input)?
     };
 
-    let mut mask = restore_from_letterbox(
+    // BiRefNet is itself a high-resolution dichotomous segmentation model and
+    // its sigmoid output contains calibrated fractional coverage. Preserve it
+    // directly: forcing an independently trained composition matting model to
+    // replace every uncertain pixel caused semantic edge drift around hair,
+    // straw, fur, and similarly complex subject boundaries.
+    let mask = restore_from_letterbox(
         &logits,
         output_width,
         output_height,
@@ -1061,8 +1052,6 @@ fn infer_subject(
         width,
         height,
     )?;
-    mask = refine_mask_with_vitmatte(vitmatte_path, image.as_raw(), width, height, &mask, 1.0)
-        .context("refine subject edges with ViTMatte")?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -1170,7 +1159,7 @@ fn infer_landscape(
     rgba: Vec<u8>,
     category: LandscapeCategory,
 ) -> Result<LandscapeMaskResult> {
-    const MAX_LANDSCAPE_MASK_PIXELS: u64 = 16_000_000;
+    const MAX_LANDSCAPE_MASK_PIXELS: u64 = 17_000_000;
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .context("landscape-mask input dimensions overflow")?;
@@ -2136,7 +2125,7 @@ const SAM21_MASK_INPUT_SIZE: u32 = 256;
 const SAM21_MAX_PROMPTS: usize = 32;
 const SAM21_ENCODER_MAX_BYTES: u64 = 160_000_000;
 const SAM21_DECODER_MAX_BYTES: u64 = 32_000_000;
-const MAX_OBJECT_MASK_PIXELS: u64 = 16_000_000;
+const MAX_OBJECT_MASK_PIXELS: u64 = 17_000_000;
 
 #[cfg(not(target_os = "android"))]
 static SAM_ENCODER_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();

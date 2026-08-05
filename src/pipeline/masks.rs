@@ -218,6 +218,11 @@ pub struct MaskImage {
     pub height: u32,
     #[serde(with = "base64_arc_bytes")]
     pub pixels: Arc<[u8]>,
+    /// Transient normalized view into `pixels`. Cropped preview/export stacks
+    /// share the original matte and change only this sampling transform, which
+    /// keeps sub-pixel alignment identical across adjacent tiles.
+    #[serde(skip, default = "unit_sampling_rect")]
+    sampling_rect: [f32; 4],
 }
 
 impl MaskImage {
@@ -229,6 +234,7 @@ impl MaskImage {
             width,
             height,
             pixels: pixels.into(),
+            sampling_rect: unit_sampling_rect(),
         })
     }
 }
@@ -239,6 +245,8 @@ pub struct MaskRgbImage {
     pub height: u32,
     #[serde(with = "base64_arc_bytes")]
     pub rgba: Arc<[u8]>,
+    #[serde(skip, default = "unit_sampling_rect")]
+    sampling_rect: [f32; 4],
 }
 
 impl MaskRgbImage {
@@ -251,8 +259,13 @@ impl MaskRgbImage {
             width,
             height,
             rgba: rgba.into(),
+            sampling_rect: unit_sampling_rect(),
         })
     }
+}
+
+fn unit_sampling_rect() -> [f32; 4] {
+    [0.0, 0.0, 1.0, 1.0]
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1032,18 +1045,33 @@ impl MaskStack {
                         remap_point(start);
                         remap_point(end);
                     }
-                    MaskGeometry::Ai { mask, .. } => {
+                    MaskGeometry::Ai {
+                        mask,
+                        grow,
+                        feather,
+                    } => {
                         *mask = mask
                             .as_ref()
                             .map(|source| crop_mask_image(source, u0, v0, du, dv));
+                        *grow *= image_scale;
+                        *feather *= image_scale.powf(1.0 / 1.30);
                     }
-                    MaskGeometry::Landscape { mask, .. } => {
+                    MaskGeometry::Landscape {
+                        mask,
+                        grow,
+                        feather,
+                        ..
+                    } => {
                         *mask = mask
                             .as_ref()
                             .map(|source| crop_mask_image(source, u0, v0, du, dv));
+                        *grow *= image_scale;
+                        *feather *= image_scale.powf(1.0 / 1.30);
                     }
                     MaskGeometry::Object {
                         mask,
+                        grow,
+                        feather,
                         brush_size,
                         strokes,
                         ..
@@ -1051,6 +1079,8 @@ impl MaskStack {
                         *mask = mask
                             .as_ref()
                             .map(|source| crop_mask_image(source, u0, v0, du, dv));
+                        *grow *= image_scale;
+                        *feather *= image_scale.powf(1.0 / 1.30);
                         *brush_size *= image_scale;
                         for stroke in strokes {
                             if stroke.brush_size > 0.0 {
@@ -1061,11 +1091,12 @@ impl MaskStack {
                             }
                         }
                     }
-                    MaskGeometry::LuminanceRange { source, .. }
-                    | MaskGeometry::ColorRange { source, .. } => {
+                    MaskGeometry::LuminanceRange { source, grow, .. }
+                    | MaskGeometry::ColorRange { source, grow, .. } => {
                         *source = source
                             .as_ref()
                             .map(|source| crop_rgb_image(source, u0, v0, du, dv));
+                        *grow *= image_scale;
                     }
                     MaskGeometry::Placeholder => {}
                 }
@@ -1123,6 +1154,43 @@ impl MaskStack {
         self.selected_mask_mut()?
             .components
             .get_mut(component_index)
+    }
+
+    /// Source-pixel context needed around a partial mask raster so grow and
+    /// feather produce the same boundary as a full-frame raster. Procedural
+    /// brushes and gradients do not need a halo because their geometry remains
+    /// available after cropping; distance-shaped masks do.
+    pub fn raster_margin_pixels_for_layer(
+        &self,
+        mask_index: usize,
+        component_index: Option<usize>,
+        image_width: u32,
+        image_height: u32,
+    ) -> u32 {
+        let Some(mask) = self.masks.get(mask_index) else {
+            return 2;
+        };
+        let edge = image_width.min(image_height).max(1) as f32;
+        mask.components
+            .iter()
+            .enumerate()
+            .filter(|(index, component)| {
+                component.enabled && component_index.is_none_or(|selected| selected == *index)
+            })
+            .map(|(_, component)| component_shape_margin_pixels(component, edge))
+            .fold(2.0_f32, f32::max)
+            .ceil() as u32
+    }
+
+    pub fn raster_margin_pixels(&self, image_width: u32, image_height: u32) -> u32 {
+        self.masks
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                self.raster_margin_pixels_for_layer(index, None, image_width, image_height)
+            })
+            .max()
+            .unwrap_or(2)
     }
 
     pub fn remove_selected_mask(&mut self) -> Option<usize> {
@@ -1359,55 +1427,26 @@ impl MaskStack {
 }
 
 fn crop_mask_image(source: &MaskImage, u0: f32, v0: f32, du: f32, dv: f32) -> MaskImage {
-    if source.width == 0 || source.height == 0 {
-        return source.clone();
-    }
-    let x0 = (u0 * source.width as f32)
-        .floor()
-        .clamp(0.0, source.width.saturating_sub(1) as f32) as u32;
-    let y0 = (v0 * source.height as f32)
-        .floor()
-        .clamp(0.0, source.height.saturating_sub(1) as f32) as u32;
-    let x1 = ((u0 + du) * source.width as f32)
-        .ceil()
-        .clamp((x0 + 1) as f32, source.width as f32) as u32;
-    let y1 = ((v0 + dv) * source.height as f32)
-        .ceil()
-        .clamp((y0 + 1) as f32, source.height as f32) as u32;
-    let width = x1 - x0;
-    let height = y1 - y0;
-    let mut pixels = Vec::with_capacity((width * height) as usize);
-    for row in y0..y1 {
-        let start = (row * source.width + x0) as usize;
-        pixels.extend_from_slice(&source.pixels[start..start + width as usize]);
-    }
-    MaskImage::new(width, height, pixels).expect("cropped mask image dimensions are valid")
+    let mut cropped = source.clone();
+    cropped.sampling_rect = crop_sampling_rect(source.sampling_rect, u0, v0, du, dv);
+    cropped
 }
 
 fn crop_rgb_image(source: &MaskRgbImage, u0: f32, v0: f32, du: f32, dv: f32) -> MaskRgbImage {
-    if source.width == 0 || source.height == 0 {
-        return source.clone();
-    }
-    let x0 = (u0 * source.width as f32)
-        .floor()
-        .clamp(0.0, source.width.saturating_sub(1) as f32) as u32;
-    let y0 = (v0 * source.height as f32)
-        .floor()
-        .clamp(0.0, source.height.saturating_sub(1) as f32) as u32;
-    let x1 = ((u0 + du) * source.width as f32)
-        .ceil()
-        .clamp((x0 + 1) as f32, source.width as f32) as u32;
-    let y1 = ((v0 + dv) * source.height as f32)
-        .ceil()
-        .clamp((y0 + 1) as f32, source.height as f32) as u32;
-    let width = x1 - x0;
-    let height = y1 - y0;
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    for row in y0..y1 {
-        let start = ((row * source.width + x0) * 4) as usize;
-        rgba.extend_from_slice(&source.rgba[start..start + width as usize * 4]);
-    }
-    MaskRgbImage::new(width, height, rgba).expect("cropped RGB mask dimensions are valid")
+    let mut cropped = source.clone();
+    cropped.sampling_rect = crop_sampling_rect(source.sampling_rect, u0, v0, du, dv);
+    cropped
+}
+
+fn crop_sampling_rect(source: [f32; 4], u0: f32, v0: f32, du: f32, dv: f32) -> [f32; 4] {
+    let source_width = source[2] - source[0];
+    let source_height = source[3] - source[1];
+    [
+        source[0] + u0 * source_width,
+        source[1] + v0 * source_height,
+        source[0] + (u0 + du) * source_width,
+        source[1] + (v0 + dv) * source_height,
+    ]
 }
 
 fn moved_index(selected: usize, from: usize, to: usize) -> usize {
@@ -1567,13 +1606,19 @@ fn rasterize_mask_image(width: u32, height: u32, mask: &MaskImage) -> Vec<f32> {
     out.par_chunks_mut(row_stride)
         .enumerate()
         .for_each(|(y, row)| {
-            let source_y = ((y as f32 + 0.5) * mask.height as f32 / height as f32 - 0.5)
+            let sample_v = mask.sampling_rect[1]
+                + (y as f32 + 0.5) / height as f32
+                    * (mask.sampling_rect[3] - mask.sampling_rect[1]);
+            let source_y = (sample_v * mask.height as f32 - 0.5)
                 .clamp(0.0, mask.height.saturating_sub(1) as f32);
             let y0 = source_y.floor() as usize;
             let y1 = (y0 + 1).min(mask.height as usize - 1);
             let fy = source_y - y0 as f32;
             for (x, value) in row.iter_mut().enumerate() {
-                let source_x = ((x as f32 + 0.5) * mask.width as f32 / width as f32 - 0.5)
+                let sample_u = mask.sampling_rect[0]
+                    + (x as f32 + 0.5) / width as f32
+                        * (mask.sampling_rect[2] - mask.sampling_rect[0]);
+                let source_x = (sample_u * mask.width as f32 - 0.5)
                     .clamp(0.0, mask.width.saturating_sub(1) as f32);
                 let x0 = source_x.floor() as usize;
                 let x1 = (x0 + 1).min(mask.width as usize - 1);
@@ -1587,6 +1632,23 @@ fn rasterize_mask_image(width: u32, height: u32, mask: &MaskImage) -> Vec<f32> {
             }
         });
     out
+}
+
+fn component_shape_margin_pixels(component: &MaskComponent, image_edge: f32) -> f32 {
+    let shape_margin = |grow: f32, feather: f32| {
+        grow.abs().clamp(0.0, 1.0) * image_edge * 0.05
+            + feather.clamp(0.0, 1.0).powf(1.30) * image_edge * 0.045
+            + 2.0
+    };
+    match &component.geometry {
+        MaskGeometry::Ai { grow, feather, .. }
+        | MaskGeometry::Landscape { grow, feather, .. }
+        | MaskGeometry::Object { grow, feather, .. } => shape_margin(*grow, *feather),
+        MaskGeometry::LuminanceRange { grow, .. } | MaskGeometry::ColorRange { grow, .. } => {
+            shape_margin(*grow, 0.0)
+        }
+        _ => 2.0,
+    }
 }
 
 fn chamfer_distance(binary: &[u8], width: usize, height: usize, target: u8) -> Vec<f32> {
@@ -1643,11 +1705,19 @@ fn shape_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32, 
         return;
     }
 
-    let grow = grow.clamp(-1.0, 1.0);
-    let feather = feather.clamp(0.0, 1.0);
+    // Cropped viewport atlases scale these normalized controls so the source-
+    // pixel grow/feather radius remains identical to a full-frame raster.
+    // Persisted/UI values stay in [-1,1]/[0,1]; the wider internal range is
+    // only needed by those cropped clones.
+    let grow = grow.clamp(-32.0, 32.0);
+    let feather = feather.clamp(0.0, 32.0);
     if grow.abs() <= 1e-5 && feather <= 1e-5 {
+        // ViTMatte deliberately returns fractional alpha for hair, fur,
+        // translucent fabric, and sub-pixel contours. Zero feather means "use
+        // the generated matte as-is", not "threshold it back to a coarse
+        // binary segmentation".
         mask.par_iter_mut()
-            .for_each(|value| *value = f32::from(*value >= 0.5));
+            .for_each(|value| *value = value.clamp(0.0, 1.0));
         return;
     }
 
@@ -1662,13 +1732,16 @@ fn shape_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32, 
     let edge = width.min(height) as f32;
     let grow_radius = grow * edge * 0.05;
     // Feather is an image-relative boundary width, so thumbnails, the preview
-    // overlay, the mask atlas, and export all show the same shape.
+    // overlay, the mask atlas, and export all show the same shape. The ramp is
+    // centered on the original 0.5 contour: increasing feather changes only
+    // the edge transition and cannot grow or contract the selected contour.
     let feather_radius = (feather.powf(1.30) * edge * 0.045).max(0.75);
 
     mask.par_iter_mut().enumerate().for_each(|(index, value)| {
-        // Preserve soft-model confidence without letting it overpower the
-        // user-visible grow radius. A full-strength ±0.5 grow must cross at
-        // least one pixel boundary on a 64 px mask in either direction.
+        // Preserve sub-pixel model confidence without letting it overpower the
+        // user-visible grow radius. This offset is zero at alpha=0.5 and is
+        // smaller than the one-pixel sign separating inside from outside, so
+        // feathering retains the exact same selected contour.
         let confidence_offset = (*value - 0.5) * 0.5;
         let signed_distance = distance_to_outside[index] - distance_to_inside[index]
             + confidence_offset
@@ -1732,23 +1805,41 @@ fn sample_rgb_mask(
     source: &MaskRgbImage,
     coverage: impl Fn([f32; 3]) -> f32 + Sync,
 ) -> Vec<f32> {
+    if width == 0 || height == 0 || source.width == 0 || source.height == 0 {
+        return vec![0.0; width as usize * height as usize];
+    }
     let row_stride = width as usize;
     let mut out = vec![0.0; row_stride * height as usize];
     out.par_chunks_mut(row_stride)
         .enumerate()
         .for_each(|(y, row)| {
-            let source_y = (y as u64 * source.height as u64 / height.max(1) as u64)
-                .min(source.height.saturating_sub(1) as u64) as usize;
+            let sample_v = source.sampling_rect[1]
+                + (y as f32 + 0.5) / height.max(1) as f32
+                    * (source.sampling_rect[3] - source.sampling_rect[1]);
+            let source_y = (sample_v * source.height as f32 - 0.5)
+                .clamp(0.0, source.height.saturating_sub(1) as f32);
+            let y0 = source_y.floor() as usize;
+            let y1 = (y0 + 1).min(source.height as usize - 1);
+            let fy = source_y - y0 as f32;
             for (x, value) in row.iter_mut().enumerate() {
-                let source_x = (x as u64 * source.width as u64 / width.max(1) as u64)
-                    .min(source.width.saturating_sub(1) as u64)
-                    as usize;
-                let index = (source_y * source.width as usize + source_x) * 4;
-                let rgb = [
-                    source.rgba[index] as f32 / 255.0,
-                    source.rgba[index + 1] as f32 / 255.0,
-                    source.rgba[index + 2] as f32 / 255.0,
-                ];
+                let sample_u = source.sampling_rect[0]
+                    + (x as f32 + 0.5) / width.max(1) as f32
+                        * (source.sampling_rect[2] - source.sampling_rect[0]);
+                let source_x = (sample_u * source.width as f32 - 0.5)
+                    .clamp(0.0, source.width.saturating_sub(1) as f32);
+                let x0 = source_x.floor() as usize;
+                let x1 = (x0 + 1).min(source.width as usize - 1);
+                let fx = source_x - x0 as f32;
+                let sample = |sx: usize, sy: usize, channel: usize| {
+                    source.rgba[(sy * source.width as usize + sx) * 4 + channel] as f32 / 255.0
+                };
+                let rgb = std::array::from_fn(|channel| {
+                    let top = sample(x0, y0, channel)
+                        + (sample(x1, y0, channel) - sample(x0, y0, channel)) * fx;
+                    let bottom = sample(x0, y1, channel)
+                        + (sample(x1, y1, channel) - sample(x0, y1, channel)) * fx;
+                    top + (bottom - top) * fy
+                });
                 *value = coverage(rgb).clamp(0.0, 1.0);
             }
         });
@@ -2389,6 +2480,59 @@ mod tests {
     }
 
     #[test]
+    fn cropped_ai_mask_keeps_full_frame_feather_width() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Subject);
+        let mut pixels = vec![0; 128 * 128];
+        for y in 32..96 {
+            for x in 40..88 {
+                pixels[y * 128 + x] = 255;
+            }
+        }
+        if let MaskGeometry::Ai { mask, feather, .. } =
+            &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = MaskImage::new(128, 128, pixels);
+            *feather = 0.8;
+        }
+
+        let full = stack.rasterize_layer(0, 128, 128, 128, 128);
+        // Partial-raster callers retain the shaping halo around the viewport.
+        let cropped = stack.cropped_for_region(24, 24, 80, 80, 128, 128);
+        let crop = cropped.rasterize_layer(0, 80, 80, 80, 80);
+        for y in 0..80 {
+            let full_start = (y + 24) * 128 + 24;
+            assert_eq!(
+                &crop[y * 80..(y + 1) * 80],
+                &full[full_start..full_start + 80]
+            );
+        }
+    }
+
+    #[test]
+    fn cropped_low_resolution_matte_keeps_full_frame_subpixel_alignment() {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Subject);
+        let pixels = (0..29)
+            .flat_map(|y| (0..37).map(move |x| ((x * 17 + y * 31) % 256) as u8))
+            .collect();
+        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = MaskImage::new(37, 29, pixels);
+        }
+
+        let full = stack.rasterize_layer(0, 128, 96, 128, 96);
+        let cropped = stack.cropped_for_region(24, 18, 80, 60, 128, 96);
+        let crop = cropped.rasterize_layer(0, 80, 60, 80, 60);
+        for y in 0..60 {
+            for x in 0..80 {
+                let expected = full[(y + 18) * 128 + x + 24];
+                assert!(crop[y * 80 + x].abs_diff(expected) <= 1);
+            }
+        }
+    }
+
+    #[test]
     fn radial_layer_has_soft_center_and_clear_corners() {
         let mut stack = MaskStack::default();
         stack.add_mask(MaskKind::Radial);
@@ -2722,6 +2866,24 @@ mod tests {
     }
 
     #[test]
+    fn ai_feather_preserves_the_half_alpha_contour() {
+        let mut hard = vec![0.0; 96 * 64];
+        for y in 12..52 {
+            for x in 23..73 {
+                hard[y * 96 + x] = 1.0;
+            }
+        }
+        let original_selected = hard.iter().filter(|value| **value >= 0.5).count();
+        shape_probability_mask(&mut hard, 96, 64, 0.0, 1.0);
+        let feathered_selected = hard.iter().filter(|value| **value >= 0.5).count();
+
+        assert_eq!(feathered_selected, original_selected);
+        assert_eq!(hard[32 * 96 + 48], 1.0);
+        assert_eq!(hard[2 * 96 + 2], 0.0);
+        assert!(hard.iter().any(|value| *value > 0.0 && *value < 1.0));
+    }
+
+    #[test]
     fn luminance_and_color_ranges_use_the_cached_preview() {
         let source = MaskRgbImage::new(2, 1, vec![0, 0, 0, 255, 255, 0, 0, 255]).unwrap();
         let mut stack = MaskStack::default();
@@ -2955,7 +3117,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_feather_object_mask_does_not_leak_subthreshold_probabilities() {
+    fn zero_feather_object_mask_preserves_refined_alpha() {
         let mut stack = MaskStack::default();
         stack.add_mask(MaskKind::Object);
         if let MaskGeometry::Object { mask, feather, .. } =
@@ -2968,7 +3130,7 @@ mod tests {
         }
 
         let layer = stack.rasterize_layer(0, 5, 1, 5, 1);
-        assert_eq!(layer, [0, 0, 0, 255, 255]);
+        assert_eq!(layer, [0, 32, 127, 128, 255]);
     }
 
     #[test]

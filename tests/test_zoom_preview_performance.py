@@ -181,15 +181,16 @@ def test_preview_geometry_does_not_change_when_backing_proxy_switches() -> None:
     assert "geometry_width as f32 / geometry_height.max(1) as f32" in PREVIEW
 
 
-def test_zoom_detail_masks_remain_in_full_image_coordinate_space() -> None:
-    # adjustments.wgsl samples local_mask_tex using tile_origin/full_size UVs.
-    # A crop-remapped atlas would therefore be transformed twice and drift as
-    # the detail crop pans around the image.
+def test_zoom_detail_masks_use_an_explicit_full_image_to_crop_mapping() -> None:
+    # The shader first computes full-image UV, then explicitly maps that into
+    # the cropped atlas rectangle. This permits native-density zoom masks
+    # without double-applying the crop offset while panning.
     assert "let global_pos = vec2<f32>(pos + tile_origin())" in ADJUSTMENTS
-    assert "let uv = clamp(global_pos / full_size" in ADJUSTMENTS
-    assert "let detail_masks = self.masks.cropped_for_region(" not in PROCESSING_EXPORT
-    assert "&self.masks,\n            &detail_raw," in PROCESSING_EXPORT
-    assert "&self.masks,\n            &full_raw," in PROCESSING_EXPORT
-    assert "full_raw.width,\n                    full_raw.height," in PROCESSING_EXPORT
+    assert "let full_uv = clamp(global_pos / full_size" in ADJUSTMENTS
+    assert "return (full_uv - rect_min)" in ADJUSTMENTS
+    assert "masks.cropped_for_region(" in PROCESSING_EXPORT
+    assert "with_mask_uv_rect_and_extent(" in PROCESSING_EXPORT
+    assert "mask_region_texture_extent(" in PROCESSING_EXPORT
+    assert "detail.mask_source_region = mask_region;" in PROCESSING_EXPORT
     assert ".upload_raw_tile(&render_state.queue, &detail_raw)" in PROCESSING_EXPORT
     assert "self.detail_dirty_mask_layers.iter().any" in PROCESSING_EXPORT
