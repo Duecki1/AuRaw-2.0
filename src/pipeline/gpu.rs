@@ -1276,6 +1276,44 @@ impl GpuParams {
         self
     }
 
+    /// Maps the normalized local-mask atlas to a source-image sub-rectangle.
+    /// Coordinates are packed as UNORM16 pairs into fields that were already
+    /// reserved in the GPU ABI, giving sub-pixel precision on ordinary RAWs
+    /// without growing the large uniform buffer.
+    pub fn with_mask_uv_rect(mut self, rect: [f32; 4]) -> Self {
+        self.set_mask_uv_rect(rect);
+        // All atlas texels are valid. This sentinel avoids coupling ordinary
+        // callers to a pipeline's texture dimensions.
+        self.mask_counts[3] = u32::MAX;
+        self
+    }
+
+    pub fn with_mask_uv_rect_and_extent(
+        mut self,
+        rect: [f32; 4],
+        texture_extent: [u32; 2],
+    ) -> Self {
+        self.set_mask_uv_rect(rect);
+        let width = texture_extent[0].clamp(1, u16::MAX as u32);
+        let height = texture_extent[1].clamp(1, u16::MAX as u32);
+        self.mask_counts[3] = width | (height << 16);
+        self
+    }
+
+    fn set_mask_uv_rect(&mut self, rect: [f32; 4]) {
+        let pack = |u: f32, v: f32| {
+            let u = (u.clamp(0.0, 1.0) * 65_535.0).round() as u32;
+            let v = (v.clamp(0.0, 1.0) * 65_535.0).round() as u32;
+            u | (v << 16)
+        };
+        let min_u = rect[0].min(rect[2]);
+        let min_v = rect[1].min(rect[3]);
+        let max_u = rect[0].max(rect[2]);
+        let max_v = rect[1].max(rect[3]);
+        self.mask_counts[1] = pack(min_u, min_v);
+        self.mask_counts[2] = pack(max_u, max_v);
+    }
+
     fn uses_ai_denoise(&self) -> bool {
         (self.process_info[1] & 2) != 0
     }
@@ -1875,12 +1913,16 @@ impl RawGpuPipeline {
         let mask_atlas_edge = mask_atlas_edge_override
             .unwrap_or(default_mask_atlas_edge)
             .clamp(64, export_mask_atlas_edge_limit());
-        let mask_layer_capacity =
-            if mask_atlas_edge_override.is_some() && quality == ProcessingQuality::High {
-                (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
-            } else {
-                MAX_LOCAL_MASKS
-            };
+        let mask_layer_capacity = if mask_atlas_edge_override.is_some() {
+            // Viewport detail and export both use explicit atlas sizes and can
+            // allocate exactly the layers they will sample. This is what makes
+            // a dense cropped detail atlas affordable alongside the main
+            // preview; the ordinary full-frame interactive pipeline keeps all
+            // 32 slots so adding common masks remains instant.
+            (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
+        } else {
+            MAX_LOCAL_MASKS
+        };
 
         let default_output_transform = IccOutputTransform::srgb();
         let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
@@ -2000,10 +2042,9 @@ impl RawGpuPipeline {
             tone_format,
             "auraw adaptive tone guide B",
         );
-        // Interactive pipelines reserve all 32 layers so masks can be added without
-        // rebuilding the RAW pipeline. Full-quality export uses an explicit mask edge
-        // and can allocate only the layers it will actually sample, avoiding a huge
-        // 4K x 4K x 32 R16F texture for ordinary edits with just a few masks.
+        // The ordinary full-frame interactive pipeline reserves all 32 layers
+        // so masks can be added without rebuilding it. Explicit-edge detail and
+        // export pipelines allocate only the layers they actually sample.
         let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("auraw normalized local-mask atlas"),
             size: wgpu::Extent3d {
@@ -3996,6 +4037,64 @@ impl RawGpuPipeline {
         Ok(())
     }
 
+    pub fn update_mask_layer_region(
+        &self,
+        queue: &wgpu::Queue,
+        layer: usize,
+        width: u32,
+        height: u32,
+        values: &[u16],
+    ) -> Result<()> {
+        if layer >= self.mask_layer_capacity {
+            return Err(anyhow!(
+                "local-mask layer {layer} exceeds atlas capacity {}",
+                self.mask_layer_capacity
+            ));
+        }
+        if width == 0
+            || height == 0
+            || width > self.mask_atlas_edge
+            || height > self.mask_atlas_edge
+        {
+            return Err(anyhow!(
+                "local-mask region {width}x{height} exceeds {}x{} atlas",
+                self.mask_atlas_edge,
+                self.mask_atlas_edge
+            ));
+        }
+        let expected = width as usize * height as usize;
+        if values.len() != expected {
+            return Err(anyhow!(
+                "local-mask region has {} samples, expected {expected}",
+                values.len()
+            ));
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(values),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 2),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
+    }
+
     /// Uploads the persisted baseline inpainting result into this pipeline's
     /// local geometry. `tile_origin_*` and `full_*` map crop/export pipelines
     /// back to full-image normalized coordinates. RGB is scene-linear Rec.2020
@@ -4120,6 +4219,10 @@ impl RawGpuPipeline {
 
     pub const fn mask_atlas_edge(&self) -> u32 {
         self.mask_atlas_edge
+    }
+
+    pub const fn mask_layer_capacity(&self) -> usize {
+        self.mask_layer_capacity
     }
 
     /// Whether this image-sized graph already contains every immutable AI

@@ -1071,6 +1071,15 @@ where
         .first()
         .context("cannot export an empty RAW image")?;
     let first_raw = extract_padded_tile(raw, first);
+    let first_mask_region = tile_mask_source_region(
+        masks,
+        first.global_origin_x,
+        first.global_origin_y,
+        first.padded_width,
+        first.padded_height,
+        raw.width,
+        raw.height,
+    );
     let first_params = GpuParams::new_for_tile(
         exposure,
         masks,
@@ -1080,12 +1089,21 @@ where
         raw.width,
         raw.height,
     )
-    .with_vignette_geometry(geometry);
+    .with_vignette_geometry(geometry)
+    .with_mask_uv_rect(mask_source_region_uv(
+        first_mask_region,
+        raw.width,
+        raw.height,
+    ));
     let pipeline_started = Instant::now();
     let export_mask_edge = if masks.masks.is_empty() {
         mask_atlas_edge()
     } else {
-        export_mask_atlas_edge(raw.width, raw.height)
+        let margin = masks.raster_margin_pixels(raw.width, raw.height);
+        export_mask_atlas_edge(
+            first.padded_width.saturating_add(margin.saturating_mul(2)),
+            first.padded_height.saturating_add(margin.saturating_mul(2)),
+        )
     };
     let tile_pipeline = if let Some(template) = program_template {
         match RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
@@ -1129,9 +1147,8 @@ where
         )
         .context("create reusable full-quality export pipeline")?
     };
-    upload_mask_atlas(&tile_pipeline, queue, masks, raw.width, raw.height)?;
     crate::diagnostics::record(format!(
-        "Full-quality export pipeline prepared in {:.3}s; padded_tile={}x{} mask_atlas={}x{} R16F",
+        "Full-quality export pipeline prepared in {:.3}s; padded_tile={}x{} viewport-local mask_atlas={}x{} R16F",
         pipeline_started.elapsed().as_secs_f64(),
         first_raw.width,
         first_raw.height,
@@ -1223,6 +1240,26 @@ where
                     format!("upload inpainting for export tile {}", global_index + 1)
                 })?;
 
+            let mask_region = tile_mask_source_region(
+                masks,
+                tile.global_origin_x,
+                tile.global_origin_y,
+                tile.padded_width,
+                tile.padded_height,
+                raw.width,
+                raw.height,
+            );
+            let mask_extent =
+                mask_region_texture_extent(mask_region, tile_pipeline.mask_atlas_edge());
+            upload_mask_atlas(
+                &tile_pipeline,
+                queue,
+                masks,
+                raw.width,
+                raw.height,
+                mask_region,
+            )?;
+
             let params = GpuParams::new_for_tile(
                 exposure,
                 masks,
@@ -1232,7 +1269,11 @@ where
                 raw.width,
                 raw.height,
             )
-            .with_vignette_geometry(geometry);
+            .with_vignette_geometry(geometry)
+            .with_mask_uv_rect_and_extent(
+                mask_source_region_uv(mask_region, raw.width, raw.height),
+                mask_extent,
+            );
             tile_pipeline.dispatch_export_tile(queue, device, &params);
             let readback = tile_pipeline
                 .begin_display_linear_region_readback(
@@ -3219,18 +3260,74 @@ fn publish_completed_export(temporary: &Path, destination: &Path) -> Result<()> 
     })
 }
 
+fn tile_mask_source_region(
+    masks: &MaskStack,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    tile_width: u32,
+    tile_height: u32,
+    full_width: u32,
+    full_height: u32,
+) -> [u32; 4] {
+    let full_width = full_width.max(1);
+    let full_height = full_height.max(1);
+    let margin = i64::from(masks.raster_margin_pixels(full_width, full_height));
+    let x0 = (i64::from(tile_origin_x) - margin).clamp(0, i64::from(full_width - 1));
+    let y0 = (i64::from(tile_origin_y) - margin).clamp(0, i64::from(full_height - 1));
+    let x1 = (i64::from(tile_origin_x) + i64::from(tile_width) + margin)
+        .clamp(x0 + 1, i64::from(full_width));
+    let y1 = (i64::from(tile_origin_y) + i64::from(tile_height) + margin)
+        .clamp(y0 + 1, i64::from(full_height));
+    [x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32]
+}
+
+fn mask_source_region_uv(region: [u32; 4], full_width: u32, full_height: u32) -> [f32; 4] {
+    let width = full_width.max(1) as f32;
+    let height = full_height.max(1) as f32;
+    [
+        region[0] as f32 / width,
+        region[1] as f32 / height,
+        region[0].saturating_add(region[2]) as f32 / width,
+        region[1].saturating_add(region[3]) as f32 / height,
+    ]
+}
+
+fn mask_region_texture_extent(region: [u32; 4], max_edge: u32) -> [u32; 2] {
+    let width = region[2].max(1);
+    let height = region[3].max(1);
+    let longest = width.max(height);
+    if longest <= max_edge {
+        return [width, height];
+    }
+    let scale = max_edge.max(1) as f64 / longest as f64;
+    [
+        ((width as f64 * scale).round() as u32).clamp(1, max_edge.max(1)),
+        ((height as f64 * scale).round() as u32).clamp(1, max_edge.max(1)),
+    ]
+}
+
 fn upload_mask_atlas(
     pipeline: &RawGpuPipeline,
     queue: &wgpu::Queue,
     masks: &MaskStack,
     image_width: u32,
     image_height: u32,
+    region: [u32; 4],
 ) -> Result<()> {
+    let cropped = masks.cropped_for_region(
+        region[0],
+        region[1],
+        region[2],
+        region[3],
+        image_width,
+        image_height,
+    );
     let edge = pipeline.mask_atlas_edge();
+    let extent = mask_region_texture_extent(region, edge);
     for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {
-        let bytes = masks.rasterize_layer_f16(layer, edge, edge, image_width, image_height);
+        let bytes = cropped.rasterize_layer_f16(layer, extent[0], extent[1], region[2], region[3]);
         pipeline
-            .update_mask_layer(queue, layer, &bytes)
+            .update_mask_layer_region(queue, layer, extent[0], extent[1], &bytes)
             .with_context(|| format!("upload local-mask layer {}", layer + 1))?;
     }
     Ok(())
@@ -3642,9 +3739,9 @@ mod tests {
     use super::{
         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
         encode_srgb_row_with_format, export_to_destination, publish_completed_export,
-        resolved_export_tile_spec, stitch_linear_tile_into_band, validate_export_dimensions,
-        ExportMetadata, ExportResizeMode, ExportRowFormat, ExportSettings, GeometryResampler,
-        LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
+        resolved_export_tile_spec, stitch_linear_tile_into_band, tile_mask_source_region,
+        validate_export_dimensions, ExportMetadata, ExportResizeMode, ExportRowFormat,
+        ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
     };
     use crate::pipeline::{
         ExportTile, ExposureParams, GeometryTransform, IccOutputTransform, MaskStack, TileSpec,
@@ -3679,6 +3776,13 @@ mod tests {
             ..ExportSettings::default()
         };
         assert_eq!(settings.output_dimensions(6000, 4000), (6000, 4000));
+    }
+
+    #[test]
+    fn export_mask_region_covers_the_padded_tile_and_clamps_to_source() {
+        let region =
+            tile_mask_source_region(&MaskStack::default(), -256, 744, 1536, 1536, 6000, 4000);
+        assert_eq!(region, [0, 742, 1282, 1540]);
     }
 
     #[test]

@@ -28,15 +28,55 @@ fn local_mask_uv(pos: vec2<i32>) -> vec2<f32> {
         f32(max(params.full_height, 1u)),
     );
     let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
-    let uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
-    return uv;
+    let full_uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
+    if params.mask_counts.w == 0u {
+        return full_uv;
+    }
+    let packed_min = params.mask_counts.y;
+    let packed_max = params.mask_counts.z;
+    let rect_min = vec2<f32>(
+        f32(packed_min & 65535u),
+        f32(packed_min >> 16u),
+    ) / 65535.0;
+    let rect_max = vec2<f32>(
+        f32(packed_max & 65535u),
+        f32(packed_max >> 16u),
+    ) / 65535.0;
+    return (full_uv - rect_min) / max(rect_max - rect_min, vec2<f32>(1.0 / 65535.0));
+}
+
+fn local_mask_texture_uv(region_uv: vec2<f32>) -> vec2<f32> {
+    if params.mask_counts.w == 0u {
+        return region_uv;
+    }
+    let atlas_size_u = textureDimensions(local_mask_tex);
+    var valid_size_u = atlas_size_u;
+    if params.mask_counts.w != 0xffffffffu {
+        valid_size_u = vec2<u32>(
+            params.mask_counts.w & 65535u,
+            params.mask_counts.w >> 16u,
+        );
+    }
+    let atlas_size = vec2<f32>(max(atlas_size_u, vec2<u32>(1u)));
+    let valid_size = vec2<f32>(max(valid_size_u, vec2<u32>(1u)));
+    // Only the top-left valid_size portion may have been uploaded. Scale the
+    // ordinary normalized coordinates into that rectangle, clamping to its
+    // outer texel centres so filtering never pulls stale atlas pixels. This
+    // preserves the exact pixel-centre mapping used while rasterizing the crop.
+    let half_texel = vec2<f32>(0.5) / valid_size;
+    let safe_region_uv = clamp(region_uv, half_texel, vec2<f32>(1.0) - half_texel);
+    return safe_region_uv * valid_size / atlas_size;
 }
 
 fn local_mask_weight(pos: vec2<i32>, index: u32) -> f32 {
+    let uv = local_mask_uv(pos);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
+        return 0.0;
+    }
     return textureSampleLevel(
         local_mask_tex,
         local_mask_sampler,
-        local_mask_uv(pos),
+        local_mask_texture_uv(uv),
         i32(index),
         0.0,
     ).x;

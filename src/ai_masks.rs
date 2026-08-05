@@ -3,6 +3,7 @@ use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::{session::Session, value::Tensor};
 use rayon::prelude::*;
 use ring::digest::{Context as Sha256Context, SHA256};
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -22,29 +23,107 @@ fn ensure_ai_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-pub const BIREFNET_MODEL_BYTES: u64 = 224_005_088;
-pub const BIREFNET_MODEL_URL: &str = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
-pub const BIREFNET_MODEL_SHA256_HEX: &str =
+pub const BIREFNET_LOW_MODEL_BYTES: u64 = 224_005_088;
+pub const BIREFNET_LOW_MODEL_URL: &str = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
+pub const BIREFNET_LOW_MODEL_SHA256_HEX: &str =
     "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333";
-const BIREFNET_MODEL_SHA256: [u8; 32] = [
-    0x56, 0x00, 0x02, 0x43, 0x76, 0xf5, 0x72, 0xa5, 0x57, 0x87, 0x0a, 0x5e, 0xb0, 0xaf, 0xb1, 0xe5,
-    0x96, 0x16, 0x36, 0xbe, 0xf4, 0xe1, 0xe2, 0x21, 0x32, 0x02, 0x54, 0x67, 0xd0, 0xf0, 0x33, 0x33,
-];
+pub const BIREFNET_MEDIUM_MODEL_BYTES: u64 = 331_082_421;
+pub const BIREFNET_MEDIUM_MODEL_URL: &str = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet_lite-general-2K-epoch_232.onnx";
+pub const BIREFNET_MEDIUM_MODEL_SHA256_HEX: &str =
+    "6003d2f758bdb4e4802a09e39167529bc2eef9288d5b8fa537331467cbc4759d";
+pub const BIREFNET_HIGH_MODEL_BYTES: u64 = 1_098_928_953;
+pub const BIREFNET_HIGH_MODEL_URL: &str = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet_HR-general-epoch_130.onnx";
+pub const BIREFNET_HIGH_MODEL_SHA256_HEX: &str =
+    "db0217e99b25e0c4f6f4dca2892ff1f7ea7aba38fb6ad84f93122a4024be536a";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BiRefNetQuality {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BiRefNetModelSpec {
+    pub(crate) checkpoint: &'static str,
+    pub(crate) download_label: &'static str,
+    pub(crate) url: &'static str,
+    pub(crate) bytes: u64,
+    pub(crate) sha256_hex: &'static str,
+    pub(crate) cache_filename: &'static str,
+    /// ONNX tensors are NCHW. Lite-2K's pinned graph declares H=2560,
+    /// W=1440, matching the official checkpoint despite its conventional
+    /// "2560 x 1440" resolution label.
+    pub(crate) input_width: u32,
+    pub(crate) input_height: u32,
+    pub(crate) explanation: &'static str,
+}
+
+impl BiRefNetQuality {
+    pub(crate) const ALL: [Self; 3] = [Self::Low, Self::Medium, Self::High];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+
+    pub(crate) const fn model(self) -> BiRefNetModelSpec {
+        match self {
+            Self::Low => BiRefNetModelSpec {
+                checkpoint: "BiRefNet General-Lite",
+                download_label: "BiRefNet General-Lite (Low)",
+                url: BIREFNET_LOW_MODEL_URL,
+                bytes: BIREFNET_LOW_MODEL_BYTES,
+                sha256_hex: BIREFNET_LOW_MODEL_SHA256_HEX,
+                cache_filename: "birefnet-general-lite.onnx",
+                input_width: 1024,
+                input_height: 1024,
+                explanation: "General-Lite at 1024 x 1024. Fastest and lowest-memory; a 224 MB download.",
+            },
+            Self::Medium => BiRefNetModelSpec {
+                checkpoint: "BiRefNet Lite-2K",
+                download_label: "BiRefNet Lite-2K (Medium)",
+                url: BIREFNET_MEDIUM_MODEL_URL,
+                bytes: BIREFNET_MEDIUM_MODEL_BYTES,
+                sha256_hex: BIREFNET_MEDIUM_MODEL_SHA256_HEX,
+                cache_filename: "birefnet-lite-2k.onnx",
+                input_width: 1440,
+                input_height: 2560,
+                explanation: "Lite-2K at its native 2560 x 1440 tensor. More boundary detail with a 331 MB download.",
+            },
+            Self::High => BiRefNetModelSpec {
+                checkpoint: "BiRefNet HR",
+                download_label: "BiRefNet HR (High)",
+                url: BIREFNET_HIGH_MODEL_URL,
+                bytes: BIREFNET_HIGH_MODEL_BYTES,
+                sha256_hex: BIREFNET_HIGH_MODEL_SHA256_HEX,
+                cache_filename: "birefnet-hr.onnx",
+                input_width: 2048,
+                input_height: 2048,
+                explanation: "The dedicated BiRefNet HR checkpoint at 2048 x 2048. Best fine-detail quality; a 1.10 GB download with the highest memory use.",
+            },
+        }
+    }
+}
 pub const VITMATTE_MODEL_BYTES: u64 = 103_885_865;
 pub const VITMATTE_MODEL_URL: &str = "https://huggingface.co/Xenova/vitmatte-small-composition-1k/resolve/5e04250c42d7a03dc125b13adb415a47584ec60b/onnx/model.onnx";
 pub const VITMATTE_MODEL_SHA256_HEX: &str =
     "bf28d2e0be2c073286e88d60ad649d7123da2749a2d99133fd1098d5887e0225";
 // probabilities are normally sparse; keeping them sparse avoids evaluating all
 // 150 classes for every query and pixel while preserving semantic argmaxes.
-const VITMATTE_MAX_EDGE_ANDROID: u32 = 768;
+const VITMATTE_MAX_EDGE_ANDROID: u32 = 1024;
 const VITMATTE_SIZE_DIVISOR: u32 = 32;
 
-const MODEL_SIZE: u32 = 1024;
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 #[cfg(not(target_os = "android"))]
-static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+static SESSION: OnceLock<Mutex<Option<(BiRefNetQuality, Session)>>> = OnceLock::new();
 #[cfg(not(target_os = "android"))]
 static VITMATTE_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
@@ -65,39 +144,10 @@ static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLo
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn subject_models_are_verified(birefnet: &Path, vitmatte: &Path) -> bool {
-    verify_model(birefnet).is_ok() && verify_vitmatte_model(vitmatte).is_ok()
-}
-
-#[cfg(test)]
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Letterbox {
-    width: u32,
-    height: u32,
-    offset_x: u32,
-    offset_y: u32,
-}
-
-impl Letterbox {
-    fn for_image(width: u32, height: u32) -> Result<Self> {
-        anyhow::ensure!(width > 0 && height > 0, "subject-mask input is empty");
-        let scale = (MODEL_SIZE as f64 / width as f64).min(MODEL_SIZE as f64 / height as f64);
-        let scaled_width = ((width as f64 * scale).round() as u32).clamp(1, MODEL_SIZE);
-        let scaled_height = ((height as f64 * scale).round() as u32).clamp(1, MODEL_SIZE);
-        Ok(Self {
-            width: scaled_width,
-            height: scaled_height,
-            offset_x: (MODEL_SIZE - scaled_width) / 2,
-            offset_y: (MODEL_SIZE - scaled_height) / 2,
-        })
-    }
-}
 
 pub struct SubjectMaskWorkerRequest {
+    pub quality: BiRefNetQuality,
     pub model_path: PathBuf,
-    pub vitmatte_path: PathBuf,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
     pub width: u32,
@@ -110,8 +160,8 @@ pub fn spawn_subject_mask(
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<SubjectMaskEvent> {
     let SubjectMaskWorkerRequest {
+        quality,
         model_path,
-        vitmatte_path,
         runtime_path,
         runtime_sha256,
         width,
@@ -126,21 +176,14 @@ pub fn spawn_subject_mask(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
                     ensure_ai_not_cancelled(&cancellation)?;
-                    ensure_model(&model_path, &worker_sender, &cancellation)?;
-                    ensure_vitmatte_model(&vitmatte_path, &cancellation, |downloaded, total| {
-                        let _ = worker_sender.send(SubjectMaskEvent::DownloadProgress {
-                            label: "ViTMatte edge-refinement model",
-                            downloaded,
-                            total,
-                        });
-                    })?;
+                    ensure_model(quality, &model_path, &worker_sender, &cancellation)?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
                     infer_subject(
                         &model_path,
-                        &vitmatte_path,
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
+                        quality,
                         width,
                         height,
                         rgba,
@@ -170,11 +213,12 @@ pub fn spawn_subject_mask(
 }
 
 fn ensure_model(
+    quality: BiRefNetQuality,
     path: &Path,
     events: &mpsc::Sender<SubjectMaskEvent>,
     cancellation: &AtomicBool,
 ) -> Result<()> {
-    match verify_model(path) {
+    match verify_model(quality, path) {
         Ok(()) => return Ok(()),
         Err(error) if path.exists() => {
             log::warn!(
@@ -186,23 +230,28 @@ fn ensure_model(
         }
         Err(_) => {}
     }
-    download_model(path, events, cancellation)?;
-    verify_model(path).context("verify published BiRefNet model")
+    download_model(quality, path, events, cancellation)?;
+    verify_model(quality, path).context("verify published BiRefNet model")
 }
 
-fn verify_model(path: &Path) -> Result<()> {
+fn verify_model(quality: BiRefNetQuality, path: &Path) -> Result<()> {
+    let model = quality.model();
     let metadata = fs::metadata(path)
         .with_context(|| format!("read BiRefNet model metadata {}", path.display()))?;
     anyhow::ensure!(metadata.is_file(), "BiRefNet cache is not a regular file");
     anyhow::ensure!(
-        metadata.len() == BIREFNET_MODEL_BYTES,
-        "BiRefNet model size mismatch: found {}, expected {BIREFNET_MODEL_BYTES}",
-        metadata.len()
+        metadata.len() == model.bytes,
+        "{} size mismatch: found {}, expected {}",
+        model.checkpoint,
+        metadata.len(),
+        model.bytes
     );
-    let digest = sha256_file(path)?;
+    let digest = sha256_file_hex(path)?;
     anyhow::ensure!(
-        digest == BIREFNET_MODEL_SHA256,
-        "BiRefNet model SHA-256 mismatch (expected {BIREFNET_MODEL_SHA256_HEX})"
+        digest == model.sha256_hex,
+        "{} SHA-256 mismatch (expected {})",
+        model.checkpoint,
+        model.sha256_hex
     );
     Ok(())
 }
@@ -237,10 +286,12 @@ pub(crate) fn sha256_file_hex(path: &Path) -> Result<String> {
 }
 
 fn download_model(
+    quality: BiRefNetQuality,
     path: &Path,
     events: &mpsc::Sender<SubjectMaskEvent>,
     cancellation: &AtomicBool,
 ) -> Result<()> {
+    let model = quality.model();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create model cache {}", parent.display()))?;
@@ -259,13 +310,15 @@ fn download_model(
             .build();
         let agent: ureq::Agent = config.into();
         let mut response = agent
-            .get(BIREFNET_MODEL_URL)
+            .get(model.url)
             .call()
             .context("download BiRefNet ONNX model")?;
         if let Some(length) = response.body().content_length() {
             anyhow::ensure!(
-                length == BIREFNET_MODEL_BYTES,
-                "BiRefNet server declared {length} bytes, expected {BIREFNET_MODEL_BYTES}"
+                length == model.bytes,
+                "{} server declared {length} bytes, expected {}",
+                model.checkpoint,
+                model.bytes
             );
         }
         let mut reader = response.body_mut().as_reader();
@@ -287,29 +340,38 @@ fn download_model(
                 .checked_add(read as u64)
                 .context("BiRefNet download byte count overflow")?;
             anyhow::ensure!(
-                downloaded <= BIREFNET_MODEL_BYTES,
-                "BiRefNet download exceeded its pinned {BIREFNET_MODEL_BYTES}-byte size"
+                downloaded <= model.bytes,
+                "{} download exceeded its pinned {}-byte size",
+                model.checkpoint,
+                model.bytes
             );
             hasher.update(&buffer[..read]);
             file.write_all(&buffer[..read])
                 .context("write BiRefNet ONNX model")?;
             let _ = events.send(SubjectMaskEvent::DownloadProgress {
-                label: "BiRefNet model",
+                label: model.download_label,
                 downloaded,
-                total: BIREFNET_MODEL_BYTES,
+                total: model.bytes,
             });
         }
         file.sync_all().context("flush BiRefNet ONNX model")?;
         anyhow::ensure!(
-            downloaded == BIREFNET_MODEL_BYTES,
-            "BiRefNet model size mismatch: received {downloaded}, expected {BIREFNET_MODEL_BYTES}"
+            downloaded == model.bytes,
+            "{} size mismatch: received {downloaded}, expected {}",
+            model.checkpoint,
+            model.bytes
         );
-        let digest: [u8; 32] = hasher.finish().as_ref().try_into().map_err(|_| {
-            anyhow::anyhow!("SHA-256 implementation returned the wrong digest length")
-        })?;
+        let digest = hasher
+            .finish()
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         anyhow::ensure!(
-            digest == BIREFNET_MODEL_SHA256,
-            "BiRefNet model SHA-256 mismatch (expected {BIREFNET_MODEL_SHA256_HEX})"
+            digest == model.sha256_hex,
+            "{} SHA-256 mismatch (expected {})",
+            model.checkpoint,
+            model.sha256_hex
         );
         ensure_ai_not_cancelled(cancellation)?;
         fs::rename(&temporary, path)
@@ -696,14 +758,14 @@ pub(crate) fn create_session(model_path: &Path) -> Result<Session> {
 
 fn infer_subject(
     model_path: &Path,
-    vitmatte_path: &Path,
     runtime_path: Option<&Path>,
     runtime_sha256: Option<&str>,
+    quality: BiRefNetQuality,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
 ) -> Result<SubjectMaskResult> {
-    const MAX_SUBJECT_MASK_PIXELS: u64 = 16_000_000;
+    const MAX_SUBJECT_MASK_PIXELS: u64 = 17_000_000;
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .context("subject-mask input dimensions overflow")?;
@@ -721,25 +783,37 @@ fn infer_subject(
         rgba.len()
     );
     initialize_runtime(runtime_path, runtime_sha256)?;
+    let model = quality.model();
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
         .context("invalid preview image for BiRefNet")?;
-    let letterbox = Letterbox::for_image(width, height)?;
+    // BiRefNet's official inference preprocessing resizes directly to the
+    // checkpoint's native tensor shape. Letterboxing changes the image scale
+    // and introduces out-of-distribution black borders; it is particularly
+    // destructive for the portrait-shaped Lite-2K graph.
     let resized = image::imageops::resize(
         &image,
-        letterbox.width,
-        letterbox.height,
+        model.input_width,
+        model.input_height,
         FilterType::Lanczos3,
     );
-    let input = normalized_letterbox(&resized, letterbox)?;
-    let input = Tensor::from_array(([1usize, 3, MODEL_SIZE as usize, MODEL_SIZE as usize], input))
-        .context("create BiRefNet input tensor")?;
+    let input = normalized_birefnet_input(&resized, model.input_width, model.input_height)?;
+    let input = Tensor::from_array((
+        [
+            1usize,
+            3,
+            model.input_height as usize,
+            model.input_width as usize,
+        ],
+        input,
+    ))
+    .context("create BiRefNet input tensor")?;
 
     #[cfg(target_os = "android")]
     let (output_width, output_height, logits) = {
         // Mobile memory is more important than avoiding session startup. Drop
         // all model weights and allocator state immediately after inference.
         let mut session = create_session(model_path)?;
-        run_subject_session(&mut session, input)?
+        run_subject_session(&mut session, input, model.input_width, model.input_height)?
     };
 
     #[cfg(not(target_os = "android"))]
@@ -748,25 +822,24 @@ fn infer_subject(
         let mut session = sessions
             .lock()
             .map_err(|_| anyhow::anyhow!("BiRefNet session lock was poisoned"))?;
-        if session.is_none() {
-            *session = Some(create_session(model_path)?);
+        if session
+            .as_ref()
+            .is_none_or(|(cached_quality, _)| *cached_quality != quality)
+        {
+            *session = Some((quality, create_session(model_path)?));
         }
-        let session = session.as_mut().ok_or_else(|| {
+        let (_, session) = session.as_mut().ok_or_else(|| {
             anyhow::anyhow!("BiRefNet session initialization produced no session")
         })?;
-        run_subject_session(session, input)?
+        run_subject_session(session, input, model.input_width, model.input_height)?
     };
 
-    let mut mask = restore_from_letterbox(
-        &logits,
-        output_width,
-        output_height,
-        letterbox,
-        width,
-        height,
-    )?;
-    mask = refine_mask_with_vitmatte(vitmatte_path, image.as_raw(), width, height, &mask, 1.0)
-        .context("refine subject edges with ViTMatte")?;
+    // BiRefNet is itself a high-resolution dichotomous segmentation model and
+    // its sigmoid output contains calibrated fractional coverage. Preserve it
+    // directly: forcing an independently trained composition matting model to
+    // replace every uncertain pixel caused semantic edge drift around hair,
+    // straw, fur, and similarly complex subject boundaries.
+    let mask = restore_birefnet_output(&logits, output_width, output_height, width, height)?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -774,7 +847,12 @@ fn infer_subject(
     })
 }
 
-fn run_subject_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32, u32, Vec<f32>)> {
+fn run_subject_session(
+    session: &mut Session,
+    input: Tensor<f32>,
+    input_width: u32,
+    input_height: u32,
+) -> Result<(u32, u32, Vec<f32>)> {
     let outputs = session
         .run(ort::inputs![input])
         .context("run BiRefNet ONNX inference")?;
@@ -786,7 +864,7 @@ fn run_subject_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32
         .try_extract_tensor::<f32>()
         .context("read BiRefNet output tensor")?;
     let (output_width, output_height, output_elements) =
-        validate_birefnet_output_shape(shape, logits.len())?;
+        validate_birefnet_output_shape(shape, logits.len(), input_width, input_height)?;
     anyhow::ensure!(
         logits.iter().all(|value| value.is_finite()),
         "BiRefNet output contains non-finite logits"
@@ -799,7 +877,12 @@ fn run_subject_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32
     Ok((output_width, output_height, owned_logits))
 }
 
-fn validate_birefnet_output_shape(shape: &[i64], logits_len: usize) -> Result<(u32, u32, usize)> {
+fn validate_birefnet_output_shape(
+    shape: &[i64],
+    logits_len: usize,
+    input_width: u32,
+    input_height: u32,
+) -> Result<(u32, u32, usize)> {
     anyhow::ensure!(
         shape.len() == 4 && shape[0] == 1 && shape[1] == 1,
         "unexpected BiRefNet output shape {shape:?}; expected [1, 1, H, W]"
@@ -816,7 +899,7 @@ fn validate_birefnet_output_shape(shape: &[i64], logits_len: usize) -> Result<(u
         .checked_mul(output_height)
         .context("BiRefNet output dimensions overflow")?;
     anyhow::ensure!(
-        output_elements <= MODEL_SIZE as usize * MODEL_SIZE as usize * 4,
+        output_elements <= input_width as usize * input_height as usize * 4,
         "BiRefNet output is implausibly large: {shape:?}"
     );
     anyhow::ensure!(
@@ -840,11 +923,23 @@ fn validate_birefnet_output_shape(shape: &[i64], logits_len: usize) -> Result<(u
     Ok(queries)
 }
 
-fn normalized_letterbox(
+fn normalized_birefnet_input(
     resized: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    letterbox: Letterbox,
+    input_width: u32,
+    input_height: u32,
 ) -> Result<Vec<f32>> {
-    let plane = (MODEL_SIZE * MODEL_SIZE) as usize;
+    anyhow::ensure!(
+        resized.dimensions() == (input_width, input_height),
+        "BiRefNet resized input does not match the model tensor dimensions"
+    );
+    let plane = usize::try_from(input_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(input_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .context("BiRefNet input dimensions overflow")?;
     let values = plane
         .checked_mul(3)
         .context("BiRefNet input size overflow")?;
@@ -853,15 +948,10 @@ fn normalized_letterbox(
         .try_reserve_exact(values)
         .context("reserve BiRefNet input tensor")?;
     input.resize(values, 0.0);
-    for channel in 0..3 {
-        let padding = (0.0 - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
-        input[channel * plane..(channel + 1) * plane].fill(padding);
-    }
-    for y in 0..letterbox.height {
-        for x in 0..letterbox.width {
+    for y in 0..input_height {
+        for x in 0..input_width {
             let pixel = resized.get_pixel(x, y);
-            let destination =
-                ((y + letterbox.offset_y) * MODEL_SIZE + x + letterbox.offset_x) as usize;
+            let destination = (y * input_width + x) as usize;
             for channel in 0..3 {
                 let value = pixel[channel] as f32 / 255.0;
                 input[channel * plane + destination] =
@@ -872,11 +962,10 @@ fn normalized_letterbox(
     Ok(input)
 }
 
-fn restore_from_letterbox(
+fn restore_birefnet_output(
     logits: &[f32],
     output_width: u32,
     output_height: u32,
-    letterbox: Letterbox,
     target_width: u32,
     target_height: u32,
 ) -> Result<Vec<u8>> {
@@ -906,20 +995,8 @@ fn restore_from_letterbox(
     let output =
         ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, probabilities)
             .context("invalid BiRefNet output buffer")?;
-
-    let scale_x = output_width as f64 / MODEL_SIZE as f64;
-    let scale_y = output_height as f64 / MODEL_SIZE as f64;
-    let crop_x = (letterbox.offset_x as f64 * scale_x).round() as u32;
-    let crop_y = (letterbox.offset_y as f64 * scale_y).round() as u32;
-    let crop_width = (letterbox.width as f64 * scale_x).round().max(1.0) as u32;
-    let crop_height = (letterbox.height as f64 * scale_y).round().max(1.0) as u32;
-    let crop_width = crop_width.min(output_width.saturating_sub(crop_x));
-    let crop_height = crop_height.min(output_height.saturating_sub(crop_y));
-    anyhow::ensure!(crop_width > 0 && crop_height > 0, "invalid letterbox crop");
-    let cropped =
-        image::imageops::crop_imm(&output, crop_x, crop_y, crop_width, crop_height).to_image();
     let resized =
-        image::imageops::resize(&cropped, target_width, target_height, FilterType::Lanczos3);
+        image::imageops::resize(&output, target_width, target_height, FilterType::Lanczos3);
     Ok(resized
         .into_raw()
         .into_iter()
@@ -1456,27 +1533,71 @@ fn sigmoid_probability(logit: f32) -> f32 {
     }
 }
 
-        assert_eq!(box_.width, MODEL_SIZE);
-        assert_eq!(box_.height, 683);
-        assert_eq!(box_.offset_x, 0);
-        assert_eq!(box_.offset_y, 170);
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalized_birefnet_input, restore_birefnet_output, sigmoid_probability,
+        validate_birefnet_output_shape, BiRefNetQuality, IMAGENET_MEAN, IMAGENET_STD,
+    };
+    use image::{ImageBuffer, Rgba};
+
+    #[test]
+    fn birefnet_preprocessing_normalizes_the_complete_native_tensor() {
+        let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
+            2,
+            1,
+            vec![255, 128, 0, 255, 0, 64, 255, 255],
+        )
+        .unwrap();
+        let input = normalized_birefnet_input(&image, 2, 1).unwrap();
+
+        assert_eq!(input.len(), 6);
+        let expected = [
+            (1.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0],
+            (0.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0],
+            (128.0 / 255.0 - IMAGENET_MEAN[1]) / IMAGENET_STD[1],
+            (64.0 / 255.0 - IMAGENET_MEAN[1]) / IMAGENET_STD[1],
+            (0.0 - IMAGENET_MEAN[2]) / IMAGENET_STD[2],
+            (1.0 - IMAGENET_MEAN[2]) / IMAGENET_STD[2],
+        ];
+        for (actual, expected) in input.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 
     #[test]
-    fn letterbox_preserves_portrait_aspect_ratio() {
-        let box_ = Letterbox::for_image(3000, 6000).unwrap();
-        assert_eq!(box_.width, 512);
-        assert_eq!(box_.height, MODEL_SIZE);
-        assert_eq!(box_.offset_x, 256);
-        assert_eq!(box_.offset_y, 0);
+    fn birefnet_output_keeps_soft_probabilities_when_restoring_size() {
+        let mask = restore_birefnet_output(&[-2.0, 0.0, 2.0], 3, 1, 3, 1).unwrap();
+        assert_eq!(mask, vec![30, 128, 225]);
     }
 
     #[test]
     fn birefnet_output_requires_single_batch_and_channel() {
-        assert!(validate_birefnet_output_shape(&[1, 1, 1024, 1024], 1024 * 1024).is_ok());
-        assert!(validate_birefnet_output_shape(&[1, 2, 1024, 1024], 2 * 1024 * 1024).is_err());
-        assert!(validate_birefnet_output_shape(&[1, 1, -1, 1024], 0).is_err());
-        assert!(validate_birefnet_output_shape(&[1, 1, 2, 2], 5).is_err());
+        assert!(
+            validate_birefnet_output_shape(&[1, 1, 1024, 1024], 1024 * 1024, 1024, 1024).is_ok()
+        );
+        assert!(
+            validate_birefnet_output_shape(&[1, 2, 1024, 1024], 2 * 1024 * 1024, 1024, 1024)
+                .is_err()
+        );
+        assert!(validate_birefnet_output_shape(&[1, 1, -1, 1024], 0, 1024, 1024).is_err());
+        assert!(validate_birefnet_output_shape(&[1, 1, 2, 2], 5, 1024, 1024).is_err());
+    }
+
+    #[test]
+    fn birefnet_quality_tiers_select_distinct_models_and_native_inputs() {
+        let low = BiRefNetQuality::Low.model();
+        let medium = BiRefNetQuality::Medium.model();
+        let high = BiRefNetQuality::High.model();
+        assert_eq!((low.input_width, low.input_height), (1024, 1024));
+        assert_eq!((medium.input_width, medium.input_height), (1440, 2560));
+        assert_eq!((high.input_width, high.input_height), (2048, 2048));
+        assert_ne!(low.url, medium.url);
+        assert_ne!(medium.url, high.url);
+        assert_ne!(low.sha256_hex, medium.sha256_hex);
+        assert_ne!(medium.sha256_hex, high.sha256_hex);
+        assert_ne!(low.cache_filename, medium.cache_filename);
+        assert_ne!(medium.cache_filename, high.cache_filename);
     }
 
     #[test]
@@ -1505,7 +1626,7 @@ const SAM21_MASK_INPUT_SIZE: u32 = 256;
 const SAM21_MAX_PROMPTS: usize = 32;
 const SAM21_ENCODER_MAX_BYTES: u64 = 160_000_000;
 const SAM21_DECODER_MAX_BYTES: u64 = 32_000_000;
-const MAX_OBJECT_MASK_PIXELS: u64 = 16_000_000;
+const MAX_OBJECT_MASK_PIXELS: u64 = 17_000_000;
 
 #[cfg(not(target_os = "android"))]
 static SAM_ENCODER_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
