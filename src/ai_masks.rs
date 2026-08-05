@@ -145,33 +145,6 @@ static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLo
 
 #[cfg(test)]
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Letterbox {
-    width: u32,
-    height: u32,
-    offset_x: u32,
-    offset_y: u32,
-}
-
-impl Letterbox {
-    fn for_image(width: u32, height: u32, canvas_width: u32, canvas_height: u32) -> Result<Self> {
-        anyhow::ensure!(width > 0 && height > 0, "subject-mask input is empty");
-        anyhow::ensure!(
-            canvas_width > 0 && canvas_height > 0,
-            "BiRefNet input canvas is empty"
-        );
-        let scale = (canvas_width as f64 / width as f64).min(canvas_height as f64 / height as f64);
-        let scaled_width = ((width as f64 * scale).round() as u32).clamp(1, canvas_width);
-        let scaled_height = ((height as f64 * scale).round() as u32).clamp(1, canvas_height);
-        Ok(Self {
-            width: scaled_width,
-            height: scaled_height,
-            offset_x: (canvas_width - scaled_width) / 2,
-            offset_y: (canvas_height - scaled_height) / 2,
-        })
-    }
-}
-
 pub struct SubjectMaskWorkerRequest {
     pub quality: BiRefNetQuality,
     pub model_path: PathBuf,
@@ -813,14 +786,17 @@ fn infer_subject(
     let model = quality.model();
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
         .context("invalid preview image for BiRefNet")?;
-    let letterbox = Letterbox::for_image(width, height, model.input_width, model.input_height)?;
+    // BiRefNet's official inference preprocessing resizes directly to the
+    // checkpoint's native tensor shape. Letterboxing changes the image scale
+    // and introduces out-of-distribution black borders; it is particularly
+    // destructive for the portrait-shaped Lite-2K graph.
     let resized = image::imageops::resize(
         &image,
-        letterbox.width,
-        letterbox.height,
+        model.input_width,
+        model.input_height,
         FilterType::Lanczos3,
     );
-    let input = normalized_letterbox(&resized, letterbox, model.input_width, model.input_height)?;
+    let input = normalized_birefnet_input(&resized, model.input_width, model.input_height)?;
     let input = Tensor::from_array((
         [
             1usize,
@@ -863,15 +839,7 @@ fn infer_subject(
     // directly: forcing an independently trained composition matting model to
     // replace every uncertain pixel caused semantic edge drift around hair,
     // straw, fur, and similarly complex subject boundaries.
-    let mask = restore_from_letterbox(
-        &logits,
-        output_width,
-        output_height,
-        letterbox,
-        model,
-        width,
-        height,
-    )?;
+    let mask = restore_birefnet_output(&logits, output_width, output_height, width, height)?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -955,13 +923,23 @@ fn validate_birefnet_output_shape(
     Ok(queries)
 }
 
-fn normalized_letterbox(
+fn normalized_birefnet_input(
     resized: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    letterbox: Letterbox,
     input_width: u32,
     input_height: u32,
 ) -> Result<Vec<f32>> {
-    let plane = (input_width * input_height) as usize;
+    anyhow::ensure!(
+        resized.dimensions() == (input_width, input_height),
+        "BiRefNet resized input does not match the model tensor dimensions"
+    );
+    let plane = usize::try_from(input_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(input_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .context("BiRefNet input dimensions overflow")?;
     let values = plane
         .checked_mul(3)
         .context("BiRefNet input size overflow")?;
@@ -970,15 +948,10 @@ fn normalized_letterbox(
         .try_reserve_exact(values)
         .context("reserve BiRefNet input tensor")?;
     input.resize(values, 0.0);
-    for channel in 0..3 {
-        let padding = (0.0 - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
-        input[channel * plane..(channel + 1) * plane].fill(padding);
-    }
-    for y in 0..letterbox.height {
-        for x in 0..letterbox.width {
+    for y in 0..input_height {
+        for x in 0..input_width {
             let pixel = resized.get_pixel(x, y);
-            let destination =
-                ((y + letterbox.offset_y) * input_width + x + letterbox.offset_x) as usize;
+            let destination = (y * input_width + x) as usize;
             for channel in 0..3 {
                 let value = pixel[channel] as f32 / 255.0;
                 input[channel * plane + destination] =
@@ -989,12 +962,10 @@ fn normalized_letterbox(
     Ok(input)
 }
 
-fn restore_from_letterbox(
+fn restore_birefnet_output(
     logits: &[f32],
     output_width: u32,
     output_height: u32,
-    letterbox: Letterbox,
-    model: BiRefNetModelSpec,
     target_width: u32,
     target_height: u32,
 ) -> Result<Vec<u8>> {
@@ -1024,20 +995,8 @@ fn restore_from_letterbox(
     let output =
         ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, probabilities)
             .context("invalid BiRefNet output buffer")?;
-
-    let scale_x = output_width as f64 / model.input_width as f64;
-    let scale_y = output_height as f64 / model.input_height as f64;
-    let crop_x = (letterbox.offset_x as f64 * scale_x).round() as u32;
-    let crop_y = (letterbox.offset_y as f64 * scale_y).round() as u32;
-    let crop_width = (letterbox.width as f64 * scale_x).round().max(1.0) as u32;
-    let crop_height = (letterbox.height as f64 * scale_y).round().max(1.0) as u32;
-    let crop_width = crop_width.min(output_width.saturating_sub(crop_x));
-    let crop_height = crop_height.min(output_height.saturating_sub(crop_y));
-    anyhow::ensure!(crop_width > 0 && crop_height > 0, "invalid letterbox crop");
-    let cropped =
-        image::imageops::crop_imm(&output, crop_x, crop_y, crop_width, crop_height).to_image();
     let resized =
-        image::imageops::resize(&cropped, target_width, target_height, FilterType::Lanczos3);
+        image::imageops::resize(&output, target_width, target_height, FilterType::Lanczos3);
     Ok(resized
         .into_raw()
         .into_iter()
@@ -1574,19 +1533,42 @@ fn sigmoid_probability(logit: f32) -> f32 {
     }
 }
 
-        assert_eq!(box_.width, 1024);
-        assert_eq!(box_.height, 683);
-        assert_eq!(box_.offset_x, 0);
-        assert_eq!(box_.offset_y, 170);
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalized_birefnet_input, restore_birefnet_output, sigmoid_probability,
+        validate_birefnet_output_shape, BiRefNetQuality, IMAGENET_MEAN, IMAGENET_STD,
+    };
+    use image::{ImageBuffer, Rgba};
+
+    #[test]
+    fn birefnet_preprocessing_normalizes_the_complete_native_tensor() {
+        let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
+            2,
+            1,
+            vec![255, 128, 0, 255, 0, 64, 255, 255],
+        )
+        .unwrap();
+        let input = normalized_birefnet_input(&image, 2, 1).unwrap();
+
+        assert_eq!(input.len(), 6);
+        let expected = [
+            (1.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0],
+            (0.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0],
+            (128.0 / 255.0 - IMAGENET_MEAN[1]) / IMAGENET_STD[1],
+            (64.0 / 255.0 - IMAGENET_MEAN[1]) / IMAGENET_STD[1],
+            (0.0 - IMAGENET_MEAN[2]) / IMAGENET_STD[2],
+            (1.0 - IMAGENET_MEAN[2]) / IMAGENET_STD[2],
+        ];
+        for (actual, expected) in input.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 
     #[test]
-    fn letterbox_preserves_portrait_aspect_ratio() {
-        let box_ = Letterbox::for_image(3000, 6000, 1024, 1024).unwrap();
-        assert_eq!(box_.width, 512);
-        assert_eq!(box_.height, 1024);
-        assert_eq!(box_.offset_x, 256);
-        assert_eq!(box_.offset_y, 0);
+    fn birefnet_output_keeps_soft_probabilities_when_restoring_size() {
+        let mask = restore_birefnet_output(&[-2.0, 0.0, 2.0], 3, 1, 3, 1).unwrap();
+        assert_eq!(mask, vec![30, 128, 225]);
     }
 
     #[test]
