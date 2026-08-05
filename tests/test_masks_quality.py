@@ -199,8 +199,17 @@ def test_ai_subject_preserves_birefnet_soft_output_without_vitmatte_drift() -> N
     ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
     subject = ai[ai.index("fn infer_subject(") : ai.index("fn run_subject_session")]
     assert "refine_mask_with_vitmatte(" not in subject
-    assert "let mask = restore_from_letterbox(" in subject
+    assert "let mask = restore_birefnet_output(" in subject
     assert "Preserve it" in subject
+
+
+def test_birefnet_uses_the_checkpoint_native_resize_without_letterboxing() -> None:
+    ai = (ROOT / "src/ai_masks.rs").read_text(encoding="utf-8")
+    subject = ai[ai.index("fn infer_subject(") : ai.index("fn run_subject_session")]
+    assert "model.input_width," in subject
+    assert "model.input_height," in subject
+    assert "normalized_birefnet_input" in subject
+    assert "struct Letterbox" not in ai
 
 
 def test_birefnet_quality_selects_checkpoint_resolution_cache_and_ui_copy() -> None:
@@ -221,6 +230,8 @@ def test_birefnet_quality_selects_checkpoint_resolution_cache_and_ui_copy() -> N
     assert "birefnet_quality.model().explanation" in SIDEBAR
     assert 'ComboBox::from_label("Subject quality")' in app
     assert "self.set_birefnet_quality(quality)" in app
+    quality_setter = app[app.index("pub(crate) fn set_birefnet_quality(") : app.index("pub(crate) fn birefnet_quality_change_enabled")]
+    assert "self.persist_performance_settings();" in quality_setter
     assert "self.birefnet_quality.model().cache_filename" in app
     assert "model.bytes as f64" in app
 

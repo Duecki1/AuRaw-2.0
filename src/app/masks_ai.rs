@@ -810,6 +810,7 @@ impl AurawApp {
         // let a request at the new tier reuse the previous tier's result.
         self.subject_mask_cache = None;
         self.subject_generation = self.subject_generation.wrapping_add(1);
+        self.persist_performance_settings();
     }
 
     pub(crate) fn birefnet_quality_change_enabled(&self) -> bool {

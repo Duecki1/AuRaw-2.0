@@ -390,6 +390,7 @@ mod tests {
     fn library_view_preferences_round_trip() {
         let mut settings = PerformanceSettings {
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Enormous,
+            birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             ..Default::default()
         };
         #[cfg(not(target_os = "android"))]
@@ -404,6 +405,10 @@ mod tests {
         assert_eq!(
             restored.library_thumbnail_size,
             crate::ui::library::LibraryThumbnailSize::Enormous
+        );
+        assert_eq!(
+            restored.birefnet_quality,
+            crate::ai_masks::BiRefNetQuality::High
         );
         #[cfg(not(target_os = "android"))]
         {
