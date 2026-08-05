@@ -760,6 +760,22 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    pub(crate) fn set_birefnet_quality(&mut self, quality: BiRefNetQuality) {
+        if self.birefnet_quality == quality {
+            return;
+        }
+        self.birefnet_quality = quality;
+        // A cached alpha belongs to the checkpoint that produced it. Keep the
+        // currently displayed mask until its replacement succeeds, but never
+        // let a request at the new tier reuse the previous tier's result.
+        self.subject_mask_cache = None;
+        self.subject_generation = self.subject_generation.wrapping_add(1);
+    }
+
+    pub(crate) fn birefnet_quality_change_enabled(&self) -> bool {
+        self.subject_task_id.is_none() && self.subject_receiver.is_none()
+    }
+
     pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
         self.object_error_dialog = None;
         self.recover_terminal_ai_mask_task_owners();
@@ -806,6 +822,7 @@ impl AurawApp {
         let request = SubjectMaskTaskRequest {
             document_id: self.sidecar_generation,
             generation,
+            quality: self.birefnet_quality,
             source,
             model_path,
             runtime_path,
@@ -929,7 +946,11 @@ impl AurawApp {
                     }
                     self.update_background_progress(
                         Some(task_id),
-                        TaskProgress::indeterminate("Running local subject-mask inference…"),
+                        TaskProgress::indeterminate(format!(
+                            "Running {} quality locally with {}…",
+                            self.birefnet_quality.label(),
+                            self.birefnet_quality.model().checkpoint
+                        )),
                     );
                 }
                 SubjectMaskEvent::Finished(result) => finished = Some(result),
@@ -1586,7 +1607,8 @@ impl AurawApp {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
             .unwrap_or_else(std::env::temp_dir);
-        root.join("auraw/models/birefnet-general-lite.onnx")
+        root.join("auraw/models")
+            .join(self.birefnet_quality.model().cache_filename)
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1746,7 +1768,8 @@ impl AurawApp {
         self.android_app
             .internal_data_path()
             .unwrap_or_else(std::env::temp_dir)
-            .join("models/birefnet-general-lite.onnx")
+            .join("models")
+            .join(self.birefnet_quality.model().cache_filename)
     }
 
     #[cfg(target_os = "android")]

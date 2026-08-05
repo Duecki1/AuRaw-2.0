@@ -18,6 +18,8 @@ pub(crate) struct PerformanceSettings {
     #[serde(default)]
     pub(crate) preview_quality: crate::app::PreviewQuality,
     #[serde(default)]
+    pub(crate) birefnet_quality: crate::ai_masks::BiRefNetQuality,
+    #[serde(default)]
     pub(crate) camera_profile_mode: CameraProfileMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) camera_profile_folder: Option<PathBuf>,
@@ -80,6 +82,7 @@ impl Default for PerformanceSettings {
             thumbnail_workers: default_thumbnail_workers(),
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::default(),
             preview_quality: crate::app::PreviewQuality::default(),
+            birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
             camera_profile_mode: CameraProfileMode::default(),
             camera_profile_folder: None,
             camera_profile_folder_label: None,
@@ -270,6 +273,7 @@ mod tests {
             thumbnail_workers: 0,
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Large,
             preview_quality: crate::app::PreviewQuality::High,
+            birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
             camera_profile_folder: Some(PathBuf::from("profiles")),
             camera_profile_folder_label: Some("CameraProfiles".to_owned()),
@@ -305,6 +309,10 @@ mod tests {
             crate::ui::library::LibraryThumbnailSize::Large
         );
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::High);
+        assert_eq!(
+            settings.birefnet_quality,
+            crate::ai_masks::BiRefNetQuality::High
+        );
         assert_eq!(settings.camera_profile_mode, CameraProfileMode::DcpProfiles);
         assert_eq!(
             settings.camera_profile_folder,
@@ -364,6 +372,10 @@ mod tests {
                 .expect("legacy settings should remain readable");
 
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
+        assert_eq!(
+            settings.birefnet_quality,
+            crate::ai_masks::BiRefNetQuality::Medium
+        );
         assert_eq!(
             settings.library_thumbnail_size,
             crate::ui::library::LibraryThumbnailSize::Medium

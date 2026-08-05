@@ -248,7 +248,7 @@ and eXIf metadata.
 Choose a local ONNX Runtime library in Settings; AuRaw records its SHA-256 and
 revalidates that exact file before every dynamic load. Each segmentation model is separately pinned by SHA-256, downloaded through a
 temporary file, revalidated on cache hits, and atomically moved into the cache
-only after verification. Subject selection uses BiRefNet followed by a pinned ViTMatte ONNX edge refiner; Object selection uses
+only after verification. Subject selection uses the explicitly selected BiRefNet General-Lite, Lite-2K, or HR checkpoint and preserves its soft output directly; Object selection uses
 AI selection stays disabled
 until a local runtime has been selected and pinned.
 
