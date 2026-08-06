@@ -22,18 +22,11 @@ struct MaskData {
     hsl_luminance_1: vec4<f32>,
 }
 
-struct Params {
-    // Keep the scalar block at exactly 16 floats so the vec4 fields below
-    // retain the same 16-byte alignment in Rust and WGSL uniforms. Two former
-    // reserved slots now configure reduced-resolution adaptive tone analysis
-    // and demosaic finishing while the stable 64-byte prefix does not move.
+struct CameraUniforms {
+    // Camera/raw-stage scalar controls. The three reserved values keep the
+    // following vec4 block on a strict 16-byte uniform boundary.
     black_point: f32,
-    exposure: f32,
-    // Global WB temperature mirrored for the stable uniform ABI. The CPU uses
-    // it to rebuild the camera matrix; shaders do not apply a second gain.
     temperature: f32,
-    saturation: f32,
-    vibrance: f32,
     highlight_clip: f32,
     chroma_denoise: f32,
     ca_red: f32,
@@ -44,23 +37,10 @@ struct Params {
     demosaic_mode: f32,
     dual_threshold: f32,
     frequency_chroma: f32,
-    // Global WB tint mirrored for the stable uniform ABI; see temperature.
     tint: f32,
-    // Highlights, shadows, whites, blacks. Process 17+ defers Blacks to the
-    // view-adjacent display-linear toe; the packed ABI remains unchanged.
-    basic_tone: vec4<f32>,
-    // darktable sigmoid: white target, black target, paper exposure, film fog.
-    sigmoid_curve: vec4<f32>,
-    // darktable sigmoid: film power, paper power, hue preservation, method.
-    sigmoid_power: vec4<f32>,
-    // Texture, clarity, dehaze, reserved. Global contrast is sigmoid_power.x.
-    presence: vec4<f32>,
-    // Glow amount, radius, highlight threshold, capture-sharpen amount.
-    creative_effects: vec4<f32>,
-    // Vignette amount, midpoint, roundness, feather.
-    vignette: vec4<f32>,
-    // Vignette highlight protection, sharpen radius, detail, masking.
-    vignette_options: vec4<f32>,
+    _pad_0: f32,
+    _pad_1: f32,
+    _pad_2: f32,
     // Reconstruction method followed by inpaint-opposed RGB chrominance offsets.
     highlight_options: vec4<f32>,
     // Per-CFA-plane sensor noise model: variance = shot * signal + read.
@@ -68,36 +48,6 @@ struct Params {
     noise_read: vec4<f32>,
     // Luma strength, detail protection, quality tier, profile confidence.
     noise_options: vec4<f32>,
-    // Eight editable point-curve coordinates, packed as x0,y0,x1,y1.
-    tone_curve_0: vec4<f32>,
-    tone_curve_1: vec4<f32>,
-    tone_curve_2: vec4<f32>,
-    tone_curve_3: vec4<f32>,
-    // Active point count, followed by reserved values.
-    tone_curve_meta: vec4<f32>,
-    // Independent scene-referred red, green and blue point curves.
-    tone_curve_red_0: vec4<f32>,
-    tone_curve_red_1: vec4<f32>,
-    tone_curve_red_2: vec4<f32>,
-    tone_curve_red_3: vec4<f32>,
-    tone_curve_red_meta: vec4<f32>,
-    tone_curve_green_0: vec4<f32>,
-    tone_curve_green_1: vec4<f32>,
-    tone_curve_green_2: vec4<f32>,
-    tone_curve_green_3: vec4<f32>,
-    tone_curve_green_meta: vec4<f32>,
-    tone_curve_blue_0: vec4<f32>,
-    tone_curve_blue_1: vec4<f32>,
-    tone_curve_blue_2: vec4<f32>,
-    tone_curve_blue_3: vec4<f32>,
-    tone_curve_blue_meta: vec4<f32>,
-    // Red, orange, yellow, green / aqua, blue, purple, magenta.
-    hsl_hue_0: vec4<f32>,
-    hsl_hue_1: vec4<f32>,
-    hsl_saturation_0: vec4<f32>,
-    hsl_saturation_1: vec4<f32>,
-    hsl_luminance_0: vec4<f32>,
-    hsl_luminance_1: vec4<f32>,
     wb: vec4<f32>,
     cam_to_srgb_0: vec4<f32>,
     cam_to_srgb_1: vec4<f32>,
@@ -127,46 +77,93 @@ struct Params {
     // HueSat encoding, LookTable encoding, default exposure EV bits, and the
     // live DCP dual-illuminant interpolation weight as f32 bits.
     profile_flags: vec4<u32>,
-    // x = processing-formula version. y bit 0 is the retired DCP-view selector
-    // (always clear in Process 31); bit 1 selects the derived AI RAW. z stores
-    // user-facing Exposure as f32 bits. w is the render-graph contract bitfield; bit 0
-    // enables explicit camera -> scene -> look -> view domain boundaries.
-    // Camera/DNG default rendering exposure lives independently in profile_flags.z.
+    // Processing version, selection flags, user exposure bits and render-graph
+    // contract flags. Kept in the camera/common block because all graph stages
+    // may need to branch on the process contract.
     process_info: vec4<u32>,
-    // Local adjustments. Each mask index maps directly to one layer in the
-    // normalized R16F array texture sampled by the adjustment shader modules.
-    // y/z can hold
-    // packed UNORM16 min/max UV pairs for a viewport-local atlas and w enables
-    // that mapping. mask_data[index].metadata.w is a feature bitset: bit 0
-    // color mixer, bit 1 color grading.
-    // x: active layers; y/z: optional source UV rectangle; w: 0 for a full
-    // image atlas, 0xffffffff for a full cropped atlas, or packed valid
-    // width/height when only its top-left texture region has been uploaded.
+}
+
+struct SceneToneUniforms {
+    // Scene-referred global controls. Padding makes the point-curve block begin
+    // on the same 16-byte boundary in Rust and WGSL.
+    exposure: f32,
+    saturation: f32,
+    vibrance: f32,
+    _pad_0: f32,
+    // Highlights, shadows, whites, blacks.
+    basic_tone: vec4<f32>,
+    // darktable sigmoid: white target, black target, paper exposure, film fog.
+    sigmoid_curve: vec4<f32>,
+    // darktable sigmoid: film power, paper power, hue preservation, method.
+    sigmoid_power: vec4<f32>,
+    // Eight editable point-curve coordinates, packed as x0,y0,x1,y1.
+    tone_curve_0: vec4<f32>,
+    tone_curve_1: vec4<f32>,
+    tone_curve_2: vec4<f32>,
+    tone_curve_3: vec4<f32>,
+    tone_curve_meta: vec4<f32>,
+    // Independent scene-referred red, green and blue point curves.
+    tone_curve_red_0: vec4<f32>,
+    tone_curve_red_1: vec4<f32>,
+    tone_curve_red_2: vec4<f32>,
+    tone_curve_red_3: vec4<f32>,
+    tone_curve_red_meta: vec4<f32>,
+    tone_curve_green_0: vec4<f32>,
+    tone_curve_green_1: vec4<f32>,
+    tone_curve_green_2: vec4<f32>,
+    tone_curve_green_3: vec4<f32>,
+    tone_curve_green_meta: vec4<f32>,
+    tone_curve_blue_0: vec4<f32>,
+    tone_curve_blue_1: vec4<f32>,
+    tone_curve_blue_2: vec4<f32>,
+    tone_curve_blue_3: vec4<f32>,
+    tone_curve_blue_meta: vec4<f32>,
+    // Red, orange, yellow, green / aqua, blue, purple, magenta.
+    hsl_hue_0: vec4<f32>,
+    hsl_hue_1: vec4<f32>,
+    hsl_saturation_0: vec4<f32>,
+    hsl_saturation_1: vec4<f32>,
+    hsl_luminance_0: vec4<f32>,
+    hsl_luminance_1: vec4<f32>,
+    // Local mask count/atlas metadata shared by scene tone and view-adjacent
+    // local edits.
     mask_counts: vec4<u32>,
-    // Four-way scene-referred grading. Wheels contain normalized hue,
-    // saturation, luminance and a reserved slot. Options contain blending and
-    // balance in normalized UI domains.
     grade_shadows: vec4<f32>,
     grade_midtones: vec4<f32>,
     grade_highlights: vec4<f32>,
     grade_global: vec4<f32>,
     grade_options: vec4<f32>,
-    // Post-crop vignette mapping. Frame = source-space crop center (xy) plus
-    // final-frame pixel dimensions (zw). Transform maps normalized source
-    // deltas to normalized final-frame deltas and includes orientation, fine
-    // rotation, flips and keystone/shear.
+}
+
+struct EffectsUniforms {
+    // Texture, clarity, dehaze, reserved.
+    presence: vec4<f32>,
+    // Glow amount, radius, highlight threshold, capture-sharpen amount.
+    creative_effects: vec4<f32>,
+    // Vignette amount, midpoint, roundness, feather.
+    vignette: vec4<f32>,
+    // Vignette highlight protection, sharpen radius, detail, masking.
+    vignette_options: vec4<f32>,
+    // Source-space crop center and final-frame dimensions.
     vignette_frame: vec4<f32>,
+    // Normalized source-to-final 2x2 affine transform.
     vignette_transform: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
+// Camera/common resources remain in group 0 with image/storage resources.
+// Scene tone and effects use independent bind groups so updating one stage does
+// not invalidate either of the other uniform bindings.
+@group(0) @binding(0) var<uniform> camera_uniforms: CameraUniforms;
+@group(1) @binding(0) var<uniform> scene_tone_uniforms: SceneToneUniforms;
+@group(2) @binding(0) var<uniform> effects_uniforms: EffectsUniforms;
+
 @group(0) @binding(33) var<storage, read> mask_data: array<MaskData>;
 
 // Render-graph contract flags shared by tone analysis and output shaders.
 const RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY: u32 = 1u;
 
 fn uses_explicit_scene_display_domains() -> bool {
-    return (params.process_info.w & RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY) != 0u;
+    return (camera_uniforms.process_info.w & RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY) != 0u;
 }
 
 @group(0) @binding(1) var raw_tex: texture_2d<u32>;
@@ -194,15 +191,15 @@ const SRGB_TO_REC2020: mat3x3<f32> = mat3x3<f32>(
 );
 
 fn image_max() -> vec2<i32> {
-    return vec2<i32>(i32(params.width) - 1, i32(params.height) - 1);
+    return vec2<i32>(i32(camera_uniforms.width) - 1, i32(camera_uniforms.height) - 1);
 }
 
 fn tile_origin() -> vec2<i32> {
-    return vec2<i32>(params.tile_origin_x, params.tile_origin_y);
+    return vec2<i32>(camera_uniforms.tile_origin_x, camera_uniforms.tile_origin_y);
 }
 
 fn full_image_max() -> vec2<i32> {
-    return vec2<i32>(i32(params.full_width) - 1, i32(params.full_height) - 1);
+    return vec2<i32>(i32(camera_uniforms.full_width) - 1, i32(camera_uniforms.full_height) - 1);
 }
 
 fn clamp_pos(pos: vec2<i32>) -> vec2<i32> {

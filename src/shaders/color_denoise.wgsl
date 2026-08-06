@@ -11,7 +11,7 @@
 @group(0) @binding(10) var color_denoise_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn color_denoise_at(pos: vec2<i32>) -> vec3<f32> {
-    let maximum = vec2<i32>(i32(params.width) - 1, i32(params.height) - 1);
+    let maximum = vec2<i32>(i32(camera_uniforms.width) - 1, i32(camera_uniforms.height) - 1);
     return textureLoad(color_denoise_read, clamp(pos, vec2<i32>(0), maximum), 0).rgb;
 }
 
@@ -36,8 +36,8 @@ fn color_denoise_scale_gain(scale: i32) -> f32 {
 }
 
 fn color_denoise_enabled(scale: i32) -> bool {
-    if params.chroma_denoise <= 1e-6 { return false; }
-    let quality = params.noise_options.z;
+    if camera_uniforms.chroma_denoise <= 1e-6 { return false; }
+    let quality = camera_uniforms.noise_options.z;
     if quality < 0.5 { return scale == 0; }
     if quality < 1.5 { return scale <= 3; }
     return true;
@@ -49,8 +49,8 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
 
     let center_signal = nr_signal(center);
     let center_variance = nr_component_variance(center);
-    let detail = clamp(params.noise_options.y, 0.0, 1.0);
-    let requested = clamp(params.chroma_denoise, 0.0, 1.0);
+    let detail = clamp(camera_uniforms.noise_options.y, 0.0, 1.0);
+    let requested = clamp(camera_uniforms.chroma_denoise, 0.0, 1.0);
     // Each accepted low pass reduces the noise presented to the next scale.
     // Using the original sensor variance forever makes a real boundary look
     // progressively less significant after the first shrinkage pass, which is
@@ -168,42 +168,42 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_1(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 1, 0), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_2(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 2, 1), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_4(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 4, 2), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_8(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 8, 3), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_16(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 16, 4), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_32(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 32, 5), 1.0));
 }

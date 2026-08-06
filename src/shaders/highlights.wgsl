@@ -21,7 +21,7 @@ fn highlight_color_at(pos: vec2<i32>) -> u32 {
 }
 
 fn highlight_wb_for_cfa_channel(channel: u32) -> f32 {
-    return params.wb[min(channel, 3u)];
+    return camera_uniforms.wb[min(channel, 3u)];
 }
 
 fn highlight_raw_sensor_at(pos: vec2<i32>) -> f32 {
@@ -29,9 +29,9 @@ fn highlight_raw_sensor_at(pos: vec2<i32>) -> f32 {
     let channel = highlight_cfa_channel_at(p);
     let raw = f32(textureLoad(raw_tex, p, 0).r);
     let metadata_black = textureLoad(black_tex, p, 0).x;
-    let white = max(params.white_levels[channel], metadata_black + 1.0);
+    let white = max(camera_uniforms.white_levels[channel], metadata_black + 1.0);
     let sensor_range = max(white - metadata_black, 1.0);
-    let black_offset = clamp(params.black_point, -0.25, 0.25) * sensor_range;
+    let black_offset = clamp(camera_uniforms.black_point, -0.25, 0.25) * sensor_range;
     let calibrated_black = clamp(metadata_black + black_offset, 0.0, white - 1.0);
     return clamp((raw - calibrated_black) / (white - calibrated_black), 0.0, 4.0);
 }
@@ -43,8 +43,8 @@ fn highlight_raw_camera_at(pos: vec2<i32>) -> f32 {
 }
 
 fn lch_common_clip() -> f32 {
-    let min_wb = min(min(params.wb.r, params.wb.g), min(params.wb.b, params.wb.a));
-    return max(params.highlight_clip, 0.01) * max(min_wb, 1e-6);
+    let min_wb = min(min(camera_uniforms.wb.r, camera_uniforms.wb.g), min(camera_uniforms.wb.b, camera_uniforms.wb.a));
+    return max(camera_uniforms.highlight_clip, 0.01) * max(min_wb, 1e-6);
 }
 
 // Bayer opponent-colour reconstruction from darktable's LCh method. It is
@@ -54,9 +54,9 @@ fn lch_reconstructed_cfa_at(pos: vec2<i32>) -> f32 {
     let center_color = highlight_color_at(center);
     let original = highlight_raw_camera_at(center);
     let clip = lch_common_clip();
-    let strength = clamp(params.highlight_reconstruction, 0.0, 1.0);
+    let strength = clamp(camera_uniforms.highlight_reconstruction, 0.0, 1.0);
 
-    if center.x >= i32(params.width) - 1 || center.y >= i32(params.height) - 1 {
+    if center.x >= i32(camera_uniforms.width) - 1 || center.y >= i32(camera_uniforms.height) - 1 {
         return mix(original, min(original, clip), strength);
     }
 
@@ -134,8 +134,8 @@ fn inpaint_opposed_refavg(pos: vec2<i32>) -> f32 {
     let color = highlight_color_at(center);
     var mean = vec3<f32>(0.0);
     var count = vec3<f32>(0.0);
-    let max_row = max(i32(params.height) - 1, 0);
-    let max_col = max(i32(params.width) - 1, 0);
+    let max_row = max(i32(camera_uniforms.height) - 1, 0);
+    let max_col = max(i32(camera_uniforms.width) - 1, 0);
     let row_end = min(max_row, center.y + 2);
     let col_end = min(max_col, center.x + 2);
 
@@ -164,21 +164,21 @@ fn inpaint_opposed_cfa_at(pos: vec2<i32>) -> f32 {
     let color = highlight_color_at(center);
     let original = highlight_raw_camera_at(center);
     let clip = DARKTABLE_OPPOSED_CLIP_MAGIC
-        * max(params.highlight_clip, 0.01)
+        * max(camera_uniforms.highlight_clip, 0.01)
         * highlight_wb_for_cfa_channel(physical_channel);
     if original < clip {
         return original;
     }
     let reference = inpaint_opposed_refavg(center);
-    let chrominance = params.highlight_options[color + 1u];
+    let chrominance = camera_uniforms.highlight_options[color + 1u];
     return max(original, reference + chrominance);
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn highlight_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    let method = params.highlight_options.x;
+    let method = camera_uniforms.highlight_options.x;
     var output = highlight_raw_camera_at(pos);
     if method >= 0.5 && method < 1.5 {
         output = lch_reconstructed_cfa_at(pos);

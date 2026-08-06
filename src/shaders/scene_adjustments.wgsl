@@ -28,16 +28,16 @@
 
 fn local_mask_uv(pos: vec2<i32>) -> vec2<f32> {
     let full_size = vec2<f32>(
-        f32(max(params.full_width, 1u)),
-        f32(max(params.full_height, 1u)),
+        f32(max(camera_uniforms.full_width, 1u)),
+        f32(max(camera_uniforms.full_height, 1u)),
     );
     let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
     let full_uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
-    if params.mask_counts.w == 0u {
+    if scene_tone_uniforms.mask_counts.w == 0u {
         return full_uv;
     }
-    let packed_min = params.mask_counts.y;
-    let packed_max = params.mask_counts.z;
+    let packed_min = scene_tone_uniforms.mask_counts.y;
+    let packed_max = scene_tone_uniforms.mask_counts.z;
     let rect_min = vec2<f32>(
         f32(packed_min & 65535u),
         f32(packed_min >> 16u),
@@ -50,15 +50,15 @@ fn local_mask_uv(pos: vec2<i32>) -> vec2<f32> {
 }
 
 fn local_mask_texture_uv(region_uv: vec2<f32>) -> vec2<f32> {
-    if params.mask_counts.w == 0u {
+    if scene_tone_uniforms.mask_counts.w == 0u {
         return region_uv;
     }
     let atlas_size_u = textureDimensions(local_mask_tex);
     var valid_size_u = atlas_size_u;
-    if params.mask_counts.w != 0xffffffffu {
+    if scene_tone_uniforms.mask_counts.w != 0xffffffffu {
         valid_size_u = vec2<u32>(
-            params.mask_counts.w & 65535u,
-            params.mask_counts.w >> 16u,
+            scene_tone_uniforms.mask_counts.w & 65535u,
+            scene_tone_uniforms.mask_counts.w >> 16u,
         );
     }
     let atlas_size = vec2<f32>(max(atlas_size_u, vec2<u32>(1u)));
@@ -88,7 +88,7 @@ fn local_mask_weight(pos: vec2<i32>, index: u32) -> f32 {
 
 fn apply_local_exposure_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(params.mask_counts.x, 32u);
+    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
@@ -124,9 +124,9 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     // basis. Remap them through the live camera transform so global
     // temperature/tint changes remain non-destructive after the erase.
     let replacement_working = vec3<f32>(
-        dot(params.inpaint_wb_0.xyz, replacement_neutral),
-        dot(params.inpaint_wb_1.xyz, replacement_neutral),
-        dot(params.inpaint_wb_2.xyz, replacement_neutral),
+        dot(camera_uniforms.inpaint_wb_0.xyz, replacement_neutral),
+        dot(camera_uniforms.inpaint_wb_1.xyz, replacement_neutral),
+        dot(camera_uniforms.inpaint_wb_2.xyz, replacement_neutral),
     );
     return mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
 }
@@ -152,7 +152,7 @@ fn presence_reference_scale() -> f32 {
     // edge. Scaling their sample steps makes the preview proxy, zoom detail,
     // and full-resolution export operate on comparable subject detail.
     return clamp(
-        f32(min(params.full_width, params.full_height)) / 1080.0,
+        f32(min(camera_uniforms.full_width, camera_uniforms.full_height)) / 1080.0,
         0.55,
         3.0,
     );
@@ -356,7 +356,7 @@ fn apply_local_curves_for_mask(mask_index: u32, input_rgb: vec3<f32>) -> vec3<f3
 
 fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(params.mask_counts.x, 32u);
+    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
@@ -367,7 +367,7 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
         // scene-tone node, not a weighted parameter contribution to a shared
         // aggregate. This keeps overlap behavior deterministic for nonlinear
         // tone, contrast, WB, and curve operations.
-        if params.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+        if camera_uniforms.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
             // Shadows is an EV-zone remap, so feather/opacity scales the
             // adjustment parameter itself. Mixing an already nonlinear fully-
             // adjusted result would produce a different transfer at mask edges.
@@ -425,7 +425,7 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
 
 @compute @workgroup_size(8, 8, 1)
 fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
     // Camera characterization is the only DCP color component allowed before
@@ -433,7 +433,7 @@ fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     // local Exposure are also scene-linear. The LookTable is deferred until all
     // scene controls have finished. Legacy edits retain the old pre-edit look.
     var rgb = apply_camera_characterization(scene_working_at(pos));
-    let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
+    let profile_exposure_ev = bitcast<f32>(camera_uniforms.profile_flags.z);
     rgb = rgb * exp2(profile_exposure_ev);
     rgb = apply_exposure(rgb);
     rgb = apply_local_exposure_nodes(pos, rgb);
@@ -445,7 +445,7 @@ fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
 
@@ -463,7 +463,7 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_local_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
     rgb = apply_local_scene_tone_nodes(pos, rgb);

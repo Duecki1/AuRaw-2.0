@@ -80,7 +80,7 @@ fn capture_noise_ev_sigma(rgb: vec3<f32>) -> f32 {
     // threshold: it follows ISO, WB amplification, and local brightness.
     let signal = max(dot(max(rgb, vec3<f32>(0.0)), vec3<f32>(0.25, 0.50, 0.25)), 1e-5);
     let channel_variance = max(
-        params.noise_read.rgb + params.noise_shot.rgb * vec3<f32>(signal),
+        camera_uniforms.noise_read.rgb + camera_uniforms.noise_shot.rgb * vec3<f32>(signal),
         vec3<f32>(1e-12),
     );
     let signal_variance = dot(
@@ -90,19 +90,19 @@ fn capture_noise_ev_sigma(rgb: vec3<f32>) -> f32 {
     let relative_sigma = sqrt(max(signal_variance, 0.0)) / signal;
     // Requested denoise reduces, but does not erase, the residual uncertainty.
     // Keeping a floor avoids immediately sharpening the remaining fine grain.
-    let residual = mix(1.0, 0.58, clamp(params.noise_options.x, 0.0, 1.0));
+    let residual = mix(1.0, 0.58, clamp(camera_uniforms.noise_options.x, 0.0, 1.0));
     return log2(1.0 + relative_sigma * residual);
 }
 
 fn apply_capture_sharpening(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let amount = clamp(params.creative_effects.w / 150.0, 0.0, 1.0);
+    let amount = clamp(effects_uniforms.creative_effects.w / 150.0, 0.0, 1.0);
     if amount < 1e-6 {
         return rgb;
     }
 
-    let radius = clamp(params.vignette_options.y, 0.5, 3.0);
-    let detail = clamp(params.vignette_options.z / 100.0, 0.0, 1.0);
-    let masking = clamp(params.vignette_options.w / 100.0, 0.0, 1.0);
+    let radius = clamp(effects_uniforms.vignette_options.y, 0.5, 3.0);
+    let detail = clamp(effects_uniforms.vignette_options.z / 100.0, 0.0, 1.0);
+    let masking = clamp(effects_uniforms.vignette_options.w / 100.0, 0.0, 1.0);
     let radius_pixels = radius * capture_detail_scale();
     let step = clamp(i32(round(max(radius_pixels * 0.48, 1.0))), 1, 3);
 

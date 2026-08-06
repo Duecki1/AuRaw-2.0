@@ -32,14 +32,14 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let replacement = textureLoad(tone_inpaint_tex, clamp_pos(pos), 0);
     if replacement.a > 1e-6 {
         let replacement_working = vec3<f32>(
-            dot(params.inpaint_wb_0.xyz, replacement.rgb),
-            dot(params.inpaint_wb_1.xyz, replacement.rgb),
-            dot(params.inpaint_wb_2.xyz, replacement.rgb),
+            dot(camera_uniforms.inpaint_wb_0.xyz, replacement.rgb),
+            dot(camera_uniforms.inpaint_wb_1.xyz, replacement.rgb),
+            dot(camera_uniforms.inpaint_wb_2.xyz, replacement.rgb),
         );
         working = mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
     }
     let characterized = apply_camera_characterization(working);
-    let profile_exposure_ev = bitcast<f32>(params.profile_flags.z);
+    let profile_exposure_ev = bitcast<f32>(camera_uniforms.profile_flags.z);
     let exposed = characterized * exp2(profile_exposure_ev);
     if uses_explicit_scene_display_domains() {
         return map_negative_gamut(exposed);
@@ -54,7 +54,7 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
     let guide_size = textureDimensions(tone_guide_write);
     if gid.x >= guide_size.x || gid.y >= guide_size.y { return; }
 
-    let source_size = vec2<u32>(params.width, params.height);
+    let source_size = vec2<u32>(camera_uniforms.width, camera_uniforms.height);
     let cell_min = vec2<u32>(
         gid.x * source_size.x / guide_size.x,
         gid.y * source_size.y / guide_size.y,
@@ -94,8 +94,8 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Histogram every source pixel rather than the cell average. This
             // preserves small specular highlights and makes the 99.5th
             // percentile independent of the reduced guide resolution.
-            let histogram_min = params.tone_histogram_bounds.xy;
-            let histogram_max = params.tone_histogram_bounds.zw;
+            let histogram_min = camera_uniforms.tone_histogram_bounds.xy;
+            let histogram_max = camera_uniforms.tone_histogram_bounds.zw;
             if x >= histogram_min.x && y >= histogram_min.y
                 && x < histogram_max.x && y < histogram_max.y {
                 atomicAdd(&tone_histogram.bins[tone_ev_to_bin(ev)], 1u);
@@ -124,7 +124,7 @@ fn tone_bilateral_guide(pos: vec2<i32>, axis: vec2<i32>) -> f32 {
     let guide_max = vec2<i32>(textureDimensions(tone_guide_read)) - vec2<i32>(1);
     let center_pos = clamp(pos, vec2<i32>(0), guide_max);
     let center = textureLoad(tone_guide_read, center_pos, 0).x;
-    let radius = clamp(i32(round(params.tone_guide_radius)), 1, 6);
+    let radius = clamp(i32(round(camera_uniforms.tone_guide_radius)), 1, 6);
     let sigma = max(f32(radius) * 0.65, 1.0);
 
     var weighted_sum = 0.0;

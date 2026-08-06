@@ -61,7 +61,7 @@ fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
     // raw_sampling.wgsl/highlights.wgsl. Exposure is therefore a pure
     // scene-linear gain here; subtracting black in working RGB changes hue and
     // destroys near-black channel relationships.
-    return rgb * exp2(params.exposure);
+    return rgb * exp2(scene_tone_uniforms.exposure);
 }
 
 fn circular_hue_distance(a: f32, b: f32) -> f32 {
@@ -77,8 +77,8 @@ fn perceptual_control(value: f32) -> f32 {
 }
 
 fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
-    let saturation = perceptual_control(params.saturation);
-    let vibrance = perceptual_control(params.vibrance);
+    let saturation = perceptual_control(scene_tone_uniforms.saturation);
+    let vibrance = perceptual_control(scene_tone_uniforms.vibrance);
     if abs(saturation) < 1e-6 && abs(vibrance) < 1e-6 {
         return rgb;
     }
