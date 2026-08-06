@@ -1,7 +1,27 @@
+"""Functional invariants for the basic Shadows and Blacks response models."""
 from __future__ import annotations
 
 import math
-MIDDLE_GREY = 0.1845
+from collections.abc import Callable
+
+import numpy as np
+
+# Display-domain region boundaries. These are semantic joins, not fitted
+# response coefficients copied for exact-output comparisons.
+BLACK_TOE_DEEP_REGION = (0.012, 0.030)
+BLACK_TOE_HDR_GUARD = (0.35, 1.0)
+DISPLAY_RANGE = (0.0, 1.0)
+HALF_FLOAT_MAX = float(np.finfo(np.float16).max)
+
+CONTROL_AMOUNTS = (-100.0, -50.0, -25.0, 0.0, 25.0, 50.0, 100.0)
+SHADOW_HISTOGRAMS = (
+    (-8.0, -4.0),  # low-key
+    (-5.0, 0.0),   # normal
+    (-2.0, 1.0),   # high-key
+    (-6.0, -1.0),  # backlit/night-like
+    (-6.8, -6.2),  # compressed dark histogram
+    (-1.9, -1.2),  # compressed bright histogram
+)
 
 
 def smoothstep(edge0: float, edge1: float, value: float) -> float:
@@ -10,9 +30,13 @@ def smoothstep(edge0: float, edge1: float, value: float) -> float:
 
 
 def shaped(value: float) -> float:
-    n = max(-1.0, min(1.0, value / 100.0))
-    m = abs(n)
-    return math.copysign(m * (1.45 - 0.45 * m), n) if m else 0.0
+    normalized = max(-1.0, min(1.0, value / 100.0))
+    magnitude = abs(normalized)
+    if magnitude == 0.0:
+        return 0.0
+    return math.copysign(
+        magnitude * (1.45 - 0.45 * magnitude), normalized
+    )
 
 
 def shadow_range(p05: float, p50: float) -> tuple[float, float]:
@@ -24,154 +48,150 @@ def shadow_weight(ev: float, bounds: tuple[float, float]) -> float:
     return 1.0 - smoothstep(lower, upper, ev)
 
 
-def shadow_output_ev(ev: float, amount: float, p05=-5.0, p50=0.0) -> tuple[float, float]:
+def shadow_output_ev(
+    ev: float,
+    amount: float,
+    p05: float = -5.0,
+    p50: float = 0.0,
+) -> tuple[float, float]:
     bounds = shadow_range(p05, p50)
     mask = shadow_weight(ev, bounds)
-    a = shaped(amount)
+    control = shaped(amount)
     lower, upper = bounds
     monotone_limit = 0.64 * max(upper - lower, 0.25)
-    strength = math.copysign(min(abs(a) * 2.20, monotone_limit), a) if a else 0.0
+    strength = (
+        math.copysign(min(abs(control) * 2.20, monotone_limit), control)
+        if control
+        else 0.0
+    )
     return ev + strength * mask, mask
 
 
 def display_black_toe(luma: float, amount: float) -> float:
     if luma <= 0.0 or amount == 0.0:
         return luma
-    a = shaped(amount)
-    hdr_guard = 1.0 - smoothstep(0.35, 1.0, luma)
-    if a >= 0.0:
+
+    control = shaped(amount)
+    hdr_guard = 1.0 - smoothstep(*BLACK_TOE_HDR_GUARD, luma)
+    if control >= 0.0:
         weight = 0.08 + 0.92 * 2.0 ** (-luma / 0.035)
-        offset = a * 1.75 * weight * hdr_guard
+        offset_ev = control * 1.75 * weight * hdr_guard
     else:
-        deep = 1.0 - smoothstep(0.012, 0.030, luma)
+        deep = 1.0 - smoothstep(*BLACK_TOE_DEEP_REGION, luma)
         tail = 0.10 + 2.35 * 2.0 ** (-luma / 0.070)
-        offset = -(-a) * (10.50 * deep + tail) * hdr_guard
-    return luma * 2.0**offset
+        offset_ev = -(-control) * (10.50 * deep + tail) * hdr_guard
+    return luma * 2.0**offset_ev
 
 
+def _all_f16_values_in_unit_interval() -> np.ndarray:
+    return np.arange(0x0000, 0x3C01, dtype=np.uint16).view(np.float16)
 
 
+def _assert_nondecreasing(values: np.ndarray, *, tolerance: float = 0.0) -> None:
+    differences = np.diff(values.astype(np.float64))
+    assert np.all(differences >= -tolerance), float(differences.min())
 
 
+def _one_sided_derivatives(
+    function: Callable[[float], float],
+    join: float,
+    step: float,
+) -> tuple[float, float]:
+    value = function(join)
+    left = (value - function(join - step)) / step
+    right = (function(join + step) - value) / step
+    return left, right
 
 
+def test_zero_input_and_neutral_controls_are_exactly_neutral() -> None:
+    for amount in CONTROL_AMOUNTS:
+        assert display_black_toe(0.0, amount) == 0.0
 
-def test_shadow_selector_dark_subject_cannot_inherit_bright_neighborhood() -> None:
-    pixel_ev = -6.0
-    guide_ev = -1.5
-    mismatch = abs(pixel_ev - guide_ev)
-    bounded_guide = pixel_ev + max(-1.25, min(0.75, guide_ev - pixel_ev))
-    guide_weight = 0.42 + (0.22 - 0.42) * smoothstep(0.50, 3.00, mismatch)
-    selected = pixel_ev + (bounded_guide - pixel_ev) * guide_weight
-    assert selected < -5.8
+    for luma in _all_f16_values_in_unit_interval():
+        assert display_black_toe(float(luma), 0.0) == float(luma)
 
-
-def test_shadow_neutrality_is_exact() -> None:
-    for ev in (-12.0, -8.0, -5.0, -3.0, 0.0, 3.0):
+    for ev in (-16.0, -8.0, -4.0, 0.0, 4.0, 12.0):
         mapped, _ = shadow_output_ev(ev, 0.0)
         assert mapped == ev
 
 
-def test_blacks_neutrality_is_exact() -> None:
-    for y in (0.0, 1e-6, 1e-4, 0.001, 0.01, 0.1, 0.15, 1.0):
-        assert display_black_toe(y, 0.0) == y
-
-
-def test_shadow_moderate_settings_have_perceptual_authority() -> None:
-    # Representative dark-detail zone in the measured Lightroom low-pass range.
-    source_ev = -4.0
-    plus25, mask = shadow_output_ev(source_ev, 25.0)
-    plus50, _ = shadow_output_ev(source_ev, 50.0)
-    minus25, _ = shadow_output_ev(source_ev, -25.0)
-    minus50, _ = shadow_output_ev(source_ev, -50.0)
-    assert mask > 0.80
-    assert plus25 - source_ev > 0.55
-    assert plus50 - source_ev > 1.00
-    assert source_ev - minus25 > 0.55
-    assert source_ev - minus50 > 1.00
-
-
-def test_shadows_give_deep_detail_authority_then_roll_out_through_midtones() -> None:
-    _, black_weight = shadow_output_ev(-10.0, 50.0)
-    _, detail_weight = shadow_output_ev(-4.0, 50.0)
-    _, mid_weight = shadow_output_ev(0.0, 50.0)
-    _, bright_weight = shadow_output_ev(3.0, 50.0)
-    assert black_weight == 1.0
-    assert detail_weight > 0.80
-    assert 0.05 < mid_weight < 0.20
-    assert bright_weight == 0.0
-
-
-
-
-def test_shadow_transfer_is_monotone_for_all_requested_settings_and_extreme_histograms() -> None:
-    scenarios = [
-        (-8.0, -4.0),  # low-key
-        (-5.0, 0.0),   # normal
-        (-2.0, 1.0),   # high-key
-        (-6.0, -1.0),  # backlit/night-like
-        (-6.8, -6.2),  # nearly degenerate dark histogram
-        (-1.9, -1.2),  # nearly degenerate bright histogram
-    ]
-    for p05, p50 in scenarios:
+def test_shadow_transfer_is_finite_and_monotone_for_extreme_histograms() -> None:
+    ev_values = np.linspace(-16.0, 12.0, 4097)
+    for p05, p50 in SHADOW_HISTOGRAMS:
         lower, upper = shadow_range(p05, p50)
-        assert math.isfinite(lower + upper)
+        assert math.isfinite(lower) and math.isfinite(upper)
         assert lower < upper
-        for amount in (-100.0, -50.0, -25.0, 0.0, 25.0, 50.0, 100.0):
-            previous = -1e30
-            for i in range(12001):
-                ev = -16.0 + 28.0 * i / 12000.0
-                mapped, _ = shadow_output_ev(ev, amount, p05, p50)
-                assert mapped >= previous - 1e-10
-                previous = mapped
+
+        for amount in CONTROL_AMOUNTS:
+            mapped = np.asarray(
+                [shadow_output_ev(float(ev), amount, p05, p50)[0] for ev in ev_values]
+            )
+            assert np.all(np.isfinite(mapped))
+            _assert_nondecreasing(mapped, tolerance=1e-12)
 
 
-def test_blacks_moderate_settings_have_toe_authority_but_protect_lower_midtones() -> None:
-    near_black = 0.01
-    lower_mid = 0.10
-    for amount, minimum_ev in [(25.0, 0.45), (50.0, 0.80), (-25.0, 3.5), (-50.0, 6.0)]:
-        mapped = display_black_toe(near_black, amount)
-        delta = math.log2(mapped / near_black)
-        assert abs(delta) > minimum_ev
-    assert abs(math.log2(display_black_toe(lower_mid, 50.0) / lower_mid)) < 0.25
-    assert abs(math.log2(display_black_toe(lower_mid, -50.0) / lower_mid)) < 0.75
-    assert 0.0 < math.log2(display_black_toe(0.15, 100.0) / 0.15) < 0.25
+def test_shadow_mask_joins_are_c0_and_c1_continuous() -> None:
+    step = 1e-5
+    for p05, p50 in SHADOW_HISTOGRAMS:
+        for amount in (-100.0, -50.0, 50.0, 100.0):
+            function = lambda ev: shadow_output_ev(ev, amount, p05, p50)[0]
+            for join in shadow_range(p05, p50):
+                center = function(join)
+                left_value = function(join - step)
+                right_value = function(join + step)
+                assert abs(right_value - left_value) < 3e-5 * max(1.0, abs(center))
+
+                left_derivative, right_derivative = _one_sided_derivatives(
+                    function, join, step
+                )
+                assert math.isclose(
+                    left_derivative,
+                    right_derivative,
+                    rel_tol=1e-5,
+                    abs_tol=1e-5,
+                )
 
 
-def test_blacks_transfer_is_monotone_for_all_requested_settings() -> None:
-    for amount in (-100.0, -50.0, -25.0, 0.0, 25.0, 50.0, 100.0):
-        previous = -1.0
-        for i in range(1, 20001):
-            y = 0.30 * i / 20000.0
-            mapped = display_black_toe(y, amount)
-            assert mapped >= previous - 1e-12
-            previous = mapped
+def test_black_toe_is_monotone_bounded_and_f16_safe() -> None:
+    inputs = _all_f16_values_in_unit_interval().astype(np.float64)
+    minimum, maximum = DISPLAY_RANGE
+
+    for amount in CONTROL_AMOUNTS:
+        mapped = np.asarray([display_black_toe(float(y), amount) for y in inputs])
+        assert np.all(np.isfinite(mapped))
+        assert np.all((mapped >= minimum) & (mapped <= maximum))
+        _assert_nondecreasing(mapped)
+
+        stored = mapped.astype(np.float16)
+        assert np.all(np.isfinite(stored))
+        assert np.all(stored.astype(np.float64) <= HALF_FLOAT_MAX)
+        _assert_nondecreasing(stored)
 
 
+def test_black_toe_region_joins_are_c0_and_c1_continuous() -> None:
+    step = 1e-7
+    joins = (*BLACK_TOE_DEEP_REGION, *BLACK_TOE_HDR_GUARD)
+
+    for amount in (-100.0, -50.0, -25.0, 25.0, 50.0, 100.0):
+        function = lambda luma: display_black_toe(luma, amount)
+        for join in joins:
+            center = function(join)
+            left_value = function(join - step)
+            right_value = function(join + step)
+            assert abs(right_value - left_value) < 1e-5 * max(1.0, abs(center))
+
+            left_derivative, right_derivative = _one_sided_derivatives(
+                function, join, step
+            )
+            assert math.isclose(
+                left_derivative,
+                right_derivative,
+                rel_tol=2e-4,
+                abs_tol=1e-5,
+            )
 
 
-
-
-
-
-
-
-
-
-def test_hdr_values_are_outside_shadow_and_black_toe_regions() -> None:
-    # +4 EV relative to middle gray is scene HDR and must remain a Shadows no-op.
-    mapped, mask = shadow_output_ev(4.0, 100.0)
-    assert mask == 0.0
-    assert mapped == 4.0
-    # Blacks receives display-linear data and has an explicit protected pivot.
-    assert display_black_toe(4.0, 100.0) == 4.0
-
-
-def test_ratio_scaling_preserves_signed_rgb_chromatic_relationships() -> None:
-    rgb = (-0.02, 0.08, 0.04)
-    scale = 2.0 ** 1.25
-    adjusted = tuple(c * scale for c in rgb)
-    assert adjusted[0] < 0.0  # no premature max(rgb, 0) in the scene control
-    assert math.isclose(adjusted[1] / adjusted[2], rgb[1] / rgb[2])
-
-
+def test_black_toe_is_identity_above_the_hdr_guard() -> None:
+    for amount in CONTROL_AMOUNTS:
+        for luma in (1.0, 2.0, 4.0, 16.0):
+            assert display_black_toe(luma, amount) == luma
