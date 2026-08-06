@@ -49,11 +49,8 @@ jobs:
       - name: Install Python test dependencies
         run: python3 -m pip install --disable-pip-version-check pytest -r requirements-regression.txt
 
-      - name: Check source connectivity
-        run: python3 scripts/check-source-connectivity.py
-
-      - name: Check immutable workflow action pins
-        run: python3 scripts/check-workflow-pins.py
+      - name: Run repository validation checks
+        run: python3 scripts/dev.py check-all
 
       - name: Check formatting
         run: cargo fmt --all -- --check

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_all_workflow_actions_are_immutable_commit_pins() -> None:
     subprocess.run(
-        [sys.executable, str(ROOT / "scripts/check-workflow-pins.py")],
+        [sys.executable, str(ROOT / "scripts/dev.py"), "check-workflows"],
         cwd=ROOT,
         check=True,
         capture_output=True,

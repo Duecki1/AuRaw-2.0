@@ -412,7 +412,7 @@ jobs:
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          python3 scripts/check-gradle-wrapper.py
+          python3 scripts/dev.py check-gradle
           ./gradlew --version
           case "$GITHUB_RUN_NUMBER" in
             ''|*[!0-9]*)

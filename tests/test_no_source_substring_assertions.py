@@ -22,9 +22,8 @@ SOURCE_SUFFIXES = {
     ".ts",
     ".wgsl",
 }
-TARGETS = tuple(sorted((ROOT / "tests").glob("test_*.py"))) + (
-    ROOT / "scripts/validate_demosaic.py",
-    ROOT / "scripts/validate_camera_profiles.py",
+TARGETS = tuple((path, None) for path in sorted((ROOT / "tests").glob("test_*.py"))) + (
+    (ROOT / "scripts/dev.py", {"run_cargo_test", "command_validate_math"}),
 )
 
 
@@ -88,8 +87,20 @@ def source_content_names(tree: ast.AST) -> set[str]:
     return source_contents
 
 
-def brittle_source_checks(path: Path) -> list[tuple[int, str]]:
+def brittle_source_checks(
+    path: Path, function_names: set[str] | None = None
+) -> list[tuple[int, str]]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    if function_names is not None:
+        selected = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in function_names
+        ]
+        assert {node.name for node in selected} == function_names
+        tree = ast.Module(body=selected, type_ignores=[])
+
     contents = source_content_names(tree)
     issues: list[tuple[int, str]] = []
     for node in ast.walk(tree):
@@ -113,8 +124,8 @@ def brittle_source_checks(path: Path) -> list[tuple[int, str]]:
 
 def test_python_validators_do_not_assert_on_source_substrings() -> None:
     failures = {
-        str(path.relative_to(ROOT)): brittle_source_checks(path)
-        for path in TARGETS
-        if brittle_source_checks(path)
+        str(path.relative_to(ROOT)): brittle_source_checks(path, function_names)
+        for path, function_names in TARGETS
+        if brittle_source_checks(path, function_names)
     }
     assert not failures, failures
