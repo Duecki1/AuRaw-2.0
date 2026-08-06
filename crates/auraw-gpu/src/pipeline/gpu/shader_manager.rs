@@ -1,8 +1,9 @@
 use super::{
-    work_shader_source, SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON,
-    SHADER_CREATIVE_EFFECTS, SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_NOISE,
-    SHADER_NOISE_CA_FINISH, SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS,
-    SHADER_TONE_COMMON, SHADER_TONEMAP,
+    specialize_compute_workgroup_size, work_shader_source, ComputeWorkgroupSize,
+    SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON, SHADER_CREATIVE_EFFECTS,
+    SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_NOISE, SHADER_NOISE_CA_FINISH,
+    SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS, SHADER_TONE_COMMON,
+    SHADER_TONEMAP,
 };
 use anyhow::{anyhow, Context, Result};
 use naga_oil::compose::{
@@ -18,15 +19,24 @@ const SCENE_ADJUSTMENTS_IMPORT: &str = "auraw::scene_adjustments";
 /// for each concrete compute-shader source.
 pub(super) struct ShaderManager {
     composer: Composer,
+    workgroup_size: ComputeWorkgroupSize,
 }
 
 impl ShaderManager {
     pub(super) fn new(work_format: wgpu::TextureFormat) -> Result<Self> {
+        Self::new_with_workgroup_size(work_format, ComputeWorkgroupSize::default())
+    }
+
+    pub(super) fn new_with_workgroup_size(
+        work_format: wgpu::TextureFormat,
+        workgroup_size: ComputeWorkgroupSize,
+    ) -> Result<Self> {
         let mut manager = Self {
             // Composer::default() keeps Naga validation enabled. Do not replace
             // this with Composer::non_validating(): accurate source spans and
             // codespan diagnostics depend on validation being active.
             composer: Composer::default(),
+            workgroup_size,
         };
 
         manager.register("auraw::common", "common.wgsl", SHADER_COMMON)?;
@@ -100,8 +110,9 @@ impl ShaderManager {
         file_name: &str,
     ) -> Result<wgpu::naga::Module> {
         let file_path = format!("{SHADER_ROOT}{file_name}");
+        let source = specialize_compute_workgroup_size(source, self.workgroup_size);
         let result = self.composer.make_naga_module(NagaModuleDescriptor {
-            source,
+            source: source.as_ref(),
             file_path: &file_path,
             shader_type: ShaderType::Wgsl,
             shader_defs: Default::default(),

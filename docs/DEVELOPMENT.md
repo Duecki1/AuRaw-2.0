@@ -15,7 +15,7 @@ The most common commands are:
 
 ```sh
 cargo xtask check-all
-cargo xtask bench
+python3 scripts/dev.py bench
 cargo run -p auraw-ui --bin auraw --release
 cargo run -p auraw-cli --bin auraw-regression-render -- --help
 ./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
@@ -26,16 +26,16 @@ python3 scripts/dev.py smoke-regression
 
 ## GPU benchmark protocol
 
-Build the regression renderer, then run the Rust benchmark gate:
+Build the regression renderer, then run the workgroup benchmark gate:
 
 ```sh
 cargo run -p auraw-cli --bin auraw-regression-render --release -- --help
-cargo xtask bench
+python3 scripts/dev.py bench
 ```
 
-The benchmark renders both committed CC0 synthetic DNG fixtures, records one warm-up plus repeated wall-clock measurements, reports median export throughput and p95 latency, and evaluates the versioned guardrails in `benchmarks/gpu-budget.json`. Use `--dry-run` to validate fixture and command wiring without a GPU binary.
+The benchmark renders both committed CC0 synthetic DNG fixtures for every workgroup shape listed in `benchmarks/gpu-budget.json` (currently 8x8, 16x8, and 16x16). It records one warm-up plus repeated measurements, retains per-scene samples and adapter limits, reports pipeline-creation and render p95 values plus export throughput, and evaluates the versioned guardrails. Use `--dry-run` to validate all fixture/configuration command wiring without a GPU binary.
 
-Wall-clock startup includes shader compilation, device creation, rendering, readback, and process overhead. It is a reproducible regression signal, not a substitute for native per-pass timestamp queries. Peak allocation remains guarded in the Rust pipeline before texture creation; texture-format or pass-count changes should update both the code-side estimate and the benchmark baseline.
+The renderer's `render_ms` measurement covers canonical GPU rendering and readback, while `pipeline_create_ms` isolates pipeline construction and shader compilation from output serialization. The report also retains whole-process wall time as a reproducible regression signal; native per-pass timestamp queries remain the preferred tool for detailed diagnosis. Peak allocation remains guarded in the Rust pipeline before texture creation; texture-format or pass-count changes should update both the code-side estimate and the benchmark baseline.
 
 ## Synthetic regression corpus
 

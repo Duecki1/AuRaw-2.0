@@ -7,15 +7,19 @@ import argparse
 from collections.abc import Iterable, Sequence
 import csv
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import NoReturn
 
 try:
@@ -1056,6 +1060,257 @@ def command_smoke_regression(_args: argparse.Namespace) -> int:
     return 0
 
 
+def percentile(values: Sequence[float], quantile: float) -> float:
+    """Return a linearly interpolated percentile for a non-empty sample."""
+    if not values:
+        fail("cannot calculate a percentile from an empty sample")
+    ordered = sorted(float(value) for value in values)
+    position = (len(ordered) - 1) * quantile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def parse_benchmark_workgroup(value: str) -> tuple[int, int]:
+    """Parse a WIDTHxHEIGHT workgroup value used by the benchmark runner."""
+    match = re.fullmatch(r"([1-9][0-9]*)[xX]([1-9][0-9]*)", value.strip())
+    if match is None:
+        raise argparse.ArgumentTypeError("workgroup size must use WIDTHxHEIGHT")
+    return int(match.group(1)), int(match.group(2))
+
+
+def command_bench(args: argparse.Namespace) -> int:
+    """Benchmark GPU workgroup configurations and emit a comparable JSON report."""
+    budget_path = rooted_path(args.budget)
+    try:
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"unable to read GPU benchmark budget {budget_path}: {error}")
+
+    if budget.get("schema") != 2:
+        fail(f"unsupported GPU benchmark budget schema in {budget_path}")
+    scenes = budget.get("scenes")
+    configured_workgroups = budget.get("workgroup_sizes")
+    limits = budget.get("budgets")
+    if not isinstance(scenes, list) or not scenes:
+        fail("GPU benchmark budget must contain at least one scene")
+    if not isinstance(configured_workgroups, list) or not configured_workgroups:
+        fail("GPU benchmark budget must contain workgroup_sizes")
+    if not isinstance(limits, dict):
+        fail("GPU benchmark budget must contain budgets")
+    required_limits = {
+        "pipeline_create_p95_ms",
+        "render_p95_ms",
+        "export_mp_per_second_min",
+    }
+    missing_limits = required_limits.difference(limits)
+    if missing_limits:
+        fail(
+            "GPU benchmark budget is missing: "
+            + ", ".join(sorted(missing_limits))
+        )
+
+    if not all(isinstance(value, str) for value in configured_workgroups):
+        fail("GPU benchmark workgroup_sizes must be strings")
+    workgroups = args.workgroup_size or [
+        parse_benchmark_workgroup(value) for value in configured_workgroups
+    ]
+    try:
+        warmup_runs = int(budget.get("warmup_runs", 0))
+        measured_runs = int(budget.get("measured_runs", 1))
+    except (TypeError, ValueError):
+        fail("GPU benchmark run counts must be integers")
+    if warmup_runs < 0 or measured_runs < 1:
+        fail("GPU benchmark run counts are invalid")
+
+    executable_suffix = ".exe" if os.name == "nt" else ""
+    renderer = rooted_path(
+        args.renderer
+        or ROOT / f"target/release/auraw-regression-render{executable_suffix}"
+    )
+    if args.dry_run:
+        for workgroup_x, workgroup_y in workgroups:
+            label = f"{workgroup_x}x{workgroup_y}"
+            for scene in scenes:
+                if not isinstance(scene, str):
+                    fail("GPU benchmark scene names must be strings")
+                raw_name = scene.removesuffix("-multitarget") + ".dng"
+                raw_path = ROOT / "regression/raw" / raw_name
+                if not raw_path.is_file():
+                    fail(f"GPU benchmark RAW does not exist: {raw_path}")
+                output_path = ROOT / "target/benchmarks" / f"{label}-{scene}-1.npz"
+                metrics_path = ROOT / "target/benchmarks" / f"{label}-{scene}-1.json"
+                command = command_list(
+                    [
+                        renderer,
+                        "--backend",
+                        "gpu",
+                        "--input",
+                        raw_path,
+                        "--output",
+                        output_path,
+                        "--workgroup-size",
+                        label,
+                        "--benchmark-json",
+                        metrics_path,
+                    ]
+                )
+                print(shlex.join(command))
+        return 0
+
+    if not args.no_build:
+        run_process(
+            [
+                "cargo",
+                "build",
+                "--release",
+                "-p",
+                "auraw-cli",
+                "--bin",
+                "auraw-regression-render",
+            ]
+        )
+    if not renderer.is_file():
+        fail(f"GPU benchmark renderer does not exist: {renderer}")
+
+    report_path = rooted_path(args.report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    all_results: list[dict[str, object]] = []
+    adapter: dict[str, object] | None = None
+    failed = False
+
+    with tempfile.TemporaryDirectory(prefix="auraw-gpu-bench-") as temporary:
+        temporary_root = Path(temporary)
+        for workgroup_x, workgroup_y in workgroups:
+            label = f"{workgroup_x}x{workgroup_y}"
+            measured_samples: list[dict[str, object]] = []
+            print(f"benchmarking workgroup {label}")
+            for scene in scenes:
+                if not isinstance(scene, str):
+                    fail("GPU benchmark scene names must be strings")
+                raw_name = scene.removesuffix("-multitarget") + ".dng"
+                raw_path = ROOT / "regression/raw" / raw_name
+                if not raw_path.is_file():
+                    fail(f"GPU benchmark RAW does not exist: {raw_path}")
+
+                for run_number in range(warmup_runs + measured_runs):
+                    measured = run_number >= warmup_runs
+                    phase = "measured" if measured else "warmup"
+                    phase_run = run_number - warmup_runs + 1 if measured else run_number + 1
+                    stem = f"{label}-{scene}-{phase}-{phase_run}"
+                    output_path = temporary_root / f"{stem}.npz"
+                    metrics_path = temporary_root / f"{stem}.json"
+                    started = time.perf_counter()
+                    run_process(
+                        [
+                            renderer,
+                            "--backend",
+                            "gpu",
+                            "--input",
+                            raw_path,
+                            "--output",
+                            output_path,
+                            "--workgroup-size",
+                            label,
+                            "--benchmark-json",
+                            metrics_path,
+                        ],
+                        stdout=subprocess.DEVNULL,
+                    )
+                    process_ms = (time.perf_counter() - started) * 1_000.0
+                    try:
+                        sample = json.loads(metrics_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as error:
+                        fail(f"unable to read renderer metrics {metrics_path}: {error}")
+                    if sample.get("workgroup_size") != [workgroup_x, workgroup_y, 1]:
+                        fail(f"renderer reported the wrong workgroup for {stem}")
+                    required_metrics = {
+                        "pipeline_create_ms",
+                        "render_ms",
+                        "export_mp_per_second",
+                    }
+                    missing_metrics = required_metrics.difference(sample)
+                    if missing_metrics:
+                        fail(
+                            f"renderer metrics for {stem} are missing: "
+                            + ", ".join(sorted(missing_metrics))
+                        )
+                    sample_adapter = sample.get("adapter")
+                    if not isinstance(sample_adapter, dict):
+                        fail(f"renderer omitted adapter metadata for {stem}")
+                    if adapter is None:
+                        adapter = sample_adapter
+                    elif adapter != sample_adapter:
+                        fail("GPU adapter changed during the benchmark run")
+                    sample.update(
+                        {
+                            "scene": scene,
+                            "run": phase_run,
+                            "process_ms": process_ms,
+                        }
+                    )
+                    if measured:
+                        measured_samples.append(sample)
+
+            pipeline_times = [float(sample["pipeline_create_ms"]) for sample in measured_samples]
+            render_times = [float(sample["render_ms"]) for sample in measured_samples]
+            throughputs = [float(sample["export_mp_per_second"]) for sample in measured_samples]
+            process_times = [float(sample["process_ms"]) for sample in measured_samples]
+            aggregate = {
+                "pipeline_create_p95_ms": percentile(pipeline_times, 0.95),
+                "render_p50_ms": percentile(render_times, 0.50),
+                "render_p95_ms": percentile(render_times, 0.95),
+                "export_mp_per_second_min": min(throughputs),
+                "export_mp_per_second_median": percentile(throughputs, 0.50),
+                "process_p95_ms": percentile(process_times, 0.95),
+            }
+            checks = {
+                "pipeline_create_p95_ms": aggregate["pipeline_create_p95_ms"]
+                <= float(limits["pipeline_create_p95_ms"]),
+                "render_p95_ms": aggregate["render_p95_ms"]
+                <= float(limits["render_p95_ms"]),
+                "export_mp_per_second_min": aggregate["export_mp_per_second_min"]
+                >= float(limits["export_mp_per_second_min"]),
+            }
+            workgroup_passed = all(checks.values())
+            failed = failed or not workgroup_passed
+            all_results.append(
+                {
+                    "workgroup_size": [workgroup_x, workgroup_y, 1],
+                    "aggregate": aggregate,
+                    "budget_checks": checks,
+                    "passed": workgroup_passed,
+                    "samples": measured_samples,
+                }
+            )
+            status = "PASS" if workgroup_passed else "FAIL"
+            print(
+                f"  {status} compile p95 {aggregate['pipeline_create_p95_ms']:.2f} ms, "
+                f"render p95 {aggregate['render_p95_ms']:.2f} ms, "
+                f"minimum {aggregate['export_mp_per_second_min']:.3f} MP/s"
+            )
+
+    report = {
+        "schema": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "budget_file": os.fspath(budget_path.relative_to(ROOT) if budget_path.is_relative_to(ROOT) else budget_path),
+        "renderer": os.fspath(renderer),
+        "adapter": adapter,
+        "scenes": scenes,
+        "warmup_runs": warmup_runs,
+        "measured_runs": measured_runs,
+        "budgets": limits,
+        "workgroups": all_results,
+        "passed": not failed,
+    }
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"wrote {report_path}")
+    return 1 if failed else 0
+
+
 def command_regression(args: argparse.Namespace) -> int:
     """Delegate to the image-quality regression framework."""
     regression_root = ROOT / "regression"
@@ -1100,6 +1355,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     smoke = subparsers.add_parser("smoke-regression", help="run the deterministic regression-renderer smoke gate")
     smoke.set_defaults(handler=command_smoke_regression)
+
+    bench = subparsers.add_parser(
+        "bench", help="benchmark GPU compute workgroup configurations"
+    )
+    bench.add_argument(
+        "--budget", type=Path, default=Path("benchmarks/gpu-budget.json")
+    )
+    bench.add_argument("--renderer", type=Path)
+    bench.add_argument(
+        "--report", type=Path, default=Path("target/benchmarks/gpu-workgroups.json")
+    )
+    bench.add_argument("--no-build", action="store_true")
+    bench.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print every renderer invocation without building or running it",
+    )
+    bench.add_argument(
+        "--workgroup-size",
+        action="append",
+        type=parse_benchmark_workgroup,
+        help="benchmark only WIDTHxHEIGHT; may be repeated",
+    )
+    bench.set_defaults(handler=command_bench)
 
     return parser
 
