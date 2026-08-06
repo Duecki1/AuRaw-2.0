@@ -18,7 +18,7 @@ SCENE_CURVE_MAX = 32768.0
 SCENE_CURVE_WORK_LIMIT = 60000.0
 HALF_FLOAT_MAX = float(np.finfo(np.float16).max)
 
-_TONEMAP_SHADER = Path(__file__).parents[1] / "src" / "shaders" / "tonemap.wgsl"
+_TONEMAP_SHADER = Path(__file__).parents[1] / "crates" / "auraw-gpu" / "src" / "shaders" / "tonemap.wgsl"
 
 
 def _shader_float_constant(name: str) -> np.float32:

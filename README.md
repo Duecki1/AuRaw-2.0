@@ -72,6 +72,13 @@ that DCP while preserving the live edits. Explicit per-image profile choices are
 stored in the `.auraw` sidecar as a path relative to the configured profile root,
 so reopening the image restores the same rendering choice.
 
+## Cargo workspace
+
+The repository is organized as six crates: `auraw-core`, `auraw-gpu`, `auraw-ai`,
+`auraw-ui`, `auraw-ffi`, and `auraw-cli`. See
+[`docs/CARGO_WORKSPACE.md`](docs/CARGO_WORKSPACE.md) for ownership rules, the
+dependency graph, and workspace-wide validation commands.
+
 ## Linux (Debian/Ubuntu)
 
 Install the build dependencies:
@@ -88,7 +95,7 @@ Install Rust with [rustup](https://rustup.rs/), then run from the repository
 root:
 
 ```sh
-cargo run --release
+cargo run -p auraw-ui --bin auraw --release
 ```
 
 ## Android

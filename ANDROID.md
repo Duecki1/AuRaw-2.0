@@ -165,7 +165,7 @@ On the computer where LibRaw is installed in `/usr/local`, continue to use:
 ```sh
 LIBRARY_PATH=/usr/local/lib \
 PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
-cargo run --release
+cargo run -p auraw-ui --bin auraw --release
 ```
 
 On a computer without desktop LibRaw, the build now fails by default. For a
@@ -174,7 +174,7 @@ deliberate non-production check that does not exercise RAW loading, explicitly s
 `false`, or an empty value do not disable the requirement. Production and release
 builds must provide LibRaw.
 
-Normal local commands such as `cargo run --release` may build uncommitted work.
+Normal local commands such as `cargo run -p auraw-ui --bin auraw --release` may build uncommitted work.
 The reproducible Linux and Android release scripts still require a clean Git
 checkout, embed the full commit ID, and discard native output if the source
 changes while compilation is running.
