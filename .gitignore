@@ -42,8 +42,9 @@ android/local.properties
 .idea/
 android.iml
 
-# Cargo config (machine-specific linker paths, NDK versions)
-.cargo/
+# Cargo config: keep the portable xtask alias, ignore machine-local additions.
+.cargo/*
+!.cargo/config.toml
 # Packaged release artifacts
 dist/
 

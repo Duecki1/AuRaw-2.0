@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "xtask",
     "crates/auraw-core",
     "crates/auraw-gpu",
     "crates/auraw-ai",

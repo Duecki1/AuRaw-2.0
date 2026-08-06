@@ -288,6 +288,7 @@ class SourceValidator:
             "crates/auraw-ui",
             "crates/auraw-ffi",
             "crates/auraw-cli",
+            "xtask",
         }
         restricted = {
             "ort": "auraw-ai",
@@ -304,7 +305,7 @@ class SourceValidator:
 
         if members != expected_members:
             self.errors.append(
-                "workspace members differ from the required six-crate architecture: "
+                "workspace members differ from the required six production crates plus xtask: "
                 f"{sorted(members)}"
             )
 
