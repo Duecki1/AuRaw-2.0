@@ -1,8 +1,10 @@
 # Development guide
 
 AuRaw keeps dependency-light repository maintenance and CI validation in the
-Rust `xtask` crate. NumPy-backed image-quality and asset-generation tooling,
-plus bootstrap steps that run before Rust is installed, remain in `scripts/dev.py`.
+Rust `xtask` crate, including native build orchestration and icon generation.
+NumPy-backed image-regression analysis and synthetic-corpus tooling remain in
+`scripts/dev.py`; the minimal pre-Rust CI downloader lives in
+`scripts/bootstrap_download.py`.
 
 ```sh
 cargo xtask --help
@@ -17,7 +19,7 @@ cargo xtask bench
 cargo run -p auraw-ui --bin auraw --release
 cargo run -p auraw-cli --bin auraw-regression-render -- --help
 ./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
-python3 scripts/dev.py icons
+cargo xtask icons
 python3 scripts/dev.py corpus
 python3 scripts/dev.py smoke-regression
 ```
@@ -69,7 +71,9 @@ The data is distributed under the GNU General Public License, version 3 or later
 
 Dependency-light Android and release checks use `cargo xtask`: `check-all`,
 `print-metadata`, `verified-download`, `verify-source-revision`, and
-`verify-android-16kb`. NumPy-backed regression workflows, native dependency
-compilation, and pre-Rust bootstrap compatibility remain in `scripts/dev.py`.
+`verify-android-16kb`, `build-android`, `build-android-libraw`,
+`build-android-lensfun`, `build-linux`, and `icons`. NumPy-backed regression
+workflows remain in `scripts/dev.py`; pre-Rust bootstrap downloads use the
+standalone `scripts/bootstrap_download.py` helper.
 Gradle and CI consume the same `[workspace.metadata]` contract from the root
 `Cargo.toml`.

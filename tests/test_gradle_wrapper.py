@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import configparser
 import subprocess
-import sys
 import zipfile
 from pathlib import Path
 
@@ -11,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_checked_in_gradle_wrapper_integrity() -> None:
     completed = subprocess.run(
-        [sys.executable, "scripts/dev.py", "check-gradle"],
+        ["cargo", "xtask", "check-gradle"],
         cwd=ROOT,
         check=False,
         capture_output=True,

@@ -4,14 +4,13 @@ from pathlib import Path
 import hashlib
 import os
 import subprocess
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_all_workflow_actions_are_immutable_commit_pins() -> None:
     subprocess.run(
-        [sys.executable, str(ROOT / "scripts/dev.py"), "check-workflows"],
+        ["cargo", "xtask", "check-workflows"],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -22,8 +21,8 @@ def test_all_workflow_actions_are_immutable_commit_pins() -> None:
 def test_verified_download_rejects_non_hex_digest_before_network_access() -> None:
     result = subprocess.run(
         [
-            sys.executable,
-            str(ROOT / "scripts/dev.py"),
+            "cargo",
+            "xtask",
             "verified-download",
             "https://example.invalid/file",
             str(ROOT / "target/invalid-download"),
@@ -44,8 +43,8 @@ def test_verified_download_accepts_sha512_digest_for_cached_file(tmp_path) -> No
 
     result = subprocess.run(
         [
-            sys.executable,
-            str(ROOT / "scripts/dev.py"),
+            "cargo",
+            "xtask",
             "verified-download",
             "https://example.invalid/file",
             str(output),
@@ -96,8 +95,8 @@ cp \"$FAKE_CURL_PAYLOAD\" \"$output\"
 
     result = subprocess.run(
         [
-            sys.executable,
-            str(ROOT / "scripts/dev.py"),
+            "cargo",
+            "xtask",
             "verified-download",
             "https://example.invalid/file",
             str(output),
