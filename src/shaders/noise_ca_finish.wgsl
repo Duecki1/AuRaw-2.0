@@ -3,9 +3,9 @@
 // algorithms stay identical while sampling their native reference texture.
 
 fn finish_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
-    let local_extent = vec2<f32>(f32(params.width - 1u), f32(params.height - 1u));
-    let origin = vec2<f32>(f32(params.tile_origin_x), f32(params.tile_origin_y));
-    let full_extent = vec2<f32>(f32(params.full_width - 1u), f32(params.full_height - 1u));
+    let local_extent = vec2<f32>(f32(camera_uniforms.width - 1u), f32(camera_uniforms.height - 1u));
+    let origin = vec2<f32>(f32(camera_uniforms.tile_origin_x), f32(camera_uniforms.tile_origin_y));
+    let full_extent = vec2<f32>(f32(camera_uniforms.full_width - 1u), f32(camera_uniforms.full_height - 1u));
     let center = 0.5 * full_extent;
     let global_pos = vec2<f32>(pos) + origin;
     let rel = global_pos - center;
@@ -29,17 +29,17 @@ fn finish_reference_bilinear(pos: vec2<f32>) -> vec3<f32> {
 
 fn finish_apply_ca(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     var out = rgb;
-    if abs(params.ca_red) > 1e-6 {
-        out.r = finish_reference_bilinear(finish_warped_pos(pos, params.ca_red)).r;
+    if abs(camera_uniforms.ca_red) > 1e-6 {
+        out.r = finish_reference_bilinear(finish_warped_pos(pos, camera_uniforms.ca_red)).r;
     }
-    if abs(params.ca_blue) > 1e-6 {
-        out.b = finish_reference_bilinear(finish_warped_pos(pos, params.ca_blue)).b;
+    if abs(camera_uniforms.ca_blue) > 1e-6 {
+        out.b = finish_reference_bilinear(finish_warped_pos(pos, camera_uniforms.ca_blue)).b;
     }
     return out;
 }
 
 fn finish_apply_legacy_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let strength = clamp(params.chroma_denoise, 0.0, 1.0);
+    let strength = clamp(camera_uniforms.chroma_denoise, 0.0, 1.0);
     if strength <= 1e-6 { return rgb; }
     var sum = vec2<f32>(0.0);
     var weight_sum = 0.0;
@@ -59,7 +59,7 @@ fn finish_apply_legacy_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f3
 }
 
 fn finish_apply_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let signal_strength = nr_perceptual_strength(params.noise_options.x, 3.2);
+    let signal_strength = nr_perceptual_strength(camera_uniforms.noise_options.x, 3.2);
     if signal_strength <= 1e-6 { return rgb; }
 
     let center_signal = nr_signal(rgb);

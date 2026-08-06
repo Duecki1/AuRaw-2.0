@@ -20,13 +20,13 @@ fn adaptive_tone_user_exposure_ev() -> f32 {
     // The histogram/guide remain cached in pre-user-exposure scene space so
     // moving Exposure stays cheap. Reintroduce the user-facing edit here. The
     // camera/DNG default rendering exposure is deliberately excluded here.
-    return clamp(bitcast<f32>(params.process_info.z), -5.0, 5.0);
+    return clamp(bitcast<f32>(camera_uniforms.process_info.z), -5.0, 5.0);
 }
 
 fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
     let guide_size_i = vec2<i32>(textureDimensions(tone_guide_tex));
     let guide_max = guide_size_i - vec2<i32>(1);
-    let full_size = vec2<f32>(f32(params.width), f32(params.height));
+    let full_size = vec2<f32>(f32(camera_uniforms.width), f32(camera_uniforms.height));
     let guide_size = vec2<f32>(guide_size_i);
     let coordinate = (vec2<f32>(pos) + vec2<f32>(0.5)) * guide_size / full_size
         - vec2<f32>(0.5);
@@ -72,7 +72,7 @@ const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18u;
 
 fn basic_low_tone_control(value: f32) -> f32 {
     let normalized = clamp(value / 100.0, -1.0, 1.0);
-    if params.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION {
+    if camera_uniforms.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION {
         return normalized;
     }
     let magnitude = abs(normalized);
@@ -85,7 +85,7 @@ fn basic_low_tone_control(value: f32) -> f32 {
 }
 
 fn adaptive_low_tone_ev(rgb: vec3<f32>, pos: vec2<i32>, guide_ev: f32) -> f32 {
-    if params.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION {
+    if camera_uniforms.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION {
         return guide_ev;
     }
     let pixel_ev = clamp(
@@ -94,7 +94,7 @@ fn adaptive_low_tone_ev(rgb: vec3<f32>, pos: vec2<i32>, guide_ev: f32) -> f32 {
         TONE_EV_MAX,
     );
     let mismatch = abs(pixel_ev - guide_ev);
-    if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+    if camera_uniforms.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
         // Process 16 compatibility: blend directly toward the reduced guide.
         let guide_weight = mix(0.38, 0.16, smoothstep(0.75, 2.75, mismatch));
         return mix(pixel_ev, guide_ev, guide_weight);
@@ -116,7 +116,7 @@ fn adaptive_tone_masks(
     high_ev: f32,
     percentiles: TonePercentiles,
 ) -> vec4<f32> {
-    if params.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION {
+    if camera_uniforms.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION {
         let black_fade_end = min(percentiles.p50 - 0.35, percentiles.p05 + 3.00);
         let black_mask = 1.0 - tone_smoothstep(
             percentiles.p005 - 0.55,
@@ -167,7 +167,7 @@ fn adaptive_tone_masks(
             percentiles.p50 - 0.30,
             high_ev,
         ),
-        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+        camera_uniforms.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     );
     let white_mask = select(
         tone_smoothstep(
@@ -180,7 +180,7 @@ fn adaptive_tone_masks(
             percentiles.p50 + 0.50,
             high_ev,
         ),
-        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+        camera_uniforms.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     );
     return vec4<f32>(black_mask, shadow_mask, highlight_mask, white_mask);
 }
@@ -293,7 +293,7 @@ fn apply_blacks_toe_v2(
     blacks: f32,
     percentiles: TonePercentiles,
 ) -> vec3<f32> {
-    if params.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION || abs(blacks) < 1e-6 {
+    if camera_uniforms.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION || abs(blacks) < 1e-6 {
         return rgb;
     }
 
@@ -343,7 +343,7 @@ fn apply_local_basic_tone_values_with_low_strength(
     var shadows = basic_low_tone_control(shadows_value);
     let whites = clamp(whites_value / 100.0, -1.0, 1.0);
     var blacks = basic_low_tone_control(blacks_value);
-    if params.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+    if camera_uniforms.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
         // For nonlinear low-tone operations, local masks interpolate adjustment
         // strength, not the fully-rendered RGB result. This makes a 50% feather
         // exactly half the EV/toe authority and avoids mask-edge tone warping.
@@ -361,7 +361,7 @@ fn apply_local_basic_tone_values_with_low_strength(
     let low_ev = adaptive_low_tone_ev(rgb, pos, guide_ev);
     let masks = adaptive_tone_masks(low_ev, guide_ev, percentiles);
 
-    if params.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION {
+    if camera_uniforms.process_info.x < BASIC_TONE_RESPONSE_PROCESS_VERSION {
         let offset_ev = signed_tone_range(blacks, 2.35, 1.90) * masks.x
             + signed_tone_range(shadows, 1.20, 1.90) * masks.y
             + signed_tone_range(highlights, 1.90, 1.15) * masks.z
@@ -369,7 +369,7 @@ fn apply_local_basic_tone_values_with_low_strength(
         return rgb * exp2(offset_ev);
     }
 
-    if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+    if camera_uniforms.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
         var adjusted = apply_blacks_toe_v2(rgb, blacks, percentiles);
 
         // Process 16 compatibility.
@@ -389,7 +389,7 @@ fn apply_local_basic_tone_values_with_low_strength(
     }
 
     var shadow_ev = 0.0;
-    if params.process_info.x < LIGHTROOM_BASIC_MATCH_PROCESS_VERSION {
+    if camera_uniforms.process_info.x < LIGHTROOM_BASIC_MATCH_PROCESS_VERSION {
         // Process 17 compatibility: a band-pass selector separated Shadows
         // from absolute black. Process 18 replaces this with Lightroom's
         // measured low-pass response.
@@ -410,22 +410,22 @@ fn apply_local_basic_tone_values_with_low_strength(
     let highlight_mask = select(
         masks.z,
         current_highlight_mask,
-        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+        camera_uniforms.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     );
     let highlight_ev = select(
         signed_tone_range(highlights, 1.90, 1.15),
         signed_tone_range(highlights, 1.35, 1.00),
-        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+        camera_uniforms.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     ) * highlight_mask;
     let negative_white_range = select(
         1.25,
         0.30,
-        params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+        camera_uniforms.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     );
     let white_ev = select(
         signed_tone_range(whites, negative_white_range, 1.40) * masks.w,
         lightroom_positive_whites_offset_ev(whites, low_ev, percentiles),
-        whites >= 0.0 && params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
+        whites >= 0.0 && camera_uniforms.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION,
     );
     let other_ev = highlight_ev + white_ev;
     return rgb * exp2(clamp(shadow_ev + other_ev, -6.5, 6.5));
@@ -454,10 +454,10 @@ fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     return apply_local_basic_tone_values(
         rgb,
         pos,
-        params.basic_tone.x,
-        params.basic_tone.y,
-        params.basic_tone.z,
-        params.basic_tone.w,
+        scene_tone_uniforms.basic_tone.x,
+        scene_tone_uniforms.basic_tone.y,
+        scene_tone_uniforms.basic_tone.z,
+        scene_tone_uniforms.basic_tone.w,
     );
 }
 
@@ -506,64 +506,64 @@ fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
 fn tone_curve_point(curve: u32, index: u32) -> vec2<f32> {
     if curve == 1u {
         switch index {
-            case 0u: { return params.tone_curve_red_0.xy; }
-            case 1u: { return params.tone_curve_red_0.zw; }
-            case 2u: { return params.tone_curve_red_1.xy; }
-            case 3u: { return params.tone_curve_red_1.zw; }
-            case 4u: { return params.tone_curve_red_2.xy; }
-            case 5u: { return params.tone_curve_red_2.zw; }
-            case 6u: { return params.tone_curve_red_3.xy; }
-            default: { return params.tone_curve_red_3.zw; }
+            case 0u: { return scene_tone_uniforms.tone_curve_red_0.xy; }
+            case 1u: { return scene_tone_uniforms.tone_curve_red_0.zw; }
+            case 2u: { return scene_tone_uniforms.tone_curve_red_1.xy; }
+            case 3u: { return scene_tone_uniforms.tone_curve_red_1.zw; }
+            case 4u: { return scene_tone_uniforms.tone_curve_red_2.xy; }
+            case 5u: { return scene_tone_uniforms.tone_curve_red_2.zw; }
+            case 6u: { return scene_tone_uniforms.tone_curve_red_3.xy; }
+            default: { return scene_tone_uniforms.tone_curve_red_3.zw; }
         }
     }
     if curve == 2u {
         switch index {
-            case 0u: { return params.tone_curve_green_0.xy; }
-            case 1u: { return params.tone_curve_green_0.zw; }
-            case 2u: { return params.tone_curve_green_1.xy; }
-            case 3u: { return params.tone_curve_green_1.zw; }
-            case 4u: { return params.tone_curve_green_2.xy; }
-            case 5u: { return params.tone_curve_green_2.zw; }
-            case 6u: { return params.tone_curve_green_3.xy; }
-            default: { return params.tone_curve_green_3.zw; }
+            case 0u: { return scene_tone_uniforms.tone_curve_green_0.xy; }
+            case 1u: { return scene_tone_uniforms.tone_curve_green_0.zw; }
+            case 2u: { return scene_tone_uniforms.tone_curve_green_1.xy; }
+            case 3u: { return scene_tone_uniforms.tone_curve_green_1.zw; }
+            case 4u: { return scene_tone_uniforms.tone_curve_green_2.xy; }
+            case 5u: { return scene_tone_uniforms.tone_curve_green_2.zw; }
+            case 6u: { return scene_tone_uniforms.tone_curve_green_3.xy; }
+            default: { return scene_tone_uniforms.tone_curve_green_3.zw; }
         }
     }
     if curve == 3u {
         switch index {
-            case 0u: { return params.tone_curve_blue_0.xy; }
-            case 1u: { return params.tone_curve_blue_0.zw; }
-            case 2u: { return params.tone_curve_blue_1.xy; }
-            case 3u: { return params.tone_curve_blue_1.zw; }
-            case 4u: { return params.tone_curve_blue_2.xy; }
-            case 5u: { return params.tone_curve_blue_2.zw; }
-            case 6u: { return params.tone_curve_blue_3.xy; }
-            default: { return params.tone_curve_blue_3.zw; }
+            case 0u: { return scene_tone_uniforms.tone_curve_blue_0.xy; }
+            case 1u: { return scene_tone_uniforms.tone_curve_blue_0.zw; }
+            case 2u: { return scene_tone_uniforms.tone_curve_blue_1.xy; }
+            case 3u: { return scene_tone_uniforms.tone_curve_blue_1.zw; }
+            case 4u: { return scene_tone_uniforms.tone_curve_blue_2.xy; }
+            case 5u: { return scene_tone_uniforms.tone_curve_blue_2.zw; }
+            case 6u: { return scene_tone_uniforms.tone_curve_blue_3.xy; }
+            default: { return scene_tone_uniforms.tone_curve_blue_3.zw; }
         }
     }
     switch index {
-        case 0u: { return params.tone_curve_0.xy; }
-        case 1u: { return params.tone_curve_0.zw; }
-        case 2u: { return params.tone_curve_1.xy; }
-        case 3u: { return params.tone_curve_1.zw; }
-        case 4u: { return params.tone_curve_2.xy; }
-        case 5u: { return params.tone_curve_2.zw; }
-        case 6u: { return params.tone_curve_3.xy; }
-        default: { return params.tone_curve_3.zw; }
+        case 0u: { return scene_tone_uniforms.tone_curve_0.xy; }
+        case 1u: { return scene_tone_uniforms.tone_curve_0.zw; }
+        case 2u: { return scene_tone_uniforms.tone_curve_1.xy; }
+        case 3u: { return scene_tone_uniforms.tone_curve_1.zw; }
+        case 4u: { return scene_tone_uniforms.tone_curve_2.xy; }
+        case 5u: { return scene_tone_uniforms.tone_curve_2.zw; }
+        case 6u: { return scene_tone_uniforms.tone_curve_3.xy; }
+        default: { return scene_tone_uniforms.tone_curve_3.zw; }
     }
 }
 
 fn tone_curve_count(curve: u32) -> u32 {
-    if curve == 1u { return u32(clamp(params.tone_curve_red_meta.x, 2.0, 8.0)); }
-    if curve == 2u { return u32(clamp(params.tone_curve_green_meta.x, 2.0, 8.0)); }
-    if curve == 3u { return u32(clamp(params.tone_curve_blue_meta.x, 2.0, 8.0)); }
-    return u32(clamp(params.tone_curve_meta.x, 2.0, 8.0));
+    if curve == 1u { return u32(clamp(scene_tone_uniforms.tone_curve_red_meta.x, 2.0, 8.0)); }
+    if curve == 2u { return u32(clamp(scene_tone_uniforms.tone_curve_green_meta.x, 2.0, 8.0)); }
+    if curve == 3u { return u32(clamp(scene_tone_uniforms.tone_curve_blue_meta.x, 2.0, 8.0)); }
+    return u32(clamp(scene_tone_uniforms.tone_curve_meta.x, 2.0, 8.0));
 }
 
 fn tone_curve_is_identity(curve: u32) -> bool {
-    if curve == 1u { return params.tone_curve_red_meta.y > 0.5; }
-    if curve == 2u { return params.tone_curve_green_meta.y > 0.5; }
-    if curve == 3u { return params.tone_curve_blue_meta.y > 0.5; }
-    return params.tone_curve_meta.y > 0.5;
+    if curve == 1u { return scene_tone_uniforms.tone_curve_red_meta.y > 0.5; }
+    if curve == 2u { return scene_tone_uniforms.tone_curve_green_meta.y > 0.5; }
+    if curve == 3u { return scene_tone_uniforms.tone_curve_blue_meta.y > 0.5; }
+    return scene_tone_uniforms.tone_curve_meta.y > 0.5;
 }
 
 fn tone_curve_secant(a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -850,7 +850,7 @@ fn apply_rgb_point_curves(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
-    if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION || abs(amount) < 1e-7 {
+    if camera_uniforms.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION || abs(amount) < 1e-7 {
         return rgb;
     }
 
@@ -868,7 +868,7 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
         return rgb;
     }
 
-    if params.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION {
+    if camera_uniforms.process_info.x >= LIGHTROOM_BASIC_MATCH_PROCESS_VERSION {
         let hdr_guard = 1.0 - tone_smoothstep(0.35, 1.0, luminance);
         if hdr_guard <= 0.0 {
             return rgb;
@@ -922,14 +922,14 @@ fn finite_scalar(value: f32) -> bool {
 }
 
 fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
-    let white_target = params.sigmoid_curve.x;
+    let white_target = scene_tone_uniforms.sigmoid_curve.x;
     // The ABI slot stores log2(paper_exposure). Steep but valid curves can
     // overflow both the film response and paper exposure in linear form even
     // though their ratio remains perfectly well behaved.
-    let log2_paper_exposure = params.sigmoid_curve.z;
-    let film_fog = params.sigmoid_curve.w;
-    let film_power = params.sigmoid_power.x;
-    let paper_power = params.sigmoid_power.y;
+    let log2_paper_exposure = scene_tone_uniforms.sigmoid_curve.z;
+    let film_fog = scene_tone_uniforms.sigmoid_curve.w;
+    let film_power = scene_tone_uniforms.sigmoid_power.x;
+    let paper_power = scene_tone_uniforms.sigmoid_power.y;
     let fallback = clamp(max(value, 0.0), 0.0, 1.0);
 
     if !finite_scalar(white_target) || white_target <= 0.0
@@ -1068,13 +1068,13 @@ fn sigmoid_per_channel(rgb: vec3<f32>) -> vec3<f32> {
         positive,
         per_channel,
         order,
-        clamp(params.sigmoid_power.z, 0.0, 1.0),
+        clamp(scene_tone_uniforms.sigmoid_power.z, 0.0, 1.0),
     );
 }
 
 fn sigmoid_rgb_ratio(rgb: vec3<f32>) -> vec3<f32> {
-    let white_target = params.sigmoid_curve.x;
-    let black_target = params.sigmoid_curve.y;
+    let white_target = scene_tone_uniforms.sigmoid_curve.x;
+    let black_target = scene_tone_uniforms.sigmoid_curve.y;
     let positive = desaturate_negative_values(rgb);
     let luma = (positive.r + positive.g + positive.b) / 3.0;
     let mapped_luma = generalized_loglogistic_sigmoid(luma);
@@ -1110,7 +1110,7 @@ fn sigmoid_rgb_ratio(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn darktable_sigmoid(rgb: vec3<f32>) -> vec3<f32> {
-    if params.sigmoid_power.w < 0.5 {
+    if scene_tone_uniforms.sigmoid_power.w < 0.5 {
         return sigmoid_per_channel(rgb);
     }
     return sigmoid_rgb_ratio(rgb);

@@ -10,13 +10,13 @@ const RCD_MARGIN: i32 = 9;
 
 fn demosaic_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(params.width) && pos.y < i32(params.height);
+        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
 }
 
 fn rcd_has_reference_margin(pos: vec2<i32>) -> bool {
     return pos.x >= RCD_MARGIN && pos.y >= RCD_MARGIN
-        && pos.x < i32(params.width) - RCD_MARGIN
-        && pos.y < i32(params.height) - RCD_MARGIN;
+        && pos.x < i32(camera_uniforms.width) - RCD_MARGIN
+        && pos.y < i32(camera_uniforms.height) - RCD_MARGIN;
 }
 
 fn green_plane_at(pos: vec2<i32>) -> f32 {
@@ -270,7 +270,7 @@ fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
         - dot(n + s + w + e, vec3<f32>(0.2627, 0.6780, 0.0593)));
     let spectral_energy = max(length(carrier_alias) - 0.25 * luma_high, 0.0);
     let reject = smoothstep(0.0015, 0.030, spectral_energy)
-        * clamp(params.frequency_chroma, 0.0, 1.0);
+        * clamp(camera_uniforms.frequency_chroma, 0.0, 1.0);
     return bayer_from_yuv(center_signal, center_opponents - reject * carrier_alias);
 }
 
@@ -314,7 +314,7 @@ fn dual_high_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32
     }
     detail /= 256.0;
 
-    let threshold = 0.005 * pow(max(params.dual_threshold, 0.0), 1.1);
+    let threshold = 0.005 * pow(max(camera_uniforms.dual_threshold, 0.0), 1.1);
     if threshold <= 1e-7 { return 1.0; }
 
     // Do not mistake sensor noise for real image detail. The low branch stores
@@ -348,19 +348,19 @@ fn finish_reference_at(pos: vec2<i32>) -> vec3<f32> {
 
 @compute @workgroup_size(8, 8, 1)
 fn bayer_rcd_output(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let reference = rcd_reference_at(pos);
     var camera_rgb = reference;
-    if params.demosaic_mode >= 1.5 {
+    if camera_uniforms.demosaic_mode >= 1.5 {
         let low = dual_low_at(pos);
         camera_rgb = mix(low.rgb, reference, dual_high_weight(pos, reference, low));
-    } else if params.demosaic_mode >= 0.5 {
+    } else if camera_uniforms.demosaic_mode >= 0.5 {
         camera_rgb = frequency_chroma_at(pos, reference);
     } else {
         camera_rgb = bayer_reference_false_color_guard(pos, reference);
     }
-    if params.process_info.x >= SENSOR_DENOISE_PROCESS_VERSION || params.noise_options.x > 1e-6 {
+    if camera_uniforms.process_info.x >= SENSOR_DENOISE_PROCESS_VERSION || camera_uniforms.noise_options.x > 1e-6 {
         camera_rgb = finish_apply_sensor_denoise(pos, camera_rgb);
         camera_rgb = finish_apply_ca(pos, camera_rgb);
     } else {

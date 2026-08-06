@@ -9,7 +9,7 @@
 
 fn xt_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(params.width) && pos.y < i32(params.height);
+        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
 }
 
 fn xt_high(pos: vec2<i32>) -> vec3<f32> {
@@ -103,7 +103,7 @@ fn xt_frequency_uv(pos: vec2<i32>) -> vec2<f32> {
     let spectral_energy = length(carrier_alias);
     let reject = smoothstep(0.0015, 0.030, max(spectral_energy - 0.35 * luma_support, 0.0));
     let corrected = center_opponents - reject * carrier_alias;
-    return mix(center_opponents, corrected, clamp(params.frequency_chroma, 0.0, 1.0));
+    return mix(center_opponents, corrected, clamp(camera_uniforms.frequency_chroma, 0.0, 1.0));
 }
 
 fn xt_median5(a0: f32, a1: f32, a2: f32, a3: f32, a4: f32) -> f32 {
@@ -153,7 +153,7 @@ fn xt_frequency_chroma(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         xt_median5(uv0.x, uvn.x, uvs.x, uvw.x, uve.x),
         xt_median5(uv0.y, uvn.y, uvs.y, uvw.y, uve.y),
     );
-    let strength = clamp(params.frequency_chroma, 0.0, 1.0);
+    let strength = clamp(camera_uniforms.frequency_chroma, 0.0, 1.0);
     let uv = mix(xt_uv(rgb), mix(uv0, median, 0.35), strength);
     let y = dot(rgb, vec3<f32>(0.2627, 0.6780, 0.0593));
     return xt_from_yuv(y, uv);
@@ -198,7 +198,7 @@ fn xt_dual_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32 {
         }
     }
     detail /= 256.0;
-    let threshold = 0.005 * pow(max(params.dual_threshold, 0.0), 1.1);
+    let threshold = 0.005 * pow(max(camera_uniforms.dual_threshold, 0.0), 1.1);
     if threshold <= 1e-7 { return 1.0; }
 
     let variance = nr_component_variance(0.5 * (reference + low.rgb));
@@ -228,19 +228,19 @@ fn finish_reference_at(pos: vec2<i32>) -> vec3<f32> {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_demosaic_finish(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let reference = xt_high(pos);
     var camera_rgb = reference;
-    if params.demosaic_mode >= 1.5 {
+    if camera_uniforms.demosaic_mode >= 1.5 {
         let low = xt_dual_low(pos);
         camera_rgb = mix(low.rgb, reference, xt_dual_weight(pos, reference, low));
-    } else if params.demosaic_mode >= 0.5 {
+    } else if camera_uniforms.demosaic_mode >= 0.5 {
         camera_rgb = xt_frequency_chroma(pos, reference);
     } else {
         camera_rgb = xt_reference_false_color_guard(pos, reference);
     }
-    if params.process_info.x >= SENSOR_DENOISE_PROCESS_VERSION || params.noise_options.x > 1e-6 {
+    if camera_uniforms.process_info.x >= SENSOR_DENOISE_PROCESS_VERSION || camera_uniforms.noise_options.x > 1e-6 {
         camera_rgb = finish_apply_sensor_denoise(pos, camera_rgb);
         camera_rgb = finish_apply_ca(pos, camera_rgb);
     } else {

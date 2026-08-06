@@ -16,7 +16,7 @@ struct XTransDirectionalEstimate {
 
 fn xtrans_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(params.width) && pos.y < i32(params.height);
+        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
 }
 
 // Returns (sample value, distance). A negative distance means no sample was
@@ -139,7 +139,7 @@ fn xtrans_seed_channel(pos: vec2<i32>, channel: u32) -> vec2<f32> {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_seed(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let red = xtrans_seed_channel(pos, 0u);
     let green = xtrans_seed_channel(pos, 1u);
@@ -185,7 +185,7 @@ fn mark13_green_bounds(pos: vec2<i32>) -> vec2<f32> {
     for (var dy = -3; dy <= 3; dy = dy + 1) {
         for (var dx = -3; dx <= 3; dx = dx + 1) {
             let q = pos + vec2<i32>(dx, dy);
-            if q.x < 0 || q.y < 0 || q.x >= i32(params.width) || q.y >= i32(params.height) {
+            if q.x < 0 || q.y < 0 || q.x >= i32(camera_uniforms.width) || q.y >= i32(camera_uniforms.height) {
                 continue;
             }
             if color_at(q) == 1u {
@@ -286,14 +286,14 @@ fn mark13_pass3(pos: vec2<i32>) -> vec3<f32> {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_pass1(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(markesteijn_write_13, pos, vec4<f32>(mark13_pass1(pos), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_pass3(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(markesteijn_write_13, pos, vec4<f32>(mark13_pass3(pos), 1.0));
 }
@@ -384,7 +384,7 @@ fn mark2_chroma(pos: vec2<i32>, channel: u32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_pass2(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let measured_channel = color_at(pos);
     var out = mark2_load(pos);
@@ -409,13 +409,13 @@ const MARKESTEIJN3_MARGIN: i32 = 17;
 
 fn mark_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(params.width) && pos.y < i32(params.height);
+        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
 }
 
 fn mark_has_margin(pos: vec2<i32>) -> bool {
     return pos.x >= MARKESTEIJN3_MARGIN && pos.y >= MARKESTEIJN3_MARGIN
-        && pos.x < i32(params.width) - MARKESTEIJN3_MARGIN
-        && pos.y < i32(params.height) - MARKESTEIJN3_MARGIN;
+        && pos.x < i32(camera_uniforms.width) - MARKESTEIJN3_MARGIN
+        && pos.y < i32(camera_uniforms.height) - MARKESTEIJN3_MARGIN;
 }
 
 fn mark_load(pos: vec2<i32>) -> vec3<f32> {
@@ -561,7 +561,7 @@ fn mark_derivative(pos: vec2<i32>, index: u32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_derivatives(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     if !mark_has_margin(pos) {
         textureStore(mark_drv_0_3_write, pos, vec4<f32>(0.0));
@@ -627,11 +627,11 @@ fn mark_local_homogeneity(pos: vec2<i32>, index: u32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_homogeneity(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let valid = pos.x >= MARK_HOMO_MARGIN && pos.y >= MARK_HOMO_MARGIN
-        && pos.x < i32(params.width) - MARK_HOMO_MARGIN
-        && pos.y < i32(params.height) - MARK_HOMO_MARGIN;
+        && pos.x < i32(camera_uniforms.width) - MARK_HOMO_MARGIN
+        && pos.y < i32(camera_uniforms.height) - MARK_HOMO_MARGIN;
     if !valid {
         textureStore(mark_homo_0_3_write, pos, vec4<f32>(0.0));
         textureStore(mark_homo_4_7_write, pos, vec4<f32>(0.0));
@@ -680,7 +680,7 @@ fn mark_homo_sum5(pos: vec2<i32>, index: u32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_accumulate(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     if !mark_has_margin(pos) {
         textureStore(mark_high_write, pos, vec4<f32>(mark_border_rgb(pos), 1.0));

@@ -14,17 +14,17 @@ struct DualEstimate {
 
 fn dual_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(params.width) && pos.y < i32(params.height);
+        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
 }
 
 fn dual_plane_variance(channel: u32, signal: f32) -> f32 {
     let c = min(channel, 3u);
-    return max(params.noise_read[c] + params.noise_shot[c] * max(signal, 0.0), 1e-10);
+    return max(camera_uniforms.noise_read[c] + camera_uniforms.noise_shot[c] * max(signal, 0.0), 1e-10);
 }
 
 fn dual_green_variance(signal: f32) -> f32 {
-    let read = 0.5 * (params.noise_read.g + params.noise_read.a);
-    let shot = 0.5 * (params.noise_shot.g + params.noise_shot.a);
+    let read = 0.5 * (camera_uniforms.noise_read.g + camera_uniforms.noise_read.a);
+    let shot = 0.5 * (camera_uniforms.noise_shot.g + camera_uniforms.noise_shot.a);
     return max(read + shot * max(signal, 0.0), 1e-10);
 }
 
@@ -159,7 +159,7 @@ fn dual_channel_estimate(pos: vec2<i32>, channel: u32, center_green: f32) -> Dua
 
 @compute @workgroup_size(8, 8, 1)
 fn dual_green_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let estimate = dual_green_estimate(pos);
     textureStore(
@@ -171,7 +171,7 @@ fn dual_green_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn dual_rgb_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let green_sample = textureLoad(dual_green_read, pos, 0);
     let red = dual_channel_estimate(pos, 0u, green_sample.x);

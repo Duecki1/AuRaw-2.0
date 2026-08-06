@@ -62,7 +62,7 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
     // tile-safe approximation of that global ambient energy. The old shader
     // promoted each pixel's local brightest neighbour to A, causing colour and
     // contrast to pump across edges and export tiles.
-    let ambient_ev = clamp(tone_stats.percentiles_1.x + params.exposure, -16.0, 16.0);
+    let ambient_ev = clamp(tone_stats.percentiles_1.x + scene_tone_uniforms.exposure, -16.0, 16.0);
     let airlight_luma = max(SCENE_MIDDLE_GREY * exp2(ambient_ev), 1e-5);
     let haze_step = presence_step(2.0, 6);
     let neighborhood = haze_neighborhood(pos, haze_step, airlight_luma);
@@ -175,7 +175,7 @@ fn glow_emission(rgb: vec3<f32>, cutoff: f32) -> vec3<f32> {
 }
 
 fn glow_cutoff() -> f32 {
-    let threshold = clamp(params.creative_effects.z / 100.0, 0.0, 1.0);
+    let threshold = clamp(effects_uniforms.creative_effects.z / 100.0, 0.0, 1.0);
     return mix(0.06, 0.92, pow(threshold, 1.12));
 }
 
@@ -195,7 +195,7 @@ fn glow_stage_step(stage: u32) -> i32 {
         default: {}
     }
     let scale = clamp(
-        f32(min(params.full_width, params.full_height)) / 1080.0,
+        f32(min(camera_uniforms.full_width, camera_uniforms.full_height)) / 1080.0,
         0.45,
         3.0,
     );
@@ -203,7 +203,7 @@ fn glow_stage_step(stage: u32) -> i32 {
 }
 
 fn glow_stage_mix(stage: u32) -> f32 {
-    let radius = clamp(params.creative_effects.y / 100.0, 0.0, 1.0);
+    let radius = clamp(effects_uniforms.creative_effects.y / 100.0, 0.0, 1.0);
     switch stage {
         case 0u: { return 1.0; }
         case 1u: { return smoothstep(0.0, 0.20, radius); }
@@ -239,7 +239,7 @@ fn glow_diffuse_at(pos: vec2<i32>, stage: u32) -> vec3<f32> {
 }
 
 fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let amount = clamp(params.creative_effects.x / 100.0, 0.0, 1.0);
+    let amount = clamp(effects_uniforms.creative_effects.x / 100.0, 0.0, 1.0);
     if amount < 1e-6 {
         return rgb;
     }
@@ -256,7 +256,7 @@ fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
 
 fn full_image_uv(pos: vec2<i32>) -> vec2<f32> {
     let dimensions = max(
-        vec2<f32>(f32(params.full_width), f32(params.full_height)),
+        vec2<f32>(f32(camera_uniforms.full_width), f32(camera_uniforms.full_height)),
         vec2<f32>(1.0),
     );
     let global_pos = clamp(pos + tile_origin(), vec2<i32>(0), full_image_max());
@@ -264,9 +264,9 @@ fn full_image_uv(pos: vec2<i32>) -> vec2<f32> {
 }
 
 fn vignette_distance(pos: vec2<i32>, roundness: f32) -> f32 {
-    let dimensions = max(params.vignette_frame.zw, vec2<f32>(1.0));
-    let source_delta = full_image_uv(pos) - params.vignette_frame.xy;
-    let transform = params.vignette_transform;
+    let dimensions = max(effects_uniforms.vignette_frame.zw, vec2<f32>(1.0));
+    let source_delta = full_image_uv(pos) - effects_uniforms.vignette_frame.xy;
+    let transform = effects_uniforms.vignette_transform;
     // Evaluate directly in final-frame coordinates even though the view pass
     // runs before geometry resampling. X and Y are normalized by their
     // own final-frame half extent, matching darktable's auto-ratio geometry.
@@ -350,14 +350,14 @@ fn lightroom_vignette_opacity(
 }
 
 fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let amount = clamp(params.vignette.x / 100.0, -1.0, 1.0);
+    let amount = clamp(effects_uniforms.vignette.x / 100.0, -1.0, 1.0);
     if abs(amount) < 1e-6 {
         return rgb;
     }
 
-    let midpoint = clamp(params.vignette.y / 100.0, 0.0, 1.0);
-    let roundness = clamp(params.vignette.z / 100.0, -1.0, 1.0);
-    let feather = clamp(params.vignette.w / 100.0, 0.0, 1.0);
+    let midpoint = clamp(effects_uniforms.vignette.y / 100.0, 0.0, 1.0);
+    let roundness = clamp(effects_uniforms.vignette.z / 100.0, -1.0, 1.0);
+    let feather = clamp(effects_uniforms.vignette.w / 100.0, 0.0, 1.0);
     var opacity = lightroom_vignette_opacity(
         vignette_distance(pos, roundness),
         amount,
@@ -365,7 +365,7 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         feather,
     );
     if amount < 0.0 {
-        let highlights = clamp(params.vignette_options.x / 100.0, 0.0, 1.0);
+        let highlights = clamp(effects_uniforms.vignette_options.x / 100.0, 0.0, 1.0);
         let highlight_protection = 1.0
             - highlights * smoothstep(0.35, 1.0, safe_luma(rgb));
         opacity = opacity * highlight_protection;
@@ -383,7 +383,7 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
 
 fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(params.mask_counts.x, 32u);
+    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
@@ -405,11 +405,11 @@ fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
-    rgb = apply_texture_and_clarity_values(pos, rgb, params.presence.x, params.presence.y);
-    rgb = apply_dehaze_value(pos, rgb, params.presence.z);
+    rgb = apply_texture_and_clarity_values(pos, rgb, effects_uniforms.presence.x, effects_uniforms.presence.y);
+    rgb = apply_dehaze_value(pos, rgb, effects_uniforms.presence.z);
     rgb = apply_saturation_vibrance(rgb);
     rgb = apply_local_scene_effect_nodes(pos, rgb);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
@@ -417,21 +417,21 @@ fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn copy_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(local_effects_out, pos, vec4<f32>(adjustment_base_at(pos), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn prepare_glow_source(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let emission = glow_emission(local_effects_at(pos), glow_cutoff());
     textureStore(glow_work_out, pos, vec4<f32>(emission, 1.0));
 }
 
 fn store_glow_stage(gid: vec3<u32>, stage: u32) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(glow_work_out, pos, vec4<f32>(glow_diffuse_at(pos, stage), 1.0));
 }
@@ -463,7 +463,7 @@ fn diffuse_glow_4(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = local_effects_at(pos);
     rgb = apply_glow(pos, rgb);

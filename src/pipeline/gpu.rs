@@ -24,7 +24,17 @@ use resources::*;
 mod tests;
 
 const GPU_PARAMS_ABI_VERSION: u32 = 5;
+// Persisted/process metadata still advertises the legacy monolithic payload so
+// existing edits and regression fixtures keep their byte-for-byte ABI marker.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
+const CAMERA_UNIFORMS_SIZE_BYTES: u32 = 416;
+const SCENE_TONE_UNIFORMS_SIZE_BYTES: u32 = 576;
+const EFFECTS_UNIFORMS_SIZE_BYTES: u32 = 96;
+const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 = CAMERA_UNIFORMS_SIZE_BYTES
+    + SCENE_TONE_UNIFORMS_SIZE_BYTES
+    + EFFECTS_UNIFORMS_SIZE_BYTES;
+// Resource accounting rounds each independently allocated buffer to 256 bytes.
+const GPU_STAGE_UNIFORM_ALLOCATION_BYTES: u64 = 512 + 768 + 256;
 const MASK_DATA_SIZE_BYTES: u64 = (std::mem::size_of::<MaskData>() * MAX_LOCAL_MASKS) as u64;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
@@ -407,14 +417,9 @@ const _: () = assert!(std::mem::size_of::<InpaintResizeParams>() == 80);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct GpuUniformParams {
-    // Must stay byte-for-byte aligned with shaders/common.wgsl. The first 16
-    // floats intentionally form one 64-byte scalar block before vec4 fields.
+struct CameraUniforms {
     black_point: f32,
-    exposure: f32,
     temperature: f32,
-    saturation: f32,
-    vibrance: f32,
     highlight_clip: f32,
     chroma_denoise: f32,
     ca_red: f32,
@@ -426,19 +431,52 @@ pub struct GpuUniformParams {
     dual_threshold: f32,
     frequency_chroma: f32,
     tint: f32,
+    _pad_0: f32,
+    _pad_1: f32,
+    _pad_2: f32,
+    highlight_options: [f32; 4],
+    noise_shot: [f32; 4],
+    noise_read: [f32; 4],
+    noise_options: [f32; 4],
+    wb: [f32; 4],
+    cam_to_srgb_0: [f32; 4],
+    cam_to_srgb_1: [f32; 4],
+    cam_to_srgb_2: [f32; 4],
+    inpaint_wb_0: [f32; 4],
+    inpaint_wb_1: [f32; 4],
+    inpaint_wb_2: [f32; 4],
+    black_levels: [f32; 4],
+    white_levels: [f32; 4],
+    width: u32,
+    height: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    full_width: u32,
+    full_height: u32,
+    abi_version: u32,
+    abi_size_bytes: u32,
+    tone_histogram_bounds: [u32; 4],
+    profile_hue_sat: [u32; 4],
+    profile_look: [u32; 4],
+    profile_tone: [u32; 4],
+    output_lut: [u32; 4],
+    profile_flags: [u32; 4],
+    process_info: [u32; 4],
+}
+
+const _: () =
+    assert!(std::mem::size_of::<CameraUniforms>() == CAMERA_UNIFORMS_SIZE_BYTES as usize);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct SceneToneUniforms {
+    exposure: f32,
+    saturation: f32,
+    vibrance: f32,
+    _pad_0: f32,
     basic_tone: [f32; 4],
     sigmoid_curve: [f32; 4],
     sigmoid_power: [f32; 4],
-    presence: [f32; 4],
-    creative_effects: [f32; 4],
-    vignette: [f32; 4],
-    vignette_options: [f32; 4],
-    highlight_options: [f32; 4],
-    // Per-CFA-plane sensor noise model: variance = shot * signal + read.
-    noise_shot: [f32; 4],
-    noise_read: [f32; 4],
-    // Luma strength, detail protection, quality tier, profile confidence.
-    noise_options: [f32; 4],
     tone_curve_0: [f32; 4],
     tone_curve_1: [f32; 4],
     tone_curve_2: [f32; 4],
@@ -465,56 +503,32 @@ pub struct GpuUniformParams {
     hsl_saturation_1: [f32; 4],
     hsl_luminance_0: [f32; 4],
     hsl_luminance_1: [f32; 4],
-    wb: [f32; 4],
-    cam_to_srgb_0: [f32; 4],
-    cam_to_srgb_1: [f32; 4],
-    cam_to_srgb_2: [f32; 4],
-    // Maps the neutral scene-working basis retained by inpainting to the
-    // current camera-WB scene-working basis. This keeps global temperature and
-    // tint editable after an erase rather than baking them into generated RGB.
-    inpaint_wb_0: [f32; 4],
-    inpaint_wb_1: [f32; 4],
-    inpaint_wb_2: [f32; 4],
-    black_levels: [f32; 4],
-    white_levels: [f32; 4],
-    width: u32,
-    height: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    full_width: u32,
-    full_height: u32,
-    abi_version: u32,
-    abi_size_bytes: u32,
-    // Local half-open rectangle whose pixels contribute to a tiled export's
-    // global histogram. Ordinary preview analysis uses the complete image.
-    tone_histogram_bounds: [u32; 4],
-    profile_hue_sat: [u32; 4],
-    profile_look: [u32; 4],
-    profile_tone: [u32; 4],
-    output_lut: [u32; 4],
-    profile_flags: [u32; 4],
-    // Processing version, view/RAW-selection flags, user Exposure f32 bits, and
-    // render-graph contract flags. Formula changes are process-versioned so
-    // existing edits can stay on their historical stage ordering.
-    process_info: [u32; 4],
-    // Local mask count followed by reserved values. Each fixed mask index maps
-    // directly to one layer in the normalized R16F mask atlas.
     mask_counts: [u32; 4],
-    // Perceptual scene-referred color grading. Wheels are packed as normalized
-    // hue, saturation, luminance, reserved. Options are blending, balance.
     grade_shadows: [f32; 4],
     grade_midtones: [f32; 4],
     grade_highlights: [f32; 4],
     grade_global: [f32; 4],
     grade_options: [f32; 4],
-    // Final-frame vignette mapping. `vignette_frame` stores source-space crop
-    // center followed by final-frame pixel dimensions. `vignette_transform` is
-    // the normalized source-to-final 2x2 affine matrix.
+}
+
+const _: () = assert!(
+    std::mem::size_of::<SceneToneUniforms>() == SCENE_TONE_UNIFORMS_SIZE_BYTES as usize
+);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct EffectsUniforms {
+    presence: [f32; 4],
+    creative_effects: [f32; 4],
+    vignette: [f32; 4],
+    vignette_options: [f32; 4],
     vignette_frame: [f32; 4],
     vignette_transform: [f32; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<GpuUniformParams>() == GPU_PARAMS_ABI_SIZE_BYTES as usize);
+const _: () =
+    assert!(std::mem::size_of::<EffectsUniforms>() == EFFECTS_UNIFORMS_SIZE_BYTES as usize);
+const _: () = assert!(GPU_STAGE_UNIFORM_SIZE_BYTES == 1_088);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -544,27 +558,23 @@ const _: () = assert!(std::mem::size_of::<MaskData>() == 752);
 
 #[derive(Clone, Debug)]
 pub struct GpuParams {
-    uniform: GpuUniformParams,
+    camera: CameraUniforms,
+    scene_tone: SceneToneUniforms,
+    effects: EffectsUniforms,
     mask_data: Box<[MaskData]>,
 }
 
-impl std::ops::Deref for GpuParams {
-    type Target = GpuUniformParams;
-
-    fn deref(&self) -> &Self::Target {
-        &self.uniform
-    }
-}
-
-impl std::ops::DerefMut for GpuParams {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.uniform
-    }
-}
-
 impl GpuParams {
-    fn uniform_bytes(&self) -> &[u8] {
-        bytemuck::bytes_of(&self.uniform)
+    fn camera_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(&self.camera)
+    }
+
+    fn scene_tone_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(&self.scene_tone)
+    }
+
+    fn effects_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(&self.effects)
     }
 
     fn mask_data_bytes(&self) -> &[u8] {
@@ -874,17 +884,11 @@ impl GpuParams {
             [0.0; 3]
         };
 
-        let uniform = GpuUniformParams {
+        let camera = CameraUniforms {
             black_point: exposure.black_point,
-            // Exposure is now exactly the user-visible edit value. Camera/DNG
-            // default rendering exposure is carried separately in profile_flags.z,
-            // so no renderer-only lift can silently stack with metadata.
-            exposure: exposure.exposure,
             temperature: exposure
                 .temperature
                 .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
-            saturation: exposure.saturation,
-            vibrance: exposure.vibrance,
             highlight_clip: exposure.highlight_clip,
             chroma_denoise: exposure.chroma_denoise,
             ca_red: exposure.ca_red,
@@ -902,43 +906,9 @@ impl GpuParams {
             tint: exposure
                 .tint
                 .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
-            basic_tone: [
-                exposure.highlights,
-                exposure.shadows,
-                exposure.whites,
-                exposure.blacks,
-            ],
-            sigmoid_curve: [
-                sigmoid.white_target,
-                sigmoid.black_target,
-                sigmoid.paper_exposure,
-                sigmoid.film_fog,
-            ],
-            sigmoid_power: [
-                sigmoid.film_power,
-                sigmoid.paper_power,
-                sigmoid.hue_preservation,
-                sigmoid.color_processing,
-            ],
-            presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
-            creative_effects: [
-                exposure.glow_amount.clamp(0.0, 100.0),
-                exposure.glow_radius.clamp(0.0, 100.0),
-                exposure.glow_threshold.clamp(0.0, 100.0),
-                exposure.sharpen_amount.clamp(0.0, 150.0),
-            ],
-            vignette: [
-                exposure.vignette_amount.clamp(-100.0, 100.0),
-                exposure.vignette_midpoint.clamp(0.0, 100.0),
-                exposure.vignette_roundness.clamp(-100.0, 100.0),
-                exposure.vignette_feather.clamp(0.0, 100.0),
-            ],
-            vignette_options: [
-                exposure.vignette_highlights.clamp(0.0, 100.0),
-                exposure.sharpen_radius.clamp(0.5, 3.0),
-                exposure.sharpen_detail.clamp(0.0, 100.0),
-                exposure.sharpen_masking.clamp(0.0, 100.0),
-            ],
+            _pad_0: 0.0,
+            _pad_1: 0.0,
+            _pad_2: 0.0,
             highlight_options: [
                 highlight_method,
                 opposed_chroma[0],
@@ -963,6 +933,59 @@ impl GpuParams {
                 (exposure.denoise_detail / 100.0).clamp(0.0, 1.0),
                 exposure.denoise_quality.shader_value(),
                 raw.noise_profile.confidence.clamp(0.0, 1.0),
+            ],
+            wb: white_balance,
+            cam_to_srgb_0: camera_transform[0],
+            cam_to_srgb_1: camera_transform[1],
+            cam_to_srgb_2: camera_transform[2],
+            inpaint_wb_0: inpaint_wb_transform[0],
+            inpaint_wb_1: inpaint_wb_transform[1],
+            inpaint_wb_2: inpaint_wb_transform[2],
+            black_levels: raw.black_levels,
+            white_levels: raw.white_levels,
+            width: raw.width,
+            height: raw.height,
+            tile_origin_x,
+            tile_origin_y,
+            full_width,
+            full_height,
+            abi_version: GPU_PARAMS_ABI_VERSION,
+            abi_size_bytes: GPU_PARAMS_ABI_SIZE_BYTES,
+            tone_histogram_bounds: [0, 0, raw.width, raw.height],
+            profile_hue_sat: profile_stages.characterization.hue_sat,
+            profile_look: profile_stages.optional_look.look_table,
+            profile_tone: profile_stages.view.profile_tone,
+            output_lut: profile_stages.output.output_lut,
+            profile_flags: profile_layout.flags,
+            process_info: [
+                CURRENT_PROCESS_VERSION,
+                raw_selection_flags,
+                exposure.exposure.to_bits(),
+                render_graph_flags(),
+            ],
+        };
+        let scene_tone = SceneToneUniforms {
+            exposure: exposure.exposure,
+            saturation: exposure.saturation,
+            vibrance: exposure.vibrance,
+            _pad_0: 0.0,
+            basic_tone: [
+                exposure.highlights,
+                exposure.shadows,
+                exposure.whites,
+                exposure.blacks,
+            ],
+            sigmoid_curve: [
+                sigmoid.white_target,
+                sigmoid.black_target,
+                sigmoid.paper_exposure,
+                sigmoid.film_fog,
+            ],
+            sigmoid_power: [
+                sigmoid.film_power,
+                sigmoid.paper_power,
+                sigmoid.hue_preservation,
+                sigmoid.color_processing,
             ],
             tone_curve_0: [
                 exposure.tone_curve.points[0][0],
@@ -1106,41 +1129,33 @@ impl GpuParams {
             hsl_saturation_1,
             hsl_luminance_0,
             hsl_luminance_1,
-            wb: white_balance,
-            cam_to_srgb_0: camera_transform[0],
-            cam_to_srgb_1: camera_transform[1],
-            cam_to_srgb_2: camera_transform[2],
-            inpaint_wb_0: inpaint_wb_transform[0],
-            inpaint_wb_1: inpaint_wb_transform[1],
-            inpaint_wb_2: inpaint_wb_transform[2],
-            black_levels: raw.black_levels,
-            white_levels: raw.white_levels,
-            width: raw.width,
-            height: raw.height,
-            tile_origin_x,
-            tile_origin_y,
-            full_width,
-            full_height,
-            abi_version: GPU_PARAMS_ABI_VERSION,
-            abi_size_bytes: GPU_PARAMS_ABI_SIZE_BYTES,
-            tone_histogram_bounds: [0, 0, raw.width, raw.height],
-            profile_hue_sat: profile_stages.characterization.hue_sat,
-            profile_look: profile_stages.optional_look.look_table,
-            profile_tone: profile_stages.view.profile_tone,
-            output_lut: profile_stages.output.output_lut,
-            profile_flags: profile_layout.flags,
-            process_info: [
-                CURRENT_PROCESS_VERSION,
-                raw_selection_flags,
-                exposure.exposure.to_bits(),
-                render_graph_flags(),
-            ],
             mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
             grade_shadows: pack_color_grade_wheel(exposure.color_grading.shadows),
             grade_midtones: pack_color_grade_wheel(exposure.color_grading.midtones),
             grade_highlights: pack_color_grade_wheel(exposure.color_grading.highlights),
             grade_global: pack_color_grade_wheel(exposure.color_grading.global),
             grade_options: pack_color_grade_options(exposure.color_grading),
+        };
+        let effects = EffectsUniforms {
+            presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
+            creative_effects: [
+                exposure.glow_amount.clamp(0.0, 100.0),
+                exposure.glow_radius.clamp(0.0, 100.0),
+                exposure.glow_threshold.clamp(0.0, 100.0),
+                exposure.sharpen_amount.clamp(0.0, 150.0),
+            ],
+            vignette: [
+                exposure.vignette_amount.clamp(-100.0, 100.0),
+                exposure.vignette_midpoint.clamp(0.0, 100.0),
+                exposure.vignette_roundness.clamp(-100.0, 100.0),
+                exposure.vignette_feather.clamp(0.0, 100.0),
+            ],
+            vignette_options: [
+                exposure.vignette_highlights.clamp(0.0, 100.0),
+                exposure.sharpen_radius.clamp(0.5, 3.0),
+                exposure.sharpen_detail.clamp(0.0, 100.0),
+                exposure.sharpen_masking.clamp(0.0, 100.0),
+            ],
             vignette_frame: [
                 0.5,
                 0.5,
@@ -1150,7 +1165,9 @@ impl GpuParams {
             vignette_transform: [1.0, 0.0, 0.0, 1.0],
         };
         Self {
-            uniform,
+            camera,
+            scene_tone,
+            effects,
             mask_data: Box::new(mask_data),
         }
     }
@@ -1158,8 +1175,8 @@ impl GpuParams {
     pub fn with_vignette_geometry(mut self, geometry: GeometryTransform) -> Self {
         let geometry = geometry.sanitized();
         let crop = geometry.crop;
-        let source_width = self.full_width.max(1) as f32;
-        let source_height = self.full_height.max(1) as f32;
+        let source_width = self.camera.full_width.max(1) as f32;
+        let source_height = self.camera.full_height.max(1) as f32;
         let crop_width = ((crop[2] - crop[0]) * source_width).max(1e-6);
         let crop_height = ((crop[3] - crop[1]) * source_height).max(1e-6);
         let center_u = (crop[0] + crop[2]) * 0.5;
@@ -1201,8 +1218,8 @@ impl GpuParams {
             (crop_height, crop_width)
         };
 
-        self.vignette_frame = [center_u, center_v, output_width, output_height];
-        self.vignette_transform = [
+        self.effects.vignette_frame = [center_u, center_v, output_width, output_height];
+        self.effects.vignette_transform = [
             forward[0] * source_width / output_width,
             forward[1] * source_height / output_width,
             forward[2] * source_width / output_height,
@@ -1212,11 +1229,11 @@ impl GpuParams {
     }
 
     pub fn with_tone_histogram_bounds(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
-        self.tone_histogram_bounds = [
+        self.camera.tone_histogram_bounds = [
             x,
             y,
-            x.saturating_add(width).min(self.width),
-            y.saturating_add(height).min(self.height),
+            x.saturating_add(width).min(self.camera.width),
+            y.saturating_add(height).min(self.camera.height),
         ];
         self
     }
@@ -1224,12 +1241,12 @@ impl GpuParams {
     /// Maps the normalized local-mask atlas to a source-image sub-rectangle.
     /// Coordinates are packed as UNORM16 pairs into fields that were already
     /// reserved in the GPU ABI, giving sub-pixel precision on ordinary RAWs
-    /// without growing the large uniform buffer.
+    /// without growing the scene-tone uniform block.
     pub fn with_mask_uv_rect(mut self, rect: [f32; 4]) -> Self {
         self.set_mask_uv_rect(rect);
         // All atlas texels are valid. This sentinel avoids coupling ordinary
         // callers to a pipeline's texture dimensions.
-        self.mask_counts[3] = u32::MAX;
+        self.scene_tone.mask_counts[3] = u32::MAX;
         self
     }
 
@@ -1241,7 +1258,7 @@ impl GpuParams {
         self.set_mask_uv_rect(rect);
         let width = texture_extent[0].clamp(1, u16::MAX as u32);
         let height = texture_extent[1].clamp(1, u16::MAX as u32);
-        self.mask_counts[3] = width | (height << 16);
+        self.scene_tone.mask_counts[3] = width | (height << 16);
         self
     }
 
@@ -1255,16 +1272,16 @@ impl GpuParams {
         let min_v = rect[1].min(rect[3]);
         let max_u = rect[0].max(rect[2]);
         let max_v = rect[1].max(rect[3]);
-        self.mask_counts[1] = pack(min_u, min_v);
-        self.mask_counts[2] = pack(max_u, max_v);
+        self.scene_tone.mask_counts[1] = pack(min_u, min_v);
+        self.scene_tone.mask_counts[2] = pack(max_u, max_v);
     }
 
     fn uses_ai_denoise(&self) -> bool {
-        (self.process_info[1] & 2) != 0
+        (self.camera.process_info[1] & 2) != 0
     }
 
     fn needs_dual_demosaic_passes(&self) -> bool {
-        self.demosaic_mode >= 1.5
+        self.camera.demosaic_mode >= 1.5
     }
 
     fn needs_intermediate_adjustment_passes(&self) -> bool {
@@ -1276,11 +1293,11 @@ impl GpuParams {
         // pass and must not force these later optional passes.
         // Omitting Saturation/Vibrance here made both global color
         // sliders a no-op.
-        let global_effects = self.saturation.abs() > 1e-6
-            || self.vibrance.abs() > 1e-6
-            || self.presence[..3].iter().any(|value| value.abs() > 1e-6);
-        let creative = self.creative_effects[0].abs() > 1e-6;
-        let local_count = (self.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
+        let global_effects = self.scene_tone.saturation.abs() > 1e-6
+            || self.scene_tone.vibrance.abs() > 1e-6
+            || self.effects.presence[..3].iter().any(|value| value.abs() > 1e-6);
+        let creative = self.effects.creative_effects[0].abs() > 1e-6;
+        let local_count = (self.scene_tone.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
         let local_effects = (0..local_count).any(|index| {
             let local = self.mask_data[index];
             let state = local.metadata;
@@ -1310,8 +1327,15 @@ impl GpuParams {
     }
 
     fn needs_glow_passes(&self) -> bool {
-        self.creative_effects[0].abs() > 1e-6
+        self.effects.creative_effects[0].abs() > 1e-6
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UploadedStageUniforms {
+    camera: CameraUniforms,
+    scene_tone: SceneToneUniforms,
+    effects: EffectsUniforms,
 }
 
 struct Pass {
@@ -1379,7 +1403,12 @@ pub struct RawGpuPipeline {
     pub height: u32,
     cfa_kind: CfaKind,
     processing_quality: ProcessingQuality,
-    params_buffer: wgpu::Buffer,
+    camera_uniforms_buffer: wgpu::Buffer,
+    scene_tone_uniforms_buffer: wgpu::Buffer,
+    effects_uniforms_buffer: wgpu::Buffer,
+    scene_tone_bind_group: wgpu::BindGroup,
+    effects_bind_group: wgpu::BindGroup,
+    uploaded_stage_uniforms: Mutex<UploadedStageUniforms>,
     mask_data_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
     tone_stats_buffer: wgpu::Buffer,
@@ -1481,7 +1510,37 @@ impl GpuOutputSnapshot {
 
 impl RawGpuPipeline {
     fn upload_params(&self, queue: &wgpu::Queue, params: &GpuParams) {
-        queue.write_buffer(&self.params_buffer, 0, params.uniform_bytes());
+        match self.uploaded_stage_uniforms.lock() {
+            Ok(mut uploaded) => {
+                if bytemuck::bytes_of(&uploaded.camera) != params.camera_bytes() {
+                    queue.write_buffer(&self.camera_uniforms_buffer, 0, params.camera_bytes());
+                    uploaded.camera = params.camera;
+                }
+                if bytemuck::bytes_of(&uploaded.scene_tone) != params.scene_tone_bytes() {
+                    queue.write_buffer(
+                        &self.scene_tone_uniforms_buffer,
+                        0,
+                        params.scene_tone_bytes(),
+                    );
+                    uploaded.scene_tone = params.scene_tone;
+                }
+                if bytemuck::bytes_of(&uploaded.effects) != params.effects_bytes() {
+                    queue.write_buffer(&self.effects_uniforms_buffer, 0, params.effects_bytes());
+                    uploaded.effects = params.effects;
+                }
+            }
+            Err(_) => {
+                // A poisoned cache must not prevent rendering. Fall back to a
+                // complete upload while preserving the stage-specific buffers.
+                queue.write_buffer(&self.camera_uniforms_buffer, 0, params.camera_bytes());
+                queue.write_buffer(
+                    &self.scene_tone_uniforms_buffer,
+                    0,
+                    params.scene_tone_bytes(),
+                );
+                queue.write_buffer(&self.effects_uniforms_buffer, 0, params.effects_bytes());
+            }
+        }
         queue.write_buffer(&self.mask_data_buffer, 0, params.mask_data_bytes());
     }
 
@@ -1871,7 +1930,7 @@ impl RawGpuPipeline {
             // a dense cropped detail atlas affordable alongside the main
             // preview; the ordinary full-frame interactive pipeline keeps all
             // 32 slots so adding common masks remains instant.
-            (params.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
+            (params.scene_tone.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
         } else {
             MAX_LOCAL_MASKS
         };
@@ -1897,7 +1956,7 @@ impl RawGpuPipeline {
             mask_layers: u32::try_from(mask_layer_capacity)
                 .map_err(|_| anyhow!("mask layer capacity does not fit in u32"))?,
             profile_buffer_bytes: profile_buffer_size_bytes,
-            params_buffer_bytes: GPU_PARAMS_ABI_SIZE_BYTES as u64,
+            stage_uniform_buffer_bytes: GPU_STAGE_UNIFORM_ALLOCATION_BYTES,
             mask_data_buffer_bytes: MASK_DATA_SIZE_BYTES,
         })?;
         let gpu_budget_reservation =
@@ -2091,11 +2150,23 @@ impl RawGpuPipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
-        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("auraw params"),
-            contents: params.uniform_bytes(),
+        let camera_uniforms_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("auraw camera uniforms"),
+            contents: params.camera_bytes(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let scene_tone_uniforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("auraw scene-tone uniforms"),
+                contents: params.scene_tone_bytes(),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let effects_uniforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("auraw effects uniforms"),
+                contents: params.effects_bytes(),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
         let mask_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("auraw local-mask data"),
             contents: params.mask_data_bytes(),
@@ -2123,6 +2194,43 @@ impl RawGpuPipeline {
             texture_entry(2, wgpu::TextureSampleType::Uint),
             texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
         ];
+
+        // Groups 1 and 2 are intentionally identical for every compute
+        // pipeline. Reusing them across passes isolates scene-tone and effects
+        // updates from the camera/raw resource bind groups in group 0.
+        let bgl_scene_tone = program_template
+            .map(|template| template.pipelines[0].get_bind_group_layout(1))
+            .unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl scene-tone uniforms"),
+                    entries: &[buffer_entry(0)],
+                })
+            });
+        let bgl_effects = program_template
+            .map(|template| template.pipelines[0].get_bind_group_layout(2))
+            .unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl effects uniforms"),
+                    entries: &[buffer_entry(0)],
+                })
+            });
+
+        let scene_tone_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg scene-tone uniforms"),
+            layout: &bgl_scene_tone,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: scene_tone_uniforms_buffer.as_entire_binding(),
+            }],
+        });
+        let effects_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg effects uniforms"),
+            layout: &bgl_effects,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: effects_uniforms_buffer.as_entire_binding(),
+            }],
+        });
 
         let demosaic_start_for_programs = 1;
         let demosaic_high_pass_count = match raw.cfa_kind {
@@ -2587,7 +2695,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2614,7 +2722,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2645,7 +2753,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2680,7 +2788,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2720,7 +2828,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2751,7 +2859,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2786,7 +2894,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2829,7 +2937,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2868,7 +2976,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2911,7 +3019,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2954,7 +3062,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2995,7 +3103,7 @@ impl RawGpuPipeline {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: params_buffer.as_entire_binding(),
+                            resource: camera_uniforms_buffer.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 10,
@@ -3029,7 +3137,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
@@ -3062,7 +3170,7 @@ impl RawGpuPipeline {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: params_buffer.as_entire_binding(),
+                            resource: camera_uniforms_buffer.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 17,
@@ -3107,7 +3215,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -3166,7 +3274,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 22,
@@ -3209,7 +3317,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 22,
@@ -3252,7 +3360,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 22,
@@ -3287,7 +3395,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 22,
@@ -3326,7 +3434,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 24,
@@ -3347,7 +3455,7 @@ impl RawGpuPipeline {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: params_buffer.as_entire_binding(),
+                            resource: camera_uniforms_buffer.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 30,
@@ -3381,7 +3489,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 24,
@@ -3404,7 +3512,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
@@ -3532,7 +3640,7 @@ impl RawGpuPipeline {
             let shader = shader.expect("shader module exists without a program template");
             let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(&format!("pll_{}", entry)),
-                bind_group_layouts: &[Some(bgl)],
+                bind_group_layouts: &[Some(bgl), Some(&bgl_scene_tone), Some(&bgl_effects)],
                 immediate_size: 0,
             });
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -3908,7 +4016,16 @@ impl RawGpuPipeline {
             height: raw.height,
             cfa_kind: raw.cfa_kind,
             processing_quality: quality,
-            params_buffer,
+            camera_uniforms_buffer,
+            scene_tone_uniforms_buffer,
+            effects_uniforms_buffer,
+            scene_tone_bind_group,
+            effects_bind_group,
+            uploaded_stage_uniforms: Mutex::new(UploadedStageUniforms {
+                camera: params.camera,
+                scene_tone: params.scene_tone,
+                effects: params.effects,
+            }),
             mask_data_buffer,
             tone_histogram_buffer,
             tone_stats_buffer,
@@ -4692,7 +4809,7 @@ impl RawGpuPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: self.params_buffer.as_entire_binding(),
+                    resource: self.camera_uniforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -4817,9 +4934,9 @@ impl RawGpuPipeline {
             output_height,
             _pad0: 0,
             _pad1: 0,
-            cam_to_working_0: params.cam_to_srgb_0,
-            cam_to_working_1: params.cam_to_srgb_1,
-            cam_to_working_2: params.cam_to_srgb_2,
+            cam_to_working_0: params.camera.cam_to_srgb_0,
+            cam_to_working_1: params.camera.cam_to_srgb_1,
+            cam_to_working_2: params.camera.cam_to_srgb_2,
         };
         let resize_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("auraw inpaint resize params"),
@@ -4919,7 +5036,7 @@ impl RawGpuPipeline {
             );
         }
         self.encode_pass(encoder, self.demosaic_finish_index);
-        if params.chroma_denoise > 1e-6 {
+        if params.camera.chroma_denoise > 1e-6 {
             self.encode_pass_range(
                 encoder,
                 self.color_denoise_start_index,
@@ -4958,6 +5075,8 @@ impl RawGpuPipeline {
         });
         pass.set_pipeline(&self.passes[index].pipeline);
         pass.set_bind_group(0, &self.passes[index].bind_group, &[]);
+        pass.set_bind_group(1, &self.scene_tone_bind_group, &[]);
+        pass.set_bind_group(2, &self.effects_bind_group, &[]);
         let workgroups = self.passes[index].workgroups;
         pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
     }

@@ -119,7 +119,7 @@ fn stabilized_mixer_sample(pos: vec2<i32>, center_rgb: vec3<f32>) -> MixerSample
     var weight_sum = center.confidence * 4.0;
     // Desktop/high-quality rendering already uses a wider tone guide, so use
     // a 5x5 selector there. Android preview keeps a 3x3 selector for speed.
-    let selector_radius = select(1, 2, params.tone_guide_radius > 3.5);
+    let selector_radius = select(1, 2, camera_uniforms.tone_guide_radius > 3.5);
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
             if (dx == 0 && dy == 0) || abs(dx) > selector_radius || abs(dy) > selector_radius {
@@ -272,7 +272,7 @@ fn apply_color_grading_wheels(
 
 fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(params.mask_counts.x, 32u);
+    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = mask_data[index].metadata;
         if state.x == 0u || (state.w & 2u) == 0u { continue; }
@@ -353,18 +353,18 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return apply_color_mixer_values(
         pos,
         rgb,
-        params.hsl_hue_0,
-        params.hsl_hue_1,
-        params.hsl_saturation_0,
-        params.hsl_saturation_1,
-        params.hsl_luminance_0,
-        params.hsl_luminance_1,
+        scene_tone_uniforms.hsl_hue_0,
+        scene_tone_uniforms.hsl_hue_1,
+        scene_tone_uniforms.hsl_saturation_0,
+        scene_tone_uniforms.hsl_saturation_1,
+        scene_tone_uniforms.hsl_luminance_0,
+        scene_tone_uniforms.hsl_luminance_1,
     );
 }
 
 fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(params.mask_counts.x, 32u);
+    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = mask_data[index].metadata;
         if state.x == 0u || (state.w & 1u) == 0u { continue; }
@@ -479,7 +479,7 @@ fn apply_explicit_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
     // ProfileToneCurve inside the DCP-aware view node; a custom/user sigmoid is
     // the complete view transform and therefore does not stack the profile tone
     // curve ahead of it. This removes the previous double-tone behavior.
-    if (params.process_info.y & 1u) != 0u {
+    if (camera_uniforms.process_info.y & 1u) != 0u {
         return apply_dcp_view_transform(view_input);
     }
     return apply_sigmoid_view_transform(view_input);
@@ -488,7 +488,7 @@ fn apply_explicit_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
 fn apply_legacy_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
     // Process <=12 compatibility: LookTable/ProfileToneCurve have already run
     // upstream. Preserve the historical final view selection byte-for-byte.
-    if (params.process_info.y & 1u) != 0u {
+    if (camera_uniforms.process_info.y & 1u) != 0u {
         return profile_tone_display_shoulder(scene_rgb);
     }
     return darktable_sigmoid(scene_rgb);
@@ -496,10 +496,10 @@ fn apply_legacy_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
 
 fn apply_local_display_blacks(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+    if camera_uniforms.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
         return rgb;
     }
-    let count = min(params.mask_counts.x, 32u);
+    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
@@ -515,18 +515,18 @@ fn apply_local_display_blacks(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32>
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let rgb = textureLoad(final_adjustment_tex, pos, 0).xyz;
     let globally_mixed = apply_color_mixer(pos, rgb);
     let mixed = apply_local_color_mixer(pos, globally_mixed);
     let globally_graded = apply_color_grading_wheels(
         mixed,
-        params.grade_shadows,
-        params.grade_midtones,
-        params.grade_highlights,
-        params.grade_global,
-        params.grade_options,
+        scene_tone_uniforms.grade_shadows,
+        scene_tone_uniforms.grade_midtones,
+        scene_tone_uniforms.grade_highlights,
+        scene_tone_uniforms.grade_global,
+        scene_tone_uniforms.grade_options,
     );
     let graded = apply_local_color_grading(pos, globally_graded);
     var display_linear = vec3<f32>(0.0);
@@ -535,8 +535,8 @@ fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         display_linear = apply_legacy_view_node(graded);
     }
-    if params.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
-        display_linear = apply_display_blacks_toe_value(display_linear, params.basic_tone.w);
+    if camera_uniforms.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
+        display_linear = apply_display_blacks_toe_value(display_linear, scene_tone_uniforms.basic_tone.w);
         display_linear = apply_local_display_blacks(pos, display_linear);
     }
     display_linear = apply_vignette(pos, display_linear);

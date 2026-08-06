@@ -13,7 +13,7 @@
 // controls, and local-mask controls are evaluated once and remain editable.
 @compute @workgroup_size(8, 8, 1)
 fn write_inpaint_working_scene(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let camera_rgb = textureLoad(regression_camera_scene, pos, 0).xyz;
     let working = cam_to_working(camera_rgb);
@@ -22,12 +22,12 @@ fn write_inpaint_working_scene(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn write_regression_scene(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let camera_rgb = textureLoad(regression_camera_scene, pos, 0).xyz;
     let working = cam_to_working(camera_rgb);
     let profile_corrected = apply_profile_hue_sat(working);
-    let baseline_exposure_ev = bitcast<f32>(params.profile_flags.z);
+    let baseline_exposure_ev = bitcast<f32>(camera_uniforms.profile_flags.z);
     let scene_linear = map_negative_gamut(
         profile_corrected * exp2(baseline_exposure_ev),
     );

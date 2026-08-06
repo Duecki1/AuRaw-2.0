@@ -162,7 +162,7 @@ fn apply_profile_hsv_map(rgb_rec2020: vec3<f32>, map_info: vec4<u32>, encoding: 
 fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
     let second = bitcast<vec4<u32>>(profile_data[0]);
     if second.x == 0u || second.y == 0u || second.z == 0u {
-        return apply_profile_hsv_map(rgb, params.profile_hue_sat, params.profile_flags.x);
+        return apply_profile_hsv_map(rgb, camera_uniforms.profile_hue_sat, camera_uniforms.profile_flags.x);
     }
 
     let profile_signed = REC2020_TO_PROPHOTO * rgb;
@@ -173,17 +173,17 @@ fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
     );
     let profile_rgb = profile_linear / profile_headroom;
     var hsv = profile_rgb_to_hsv(profile_rgb);
-    let encode_value = params.profile_flags.x == 1u
-        && (params.profile_hue_sat.z > 1u || second.z > 1u);
+    let encode_value = camera_uniforms.profile_flags.x == 1u
+        && (camera_uniforms.profile_hue_sat.z > 1u || second.z > 1u);
     if encode_value {
         hsv.z = profile_srgb_encode_value(hsv.z);
     }
     // DNG dual-illuminant profile tables are interpolated entrywise. Sampling
     // each endpoint and mixing the adjustment is equivalent for the tables'
     // trilinear interpolation, while retaining the endpoints for live WB.
-    let weight = clamp(bitcast<f32>(params.profile_flags.w), 0.0, 1.0);
+    let weight = clamp(bitcast<f32>(camera_uniforms.profile_flags.w), 0.0, 1.0);
     let adjustment = mix(
-        profile_map_sample(params.profile_hue_sat, hsv),
+        profile_map_sample(camera_uniforms.profile_hue_sat, hsv),
         profile_map_sample(second, hsv),
         weight,
     );
@@ -205,15 +205,15 @@ fn apply_camera_characterization(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn apply_optional_profile_look(rgb: vec3<f32>) -> vec3<f32> {
-    return apply_profile_hsv_map(rgb, params.profile_look, params.profile_flags.y);
+    return apply_profile_hsv_map(rgb, camera_uniforms.profile_look, camera_uniforms.profile_flags.y);
 }
 
 fn profile_curve_value(x: f32) -> f32 {
-    let size = params.profile_tone.x;
+    let size = camera_uniforms.profile_tone.x;
     if size < 2u {
         return x;
     }
-    let offset = params.profile_tone.y;
+    let offset = camera_uniforms.profile_tone.y;
     let maximum = size - 1u;
     if x <= 0.0 {
         return profile_data[offset].x;
@@ -232,7 +232,7 @@ fn profile_curve_value(x: f32) -> f32 {
 }
 
 fn apply_profile_tone_curve(rgb_rec2020: vec3<f32>) -> vec3<f32> {
-    if params.profile_tone.x < 2u {
+    if camera_uniforms.profile_tone.x < 2u {
         return rgb_rec2020;
     }
 
@@ -268,7 +268,7 @@ fn apply_profile_view_tone(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn output_lut_fetch(r: u32, g: u32, b: u32) -> vec3<f32> {
-    let lut_info = params.output_lut;
+    let lut_info = camera_uniforms.output_lut;
     let index = lut_info.w + (b * lut_info.y + g) * lut_info.x + r;
     return profile_data[index].xyz;
 }
@@ -293,7 +293,7 @@ fn map_output_lut_input_rec2020(rgb: vec3<f32>) -> vec3<f32> {
 // The sampled output is not linear sRGB and must not be passed through a
 // linear-light gamut operation after lookup.
 fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
-    let lut_info = params.output_lut;
+    let lut_info = camera_uniforms.output_lut;
     if lut_info.x < 2u || lut_info.y < 2u || lut_info.z < 2u {
         // The no-LUT fallback is explicitly linear Rec.2020 -> linear sRGB,
         // followed by sRGB-domain gamut mapping and encoding. Unlike the ICC

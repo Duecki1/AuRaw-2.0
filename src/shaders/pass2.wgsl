@@ -45,7 +45,7 @@ fn rcd_diagonal_stat(pos: vec2<i32>, axis: vec2<i32>) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn bayer_rcd_green(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.width || gid.y >= params.height { return; }
+    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let cc = color_at(pos);
     var green = raw_cfa_at(pos);

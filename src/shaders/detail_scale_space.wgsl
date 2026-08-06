@@ -14,7 +14,7 @@ fn creative_fine_base_ev(pos: vec2<i32>) -> f32 {
 }
 
 fn creative_broad_base_ev(pos: vec2<i32>) -> f32 {
-    let clarity_reference = select(4.5, 5.5, params.tone_guide_radius > 3.5);
+    let clarity_reference = select(4.5, 5.5, camera_uniforms.tone_guide_radius > 3.5);
     let step = presence_step(clarity_reference, 14);
     return atrous_log_luminance(pos, step, 1.05);
 }

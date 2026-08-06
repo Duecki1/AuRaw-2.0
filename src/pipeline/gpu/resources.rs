@@ -68,7 +68,7 @@ pub(super) struct GpuResourcePlanInput {
     pub mask_atlas_edge: u32,
     pub mask_layers: u32,
     pub profile_buffer_bytes: u64,
-    pub params_buffer_bytes: u64,
+    pub stage_uniform_buffer_bytes: u64,
     pub mask_data_buffer_bytes: u64,
 }
 
@@ -301,9 +301,9 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
     );
     push_entry(
         &mut entries,
-        "pipeline parameter buffer",
+        "stage uniform buffers",
         GpuResourceResidency::Persistent,
-        aligned_buffer_bytes(input.params_buffer_bytes)?,
+        aligned_buffer_bytes(input.stage_uniform_buffer_bytes)?,
     );
     push_entry(
         &mut entries,
@@ -1075,7 +1075,7 @@ mod resource_plan_tests {
             mask_atlas_edge: 256,
             mask_layers: 4,
             profile_buffer_bytes: 4096,
-            params_buffer_bytes: GPU_PARAMS_ABI_SIZE_BYTES as u64,
+            stage_uniform_buffer_bytes: GPU_STAGE_UNIFORM_ALLOCATION_BYTES,
             mask_data_buffer_bytes: MASK_DATA_SIZE_BYTES,
         }
     }
@@ -1225,7 +1225,7 @@ mod resource_plan_tests {
             "local-mask atlas",
             "inpaint texture",
             "camera/output profile buffer",
-            "pipeline parameter buffer",
+            "stage uniform buffers",
             "local-mask data buffer",
             "tone histogram buffer",
             "tone statistics buffer",

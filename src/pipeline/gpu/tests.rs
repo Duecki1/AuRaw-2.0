@@ -655,154 +655,184 @@ fn tone_analysis_shader_exposes_every_dispatched_entry_point() {
 }
 
 #[test]
-fn gpu_params_follow_the_wgsl_uniform_layout() {
-    // The uniform ABI keeps its stable scalar/camera/profile prefix, while all
-    // fixed per-layer arrays now live in the storage-buffer record below.
-    assert_eq!(std::mem::size_of::<super::GpuUniformParams>(), 1072);
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, basic_tone), 64);
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, sigmoid_curve), 80);
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, sigmoid_power), 96);
+fn stage_uniforms_follow_the_wgsl_uniform_layout() {
+    macro_rules! assert_offsets {
+        ($layout:expr, $ty:ty, [$($field:ident),+ $(,)?]) => {
+            $(
+                assert_eq!(
+                    wgsl_field_offset(&$layout, stringify!($field)),
+                    std::mem::offset_of!($ty, $field),
+                    "{}.{}",
+                    stringify!($ty),
+                    stringify!($field),
+                );
+            )+
+        };
+    }
+
+    assert_eq!(std::mem::size_of::<super::CameraUniforms>(), 416);
+    assert_eq!(std::mem::size_of::<super::SceneToneUniforms>(), 576);
+    assert_eq!(std::mem::size_of::<super::EffectsUniforms>(), 96);
+    assert_eq!(super::GPU_STAGE_UNIFORM_SIZE_BYTES, 1_088);
+    // Persisted process metadata intentionally retains the previous monolithic
+    // ABI marker even though live GPU bindings are now stage-specific.
+    assert_eq!(super::GPU_PARAMS_ABI_SIZE_BYTES, 1_072);
+
+    let common = validated_shader_module("stage uniform ABI", super::SHADER_COMMON_FOR_TESTS);
+
+    let (camera_span, camera_layout) = wgsl_struct_layout(&common, "CameraUniforms");
     assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, creative_effects),
-        128
+        camera_span as usize,
+        std::mem::size_of::<super::CameraUniforms>()
     );
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, vignette), 144);
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, vignette_options),
-        160
+    assert_offsets!(
+        camera_layout,
+        super::CameraUniforms,
+        [
+            black_point,
+            temperature,
+            highlight_clip,
+            chroma_denoise,
+            ca_red,
+            ca_blue,
+            highlight_reconstruction,
+            tone_analysis_scale,
+            tone_guide_radius,
+            demosaic_mode,
+            dual_threshold,
+            frequency_chroma,
+            tint,
+            _pad_0,
+            _pad_1,
+            _pad_2,
+            highlight_options,
+            noise_shot,
+            noise_read,
+            noise_options,
+            wb,
+            cam_to_srgb_0,
+            cam_to_srgb_1,
+            cam_to_srgb_2,
+            inpaint_wb_0,
+            inpaint_wb_1,
+            inpaint_wb_2,
+            black_levels,
+            white_levels,
+            width,
+            height,
+            tile_origin_x,
+            tile_origin_y,
+            full_width,
+            full_height,
+            abi_version,
+            abi_size_bytes,
+            tone_histogram_bounds,
+            profile_hue_sat,
+            profile_look,
+            profile_tone,
+            output_lut,
+            profile_flags,
+            process_info,
+        ]
     );
+
+    let (scene_span, scene_layout) = wgsl_struct_layout(&common, "SceneToneUniforms");
     assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, highlight_options),
-        176
+        scene_span as usize,
+        std::mem::size_of::<super::SceneToneUniforms>()
     );
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, tone_curve_0), 240);
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, tone_curve_meta),
-        304
+    assert_offsets!(
+        scene_layout,
+        super::SceneToneUniforms,
+        [
+            exposure,
+            saturation,
+            vibrance,
+            _pad_0,
+            basic_tone,
+            sigmoid_curve,
+            sigmoid_power,
+            tone_curve_0,
+            tone_curve_1,
+            tone_curve_2,
+            tone_curve_3,
+            tone_curve_meta,
+            tone_curve_red_0,
+            tone_curve_red_1,
+            tone_curve_red_2,
+            tone_curve_red_3,
+            tone_curve_red_meta,
+            tone_curve_green_0,
+            tone_curve_green_1,
+            tone_curve_green_2,
+            tone_curve_green_3,
+            tone_curve_green_meta,
+            tone_curve_blue_0,
+            tone_curve_blue_1,
+            tone_curve_blue_2,
+            tone_curve_blue_3,
+            tone_curve_blue_meta,
+            hsl_hue_0,
+            hsl_hue_1,
+            hsl_saturation_0,
+            hsl_saturation_1,
+            hsl_luminance_0,
+            hsl_luminance_1,
+            mask_counts,
+            grade_shadows,
+            grade_midtones,
+            grade_highlights,
+            grade_global,
+            grade_options,
+        ]
     );
+
+    let (effects_span, effects_layout) = wgsl_struct_layout(&common, "EffectsUniforms");
     assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, tone_curve_red_0),
-        320
+        effects_span as usize,
+        std::mem::size_of::<super::EffectsUniforms>()
     );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, tone_curve_green_0),
-        400
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, tone_curve_blue_0),
-        480
-    );
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, wb), 656);
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, inpaint_wb_0), 720);
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, width), 800);
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, tile_origin_x),
-        808
-    );
-    assert_eq!(std::mem::offset_of!(super::GpuUniformParams, full_width), 816);
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, tone_histogram_bounds),
-        832
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, profile_hue_sat),
-        848
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, profile_flags),
-        912
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, process_info),
-        928
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, mask_counts),
-        944
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, grade_shadows),
-        960
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, grade_options),
-        1024
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, vignette_frame),
-        1040
-    );
-    assert_eq!(
-        std::mem::offset_of!(super::GpuUniformParams, vignette_transform),
-        1056
+    assert_offsets!(
+        effects_layout,
+        super::EffectsUniforms,
+        [
+            presence,
+            creative_effects,
+            vignette,
+            vignette_options,
+            vignette_frame,
+            vignette_transform,
+        ]
     );
 
     assert_eq!(std::mem::size_of::<super::MaskData>(), 752);
-    assert_eq!(std::mem::offset_of!(super::MaskData, metadata), 0);
-    assert_eq!(std::mem::offset_of!(super::MaskData, adjust_0), 16);
-    assert_eq!(std::mem::offset_of!(super::MaskData, adjust_1), 32);
-    assert_eq!(std::mem::offset_of!(super::MaskData, adjust_2), 48);
-    assert_eq!(std::mem::offset_of!(super::MaskData, curves), 64);
-    assert_eq!(std::mem::offset_of!(super::MaskData, grade_shadows), 192);
-    assert_eq!(std::mem::offset_of!(super::MaskData, grade_options), 256);
-    assert_eq!(std::mem::offset_of!(super::MaskData, curves_red), 272);
-    assert_eq!(std::mem::offset_of!(super::MaskData, curves_green), 400);
-    assert_eq!(std::mem::offset_of!(super::MaskData, curves_blue), 528);
-    assert_eq!(std::mem::offset_of!(super::MaskData, hsl_hue_0), 656);
-    assert_eq!(std::mem::offset_of!(super::MaskData, hsl_luminance_1), 736);
-
-    let common = validated_shader_module("common ABI", super::SHADER_COMMON_FOR_TESTS);
-    let (params_span, params_layout) = wgsl_struct_layout(&common, "Params");
-    assert_eq!(params_span as usize, std::mem::size_of::<super::GpuUniformParams>());
-    for (field, rust_offset) in [
-        ("basic_tone", std::mem::offset_of!(super::GpuUniformParams, basic_tone)),
-        ("sigmoid_curve", std::mem::offset_of!(super::GpuUniformParams, sigmoid_curve)),
-        ("sigmoid_power", std::mem::offset_of!(super::GpuUniformParams, sigmoid_power)),
-        ("creative_effects", std::mem::offset_of!(super::GpuUniformParams, creative_effects)),
-        ("vignette", std::mem::offset_of!(super::GpuUniformParams, vignette)),
-        ("vignette_options", std::mem::offset_of!(super::GpuUniformParams, vignette_options)),
-        ("highlight_options", std::mem::offset_of!(super::GpuUniformParams, highlight_options)),
-        ("tone_curve_0", std::mem::offset_of!(super::GpuUniformParams, tone_curve_0)),
-        ("tone_curve_meta", std::mem::offset_of!(super::GpuUniformParams, tone_curve_meta)),
-        ("tone_curve_red_0", std::mem::offset_of!(super::GpuUniformParams, tone_curve_red_0)),
-        ("tone_curve_green_0", std::mem::offset_of!(super::GpuUniformParams, tone_curve_green_0)),
-        ("tone_curve_blue_0", std::mem::offset_of!(super::GpuUniformParams, tone_curve_blue_0)),
-        ("wb", std::mem::offset_of!(super::GpuUniformParams, wb)),
-        ("inpaint_wb_0", std::mem::offset_of!(super::GpuUniformParams, inpaint_wb_0)),
-        ("width", std::mem::offset_of!(super::GpuUniformParams, width)),
-        ("tile_origin_x", std::mem::offset_of!(super::GpuUniformParams, tile_origin_x)),
-        ("full_width", std::mem::offset_of!(super::GpuUniformParams, full_width)),
-        ("tone_histogram_bounds", std::mem::offset_of!(super::GpuUniformParams, tone_histogram_bounds)),
-        ("profile_hue_sat", std::mem::offset_of!(super::GpuUniformParams, profile_hue_sat)),
-        ("profile_flags", std::mem::offset_of!(super::GpuUniformParams, profile_flags)),
-        ("process_info", std::mem::offset_of!(super::GpuUniformParams, process_info)),
-        ("mask_counts", std::mem::offset_of!(super::GpuUniformParams, mask_counts)),
-        ("grade_shadows", std::mem::offset_of!(super::GpuUniformParams, grade_shadows)),
-        ("grade_options", std::mem::offset_of!(super::GpuUniformParams, grade_options)),
-        ("vignette_frame", std::mem::offset_of!(super::GpuUniformParams, vignette_frame)),
-        ("vignette_transform", std::mem::offset_of!(super::GpuUniformParams, vignette_transform)),
-    ] {
-        assert_eq!(wgsl_field_offset(&params_layout, field), rust_offset, "Params.{field}");
-    }
-
     let (mask_span, mask_layout) = wgsl_struct_layout(&common, "MaskData");
     assert_eq!(mask_span as usize, std::mem::size_of::<super::MaskData>());
-    for (field, rust_offset) in [
-        ("metadata", std::mem::offset_of!(super::MaskData, metadata)),
-        ("adjust_0", std::mem::offset_of!(super::MaskData, adjust_0)),
-        ("adjust_1", std::mem::offset_of!(super::MaskData, adjust_1)),
-        ("adjust_2", std::mem::offset_of!(super::MaskData, adjust_2)),
-        ("curves", std::mem::offset_of!(super::MaskData, curves)),
-        ("grade_shadows", std::mem::offset_of!(super::MaskData, grade_shadows)),
-        ("grade_options", std::mem::offset_of!(super::MaskData, grade_options)),
-        ("curves_red", std::mem::offset_of!(super::MaskData, curves_red)),
-        ("curves_green", std::mem::offset_of!(super::MaskData, curves_green)),
-        ("curves_blue", std::mem::offset_of!(super::MaskData, curves_blue)),
-        ("hsl_hue_0", std::mem::offset_of!(super::MaskData, hsl_hue_0)),
-        ("hsl_luminance_1", std::mem::offset_of!(super::MaskData, hsl_luminance_1)),
-    ] {
-        assert_eq!(wgsl_field_offset(&mask_layout, field), rust_offset, "MaskData.{field}");
-    }
+    assert_offsets!(
+        mask_layout,
+        super::MaskData,
+        [
+            metadata,
+            adjust_0,
+            adjust_1,
+            adjust_2,
+            curves,
+            grade_shadows,
+            grade_midtones,
+            grade_highlights,
+            grade_global,
+            grade_options,
+            curves_red,
+            curves_green,
+            curves_blue,
+            hsl_hue_0,
+            hsl_hue_1,
+            hsl_saturation_0,
+            hsl_saturation_1,
+            hsl_luminance_0,
+            hsl_luminance_1,
+        ]
+    );
 }
 
 #[test]
@@ -913,14 +943,14 @@ fn global_wb_changes_raw_multipliers_without_changing_the_camera_transform() {
             &raw,
         );
         let wb = [
-            params.wb[0],
-            0.5 * (params.wb[1] + params.wb[3]),
-            params.wb[2],
+            params.camera.wb[0],
+            0.5 * (params.camera.wb[1] + params.camera.wb[3]),
+            params.camera.wb[2],
         ];
         [
-            params.cam_to_srgb_0,
-            params.cam_to_srgb_1,
-            params.cam_to_srgb_2,
+            params.camera.cam_to_srgb_0,
+            params.camera.cam_to_srgb_1,
+            params.camera.cam_to_srgb_2,
         ]
         .map(|row| (0..3).map(|column| row[column] * wb[column]).sum::<f32>())
     };
