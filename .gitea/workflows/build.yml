@@ -85,11 +85,11 @@ jobs:
         run: |
           set -euxo pipefail
 
-          download_verified() {
+          bootstrap_download_verified() {
             python3 scripts/dev.py verified-download "$1" "$2" "$3"
           }
 
-          download_verified \
+          bootstrap_download_verified \
             https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
             /tmp/rustup-init \
             https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init.sha256
@@ -99,7 +99,7 @@ jobs:
 
           # Match the LibRaw checkout and default Autotools configuration
           # installed in /usr/local on the development PC.
-          eval "$(python3 scripts/dev.py print-build-metadata --format shell)"
+          eval "$(cargo xtask print-metadata --format shell)"
           LIBRAW_SOURCE_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
           LIBRAW_ARCHIVE_SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
           if [ -f "$LIBRAW_PREFIX/lib/pkgconfig/libraw.pc" ] \
@@ -109,7 +109,7 @@ jobs:
           else
             rm -rf /tmp/auraw-libraw-src "$LIBRAW_PREFIX"
             mkdir -p /tmp/auraw-libraw-src
-            download_verified \
+            cargo xtask verified-download \
               "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_SOURCE_REVISION.tar.gz" \
               /tmp/auraw-libraw.tar.gz "$LIBRAW_ARCHIVE_SHA256"
             tar -xzf /tmp/auraw-libraw.tar.gz \
@@ -131,7 +131,7 @@ jobs:
 
           test "$(pkg-config --modversion libraw)" = "$AURAW_LIBRAW_REVISION"
           pkg-config --modversion lensfun
-          REVISION="$(python3 scripts/dev.py verify-source-revision)"
+          REVISION="$(cargo xtask verify-source-revision)"
           export AURAW_REQUIRE_COMMITTED_SOURCE=1
           export AURAW_SOURCE_REVISION="$REVISION"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$REVISION")"
@@ -146,10 +146,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
-          download_verified() {
-            python3 scripts/dev.py verified-download "$1" "$2" "$3"
-          }
 
           VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           test -n "$VERSION"
@@ -191,7 +187,7 @@ jobs:
 
           # Digest from the successful upstream release build artifact.
           LINUXDEPLOY_SHA256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
-          download_verified \
+          cargo xtask verified-download \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
             /tmp/linuxdeploy-x86_64.AppImage "$LINUXDEPLOY_SHA256"
           chmod +x /tmp/linuxdeploy-x86_64.AppImage
@@ -270,7 +266,7 @@ jobs:
             ~/.cargo/bin/cargo-ndk-runner
             ~/.cargo/bin/cargo-ndk-test
             android/native
-          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/dev.py') }}-v2
+          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/dev.py', 'xtask/src/main.rs') }}-v2
 
       - name: Restore Android dependency and build cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
@@ -348,11 +344,23 @@ jobs:
         run: |
           set -euxo pipefail
 
-          download_verified() {
+          bootstrap_download_verified() {
             python3 scripts/dev.py verified-download "$1" "$2" "$3"
           }
 
-          eval "$(python3 scripts/dev.py print-build-metadata --format shell)"
+          bootstrap_download_verified \
+            https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
+            /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init.sha256
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
+          source "$HOME/.cargo/env"
+          rustup target add aarch64-linux-android
+          if [ "$(cargo ndk --version 2>/dev/null || true)" != "cargo-ndk 4.1.2" ]; then
+            cargo install cargo-ndk --version 4.1.2 --locked
+          fi
+
+          eval "$(cargo xtask print-metadata --format shell)"
 
           install_sdk_packages() {
             local attempt
@@ -381,7 +389,7 @@ jobs:
             mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-command-line-tools
             # Raw archive SHA-512 from the Gentoo Manifest for this exact Google artifact.
             ANDROID_CMDLINE_TOOLS_SHA512=b65e830d7655fb39cc9eee669806977f462c49375807ef2c6487fabcc9afdbc210465ce6a1e2429ff95c74ca519d1239daf9a403c30b8d0bdb7a0962af656c8e
-            download_verified \
+            bootstrap_download_verified \
               https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip \
               /tmp/android-command-line-tools.zip \
               "sha512:$ANDROID_CMDLINE_TOOLS_SHA512"
@@ -397,24 +405,12 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$AURAW_ANDROID_NDK_VERSION"
           export PATH="$ANDROID_HOME/cmake/$ANDROID_CMAKE_VERSION/bin:$PATH"
 
-          download_verified \
-            https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
-            /tmp/rustup-init \
-            https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init.sha256
-          chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
-          source "$HOME/.cargo/env"
-          rustup target add aarch64-linux-android
-          if [ "$(cargo ndk --version 2>/dev/null || true)" != "cargo-ndk 4.1.2" ]; then
-            cargo install cargo-ndk --version 4.1.2 --locked
-          fi
-
           LIBCLANG_SO="$(find /usr/lib -path '*/llvm-*/lib/libclang.so*' -print -quit 2>/dev/null || true)"
           if [ -n "$LIBCLANG_SO" ]; then
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          python3 scripts/dev.py check-gradle
+          cargo xtask check-all
           ./gradlew --version
           case "$GITHUB_RUN_NUMBER" in
             ''|*[!0-9]*)
@@ -428,7 +424,7 @@ jobs:
             --stacktrace \
             -p android \
             assembleDebug \
-            -PaurawAbi=arm64-v8a \
+            -PaurawAbis=arm64-v8a \
             -PaurawVersionCode="$GITHUB_RUN_NUMBER"
 
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
@@ -441,7 +437,7 @@ jobs:
           grep -q "application-icon-" /tmp/auraw-apk-badging.txt
           grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' \
             android/app/src/main/AndroidManifest.xml
-          python3 scripts/dev.py verify-android-16kb "$APK"
+          cargo xtask verify-android-16kb "$APK"
           mkdir -p dist
           cp "$APK" dist/AuRaw-debug-arm64-v8a.apk
           "$ANDROID_HOME/build-tools/$AURAW_ANDROID_BUILD_TOOLS_VERSION/apksigner" \

@@ -50,7 +50,7 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check pytest -r requirements-regression.txt
 
       - name: Run repository validation checks
-        run: python3 scripts/dev.py check-all
+        run: cargo xtask check-all
 
       - name: Check formatting
         run: cargo fmt --all -- --check

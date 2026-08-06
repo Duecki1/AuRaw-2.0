@@ -17,7 +17,7 @@ Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
 
 ```sh
 export ANDROID_SDK_ROOT="/home/duecki/Android/Sdk"
-eval "$(python3 scripts/dev.py print-build-metadata --format shell)"
+eval "$(cargo xtask print-metadata --format shell)"
 export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$AURAW_ANDROID_NDK_VERSION"
 rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
@@ -35,18 +35,12 @@ Open the `android` directory in Android Studio and press Run, or build from the
 repository root:
 
 ```sh
-./gradlew assembleDebug
-```
-
-The default build produces `arm64-v8a` and `x86_64`. Restrict a build with a
-comma-separated property:
-
-```sh
-./gradlew assembleDebug -PaurawAbis=arm64-v8a
 ./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 ```
 
-The legacy single-value `-PaurawAbi=arm64-v8a` property remains accepted. The
+This builds both supported 64-bit ABIs. The legacy single-value `aurawAbi`
+property remains accepted for compatibility, but new documentation and CI use
+the comma-separated `aurawAbis` contract. The
 debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
 
 ### Native dependency graph
@@ -101,7 +95,7 @@ alignment.
 After building an APK, verify both ELF LOAD alignment and APK zip alignment:
 
 ```sh
-python3 scripts/dev.py verify-android-16kb android/app/build/outputs/apk/debug/app-debug.apk
+cargo xtask verify-android-16kb android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 The verifier checks every 64-bit `.so` with the pinned NDK's `llvm-objdump` and
