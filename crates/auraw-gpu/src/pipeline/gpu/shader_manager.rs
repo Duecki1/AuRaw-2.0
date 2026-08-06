@@ -1,0 +1,166 @@
+use super::{
+    work_shader_source, SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON,
+    SHADER_CREATIVE_EFFECTS, SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_NOISE,
+    SHADER_NOISE_CA_FINISH, SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS,
+    SHADER_SCENE_DETAIL_OVERRIDES, SHADER_TONE_COMMON, SHADER_TONEMAP,
+};
+use anyhow::{anyhow, Context, Result};
+use naga_oil::compose::{
+    ComposableModuleDescriptor, Composer, ComposerError, ImportDefinition, NagaModuleDescriptor,
+    ShaderDefValue, ShaderLanguage, ShaderType,
+};
+use std::{borrow::Cow, collections::HashMap};
+
+const SHADER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders/");
+const SCENE_ADJUSTMENTS_IMPORT: &str = "auraw::scene_adjustments";
+const SCENE_DETAIL_OVERRIDES_IMPORT: &str = "auraw::scene_detail_overrides";
+const SCENE_TOP_LEVEL_DEF: &str = "AURAW_SCENE_TOP_LEVEL";
+const SCENE_TOP_LEVEL_DIRECTIVE: &str = "#ifdef AURAW_SCENE_TOP_LEVEL";
+
+/// Owns AuRaw's reusable WGSL module registry and composes validated Naga IR
+/// for each concrete compute-shader source.
+pub(super) struct ShaderManager {
+    composer: Composer,
+}
+
+impl ShaderManager {
+    pub(super) fn new(work_format: wgpu::TextureFormat) -> Result<Self> {
+        let mut manager = Self {
+            // Composer::default() keeps Naga validation enabled. Do not replace
+            // this with Composer::non_validating(): accurate source spans and
+            // codespan diagnostics depend on validation being active.
+            composer: Composer::default(),
+        };
+
+        manager.register("auraw::common", "common.wgsl", SHADER_COMMON)?;
+        manager.register("auraw::color", "color.wgsl", SHADER_COLOR)?;
+        manager.register("auraw::noise", "noise.wgsl", SHADER_NOISE)?;
+        manager.register(
+            "auraw::raw_sampling",
+            "raw_sampling.wgsl",
+            SHADER_RAW_SAMPLING,
+        )?;
+        manager.register("auraw::profile", "profile.wgsl", SHADER_PROFILE)?;
+        manager.register(
+            "auraw::basic_adjustments",
+            "basic_adjustments.wgsl",
+            SHADER_BASIC_ADJUSTMENTS,
+        )?;
+        manager.register("auraw::tone_common", "tone_common.wgsl", SHADER_TONE_COMMON)?;
+        manager.register("auraw::tonemap", "tonemap.wgsl", SHADER_TONEMAP)?;
+        manager.register(
+            "auraw::noise_ca_finish",
+            "noise_ca_finish.wgsl",
+            SHADER_NOISE_CA_FINISH,
+        )?;
+        manager.register(
+            "auraw::detail_capture",
+            "detail_capture.wgsl",
+            SHADER_DETAIL_CAPTURE,
+        )?;
+
+        let scene_adjustments = work_shader_source(SHADER_SCENE_ADJUSTMENTS, work_format)
+            .context("specialize reusable scene-adjustments module")?;
+        manager.register(
+            SCENE_ADJUSTMENTS_IMPORT,
+            "scene_adjustments.wgsl",
+            scene_adjustments.as_ref(),
+        )?;
+        manager.register(
+            SCENE_DETAIL_OVERRIDES_IMPORT,
+            "scene_detail_overrides.wgsl",
+            SHADER_SCENE_DETAIL_OVERRIDES,
+        )?;
+        manager.register(
+            "auraw::detail_scale_space",
+            "detail_scale_space.wgsl",
+            SHADER_DETAIL_SCALE_SPACE,
+        )?;
+        manager.register(
+            "auraw::creative_effects",
+            "creative_effects.wgsl",
+            SHADER_CREATIVE_EFFECTS,
+        )?;
+
+        Ok(manager)
+    }
+
+    fn register(&mut self, import_path: &str, file_name: &str, source: &str) -> Result<()> {
+        let file_path = format!("{SHADER_ROOT}{file_name}");
+        let result = self
+            .composer
+            .add_composable_module(ComposableModuleDescriptor {
+                source,
+                file_path: &file_path,
+                language: ShaderLanguage::Wgsl,
+                as_name: Some(import_path.to_owned()),
+                ..Default::default()
+            });
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) => Err(self.composer_error("register WGSL module", error)),
+        }
+    }
+
+    pub(super) fn compose_naga_module(
+        &mut self,
+        source: &str,
+        file_name: &str,
+    ) -> Result<wgpu::naga::Module> {
+        let file_path = format!("{SHADER_ROOT}{file_name}");
+        let additional_imports = Self::entrypoint_additional_imports(source);
+        let mut shader_defs = HashMap::new();
+        if source.contains(SCENE_TOP_LEVEL_DIRECTIVE) {
+            shader_defs.insert(SCENE_TOP_LEVEL_DEF.to_owned(), ShaderDefValue::Bool(true));
+        }
+        let result = self.composer.make_naga_module(NagaModuleDescriptor {
+            source,
+            file_path: &file_path,
+            shader_type: ShaderType::Wgsl,
+            shader_defs,
+            additional_imports: &additional_imports,
+        });
+        match result {
+            Ok(module) => Ok(module),
+            Err(error) => Err(self.composer_error("compose WGSL entrypoint", error)),
+        }
+    }
+
+    pub(super) fn create_shader_module(
+        &mut self,
+        device: &wgpu::Device,
+        label: &'static str,
+        source: &str,
+        file_name: &str,
+    ) -> Result<wgpu::ShaderModule> {
+        let module = self
+            .compose_naga_module(source, file_name)
+            .with_context(|| format!("compose {label}"))?;
+        Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(module)),
+        }))
+    }
+
+    fn entrypoint_additional_imports(source: &str) -> Vec<ImportDefinition> {
+        let imports_scene_adjustments = source.lines().any(|line| {
+            line.trim_start()
+                .starts_with("#import auraw::scene_adjustments")
+        });
+        if imports_scene_adjustments {
+            vec![ImportDefinition {
+                import: SCENE_DETAIL_OVERRIDES_IMPORT.to_owned(),
+                // An empty item list requests no ordinary exports. naga_oil still
+                // retains override functions from an additional import, so this
+                // applies the adapter without exposing another WGSL namespace.
+                items: Vec::new(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn composer_error(&self, operation: &str, error: ComposerError) -> anyhow::Error {
+        anyhow!("{operation} failed:\n{}", error.emit_to_string(&self.composer))
+    }
+}

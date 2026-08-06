@@ -1,3 +1,6 @@
+#import auraw::common as Common
+#import auraw::raw_sampling as RawSampling
+
 // Grouped X-Trans seed, Markesteijn interpolation, directional analysis,
 // homogeneity, and accumulation passes. Bindings are unique across the module
 // so all entry points compile once while retaining their existing dispatch order.
@@ -16,7 +19,7 @@ struct XTransDirectionalEstimate {
 
 fn xtrans_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
+        && pos.x < i32(Common::camera_uniforms.width) && pos.y < i32(Common::camera_uniforms.height);
 }
 
 // Returns (sample value, distance). A negative distance means no sample was
@@ -29,8 +32,8 @@ fn xtrans_nearest_in_direction(
     for (var step = 1; step <= 6; step = step + 1) {
         let sample_pos = pos + direction * step;
         if !xtrans_in_bounds(sample_pos) { continue; }
-        if color_at(sample_pos) == channel {
-            return vec2<f32>(raw_cfa_at(sample_pos), f32(step));
+        if RawSampling::color_at(sample_pos) == channel {
+            return vec2<f32>(RawSampling::raw_cfa_at(sample_pos), f32(step));
         }
     }
     return vec2<f32>(0.0, -1.0);
@@ -89,22 +92,22 @@ fn xtrans_radial_fallback(pos: vec2<i32>, channel: u32) -> f32 {
             if dx == 0 && dy == 0 { continue; }
             let sample_pos = pos + vec2<i32>(dx, dy);
             if !xtrans_in_bounds(sample_pos) { continue; }
-            if color_at(sample_pos) != channel { continue; }
+            if RawSampling::color_at(sample_pos) != channel { continue; }
             let distance_squared = f32(dx * dx + dy * dy);
             let weight = 1.0 / max(distance_squared, 1.0);
-            sum = sum + raw_cfa_at(sample_pos) * weight;
+            sum = sum + RawSampling::raw_cfa_at(sample_pos) * weight;
             weight_sum = weight_sum + weight;
         }
     }
     if weight_sum > 0.0 {
         return sum / weight_sum;
     }
-    return raw_cfa_at(pos);
+    return RawSampling::raw_cfa_at(pos);
 }
 
 fn xtrans_seed_channel(pos: vec2<i32>, channel: u32) -> vec2<f32> {
-    if color_at(pos) == channel {
-        return vec2<f32>(raw_cfa_at(pos), 1.0);
+    if RawSampling::color_at(pos) == channel {
+        return vec2<f32>(RawSampling::raw_cfa_at(pos), 1.0);
     }
 
     var weighted_sum = 0.0;
@@ -139,7 +142,7 @@ fn xtrans_seed_channel(pos: vec2<i32>, channel: u32) -> vec2<f32> {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_seed(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let red = xtrans_seed_channel(pos, 0u);
     let green = xtrans_seed_channel(pos, 1u);
@@ -162,7 +165,7 @@ fn xtrans_seed(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(6) var markesteijn_write_13: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn mark13_load(pos: vec2<i32>) -> vec3<f32> {
-    return textureLoad(markesteijn_read_13, clamp_pos(pos), 0).rgb;
+    return textureLoad(markesteijn_read_13, Common::clamp_pos(pos), 0).rgb;
 }
 
 fn mark13_component(rgb: vec3<f32>, channel: u32) -> f32 {
@@ -185,11 +188,11 @@ fn mark13_green_bounds(pos: vec2<i32>) -> vec2<f32> {
     for (var dy = -3; dy <= 3; dy = dy + 1) {
         for (var dx = -3; dx <= 3; dx = dx + 1) {
             let q = pos + vec2<i32>(dx, dy);
-            if q.x < 0 || q.y < 0 || q.x >= i32(camera_uniforms.width) || q.y >= i32(camera_uniforms.height) {
+            if q.x < 0 || q.y < 0 || q.x >= i32(Common::camera_uniforms.width) || q.y >= i32(Common::camera_uniforms.height) {
                 continue;
             }
-            if color_at(q) == 1u {
-                let value = raw_cfa_at(q);
+            if RawSampling::color_at(q) == 1u {
+                let value = RawSampling::raw_cfa_at(q);
                 lo = min(lo, value);
                 hi = max(hi, value);
             }
@@ -224,7 +227,7 @@ fn mark13_green_axis(pos: vec2<i32>, axis: vec2<i32>, measured_channel: u32) -> 
 
 fn mark13_pass1(pos: vec2<i32>) -> vec3<f32> {
     let center = mark13_load(pos);
-    let measured_channel = color_at(pos);
+    let measured_channel = RawSampling::color_at(pos);
     if measured_channel == 1u { return center; }
 
     let h = mark13_green_axis(pos, vec2<i32>(1, 0), measured_channel);
@@ -243,7 +246,7 @@ fn mark13_pass1(pos: vec2<i32>) -> vec3<f32> {
     );
     var out = center;
     out.g = green;
-    out = mark13_set(out, measured_channel, raw_cfa_at(pos));
+    out = mark13_set(out, measured_channel, RawSampling::raw_cfa_at(pos));
     return out;
 }
 
@@ -276,24 +279,24 @@ fn mark13_refine_channel(pos: vec2<i32>, channel: u32) -> f32 {
 
 fn mark13_pass3(pos: vec2<i32>) -> vec3<f32> {
     let center = mark13_load(pos);
-    let measured_channel = color_at(pos);
+    let measured_channel = RawSampling::color_at(pos);
     var out = center;
     if measured_channel != 0u { out.r = center.g + mark13_refine_channel(pos, 0u); }
     if measured_channel != 2u { out.b = center.g + mark13_refine_channel(pos, 2u); }
-    out = mark13_set(out, measured_channel, raw_cfa_at(pos));
+    out = mark13_set(out, measured_channel, RawSampling::raw_cfa_at(pos));
     return out;
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_pass1(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(markesteijn_write_13, pos, vec4<f32>(mark13_pass1(pos), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_pass3(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(markesteijn_write_13, pos, vec4<f32>(mark13_pass3(pos), 1.0));
 }
@@ -306,7 +309,7 @@ fn xtrans_markesteijn_pass3(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(8) var markesteijn_write_2: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn mark2_load(pos: vec2<i32>) -> vec3<f32> {
-    return textureLoad(markesteijn_read_2, clamp_pos(pos), 0).rgb;
+    return textureLoad(markesteijn_read_2, Common::clamp_pos(pos), 0).rgb;
 }
 
 fn mark2_component(rgb: vec3<f32>, channel: u32) -> f32 {
@@ -384,16 +387,16 @@ fn mark2_chroma(pos: vec2<i32>, channel: u32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_pass2(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    let measured_channel = color_at(pos);
+    let measured_channel = RawSampling::color_at(pos);
     var out = mark2_load(pos);
     if measured_channel != 1u {
         out.g = mark2_recalculate_green(pos, measured_channel);
     }
     if measured_channel != 0u { out.r = mark2_chroma(pos, 0u); }
     if measured_channel != 2u { out.b = mark2_chroma(pos, 2u); }
-    out = mark2_set(out, measured_channel, raw_cfa_at(pos));
+    out = mark2_set(out, measured_channel, RawSampling::raw_cfa_at(pos));
     textureStore(markesteijn_write_2, pos, vec4<f32>(out, 1.0));
 }
 // END merged source: candidate refinement
@@ -409,17 +412,17 @@ const MARKESTEIJN3_MARGIN: i32 = 17;
 
 fn mark_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
+        && pos.x < i32(Common::camera_uniforms.width) && pos.y < i32(Common::camera_uniforms.height);
 }
 
 fn mark_has_margin(pos: vec2<i32>) -> bool {
     return pos.x >= MARKESTEIJN3_MARGIN && pos.y >= MARKESTEIJN3_MARGIN
-        && pos.x < i32(camera_uniforms.width) - MARKESTEIJN3_MARGIN
-        && pos.y < i32(camera_uniforms.height) - MARKESTEIJN3_MARGIN;
+        && pos.x < i32(Common::camera_uniforms.width) - MARKESTEIJN3_MARGIN
+        && pos.y < i32(Common::camera_uniforms.height) - MARKESTEIJN3_MARGIN;
 }
 
 fn mark_load(pos: vec2<i32>) -> vec3<f32> {
-    return textureLoad(markesteijn_base_read, clamp_pos(pos), 0).rgb;
+    return textureLoad(markesteijn_base_read, Common::clamp_pos(pos), 0).rgb;
 }
 
 fn mark_direction(index: u32) -> vec2<i32> {
@@ -503,7 +506,7 @@ fn mark_candidate(pos: vec2<i32>, index: u32) -> vec3<f32> {
     candidate = clamp(candidate, bounds[0] - 0.125 * span, bounds[1] + 0.125 * span);
 
     // Preserve the sensor sample exactly at every refinement and candidate.
-    let measured_channel = color_at(pos);
+    let measured_channel = RawSampling::color_at(pos);
     candidate = mark_set_component(
         candidate,
         measured_channel,
@@ -528,17 +531,17 @@ fn mark_border_rgb(pos: vec2<i32>) -> vec3<f32> {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
             let q = pos + vec2<i32>(dx, dy);
             if !mark_in_bounds(q) { continue; }
-            let channel = color_at(q);
+            let channel = RawSampling::color_at(q);
             let weight = 1.0 / (1.0 + f32(dx * dx + dy * dy));
-            let value = max(raw_cfa_at(q), 0.0);
+            let value = max(RawSampling::raw_cfa_at(q), 0.0);
             if channel == 0u { sum.r += value * weight; weight_sum.r += weight; }
             if channel == 1u { sum.g += value * weight; weight_sum.g += weight; }
             if channel == 2u { sum.b += value * weight; weight_sum.b += weight; }
         }
     }
     var rgb = sum / max(weight_sum, vec3<f32>(1e-6));
-    let measured_channel = color_at(pos);
-    rgb = mark_set_component(rgb, measured_channel, raw_cfa_at(pos));
+    let measured_channel = RawSampling::color_at(pos);
+    rgb = mark_set_component(rgb, measured_channel, RawSampling::raw_cfa_at(pos));
     return rgb;
 }
 // END merged source: shared candidate sampling helpers
@@ -561,7 +564,7 @@ fn mark_derivative(pos: vec2<i32>, index: u32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_derivatives(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     if !mark_has_margin(pos) {
         textureStore(mark_drv_0_3_write, pos, vec4<f32>(0.0));
@@ -595,7 +598,7 @@ fn xtrans_markesteijn_derivatives(@builtin(global_invocation_id) gid: vec3<u32>)
 const MARK_HOMO_MARGIN: i32 = 15;
 
 fn mark_drv(pos: vec2<i32>, index: u32) -> f32 {
-    let p = clamp_pos(pos);
+    let p = Common::clamp_pos(pos);
     if index < 4u {
         return textureLoad(mark_drv_0_3_read, p, 0)[index];
     }
@@ -627,11 +630,11 @@ fn mark_local_homogeneity(pos: vec2<i32>, index: u32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_homogeneity(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let valid = pos.x >= MARK_HOMO_MARGIN && pos.y >= MARK_HOMO_MARGIN
-        && pos.x < i32(camera_uniforms.width) - MARK_HOMO_MARGIN
-        && pos.y < i32(camera_uniforms.height) - MARK_HOMO_MARGIN;
+        && pos.x < i32(Common::camera_uniforms.width) - MARK_HOMO_MARGIN
+        && pos.y < i32(Common::camera_uniforms.height) - MARK_HOMO_MARGIN;
     if !valid {
         textureStore(mark_homo_0_3_write, pos, vec4<f32>(0.0));
         textureStore(mark_homo_4_7_write, pos, vec4<f32>(0.0));
@@ -661,7 +664,7 @@ fn xtrans_markesteijn_homogeneity(@builtin(global_invocation_id) gid: vec3<u32>)
 @group(0) @binding(26) var mark_high_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn mark_homo(pos: vec2<i32>, index: u32) -> f32 {
-    let p = clamp_pos(pos);
+    let p = Common::clamp_pos(pos);
     if index < 4u {
         return textureLoad(mark_homo_0_3_read, p, 0)[index];
     }
@@ -680,7 +683,7 @@ fn mark_homo_sum5(pos: vec2<i32>, index: u32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_markesteijn_accumulate(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     if !mark_has_margin(pos) {
         textureStore(mark_high_write, pos, vec4<f32>(mark_border_rgb(pos), 1.0));
@@ -714,7 +717,7 @@ fn xtrans_markesteijn_accumulate(@builtin(global_invocation_id) gid: vec3<u32>) 
         }
     }
     var rgb = select(mark_load(pos), sum / max(count, 1.0), count > 0.0);
-    let measured_channel = color_at(pos);
+    let measured_channel = RawSampling::color_at(pos);
     rgb = mark_set_component(
         rgb,
         measured_channel,

@@ -1,3 +1,8 @@
+#import auraw::common as Common
+#import auraw::raw_sampling as RawSampling
+#import auraw::noise as Noise
+#import auraw::noise_ca_finish as NoiseCaFinish
+
 // Bayer RCD stage 4. The 9-pixel exterior is deliberately produced by PPG,
 // matching darktable's RCD margin policy; RCD samples never rely on clamped
 // coordinates. The same reference result feeds optional FDC and dual modes.
@@ -10,35 +15,35 @@ const RCD_MARGIN: i32 = 9;
 
 fn demosaic_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
+        && pos.x < i32(Common::camera_uniforms.width) && pos.y < i32(Common::camera_uniforms.height);
 }
 
 fn rcd_has_reference_margin(pos: vec2<i32>) -> bool {
     return pos.x >= RCD_MARGIN && pos.y >= RCD_MARGIN
-        && pos.x < i32(camera_uniforms.width) - RCD_MARGIN
-        && pos.y < i32(camera_uniforms.height) - RCD_MARGIN;
+        && pos.x < i32(Common::camera_uniforms.width) - RCD_MARGIN
+        && pos.y < i32(Common::camera_uniforms.height) - RCD_MARGIN;
 }
 
 fn green_plane_at(pos: vec2<i32>) -> f32 {
-    return textureLoad(tex2_read, clamp_pos(pos), 0).x;
+    return textureLoad(tex2_read, Common::clamp_pos(pos), 0).x;
 }
 
 // PPG fallback used for the complete exterior margin and for small images.
 // It preserves measured samples and only clamps where the border algorithm
 // itself requires unavailable sensor samples.
 fn ppg_green_at(pos: vec2<i32>) -> f32 {
-    let p = clamp_pos(pos);
-    if color_at(p) == 1u { return raw_cfa_at(p); }
+    let p = Common::clamp_pos(pos);
+    if RawSampling::color_at(p) == 1u { return RawSampling::raw_cfa_at(p); }
 
-    let c = raw_cfa_at(p);
-    let gm = raw_cfa_at(p + vec2<i32>(-1, 0));
-    let gp = raw_cfa_at(p + vec2<i32>( 1, 0));
-    let gv_m = raw_cfa_at(p + vec2<i32>(0, -1));
-    let gv_p = raw_cfa_at(p + vec2<i32>(0,  1));
-    let cm2 = raw_cfa_at(p + vec2<i32>(-2, 0));
-    let cp2 = raw_cfa_at(p + vec2<i32>( 2, 0));
-    let cv_m2 = raw_cfa_at(p + vec2<i32>(0, -2));
-    let cv_p2 = raw_cfa_at(p + vec2<i32>(0,  2));
+    let c = RawSampling::raw_cfa_at(p);
+    let gm = RawSampling::raw_cfa_at(p + vec2<i32>(-1, 0));
+    let gp = RawSampling::raw_cfa_at(p + vec2<i32>( 1, 0));
+    let gv_m = RawSampling::raw_cfa_at(p + vec2<i32>(0, -1));
+    let gv_p = RawSampling::raw_cfa_at(p + vec2<i32>(0,  1));
+    let cm2 = RawSampling::raw_cfa_at(p + vec2<i32>(-2, 0));
+    let cp2 = RawSampling::raw_cfa_at(p + vec2<i32>( 2, 0));
+    let cv_m2 = RawSampling::raw_cfa_at(p + vec2<i32>(0, -2));
+    let cv_p2 = RawSampling::raw_cfa_at(p + vec2<i32>(0,  2));
 
     let dh = abs(cm2 - cp2) + abs(gm - gp);
     let dv = abs(cv_m2 - cv_p2) + abs(gv_m - gv_p);
@@ -52,51 +57,51 @@ fn ppg_green_at(pos: vec2<i32>) -> f32 {
 }
 
 fn ppg_difference_pair(pos: vec2<i32>, channel: u32, axis: vec2<i32>) -> f32 {
-    let a = clamp_pos(pos - axis);
-    let b = clamp_pos(pos + axis);
+    let a = Common::clamp_pos(pos - axis);
+    let b = Common::clamp_pos(pos + axis);
     var sum = 0.0;
     var count = 0.0;
-    if color_at(a) == channel {
-        sum += raw_cfa_at(a) - ppg_green_at(a);
+    if RawSampling::color_at(a) == channel {
+        sum += RawSampling::raw_cfa_at(a) - ppg_green_at(a);
         count += 1.0;
     }
-    if color_at(b) == channel {
-        sum += raw_cfa_at(b) - ppg_green_at(b);
+    if RawSampling::color_at(b) == channel {
+        sum += RawSampling::raw_cfa_at(b) - ppg_green_at(b);
         count += 1.0;
     }
     return sum / max(count, 1.0);
 }
 
 fn ppg_rgb_at(pos: vec2<i32>) -> vec3<f32> {
-    let p = clamp_pos(pos);
-    let cc = color_at(p);
+    let p = Common::clamp_pos(pos);
+    let cc = RawSampling::color_at(p);
     let g = ppg_green_at(p);
     var r = g;
     var b = g;
     if cc == 0u {
-        r = raw_cfa_at(p);
+        r = RawSampling::raw_cfa_at(p);
         var d = 0.0;
         for (var sy = -1; sy <= 1; sy = sy + 2) {
             for (var sx = -1; sx <= 1; sx = sx + 2) {
-                let q = clamp_pos(p + vec2<i32>(sx, sy));
-                d += raw_cfa_at(q) - ppg_green_at(q);
+                let q = Common::clamp_pos(p + vec2<i32>(sx, sy));
+                d += RawSampling::raw_cfa_at(q) - ppg_green_at(q);
             }
         }
         b = g + 0.25 * d;
     } else if cc == 2u {
-        b = raw_cfa_at(p);
+        b = RawSampling::raw_cfa_at(p);
         var d = 0.0;
         for (var sy = -1; sy <= 1; sy = sy + 2) {
             for (var sx = -1; sx <= 1; sx = sx + 2) {
-                let q = clamp_pos(p + vec2<i32>(sx, sy));
-                d += raw_cfa_at(q) - ppg_green_at(q);
+                let q = Common::clamp_pos(p + vec2<i32>(sx, sy));
+                d += RawSampling::raw_cfa_at(q) - ppg_green_at(q);
             }
         }
         r = g + 0.25 * d;
     } else {
         let horizontal = vec2<i32>(1, 0);
         let vertical = vec2<i32>(0, 1);
-        if color_at(clamp_pos(p + horizontal)) == 0u {
+        if RawSampling::color_at(Common::clamp_pos(p + horizontal)) == 0u {
             r = g + ppg_difference_pair(p, 0u, horizontal);
             b = g + ppg_difference_pair(p, 2u, vertical);
         } else {
@@ -167,7 +172,7 @@ fn rcd_green_channel(pos: vec2<i32>, channel: u32) -> f32 {
 
 fn rcd_reference_at(pos: vec2<i32>) -> vec3<f32> {
     if !rcd_has_reference_margin(pos) { return ppg_rgb_at(pos); }
-    let cc = color_at(pos);
+    let cc = RawSampling::color_at(pos);
     if cc != 1u { return textureLoad(tex3_read, pos, 0).rgb; }
     let g = green_plane_at(pos);
     let r = rcd_green_channel(pos, 0u);
@@ -215,10 +220,10 @@ fn bayer_reference_false_color_guard(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32
     // color and rises only when the center chroma disagrees strongly with all
     // four immediate neighbors.
     let uv0 = bayer_uv(rgb);
-    let uvn = bayer_uv(rcd_reference_at(clamp_pos(pos + vec2<i32>(0, -1))));
-    let uvs = bayer_uv(rcd_reference_at(clamp_pos(pos + vec2<i32>(0,  1))));
-    let uvw = bayer_uv(rcd_reference_at(clamp_pos(pos + vec2<i32>(-1, 0))));
-    let uve = bayer_uv(rcd_reference_at(clamp_pos(pos + vec2<i32>( 1, 0))));
+    let uvn = bayer_uv(rcd_reference_at(Common::clamp_pos(pos + vec2<i32>(0, -1))));
+    let uvs = bayer_uv(rcd_reference_at(Common::clamp_pos(pos + vec2<i32>(0,  1))));
+    let uvw = bayer_uv(rcd_reference_at(Common::clamp_pos(pos + vec2<i32>(-1, 0))));
+    let uve = bayer_uv(rcd_reference_at(Common::clamp_pos(pos + vec2<i32>( 1, 0))));
     let median = vec2<f32>(
         bayer_median5(uv0.x, uvn.x, uvs.x, uvw.x, uve.x),
         bayer_median5(uv0.y, uvn.y, uvs.y, uvw.y, uve.y),
@@ -270,16 +275,16 @@ fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
         - dot(n + s + w + e, vec3<f32>(0.2627, 0.6780, 0.0593)));
     let spectral_energy = max(length(carrier_alias) - 0.25 * luma_high, 0.0);
     let reject = smoothstep(0.0015, 0.030, spectral_energy)
-        * clamp(camera_uniforms.frequency_chroma, 0.0, 1.0);
+        * clamp(Common::camera_uniforms.frequency_chroma, 0.0, 1.0);
     return bayer_from_yuv(center_signal, center_opponents - reject * carrier_alias);
 }
 
 fn dual_low_at(pos: vec2<i32>) -> vec4<f32> {
-    return textureLoad(dual_low_read, clamp_pos(pos), 0);
+    return textureLoad(dual_low_read, Common::clamp_pos(pos), 0);
 }
 
 fn reference_luma_at(pos: vec2<i32>) -> f32 {
-    return dot(rcd_reference_at(clamp_pos(pos)), vec3<f32>(0.25, 0.50, 0.25));
+    return dot(rcd_reference_at(Common::clamp_pos(pos)), vec3<f32>(0.25, 0.50, 0.25));
 }
 
 fn scharr_detail_at(pos: vec2<i32>) -> f32 {
@@ -309,18 +314,18 @@ fn dual_high_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32
         let wy = gaussian5_weight(dy);
         for (var dx = -2; dx <= 2; dx = dx + 1) {
             detail += wy * gaussian5_weight(dx)
-                * scharr_detail_at(clamp_pos(pos + vec2<i32>(dx, dy)));
+                * scharr_detail_at(Common::clamp_pos(pos + vec2<i32>(dx, dy)));
         }
     }
     detail /= 256.0;
 
-    let threshold = 0.005 * pow(max(camera_uniforms.dual_threshold, 0.0), 1.1);
+    let threshold = 0.005 * pow(max(Common::camera_uniforms.dual_threshold, 0.0), 1.1);
     if threshold <= 1e-7 { return 1.0; }
 
     // Do not mistake sensor noise for real image detail. The low branch stores
     // its own support/coherence confidence in alpha, so weak low estimates
     // automatically fall back to RCD instead of smearing edges or borders.
-    let variance = nr_component_variance(0.5 * (reference + low.rgb));
+    let variance = Noise::nr_component_variance(0.5 * (reference + low.rgb));
     let noise_floor = 2.25 * sqrt(max(variance.x, 1e-10));
     let detail_signal = max(detail - noise_floor, 0.0);
     let edge_confidence = smoothstep(
@@ -338,29 +343,27 @@ fn dual_high_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32
     return clamp(1.0 - low_confidence * (1.0 - high_confidence), 0.0, 1.0);
 }
 
-// Adapter used by the build-time shared noise/CA include. Bayer's reference
+// Adapter used by the reusable noise/CA composition module. Bayer's reference
 // path requires explicit clamping before the RCD/PPG border fallback.
-fn finish_reference_at(pos: vec2<i32>) -> vec3<f32> {
-    return rcd_reference_at(clamp_pos(pos));
+override fn NoiseCaFinish::finish_reference_at(pos: vec2<i32>) -> vec3<f32> {
+    return rcd_reference_at(Common::clamp_pos(pos));
 }
-
-// @include "noise_ca_finish.wgsl"
 
 @compute @workgroup_size(8, 8, 1)
 fn bayer_rcd_output(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let reference = rcd_reference_at(pos);
     var camera_rgb = reference;
-    if camera_uniforms.demosaic_mode >= 1.5 {
+    if Common::camera_uniforms.demosaic_mode >= 1.5 {
         let low = dual_low_at(pos);
         camera_rgb = mix(low.rgb, reference, dual_high_weight(pos, reference, low));
-    } else if camera_uniforms.demosaic_mode >= 0.5 {
+    } else if Common::camera_uniforms.demosaic_mode >= 0.5 {
         camera_rgb = frequency_chroma_at(pos, reference);
     } else {
         camera_rgb = bayer_reference_false_color_guard(pos, reference);
     }
-    camera_rgb = finish_apply_sensor_denoise(pos, camera_rgb);
-    camera_rgb = finish_apply_ca(pos, camera_rgb);
+    camera_rgb = NoiseCaFinish::finish_apply_sensor_denoise(pos, camera_rgb);
+    camera_rgb = NoiseCaFinish::finish_apply_ca(pos, camera_rgb);
     textureStore(scene_write, pos, vec4<f32>(camera_rgb, 1.0));
 }

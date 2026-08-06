@@ -19,7 +19,8 @@ image.workspace = true
 log.workspace = true
 memmap2.workspace = true
 png.workspace = true
-wgpu.workspace = true
+wgpu = { workspace = true, features = ["naga-ir"] }
+naga_oil.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 auraw-ffi.workspace = true

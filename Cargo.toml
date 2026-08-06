@@ -56,6 +56,7 @@ egui-phosphor = "0.13"
 egui-wgpu = "0.35"
 wgpu = "29"
 naga = { version = "29", features = ["wgsl-in"] }
+naga_oil = { version = "=0.22.0", default-features = false }
 
 env_logger = { version = "=0.11.11", default-features = false, features = ["humantime", "regex"] }
 rfd = "=0.17.2"

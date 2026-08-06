@@ -1,3 +1,6 @@
+#import auraw::common as Common
+#import auraw::noise as Noise
+
 // Dense post-demosaic colour-noise reduction.
 //
 // The old finishing pass averaged isolated samples on sparse radius rings.
@@ -11,7 +14,7 @@
 @group(0) @binding(10) var color_denoise_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
 fn color_denoise_at(pos: vec2<i32>) -> vec3<f32> {
-    let maximum = vec2<i32>(i32(camera_uniforms.width) - 1, i32(camera_uniforms.height) - 1);
+    let maximum = vec2<i32>(i32(Common::camera_uniforms.width) - 1, i32(Common::camera_uniforms.height) - 1);
     return textureLoad(color_denoise_read, clamp(pos, vec2<i32>(0), maximum), 0).rgb;
 }
 
@@ -36,8 +39,8 @@ fn color_denoise_scale_gain(scale: i32) -> f32 {
 }
 
 fn color_denoise_enabled(scale: i32) -> bool {
-    if camera_uniforms.chroma_denoise <= 1e-6 { return false; }
-    let quality = camera_uniforms.noise_options.z;
+    if Common::camera_uniforms.chroma_denoise <= 1e-6 { return false; }
+    let quality = Common::camera_uniforms.noise_options.z;
     if quality < 0.5 { return scale == 0; }
     if quality < 1.5 { return scale <= 3; }
     return true;
@@ -47,10 +50,10 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let center = color_denoise_at(pos);
     if !color_denoise_enabled(scale) { return center; }
 
-    let center_signal = nr_signal(center);
-    let center_variance = nr_component_variance(center);
-    let detail = clamp(camera_uniforms.noise_options.y, 0.0, 1.0);
-    let requested = clamp(camera_uniforms.chroma_denoise, 0.0, 1.0);
+    let center_signal = Noise::nr_signal(center);
+    let center_variance = Noise::nr_component_variance(center);
+    let detail = clamp(Common::camera_uniforms.noise_options.y, 0.0, 1.0);
+    let requested = clamp(Common::camera_uniforms.chroma_denoise, 0.0, 1.0);
     // Each accepted low pass reduces the noise presented to the next scale.
     // Using the original sensor variance forever makes a real boundary look
     // progressively less significant after the first shrinkage pass, which is
@@ -70,8 +73,8 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let signal_guide_sigma = mix(10.0, 5.5, detail);
     let opponent_noise_deadzone = mix(12.0, 6.0, detail);
     let opponent_edge_slope = mix(0.28, 0.52, detail);
-    let center_opponents = nr_opponents(center);
-    let center_opponent_variance = nr_opponent_variance(center);
+    let center_opponents = Noise::nr_opponents(center);
+    let center_opponent_variance = Noise::nr_opponent_variance(center);
     // The two broadest High-quality scales use a 3x3 binomial kernel. Their
     // large spacing supplies Lightroom-like color smoothness without paying
     // for 25 samples per pixel or extending support beyond the export halo.
@@ -83,8 +86,8 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     for (var y = -extent; y <= extent; y = y + 1) {
         for (var x = -extent; x <= extent; x = x + 1) {
             let sample = color_denoise_at(pos + vec2<i32>(x, y) * radius);
-            let sample_signal = nr_signal(sample);
-            let sample_variance = nr_component_variance(sample);
+            let sample_signal = Noise::nr_signal(sample);
+            let sample_variance = Noise::nr_component_variance(sample);
             let signal_delta = sample_signal - center_signal;
             let signal_variance = center_variance.x + sample_variance.x;
             let signal_distance = signal_delta * signal_delta
@@ -95,10 +98,10 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
                         * signal_guide_sigma,
                     1e-10,
                 );
-            let sample_opponents = nr_opponents(sample);
+            let sample_opponents = Noise::nr_opponents(sample);
             let opponent_delta = sample_opponents - center_opponents;
             let opponent_variance =
-                center_opponent_variance + nr_opponent_variance(sample);
+                center_opponent_variance + Noise::nr_opponent_variance(sample);
             let normalized_opponent_distance = dot(
                 opponent_delta * opponent_delta
                     / max(
@@ -123,7 +126,7 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let low_opponents = opponent_sum / max(weight_sum, 1e-6);
     let opponent_detail = center_opponents - low_opponents;
     let opponent_sigma = sqrt(
-        nr_opponent_variance(center) * guide_variance_scale,
+        Noise::nr_opponent_variance(center) * guide_variance_scale,
     );
 
     // A soft threshold is the key distinction from a blur: noise-sized colour
@@ -163,47 +166,47 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
         max(feature_retention, saturated_feature),
     );
     let filtered_opponents = low_opponents + opponent_detail * retained;
-    return nr_from_signal_opponents(center_signal, filtered_opponents);
+    return Noise::nr_from_signal_opponents(center_signal, filtered_opponents);
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_1(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 1, 0), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_2(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 2, 1), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_4(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 4, 2), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_8(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 8, 3), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_16(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 16, 4), 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn color_denoise_scale_32(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     textureStore(color_denoise_write, pos, vec4<f32>(color_denoise_apply(pos, 32, 5), 1.0));
 }

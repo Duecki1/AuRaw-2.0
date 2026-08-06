@@ -1,3 +1,10 @@
+#import auraw::common as Common
+#import auraw::color as Color
+#import auraw::basic_adjustments as BasicAdjustments
+#import auraw::scene_adjustments as SceneAdjustments
+#import auraw::tone_common as ToneCommon
+#import auraw::tonemap as Tonemap
+
 // Stage 2: creative detail scale-space.
 //
 // Texture and Clarity operate on adjacent, non-overlapping Laplacian bands:
@@ -9,22 +16,22 @@
 fn creative_fine_base_ev(pos: vec2<i32>) -> f32 {
     // Start outside the capture-acutance footprint. The 5x5 bilateral base
     // follows subject-space scaling and rejects hard-edge cross-talk.
-    let step = presence_step(1.65, 5);
-    return bilateral_log_luminance(pos, 2, step, 10.5);
+    let step = SceneAdjustments::presence_step(1.65, 5);
+    return SceneAdjustments::bilateral_log_luminance(pos, 2, step, 10.5);
 }
 
 fn creative_broad_base_ev(pos: vec2<i32>) -> f32 {
-    let clarity_reference = select(4.5, 5.5, camera_uniforms.tone_guide_radius > 3.5);
-    let step = presence_step(clarity_reference, 14);
-    return atrous_log_luminance(pos, step, 1.05);
+    let clarity_reference = select(4.5, 5.5, Common::camera_uniforms.tone_guide_radius > 3.5);
+    let step = SceneAdjustments::presence_step(clarity_reference, 14);
+    return SceneAdjustments::atrous_log_luminance(pos, step, 1.05);
 }
 
 fn creative_edge_guard(pos: vec2<i32>) -> f32 {
-    let step = presence_step(1.0, 3);
-    let left = log_luminance(adjustment_base_at(pos + vec2<i32>(-step, 0)));
-    let right = log_luminance(adjustment_base_at(pos + vec2<i32>(step, 0)));
-    let up = log_luminance(adjustment_base_at(pos + vec2<i32>(0, -step)));
-    let down = log_luminance(adjustment_base_at(pos + vec2<i32>(0, step)));
+    let step = SceneAdjustments::presence_step(1.0, 3);
+    let left = SceneAdjustments::log_luminance(SceneAdjustments::adjustment_base_at(pos + vec2<i32>(-step, 0)));
+    let right = SceneAdjustments::log_luminance(SceneAdjustments::adjustment_base_at(pos + vec2<i32>(step, 0)));
+    let up = SceneAdjustments::log_luminance(SceneAdjustments::adjustment_base_at(pos + vec2<i32>(0, -step)));
+    let down = SceneAdjustments::log_luminance(SceneAdjustments::adjustment_base_at(pos + vec2<i32>(0, step)));
     let gradient = length(vec2<f32>(right - left, down - up));
     // Preserve local contrast near ordinary texture while backing away from
     // high-contrast silhouettes where wide-band boosts would create halos.
@@ -37,13 +44,13 @@ fn apply_texture_and_clarity_values(
     texture_value: f32,
     clarity_value: f32,
 ) -> vec3<f32> {
-    let texture = perceptual_control(texture_value);
-    let clarity = perceptual_control(clarity_value);
+    let texture = BasicAdjustments::perceptual_control(texture_value);
+    let clarity = BasicAdjustments::perceptual_control(clarity_value);
     if abs(texture) < 1e-6 && abs(clarity) < 1e-6 {
         return rgb;
     }
 
-    let center_ev = log_luminance(rgb);
+    let center_ev = SceneAdjustments::log_luminance(rgb);
     let fine_base_ev = creative_fine_base_ev(pos);
     var broad_base_ev = fine_base_ev;
     if abs(clarity) >= 1e-6 {
@@ -58,16 +65,16 @@ fn apply_texture_and_clarity_values(
     let signal_gate = smoothstep(-7.4, -2.35, center_ev);
     let shadow_noise = 1.0 - signal_gate;
     let texture_threshold = mix(0.028, 0.006, signal_gate) * mix(1.0, 1.65, shadow_noise);
-    let positive_texture = soft_detail_threshold(texture_band_ev, texture_threshold);
+    let positive_texture = SceneAdjustments::soft_detail_threshold(texture_band_ev, texture_threshold);
     var negative_texture_base_ev = fine_base_ev;
     if texture < 0.0 {
         // Lightroom's negative endpoint smooths a wider surface band than its
         // positive microcontrast control. The lower range weight follows
         // surface variation while continuing to reject hard silhouettes.
-        negative_texture_base_ev = bilateral_log_luminance(
+        negative_texture_base_ev = SceneAdjustments::bilateral_log_luminance(
             pos,
             3,
-            presence_step(1.65, 5),
+            SceneAdjustments::presence_step(1.65, 5),
             3.0,
         );
     }
@@ -75,16 +82,16 @@ fn apply_texture_and_clarity_values(
 
     let midtone_gate = smoothstep(-7.0, -2.25, center_ev)
         * (1.0 - 0.74 * smoothstep(0.9, 3.6, center_ev));
-    let selected_clarity = soft_detail_threshold(clarity_band_ev, 0.0065);
+    let selected_clarity = SceneAdjustments::soft_detail_threshold(clarity_band_ev, 0.0065);
     let halo_guard = creative_edge_guard(pos);
-    let percentiles = tone_percentiles();
-    let center_relative_ev = center_ev - log2(SCENE_MIDDLE_GREY);
-    let clarity_scene_gate = tone_smoothstep(
+    let percentiles = Tonemap::tone_percentiles();
+    let center_relative_ev = center_ev - log2(ToneCommon::SCENE_MIDDLE_GREY);
+    let clarity_scene_gate = ToneCommon::tone_smoothstep(
         1.0,
         2.5,
         percentiles.p995 - percentiles.p005,
     );
-    let clarity_tone_position = tone_smoothstep(
+    let clarity_tone_position = ToneCommon::tone_smoothstep(
         percentiles.p05 + 0.50,
         percentiles.p50 - 0.10,
         center_relative_ev,
@@ -119,5 +126,5 @@ fn apply_texture_and_clarity_values(
     // Scalar detail gain preserves RGB ratios. Keep already-nonnegative
     // camera-characterized Rec.2020 values exact; invoke the perceptual
     // projector only when the operation creates a negative component.
-    return gamut_project_nonnegative_rec2020(rgb * exp2(delta_ev));
+    return Color::gamut_project_nonnegative_rec2020(rgb * exp2(delta_ev));
 }

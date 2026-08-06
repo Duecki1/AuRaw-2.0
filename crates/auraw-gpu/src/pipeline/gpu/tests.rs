@@ -1,6 +1,7 @@
 use super::{
     canonicalize_green_noise, color_grade_hue_turns, composite_inpaint_rgba16f,
     explicit_render_graph_contracts_are_contiguous, pack_local_point_curve, processing_work_format,
+    shader_manager::ShaderManager,
     shader_highlight_method, work_shader_source, ProcessingQuality, COLOR_DENOISE_ENTRY_POINTS,
     SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
     SHADER_COLOR_DENOISE, SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS,
@@ -16,13 +17,32 @@ fn gpu_resource_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .expect("GPU resource test lock poisoned")
 }
 
-fn shader_module(name: &str, source: &str) -> naga::Module {
-    naga::front::wgsl::parse_str(source)
-        .unwrap_or_else(|error| panic!("{name} did not parse: {error}"))
+fn shader_module_with_format(
+    name: &str,
+    source: &str,
+    work_format: wgpu::TextureFormat,
+) -> naga::Module {
+    let mut manager = ShaderManager::new(work_format)
+        .unwrap_or_else(|error| panic!("{name} module registry failed:\n{error:#}"));
+    manager
+        .compose_naga_module(source, "shader_composition_test.wgsl")
+        .unwrap_or_else(|error| panic!("{name} did not compose:\n{error:#}"))
 }
 
-fn validated_shader_module(name: &str, source: &str) -> naga::Module {
-    let module = shader_module(name, source);
+fn shader_module(name: &str, source: &str) -> naga::Module {
+    shader_module_with_format(
+        name,
+        source,
+        processing_work_format(ProcessingQuality::Preview),
+    )
+}
+
+fn validated_shader_module_with_format(
+    name: &str,
+    source: &str,
+    work_format: wgpu::TextureFormat,
+) -> naga::Module {
+    let module = shader_module_with_format(name, source, work_format);
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
@@ -32,15 +52,32 @@ fn validated_shader_module(name: &str, source: &str) -> naga::Module {
     module
 }
 
+fn validated_shader_module(name: &str, source: &str) -> naga::Module {
+    validated_shader_module_with_format(
+        name,
+        source,
+        processing_work_format(ProcessingQuality::Preview),
+    )
+}
+
+fn naga_name_matches(actual: &str, expected: &str) -> bool {
+    actual == expected || actual.rsplit("::").next() == Some(expected)
+}
+
+fn unqualified_naga_name(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
 fn has_function(module: &naga::Module, function_name: &str) -> bool {
-    module
-        .functions
+    module.functions.iter().any(|(_, function)| {
+        function
+            .name
+            .as_deref()
+            .is_some_and(|name| naga_name_matches(name, function_name))
+    }) || module
+        .entry_points
         .iter()
-        .any(|(_, function)| function.name.as_deref() == Some(function_name))
-        || module
-            .entry_points
-            .iter()
-            .any(|entry| entry.name == function_name)
+        .any(|entry| entry.name == function_name)
 }
 
 fn named_i32_constant(module: &naga::Module, constant_name: &str) -> i32 {
@@ -131,7 +168,9 @@ fn append_direct_call_names(module: &naga::Module, block: &naga::Block, calls: &
                 calls.push(
                     module.functions[*function]
                         .name
-                        .clone()
+                        .as_deref()
+                        .map(unqualified_naga_name)
+                        .map(str::to_owned)
                         .unwrap_or_else(|| format!("<anonymous {:?}>", function)),
                 );
             }
@@ -152,21 +191,44 @@ fn entry_point_call_names(module: &naga::Module, entry_point: &str) -> Vec<Strin
 }
 
 fn function_call_names(module: &naga::Module, function_name: &str) -> Vec<String> {
-    let (_, function) = module
+    let matching_functions: Vec<_> = module
         .functions
         .iter()
-        .find(|(_, function)| function.name.as_deref() == Some(function_name))
-        .unwrap_or_else(|| panic!("missing WGSL function {function_name}"));
-    let mut calls = Vec::new();
-    append_direct_call_names(module, &function.body, &mut calls);
-    calls
+        .filter(|(_, function)| {
+            function
+                .name
+                .as_deref()
+                .is_some_and(|name| naga_name_matches(name, function_name))
+        })
+        .collect();
+    assert!(
+        !matching_functions.is_empty(),
+        "missing WGSL function {function_name}"
+    );
+
+    // A virtual function and its override may both retain diagnostic names in
+    // the composed IR. The concrete override has the meaningful call body.
+    matching_functions
+        .into_iter()
+        .map(|(_, function)| {
+            let mut calls = Vec::new();
+            append_direct_call_names(module, &function.body, &mut calls);
+            calls
+        })
+        .max_by_key(Vec::len)
+        .unwrap_or_default()
 }
 
 fn function_name_count(module: &naga::Module, function_name: &str) -> usize {
     module
         .functions
         .iter()
-        .filter(|(_, function)| function.name.as_deref() == Some(function_name))
+        .filter(|(_, function)| {
+            function
+                .name
+                .as_deref()
+                .is_some_and(|name| naga_name_matches(name, function_name))
+        })
         .count()
 }
 
@@ -347,23 +409,19 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
         ),
         (
             "32-bit creative effects",
-            work_shader_source(
-                SHADER_CREATIVE_EFFECTS,
-                processing_work_format(ProcessingQuality::High),
-            )
-            .expect("specialize high-quality shader"),
+            std::borrow::Cow::Borrowed(SHADER_CREATIVE_EFFECTS),
         ),
         (
             "32-bit view transform",
-            work_shader_source(
-                SHADER_VIEW_TRANSFORM,
-                processing_work_format(ProcessingQuality::High),
-            )
-            .expect("specialize high-quality shader"),
+            std::borrow::Cow::Borrowed(SHADER_VIEW_TRANSFORM),
         ),
     ] {
         assert_eq!(processing_work_format(ProcessingQuality::High), wgpu::TextureFormat::Rgba32Float);
-        validated_shader_module(name, source.as_ref());
+        validated_shader_module_with_format(
+            name,
+            source.as_ref(),
+            processing_work_format(ProcessingQuality::High),
+        );
     }
 }
 
