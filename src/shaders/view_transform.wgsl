@@ -7,6 +7,32 @@
 // hues in perceptual OKLab, stabilizes only the selector with an edge-aware
 // neighbourhood, and applies luminance as a scene-linear exposure gain.
 
+// Perceptual hue-selector anchors, expressed in turns on the OKLab a/b plane:
+// hue = wrap(atan2(b, a) / (2*pi), 0, 1). The values were obtained by converting
+// fully saturated sRGB primary/secondary swatches plus the orange and purple
+// intermediates at HSL 0, 30, 60, 120, 180, 240, 270, and 300 degrees to
+// OKLab. They therefore do not equal the source HSL angles: OKLab deliberately
+// redistributes hue around its perceptual plane. The paired bell widths are
+// empirical overlap widths chosen to bridge the unequal OKLab spacing while
+// retaining distinct centers for Lightroom's eight named mixer ranges.
+const MIXER_HUE_RED: f32 = 0.0812052;
+const MIXER_HUE_ORANGE: f32 = 0.1465993;
+const MIXER_HUE_YELLOW: f32 = 0.3049145;
+const MIXER_HUE_GREEN: f32 = 0.3958204;
+const MIXER_HUE_AQUA: f32 = 0.5410248;
+const MIXER_HUE_BLUE: f32 = 0.7334778;
+const MIXER_HUE_PURPLE: f32 = 0.8160390;
+const MIXER_HUE_MAGENTA: f32 = 0.9121206;
+
+const MIXER_WIDTH_RED: f32 = 0.160;
+const MIXER_WIDTH_ORANGE: f32 = 0.150;
+const MIXER_WIDTH_YELLOW: f32 = 0.150;
+const MIXER_WIDTH_GREEN: f32 = 0.140;
+const MIXER_WIDTH_AQUA: f32 = 0.180;
+const MIXER_WIDTH_BLUE: f32 = 0.180;
+const MIXER_WIDTH_PURPLE: f32 = 0.100;
+const MIXER_WIDTH_MAGENTA: f32 = 0.160;
+
 struct MixerSample {
     lab: vec3<f32>,
     chroma: f32,
@@ -38,22 +64,20 @@ fn smooth_hue_bell(hue: f32, anchor: f32, width: f32) -> f32 {
 }
 
 fn mixer_band_weights(hue: f32) -> MixerBandWeights {
-    // Red, orange, yellow, green, aqua, blue, purple, magenta. The
-    // anchors are the OKLab hue angles of fully saturated sRGB swatches at
-    // HSL hue 0, 30, 60, 120, 180, 240, 270 and 300 degrees. Using ordinary
-    // HSL angles directly in OKLab would mislabel red as orange and yellow as
-    // green. Widths follow the unequal perceptual spacing between anchors.
+    // Red, orange, yellow, green, aqua, blue, purple, magenta. Use the OKLab
+    // swatch-derived anchors above rather than treating HSL degrees as uniform
+    // angles in the perceptual a/b plane.
     let first = vec4<f32>(
-        smooth_hue_bell(hue, 0.0812052, 0.160),
-        smooth_hue_bell(hue, 0.1465993, 0.150),
-        smooth_hue_bell(hue, 0.3049145, 0.150),
-        smooth_hue_bell(hue, 0.3958204, 0.140),
+        smooth_hue_bell(hue, MIXER_HUE_RED, MIXER_WIDTH_RED),
+        smooth_hue_bell(hue, MIXER_HUE_ORANGE, MIXER_WIDTH_ORANGE),
+        smooth_hue_bell(hue, MIXER_HUE_YELLOW, MIXER_WIDTH_YELLOW),
+        smooth_hue_bell(hue, MIXER_HUE_GREEN, MIXER_WIDTH_GREEN),
     );
     let second = vec4<f32>(
-        smooth_hue_bell(hue, 0.5410248, 0.180),
-        smooth_hue_bell(hue, 0.7334778, 0.180),
-        smooth_hue_bell(hue, 0.8160390, 0.100),
-        smooth_hue_bell(hue, 0.9121206, 0.160),
+        smooth_hue_bell(hue, MIXER_HUE_AQUA, MIXER_WIDTH_AQUA),
+        smooth_hue_bell(hue, MIXER_HUE_BLUE, MIXER_WIDTH_BLUE),
+        smooth_hue_bell(hue, MIXER_HUE_PURPLE, MIXER_WIDTH_PURPLE),
+        smooth_hue_bell(hue, MIXER_HUE_MAGENTA, MIXER_WIDTH_MAGENTA),
     );
     return MixerBandWeights(first, second, dot(first, vec4<f32>(1.0)) + dot(second, vec4<f32>(1.0)));
 }

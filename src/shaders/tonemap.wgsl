@@ -640,6 +640,18 @@ fn apply_rgb_point_curves(rgb: vec3<f32>) -> vec3<f32> {
     return result;
 }
 
+// Display-linear Blacks-toe calibration. The two decay scales are denominators
+// of exp2(-luminance / scale), so each scale is the display-linear luminance
+// interval over which that tail halves. 0.035 gives positive Blacks a compact
+// black lift with a long low-amplitude tail; 0.070 makes the negative tail fall
+// off more slowly. The 10.50 coefficient is the fitted EV-domain strength of
+// the deepest negative toe inside the 0.012..0.030 luminance mask. Together
+// these values reproduce the measured black-end response without tying the
+// control to scene exposure or the profile/sigmoid view transform.
+const DISPLAY_BLACKS_LIFT_DECAY: f32 = 0.035;
+const DISPLAY_BLACKS_CRUSH_TAIL_DECAY: f32 = 0.070;
+const DISPLAY_BLACKS_DEEP_CRUSH_EV: f32 = 10.50;
+
 fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
     if abs(amount) < 1e-7 {
         return rgb;
@@ -660,13 +672,13 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
     var offset_ev = 0.0;
     if amount >= 0.0 {
         // Positive Blacks is a long, smooth toe with a small upper-tone tail.
-        let weight = 0.08 + 0.92 * exp2(-luminance / 0.035);
+        let weight = 0.08 + 0.92 * exp2(-luminance / DISPLAY_BLACKS_LIFT_DECAY);
         offset_ev = amount * 1.75 * weight * hdr_guard;
     } else {
         // Negative Blacks crushes the darkest region, then falls to a restrained tail.
         let deep = 1.0 - tone_smoothstep(0.012, 0.030, luminance);
-        let tail = 0.10 + 2.35 * exp2(-luminance / 0.070);
-        offset_ev = -(-amount) * (10.50 * deep + tail) * hdr_guard;
+        let tail = 0.10 + 2.35 * exp2(-luminance / DISPLAY_BLACKS_CRUSH_TAIL_DECAY);
+        offset_ev = -(-amount) * (DISPLAY_BLACKS_DEEP_CRUSH_EV * deep + tail) * hdr_guard;
     }
     let target_luminance = luminance * exp2(offset_ev);
     return rgb * (target_luminance / luminance);
