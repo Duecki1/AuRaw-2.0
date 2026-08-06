@@ -1416,14 +1416,16 @@ fn command_verify_android_16kb(args: AndroidArgs) -> Result<()> {
         return Err(XtaskError::usage(format!("APK not found: {}", apk.display())));
     }
 
-    let contract_path = root.join("android/build-contract.properties");
-    let contract = read_properties(&contract_path)?;
+    let contract_path = root.join("Cargo.toml");
+    let contract = read_workspace_metadata(&contract_path)?;
     let ndk_version = contract
-        .get("ndkVersion")
-        .ok_or_else(|| XtaskError::new("build contract is missing ndkVersion"))?;
+        .get("android_ndk_version")
+        .ok_or_else(|| XtaskError::new("workspace metadata is missing android_ndk_version"))?;
     let build_tools_version = contract
-        .get("buildToolsVersion")
-        .ok_or_else(|| XtaskError::new("build contract is missing buildToolsVersion"))?;
+        .get("android_build_tools_version")
+        .ok_or_else(|| {
+            XtaskError::new("workspace metadata is missing android_build_tools_version")
+        })?;
 
     let sdk = android_sdk_root();
     let objdump = match args
@@ -1493,26 +1495,77 @@ fn command_verify_android_16kb(args: AndroidArgs) -> Result<()> {
     Ok(())
 }
 
-fn read_properties(path: &Path) -> Result<BTreeMap<String, String>> {
-    let source = fs::read_to_string(path).map_err(|error| {
-        XtaskError::new(format!("cannot read {}: {error}", path.display()))
-    })?;
+fn read_workspace_metadata(path: &Path) -> Result<BTreeMap<String, String>> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| XtaskError::new(format!("cannot read {}: {error}", path.display())))?;
     let mut values = BTreeMap::new();
+    let mut in_metadata = false;
     for (line_number, raw_line) in source.lines().enumerate() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
+        if line.starts_with('[') && line.ends_with(']') {
+            in_metadata = line == "[workspace.metadata]";
+            continue;
+        }
+        if !in_metadata {
+            continue;
+        }
+        let Some((key, encoded)) = line.split_once('=') else {
             return Err(XtaskError::new(format!(
-                "{}:{}: expected key=value",
+                "{}:{}: expected key = value in [workspace.metadata]",
                 path.display(),
                 line_number + 1
             )));
         };
-        values.insert(key.trim().to_owned(), value.trim().to_owned());
+        let key = key.trim();
+        if !matches!(key, "android_ndk_version" | "android_build_tools_version") {
+            continue;
+        }
+        let encoded = encoded.trim();
+        let value = encoded
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .filter(|value| !value.is_empty() && !value.contains('"') && !value.contains('\\'))
+            .ok_or_else(|| {
+                XtaskError::new(format!(
+                    "{}:{}: workspace metadata {} must be a plain TOML string",
+                    path.display(),
+                    line_number + 1,
+                    key
+                ))
+            })?;
+        if values.insert(key.to_owned(), value.to_owned()).is_some() {
+            return Err(XtaskError::new(format!(
+                "{}:{}: duplicate workspace metadata key {key}",
+                path.display(),
+                line_number + 1
+            )));
+        }
     }
     Ok(values)
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+        } else if character == '"' {
+            in_string = true;
+        } else if character == '#' {
+            return &line[..index];
+        }
+    }
+    line
 }
 
 fn android_sdk_root() -> Option<PathBuf> {

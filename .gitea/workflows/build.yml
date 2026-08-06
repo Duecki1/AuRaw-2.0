@@ -99,17 +99,18 @@ jobs:
 
           # Match the LibRaw checkout and default Autotools configuration
           # installed in /usr/local on the development PC.
-          LIBRAW_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
+          eval "$(python3 scripts/dev.py print-build-metadata --format shell)"
+          LIBRAW_SOURCE_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
           LIBRAW_ARCHIVE_SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
           if [ -f "$LIBRAW_PREFIX/lib/pkgconfig/libraw.pc" ] \
             && [ -f "$LIBRAW_PREFIX/lib/libraw.so" ] \
-            && [ "$(pkg-config --modversion libraw)" = "0.22.1" ]; then
-            echo "Using cached desktop LibRaw $LIBRAW_REVISION"
+            && [ "$(pkg-config --modversion libraw)" = "$AURAW_LIBRAW_REVISION" ]; then
+            echo "Using cached desktop LibRaw $LIBRAW_SOURCE_REVISION"
           else
             rm -rf /tmp/auraw-libraw-src "$LIBRAW_PREFIX"
             mkdir -p /tmp/auraw-libraw-src
             download_verified \
-              "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_REVISION.tar.gz" \
+              "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_SOURCE_REVISION.tar.gz" \
               /tmp/auraw-libraw.tar.gz "$LIBRAW_ARCHIVE_SHA256"
             tar -xzf /tmp/auraw-libraw.tar.gz \
               --strip-components=1 \
@@ -128,7 +129,7 @@ jobs:
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          test "$(pkg-config --modversion libraw)" = "0.22.1"
+          test "$(pkg-config --modversion libraw)" = "$AURAW_LIBRAW_REVISION"
           pkg-config --modversion lensfun
           REVISION="$(python3 scripts/dev.py verify-source-revision)"
           export AURAW_REQUIRE_COMMITTED_SOURCE=1
@@ -269,7 +270,7 @@ jobs:
             ~/.cargo/bin/cargo-ndk-runner
             ~/.cargo/bin/cargo-ndk-test
             android/native
-          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-ndk-28.2.13676358-cmake-3.22.1-wrapper-8.11.1-cargo-ndk-4.1.2-libraw-0.22.1-lensfun-0.3.4-glib-2.78.6-v1
+          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/dev.py') }}-v2
 
       - name: Restore Android dependency and build cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
@@ -351,14 +352,16 @@ jobs:
             python3 scripts/dev.py verified-download "$1" "$2" "$3"
           }
 
+          eval "$(python3 scripts/dev.py print-build-metadata --format shell)"
+
           install_sdk_packages() {
             local attempt
             for attempt in 1 2 3 4; do
               if sdkmanager \
                 "platform-tools" \
-                "platforms;android-35" \
-                "build-tools;35.0.0" \
-                "ndk;$ANDROID_NDK_VERSION" \
+                "platforms;android-$AURAW_ANDROID_COMPILE_SDK" \
+                "build-tools;$AURAW_ANDROID_BUILD_TOOLS_VERSION" \
+                "ndk;$AURAW_ANDROID_NDK_VERSION" \
                 "cmake;$ANDROID_CMAKE_VERSION"; then
                 return 0
               fi
@@ -370,9 +373,8 @@ jobs:
 
           ANDROID_HOME="$HOME/android-sdk"
           ANDROID_SDK_ROOT="$ANDROID_HOME"
-          ANDROID_NDK_VERSION="28.2.13676358"
           ANDROID_CMAKE_VERSION="3.22.1"
-          export ANDROID_HOME ANDROID_SDK_ROOT ANDROID_NDK_VERSION ANDROID_CMAKE_VERSION
+          export ANDROID_HOME ANDROID_SDK_ROOT ANDROID_CMAKE_VERSION
 
           if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
             rm -rf /tmp/android-command-line-tools
@@ -392,7 +394,7 @@ jobs:
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses >/dev/null || true
           install_sdk_packages
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$AURAW_ANDROID_NDK_VERSION"
           export PATH="$ANDROID_HOME/cmake/$ANDROID_CMAKE_VERSION/bin:$PATH"
 
           download_verified \
@@ -434,7 +436,7 @@ jobs:
           unzip -tq "$APK" 'lib/arm64-v8a/libauraw.so'
           unzip -tq "$APK" 'lib/arm64-v8a/libc++_shared.so'
           unzip -tq "$APK" 'assets/lensfun/version_1/*.xml'
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" \
+          "$ANDROID_HOME/build-tools/$AURAW_ANDROID_BUILD_TOOLS_VERSION/aapt" dump badging "$APK" \
             | tee /tmp/auraw-apk-badging.txt
           grep -q "application-icon-" /tmp/auraw-apk-badging.txt
           grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' \
@@ -442,7 +444,7 @@ jobs:
           python3 scripts/dev.py verify-android-16kb "$APK"
           mkdir -p dist
           cp "$APK" dist/AuRaw-debug-arm64-v8a.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
+          "$ANDROID_HOME/build-tools/$AURAW_ANDROID_BUILD_TOOLS_VERSION/apksigner" \
             verify --print-certs "$APK" \
             | tee dist/AuRaw-debug-arm64-v8a.signing-certificate.txt
           sha256sum dist/AuRaw-debug-arm64-v8a.apk \

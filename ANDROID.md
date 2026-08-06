@@ -8,7 +8,7 @@ the application entry point and the system file-picker bridge.
 
 - Rust with the Android target for the device (normally
   `aarch64-linux-android`)
-- Android SDK 35 and Android NDK 28.2.13676358
+- Android SDK platform and NDK versions declared in `Cargo.toml` `[workspace.metadata]`
 - Android SDK CMake 3.22.1 (with its bundled Ninja), a JDK, host `libclang`, and Gradle 8.11.1 or newer in the Gradle 8 series (CI uses 8.11.1). The first Lensfun build automatically bootstraps a pinned Meson build tool in `android/native/tools/`.
 - `cargo-ndk` 4.1.2 (`cargo install cargo-ndk --version 4.1.2 --locked`)
 
@@ -16,7 +16,8 @@ Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
 
 ```sh
 export ANDROID_SDK_ROOT="/home/duecki/Android/Sdk"
-export ANDROID_NDK_HOME="/home/duecki/Android/Sdk/ndk/28.2.13676358"
+eval "$(python3 scripts/dev.py print-build-metadata --format shell)"
+export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$AURAW_ANDROID_NDK_VERSION"
 rustup target add aarch64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 ```
@@ -57,7 +58,7 @@ python3 scripts/dev.py verify-android-16kb android/app/build/outputs/apk/debug/a
 ```
 
 The verifier checks every 64-bit `.so` with the pinned NDK's `llvm-objdump` and
-runs Build Tools 35.0.0 `zipalign -c -P 16 -v 4`. CI runs the same check on the
+runs the pinned Build Tools `zipalign -c -P 16 -v 4`. CI runs the same check on the
 arm64 debug APK. Runtime testing should also be performed on a 16 KB Android 15
 or newer device/emulator (`adb shell getconf PAGE_SIZE` must report `16384`).
 
@@ -67,7 +68,7 @@ To build only the native LibRaw, Lensfun, and Rust libraries without packaging a
 python3 scripts/dev.py build-android arm64-v8a release
 ```
 
-The first native build downloads LibRaw 0.22.1 and Lensfun 0.3.4, then
+The first native build downloads the LibRaw and Lensfun revisions pinned in `Cargo.toml`, then
 cross-compiles static libraries with the pinned NDK. Lensfun's profile XML
 database is staged as APK assets and copied to app-private storage on first
 launch, because Lensfun loads its database from filesystem paths. Generated

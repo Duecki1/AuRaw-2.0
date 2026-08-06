@@ -3,8 +3,13 @@ use std::process::Command;
 
 #[path = "build_support/lensfun_version.rs"]
 mod lensfun_version;
+#[path = "build_support/workspace_metadata.rs"]
+mod workspace_metadata;
 
 fn main() {
+    let build_metadata = workspace_metadata::WorkspaceMetadata::load_from_manifest_dir()
+        .unwrap_or_else(|error| panic!("invalid Cargo workspace build metadata: {error}"));
+    build_metadata.emit_cargo_contract();
     configure_source_revision();
 
     for variable in [
@@ -22,8 +27,8 @@ fn main() {
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "android" {
-        configure_android_libraw();
-        configure_android_lensfun();
+        configure_android_libraw(build_metadata.android_min_sdk);
+        configure_android_lensfun(&build_metadata);
     } else {
         configure_desktop_libraw();
         configure_desktop_lensfun();
@@ -115,7 +120,7 @@ fn command_output(command: &mut Command) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn configure_android_libraw() {
+fn configure_android_libraw(android_min_sdk: u32) {
     let target = std::env::var("TARGET").expect("Cargo did not set TARGET");
     let abi =
         android_abi(&target).unwrap_or_else(|| panic!("unsupported Android target: {target}"));
@@ -151,10 +156,10 @@ fn configure_android_libraw() {
     println!("cargo:rustc-link-lib=log");
     println!("cargo:rustc-link-lib=android");
 
-    generate_bindings(&header, &[root.join("include")]);
+    generate_bindings(&header, &[root.join("include")], Some(android_min_sdk));
 }
 
-fn configure_android_lensfun() {
+fn configure_android_lensfun(build_metadata: &workspace_metadata::WorkspaceMetadata) {
     let target = std::env::var("TARGET").expect("Cargo did not set TARGET");
     let abi =
         android_abi(&target).unwrap_or_else(|| panic!("unsupported Android target: {target}"));
@@ -190,6 +195,11 @@ fn configure_android_lensfun() {
             Ok(version)
         })
         .unwrap_or_else(|error| panic!("{}: {error}", header.display()));
+    assert_eq!(
+        version.to_string(),
+        build_metadata.lensfun_revision.as_str(),
+        "Android Lensfun headers do not match workspace.metadata.lensfun_revision"
+    );
     generate_lensfun_bindings(&header, &[root.join("include")]);
     println!("cargo:rustc-env=AURAW_LENSFUN_BUILD_VERSION={version}");
     println!("cargo:rustc-cfg=lensfun_available");
@@ -305,7 +315,7 @@ fn configure_desktop_libraw() {
         return;
     };
 
-    generate_bindings(&header, &libraw.include_paths);
+    generate_bindings(&header, &libraw.include_paths, None);
 }
 
 fn emit_macos_libraw_link_metadata(libraw: &pkg_config::Library) {
@@ -344,7 +354,7 @@ fn find_libraw_header(include_paths: &[PathBuf]) -> Option<PathBuf> {
         .find(|path| path.exists())
 }
 
-fn generate_bindings(header: &Path, include_paths: &[PathBuf]) {
+fn generate_bindings(header: &Path, include_paths: &[PathBuf], android_min_sdk: Option<u32>) {
     let mut builder = bindgen::Builder::default()
         .header(header.to_string_lossy())
         .clang_args(
@@ -358,8 +368,7 @@ fn generate_bindings(header: &Path, include_paths: &[PathBuf]) {
         .layout_tests(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
-        let api = std::env::var("AURAW_MIN_SDK").unwrap_or_else(|_| "26".to_owned());
+    if let Some(api) = android_min_sdk {
         builder = builder.clang_arg(format!("-D__ANDROID_MIN_SDK_VERSION__={api}"));
     }
 

@@ -2,18 +2,106 @@ plugins {
     id "com.android.application"
 }
 
-def buildContract = new Properties()
-new File(rootProject.projectDir, "build-contract.properties").withInputStream {
-    buildContract.load(it)
+def repositoryRoot = rootProject.projectDir.parentFile
+def cargoManifest = new File(repositoryRoot, "Cargo.toml")
+
+def parseWorkspaceMetadata = { File manifest ->
+    if (!manifest.isFile()) {
+        throw new GradleException("Cargo workspace manifest not found: ${manifest}")
+    }
+
+    def values = [:]
+    def requiredKeys = [
+        "android_ndk_version",
+        "android_build_tools_version",
+        "android_compile_sdk",
+        "android_min_sdk",
+        "android_target_sdk",
+        "libraw_revision",
+        "lensfun_revision",
+        "android_use_legacy_packaging",
+    ] as Set
+    def inWorkspaceMetadata = false
+    manifest.eachLine("UTF-8") { rawLine, lineNumber ->
+        def line = rawLine.trim()
+        if (!line || line.startsWith("#")) {
+            return
+        }
+
+        def table = line =~ /^\[([A-Za-z0-9_.-]+)]\s*(?:#.*)?$/
+        if (table.matches()) {
+            inWorkspaceMetadata = table.group(1) == "workspace.metadata"
+            return
+        }
+        if (!inWorkspaceMetadata) {
+            return
+        }
+
+        def assignment = line =~ /^([A-Za-z0-9_-]+)\s*=\s*(.*?)\s*$/
+        if (!assignment.matches()) {
+            throw new GradleException(
+                "${manifest}:${lineNumber}: invalid [workspace.metadata] assignment"
+            )
+        }
+
+        def key = assignment.group(1)
+        if (!requiredKeys.contains(key)) {
+            return
+        }
+        if (values.containsKey(key)) {
+            throw new GradleException(
+                "${manifest}:${lineNumber}: duplicate [workspace.metadata] key '${key}'"
+            )
+        }
+        def encoded = assignment.group(2)
+        def stringValue = encoded =~ /^"([^"\\]*)"\s*(?:#.*)?$/
+        def integerValue = encoded =~ /^([0-9]+)\s*(?:#.*)?$/
+        def booleanValue = encoded =~ /^(true|false)\s*(?:#.*)?$/
+        if (stringValue.matches()) {
+            values[key] = stringValue.group(1)
+        } else if (integerValue.matches()) {
+            values[key] = integerValue.group(1).toInteger()
+        } else if (booleanValue.matches()) {
+            values[key] = booleanValue.group(1).toBoolean()
+        } else {
+            throw new GradleException(
+                "${manifest}:${lineNumber}: ${key} must be a plain TOML string, integer, or boolean"
+            )
+        }
+    }
+
+    return values
 }
-def aurawNdkVersion = buildContract.getProperty("ndkVersion")
-def aurawUseLegacyPackaging = buildContract.getProperty("useLegacyPackaging").toBoolean()
+
+def workspaceMetadata = parseWorkspaceMetadata(cargoManifest)
+def requireMetadata = { String key, Class expectedType ->
+    if (!workspaceMetadata.containsKey(key)) {
+        throw new GradleException(
+            "${cargoManifest}: [workspace.metadata] is missing required key '${key}'"
+        )
+    }
+    def value = workspaceMetadata[key]
+    if (!expectedType.isInstance(value)) {
+        throw new GradleException(
+            "${cargoManifest}: [workspace.metadata].${key} must be ${expectedType.simpleName}"
+        )
+    }
+    return value
+}
+
+def aurawNdkVersion = requireMetadata("android_ndk_version", String)
+def aurawBuildToolsVersion = requireMetadata("android_build_tools_version", String)
+def aurawCompileSdk = requireMetadata("android_compile_sdk", Integer)
+def aurawMinSdk = requireMetadata("android_min_sdk", Integer)
+def aurawTargetSdk = requireMetadata("android_target_sdk", Integer)
+def aurawLibrawRevision = requireMetadata("libraw_revision", String)
+def aurawLensfunRevision = requireMetadata("lensfun_revision", String)
+def aurawUseLegacyPackaging = requireMetadata("android_use_legacy_packaging", Boolean)
 
 def aurawVersionCode = providers.gradleProperty("aurawVersionCode")
     .getOrElse("1")
     .toInteger()
 def rustAbi = providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")
-def repositoryRoot = rootProject.projectDir.parentFile
 def lensfunAssets = new File(
     repositoryRoot,
     "android/native/lensfun/${rustAbi}/apk-assets"
@@ -21,13 +109,14 @@ def lensfunAssets = new File(
 
 android {
     namespace "de.duecki.auraw"
-    compileSdk 36
+    compileSdk aurawCompileSdk
+    buildToolsVersion aurawBuildToolsVersion
     ndkVersion aurawNdkVersion
 
     defaultConfig {
         applicationId "de.duecki.auraw"
-        minSdk 26
-        targetSdk 36
+        minSdk aurawMinSdk
+        targetSdk aurawTargetSdk
         versionCode aurawVersionCode
         versionName "0.1.0"
         ndk {
@@ -95,7 +184,13 @@ tasks.register("printAndroidBuildContract") {
     doLast {
         println groovy.json.JsonOutput.toJson([
             ndkVersion: aurawNdkVersion,
+            buildToolsVersion: aurawBuildToolsVersion,
+            compileSdk: aurawCompileSdk,
+            minSdk: aurawMinSdk,
+            targetSdk: aurawTargetSdk,
             useLegacyPackaging: aurawUseLegacyPackaging,
+            librawRevision: aurawLibrawRevision,
+            lensfunRevision: aurawLensfunRevision,
         ])
     }
 }
