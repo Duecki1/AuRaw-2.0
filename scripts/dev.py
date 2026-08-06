@@ -251,6 +251,7 @@ class SourceValidator:
 
     def validate(self) -> list[str]:
         self._validate_rust_version()
+        self._validate_workspace_boundaries()
         self._validate_rust_modules()
         self._validate_shaders()
         self._validate_generated_binaries()
@@ -269,7 +270,7 @@ class SourceValidator:
                 manifest = tomllib.load(handle)
             with (ROOT / "rust-toolchain.toml").open("rb") as handle:
                 toolchain = tomllib.load(handle)
-            manifest_rust = str(manifest["package"]["rust-version"])
+            manifest_rust = str(manifest["workspace"]["package"]["rust-version"])
             pinned_rust = str(toolchain["toolchain"]["channel"])
             if normalized_rust_version(manifest_rust) != normalized_rust_version(pinned_rust):
                 self.errors.append(
@@ -279,26 +280,106 @@ class SourceValidator:
         except (KeyError, OSError, ValueError, tomllib.TOMLDecodeError) as error:
             self.errors.append(f"cannot validate the pinned Rust version: {error}")
 
-    def _validate_rust_modules(self) -> None:
-        if not SRC.is_dir():
-            self.errors.append("missing Rust source directory: src")
+    def _validate_workspace_boundaries(self) -> None:
+        expected_members = {
+            "crates/auraw-core",
+            "crates/auraw-gpu",
+            "crates/auraw-ai",
+            "crates/auraw-ui",
+            "crates/auraw-ffi",
+            "crates/auraw-cli",
+        }
+        restricted = {
+            "ort": "auraw-ai",
+            "eframe": "auraw-ui",
+            "jni": "auraw-ffi",
+        }
+        try:
+            with (ROOT / "Cargo.toml").open("rb") as handle:
+                root_manifest = tomllib.load(handle)
+            members = set(root_manifest["workspace"]["members"])
+        except (KeyError, OSError, tomllib.TOMLDecodeError) as error:
+            self.errors.append(f"cannot validate workspace members: {error}")
             return
 
-        roots = [path for path in (SRC / "lib.rs", SRC / "main.rs") if path.is_file()]
-        roots.extend(sorted((SRC / "bin").glob("*.rs")))
+        if members != expected_members:
+            self.errors.append(
+                "workspace members differ from the required six-crate architecture: "
+                f"{sorted(members)}"
+            )
+
+        for member in sorted(expected_members):
+            manifest_path = ROOT / member / "Cargo.toml"
+            try:
+                with manifest_path.open("rb") as handle:
+                    manifest = tomllib.load(handle)
+            except (OSError, tomllib.TOMLDecodeError) as error:
+                self.errors.append(
+                    f"cannot read workspace manifest {relative_display(manifest_path)}: {error}"
+                )
+                continue
+
+            package_name = manifest.get("package", {}).get("name")
+            dependency_tables = [
+                value
+                for key, value in manifest.items()
+                if key in {"dependencies", "dev-dependencies", "build-dependencies"}
+                and isinstance(value, dict)
+            ]
+            for target in manifest.get("target", {}).values():
+                if not isinstance(target, dict):
+                    continue
+                dependency_tables.extend(
+                    value
+                    for key, value in target.items()
+                    if key in {"dependencies", "dev-dependencies", "build-dependencies"}
+                    and isinstance(value, dict)
+                )
+
+            declared = set().union(*(table.keys() for table in dependency_tables))
+            for dependency, owner in restricted.items():
+                if dependency in declared and package_name != owner:
+                    self.errors.append(
+                        f"{dependency} must only be declared by {owner}, not {package_name}"
+                    )
+
+            source_root = manifest_path.parent / "src"
+            for source in source_root.rglob("*.rs"):
+                text = self._read_text(source, "Rust source")
+                if text is None:
+                    continue
+                for dependency, owner in restricted.items():
+                    if package_name == owner:
+                        continue
+                    if re.search(rf"(?<![A-Za-z0-9_]){re.escape(dependency)}::", text):
+                        self.errors.append(
+                            f"{dependency} API used outside {owner}: {relative_display(source)}"
+                        )
+
+    def _validate_rust_modules(self) -> None:
+        crate_sources = sorted((ROOT / "crates").glob("*/src"))
+        if not crate_sources:
+            self.errors.append("missing workspace crate sources under crates/*/src")
+            return
+
+        roots: list[Path] = []
+        for source in crate_sources:
+            roots.extend(path for path in (source / "lib.rs", source / "main.rs") if path.is_file())
+            roots.extend(sorted((source / "bin").glob("*.rs")))
         if not roots:
-            self.errors.append("no Rust crate roots found under src")
+            self.errors.append("no Rust crate roots found in the workspace")
             return
 
         for root in roots:
             self._visit_module(root)
 
-        for module in sorted(SRC.rglob("*.rs")):
-            if module.resolve() not in self.connected:
-                self.errors.append(
-                    "stale Rust source is not reachable from a crate root: "
-                    f"{relative_display(module)}"
-                )
+        for source in crate_sources:
+            for module in sorted(source.rglob("*.rs")):
+                if module.resolve() not in self.connected:
+                    self.errors.append(
+                        "stale Rust source is not reachable from a crate root: "
+                        f"{relative_display(module)}"
+                    )
 
     def _visit_module(self, module: Path) -> None:
         module = module.resolve()
@@ -367,37 +448,34 @@ class SourceValidator:
                 )
 
     def _validate_shaders(self) -> None:
-        shader_dir = SRC / "shaders"
+        gpu_root = ROOT / "crates/auraw-gpu"
+        shader_dir = gpu_root / "src/shaders"
         if not shader_dir.is_dir():
-            self.errors.append("missing shader source directory: src/shaders")
+            self.errors.append("missing shader source directory: crates/auraw-gpu/src/shaders")
             return
 
-        shader_paths = {
-            path.relative_to(ROOT).as_posix() for path in shader_dir.glob("*.wgsl")
-        }
-
-        build_rs = self._read_text(ROOT / "build.rs", "build script")
+        shader_names = {path.name for path in shader_dir.glob("*.wgsl")}
+        build_rs = self._read_text(gpu_root / "build.rs", "GPU build script")
         if build_rs is not None:
-            watched = set(re.findall(r'"(src/shaders/[^"\\]+\.wgsl)"', build_rs))
-            for path in sorted(shader_paths - watched):
-                self.errors.append(f"WGSL file is not watched by build.rs: {path}")
-            for path in sorted(watched - shader_paths):
-                self.errors.append(f"build.rs watches a missing WGSL file: {path}")
+            watched = set(re.findall(r'"([^"\\]+\.wgsl)"', build_rs))
+            for name in sorted(shader_names - watched):
+                self.errors.append(f"WGSL file is not watched by auraw-gpu/build.rs: {name}")
+            for name in sorted(watched - shader_names):
+                self.errors.append(f"auraw-gpu/build.rs watches a missing WGSL file: {name}")
 
         rust_sources: list[str] = []
-        for path in SRC.rglob("*.rs"):
+        for path in (gpu_root / "src").rglob("*.rs"):
             source = self._read_text(path, "Rust source")
             if source is not None:
                 rust_sources.append(source)
-        included_names = set(
+        included = set(
             re.findall(
                 r'include_str!\("\.\./shaders/([^"\\]+\.wgsl)"\)',
                 "\n".join(rust_sources),
             )
         )
-        included = {f"src/shaders/{name}" for name in included_names}
 
-        preprocessor_path = ROOT / "build_support/shader_preprocessor.rs"
+        preprocessor_path = gpu_root / "build_support/shader_preprocessor.rs"
         preprocessor = self._read_text(preprocessor_path, "shader preprocessor")
         if preprocessor is not None:
             generated_templates = set(
@@ -410,17 +488,16 @@ class SourceValidator:
                 template = shader_dir / template_name
                 if not template.is_file():
                     continue
-                included.add(f"src/shaders/{template_name}")
+                included.add(template_name)
                 template_source = self._read_text(template, "shader template")
                 if template_source is None:
                     continue
-                for fragment in re.findall(
-                    r'//\s*@include\s+"([^"\\]+\.wgsl)"', template_source
-                ):
-                    included.add(f"src/shaders/{fragment}")
+                included.update(
+                    re.findall(r'//\s*@include\s+"([^"\\]+\.wgsl)"', template_source)
+                )
 
-        for path in sorted(shader_paths - included):
-            self.errors.append(f"WGSL file is not included by Rust source: {path}")
+        for name in sorted(shader_names - included):
+            self.errors.append(f"WGSL file is not included by auraw-gpu Rust source: {name}")
 
     def _validate_generated_binaries(self) -> None:
         for path in sorted(item for item in ROOT.rglob("*") if item.is_file()):
@@ -2530,6 +2607,8 @@ def command_build_android(args: argparse.Namespace) -> int:
             "build",
             "--locked",
             *cargo_profile,
+            "--package",
+            "auraw-ui",
             "--lib",
             "--manifest-path",
             ROOT / "Cargo.toml",

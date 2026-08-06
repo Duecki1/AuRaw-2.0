@@ -17,7 +17,7 @@ Every candidate and reference is normalized to the same intermediate:
 Build and run the real renderer:
 
 ```sh
-cargo build --locked --release --bin auraw-regression-render
+cargo build --locked -p auraw-cli --release --bin auraw-regression-render
 
 target/release/auraw-regression-render \
   --backend gpu \
@@ -123,7 +123,7 @@ ROIs in `corpus.yaml` select the appropriate target for each metric. `thresholds
 On a machine with LibRaw and a wgpu adapter (a Mesa software Vulkan adapter is sufficient):
 
 ```sh
-cargo build --locked --bin auraw-regression-render
+cargo build --locked -p auraw-cli --bin auraw-regression-render
 python3 scripts/dev.py smoke-regression
 ```
 

@@ -80,6 +80,7 @@ jobs:
           cargo build \
             --locked \
             --release \
+            --package auraw-ui \
             --target "${{ matrix.target }}" \
             --bin auraw
 
