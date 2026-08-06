@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_checked_in_gradle_wrapper_integrity() -> None:
     completed = subprocess.run(
-        [sys.executable, "scripts/check-gradle-wrapper.py"],
+        [sys.executable, "scripts/dev.py", "check-gradle"],
         cwd=ROOT,
         check=False,
         capture_output=True,
