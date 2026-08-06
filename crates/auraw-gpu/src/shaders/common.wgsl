@@ -134,6 +134,14 @@ struct SceneToneUniforms {
     grade_highlights: vec4<f32>,
     grade_global: vec4<f32>,
     grade_options: vec4<f32>,
+    // Fixed scene-working colour transforms are stored as uniform matrices so
+    // alternate working-space/adaptation calibrations can be supplied without
+    // rebuilding the shader module. WGSL uniform matrices use a 16-byte stride
+    // per vec3 column; Rust mirrors each column with a padded [f32; 4].
+    rec2020_to_xyz: mat3x3<f32>,
+    xyz_to_rec2020: mat3x3<f32>,
+    xyz_to_bradford: mat3x3<f32>,
+    bradford_to_xyz: mat3x3<f32>,
 }
 
 struct EffectsUniforms {
@@ -149,6 +157,21 @@ struct EffectsUniforms {
     vignette_frame: vec4<f32>,
     // Normalized source-to-final 2x2 affine transform.
     vignette_transform: vec4<f32>,
+    // Lightroom-like vignette calibration anchors. Each lane stores
+    // (smoothstep start, smoothstep end, falloff exponent, corner opacity).
+    vignette_dark_half_fit: vec4<f32>,
+    vignette_dark_full_fit: vec4<f32>,
+    vignette_light_half_fit: vec4<f32>,
+    vignette_light_full_fit: vec4<f32>,
+    // Capture sharpening tuning, packed into complete 16-byte lanes.
+    // x/y = capture scale min/max; z/w = bilateral sigma min/max.
+    capture_scale_sigma: vec4<f32>,
+    // x/y = fixed thresholds at Detail 0/100 EV;
+    // z/w = edge-noise relief start/end EV.
+    capture_thresholds: vec4<f32>,
+    // x/y = masking threshold min/max EV;
+    // z/w = impulse coherence full/zero EV.
+    capture_mask_coherence: vec4<f32>,
 }
 
 // Camera/common resources remain in group 0 with image/storage resources.

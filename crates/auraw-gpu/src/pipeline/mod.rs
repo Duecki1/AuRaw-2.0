@@ -12,8 +12,8 @@ pub use export::{
     MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
 };
 pub use gpu::{
-    GpuOutputSnapshot, GpuParams, GpuProgramPrewarm, ProcessingQuality, RawGpuPipeline,
-    RawGpuProgramTemplate,
+    GpuOutputSnapshot, GpuParams, GpuProgramPrewarm, GpuShaderTuning, ProcessingQuality,
+    RawGpuPipeline, RawGpuProgramTemplate,
 };
 #[cfg(target_os = "android")]
 pub use gpu_cache::PersistentGpuPipelineCache;
