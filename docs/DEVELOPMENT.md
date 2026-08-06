@@ -1,28 +1,34 @@
 # Development guide
 
-AuRaw exposes repository maintenance, validation, build, benchmarking, and regression tooling through one entry point:
+AuRaw keeps dependency-light repository maintenance and CI validation in the
+Rust `xtask` crate. NumPy-backed image-quality and asset-generation tooling,
+plus bootstrap steps that run before Rust is installed, remain in `scripts/dev.py`.
 
 ```sh
+cargo xtask --help
 python3 scripts/dev.py --help
 ```
 
 The most common commands are:
 
 ```sh
-python3 scripts/dev.py check-all
-python3 scripts/dev.py bench --enforce-budget
+cargo xtask check-all
+cargo xtask bench
+cargo run -p auraw-ui --bin auraw --release
+cargo run -p auraw-cli --bin auraw-regression-render -- --help
+./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 python3 scripts/dev.py icons
 python3 scripts/dev.py corpus
-./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 python3 scripts/dev.py smoke-regression
 ```
 
 ## GPU benchmark protocol
 
-Build `auraw-regression-render`, then run:
+Build the regression renderer, then run the Rust benchmark gate:
 
 ```sh
-python3 scripts/dev.py bench --enforce-budget
+cargo run -p auraw-cli --bin auraw-regression-render --release -- --help
+cargo xtask bench
 ```
 
 The benchmark renders both committed CC0 synthetic DNG fixtures, records one warm-up plus repeated wall-clock measurements, reports median export throughput and p95 latency, and evaluates the versioned guardrails in `benchmarks/gpu-budget.json`. Use `--dry-run` to validate fixture and command wiring without a GPU binary.
@@ -61,4 +67,9 @@ The data is distributed under the GNU General Public License, version 3 or later
 
 ## Android and release helpers
 
-Android dependency builds, APK alignment verification, verified downloads, and clean-source revision checks are subcommands of `scripts/dev.py`. The pinned implementation remains shared by Gradle and CI, so local and automated builds execute the same contracts.
+Dependency-light Android and release checks use `cargo xtask`: `check-all`,
+`print-metadata`, `verified-download`, `verify-source-revision`, and
+`verify-android-16kb`. NumPy-backed regression workflows, native dependency
+compilation, and pre-Rust bootstrap compatibility remain in `scripts/dev.py`.
+Gradle and CI consume the same `[workspace.metadata]` contract from the root
+`Cargo.toml`.

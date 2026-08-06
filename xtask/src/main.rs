@@ -4,7 +4,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -34,6 +34,39 @@ const BENCHMARK_SCENES: [(&str, &str, u32, u32); 2] = [
 
 const ANDROID_64_BIT_ABIS: [&str; 2] = ["arm64-v8a", "x86_64"];
 
+const REQUIRED_WORKSPACE_METADATA: [(&str, MetadataKind); 8] = [
+    ("android_ndk_version", MetadataKind::String),
+    ("android_build_tools_version", MetadataKind::String),
+    ("android_compile_sdk", MetadataKind::PositiveInteger),
+    ("android_min_sdk", MetadataKind::PositiveInteger),
+    ("android_target_sdk", MetadataKind::PositiveInteger),
+    ("libraw_revision", MetadataKind::String),
+    ("lensfun_revision", MetadataKind::String),
+    ("android_use_legacy_packaging", MetadataKind::Boolean),
+];
+
+const EXPECTED_GRADLE_VERSION: &str = "8.11.1";
+const EXPECTED_GRADLE_DISTRIBUTION_SHA256: &str =
+    "f397b287023acdba1e9f6fc5ea72d22dd63669d59ed4a289a29b1a76eee151c6";
+const EXPECTED_GRADLE_WRAPPER_JAR_SHA256: &str =
+    "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046";
+
+const BINARY_SUFFIXES: [&str; 13] = [
+    "a", "aar", "apk", "class", "dll", "dylib", "exe", "jar", "o", "obj", "rlib",
+    "rmeta", "so",
+];
+const ALLOWED_BINARY_PATHS: [&str; 1] = ["gradle/wrapper/gradle-wrapper.jar"];
+const IGNORED_BINARY_ROOTS: [&str; 8] = [
+    ".git",
+    ".gradle",
+    "dist",
+    "target",
+    "android/.gradle",
+    "android/build",
+    "android/app/build",
+    "android/native",
+];
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -58,6 +91,12 @@ fn run() -> Result<()> {
             ensure_no_extra_args(&rest, "check-all")?;
             command_check_all()
         }
+        "print-metadata" => command_print_metadata(parse_print_metadata_args(rest)?),
+        "verified-download" => command_verified_download(parse_verified_download_args(rest)?),
+        "verify-source-revision" => {
+            ensure_no_extra_args(&rest, "verify-source-revision")?;
+            command_verify_source_revision()
+        }
         "bench" => command_bench(parse_bench_args(rest)?),
         "verify-android-16kb" => command_verify_android_16kb(parse_android_args(rest)?),
         "help" | "--help" | "-h" => {
@@ -75,7 +114,10 @@ fn print_help() {
     println!(
         "{BOLD}AuRaw developer tasks{RESET}\n\n\
          {BOLD}USAGE{RESET}\n  cargo xtask <COMMAND> [OPTIONS]\n\n\
-         {BOLD}COMMANDS{RESET}\n  check-all\n      Validate Rust source reachability, WGSL imports, and a clean Git tree.\n\n\
+         {BOLD}COMMANDS{RESET}\n  check-all\n      Validate the source tree, immutable workflow pins, and Gradle wrapper.\n\n\
+         print-metadata [--format json|shell]\n      Print the root Cargo.toml [workspace.metadata] table.\n\n\
+         verified-download <URL> <OUTPUT> <EXPECTED-SHA256>\n      Download an HTTPS artifact with retries and atomically verify SHA-256.\n\n\
+         verify-source-revision\n      Require a clean Git working tree and print the exact HEAD revision.\n\n\
          bench [--renderer PATH] [--runs N] [--warmup-runs N]\n        [--budget-file PATH] [--output PATH] [--dry-run]\n      Benchmark the canonical GPU regression renderer and enforce its budget.\n\n\
          verify-android-16kb <APK> [--objdump PATH] [--zipalign PATH]\n      Verify 16 KB ELF LOAD alignment and APK zip alignment."
     );
@@ -207,6 +249,70 @@ fn parse_positive_usize(value: &OsStr, option: &str) -> Result<usize> {
     Ok(parsed)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum MetadataFormat {
+    Json,
+    Shell,
+}
+
+fn parse_print_metadata_args(args: Vec<OsString>) -> Result<MetadataFormat> {
+    let mut format = MetadataFormat::Json;
+    let mut index = 0usize;
+    while index < args.len() {
+        let argument = args[index].to_string_lossy();
+        let value = if argument == "--format" {
+            next_value(&args, &mut index, "--format")?
+                .to_string_lossy()
+                .into_owned()
+        } else if let Some(value) = argument.strip_prefix("--format=") {
+            value.to_owned()
+        } else {
+            return Err(XtaskError::usage(format!(
+                "unknown print-metadata option: {argument}"
+            )));
+        };
+        format = match value.as_str() {
+            "json" => MetadataFormat::Json,
+            "shell" => MetadataFormat::Shell,
+            _ => {
+                return Err(XtaskError::usage(
+                    "--format must be either json or shell",
+                ))
+            }
+        };
+        index += 1;
+    }
+    Ok(format)
+}
+
+#[derive(Debug)]
+struct VerifiedDownloadArgs {
+    url: String,
+    output: PathBuf,
+    expected_sha256: String,
+}
+
+fn parse_verified_download_args(args: Vec<OsString>) -> Result<VerifiedDownloadArgs> {
+    if args.len() != 3 {
+        return Err(XtaskError::usage(
+            "verified-download requires <url> <output-path> <expected-sha256>",
+        ));
+    }
+    let url = args[0]
+        .to_str()
+        .ok_or_else(|| XtaskError::usage("download URL must be valid UTF-8"))?
+        .to_owned();
+    let expected_sha256 = args[2]
+        .to_str()
+        .ok_or_else(|| XtaskError::usage("expected SHA-256 must be valid UTF-8"))?
+        .to_owned();
+    Ok(VerifiedDownloadArgs {
+        url,
+        output: PathBuf::from(args[1].clone()),
+        expected_sha256,
+    })
+}
+
 #[derive(Debug)]
 struct BenchArgs {
     renderer: PathBuf,
@@ -319,20 +425,24 @@ fn command_check_all() -> Result<()> {
     let root = workspace_root();
     let mut failure_count = 0usize;
 
-    info("checking Rust module reachability");
-    let source_errors = validate_source_reachability(&root)?;
-    failure_count += report_validation("Rust source reachability", &source_errors);
+    info("checking source tree reachability, shaders, and generated binaries");
+    let mut source_errors = validate_source_reachability(&root)?;
+    source_errors.extend(validate_shader_imports(&root)?);
+    source_errors.extend(validate_generated_binaries(&root)?);
+    source_errors.sort();
+    source_errors.dedup();
+    failure_count += report_validation("source tree", &source_errors);
 
-    info("checking WGSL build watches and imports");
-    let shader_errors = validate_shader_imports(&root)?;
-    failure_count += report_validation("shader imports", &shader_errors);
+    info("checking immutable workflow action pins");
+    let workflow_errors = validate_workflow_pins(&root)?;
+    failure_count += report_validation("workflow pins", &workflow_errors);
 
-    info("checking Git working tree");
-    let git_errors = validate_clean_git_tree(&root)?;
-    failure_count += report_validation("Git working tree", &git_errors);
+    info("checking Gradle wrapper integrity");
+    let gradle_errors = validate_gradle_wrapper(&root)?;
+    failure_count += report_validation("Gradle wrapper", &gradle_errors);
 
     if failure_count == 0 {
-        pass("all developer source checks completed");
+        pass("all developer and CI checks completed");
         Ok(())
     } else {
         Err(XtaskError::new(format!(
@@ -354,36 +464,290 @@ fn report_validation(name: &str, errors: &[String]) -> usize {
     errors.len()
 }
 
-fn validate_clean_git_tree(root: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "--untracked-files=all"])
-        .current_dir(root)
-        .output()
-        .map_err(|error| XtaskError::new(format!("could not execute git: {error}")))?;
+fn validate_generated_binaries(root: &Path) -> Result<Vec<String>> {
+    fn visit(root: &Path, directory: &Path, errors: &mut Vec<String>) -> Result<()> {
+        for entry in fs::read_dir(directory).map_err(|error| {
+            XtaskError::new(format!("cannot read directory {}: {error}", directory.display()))
+        })? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = relative_display(root, &path);
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                if IGNORED_BINARY_ROOTS.iter().any(|ignored| {
+                    relative == *ignored || relative.starts_with(&format!("{ignored}/"))
+                }) {
+                    continue;
+                }
+                visit(root, &path, errors)?;
+            } else if file_type.is_file() {
+                let extension = path
+                    .extension()
+                    .and_then(OsStr::to_str)
+                    .map(str::to_ascii_lowercase);
+                if extension
+                    .as_deref()
+                    .is_some_and(|extension| BINARY_SUFFIXES.contains(&extension))
+                    && !ALLOWED_BINARY_PATHS.contains(&relative.as_str())
+                {
+                    errors.push(format!(
+                        "generated binary is present in the source tree: {relative}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 
-    if !output.status.success() {
-        let code = output.status.code().unwrap_or(1);
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(XtaskError::with_code(
-            if stderr.is_empty() {
-                "git status failed".to_owned()
+    let mut errors = Vec::new();
+    visit(root, root, &mut errors)?;
+    errors.sort();
+    Ok(errors)
+}
+
+fn validate_workflow_pins(root: &Path) -> Result<Vec<String>> {
+    let mut errors = Vec::new();
+    for workflow_root in [root.join(".github/workflows"), root.join(".gitea/workflows")] {
+        if !workflow_root.is_dir() {
+            continue;
+        }
+        let mut workflows = Vec::new();
+        collect_files_with_extensions(&workflow_root, &["yml", "yaml"], &mut workflows)?;
+        workflows.sort();
+        for path in workflows {
+            let source = fs::read_to_string(&path).map_err(|error| {
+                XtaskError::new(format!(
+                    "cannot read workflow {}: {error}",
+                    relative_display(root, &path)
+                ))
+            })?;
+            for (line_index, line) in source.lines().enumerate() {
+                let Some(action) = workflow_action_reference(line) else {
+                    continue;
+                };
+                if action.starts_with("./") || action.starts_with("docker://") {
+                    continue;
+                }
+                let revision = action.rsplit_once('@').map(|(_, revision)| revision);
+                if !revision.is_some_and(is_full_commit_sha) {
+                    errors.push(format!(
+                        "{}:{}: mutable action reference {action}",
+                        relative_display(root, &path),
+                        line_index + 1
+                    ));
+                }
+            }
+        }
+    }
+    errors.sort();
+    Ok(errors)
+}
+
+fn workflow_action_reference(line: &str) -> Option<String> {
+    let line = strip_yaml_comment(line);
+    let bytes = line.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(relative) = line[search_from..].find("uses:") {
+        let index = search_from + relative;
+        let boundary_ok = index == 0
+            || bytes[index - 1].is_ascii_whitespace()
+            || matches!(bytes[index - 1], b'-' | b'{' | b',');
+        if boundary_ok {
+            let tail = line[index + "uses:".len()..].trim_start();
+            let token = tail
+                .split(|character: char| character.is_whitespace() || character == '#')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches(|character| matches!(character, ',' | '}'))
+                .trim_matches(|character| matches!(character, '\'' | '"'));
+            if !token.is_empty() {
+                return Some(token.to_owned());
+            }
+        }
+        search_from = index + "uses:".len();
+    }
+    None
+}
+
+fn strip_yaml_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        match quote {
+            Some('"') => {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    quote = None;
+                }
+            }
+            Some('\'') => {
+                if character == '\'' {
+                    quote = None;
+                }
+            }
+            _ if character == '"' || character == '\'' => quote = Some(character),
+            _ if character == '#' => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn is_full_commit_sha(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_gradle_wrapper(root: &Path) -> Result<Vec<String>> {
+    let properties_path = root.join("gradle/wrapper/gradle-wrapper.properties");
+    let jar_path = root.join("gradle/wrapper/gradle-wrapper.jar");
+    let gradlew = root.join("gradlew");
+    let gradlew_bat = root.join("gradlew.bat");
+    let required = [&properties_path, &jar_path, &gradlew, &gradlew_bat];
+    let mut errors = Vec::new();
+    for path in required {
+        if !path.is_file() {
+            errors.push(format!("missing wrapper file: {}", relative_display(root, path)));
+        }
+    }
+    if !errors.is_empty() {
+        return Ok(errors);
+    }
+
+    let properties = match parse_properties_file(&properties_path) {
+        Ok(properties) => properties,
+        Err(error) => return Ok(vec![error.to_string()]),
+    };
+    let distribution_url = properties
+        .get("distributionUrl")
+        .map(|value| value.replace("\\:", ":"))
+        .unwrap_or_default();
+    let expected_suffix = format!("/gradle-{EXPECTED_GRADLE_VERSION}-bin.zip");
+    if !distribution_url.starts_with("https://services.gradle.org/distributions/") {
+        errors.push(
+            "distributionUrl must use the official HTTPS Gradle distribution host".to_owned(),
+        );
+    }
+    if !distribution_url.ends_with(&expected_suffix) {
+        errors.push(format!(
+            "distributionUrl must select Gradle {EXPECTED_GRADLE_VERSION}; found {}",
+            if distribution_url.is_empty() {
+                "<missing>"
             } else {
-                format!("git status failed: {stderr}")
-            },
-            code,
+                &distribution_url
+            }
         ));
     }
-
-    let status = String::from_utf8_lossy(&output.stdout);
-    if status.trim().is_empty() {
-        return Ok(Vec::new());
+    if properties.get("distributionSha256Sum").map(String::as_str)
+        != Some(EXPECTED_GRADLE_DISTRIBUTION_SHA256)
+    {
+        errors.push("distributionSha256Sum does not match the pinned Gradle distribution".to_owned());
+    }
+    if properties
+        .get("validateDistributionUrl")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        != Some(true)
+    {
+        errors.push("validateDistributionUrl must remain enabled".to_owned());
     }
 
-    let mut errors = vec![
-        "commit, stash, or remove working-tree changes before continuing".to_owned(),
-    ];
-    errors.extend(status.lines().map(|line| format!("working-tree entry: {line}")));
+    match sha256_file(&jar_path) {
+        Ok(actual) if actual != EXPECTED_GRADLE_WRAPPER_JAR_SHA256 => errors.push(format!(
+            "gradle-wrapper.jar checksum mismatch: expected {EXPECTED_GRADLE_WRAPPER_JAR_SHA256}, found {actual}"
+        )),
+        Ok(_) => {}
+        Err(error) => errors.push(format!(
+            "cannot hash {}: {error}",
+            relative_display(root, &jar_path)
+        )),
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::metadata(&gradlew) {
+            Ok(metadata) if metadata.permissions().mode() & 0o100 == 0 => {
+                errors.push("gradlew must be executable".to_owned())
+            }
+            Ok(_) => {}
+            Err(error) => errors.push(format!("cannot inspect gradlew permissions: {error}")),
+        }
+    }
+
+    match (fs::read_to_string(&gradlew), fs::read_to_string(&gradlew_bat)) {
+        (Ok(shell), Ok(batch)) => {
+            if !shell
+                .replace("$APP_HOME/", "")
+                .contains("gradle/wrapper/gradle-wrapper.jar")
+            {
+                errors.push("gradlew does not reference the checked-in wrapper JAR".to_owned());
+            }
+            let normalized_batch = batch.replace('\\', "/").to_ascii_lowercase();
+            if !normalized_batch.contains("gradle/wrapper/gradle-wrapper.jar") {
+                errors.push("gradlew.bat does not reference the checked-in wrapper JAR".to_owned());
+            }
+        }
+        (shell, batch) => {
+            let details = [shell.err(), batch.err()]
+                .into_iter()
+                .flatten()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            errors.push(format!("cannot inspect Gradle launcher scripts: {details}"));
+        }
+    }
+
+    errors.sort();
     Ok(errors)
+}
+
+fn parse_properties_file(path: &Path) -> Result<BTreeMap<String, String>> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| XtaskError::new(format!("cannot read {}: {error}", path.display())))?;
+    let mut values = BTreeMap::new();
+    for (line_index, raw_line) in source.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(XtaskError::new(format!(
+                "{}:{}: expected key=value",
+                path.display(),
+                line_index + 1
+            )));
+        };
+        values.insert(key.trim().to_owned(), value.trim().to_owned());
+    }
+    Ok(values)
+}
+
+fn collect_files_with_extensions(
+    directory: &Path,
+    extensions: &[&str],
+    output: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory).map_err(|error| {
+        XtaskError::new(format!("cannot read directory {}: {error}", directory.display()))
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_files_with_extensions(&path, extensions, output)?;
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|extension| extensions.contains(&extension))
+        {
+            output.push(path);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1418,14 +1782,10 @@ fn command_verify_android_16kb(args: AndroidArgs) -> Result<()> {
 
     let contract_path = root.join("Cargo.toml");
     let contract = read_workspace_metadata(&contract_path)?;
-    let ndk_version = contract
-        .get("android_ndk_version")
-        .ok_or_else(|| XtaskError::new("workspace metadata is missing android_ndk_version"))?;
-    let build_tools_version = contract
-        .get("android_build_tools_version")
-        .ok_or_else(|| {
-            XtaskError::new("workspace metadata is missing android_build_tools_version")
-        })?;
+    validate_required_workspace_metadata(&contract_path, &contract)?;
+    let ndk_version = metadata_string(&contract_path, &contract, "android_ndk_version")?;
+    let build_tools_version =
+        metadata_string(&contract_path, &contract, "android_build_tools_version")?;
 
     let sdk = android_sdk_root();
     let objdump = match args
@@ -1495,77 +1855,496 @@ fn command_verify_android_16kb(args: AndroidArgs) -> Result<()> {
     Ok(())
 }
 
-fn read_workspace_metadata(path: &Path) -> Result<BTreeMap<String, String>> {
-    let source = fs::read_to_string(path)
-        .map_err(|error| XtaskError::new(format!("cannot read {}: {error}", path.display())))?;
-    let mut values = BTreeMap::new();
-    let mut in_metadata = false;
-    for (line_number, raw_line) in source.lines().enumerate() {
-        let line = strip_toml_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_metadata = line == "[workspace.metadata]";
-            continue;
-        }
-        if !in_metadata {
-            continue;
-        }
-        let Some((key, encoded)) = line.split_once('=') else {
-            return Err(XtaskError::new(format!(
-                "{}:{}: expected key = value in [workspace.metadata]",
-                path.display(),
-                line_number + 1
-            )));
-        };
-        let key = key.trim();
-        if !matches!(key, "android_ndk_version" | "android_build_tools_version") {
-            continue;
-        }
-        let encoded = encoded.trim();
-        let value = encoded
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .filter(|value| !value.is_empty() && !value.contains('"') && !value.contains('\\'))
-            .ok_or_else(|| {
-                XtaskError::new(format!(
-                    "{}:{}: workspace metadata {} must be a plain TOML string",
-                    path.display(),
-                    line_number + 1,
-                    key
-                ))
-            })?;
-        if values.insert(key.to_owned(), value.to_owned()).is_some() {
-            return Err(XtaskError::new(format!(
-                "{}:{}: duplicate workspace metadata key {key}",
-                path.display(),
-                line_number + 1
-            )));
-        }
-    }
-    Ok(values)
+#[derive(Debug, Clone, Copy)]
+enum MetadataKind {
+    String,
+    PositiveInteger,
+    Boolean,
 }
 
-fn strip_toml_comment(line: &str) -> &str {
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, character) in line.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
+fn command_print_metadata(format: MetadataFormat) -> Result<()> {
+    let root = workspace_root();
+    let manifest = root.join("Cargo.toml");
+    let metadata = read_workspace_metadata(&manifest)?;
+    validate_required_workspace_metadata(&manifest, &metadata)?;
+
+    match format {
+        MetadataFormat::Json => {
+            let mut stdout = io::stdout().lock();
+            serde_json::to_writer_pretty(&mut stdout, &metadata)?;
+            stdout.write_all(b"\n")?;
+        }
+        MetadataFormat::Shell => {
+            for (key, value) in &metadata {
+                let encoded = metadata_scalar(value).ok_or_else(|| {
+                    XtaskError::new(format!(
+                        "{}: [workspace.metadata].{key} cannot be represented as a shell scalar",
+                        manifest.display()
+                    ))
+                })?;
+                let environment_key = format!("AURAW_{}", key.to_ascii_uppercase());
+                println!(
+                    "export {environment_key}={}",
+                    shell_escape(OsStr::new(&encoded))
+                );
             }
-        } else if character == '"' {
-            in_string = true;
-        } else if character == '#' {
-            return &line[..index];
         }
     }
-    line
+    Ok(())
+}
+
+fn command_verified_download(args: VerifiedDownloadArgs) -> Result<()> {
+    if !args.url.starts_with("https://") {
+        return Err(XtaskError::usage(format!(
+            "refusing non-HTTPS download: {}",
+            args.url
+        )));
+    }
+    let expected = args.expected_sha256.to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(XtaskError::usage(
+            "invalid checksum: expected SHA-256 must contain exactly 64 hexadecimal digits",
+        ));
+    }
+
+    let root = workspace_root();
+    let output = rooted(&root, args.output);
+    if output.is_file() && sha256_file(&output)? == expected {
+        println!("verified cached download: {}", output.display());
+        return Ok(());
+    }
+    let parent = output.parent().ok_or_else(|| {
+        XtaskError::new(format!("download output has no parent: {}", output.display()))
+    })?;
+    fs::create_dir_all(parent)?;
+    let file_name = output
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("download");
+    let temporary = parent.join(format!(
+        ".{file_name}.download.{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let _cleanup = TemporaryFile::new(temporary.clone());
+
+    let status = Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--silent",
+            "--show-error",
+            "--retry",
+            "8",
+            "--retry-all-errors",
+            "--retry-delay",
+            "2",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "900",
+            "-o",
+        ])
+        .arg(&temporary)
+        .arg(&args.url)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|error| XtaskError::new(format!("could not execute curl: {error}")))?;
+    if !status.success() {
+        return Err(XtaskError::with_code(
+            format!("HTTPS download failed: {}", args.url),
+            status.code().unwrap_or(1),
+        ));
+    }
+
+    let actual = sha256_file(&temporary)?;
+    if actual != expected {
+        return Err(XtaskError::new(format!(
+            "sha256 checksum mismatch for {}\n  expected: {expected}\n  actual:   {actual}",
+            args.url
+        )));
+    }
+
+    if let Ok(metadata) = fs::metadata(&output) {
+        fs::set_permissions(&temporary, metadata.permissions())?;
+    }
+    replace_file(&temporary, &output)?;
+    println!("verified download: {}", output.display());
+    Ok(())
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if destination.exists() {
+            fs::remove_file(destination).map_err(|error| {
+                XtaskError::new(format!(
+                    "cannot replace existing download {}: {error}",
+                    destination.display()
+                ))
+            })?;
+        }
+    }
+    fs::rename(source, destination).map_err(|error| {
+        XtaskError::new(format!(
+            "cannot move verified download to {}: {error}",
+            destination.display()
+        ))
+    })
+}
+
+fn command_verify_source_revision() -> Result<()> {
+    let root = workspace_root();
+    let status = run_command_output(
+        Command::new("git")
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .current_dir(&root),
+        "git status",
+    )?;
+    if !status.trim().is_empty() {
+        let entries = status
+            .lines()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(XtaskError::new(format!(
+            "Git working tree is not clean:\n{entries}"
+        )));
+    }
+
+    let revision = run_command_output(
+        Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(&root),
+        "git rev-parse HEAD",
+    )?;
+    let revision = revision.trim();
+    if !is_full_commit_sha(revision) {
+        return Err(XtaskError::new(format!(
+            "git rev-parse returned an invalid HEAD revision: {revision:?}"
+        )));
+    }
+    println!("{revision}");
+    Ok(())
+}
+
+fn run_command_output(command: &mut Command, description: &str) -> Result<String> {
+    let output = command
+        .output()
+        .map_err(|error| XtaskError::new(format!("could not execute {description}: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(XtaskError::with_code(
+            if stderr.is_empty() {
+                format!("{description} failed")
+            } else {
+                format!("{description} failed: {stderr}")
+            },
+            output.status.code().unwrap_or(1),
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| XtaskError::new(format!("{description} produced non-UTF-8 output: {error}")))
+}
+
+fn read_workspace_metadata(path: &Path) -> Result<BTreeMap<String, Value>> {
+    let root = path.parent().ok_or_else(|| {
+        XtaskError::new(format!("workspace manifest has no parent: {}", path.display()))
+    })?;
+    let output = Command::new("cargo")
+        .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| XtaskError::new(format!("could not execute cargo metadata: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(XtaskError::with_code(
+            if stderr.is_empty() {
+                format!("cannot read [workspace.metadata] from {}", path.display())
+            } else {
+                format!("cannot read [workspace.metadata] from {}: {stderr}", path.display())
+            },
+            output.status.code().unwrap_or(1),
+        ));
+    }
+
+    let document: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        XtaskError::new(format!("cargo metadata returned invalid JSON: {error}"))
+    })?;
+    let metadata = document
+        .get("metadata")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            XtaskError::new(format!(
+                "{}: missing or invalid [workspace.metadata] table",
+                path.display()
+            ))
+        })?;
+    Ok(metadata
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect())
+}
+
+fn validate_required_workspace_metadata(
+    path: &Path,
+    values: &BTreeMap<String, Value>,
+) -> Result<()> {
+    let missing = REQUIRED_WORKSPACE_METADATA
+        .iter()
+        .filter_map(|(key, _)| (!values.contains_key(*key)).then_some(*key))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(XtaskError::new(format!(
+            "{}: [workspace.metadata] is missing required key(s): {}",
+            path.display(),
+            missing.join(", ")
+        )));
+    }
+
+    for (key, kind) in REQUIRED_WORKSPACE_METADATA {
+        let value = &values[key];
+        let valid = match kind {
+            MetadataKind::String => value.as_str().is_some_and(|value| !value.is_empty()),
+            MetadataKind::PositiveInteger => value.as_u64().is_some_and(|value| value > 0),
+            MetadataKind::Boolean => value.is_boolean(),
+        };
+        if !valid {
+            let expected = match kind {
+                MetadataKind::String => "a non-empty string",
+                MetadataKind::PositiveInteger => "a positive integer",
+                MetadataKind::Boolean => "a boolean",
+            };
+            return Err(XtaskError::new(format!(
+                "{}: [workspace.metadata].{key} must be {expected}",
+                path.display()
+            )));
+        }
+    }
+
+    let min_sdk = values["android_min_sdk"].as_u64().unwrap_or_default();
+    let target_sdk = values["android_target_sdk"].as_u64().unwrap_or_default();
+    let compile_sdk = values["android_compile_sdk"].as_u64().unwrap_or_default();
+    if min_sdk > target_sdk {
+        return Err(XtaskError::new(format!(
+            "{}: [workspace.metadata].android_min_sdk cannot exceed android_target_sdk",
+            path.display()
+        )));
+    }
+    if target_sdk > compile_sdk {
+        return Err(XtaskError::new(format!(
+            "{}: [workspace.metadata].android_target_sdk cannot exceed android_compile_sdk",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn metadata_string<'a>(
+    path: &Path,
+    values: &'a BTreeMap<String, Value>,
+    key: &str,
+) -> Result<&'a str> {
+    values.get(key).and_then(Value::as_str).ok_or_else(|| {
+        XtaskError::new(format!(
+            "{}: [workspace.metadata].{key} must be a string",
+            path.display()
+        ))
+    })
+}
+
+fn metadata_scalar(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+struct Sha256 {
+    state: [u32; 8],
+    buffer: [u8; 64],
+    buffer_len: usize,
+    total_len: u64,
+}
+
+impl Sha256 {
+    fn new() -> Self {
+        Self {
+            state: [
+                0x6a09e667,
+                0xbb67ae85,
+                0x3c6ef372,
+                0xa54ff53a,
+                0x510e527f,
+                0x9b05688c,
+                0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            buffer: [0; 64],
+            buffer_len: 0,
+            total_len: 0,
+        }
+    }
+
+    fn update(&mut self, mut input: &[u8]) {
+        self.total_len = self.total_len.wrapping_add(input.len() as u64);
+        if self.buffer_len != 0 {
+            let needed = 64 - self.buffer_len;
+            let copied = needed.min(input.len());
+            self.buffer[self.buffer_len..self.buffer_len + copied]
+                .copy_from_slice(&input[..copied]);
+            self.buffer_len += copied;
+            input = &input[copied..];
+            if self.buffer_len == 64 {
+                let block = self.buffer;
+                self.compress(&block);
+                self.buffer_len = 0;
+            }
+        }
+        while input.len() >= 64 {
+            let block: &[u8; 64] = input[..64].try_into().expect("64-byte SHA-256 block");
+            self.compress(block);
+            input = &input[64..];
+        }
+        if !input.is_empty() {
+            self.buffer[..input.len()].copy_from_slice(input);
+            self.buffer_len = input.len();
+        }
+    }
+
+    fn finalize(mut self) -> [u8; 32] {
+        let bit_len = self.total_len.wrapping_mul(8);
+        self.buffer[self.buffer_len] = 0x80;
+        self.buffer_len += 1;
+        if self.buffer_len > 56 {
+            self.buffer[self.buffer_len..].fill(0);
+            let block = self.buffer;
+            self.compress(&block);
+            self.buffer = [0; 64];
+            self.buffer_len = 0;
+        }
+        self.buffer[self.buffer_len..56].fill(0);
+        self.buffer[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        let block = self.buffer;
+        self.compress(&block);
+
+        let mut digest = [0u8; 32];
+        for (chunk, word) in digest.chunks_exact_mut(4).zip(self.state) {
+            chunk.copy_from_slice(&word.to_be_bytes());
+        }
+        digest
+    }
+
+    fn compress(&mut self, block: &[u8; 64]) {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+            0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+            0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+            0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+            0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+            0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+            0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+            0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        ];
+        let mut schedule = [0u32; 64];
+        for (index, chunk) in block.chunks_exact(4).take(16).enumerate() {
+            schedule[index] = u32::from_be_bytes(chunk.try_into().expect("four-byte word"));
+        }
+        for index in 16..64 {
+            let s0 = schedule[index - 15].rotate_right(7)
+                ^ schedule[index - 15].rotate_right(18)
+                ^ (schedule[index - 15] >> 3);
+            let s1 = schedule[index - 2].rotate_right(17)
+                ^ schedule[index - 2].rotate_right(19)
+                ^ (schedule[index - 2] >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
+        for index in 0..64 {
+            let sigma1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choose = (e & f) ^ ((!e) & g);
+            let temp1 = h
+                .wrapping_add(sigma1)
+                .wrapping_add(choose)
+                .wrapping_add(K[index])
+                .wrapping_add(schedule[index]);
+            let sigma0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = sigma0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        for (state, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *state = state.wrapping_add(value);
+        }
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let file = File::open(path)
+        .map_err(|error| XtaskError::new(format!("cannot open {}: {error}", path.display())))?;
+    let mut reader = io::BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| XtaskError::new(format!("cannot read {}: {error}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex_encode(&hasher.finalize()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+struct TemporaryFile {
+    path: PathBuf,
+}
+
+impl TemporaryFile {
+    fn new(path: PathBuf) -> Self {
+        let _ = fs::remove_file(&path);
+        Self { path }
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn android_sdk_root() -> Option<PathBuf> {
@@ -1769,7 +2548,9 @@ impl Drop for TemporaryDirectory {
 
 #[cfg(test)]
 mod tests {
-    use super::{median, native_library_path, parse_alignment_power, percentile_95};
+    use super::{
+        hex_encode, median, native_library_path, parse_alignment_power, percentile_95, Sha256,
+    };
 
     #[test]
     fn statistics_are_deterministic() {
@@ -1782,6 +2563,16 @@ mod tests {
     fn parses_llvm_objdump_alignment() {
         assert_eq!(parse_alignment_power("  LOAD off 0x0 align 2**14"), Some(14));
         assert_eq!(parse_alignment_power("  LOAD off 0x0 align 4096"), None);
+    }
+
+    #[test]
+    fn sha256_matches_standard_test_vector() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"abc");
+        assert_eq!(
+            hex_encode(&hasher.finalize()),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

@@ -114,14 +114,14 @@ rustup target add aarch64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-eval "$(python3 scripts/dev.py print-build-metadata --format shell)"
+eval "$(cargo xtask print-metadata --format shell)"
 export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$AURAW_ANDROID_NDK_VERSION"
 ```
 
 Build the APK from the repository root:
 
 ```sh
-gradle assembleDebug -PaurawAbi=arm64-v8a
+./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 ```
 
 Install it on a connected device:

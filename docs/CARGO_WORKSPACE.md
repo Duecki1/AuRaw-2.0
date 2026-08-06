@@ -40,10 +40,16 @@ cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo run -p auraw-ui --bin auraw --release
 cargo run -p auraw-cli --bin auraw-regression-render -- --help
+./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
+cargo xtask check-all
 ```
 
 `AURAW_ALLOW_NO_LIBRAW=1` remains available only for intentional non-production
 checks on hosts without LibRaw. Production builds still require LibRaw.
+
+The Android build contract is defined only in the root `Cargo.toml` under
+`[workspace.metadata]`. `android/build-contract.properties` is retained solely as
+an empty legacy compatibility marker and must not contain contract values.
 
 ## Ownership rules
 
