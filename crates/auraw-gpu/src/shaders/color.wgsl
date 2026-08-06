@@ -1,7 +1,9 @@
+#import auraw::common as Common
+
 fn cam_to_working(rgb: vec3<f32>) -> vec3<f32> {
-    let r = dot(camera_uniforms.cam_to_srgb_0.xyz, rgb);
-    let g = dot(camera_uniforms.cam_to_srgb_1.xyz, rgb);
-    let b = dot(camera_uniforms.cam_to_srgb_2.xyz, rgb);
+    let r = dot(Common::camera_uniforms.cam_to_srgb_0.xyz, rgb);
+    let g = dot(Common::camera_uniforms.cam_to_srgb_1.xyz, rgb);
+    let b = dot(Common::camera_uniforms.cam_to_srgb_2.xyz, rgb);
     return vec3<f32>(r, g, b);
 }
 
@@ -47,11 +49,11 @@ fn oklab_to_linear_srgb(lab: vec3<f32>) -> vec3<f32> {
 }
 
 fn rec2020_from_oklab(lab: vec3<f32>) -> vec3<f32> {
-    return SRGB_TO_REC2020 * oklab_to_linear_srgb(lab);
+    return Common::SRGB_TO_REC2020 * oklab_to_linear_srgb(lab);
 }
 
 fn rec2020_to_oklab(rgb: vec3<f32>) -> vec3<f32> {
-    return linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
+    return linear_srgb_to_oklab(Common::REC2020_TO_SRGB * rgb);
 }
 
 fn rgb_is_nonnegative(rgb: vec3<f32>) -> bool {

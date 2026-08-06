@@ -1,3 +1,7 @@
+#import auraw::common as Common
+#import auraw::noise as Noise
+#import auraw::noise_ca_finish as NoiseCaFinish
+
 // Grouped X-Trans finishing/FDC stage. Mode 0 keeps the Markesteijn-3 result. Mode 1
 // preserves its luminance while rejecting chroma energy at the 6x6 X-Trans
 // carrier frequencies. Mode 2 blends the Markesteijn reference with a separate
@@ -9,11 +13,11 @@
 
 fn xt_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
+        && pos.x < i32(Common::camera_uniforms.width) && pos.y < i32(Common::camera_uniforms.height);
 }
 
 fn xt_high(pos: vec2<i32>) -> vec3<f32> {
-    return textureLoad(mark_high_read, clamp_pos(pos), 0).rgb;
+    return textureLoad(mark_high_read, Common::clamp_pos(pos), 0).rgb;
 }
 
 fn xt_uv(rgb: vec3<f32>) -> vec2<f32> {
@@ -103,7 +107,7 @@ fn xt_frequency_uv(pos: vec2<i32>) -> vec2<f32> {
     let spectral_energy = length(carrier_alias);
     let reject = smoothstep(0.0015, 0.030, max(spectral_energy - 0.35 * luma_support, 0.0));
     let corrected = center_opponents - reject * carrier_alias;
-    return mix(center_opponents, corrected, clamp(camera_uniforms.frequency_chroma, 0.0, 1.0));
+    return mix(center_opponents, corrected, clamp(Common::camera_uniforms.frequency_chroma, 0.0, 1.0));
 }
 
 fn xt_median5(a0: f32, a1: f32, a2: f32, a3: f32, a4: f32) -> f32 {
@@ -153,14 +157,14 @@ fn xt_frequency_chroma(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         xt_median5(uv0.x, uvn.x, uvs.x, uvw.x, uve.x),
         xt_median5(uv0.y, uvn.y, uvs.y, uvw.y, uve.y),
     );
-    let strength = clamp(camera_uniforms.frequency_chroma, 0.0, 1.0);
+    let strength = clamp(Common::camera_uniforms.frequency_chroma, 0.0, 1.0);
     let uv = mix(xt_uv(rgb), mix(uv0, median, 0.35), strength);
     let y = dot(rgb, vec3<f32>(0.2627, 0.6780, 0.0593));
     return xt_from_yuv(y, uv);
 }
 
 fn xt_dual_low(pos: vec2<i32>) -> vec4<f32> {
-    return textureLoad(xtrans_dual_low_read, clamp_pos(pos), 0);
+    return textureLoad(xtrans_dual_low_read, Common::clamp_pos(pos), 0);
 }
 
 fn xt_luma(pos: vec2<i32>) -> f32 {
@@ -194,14 +198,14 @@ fn xt_dual_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32 {
         let wy = xt_gaussian5_weight(dy);
         for (var dx = -2; dx <= 2; dx = dx + 1) {
             detail += wy * xt_gaussian5_weight(dx)
-                * xt_scharr(clamp_pos(pos + vec2<i32>(dx, dy)));
+                * xt_scharr(Common::clamp_pos(pos + vec2<i32>(dx, dy)));
         }
     }
     detail /= 256.0;
-    let threshold = 0.005 * pow(max(camera_uniforms.dual_threshold, 0.0), 1.1);
+    let threshold = 0.005 * pow(max(Common::camera_uniforms.dual_threshold, 0.0), 1.1);
     if threshold <= 1e-7 { return 1.0; }
 
-    let variance = nr_component_variance(0.5 * (reference + low.rgb));
+    let variance = Noise::nr_component_variance(0.5 * (reference + low.rgb));
     let noise_floor = 2.25 * sqrt(max(variance.x, 1e-10));
     let detail_signal = max(detail - noise_floor, 0.0);
     let edge_confidence = smoothstep(
@@ -218,29 +222,27 @@ fn xt_dual_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32 {
     return clamp(1.0 - low_confidence * (1.0 - high_confidence), 0.0, 1.0);
 }
 
-// Adapter used by the build-time shared noise/CA include. xt_high clamps
+// Adapter used by the reusable noise/CA composition module. xt_high clamps
 // coordinates while sampling the final Markesteijn reference texture.
-fn finish_reference_at(pos: vec2<i32>) -> vec3<f32> {
+override fn NoiseCaFinish::finish_reference_at(pos: vec2<i32>) -> vec3<f32> {
     return xt_high(pos);
 }
 
-// @include "noise_ca_finish.wgsl"
-
 @compute @workgroup_size(8, 8, 1)
 fn xtrans_demosaic_finish(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let reference = xt_high(pos);
     var camera_rgb = reference;
-    if camera_uniforms.demosaic_mode >= 1.5 {
+    if Common::camera_uniforms.demosaic_mode >= 1.5 {
         let low = xt_dual_low(pos);
         camera_rgb = mix(low.rgb, reference, xt_dual_weight(pos, reference, low));
-    } else if camera_uniforms.demosaic_mode >= 0.5 {
+    } else if Common::camera_uniforms.demosaic_mode >= 0.5 {
         camera_rgb = xt_frequency_chroma(pos, reference);
     } else {
         camera_rgb = xt_reference_false_color_guard(pos, reference);
     }
-    camera_rgb = finish_apply_sensor_denoise(pos, camera_rgb);
-    camera_rgb = finish_apply_ca(pos, camera_rgb);
+    camera_rgb = NoiseCaFinish::finish_apply_sensor_denoise(pos, camera_rgb);
+    camera_rgb = NoiseCaFinish::finish_apply_ca(pos, camera_rgb);
     textureStore(xtrans_scene_write, pos, vec4<f32>(camera_rgb, 1.0));
 }

@@ -1,3 +1,6 @@
+#import auraw::common as Common
+#import auraw::tone_common as ToneCommon
+
 // darktable sigmoid display transform, ported from darktable 5.6.0
 // src/iop/sigmoid.c and data/kernels/sigmoid.cl.
 // Copyright (C) 2020-2026 darktable developers.
@@ -10,7 +13,7 @@
 // The scene-to-display transform below includes darktable's generalized
 // log-logistic sigmoid path and color processing.
 
-@group(0) @binding(16) var<storage, read> tone_stats: ToneStats;
+@group(0) @binding(16) var<storage, read> tone_stats: ToneCommon::ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
 
 // This file implements the scene-to-display sigmoid view transform.
@@ -20,13 +23,13 @@ fn adaptive_tone_user_exposure_ev() -> f32 {
     // The histogram/guide remain cached in pre-user-exposure scene space so
     // moving Exposure stays cheap. Reintroduce the user-facing edit here. The
     // camera/DNG default rendering exposure is deliberately excluded here.
-    return clamp(bitcast<f32>(camera_uniforms.user_exposure_bits), -5.0, 5.0);
+    return clamp(bitcast<f32>(Common::camera_uniforms.user_exposure_bits), -5.0, 5.0);
 }
 
 fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
     let guide_size_i = vec2<i32>(textureDimensions(tone_guide_tex));
     let guide_max = guide_size_i - vec2<i32>(1);
-    let full_size = vec2<f32>(f32(camera_uniforms.width), f32(camera_uniforms.height));
+    let full_size = vec2<f32>(f32(Common::camera_uniforms.width), f32(Common::camera_uniforms.height));
     let guide_size = vec2<f32>(guide_size_i);
     let coordinate = (vec2<f32>(pos) + vec2<f32>(0.5)) * guide_size / full_size
         - vec2<f32>(0.5);
@@ -48,7 +51,7 @@ fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
     return mix(a, b, fraction.y) + adaptive_tone_user_exposure_ev();
 }
 
-fn tone_percentiles() -> TonePercentiles {
+fn tone_percentiles() -> ToneCommon::TonePercentiles {
     let p0 = tone_stats.percentiles_0;
     let p1 = tone_stats.percentiles_1;
     // Partially follow base Exposure instead of shifting the entire analysis
@@ -57,7 +60,7 @@ fn tone_percentiles() -> TonePercentiles {
     // recovery controls a more photographic, exposure-aware response without
     // making their target ranges jump abruptly after large edits.
     let guide_follow = adaptive_tone_user_exposure_ev() * 0.35;
-    return TonePercentiles(
+    return ToneCommon::TonePercentiles(
         p0.x + guide_follow,
         p0.y + guide_follow,
         p0.z + guide_follow,
@@ -80,9 +83,9 @@ fn basic_low_tone_control(value: f32) -> f32 {
 
 fn adaptive_low_tone_ev(rgb: vec3<f32>, pos: vec2<i32>, guide_ev: f32) -> f32 {
     let pixel_ev = clamp(
-        log2(safe_luma(rgb) / SCENE_MIDDLE_GREY),
-        TONE_EV_MIN,
-        TONE_EV_MAX,
+        log2(Common::safe_luma(rgb) / ToneCommon::SCENE_MIDDLE_GREY),
+        ToneCommon::TONE_EV_MIN,
+        ToneCommon::TONE_EV_MAX,
     );
     let mismatch = abs(pixel_ev - guide_ev);
     // The guide may suppress halos, but it may not reclassify a
@@ -99,29 +102,29 @@ fn adaptive_low_tone_ev(rgb: vec3<f32>, pos: vec2<i32>, guide_ev: f32) -> f32 {
 fn adaptive_tone_masks(
     low_ev: f32,
     high_ev: f32,
-    percentiles: TonePercentiles,
+    percentiles: ToneCommon::TonePercentiles,
 ) -> vec4<f32> {
     // Blacks is implemented by a dedicated monotone display-linear toe, so
     // its mask is retained only for diagnostics/future use. Shadows reaches
     // farther into lower midtones while still rolling out before the bright
     // half of the image. Highlight/White semantics remain unchanged.
     let black_fade_end = min(percentiles.p50 - 0.55, percentiles.p05 + 3.35);
-    let black_mask = 1.0 - tone_smoothstep(
+    let black_mask = 1.0 - ToneCommon::tone_smoothstep(
         percentiles.p005 - 0.75,
         max(black_fade_end, percentiles.p05 + 0.90),
         low_ev,
     );
-    let shadow_mask = 1.0 - tone_smoothstep(
+    let shadow_mask = 1.0 - ToneCommon::tone_smoothstep(
         percentiles.p05 - 0.90,
         percentiles.p50 + 1.35,
         low_ev,
     );
-    let highlight_mask = tone_smoothstep(
+    let highlight_mask = ToneCommon::tone_smoothstep(
         percentiles.p005 - 0.40,
         percentiles.p50 - 0.30,
         high_ev,
     );
-    let white_mask = tone_smoothstep(
+    let white_mask = ToneCommon::tone_smoothstep(
         percentiles.p05 - 0.10,
         percentiles.p50 + 0.50,
         high_ev,
@@ -132,7 +135,7 @@ fn adaptive_tone_masks(
 fn lightroom_shadow_offset_ev(
     shadows: f32,
     mask: f32,
-    percentiles: TonePercentiles,
+    percentiles: ToneCommon::TonePercentiles,
 ) -> f32 {
     if abs(shadows) < 1e-7 || mask <= 0.0 {
         return 0.0;
@@ -155,7 +158,7 @@ fn lightroom_shadow_offset_ev(
 fn lightroom_positive_whites_offset_ev(
     whites: f32,
     low_ev: f32,
-    percentiles: TonePercentiles,
+    percentiles: ToneCommon::TonePercentiles,
 ) -> f32 {
     if whites <= 0.0 {
         return 0.0;
@@ -165,14 +168,14 @@ fn lightroom_positive_whites_offset_ev(
     // neutral in the bottom decile, strongest from upper midtones into diffuse
     // white, then rolling away from the clipped endpoint. The previous 20%
     // floor and 2.35 EV request turned Whites into a second Exposure control.
-    let rise = tone_smoothstep(
+    let rise = ToneCommon::tone_smoothstep(
         percentiles.p05 - 0.15,
         percentiles.p50 + 0.55,
         low_ev,
     );
     let fall_start = percentiles.p50 + 0.10;
     let fall_end = percentiles.p995 + 0.60;
-    let fall = 1.0 - 0.35 * tone_smoothstep(fall_start, fall_end, low_ev);
+    let fall = 1.0 - 0.35 * ToneCommon::tone_smoothstep(fall_start, fall_end, low_ev);
     let mask = (0.025 + 0.975 * rise) * fall;
     let monotone_limit = 0.90 * max(fall_end - fall_start, 0.25) / (1.5 * 0.35);
     return min(whites * 0.95, monotone_limit) * mask;
@@ -208,7 +211,7 @@ fn apply_local_basic_tone_values_with_low_strength(
 
     let shadow_ev = lightroom_shadow_offset_ev(shadows, masks.y, percentiles);
     // Highlights peak in the top decile while staying gentle below the median.
-    let highlight_mask = 0.10 + 0.90 * tone_smoothstep(
+    let highlight_mask = 0.10 + 0.90 * ToneCommon::tone_smoothstep(
         percentiles.p50 - 0.35,
         percentiles.p95 + 0.45,
         guide_ev,
@@ -245,10 +248,10 @@ fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     return apply_local_basic_tone_values(
         rgb,
         pos,
-        scene_tone_uniforms.basic_tone.x,
-        scene_tone_uniforms.basic_tone.y,
-        scene_tone_uniforms.basic_tone.z,
-        scene_tone_uniforms.basic_tone.w,
+        Common::scene_tone_uniforms.basic_tone.x,
+        Common::scene_tone_uniforms.basic_tone.y,
+        Common::scene_tone_uniforms.basic_tone.z,
+        Common::scene_tone_uniforms.basic_tone.w,
     );
 }
 
@@ -261,8 +264,8 @@ fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
         return rgb;
     }
 
-    let luminance = safe_luma(rgb);
-    let scene_ev = log2(luminance / SCENE_MIDDLE_GREY);
+    let luminance = Common::safe_luma(rgb);
+    let scene_ev = log2(luminance / ToneCommon::SCENE_MIDDLE_GREY);
     let contrast_pivot_ev = tone_percentiles().p50 + 0.12;
     let relative_ev = scene_ev - contrast_pivot_ev;
 
@@ -287,7 +290,7 @@ fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     // pivot: 1 - 1.70*ln(2)/1.65 = 0.286 in the toe and
     // 1 - 0.95*ln(2)/1.85 = 0.644 in the shoulder.
     let adjusted_ev = scene_ev + amount * signed_protected_shape;
-    let adjusted_luminance = SCENE_MIDDLE_GREY * exp2(adjusted_ev);
+    let adjusted_luminance = ToneCommon::SCENE_MIDDLE_GREY * exp2(adjusted_ev);
     return rgb * clamp(adjusted_luminance / luminance, 0.0, 64.0);
 }
 
@@ -297,64 +300,64 @@ fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
 fn tone_curve_point(curve: u32, index: u32) -> vec2<f32> {
     if curve == 1u {
         switch index {
-            case 0u: { return scene_tone_uniforms.tone_curve_red_0.xy; }
-            case 1u: { return scene_tone_uniforms.tone_curve_red_0.zw; }
-            case 2u: { return scene_tone_uniforms.tone_curve_red_1.xy; }
-            case 3u: { return scene_tone_uniforms.tone_curve_red_1.zw; }
-            case 4u: { return scene_tone_uniforms.tone_curve_red_2.xy; }
-            case 5u: { return scene_tone_uniforms.tone_curve_red_2.zw; }
-            case 6u: { return scene_tone_uniforms.tone_curve_red_3.xy; }
-            default: { return scene_tone_uniforms.tone_curve_red_3.zw; }
+            case 0u: { return Common::scene_tone_uniforms.tone_curve_red_0.xy; }
+            case 1u: { return Common::scene_tone_uniforms.tone_curve_red_0.zw; }
+            case 2u: { return Common::scene_tone_uniforms.tone_curve_red_1.xy; }
+            case 3u: { return Common::scene_tone_uniforms.tone_curve_red_1.zw; }
+            case 4u: { return Common::scene_tone_uniforms.tone_curve_red_2.xy; }
+            case 5u: { return Common::scene_tone_uniforms.tone_curve_red_2.zw; }
+            case 6u: { return Common::scene_tone_uniforms.tone_curve_red_3.xy; }
+            default: { return Common::scene_tone_uniforms.tone_curve_red_3.zw; }
         }
     }
     if curve == 2u {
         switch index {
-            case 0u: { return scene_tone_uniforms.tone_curve_green_0.xy; }
-            case 1u: { return scene_tone_uniforms.tone_curve_green_0.zw; }
-            case 2u: { return scene_tone_uniforms.tone_curve_green_1.xy; }
-            case 3u: { return scene_tone_uniforms.tone_curve_green_1.zw; }
-            case 4u: { return scene_tone_uniforms.tone_curve_green_2.xy; }
-            case 5u: { return scene_tone_uniforms.tone_curve_green_2.zw; }
-            case 6u: { return scene_tone_uniforms.tone_curve_green_3.xy; }
-            default: { return scene_tone_uniforms.tone_curve_green_3.zw; }
+            case 0u: { return Common::scene_tone_uniforms.tone_curve_green_0.xy; }
+            case 1u: { return Common::scene_tone_uniforms.tone_curve_green_0.zw; }
+            case 2u: { return Common::scene_tone_uniforms.tone_curve_green_1.xy; }
+            case 3u: { return Common::scene_tone_uniforms.tone_curve_green_1.zw; }
+            case 4u: { return Common::scene_tone_uniforms.tone_curve_green_2.xy; }
+            case 5u: { return Common::scene_tone_uniforms.tone_curve_green_2.zw; }
+            case 6u: { return Common::scene_tone_uniforms.tone_curve_green_3.xy; }
+            default: { return Common::scene_tone_uniforms.tone_curve_green_3.zw; }
         }
     }
     if curve == 3u {
         switch index {
-            case 0u: { return scene_tone_uniforms.tone_curve_blue_0.xy; }
-            case 1u: { return scene_tone_uniforms.tone_curve_blue_0.zw; }
-            case 2u: { return scene_tone_uniforms.tone_curve_blue_1.xy; }
-            case 3u: { return scene_tone_uniforms.tone_curve_blue_1.zw; }
-            case 4u: { return scene_tone_uniforms.tone_curve_blue_2.xy; }
-            case 5u: { return scene_tone_uniforms.tone_curve_blue_2.zw; }
-            case 6u: { return scene_tone_uniforms.tone_curve_blue_3.xy; }
-            default: { return scene_tone_uniforms.tone_curve_blue_3.zw; }
+            case 0u: { return Common::scene_tone_uniforms.tone_curve_blue_0.xy; }
+            case 1u: { return Common::scene_tone_uniforms.tone_curve_blue_0.zw; }
+            case 2u: { return Common::scene_tone_uniforms.tone_curve_blue_1.xy; }
+            case 3u: { return Common::scene_tone_uniforms.tone_curve_blue_1.zw; }
+            case 4u: { return Common::scene_tone_uniforms.tone_curve_blue_2.xy; }
+            case 5u: { return Common::scene_tone_uniforms.tone_curve_blue_2.zw; }
+            case 6u: { return Common::scene_tone_uniforms.tone_curve_blue_3.xy; }
+            default: { return Common::scene_tone_uniforms.tone_curve_blue_3.zw; }
         }
     }
     switch index {
-        case 0u: { return scene_tone_uniforms.tone_curve_0.xy; }
-        case 1u: { return scene_tone_uniforms.tone_curve_0.zw; }
-        case 2u: { return scene_tone_uniforms.tone_curve_1.xy; }
-        case 3u: { return scene_tone_uniforms.tone_curve_1.zw; }
-        case 4u: { return scene_tone_uniforms.tone_curve_2.xy; }
-        case 5u: { return scene_tone_uniforms.tone_curve_2.zw; }
-        case 6u: { return scene_tone_uniforms.tone_curve_3.xy; }
-        default: { return scene_tone_uniforms.tone_curve_3.zw; }
+        case 0u: { return Common::scene_tone_uniforms.tone_curve_0.xy; }
+        case 1u: { return Common::scene_tone_uniforms.tone_curve_0.zw; }
+        case 2u: { return Common::scene_tone_uniforms.tone_curve_1.xy; }
+        case 3u: { return Common::scene_tone_uniforms.tone_curve_1.zw; }
+        case 4u: { return Common::scene_tone_uniforms.tone_curve_2.xy; }
+        case 5u: { return Common::scene_tone_uniforms.tone_curve_2.zw; }
+        case 6u: { return Common::scene_tone_uniforms.tone_curve_3.xy; }
+        default: { return Common::scene_tone_uniforms.tone_curve_3.zw; }
     }
 }
 
 fn tone_curve_count(curve: u32) -> u32 {
-    if curve == 1u { return u32(clamp(scene_tone_uniforms.tone_curve_red_meta.x, 2.0, 8.0)); }
-    if curve == 2u { return u32(clamp(scene_tone_uniforms.tone_curve_green_meta.x, 2.0, 8.0)); }
-    if curve == 3u { return u32(clamp(scene_tone_uniforms.tone_curve_blue_meta.x, 2.0, 8.0)); }
-    return u32(clamp(scene_tone_uniforms.tone_curve_meta.x, 2.0, 8.0));
+    if curve == 1u { return u32(clamp(Common::scene_tone_uniforms.tone_curve_red_meta.x, 2.0, 8.0)); }
+    if curve == 2u { return u32(clamp(Common::scene_tone_uniforms.tone_curve_green_meta.x, 2.0, 8.0)); }
+    if curve == 3u { return u32(clamp(Common::scene_tone_uniforms.tone_curve_blue_meta.x, 2.0, 8.0)); }
+    return u32(clamp(Common::scene_tone_uniforms.tone_curve_meta.x, 2.0, 8.0));
 }
 
 fn tone_curve_is_identity(curve: u32) -> bool {
-    if curve == 1u { return scene_tone_uniforms.tone_curve_red_meta.y > 0.5; }
-    if curve == 2u { return scene_tone_uniforms.tone_curve_green_meta.y > 0.5; }
-    if curve == 3u { return scene_tone_uniforms.tone_curve_blue_meta.y > 0.5; }
-    return scene_tone_uniforms.tone_curve_meta.y > 0.5;
+    if curve == 1u { return Common::scene_tone_uniforms.tone_curve_red_meta.y > 0.5; }
+    if curve == 2u { return Common::scene_tone_uniforms.tone_curve_green_meta.y > 0.5; }
+    if curve == 3u { return Common::scene_tone_uniforms.tone_curve_blue_meta.y > 0.5; }
+    return Common::scene_tone_uniforms.tone_curve_meta.y > 0.5;
 }
 
 fn tone_curve_secant(a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -428,10 +431,10 @@ const SCENE_CURVE_SHOULDER_ENCODE_START: f32 = 0.9999915361404419;
 const SCENE_CURVE_SHOULDER_WIDTH: f32 =
     1.0 - SCENE_CURVE_SHOULDER_ENCODE_START;
 const SCENE_CURVE_SHOULDER_START: f32 =
-    SCENE_MIDDLE_GREY * SCENE_CURVE_SHOULDER_ENCODE_START
+    ToneCommon::SCENE_MIDDLE_GREY * SCENE_CURVE_SHOULDER_ENCODE_START
         / SCENE_CURVE_SHOULDER_WIDTH;
 const SCENE_CURVE_SHOULDER_TANGENT: f32 =
-    SCENE_MIDDLE_GREY / SCENE_CURVE_SHOULDER_WIDTH;
+    ToneCommon::SCENE_MIDDLE_GREY / SCENE_CURVE_SHOULDER_WIDTH;
 
 fn scene_curve_shoulder_decode(t: f32) -> f32 {
     let bounded_t = clamp(t, 0.0, 1.0);
@@ -454,7 +457,7 @@ fn scene_curve_shoulder_derivative(t: f32) -> f32 {
 fn scene_curve_decode(value: f32) -> f32 {
     let bounded = clamp(value, 0.0, 1.0);
     if bounded <= SCENE_CURVE_SHOULDER_ENCODE_START {
-        return SCENE_MIDDLE_GREY * bounded / max(1.0 - bounded, 1e-6);
+        return ToneCommon::SCENE_MIDDLE_GREY * bounded / max(1.0 - bounded, 1e-6);
     }
     let t = (bounded - SCENE_CURVE_SHOULDER_ENCODE_START)
         / SCENE_CURVE_SHOULDER_WIDTH;
@@ -472,7 +475,7 @@ fn scene_curve_encode(value: f32) -> f32 {
         // branch to the exact shoulder coordinate so decode(encode(y)) remains
         // monotonic across the join.
         return min(
-            positive / (positive + SCENE_MIDDLE_GREY),
+            positive / (positive + ToneCommon::SCENE_MIDDLE_GREY),
             SCENE_CURVE_SHOULDER_ENCODE_START,
         );
     }
@@ -498,7 +501,7 @@ fn scene_curve_encode(value: f32) -> f32 {
 
 fn scene_curve_decode_slope_scale(encoded_endpoint: f32) -> f32 {
     // Return d(scene output) / d(scene input) per unit encoded-curve tangent.
-    // scene_curve_encode'(0) is 1 / SCENE_MIDDLE_GREY. The scale is C1 at the
+    // scene_curve_encode'(0) is 1 / ToneCommon::SCENE_MIDDLE_GREY. The scale is C1 at the
     // shoulder join and falls smoothly to zero at an endpoint of 1.0.
     let bounded = clamp(encoded_endpoint, 0.0, 1.0);
     if bounded != encoded_endpoint {
@@ -513,7 +516,7 @@ fn scene_curve_decode_slope_scale(encoded_endpoint: f32) -> f32 {
         / SCENE_CURVE_SHOULDER_WIDTH;
     let decoded_derivative = scene_curve_shoulder_derivative(t)
         / SCENE_CURVE_SHOULDER_WIDTH;
-    return max(decoded_derivative / SCENE_MIDDLE_GREY, 0.0);
+    return max(decoded_derivative / ToneCommon::SCENE_MIDDLE_GREY, 0.0);
 }
 
 fn limit_scene_curve_endpoint_tangent(encoded_endpoint: f32, encoded_slope: f32) -> f32 {
@@ -563,7 +566,7 @@ fn remap_scene_luminance(
     black_luminance: f32,
     zero_slope: f32,
 ) -> vec3<f32> {
-    let luminance = dot(rgb, LUMA);
+    let luminance = dot(rgb, Common::LUMA);
     let black = max(black_luminance, 0.0);
     if luminance <= 0.0 {
         // Continue the scene-domain master curve linearly through non-positive
@@ -609,7 +612,7 @@ fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
     if tone_curve_is_identity(0u) {
         return rgb;
     }
-    let luminance = max(dot(rgb, LUMA), 0.0);
+    let luminance = max(dot(rgb, Common::LUMA), 0.0);
     let encoded_black = point_curve_value(0u, 0.0);
     let black_luminance = scene_curve_decode(encoded_black);
     let adjusted_luminance = scene_curve_decode(
@@ -660,11 +663,11 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
     // Apply Blacks after the single view transform so profile/sigmoid compression
     // cannot erase its endpoint authority. The fixed display-linear response also
     // keeps low/high-key histogram statistics from changing the control's reach.
-    let luminance = dot(rgb, LUMA);
+    let luminance = dot(rgb, Common::LUMA);
     if luminance <= 0.0 {
         return rgb;
     }
-    let hdr_guard = 1.0 - tone_smoothstep(0.35, 1.0, luminance);
+    let hdr_guard = 1.0 - ToneCommon::tone_smoothstep(0.35, 1.0, luminance);
     if hdr_guard <= 0.0 {
         return rgb;
     }
@@ -676,7 +679,7 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
         offset_ev = amount * 1.75 * weight * hdr_guard;
     } else {
         // Negative Blacks crushes the darkest region, then falls to a restrained tail.
-        let deep = 1.0 - tone_smoothstep(0.012, 0.030, luminance);
+        let deep = 1.0 - ToneCommon::tone_smoothstep(0.012, 0.030, luminance);
         let tail = 0.10 + 2.35 * exp2(-luminance / DISPLAY_BLACKS_CRUSH_TAIL_DECAY);
         offset_ev = -(-amount) * (DISPLAY_BLACKS_DEEP_CRUSH_EV * deep + tail) * hdr_guard;
     }
@@ -698,14 +701,14 @@ fn finite_scalar(value: f32) -> bool {
 }
 
 fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
-    let white_target = scene_tone_uniforms.sigmoid_curve.x;
+    let white_target = Common::scene_tone_uniforms.sigmoid_curve.x;
     // The ABI slot stores log2(paper_exposure). Steep but valid curves can
     // overflow both the film response and paper exposure in linear form even
     // though their ratio remains perfectly well behaved.
-    let log2_paper_exposure = scene_tone_uniforms.sigmoid_curve.z;
-    let film_fog = scene_tone_uniforms.sigmoid_curve.w;
-    let film_power = scene_tone_uniforms.sigmoid_power.x;
-    let paper_power = scene_tone_uniforms.sigmoid_power.y;
+    let log2_paper_exposure = Common::scene_tone_uniforms.sigmoid_curve.z;
+    let film_fog = Common::scene_tone_uniforms.sigmoid_curve.w;
+    let film_power = Common::scene_tone_uniforms.sigmoid_power.x;
+    let paper_power = Common::scene_tone_uniforms.sigmoid_power.y;
     let fallback = clamp(max(value, 0.0), 0.0, 1.0);
 
     if !finite_scalar(white_target) || white_target <= 0.0
@@ -844,13 +847,13 @@ fn sigmoid_per_channel(rgb: vec3<f32>) -> vec3<f32> {
         positive,
         per_channel,
         order,
-        clamp(scene_tone_uniforms.sigmoid_power.z, 0.0, 1.0),
+        clamp(Common::scene_tone_uniforms.sigmoid_power.z, 0.0, 1.0),
     );
 }
 
 fn sigmoid_rgb_ratio(rgb: vec3<f32>) -> vec3<f32> {
-    let white_target = scene_tone_uniforms.sigmoid_curve.x;
-    let black_target = scene_tone_uniforms.sigmoid_curve.y;
+    let white_target = Common::scene_tone_uniforms.sigmoid_curve.x;
+    let black_target = Common::scene_tone_uniforms.sigmoid_curve.y;
     let positive = desaturate_negative_values(rgb);
     let luma = (positive.r + positive.g + positive.b) / 3.0;
     let mapped_luma = generalized_loglogistic_sigmoid(luma);
@@ -886,7 +889,7 @@ fn sigmoid_rgb_ratio(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn darktable_sigmoid(rgb: vec3<f32>) -> vec3<f32> {
-    if scene_tone_uniforms.sigmoid_power.w < 0.5 {
+    if Common::scene_tone_uniforms.sigmoid_power.w < 0.5 {
         return sigmoid_per_channel(rgb);
     }
     return sigmoid_rgb_ratio(rgb);

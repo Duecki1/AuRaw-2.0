@@ -1,3 +1,11 @@
+#import auraw::common as Common
+#import auraw::color as Color
+#import auraw::profile as Profile
+#import auraw::scene_adjustments as SceneAdjustments
+#import auraw::creative_effects as CreativeEffects
+#import auraw::tone_common as ToneCommon
+#import auraw::tonemap as Tonemap
+
 // Display/view-domain processing: perceptual color mixer, color grading, the
 // profile/sigmoid view transform, display black toe, and output encoding.
 
@@ -113,7 +121,7 @@ fn mixer_hue_shift_values(weights: MixerBandWeights, first_values: vec4<f32>, se
 }
 
 fn mixer_sample_from_rgb(rgb: vec3<f32>) -> MixerSample {
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
+    let lab = Color::linear_srgb_to_oklab(Common::REC2020_TO_SRGB * rgb);
     let chroma = length(lab.yz);
     var hue_vector = vec2<f32>(1.0, 0.0);
     if chroma > 1e-9 {
@@ -143,13 +151,13 @@ fn stabilized_mixer_sample(pos: vec2<i32>, center_rgb: vec3<f32>) -> MixerSample
     var weight_sum = center.confidence * 4.0;
     // Desktop/high-quality rendering already uses a wider tone guide, so use
     // a 5x5 selector there. Android preview keeps a 3x3 selector for speed.
-    let selector_radius = select(1, 2, camera_uniforms.tone_guide_radius > 3.5);
+    let selector_radius = select(1, 2, Common::camera_uniforms.tone_guide_radius > 3.5);
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
             if (dx == 0 && dy == 0) || abs(dx) > selector_radius || abs(dy) > selector_radius {
                 continue;
             }
-            let neighbour_rgb = textureLoad(final_adjustment_tex, clamp_pos(pos + vec2<i32>(dx, dy)), 0).xyz;
+            let neighbour_rgb = textureLoad(SceneAdjustments::final_adjustment_tex, Common::clamp_pos(pos + vec2<i32>(dx, dy)), 0).xyz;
             let neighbour = mixer_sample_from_rgb(neighbour_rgb);
             if neighbour.confidence < 1e-5 {
                 continue;
@@ -221,7 +229,7 @@ fn color_grade_tonal_weights(luminance: f32, options: vec4<f32>) -> vec3<f32> {
     // Evaluate ranges in exposure space around photographic middle gray.
     // Wider blending produces Lightroom-like overlap without hard range
     // boundaries. Balance shifts the shared pivot by up to 1.5 stops.
-    let ev = log2(max(luminance, 1e-7) / SCENE_MIDDLE_GREY);
+    let ev = log2(max(luminance, 1e-7) / ToneCommon::SCENE_MIDDLE_GREY);
     let width = mix(0.60, 2.80, clamp(options.x, 0.0, 1.0));
     let pivot = -clamp(options.y, -1.0, 1.0) * 1.5;
     let shadows = 1.0 - smoothstep(
@@ -252,9 +260,9 @@ fn apply_color_grading_wheels(
     }
 
     let rgb = input_rgb;
-    let luminance = max(dot(rgb, LUMA), 0.0);
+    let luminance = max(dot(rgb, Common::LUMA), 0.0);
     let weights = color_grade_tonal_weights(luminance, options);
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
+    let lab = Color::linear_srgb_to_oklab(Common::REC2020_TO_SRGB * rgb);
 
     let grade_vector = color_grade_vector(shadows) * weights.x
         + color_grade_vector(midtones) * weights.y
@@ -274,7 +282,7 @@ fn apply_color_grading_wheels(
         let target_ab = lab.yz + grade_vector * (0.135 * signal * hdr_guard * saturation_guard);
         let target_chroma = length(target_ab);
         if target_chroma > 1e-8 {
-            adjusted = perceptual_rec2020_from_oklab_nonnegative(
+            adjusted = Color::perceptual_rec2020_from_oklab_nonnegative(
                 lab.x,
                 target_ab / target_chroma,
                 target_chroma,
@@ -295,19 +303,19 @@ fn apply_color_grading_wheels(
 
 fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
-        let state = mask_data[index].metadata;
+        let state = Common::mask_data[index].metadata;
         if state.x == 0u || (state.w & 2u) == 0u { continue; }
-        let weight = local_mask_weight(pos, index);
+        let weight = SceneAdjustments::local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
         let adjusted = apply_color_grading_wheels(
             rgb,
-            mask_data[index].grade_shadows,
-            mask_data[index].grade_midtones,
-            mask_data[index].grade_highlights,
-            mask_data[index].grade_global,
-            mask_data[index].grade_options,
+            Common::mask_data[index].grade_shadows,
+            Common::mask_data[index].grade_midtones,
+            Common::mask_data[index].grade_highlights,
+            Common::mask_data[index].grade_global,
+            Common::mask_data[index].grade_options,
         );
         rgb = mix(rgb, adjusted, weight);
     }
@@ -357,7 +365,7 @@ fn apply_color_mixer_values(
         let target_angle = center_angle + hue_shift * 2.0 * 3.14159265359;
         let target_hue = vec2<f32>(cos(target_angle), sin(target_angle));
         let target_chroma = sample.chroma * mixer_saturation_factor(saturation_amount);
-        adjusted = perceptual_rec2020_from_oklab_nonnegative(
+        adjusted = Color::perceptual_rec2020_from_oklab_nonnegative(
             sample.lab.x,
             target_hue,
             target_chroma,
@@ -367,7 +375,7 @@ fn apply_color_mixer_values(
     if abs(luminance_amount) > 1e-7 {
         // A scalar scene-linear gain preserves RGB ratios, hue and saturation.
         adjusted = adjusted * exp2(mixer_luminance_ev(luminance_amount, sample.lab.x));
-        adjusted = perceptual_gamut_compress_nonnegative_rec2020(adjusted);
+        adjusted = Color::perceptual_gamut_compress_nonnegative_rec2020(adjusted);
     }
     return adjusted;
 }
@@ -376,22 +384,22 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return apply_color_mixer_values(
         pos,
         rgb,
-        scene_tone_uniforms.hsl_hue_0,
-        scene_tone_uniforms.hsl_hue_1,
-        scene_tone_uniforms.hsl_saturation_0,
-        scene_tone_uniforms.hsl_saturation_1,
-        scene_tone_uniforms.hsl_luminance_0,
-        scene_tone_uniforms.hsl_luminance_1,
+        Common::scene_tone_uniforms.hsl_hue_0,
+        Common::scene_tone_uniforms.hsl_hue_1,
+        Common::scene_tone_uniforms.hsl_saturation_0,
+        Common::scene_tone_uniforms.hsl_saturation_1,
+        Common::scene_tone_uniforms.hsl_luminance_0,
+        Common::scene_tone_uniforms.hsl_luminance_1,
     );
 }
 
 fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
-        let state = mask_data[index].metadata;
+        let state = Common::mask_data[index].metadata;
         if state.x == 0u || (state.w & 1u) == 0u { continue; }
-        let weight = local_mask_weight(pos, index);
+        let weight = SceneAdjustments::local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
 
         // A local HSL/mixer edit is exactly the global mixer node with mask-
@@ -400,12 +408,12 @@ fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
         let adjusted = apply_color_mixer_values(
             pos,
             rgb,
-            mask_data[index].hsl_hue_0,
-            mask_data[index].hsl_hue_1,
-            mask_data[index].hsl_saturation_0,
-            mask_data[index].hsl_saturation_1,
-            mask_data[index].hsl_luminance_0,
-            mask_data[index].hsl_luminance_1,
+            Common::mask_data[index].hsl_hue_0,
+            Common::mask_data[index].hsl_hue_1,
+            Common::mask_data[index].hsl_saturation_0,
+            Common::mask_data[index].hsl_saturation_1,
+            Common::mask_data[index].hsl_luminance_0,
+            Common::mask_data[index].hsl_luminance_1,
         );
         rgb = mix(rgb, adjusted, weight);
     }
@@ -416,50 +424,50 @@ fn apply_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
     // Optional creative profile look is the final scene-domain operation. It is
     // deliberately downstream of H/S/W/B, Contrast, curves, presence, mixer,
     // and grading so those controls mean the same thing across camera profiles.
-    let looked = apply_optional_profile_look(scene_rgb);
-    let view_input = gamut_project_nonnegative_rec2020(looked);
+    let looked = Profile::apply_optional_profile_look(scene_rgb);
+    let view_input = Color::gamut_project_nonnegative_rec2020(looked);
 
-    return apply_sigmoid_view_transform(view_input);
+    return Tonemap::apply_sigmoid_view_transform(view_input);
 }
 
 fn apply_local_display_blacks(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
-        let state = mask_data[index].metadata;
+        let state = Common::mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
-        let value = mask_data[index].adjust_1.y;
+        let value = Common::mask_data[index].adjust_1.y;
         if abs(value) < 1e-7 { continue; }
-        let weight = local_mask_weight(pos, index);
+        let weight = SceneAdjustments::local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
-        let amount = basic_low_tone_control(value) * weight;
-        rgb = apply_display_blacks_toe_amount(rgb, amount);
+        let amount = Tonemap::basic_low_tone_control(value) * weight;
+        rgb = Tonemap::apply_display_blacks_toe_amount(rgb, amount);
     }
     return rgb;
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    let rgb = textureLoad(final_adjustment_tex, pos, 0).xyz;
+    let rgb = textureLoad(SceneAdjustments::final_adjustment_tex, pos, 0).xyz;
     let globally_mixed = apply_color_mixer(pos, rgb);
     let mixed = apply_local_color_mixer(pos, globally_mixed);
     let globally_graded = apply_color_grading_wheels(
         mixed,
-        scene_tone_uniforms.grade_shadows,
-        scene_tone_uniforms.grade_midtones,
-        scene_tone_uniforms.grade_highlights,
-        scene_tone_uniforms.grade_global,
-        scene_tone_uniforms.grade_options,
+        Common::scene_tone_uniforms.grade_shadows,
+        Common::scene_tone_uniforms.grade_midtones,
+        Common::scene_tone_uniforms.grade_highlights,
+        Common::scene_tone_uniforms.grade_global,
+        Common::scene_tone_uniforms.grade_options,
     );
     let graded = apply_local_color_grading(pos, globally_graded);
     var display_linear = apply_view_transform(graded);
-    display_linear = apply_display_blacks_toe_value(display_linear, scene_tone_uniforms.basic_tone.w);
+    display_linear = Tonemap::apply_display_blacks_toe_value(display_linear, Common::scene_tone_uniforms.basic_tone.w);
     display_linear = apply_local_display_blacks(pos, display_linear);
-    display_linear = apply_vignette(pos, display_linear);
-    textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
+    display_linear = CreativeEffects::apply_vignette(pos, display_linear);
+    textureStore(SceneAdjustments::display_linear_out, pos, vec4<f32>(display_linear, 1.0));
     // Output ICC/device encoding is a separate display-domain operation, not a
     // second view transform. It receives already display-referred linear RGB.
-    textureStore(out_tex, pos, vec4<f32>(apply_output_lut(display_linear), 1.0));
+    textureStore(SceneAdjustments::out_tex, pos, vec4<f32>(Profile::apply_output_lut(display_linear), 1.0));
 }

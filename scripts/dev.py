@@ -476,26 +476,20 @@ class SourceValidator:
             )
         )
 
-        preprocessor_path = gpu_root / "build_support/shader_preprocessor.rs"
-        preprocessor = self._read_text(preprocessor_path, "shader preprocessor")
-        if preprocessor is not None:
-            generated_templates = set(
-                re.findall(
-                    r'\("([^"\\]+\.wgsl)",\s*"[^"\\]+\.generated\.wgsl"\)',
-                    preprocessor,
-                )
-            )
-            for template_name in generated_templates:
-                template = shader_dir / template_name
-                if not template.is_file():
-                    continue
-                included.add(template_name)
-                template_source = self._read_text(template, "shader template")
-                if template_source is None:
-                    continue
-                included.update(
-                    re.findall(r'//\s*@include\s+"([^"\\]+\.wgsl)"', template_source)
-                )
+        # Every reusable module is embedded once by ShaderManager. Validate
+        # naga_oil import paths independently so a renamed/missing WGSL module
+        # fails source validation before runtime composition.
+        import_re = re.compile(r"^\s*#import\s+auraw::([A-Za-z0-9_]+)(?:::\{|\s|$)", re.MULTILINE)
+        for shader_path in sorted(shader_dir.glob("*.wgsl")):
+            shader_source = self._read_text(shader_path, "WGSL source")
+            if shader_source is None:
+                continue
+            for module_name in import_re.findall(shader_source):
+                imported_name = f"{module_name}.wgsl"
+                if imported_name not in shader_names:
+                    self.errors.append(
+                        f"{shader_path.name} imports missing naga_oil module: auraw::{module_name}"
+                    )
 
         for name in sorted(shader_names - included):
             self.errors.append(f"WGSL file is not included by auraw-gpu Rust source: {name}")

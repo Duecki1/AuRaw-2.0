@@ -1,3 +1,7 @@
+#import auraw::common as Common
+#import auraw::color as Color
+#import auraw::profile as Profile
+
 // Regression-only scene export. The internal demosaic texture stores camera
 // RGB so the interactive pipeline can reuse it when input/profile settings
 // change. This pass converts it to the canonical scene-linear Rec.2020 image
@@ -13,22 +17,22 @@
 // controls, and local-mask controls are evaluated once and remain editable.
 @compute @workgroup_size(8, 8, 1)
 fn write_inpaint_working_scene(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let camera_rgb = textureLoad(regression_camera_scene, pos, 0).xyz;
-    let working = cam_to_working(camera_rgb);
+    let working = Color::cam_to_working(camera_rgb);
     textureStore(regression_working_scene, pos, vec4<f32>(working, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn write_regression_scene(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let camera_rgb = textureLoad(regression_camera_scene, pos, 0).xyz;
-    let working = cam_to_working(camera_rgb);
-    let profile_corrected = apply_profile_hue_sat(working);
-    let baseline_exposure_ev = bitcast<f32>(camera_uniforms.profile_flags.z);
-    let scene_linear = map_negative_gamut(
+    let working = Color::cam_to_working(camera_rgb);
+    let profile_corrected = Profile::apply_profile_hue_sat(working);
+    let baseline_exposure_ev = bitcast<f32>(Common::camera_uniforms.profile_flags.z);
+    let scene_linear = Color::map_negative_gamut(
         profile_corrected * exp2(baseline_exposure_ev),
     );
     textureStore(regression_working_scene, pos, vec4<f32>(scene_linear, 1.0));

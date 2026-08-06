@@ -1,3 +1,5 @@
+#import auraw::common as Common
+
 // Shared sensor-profiled denoise math. Sampling stays in the CFA-specific
 // finishing shader so Bayer and X-Trans can reuse their native reconstructed
 // reference textures without adding another full-frame intermediate.
@@ -45,7 +47,7 @@ fn nr_from_signal_opponents(signal: f32, opponents: vec2<f32>) -> vec3<f32> {
 
 fn nr_rgb_variance(signal_rgb: vec3<f32>) -> vec3<f32> {
     return max(
-        camera_uniforms.noise_read.rgb + camera_uniforms.noise_shot.rgb * max(signal_rgb, vec3<f32>(0.0)),
+        Common::camera_uniforms.noise_read.rgb + Common::camera_uniforms.noise_shot.rgb * max(signal_rgb, vec3<f32>(0.0)),
         vec3<f32>(1e-10),
     );
 }
@@ -79,7 +81,7 @@ fn nr_signal_range_weight(
     sample_variance: vec2<f32>,
     spatial: f32,
 ) -> f32 {
-    let detail = clamp(camera_uniforms.noise_options.y, 0.0, 1.0);
+    let detail = clamp(Common::camera_uniforms.noise_options.y, 0.0, 1.0);
     // Detail raises selectivity. At 100, cross-edge pooling is rejected more
     // aggressively; at 0, flat noisy regions can pool a wider sigma range.
     let signal_sigma = mix(3.4, 1.7, detail);
@@ -99,7 +101,7 @@ fn nr_scale_radius(scale_index: i32) -> i32 {
 }
 
 fn nr_scale_count() -> i32 {
-    let quality = camera_uniforms.noise_options.z;
+    let quality = Common::camera_uniforms.noise_options.z;
     if quality < 0.5 { return 1; }
     if quality < 1.5 { return 2; }
     return 5;
@@ -125,12 +127,12 @@ fn nr_finish_signal(
     let center_opponents = nr_opponents(center);
     let filtered_signal = signal_sum / max(signal_weight_sum, 1e-6);
 
-    let signal_strength = nr_perceptual_strength(camera_uniforms.noise_options.x, 3.2);
+    let signal_strength = nr_perceptual_strength(Common::camera_uniforms.noise_options.x, 3.2);
     if signal_strength <= 1e-6 { return center; }
 
     // Avoid turning weak/failed profile fits into generic blur. The fallback
     // remains usable, but a measured profile earns the full requested blend.
-    let profile_trust = mix(0.72, 1.0, clamp(camera_uniforms.noise_options.w, 0.0, 1.0));
+    let profile_trust = mix(0.72, 1.0, clamp(Common::camera_uniforms.noise_options.w, 0.0, 1.0));
     let out_signal = mix(center_signal, filtered_signal, signal_strength * profile_trust);
     return nr_from_signal_opponents(out_signal, center_opponents);
 }

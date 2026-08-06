@@ -15,9 +15,11 @@ use wgpu::util::DeviceExt;
 
 mod readback;
 mod resources;
+mod shader_manager;
 
 use readback::*;
 use resources::*;
+use shader_manager::ShaderManager;
 
 #[cfg(test)]
 mod tests;
@@ -100,14 +102,22 @@ fn explicit_render_graph_contracts_are_contiguous() -> bool {
         && EXPLICIT_RENDER_GRAPH[3].name == "view_transform"
 }
 
-#[cfg(test)]
-const SHADER_COMMON_FOR_TESTS: &str = include_str!("../shaders/common.wgsl");
+const SHADER_COMMON: &str = include_str!("../shaders/common.wgsl");
+const SHADER_COLOR: &str = include_str!("../shaders/color.wgsl");
+const SHADER_NOISE: &str = include_str!("../shaders/noise.wgsl");
+const SHADER_RAW_SAMPLING: &str = include_str!("../shaders/raw_sampling.wgsl");
+const SHADER_PROFILE: &str = include_str!("../shaders/profile.wgsl");
+const SHADER_BASIC_ADJUSTMENTS: &str = include_str!("../shaders/basic_adjustments.wgsl");
+const SHADER_TONE_COMMON: &str = include_str!("../shaders/tone_common.wgsl");
+const SHADER_TONEMAP: &str = include_str!("../shaders/tonemap.wgsl");
+const SHADER_NOISE_CA_FINISH: &str = include_str!("../shaders/noise_ca_finish.wgsl");
+const SHADER_DETAIL_CAPTURE: &str = include_str!("../shaders/detail_capture.wgsl");
+const SHADER_DETAIL_SCALE_SPACE: &str = include_str!("../shaders/detail_scale_space.wgsl");
 
-const SHADER_HIGHLIGHTS: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/highlights.wgsl")
-);
+#[cfg(test)]
+const SHADER_COMMON_FOR_TESTS: &str = SHADER_COMMON;
+
+const SHADER_HIGHLIGHTS: &str = include_str!("../shaders/highlights.wgsl");
 
 const COLOR_DENOISE_ENTRY_POINTS: [&str; 6] = [
     "color_denoise_scale_1",
@@ -137,175 +147,21 @@ fn expected_pass_count(cfa_kind: CfaKind) -> usize {
     1 + demosaic_passes + COLOR_DENOISE_ENTRY_POINTS.len() + 4 + 13
 }
 
-const SHADER_BAYER_RCD_P1: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/raw_sampling.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/pass1.wgsl")
-);
+const SHADER_BAYER_RCD_P1: &str = include_str!("../shaders/pass1.wgsl");
+const SHADER_BAYER_RCD_P2: &str = include_str!("../shaders/pass2.wgsl");
+const SHADER_BAYER_RCD_P3: &str = include_str!("../shaders/pass3.wgsl");
+const SHADER_BAYER_RCD_P4: &str = include_str!("../shaders/pass4.wgsl");
+const SHADER_DUAL_DEMOSAIC: &str = include_str!("../shaders/dual_demosaic.wgsl");
+const SHADER_XTRANS_DEMOSAIC: &str = include_str!("../shaders/xtrans_demosaic.wgsl");
+const SHADER_XTRANS_FINISH: &str = include_str!("../shaders/xtrans_finish.wgsl");
+const SHADER_COLOR_DENOISE: &str = include_str!("../shaders/color_denoise.wgsl");
+const SHADER_TONE_ANALYSIS: &str = include_str!("../shaders/tone_analysis.wgsl");
+const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.wgsl");
 
-const SHADER_BAYER_RCD_P2: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/raw_sampling.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/pass2.wgsl")
-);
-
-const SHADER_BAYER_RCD_P3: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/raw_sampling.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/pass3.wgsl")
-);
-
-const SHADER_BAYER_RCD_P4: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/raw_sampling.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/noise.wgsl"),
-    "\n",
-    include_str!(concat!(env!("OUT_DIR"), "/pass4.generated.wgsl"))
-);
-
-const SHADER_DUAL_DEMOSAIC: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/raw_sampling.wgsl"),
-    "\n",
-    include_str!("../shaders/dual_demosaic.wgsl")
-);
-
-const SHADER_XTRANS_DEMOSAIC: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/raw_sampling.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/xtrans_demosaic.wgsl")
-);
-
-const SHADER_XTRANS_FINISH: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/raw_sampling.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/noise.wgsl"),
-    "\n",
-    include_str!(concat!(env!("OUT_DIR"), "/xtrans_finish.generated.wgsl"))
-);
-
-const SHADER_COLOR_DENOISE: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/noise.wgsl"),
-    "\n",
-    include_str!("../shaders/color_denoise.wgsl")
-);
-
-const SHADER_TONE_ANALYSIS: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/profile.wgsl"),
-    "\n",
-    include_str!("../shaders/basic_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/tone_common.wgsl"),
-    "\n",
-    include_str!("../shaders/tone_analysis.wgsl")
-);
-
-const SHADER_REGRESSION_SCENE: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/profile.wgsl"),
-    "\n",
-    include_str!("../shaders/regression_scene.wgsl")
-);
-
-const SHADER_SCENE_ADJUSTMENTS: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/profile.wgsl"),
-    "\n",
-    include_str!("../shaders/basic_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/tone_common.wgsl"),
-    "\n",
-    include_str!("../shaders/tonemap.wgsl"),
-    "\n",
-    include_str!("../shaders/scene_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/detail_capture.wgsl"),
-    "\n",
-    include_str!("../shaders/detail_scale_space.wgsl")
-);
-
-const SHADER_CREATIVE_EFFECTS: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/profile.wgsl"),
-    "\n",
-    include_str!("../shaders/basic_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/tone_common.wgsl"),
-    "\n",
-    include_str!("../shaders/tonemap.wgsl"),
-    "\n",
-    include_str!("../shaders/scene_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/creative_effects.wgsl"),
-    "\n",
-    include_str!("../shaders/detail_capture.wgsl"),
-    "\n",
-    include_str!("../shaders/detail_scale_space.wgsl")
-);
-
-const SHADER_VIEW_TRANSFORM: &str = concat!(
-    include_str!("../shaders/common.wgsl"),
-    "\n",
-    include_str!("../shaders/color.wgsl"),
-    "\n",
-    include_str!("../shaders/profile.wgsl"),
-    "\n",
-    include_str!("../shaders/basic_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/tone_common.wgsl"),
-    "\n",
-    include_str!("../shaders/tonemap.wgsl"),
-    "\n",
-    include_str!("../shaders/scene_adjustments.wgsl"),
-    "\n",
-    include_str!("../shaders/creative_effects.wgsl"),
-    "\n",
-    include_str!("../shaders/view_transform.wgsl"),
-    "\n",
-    include_str!("../shaders/detail_capture.wgsl"),
-    "\n",
-    include_str!("../shaders/detail_scale_space.wgsl")
-);
+const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
+const SHADER_SCENE_DETAIL_OVERRIDES: &str = include_str!("../shaders/scene_detail_overrides.wgsl");
+const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
+const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
 
 const SHADER_INPAINT_DOWNSAMPLE: &str = r#"
 struct ResizeParams {
@@ -3542,7 +3398,6 @@ impl RawGpuPipeline {
 
         // Storage texture declarations are format-specific in the demosaic and
         // scene shaders. Highlight reconstruction writes its fixed R32F CFA.
-        let highlight_shader = Cow::Borrowed(SHADER_HIGHLIGHTS);
         let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format)
             .context("specialize Bayer RCD pass 1 work format")?;
         let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format)
@@ -3561,61 +3416,77 @@ impl RawGpuPipeline {
             .context("specialize multiscale color denoise work format")?;
         let scene_adjustments_shader = work_shader_source(SHADER_SCENE_ADJUSTMENTS, work_format)
             .context("specialize scene-adjustments shader work format")?;
-        let creative_effects_shader = work_shader_source(SHADER_CREATIVE_EFFECTS, work_format)
-            .context("specialize creative-effects shader work format")?;
-        let view_transform_shader = work_shader_source(SHADER_VIEW_TRANSFORM, work_format)
-            .context("specialize view-transform shader work format")?;
 
-        let create_shader = |label: &'static str, source: &str| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            })
+        let mut shader_manager = program_template
+            .is_none()
+            .then(|| ShaderManager::new(work_format))
+            .transpose()
+            .context("initialize WGSL shader composer")?;
+        let mut create_shader = |
+            label: &'static str,
+            source: &str,
+            file_name: &str,
+        | -> Result<wgpu::ShaderModule> {
+            shader_manager
+                .as_mut()
+                .expect("shader manager exists without a program template")
+                .create_shader_module(device, label, source, file_name)
         };
-        // One module per WGSL source. Entry-point pipelines below share these
-        // modules instead of recompiling the same source for every pass.
+        // One validated Naga module per WGSL entrypoint source. Entry-point
+        // pipelines below share these modules instead of recompiling the same
+        // source for every pass.
         let highlight_module = program_template
             .is_none()
-            .then(|| create_shader("auraw highlight module", highlight_shader.as_ref()));
+            .then(|| create_shader("auraw highlight module", SHADER_HIGHLIGHTS, "highlights.wgsl"))
+            .transpose()?;
         let bayer_rcd_p1_module = program_template
             .is_none()
-            .then(|| create_shader("auraw Bayer RCD pass 1", bayer_rcd_p1.as_ref()));
+            .then(|| create_shader("auraw Bayer RCD pass 1", bayer_rcd_p1.as_ref(), "pass1.wgsl"))
+            .transpose()?;
         let bayer_rcd_p2_module = program_template
             .is_none()
-            .then(|| create_shader("auraw Bayer RCD pass 2", bayer_rcd_p2.as_ref()));
+            .then(|| create_shader("auraw Bayer RCD pass 2", bayer_rcd_p2.as_ref(), "pass2.wgsl"))
+            .transpose()?;
         let bayer_rcd_p3_module = program_template
             .is_none()
-            .then(|| create_shader("auraw Bayer RCD pass 3", bayer_rcd_p3.as_ref()));
+            .then(|| create_shader("auraw Bayer RCD pass 3", bayer_rcd_p3.as_ref(), "pass3.wgsl"))
+            .transpose()?;
         let bayer_rcd_p4_module = program_template
             .is_none()
-            .then(|| create_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref()));
+            .then(|| create_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref(), "pass4.wgsl"))
+            .transpose()?;
         let dual_demosaic_module = program_template
             .is_none()
-            .then(|| create_shader("auraw robust dual demosaic", dual_demosaic.as_ref()));
+            .then(|| create_shader("auraw robust dual demosaic", dual_demosaic.as_ref(), "dual_demosaic.wgsl"))
+            .transpose()?;
         let xtrans_demosaic_module = program_template
             .is_none()
-            .then(|| create_shader("auraw grouped X-Trans demosaic", xtrans_demosaic.as_ref()));
+            .then(|| create_shader("auraw grouped X-Trans demosaic", xtrans_demosaic.as_ref(), "xtrans_demosaic.wgsl"))
+            .transpose()?;
         let xtrans_finish_module = program_template
             .is_none()
-            .then(|| create_shader("auraw X-Trans finish", xtrans_finish.as_ref()));
-        let color_denoise_module = program_template.is_none().then(|| {
-            create_shader(
-                "auraw multiscale color denoise",
-                color_denoise_shader.as_ref(),
-            )
-        });
+            .then(|| create_shader("auraw X-Trans finish", xtrans_finish.as_ref(), "xtrans_finish.wgsl"))
+            .transpose()?;
+        let color_denoise_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw multiscale color denoise", color_denoise_shader.as_ref(), "color_denoise.wgsl"))
+            .transpose()?;
         let tone_analysis_module = program_template
             .is_none()
-            .then(|| create_shader("auraw tone analysis", SHADER_TONE_ANALYSIS));
-        let scene_adjustments_module = program_template.is_none().then(|| {
-            create_shader("auraw scene adjustments", scene_adjustments_shader.as_ref())
-        });
-        let creative_effects_module = program_template.is_none().then(|| {
-            create_shader("auraw creative effects", creative_effects_shader.as_ref())
-        });
-        let view_transform_module = program_template.is_none().then(|| {
-            create_shader("auraw view transform", view_transform_shader.as_ref())
-        });
+            .then(|| create_shader("auraw tone analysis", SHADER_TONE_ANALYSIS, "tone_analysis.wgsl"))
+            .transpose()?;
+        let scene_adjustments_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw scene adjustments", scene_adjustments_shader.as_ref(), "scene_adjustments.wgsl"))
+            .transpose()?;
+        let creative_effects_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw creative effects", SHADER_CREATIVE_EFFECTS, "creative_effects.wgsl"))
+            .transpose()?;
+        let view_transform_module = program_template
+            .is_none()
+            .then(|| create_shader("auraw view transform", SHADER_VIEW_TRANSFORM, "view_transform.wgsl"))
+            .transpose()?;
         debug_assert!(explicit_render_graph_contracts_are_contiguous());
 
         let mut next_program_index = 0usize;
@@ -4828,10 +4699,14 @@ impl RawGpuPipeline {
                 },
             ],
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("auraw scene conversion shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_REGRESSION_SCENE.into()),
-        });
+        let mut shader_manager = ShaderManager::new(processing_work_format(self.processing_quality))
+            .context("initialize regression-scene WGSL composer")?;
+        let shader = shader_manager.create_shader_module(
+            device,
+            "auraw scene conversion shader",
+            SHADER_REGRESSION_SCENE,
+            "regression_scene.wgsl",
+        )?;
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("auraw scene conversion pipeline layout"),
             bind_group_layouts: &[Some(&layout)],

@@ -954,28 +954,9 @@ fn validate_shader_imports(root: &Path) -> Result<Vec<String>> {
         }
     }
 
-    let preprocessor_path = gpu_root.join("build_support/shader_preprocessor.rs");
-    let preprocessor = fs::read_to_string(&preprocessor_path).map_err(|error| {
-        XtaskError::new(format!(
-            "cannot read shader preprocessor {}: {error}",
-            relative_display(root, &preprocessor_path)
-        ))
-    })?;
-    for literal in rust_string_literals(&preprocessor) {
-        if literal.ends_with(".generated.wgsl") {
-            continue;
-        }
-        let Some(name) = Path::new(&literal).file_name().and_then(OsStr::to_str) else {
-            continue;
-        };
-        if shader_names.contains(name) {
-            imported.insert(name.to_owned());
-        }
-    }
-
     let roots: Vec<String> = imported.iter().cloned().collect();
     for shader in roots {
-        collect_shader_includes(&shader_directory, &shader, &mut imported, &mut errors)?;
+        collect_shader_imports(&shader_directory, &shader, &mut imported, &mut errors)?;
     }
 
     for name in shader_names.difference(&imported) {
@@ -989,7 +970,7 @@ fn validate_shader_imports(root: &Path) -> Result<Vec<String>> {
     Ok(errors)
 }
 
-fn collect_shader_includes(
+fn collect_shader_imports(
     shader_directory: &Path,
     shader_name: &str,
     imported: &mut BTreeSet<String>,
@@ -997,31 +978,37 @@ fn collect_shader_includes(
 ) -> Result<()> {
     let path = shader_directory.join(shader_name);
     if !path.is_file() {
-        errors.push(format!("shader import references missing WGSL file: {shader_name}"));
+        errors.push(format!("shader #import references missing WGSL file: {shader_name}"));
         return Ok(());
     }
     let source = fs::read_to_string(&path)?;
     for line in source.lines() {
         let trimmed = line.trim();
-        let Some(argument) = trimmed.strip_prefix("// @include ") else {
+        let Some(argument) = trimmed.strip_prefix("#import ") else {
             continue;
         };
-        let Some(include) = argument
-            .trim()
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-        else {
-            errors.push(format!("{shader_name} has invalid include directive: {trimmed}"));
-            continue;
-        };
-        if !is_simple_file_name(include) {
+        let import_path = argument
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .split("::{")
+            .next()
+            .unwrap_or_default();
+        let Some(module_name) = import_path.strip_prefix("auraw::") else {
             errors.push(format!(
-                "{shader_name} includes invalid shader path: {include:?}"
+                "{shader_name} has unsupported naga_oil import path: {import_path:?}"
+            ));
+            continue;
+        };
+        if module_name.contains("::") || !is_simple_file_name(module_name) {
+            errors.push(format!(
+                "{shader_name} imports invalid naga_oil module: {import_path:?}"
             ));
             continue;
         }
-        if imported.insert(include.to_owned()) {
-            collect_shader_includes(shader_directory, include, imported, errors)?;
+        let imported_shader = format!("{module_name}.wgsl");
+        if imported.insert(imported_shader.clone()) {
+            collect_shader_imports(shader_directory, &imported_shader, imported, errors)?;
         }
     }
     Ok(())

@@ -1,3 +1,6 @@
+#import auraw::common as Common
+#import auraw::color as Color
+
 // Scene-linear operations that intentionally happen before the final
 // scene-to-display transform. Global white balance is assembled into the
 // camera/DCP transform on the CPU; the Bradford transform below remains useful
@@ -61,7 +64,7 @@ fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
     // raw_sampling.wgsl/highlights.wgsl. Exposure is therefore a pure
     // scene-linear gain here; subtracting black in working RGB changes hue and
     // destroys near-black channel relationships.
-    return rgb * exp2(scene_tone_uniforms.exposure);
+    return rgb * exp2(Common::scene_tone_uniforms.exposure);
 }
 
 fn circular_hue_distance(a: f32, b: f32) -> f32 {
@@ -77,13 +80,13 @@ fn perceptual_control(value: f32) -> f32 {
 }
 
 fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
-    let saturation = perceptual_control(scene_tone_uniforms.saturation);
-    let vibrance = perceptual_control(scene_tone_uniforms.vibrance);
+    let saturation = perceptual_control(Common::scene_tone_uniforms.saturation);
+    let vibrance = perceptual_control(Common::scene_tone_uniforms.vibrance);
     if abs(saturation) < 1e-6 && abs(vibrance) < 1e-6 {
         return rgb;
     }
 
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
+    let lab = Color::linear_srgb_to_oklab(Common::REC2020_TO_SRGB * rgb);
     let chroma = length(lab.yz);
     if chroma < 1e-9 {
         return rgb;
@@ -126,8 +129,8 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
 
     let chroma_factor = clamp(saturation_factor * vibrance_factor, 0.0, 4.0);
     let adjusted = vec3<f32>(lab.x, lab.yz * chroma_factor);
-    return perceptual_gamut_compress_nonnegative_rec2020(
-        SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted),
+    return Color::perceptual_gamut_compress_nonnegative_rec2020(
+        Common::SRGB_TO_REC2020 * Color::oklab_to_linear_srgb(adjusted),
     );
 }
 
@@ -136,13 +139,13 @@ fn apply_saturation_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     if abs(saturation) < 1e-6 {
         return rgb;
     }
-    let lab = linear_srgb_to_oklab(REC2020_TO_SRGB * rgb);
+    let lab = Color::linear_srgb_to_oklab(Common::REC2020_TO_SRGB * rgb);
     var factor = max(1.0 + saturation, 0.0);
     if saturation > 0.0 {
         factor = exp2(saturation * 0.72);
     }
     let adjusted = vec3<f32>(lab.x, lab.yz * factor);
-    return perceptual_gamut_compress_nonnegative_rec2020(
-        SRGB_TO_REC2020 * oklab_to_linear_srgb(adjusted),
+    return Color::perceptual_gamut_compress_nonnegative_rec2020(
+        Common::SRGB_TO_REC2020 * Color::oklab_to_linear_srgb(adjusted),
     );
 }

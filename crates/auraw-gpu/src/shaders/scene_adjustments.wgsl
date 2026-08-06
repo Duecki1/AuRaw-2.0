@@ -1,3 +1,10 @@
+#import auraw::common as Common
+#import auraw::color as Color
+#import auraw::profile as Profile
+#import auraw::basic_adjustments as BasicAdjustments
+#import auraw::tonemap as Tonemap
+#import auraw::detail_capture as DetailCapture
+
 // Scene-domain adjustment stages: camera characterization, exposure, basic tone,
 // presence controls, and global/local point curves. Creative and display-domain
 // operations are deliberately defined in their own shader files.
@@ -27,16 +34,16 @@
 
 fn local_mask_uv(pos: vec2<i32>) -> vec2<f32> {
     let full_size = vec2<f32>(
-        f32(max(camera_uniforms.full_width, 1u)),
-        f32(max(camera_uniforms.full_height, 1u)),
+        f32(max(Common::camera_uniforms.full_width, 1u)),
+        f32(max(Common::camera_uniforms.full_height, 1u)),
     );
-    let global_pos = vec2<f32>(pos + tile_origin()) + vec2<f32>(0.5);
+    let global_pos = vec2<f32>(pos + Common::tile_origin()) + vec2<f32>(0.5);
     let full_uv = clamp(global_pos / full_size, vec2<f32>(0.0), vec2<f32>(1.0));
-    if scene_tone_uniforms.mask_counts.w == 0u {
+    if Common::scene_tone_uniforms.mask_counts.w == 0u {
         return full_uv;
     }
-    let packed_min = scene_tone_uniforms.mask_counts.y;
-    let packed_max = scene_tone_uniforms.mask_counts.z;
+    let packed_min = Common::scene_tone_uniforms.mask_counts.y;
+    let packed_max = Common::scene_tone_uniforms.mask_counts.z;
     let rect_min = vec2<f32>(
         f32(packed_min & 65535u),
         f32(packed_min >> 16u),
@@ -49,15 +56,15 @@ fn local_mask_uv(pos: vec2<i32>) -> vec2<f32> {
 }
 
 fn local_mask_texture_uv(region_uv: vec2<f32>) -> vec2<f32> {
-    if scene_tone_uniforms.mask_counts.w == 0u {
+    if Common::scene_tone_uniforms.mask_counts.w == 0u {
         return region_uv;
     }
     let atlas_size_u = textureDimensions(local_mask_tex);
     var valid_size_u = atlas_size_u;
-    if scene_tone_uniforms.mask_counts.w != 0xffffffffu {
+    if Common::scene_tone_uniforms.mask_counts.w != 0xffffffffu {
         valid_size_u = vec2<u32>(
-            scene_tone_uniforms.mask_counts.w & 65535u,
-            scene_tone_uniforms.mask_counts.w >> 16u,
+            Common::scene_tone_uniforms.mask_counts.w & 65535u,
+            Common::scene_tone_uniforms.mask_counts.w >> 16u,
         );
     }
     let atlas_size = vec2<f32>(max(atlas_size_u, vec2<u32>(1u)));
@@ -87,11 +94,11 @@ fn local_mask_weight(pos: vec2<i32>, index: u32) -> f32 {
 
 fn apply_local_exposure_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
-        let state = mask_data[index].metadata;
+        let state = Common::mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
-        let value = clamp(mask_data[index].adjust_0.x, -5.0, 5.0);
+        let value = clamp(Common::mask_data[index].adjust_0.x, -5.0, 5.0);
         if abs(value) <= 1e-7 { continue; }
         let weight = local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
@@ -102,19 +109,19 @@ fn apply_local_exposure_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32>
 }
 
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
-    let camera_rgb = textureLoad(scene_tex, clamp_pos(pos), 0).xyz;
+    let camera_rgb = textureLoad(scene_tex, Common::clamp_pos(pos), 0).xyz;
     // The global white balance and its DCP interpolation are folded into the
     // camera-specific matrix assembled on the CPU. Preserve the matrix result
     // until all DCP stages are complete: gamut remapping between HueSatMap,
     // exposure, LookTable and ProfileToneCurve changes the profile itself.
-    let working = cam_to_working(camera_rgb);
+    let working = Color::cam_to_working(camera_rgb);
 
     // LaMa is run on a neutral pre-adjustment rendition. Its generated output
     // is converted to scene-linear Rec.2020 on the CPU immediately after
     // inference and retained as RGBA16F, so no 8-bit sRGB round trip occurs here.
     // From this point onward the replacement follows the exact same profile,
     // global, mask, Effects, grading, vignette, sigmoid and output-transform path.
-    let replacement = textureLoad(inpaint_tex, clamp_pos(pos), 0);
+    let replacement = textureLoad(inpaint_tex, Common::clamp_pos(pos), 0);
     if replacement.a <= 1e-6 {
         return working;
     }
@@ -123,9 +130,9 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     // basis. Remap them through the live camera transform so global
     // temperature/tint changes remain non-destructive after the erase.
     let replacement_working = vec3<f32>(
-        dot(camera_uniforms.inpaint_wb_0.xyz, replacement_neutral),
-        dot(camera_uniforms.inpaint_wb_1.xyz, replacement_neutral),
-        dot(camera_uniforms.inpaint_wb_2.xyz, replacement_neutral),
+        dot(Common::camera_uniforms.inpaint_wb_0.xyz, replacement_neutral),
+        dot(Common::camera_uniforms.inpaint_wb_1.xyz, replacement_neutral),
+        dot(Common::camera_uniforms.inpaint_wb_2.xyz, replacement_neutral),
     );
     return mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
 }
@@ -135,15 +142,15 @@ fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
     // binds the pre-tone base here; the later presence pass binds its post-tone
     // output here. This keeps both spatial operators sampling the correct domain
     // without allocating another full-frame working texture.
-    return textureLoad(adjustment_base_tex, clamp_pos(pos), 0).xyz;
+    return textureLoad(adjustment_base_tex, Common::clamp_pos(pos), 0).xyz;
 }
 
 fn local_effects_at(pos: vec2<i32>) -> vec3<f32> {
-    return textureLoad(local_effects_tex, clamp_pos(pos), 0).xyz;
+    return textureLoad(local_effects_tex, Common::clamp_pos(pos), 0).xyz;
 }
 
 fn log_luminance(rgb: vec3<f32>) -> f32 {
-    return log2(safe_luma(rgb));
+    return log2(Common::safe_luma(rgb));
 }
 
 fn presence_reference_scale() -> f32 {
@@ -151,7 +158,7 @@ fn presence_reference_scale() -> f32 {
     // edge. Scaling their sample steps makes the preview proxy, zoom detail,
     // and full-resolution export operate on comparable subject detail.
     return clamp(
-        f32(min(camera_uniforms.full_width, camera_uniforms.full_height)) / 1080.0,
+        f32(min(Common::camera_uniforms.full_width, Common::camera_uniforms.full_height)) / 1080.0,
         0.55,
         3.0,
     );
@@ -230,11 +237,32 @@ fn soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
     return sign(detail) * max(abs(detail) - threshold, 0.0);
 }
 
+// The concrete entrypoint source owns these overrides. Reusable modules import
+// scene_detail_overrides.wgsl as an additional import so naga_oil retains the
+// same callback bindings after tree-shaking.
+#ifdef AURAW_SCENE_TOP_LEVEL
+override fn DetailCapture::adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
+    return adjustment_base_at(pos);
+}
+
+override fn DetailCapture::log_luminance(rgb: vec3<f32>) -> f32 {
+    return log_luminance(rgb);
+}
+
+override fn DetailCapture::presence_reference_scale() -> f32 {
+    return presence_reference_scale();
+}
+
+override fn DetailCapture::soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
+    return soft_detail_threshold(detail, threshold);
+}
+#endif
+
 fn local_curve_block(mask_index: u32, curve: u32, block: u32) -> vec4<f32> {
-    if curve == 1u { return mask_data[mask_index].curves_red[block]; }
-    if curve == 2u { return mask_data[mask_index].curves_green[block]; }
-    if curve == 3u { return mask_data[mask_index].curves_blue[block]; }
-    return mask_data[mask_index].curves[block];
+    if curve == 1u { return Common::mask_data[mask_index].curves_red[block]; }
+    if curve == 2u { return Common::mask_data[mask_index].curves_green[block]; }
+    if curve == 3u { return Common::mask_data[mask_index].curves_blue[block]; }
+    return Common::mask_data[mask_index].curves[block];
 }
 
 fn local_curve_point(mask_index: u32, curve: u32, index: u32) -> vec2<f32> {
@@ -253,7 +281,7 @@ fn local_curve_tangent(mask_index: u32, curve: u32, index: u32, count: u32) -> f
             endpoint,
             local_curve_point(mask_index, curve, 1u),
         );
-        return limit_scene_curve_endpoint_tangent(endpoint.y, raw_slope);
+        return Tonemap::limit_scene_curve_endpoint_tangent(endpoint.y, raw_slope);
     }
     if index + 1u >= count {
         return local_curve_secant(
@@ -305,33 +333,33 @@ fn local_scene_curve_zero_slope(mask_index: u32, curve: u32) -> f32 {
     let count = u32(clamp(local_curve_block(mask_index, curve, 4u).x, 2.0, 8.0));
     let encoded_black = local_curve_value(mask_index, curve, 0.0);
     let encoded_slope = local_curve_tangent(mask_index, curve, 0u, count);
-    return decoded_scene_curve_zero_slope(encoded_black, encoded_slope);
+    return Tonemap::decoded_scene_curve_zero_slope(encoded_black, encoded_slope);
 }
 
 fn apply_local_scene_channel_curve(mask_index: u32, curve: u32, value: f32) -> f32 {
     let encoded_black = local_curve_value(mask_index, curve, 0.0);
-    let black = scene_curve_decode(encoded_black);
+    let black = Tonemap::scene_curve_decode(encoded_black);
     if value < 0.0 {
-        return clamp_scene_curve_value(
+        return Tonemap::clamp_scene_curve_value(
             black + value * local_scene_curve_zero_slope(mask_index, curve),
         );
     }
-    return scene_curve_decode(
-        local_curve_value(mask_index, curve, scene_curve_encode(value)),
+    return Tonemap::scene_curve_decode(
+        local_curve_value(mask_index, curve, Tonemap::scene_curve_encode(value)),
     );
 }
 
 fn apply_local_curves_for_mask(mask_index: u32, input_rgb: vec3<f32>) -> vec3<f32> {
     var adjusted = input_rgb;
-    let state = mask_data[mask_index].metadata;
+    let state = Common::mask_data[mask_index].metadata;
     if (state.z & 1u) != 0u {
-        let luminance = max(dot(adjusted, LUMA), 0.0);
+        let luminance = max(dot(adjusted, Common::LUMA), 0.0);
         let encoded_black = local_curve_value(mask_index, 0u, 0.0);
-        let black_luminance = scene_curve_decode(encoded_black);
-        let curved = scene_curve_decode(
-            local_curve_value(mask_index, 0u, scene_curve_encode(luminance)),
+        let black_luminance = Tonemap::scene_curve_decode(encoded_black);
+        let curved = Tonemap::scene_curve_decode(
+            local_curve_value(mask_index, 0u, Tonemap::scene_curve_encode(luminance)),
         );
-        adjusted = remap_scene_luminance(
+        adjusted = Tonemap::remap_scene_luminance(
             adjusted,
             curved,
             black_luminance,
@@ -354,9 +382,9 @@ fn apply_local_curves_for_mask(mask_index: u32, input_rgb: vec3<f32>) -> vec3<f3
 
 fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    let count = min(scene_tone_uniforms.mask_counts.x, 32u);
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
-        let state = mask_data[index].metadata;
+        let state = Common::mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
         let weight = local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
@@ -368,11 +396,11 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
         // Shadows is an EV-zone remap, so feather/opacity scales the
         // adjustment parameter itself. Mixing an already nonlinear fully-
         // adjusted result would produce a different transfer at mask edges.
-        rgb = apply_local_basic_tone_values_with_low_strength(
+        rgb = Tonemap::apply_local_basic_tone_values_with_low_strength(
             rgb,
             pos,
             0.0,
-            mask_data[index].adjust_0.w,
+            Common::mask_data[index].adjust_0.w,
             0.0,
             0.0,
             weight,
@@ -380,19 +408,19 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
 
         // Preserve masked-result interpolation for unrelated
         // local tone/WB/curve controls. Blacks is deferred to display-linear.
-        var adjusted = apply_local_basic_tone_values(
+        var adjusted = Tonemap::apply_local_basic_tone_values(
             rgb,
             pos,
-            mask_data[index].adjust_0.z,
+            Common::mask_data[index].adjust_0.z,
             0.0,
-            mask_data[index].adjust_1.x,
+            Common::mask_data[index].adjust_1.x,
             0.0,
         );
-        adjusted = apply_mask_contrast_value(adjusted, mask_data[index].adjust_0.y);
-        adjusted = apply_temperature_tint_values(
+        adjusted = Tonemap::apply_mask_contrast_value(adjusted, Common::mask_data[index].adjust_0.y);
+        adjusted = BasicAdjustments::apply_temperature_tint_values(
             adjusted,
-            mask_data[index].adjust_1.z,
-            mask_data[index].adjust_1.w,
+            Common::mask_data[index].adjust_1.z,
+            Common::mask_data[index].adjust_1.w,
         );
         adjusted = apply_local_curves_for_mask(index, adjusted);
         rgb = mix(rgb, adjusted, weight);
@@ -402,37 +430,37 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
 
 @compute @workgroup_size(8, 8, 1)
 fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
     // Camera characterization is the only DCP color component allowed before
     // scene edits. Fixed profile exposure and editable global/local Exposure are
     // also scene-linear. The LookTable is deferred until scene controls finish.
-    var rgb = apply_camera_characterization(scene_working_at(pos));
-    let profile_exposure_ev = bitcast<f32>(camera_uniforms.profile_flags.z);
+    var rgb = Profile::apply_camera_characterization(scene_working_at(pos));
+    let profile_exposure_ev = bitcast<f32>(Common::camera_uniforms.profile_flags.z);
     rgb = rgb * exp2(profile_exposure_ev);
-    rgb = apply_exposure(rgb);
+    rgb = BasicAdjustments::apply_exposure(rgb);
     rgb = apply_local_exposure_nodes(pos, rgb);
     textureStore(adjustment_base_out, pos, vec4<f32>(rgb, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
 
     // Capture sharpening and all H/S/W/B, Contrast, curve, and local tone
     // controls operate in the scene domain. ProfileToneCurve is excluded so
     // slider semantics remain profile-independent.
-    rgb = apply_capture_sharpening(pos, rgb);
-    rgb = apply_lightroom_tone(rgb, pos);
+    rgb = DetailCapture::apply_capture_sharpening(pos, rgb);
+    rgb = Tonemap::apply_lightroom_tone(rgb, pos);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_local_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
     rgb = apply_local_scene_tone_nodes(pos, rgb);

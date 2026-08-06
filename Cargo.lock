@@ -497,6 +497,7 @@ dependencies = [
  "log",
  "memmap2",
  "naga",
+ "naga_oil",
  "png",
  "pollster",
  "wgpu",
@@ -905,6 +906,12 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
+
+[[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "defmt"
@@ -2222,6 +2229,23 @@ dependencies = [
  "rustc-hash 1.1.0",
  "spirv",
  "thiserror 2.0.18",
+ "unicode-ident",
+]
+
+[[package]]
+name = "naga_oil"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "319f03062940ed85c03da020042618356bb8ca5263020322930883b05e30208e"
+dependencies = [
+ "codespan-reporting",
+ "data-encoding",
+ "indexmap",
+ "naga",
+ "regex",
+ "rustc-hash 1.1.0",
+ "thiserror 2.0.18",
+ "tracing",
  "unicode-ident",
 ]
 

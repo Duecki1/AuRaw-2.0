@@ -1,3 +1,6 @@
+#import auraw::common as Common
+#import auraw::raw_sampling as RawSampling
+
 // Robust low-frequency branch for dual demosaic. This is a clean-room,
 // gradient/noise-aware reconstruction rather than a port of VNG/LMMSE code.
 // Pass 1 builds a full-resolution green guide from symmetric same-colour
@@ -14,17 +17,17 @@ struct DualEstimate {
 
 fn dual_in_bounds(pos: vec2<i32>) -> bool {
     return pos.x >= 0 && pos.y >= 0
-        && pos.x < i32(camera_uniforms.width) && pos.y < i32(camera_uniforms.height);
+        && pos.x < i32(Common::camera_uniforms.width) && pos.y < i32(Common::camera_uniforms.height);
 }
 
 fn dual_plane_variance(channel: u32, signal: f32) -> f32 {
     let c = min(channel, 3u);
-    return max(camera_uniforms.noise_read[c] + camera_uniforms.noise_shot[c] * max(signal, 0.0), 1e-10);
+    return max(Common::camera_uniforms.noise_read[c] + Common::camera_uniforms.noise_shot[c] * max(signal, 0.0), 1e-10);
 }
 
 fn dual_green_variance(signal: f32) -> f32 {
-    let read = 0.5 * (camera_uniforms.noise_read.g + camera_uniforms.noise_read.a);
-    let shot = 0.5 * (camera_uniforms.noise_shot.g + camera_uniforms.noise_shot.a);
+    let read = 0.5 * (Common::camera_uniforms.noise_read.g + Common::camera_uniforms.noise_read.a);
+    let shot = 0.5 * (Common::camera_uniforms.noise_shot.g + Common::camera_uniforms.noise_shot.a);
     return max(read + shot * max(signal, 0.0), 1e-10);
 }
 
@@ -33,9 +36,9 @@ fn dual_spatial_weight(dx: i32, dy: i32) -> f32 {
 }
 
 fn dual_green_estimate(pos: vec2<i32>) -> DualEstimate {
-    let p = clamp_pos(pos);
-    if color_at(p) == 1u {
-        return DualEstimate(raw_cfa_at(p), 1.0);
+    let p = Common::clamp_pos(pos);
+    if RawSampling::color_at(p) == 1u {
+        return DualEstimate(RawSampling::raw_cfa_at(p), 1.0);
     }
 
     var fallback_sum = 0.0;
@@ -53,9 +56,9 @@ fn dual_green_estimate(pos: vec2<i32>) -> DualEstimate {
         for (var dx = -4; dx <= 4; dx = dx + 1) {
             if dx == 0 && dy == 0 { continue; }
             let q = pos + vec2<i32>(dx, dy);
-            if dual_in_bounds(q) && color_at(q) == 1u {
+            if dual_in_bounds(q) && RawSampling::color_at(q) == 1u {
                 let spatial = dual_spatial_weight(dx, dy);
-                fallback_sum += raw_cfa_at(q) * spatial;
+                fallback_sum += RawSampling::raw_cfa_at(q) * spatial;
                 fallback_weight += spatial;
             }
 
@@ -63,10 +66,10 @@ fn dual_green_estimate(pos: vec2<i32>) -> DualEstimate {
             let q0 = pos + vec2<i32>(dx, dy);
             let q1 = pos - vec2<i32>(dx, dy);
             if !dual_in_bounds(q0) || !dual_in_bounds(q1) { continue; }
-            if color_at(q0) != 1u || color_at(q1) != 1u { continue; }
+            if RawSampling::color_at(q0) != 1u || RawSampling::color_at(q1) != 1u { continue; }
 
-            let v0 = raw_cfa_at(q0);
-            let v1 = raw_cfa_at(q1);
+            let v0 = RawSampling::raw_cfa_at(q0);
+            let v1 = RawSampling::raw_cfa_at(q1);
             let sigma = sqrt(dual_green_variance(v0) + dual_green_variance(v1));
             let normalized_gradient = abs(v0 - v1) / max(3.0 * sigma, 0.0020);
             let spatial = dual_spatial_weight(dx, dy);
@@ -92,9 +95,9 @@ fn dual_green_estimate(pos: vec2<i32>) -> DualEstimate {
 }
 
 fn dual_channel_estimate(pos: vec2<i32>, channel: u32, center_green: f32) -> DualEstimate {
-    let p = clamp_pos(pos);
-    if color_at(p) == channel {
-        return DualEstimate(raw_cfa_at(p), 1.0);
+    let p = Common::clamp_pos(pos);
+    if RawSampling::color_at(p) == channel {
+        return DualEstimate(RawSampling::raw_cfa_at(p), 1.0);
     }
 
     var first_sum = 0.0;
@@ -103,8 +106,8 @@ fn dual_channel_estimate(pos: vec2<i32>, channel: u32, center_green: f32) -> Dua
     for (var dy = -4; dy <= 4; dy = dy + 1) {
         for (var dx = -4; dx <= 4; dx = dx + 1) {
             let q = pos + vec2<i32>(dx, dy);
-            if !dual_in_bounds(q) || color_at(q) != channel { continue; }
-            let sample = raw_cfa_at(q);
+            if !dual_in_bounds(q) || RawSampling::color_at(q) != channel { continue; }
+            let sample = RawSampling::raw_cfa_at(q);
             let sample_green = textureLoad(dual_green_read, q, 0).x;
             let sigma = sqrt(dual_green_variance(center_green) + dual_green_variance(sample_green));
             let edge = abs(sample_green - center_green) / max(3.5 * sigma, 0.0030);
@@ -127,8 +130,8 @@ fn dual_channel_estimate(pos: vec2<i32>, channel: u32, center_green: f32) -> Dua
     for (var dy = -4; dy <= 4; dy = dy + 1) {
         for (var dx = -4; dx <= 4; dx = dx + 1) {
             let q = pos + vec2<i32>(dx, dy);
-            if !dual_in_bounds(q) || color_at(q) != channel { continue; }
-            let sample = raw_cfa_at(q);
+            if !dual_in_bounds(q) || RawSampling::color_at(q) != channel { continue; }
+            let sample = RawSampling::raw_cfa_at(q);
             let sample_green = textureLoad(dual_green_read, q, 0).x;
             let difference = sample - sample_green;
             let green_sigma = sqrt(dual_green_variance(center_green) + dual_green_variance(sample_green));
@@ -136,7 +139,7 @@ fn dual_channel_estimate(pos: vec2<i32>, channel: u32, center_green: f32) -> Dua
             let spatial = dual_spatial_weight(dx, dy);
             let base_weight = spatial / (1.0 + edge * edge);
 
-            let plane = cfa_channel_at(q);
+            let plane = RawSampling::cfa_channel_at(q);
             let chroma_sigma = sqrt(
                 dual_plane_variance(plane, sample)
                 + dual_green_variance(sample_green)
@@ -159,7 +162,7 @@ fn dual_channel_estimate(pos: vec2<i32>, channel: u32, center_green: f32) -> Dua
 
 @compute @workgroup_size(8, 8, 1)
 fn dual_green_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let estimate = dual_green_estimate(pos);
     textureStore(
@@ -171,7 +174,7 @@ fn dual_green_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn dual_rgb_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= camera_uniforms.width || gid.y >= camera_uniforms.height { return; }
+    if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     let green_sample = textureLoad(dual_green_read, pos, 0);
     let red = dual_channel_estimate(pos, 0u, green_sample.x);

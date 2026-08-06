@@ -1,3 +1,8 @@
+#import auraw::common as Common
+#import auraw::color as Color
+#import auraw::profile as Profile
+#import auraw::tone_common as ToneCommon
+
 // Quarter/eighth-resolution image analysis. One pass creates a log-luminance
 // guide and histogram, two separable bilateral passes make the guide
 // edge-aware, and one tiny reduction pass extracts robust percentiles.
@@ -8,13 +13,13 @@ struct ToneHistogram {
 
 @group(0) @binding(11) var tone_scene_tex: texture_2d<f32>;
 @group(0) @binding(15) var<storage, read_write> tone_histogram: ToneHistogram;
-@group(0) @binding(16) var<storage, read_write> tone_stats_out: ToneStats;
+@group(0) @binding(16) var<storage, read_write> tone_stats_out: ToneCommon::ToneStats;
 @group(0) @binding(17) var tone_guide_read: texture_2d<f32>;
 @group(0) @binding(18) var tone_guide_write: texture_storage_2d<r32float, write>;
 @group(0) @binding(32) var tone_inpaint_tex: texture_2d<f32>;
 
 fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
-    let camera_rgb = textureLoad(tone_scene_tex, clamp_pos(pos), 0).xyz;
+    let camera_rgb = textureLoad(tone_scene_tex, Common::clamp_pos(pos), 0).xyz;
 
     // Sensor black calibration has already happened per CFA plane. Tone
     // statistics are measured after camera characterization and fixed DNG
@@ -22,24 +27,24 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     // excluded so H/S/W/B, Contrast, curves, and presence controls keep stable
     // scene semantics across profiles. User Exposure is reintroduced
     // analytically by tonemap.wgsl.
-    var working = cam_to_working(camera_rgb);
+    var working = Color::cam_to_working(camera_rgb);
     // Tone masks and histogram anchors must analyze the same inpainted scene
     // that the adjustment graph renders. Reading the original scene here made
     // erased objects reappear as tonal silhouettes when Highlights/Shadows or
     // related adaptive controls were moved.
-    let replacement = textureLoad(tone_inpaint_tex, clamp_pos(pos), 0);
+    let replacement = textureLoad(tone_inpaint_tex, Common::clamp_pos(pos), 0);
     if replacement.a > 1e-6 {
         let replacement_working = vec3<f32>(
-            dot(camera_uniforms.inpaint_wb_0.xyz, replacement.rgb),
-            dot(camera_uniforms.inpaint_wb_1.xyz, replacement.rgb),
-            dot(camera_uniforms.inpaint_wb_2.xyz, replacement.rgb),
+            dot(Common::camera_uniforms.inpaint_wb_0.xyz, replacement.rgb),
+            dot(Common::camera_uniforms.inpaint_wb_1.xyz, replacement.rgb),
+            dot(Common::camera_uniforms.inpaint_wb_2.xyz, replacement.rgb),
         );
         working = mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
     }
-    let characterized = apply_camera_characterization(working);
-    let profile_exposure_ev = bitcast<f32>(camera_uniforms.profile_flags.z);
+    let characterized = Profile::apply_camera_characterization(working);
+    let profile_exposure_ev = bitcast<f32>(Common::camera_uniforms.profile_flags.z);
     let exposed = characterized * exp2(profile_exposure_ev);
-    return map_negative_gamut(exposed);
+    return Color::map_negative_gamut(exposed);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -47,7 +52,7 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
     let guide_size = textureDimensions(tone_guide_write);
     if gid.x >= guide_size.x || gid.y >= guide_size.y { return; }
 
-    let source_size = vec2<u32>(camera_uniforms.width, camera_uniforms.height);
+    let source_size = vec2<u32>(Common::camera_uniforms.width, Common::camera_uniforms.height);
     let cell_min = vec2<u32>(
         gid.x * source_size.x / guide_size.x,
         gid.y * source_size.y / guide_size.y,
@@ -59,7 +64,7 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var log_sum = 0.0;
     var count = 0.0;
-    var brightest = vec4<f32>(TONE_EV_MIN);
+    var brightest = vec4<f32>(ToneCommon::TONE_EV_MIN);
     var y = cell_min.y;
     loop {
         if y >= min(cell_max.y, source_size.y) { break; }
@@ -68,9 +73,9 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
             if x >= min(cell_max.x, source_size.x) { break; }
             let rgb = tone_unexposed_working_at(vec2<i32>(i32(x), i32(y)));
             let ev = clamp(
-                log2(safe_luma(rgb) / SCENE_MIDDLE_GREY),
-                TONE_EV_MIN,
-                TONE_EV_MAX,
+                log2(Common::safe_luma(rgb) / ToneCommon::SCENE_MIDDLE_GREY),
+                ToneCommon::TONE_EV_MIN,
+                ToneCommon::TONE_EV_MAX,
             );
             log_sum = log_sum + ev;
             if ev > brightest.x {
@@ -87,11 +92,11 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Histogram every source pixel rather than the cell average. This
             // preserves small specular highlights and makes the 99.5th
             // percentile independent of the reduced guide resolution.
-            let histogram_min = camera_uniforms.tone_histogram_bounds.xy;
-            let histogram_max = camera_uniforms.tone_histogram_bounds.zw;
+            let histogram_min = Common::camera_uniforms.tone_histogram_bounds.xy;
+            let histogram_max = Common::camera_uniforms.tone_histogram_bounds.zw;
             if x >= histogram_min.x && y >= histogram_min.y
                 && x < histogram_max.x && y < histogram_max.y {
-                atomicAdd(&tone_histogram.bins[tone_ev_to_bin(ev)], 1u);
+                atomicAdd(&tone_histogram.bins[ToneCommon::tone_ev_to_bin(ev)], 1u);
             }
             x = x + 1u;
         }
@@ -117,7 +122,7 @@ fn tone_bilateral_guide(pos: vec2<i32>, axis: vec2<i32>) -> f32 {
     let guide_max = vec2<i32>(textureDimensions(tone_guide_read)) - vec2<i32>(1);
     let center_pos = clamp(pos, vec2<i32>(0), guide_max);
     let center = textureLoad(tone_guide_read, center_pos, 0).x;
-    let radius = clamp(i32(round(camera_uniforms.tone_guide_radius)), 1, 6);
+    let radius = clamp(i32(round(Common::camera_uniforms.tone_guide_radius)), 1, 6);
     let sigma = max(f32(radius) * 0.65, 1.0);
 
     var weighted_sum = 0.0;
@@ -160,7 +165,7 @@ fn tone_reduce_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
     if any(gid != vec3<u32>(0u)) { return; }
 
     var total = 0u;
-    for (var index = 0u; index < TONE_HISTOGRAM_BIN_COUNT; index = index + 1u) {
+    for (var index = 0u; index < ToneCommon::TONE_HISTOGRAM_BIN_COUNT; index = index + 1u) {
         total = total + atomicLoad(&tone_histogram.bins[index]);
     }
 
@@ -177,20 +182,20 @@ fn tone_reduce_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
     let target_995 = max(1u, u32(ceil(f32(total) * 0.995)));
 
     var cumulative = 0u;
-    var p005 = TONE_EV_MIN;
-    var p05 = TONE_EV_MIN;
+    var p005 = ToneCommon::TONE_EV_MIN;
+    var p05 = ToneCommon::TONE_EV_MIN;
     var p50 = 0.0;
-    var p95 = TONE_EV_MAX;
-    var p995 = TONE_EV_MAX;
+    var p95 = ToneCommon::TONE_EV_MAX;
+    var p995 = ToneCommon::TONE_EV_MAX;
     var found_005 = false;
     var found_05 = false;
     var found_50 = false;
     var found_95 = false;
     var found_995 = false;
 
-    for (var index = 0u; index < TONE_HISTOGRAM_BIN_COUNT; index = index + 1u) {
+    for (var index = 0u; index < ToneCommon::TONE_HISTOGRAM_BIN_COUNT; index = index + 1u) {
         cumulative = cumulative + atomicLoad(&tone_histogram.bins[index]);
-        let ev = tone_bin_to_ev(index);
+        let ev = ToneCommon::tone_bin_to_ev(index);
         if !found_005 && cumulative >= target_005 { p005 = ev; found_005 = true; }
         if !found_05 && cumulative >= target_05 { p05 = ev; found_05 = true; }
         if !found_50 && cumulative >= target_50 { p50 = ev; found_50 = true; }
