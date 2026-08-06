@@ -1,6 +1,18 @@
 // Creative effects layered after scene-domain adjustments: dehaze, Glow diffusion,
 // and the post-crop vignette used by the final display-linear pass.
 
+// Lightroom-like post-crop vignette calibration anchors. Each vec4 stores
+// (smoothstep start radius, smoothstep end radius, falloff exponent, corner
+// opacity). These are empirical curve fits measured from linear-light
+// differences against Lightroom Amount -50, -100, +50, and +100 reference
+// renders at the default Midpoint/Feather settings; they are not analytic lens
+// vignetting coefficients. Darkening uses a broader transition and lower power,
+// while brightening uses a narrower, steeper shoulder.
+const VIGNETTE_DARK_HALF_FIT: vec4<f32> = vec4<f32>(0.10, 1.235, 2.88, 0.86);
+const VIGNETTE_DARK_FULL_FIT: vec4<f32> = vec4<f32>(0.02, 1.135, 3.46, 1.0);
+const VIGNETTE_LIGHT_HALF_FIT: vec4<f32> = vec4<f32>(0.305, 1.24, 4.36, 0.90);
+const VIGNETTE_LIGHT_FULL_FIT: vec4<f32> = vec4<f32>(0.13, 1.075, 5.66, 1.0);
+
 struct HazeNeighborhood {
     dark_ratio: f32,
     airlight: vec3<f32>,
@@ -323,15 +335,39 @@ fn lightroom_vignette_opacity(
     var half_amount = 0.0;
     var full_amount = 0.0;
 
-    // These four curves are robust fits to linear-light differences from the
-    // supplied Lightroom default -50, -100, +50, and +100 exports. Lightroom
-    // deliberately uses a broader dark falloff and a tighter white shoulder.
+    // Interpolate between the calibrated half/full Amount anchor curves. The
+    // fit coefficients are declared above so their measured origin and tuple
+    // ordering remain visible instead of appearing as call-site magic numbers.
     if amount < 0.0 {
-        half_amount = calibrated_vignette_anchor(shaped_distance, 0.10, 1.235, 2.88, 0.86);
-        full_amount = calibrated_vignette_anchor(shaped_distance, 0.02, 1.135, 3.46, 1.0);
+        half_amount = calibrated_vignette_anchor(
+            shaped_distance,
+            VIGNETTE_DARK_HALF_FIT.x,
+            VIGNETTE_DARK_HALF_FIT.y,
+            VIGNETTE_DARK_HALF_FIT.z,
+            VIGNETTE_DARK_HALF_FIT.w
+        );
+        full_amount = calibrated_vignette_anchor(
+            shaped_distance,
+            VIGNETTE_DARK_FULL_FIT.x,
+            VIGNETTE_DARK_FULL_FIT.y,
+            VIGNETTE_DARK_FULL_FIT.z,
+            VIGNETTE_DARK_FULL_FIT.w
+        );
     } else {
-        half_amount = calibrated_vignette_anchor(shaped_distance, 0.305, 1.24, 4.36, 0.90);
-        full_amount = calibrated_vignette_anchor(shaped_distance, 0.13, 1.075, 5.66, 1.0);
+        half_amount = calibrated_vignette_anchor(
+            shaped_distance,
+            VIGNETTE_LIGHT_HALF_FIT.x,
+            VIGNETTE_LIGHT_HALF_FIT.y,
+            VIGNETTE_LIGHT_HALF_FIT.z,
+            VIGNETTE_LIGHT_HALF_FIT.w
+        );
+        full_amount = calibrated_vignette_anchor(
+            shaped_distance,
+            VIGNETTE_LIGHT_FULL_FIT.x,
+            VIGNETTE_LIGHT_FULL_FIT.y,
+            VIGNETTE_LIGHT_FULL_FIT.z,
+            VIGNETTE_LIGHT_FULL_FIT.w
+        );
     }
 
     var opacity = 0.0;

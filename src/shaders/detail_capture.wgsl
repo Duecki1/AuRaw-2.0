@@ -4,17 +4,47 @@
 // Texture/Clarity live in detail_scale_space.wgsl and start at a wider spatial
 // scale, so the two stages do not reinforce the same residual and create halos.
 
+// Capture-acutance calibration. Scale and sigma bounds keep the bilateral base
+// inside the sensor-detail band across proxy and full-resolution renders. The
+// fixed detail thresholds are log2-luminance (EV) residual magnitudes: Detail 0
+// rejects residuals below 0.015 EV, while Detail 100 reaches 0.0045 EV. Edge
+// noise relief begins at a 0.055 EV gradient and is fully active by 0.28 EV, so
+// sensor-noise suppression is retained in flat areas but relaxed on coherent
+// structural edges. Masking maps its UI range to 0.035..0.62 EV edge thresholds.
+const CAPTURE_SCALE_MIN: f32 = 0.74;
+const CAPTURE_SCALE_MAX: f32 = 1.75;
+const CAPTURE_SIGMA_MIN: f32 = 0.58;
+const CAPTURE_SIGMA_MAX: f32 = 1.65;
+const CAPTURE_FIXED_THRESHOLD_DETAIL_0_EV: f32 = 0.015;
+const CAPTURE_FIXED_THRESHOLD_DETAIL_100_EV: f32 = 0.0045;
+const CAPTURE_EDGE_RELIEF_START_EV: f32 = 0.055;
+const CAPTURE_EDGE_RELIEF_END_EV: f32 = 0.28;
+const CAPTURE_MASK_THRESHOLD_MIN_EV: f32 = 0.035;
+const CAPTURE_MASK_THRESHOLD_MAX_EV: f32 = 0.62;
+
+// Impulse-coherence bounds, also in EV. `support` is the smallest center-to-
+// neighbour difference found on either image axis. At or below 0.055 EV the
+// residual has nearby support and receives full coherence; from 0.055 to
+// 0.22 EV it fades smoothly; at or above 0.22 EV it is treated as an isolated
+// one-pixel impulse (typically noise or demosaic sparkle) and receives zero.
+const CAPTURE_COHERENCE_FULL_EV: f32 = 0.055;
+const CAPTURE_COHERENCE_ZERO_EV: f32 = 0.22;
+
 fn capture_detail_scale() -> f32 {
     // Capture sharpening follows sensor/acutance detail, not the much wider
     // subject-space scaling used by creative presence controls. A square-root
     // scale keeps proxy/full-resolution rendering visually stable without letting
     // large files turn Radius into a broad local-contrast operator.
-    return clamp(sqrt(presence_reference_scale()), 0.74, 1.75);
+    return clamp(sqrt(presence_reference_scale()), CAPTURE_SCALE_MIN, CAPTURE_SCALE_MAX);
 }
 
 fn capture_sharpen_blur_ev(pos: vec2<i32>, radius_pixels: f32, step: i32) -> f32 {
     let center_ev = log_luminance(adjustment_base_at(pos));
-    let sigma_samples = clamp(radius_pixels / max(f32(step), 1.0), 0.58, 1.65);
+    let sigma_samples = clamp(
+        radius_pixels / max(f32(step), 1.0),
+        CAPTURE_SIGMA_MIN,
+        CAPTURE_SIGMA_MAX
+    );
     var weighted_sum = 0.0;
     var weight_sum = 0.0;
 
@@ -70,7 +100,7 @@ fn capture_impulse_coherence(pos: vec2<i32>, center_ev: f32) -> f32 {
     let horizontal = min(abs(center_ev - left), abs(center_ev - right));
     let vertical = min(abs(center_ev - up), abs(center_ev - down));
     let support = min(horizontal, vertical);
-    return 1.0 - smoothstep(0.055, 0.22, support);
+    return 1.0 - smoothstep(CAPTURE_COHERENCE_FULL_EV, CAPTURE_COHERENCE_ZERO_EV, support);
 }
 
 fn capture_noise_ev_sigma(rgb: vec3<f32>) -> f32 {
@@ -124,13 +154,21 @@ fn apply_capture_sharpening(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     // Shadow thresholding plus impulse coherence prevents capture sharpening
     // from turning sensor noise into crisp grain before creative detail runs.
     let shadow_noise = 1.0 - smoothstep(-8.2, -3.3, center_ev);
-    let fixed_threshold = mix(0.015, 0.0045, detail) * mix(1.0, 2.3, shadow_noise);
+    let fixed_threshold = mix(
+        CAPTURE_FIXED_THRESHOLD_DETAIL_0_EV,
+        CAPTURE_FIXED_THRESHOLD_DETAIL_100_EV,
+        detail
+    ) * mix(1.0, 2.3, shadow_noise);
     let edge_strength = capture_sharpen_edge_strength(pos, 1);
     // A sensor-aware threshold belongs in flat/weakly textured regions, not
     // across an unambiguous structural edge. Relieving it continuously on
     // strong edges keeps Amount 40 at Lightroom-like acutance without turning
     // the same ISO noise into crisp grain in sky, snow, or painted panels.
-    let edge_noise_relief = smoothstep(0.055, 0.28, edge_strength);
+    let edge_noise_relief = smoothstep(
+        CAPTURE_EDGE_RELIEF_START_EV,
+        CAPTURE_EDGE_RELIEF_END_EV,
+        edge_strength
+    );
     let sensor_threshold = capture_noise_ev_sigma(rgb)
         * mix(0.52, 0.34, detail)
         * mix(1.0, 0.12, edge_noise_relief);
@@ -140,7 +178,11 @@ fn apply_capture_sharpening(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
 
     var edge_mask = 1.0;
     if masking > 1e-6 {
-        let edge_threshold = mix(0.035, 0.62, pow(masking, 1.35));
+        let edge_threshold = mix(
+            CAPTURE_MASK_THRESHOLD_MIN_EV,
+            CAPTURE_MASK_THRESHOLD_MAX_EV,
+            pow(masking, 1.35)
+        );
         edge_mask = smoothstep(edge_threshold * 0.72, edge_threshold + 0.16, edge_strength);
     }
 
