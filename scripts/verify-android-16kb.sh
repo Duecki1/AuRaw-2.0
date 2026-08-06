@@ -3,8 +3,14 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 APK=${1:-"$ROOT/android/app/build/outputs/apk/debug/app-debug.apk"}
-EXPECTED_NDK_VERSION=28.2.13676358
-BUILD_TOOLS_VERSION=35.0.0
+BUILD_CONTRACT="$ROOT/android/build-contract.properties"
+EXPECTED_NDK_VERSION=$(sed -n 's/^ndkVersion=//p' "$BUILD_CONTRACT")
+BUILD_TOOLS_VERSION=$(sed -n 's/^buildToolsVersion=//p' "$BUILD_CONTRACT")
+
+if [ "${1:-}" = "--print-build-contract" ]; then
+    printf '{"ndkVersion":"%s","buildToolsVersion":"%s"}\n' "$EXPECTED_NDK_VERSION" "$BUILD_TOOLS_VERSION"
+    exit 0
+fi
 
 if [ ! -f "$APK" ]; then
     echo "APK not found: $APK" >&2

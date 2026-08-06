@@ -2,6 +2,13 @@ plugins {
     id "com.android.application"
 }
 
+def buildContract = new Properties()
+new File(rootProject.projectDir, "build-contract.properties").withInputStream {
+    buildContract.load(it)
+}
+def aurawNdkVersion = buildContract.getProperty("ndkVersion")
+def aurawUseLegacyPackaging = buildContract.getProperty("useLegacyPackaging").toBoolean()
+
 def aurawVersionCode = providers.gradleProperty("aurawVersionCode")
     .getOrElse("1")
     .toInteger()
@@ -15,7 +22,7 @@ def lensfunAssets = new File(
 android {
     namespace "de.duecki.auraw"
     compileSdk 36
-    ndkVersion "28.2.13676358"
+    ndkVersion aurawNdkVersion
 
     defaultConfig {
         applicationId "de.duecki.auraw"
@@ -37,7 +44,7 @@ android {
     // Keep this explicit so a future packaging-default change cannot regress support.
     packagingOptions {
         jniLibs {
-            useLegacyPackaging false
+            useLegacyPackaging aurawUseLegacyPackaging
         }
     }
 
@@ -76,5 +83,15 @@ if (buildRustEnabled) {
     }
     tasks.matching { it.name == "preReleaseBuild" }.configureEach {
         dependsOn("buildRustRelease")
+    }
+}
+
+
+tasks.register("printAndroidBuildContract") {
+    doLast {
+        println groovy.json.JsonOutput.toJson([
+            ndkVersion: aurawNdkVersion,
+            useLegacyPackaging: aurawUseLegacyPackaging,
+        ])
     }
 }

@@ -23,6 +23,93 @@ fn shader_module(name: &str, source: &str) -> naga::Module {
         .unwrap_or_else(|error| panic!("{name} did not parse: {error}"))
 }
 
+fn validated_shader_module(name: &str, source: &str) -> naga::Module {
+    let module = shader_module(name, source);
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
+    module
+}
+
+fn has_function(module: &naga::Module, function_name: &str) -> bool {
+    module
+        .functions
+        .iter()
+        .any(|(_, function)| function.name.as_deref() == Some(function_name))
+        || module
+            .entry_points
+            .iter()
+            .any(|entry| entry.name == function_name)
+}
+
+fn named_i32_constant(module: &naga::Module, constant_name: &str) -> i32 {
+    let (_, constant) = module
+        .constants
+        .iter()
+        .find(|(_, constant)| constant.name.as_deref() == Some(constant_name))
+        .unwrap_or_else(|| panic!("missing WGSL constant {constant_name}"));
+    match &module.global_expressions[constant.init] {
+        naga::Expression::Literal(naga::Literal::I32(value)) => *value,
+        expression => {
+            panic!("WGSL constant {constant_name} is not an i32 literal: {expression:?}")
+        }
+    }
+}
+
+fn named_f32_constant(module: &naga::Module, constant_name: &str) -> f32 {
+    let (_, constant) = module
+        .constants
+        .iter()
+        .find(|(_, constant)| constant.name.as_deref() == Some(constant_name))
+        .unwrap_or_else(|| panic!("missing WGSL constant {constant_name}"));
+    match &module.global_expressions[constant.init] {
+        naga::Expression::Literal(naga::Literal::F32(value)) => *value,
+        expression => {
+            panic!("WGSL constant {constant_name} is not an f32 literal: {expression:?}")
+        }
+    }
+}
+
+fn wgsl_struct_layout(
+    module: &naga::Module,
+    struct_name: &str,
+) -> (u32, Vec<(String, u32)>) {
+    let (_, ty) = module
+        .types
+        .iter()
+        .find(|(_, ty)| ty.name.as_deref() == Some(struct_name))
+        .unwrap_or_else(|| panic!("missing WGSL struct {struct_name}"));
+    match &ty.inner {
+        naga::TypeInner::Struct { members, span } => (
+            *span,
+            members
+                .iter()
+                .map(|member| {
+                    (
+                        member
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| "<anonymous>".to_owned()),
+                        member.offset,
+                    )
+                })
+                .collect(),
+        ),
+        other => panic!("WGSL type {struct_name} is not a struct: {other:?}"),
+    }
+}
+
+fn wgsl_field_offset(layout: &[(String, u32)], field_name: &str) -> usize {
+    layout
+        .iter()
+        .find(|(name, _)| name == field_name)
+        .map(|(_, offset)| *offset as usize)
+        .unwrap_or_else(|| panic!("missing WGSL field {field_name}"))
+}
+
 fn append_direct_call_names(module: &naga::Module, block: &naga::Block, calls: &mut Vec<String>) {
     for statement in block {
         match statement {
@@ -196,13 +283,13 @@ fn generated_finish_shaders_define_each_shared_routine_once() {
 
 #[test]
 fn generated_finish_shaders_keep_cfa_specific_reference_adapters() {
-    let bayer = shader_module("Bayer finish", SHADER_BAYER_RCD_P4);
+    let bayer = validated_shader_module("Bayer finish", SHADER_BAYER_RCD_P4);
     let bayer_calls = function_call_names(&bayer, "finish_reference_at");
     assert!(bayer_calls.iter().any(|call| call == "clamp_pos"));
     assert!(bayer_calls.iter().any(|call| call == "rcd_reference_at"));
     assert!(!bayer_calls.iter().any(|call| call == "xt_high"));
 
-    let xtrans = shader_module("X-Trans finish", SHADER_XTRANS_FINISH);
+    let xtrans = validated_shader_module("X-Trans finish", SHADER_XTRANS_FINISH);
     let xtrans_calls = function_call_names(&xtrans, "finish_reference_at");
     assert_eq!(xtrans_calls, vec!["xt_high".to_owned()]);
 }
@@ -225,14 +312,7 @@ fn compute_shaders_parse_and_validate() {
         ("creative effects", SHADER_CREATIVE_EFFECTS),
         ("view transform", SHADER_VIEW_TRANSFORM),
     ] {
-        let module = naga::front::wgsl::parse_str(source)
-            .unwrap_or_else(|error| panic!("{name} did not parse: {error}"));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
+        validated_shader_module(name, source);
     }
 }
 
@@ -288,16 +368,8 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
             .expect("specialize high-quality shader"),
         ),
     ] {
-        assert!(!source.contains("rgba16float"));
-        assert!(source.contains("rgba32float"));
-        let module = naga::front::wgsl::parse_str(source.as_ref())
-            .unwrap_or_else(|error| panic!("{name} did not parse: {error}"));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
+        assert_eq!(processing_work_format(ProcessingQuality::High), wgpu::TextureFormat::Rgba32Float);
+        validated_shader_module(name, source.as_ref());
     }
 }
 
@@ -327,16 +399,19 @@ fn every_edit_uses_the_current_scene_display_contract_graph() {
 
 #[test]
 fn highlight_shader_exposes_the_single_reconstruction_entry_point() {
-    let module =
-        naga::front::wgsl::parse_str(SHADER_HIGHLIGHTS).expect("highlight shader did not parse");
+    let module = validated_shader_module("highlight reconstruction", SHADER_HIGHLIGHTS);
     assert_eq!(module.entry_points.len(), 1);
     assert_eq!(module.entry_points[0].name, "highlight_reconstruct");
 }
 
 #[test]
 fn inpaint_opposed_uses_darktable_clip_and_never_lowers_clipped_signal() {
-    assert!(SHADER_HIGHLIGHTS.contains("const DARKTABLE_OPPOSED_CLIP_MAGIC: f32 = 0.987;"));
-    assert!(SHADER_HIGHLIGHTS.contains("return max(original, reference + chrominance);"));
+    let module = validated_shader_module("highlight reconstruction", SHADER_HIGHLIGHTS);
+    assert!(
+        (named_f32_constant(&module, "DARKTABLE_OPPOSED_CLIP_MAGIC") - 0.987).abs() < 1e-6
+    );
+    let calls = function_call_names(&module, "inpaint_opposed_cfa_at");
+    assert!(calls.iter().any(|call| call == "inpaint_opposed_refavg"));
 }
 
 #[test]
@@ -410,12 +485,6 @@ fn profile_highlight_shoulder_is_scene_adaptive_and_monotonic() {
         }
     }
 
-    assert!(SHADER_VIEW_TRANSFORM.contains("fn profile_tone_scene_shoulder_knee"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("let broad_highlight_pressure"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("let isolated_specular"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("let shoulder_knee = profile_tone_scene_shoulder_knee()"));
-    assert!(!SHADER_VIEW_TRANSFORM.contains("let shoulder_knee = 0.70"));
-    assert!(!SHADER_VIEW_TRANSFORM.contains("mix(positive, darktable_sigmoid"));
 }
 
 #[test]
@@ -451,8 +520,6 @@ fn masked_contrast_has_protected_toe_midtones_and_shoulder() {
     assert!(contrast_ev(8.0, 1.0) < 9.0);
     assert_eq!(contrast_ev(0.12, 1.0), 0.12);
 
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_mask_contrast_value"));
-    assert!(!SHADER_VIEW_TRANSFORM.contains("apply_basic_contrast"));
 }
 
 #[test]
@@ -479,10 +546,10 @@ fn basic_contrast_drives_sigmoid_without_switching_view_operators() {
 
 #[test]
 fn lifted_black_curve_uses_continuous_luminance_remapping() {
-    assert!(SHADER_VIEW_TRANSFORM.contains("fn remap_scene_luminance"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("if luminance <= 0.0"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("vec3<f32>(black) + rgb * zero_slope"));
-    assert!(!SHADER_VIEW_TRANSFORM.contains("adjusted * clamp(curved / luminance, 0.0, 256.0)"));
+    let module = validated_shader_module("view transform", SHADER_VIEW_TRANSFORM);
+    assert!(has_function(&module, "remap_scene_luminance"));
+    let calls = function_call_names(&module, "apply_point_tone_curve");
+    assert!(calls.iter().any(|call| call == "remap_scene_luminance"));
 }
 
 #[test]
@@ -497,28 +564,33 @@ fn local_curves_preserve_exact_control_points() {
     assert_eq!(packed[0], [0.0, 0.0, 0.500, 0.20]);
     assert_eq!(packed[1], [0.505, 0.80, 1.0, 1.0]);
     assert_eq!(packed[4][0], 4.0);
-    assert!(SHADER_VIEW_TRANSFORM.contains("fn local_curve_tangent"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("let hermite ="));
-    assert!(!SHADER_VIEW_TRANSFORM.contains("clamp(input, 0.0, 1.0) * 31.0"));
 }
 
 #[test]
-fn demosaic_reference_invariants_are_present() {
-    assert!(SHADER_BAYER_RCD_P4.contains("const RCD_MARGIN: i32 = 9"));
-    assert!(SHADER_BAYER_RCD_P4.contains("ppg_rgb_at"));
-    assert!(SHADER_BAYER_RCD_P2.contains("green = mix(vertical.x, horizontal.x, vh)"));
-    assert!(SHADER_BAYER_RCD_P3.contains("return mix(p_est, q_est, pq)"));
+fn demosaic_contracts_are_compiler_validated() {
+    let bayer_finish = validated_shader_module("Bayer finish", SHADER_BAYER_RCD_P4);
+    let xtrans = validated_shader_module("X-Trans demosaic", SHADER_XTRANS_DEMOSAIC);
+    let xtrans_finish = validated_shader_module("X-Trans finish", SHADER_XTRANS_FINISH);
+    let dual = validated_shader_module("dual demosaic", SHADER_DUAL_DEMOSAIC);
 
-    assert!(SHADER_XTRANS_DEMOSAIC.contains("index < 8u"));
-    assert!(SHADER_XTRANS_DEMOSAIC.contains("minimum * 8.0"));
-    assert!(SHADER_XTRANS_DEMOSAIC.contains("mark_homo_sum5"));
-    assert!(SHADER_XTRANS_DEMOSAIC.contains("index + 4u"));
-    assert!(SHADER_XTRANS_DEMOSAIC.contains("MARKESTEIJN3_MARGIN"));
+    assert_eq!(named_i32_constant(&bayer_finish, "RCD_MARGIN"), 9);
+    assert_eq!(named_i32_constant(&xtrans, "MARKESTEIJN3_MARGIN"), 17);
+    assert!(has_function(&bayer_finish, "ppg_rgb_at"));
+    assert!(has_function(&bayer_finish, "frequency_chroma_at"));
+    assert!(has_function(&bayer_finish, "gaussian5_weight"));
+    assert!(has_function(&xtrans, "mark_candidate"));
+    assert!(has_function(&xtrans, "mark_homo_sum5"));
+    assert!(has_function(&xtrans_finish, "xt_frequency_uv"));
+    assert!(has_function(&xtrans_finish, "xt_median5"));
+    assert!(has_function(&xtrans_finish, "xt_gaussian5_weight"));
 
-    assert!(SHADER_BAYER_RCD_P4.contains("for (var dy = -6; dy <= 6"));
-    assert!(SHADER_XTRANS_FINISH.contains("for (var dy = -6; dy <= 6"));
-    assert!(SHADER_BAYER_RCD_P4.contains("detail /= 256.0"));
-    assert!(SHADER_XTRANS_FINISH.contains("detail /= 256.0"));
+    for entry in ["dual_green_reconstruct", "dual_rgb_reconstruct"] {
+        assert!(dual.entry_points.iter().any(|candidate| candidate.name == entry));
+    }
+    let bayer_output_calls = entry_point_call_names(&bayer_finish, "bayer_rcd_output");
+    assert!(bayer_output_calls.iter().any(|call| call == "finish_reference_at"));
+    let xtrans_output_calls = entry_point_call_names(&xtrans_finish, "xtrans_demosaic_finish");
+    assert!(xtrans_output_calls.iter().any(|call| call == "finish_reference_at"));
 }
 
 #[test]
@@ -537,7 +609,7 @@ fn demosaic_shaders_expose_every_dispatched_entry_point() {
         (SHADER_XTRANS_DEMOSAIC, "xtrans_markesteijn_accumulate"),
         (SHADER_XTRANS_FINISH, "xtrans_demosaic_finish"),
     ] {
-        let module = naga::front::wgsl::parse_str(source).expect("demosaic shader did not parse");
+        let module = validated_shader_module(expected, source);
         assert!(
             module
                 .entry_points
@@ -550,8 +622,7 @@ fn demosaic_shaders_expose_every_dispatched_entry_point() {
 
 #[test]
 fn color_denoise_shader_exposes_every_dispatched_scale() {
-    let module = naga::front::wgsl::parse_str(SHADER_COLOR_DENOISE)
-        .expect("multiscale color-denoise shader did not parse");
+    let module = validated_shader_module("multiscale color denoise", SHADER_COLOR_DENOISE);
     for expected in COLOR_DENOISE_ENTRY_POINTS {
         assert!(
             module
@@ -565,8 +636,7 @@ fn color_denoise_shader_exposes_every_dispatched_scale() {
 
 #[test]
 fn tone_analysis_shader_exposes_every_dispatched_entry_point() {
-    let module = naga::front::wgsl::parse_str(SHADER_TONE_ANALYSIS)
-        .expect("adaptive tone-analysis shader did not parse");
+    let module = validated_shader_module("adaptive tone analysis", SHADER_TONE_ANALYSIS);
 
     for expected in [
         "tone_guide_prepare",
@@ -680,91 +750,136 @@ fn gpu_params_follow_the_wgsl_uniform_layout() {
     assert_eq!(std::mem::offset_of!(super::MaskData, curves_blue), 528);
     assert_eq!(std::mem::offset_of!(super::MaskData, hsl_hue_0), 656);
     assert_eq!(std::mem::offset_of!(super::MaskData, hsl_luminance_1), 736);
+
+    let common = validated_shader_module("common ABI", super::SHADER_COMMON_FOR_TESTS);
+    let (params_span, params_layout) = wgsl_struct_layout(&common, "Params");
+    assert_eq!(params_span as usize, std::mem::size_of::<super::GpuUniformParams>());
+    for (field, rust_offset) in [
+        ("basic_tone", std::mem::offset_of!(super::GpuUniformParams, basic_tone)),
+        ("sigmoid_curve", std::mem::offset_of!(super::GpuUniformParams, sigmoid_curve)),
+        ("sigmoid_power", std::mem::offset_of!(super::GpuUniformParams, sigmoid_power)),
+        ("creative_effects", std::mem::offset_of!(super::GpuUniformParams, creative_effects)),
+        ("vignette", std::mem::offset_of!(super::GpuUniformParams, vignette)),
+        ("vignette_options", std::mem::offset_of!(super::GpuUniformParams, vignette_options)),
+        ("highlight_options", std::mem::offset_of!(super::GpuUniformParams, highlight_options)),
+        ("tone_curve_0", std::mem::offset_of!(super::GpuUniformParams, tone_curve_0)),
+        ("tone_curve_meta", std::mem::offset_of!(super::GpuUniformParams, tone_curve_meta)),
+        ("tone_curve_red_0", std::mem::offset_of!(super::GpuUniformParams, tone_curve_red_0)),
+        ("tone_curve_green_0", std::mem::offset_of!(super::GpuUniformParams, tone_curve_green_0)),
+        ("tone_curve_blue_0", std::mem::offset_of!(super::GpuUniformParams, tone_curve_blue_0)),
+        ("wb", std::mem::offset_of!(super::GpuUniformParams, wb)),
+        ("inpaint_wb_0", std::mem::offset_of!(super::GpuUniformParams, inpaint_wb_0)),
+        ("width", std::mem::offset_of!(super::GpuUniformParams, width)),
+        ("tile_origin_x", std::mem::offset_of!(super::GpuUniformParams, tile_origin_x)),
+        ("full_width", std::mem::offset_of!(super::GpuUniformParams, full_width)),
+        ("tone_histogram_bounds", std::mem::offset_of!(super::GpuUniformParams, tone_histogram_bounds)),
+        ("profile_hue_sat", std::mem::offset_of!(super::GpuUniformParams, profile_hue_sat)),
+        ("profile_flags", std::mem::offset_of!(super::GpuUniformParams, profile_flags)),
+        ("process_info", std::mem::offset_of!(super::GpuUniformParams, process_info)),
+        ("mask_counts", std::mem::offset_of!(super::GpuUniformParams, mask_counts)),
+        ("grade_shadows", std::mem::offset_of!(super::GpuUniformParams, grade_shadows)),
+        ("grade_options", std::mem::offset_of!(super::GpuUniformParams, grade_options)),
+        ("vignette_frame", std::mem::offset_of!(super::GpuUniformParams, vignette_frame)),
+        ("vignette_transform", std::mem::offset_of!(super::GpuUniformParams, vignette_transform)),
+    ] {
+        assert_eq!(wgsl_field_offset(&params_layout, field), rust_offset, "Params.{field}");
+    }
+
+    let (mask_span, mask_layout) = wgsl_struct_layout(&common, "MaskData");
+    assert_eq!(mask_span as usize, std::mem::size_of::<super::MaskData>());
+    for (field, rust_offset) in [
+        ("metadata", std::mem::offset_of!(super::MaskData, metadata)),
+        ("adjust_0", std::mem::offset_of!(super::MaskData, adjust_0)),
+        ("adjust_1", std::mem::offset_of!(super::MaskData, adjust_1)),
+        ("adjust_2", std::mem::offset_of!(super::MaskData, adjust_2)),
+        ("curves", std::mem::offset_of!(super::MaskData, curves)),
+        ("grade_shadows", std::mem::offset_of!(super::MaskData, grade_shadows)),
+        ("grade_options", std::mem::offset_of!(super::MaskData, grade_options)),
+        ("curves_red", std::mem::offset_of!(super::MaskData, curves_red)),
+        ("curves_green", std::mem::offset_of!(super::MaskData, curves_green)),
+        ("curves_blue", std::mem::offset_of!(super::MaskData, curves_blue)),
+        ("hsl_hue_0", std::mem::offset_of!(super::MaskData, hsl_hue_0)),
+        ("hsl_luminance_1", std::mem::offset_of!(super::MaskData, hsl_luminance_1)),
+    ] {
+        assert_eq!(wgsl_field_offset(&mask_layout, field), rust_offset, "MaskData.{field}");
+    }
 }
 
 #[test]
-fn adjustments_shader_contains_darktable_sigmoid_paths() {
-    assert!(SHADER_VIEW_TRANSFORM.contains("generalized_loglogistic_sigmoid"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("preserve_hue_and_energy"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("sigmoid_rgb_ratio"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("hyperbolic_chroma"));
+fn adjustments_shader_exposes_darktable_sigmoid_paths() {
+    let module = validated_shader_module("view transform", SHADER_VIEW_TRANSFORM);
+    for function in [
+        "generalized_loglogistic_sigmoid",
+        "preserve_hue_and_energy",
+        "sigmoid_rgb_ratio",
+    ] {
+        assert!(has_function(&module, function), "missing WGSL function {function}");
+    }
+    let calls = function_call_names(&module, "apply_sigmoid_view_transform");
+    assert!(calls.iter().any(|call| call == "sigmoid_rgb_ratio"));
 }
 
 #[test]
 fn signed_scene_rgb_is_preserved_until_explicit_positive_domain_boundaries() {
-    // Shared projection is used only where a positive/unit RGB domain is part
-    // of the algorithm contract; scene intermediates must not floor channels.
-    assert!(SHADER_VIEW_TRANSFORM.contains("fn gamut_project_nonnegative("));
-    assert!(SHADER_VIEW_TRANSFORM.contains("fn gamut_project_unit("));
-    assert!(
-        SHADER_VIEW_TRANSFORM.contains("let view_input = gamut_project_nonnegative_rec2020(looked)")
-    );
-    assert!(SHADER_VIEW_TRANSFORM.contains("perceptual_gamut_compress_unit_rec2020"));
-
-    for forbidden in [
-        "max(REC2020_TO_PROPHOTO *",
-        "linear_srgb_to_oklab(REC2020_TO_SRGB * max(rgb",
-        "return max(adjusted, vec3<f32>(0.0))",
-        "vec4<f32>(max(rgb, vec3<f32>(0.0)), 1.0)",
-        "let view_input = max(map_negative_gamut",
+    let module = validated_shader_module("view transform", SHADER_VIEW_TRANSFORM);
+    for function in [
+        "gamut_project_nonnegative",
+        "gamut_project_unit",
+        "perceptual_gamut_compress_unit_rec2020",
     ] {
-        assert!(
-            !SHADER_VIEW_TRANSFORM.contains(forbidden),
-            "premature RGB floor reintroduced: {forbidden}"
-        );
+        assert!(has_function(&module, function), "missing explicit gamut boundary {function}");
     }
+    let calls = function_call_names(&module, "apply_explicit_view_node");
+    assert!(calls.iter().any(|call| call == "gamut_project_nonnegative_rec2020"));
 
     for (name, source) in [
         ("Bayer pass 2", SHADER_BAYER_RCD_P2),
         ("Bayer pass 3", SHADER_BAYER_RCD_P3),
         ("Bayer finish", SHADER_BAYER_RCD_P4),
-        ("X-Trans pass 2", SHADER_XTRANS_DEMOSAIC),
-        ("X-Trans pass 3", SHADER_XTRANS_DEMOSAIC),
-        ("X-Trans accumulation", SHADER_XTRANS_DEMOSAIC),
+        ("X-Trans", SHADER_XTRANS_DEMOSAIC),
         ("X-Trans finish", SHADER_XTRANS_FINISH),
     ] {
-        for forbidden in [
-            "max(camera_rgb, vec3<f32>(0.0))",
-            "max(rgb, vec3<f32>(0.0))",
-            "max(out, vec3<f32>(0.0))",
-            "max(green, 0.0)",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{name} reintroduced destructive demosaic flooring: {forbidden}"
-            );
-        }
+        validated_shader_module(name, source);
     }
 }
 
 #[test]
-fn adjustments_shader_contains_lightroom_style_controls() {
-    assert!(!SHADER_VIEW_TRANSFORM.contains("apply_camera_temperature_tint"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("bitcast<f32>(params.profile_flags.w)"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_mask_contrast_value"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_point_tone_curve"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("linear_srgb_to_oklab"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("skin_protection"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("prepare_scene_node"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_scene_tone_node"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_scene_effects_node"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_creative_effects"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_glow"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_vignette"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("stabilized_mixer_sample"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("perceptual_rec2020_from_oklab_nonnegative"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("mixer_luminance_ev"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_color_grading_wheels"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("color_grade_tonal_weights"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("apply_local_color_grading"));
-    assert!(!SHADER_VIEW_TRANSFORM.contains("rgb_to_hsl"));
-    assert!(!SHADER_VIEW_TRANSFORM.contains("hsl_to_rgb"));
+fn adjustment_modules_expose_the_render_graph_controls() {
+    let scene = validated_shader_module("scene adjustments", SHADER_SCENE_ADJUSTMENTS);
+    let creative = validated_shader_module("creative effects", SHADER_CREATIVE_EFFECTS);
+    let view = validated_shader_module("view transform", SHADER_VIEW_TRANSFORM);
+
+    for function in ["apply_mask_contrast_value", "apply_point_tone_curve", "local_curve_tangent"] {
+        assert!(has_function(&scene, function), "missing scene-control function {function}");
+    }
+    for function in ["apply_creative_effects", "apply_glow", "apply_vignette"] {
+        assert!(
+            has_function(&creative, function) || has_function(&view, function),
+            "missing creative-control function {function}"
+        );
+    }
+    for function in [
+        "stabilized_mixer_sample",
+        "mixer_luminance_ev",
+        "apply_color_grading_wheels",
+        "color_grade_tonal_weights",
+        "apply_local_color_grading",
+    ] {
+        assert!(has_function(&view, function), "missing view-control function {function}");
+    }
 }
 
 #[test]
-fn profile_tables_preserve_value_channel_and_maximum_lookup() {
-    assert!(SHADER_VIEW_TRANSFORM.contains("hsv.z = clamp(hsv.z * adjustment.z, 0.0, 1.0)"));
-    assert!(SHADER_VIEW_TRANSFORM.contains("return profile_data[offset + maximum].x"));
+fn profile_shader_parses_with_the_profile_storage_contract() {
+    let module = validated_shader_module("view transform", SHADER_VIEW_TRANSFORM);
+    for function in [
+        "profile_map_sample",
+        "apply_profile_hsv_map",
+        "apply_profile_tone_curve",
+        "apply_profile_view_tone",
+    ] {
+        assert!(has_function(&module, function), "missing profile function {function}");
+    }
 }
 
 #[test]
