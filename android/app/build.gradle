@@ -69,12 +69,12 @@ def buildRustEnabled = providers.gradleProperty("aurawBuildRust").map { it.toBoo
 
 tasks.register("buildRustDebug", Exec) {
     workingDir repositoryRoot
-    commandLine "sh", new File(repositoryRoot, "scripts/build-android.sh"), rustAbi, "debug"
+    commandLine "python3", new File(repositoryRoot, "scripts/dev.py"), "build-android", rustAbi, "debug"
 }
 
 tasks.register("buildRustRelease", Exec) {
     workingDir repositoryRoot
-    commandLine "sh", new File(repositoryRoot, "scripts/build-android.sh"), rustAbi, "release"
+    commandLine "python3", new File(repositoryRoot, "scripts/dev.py"), "build-android", rustAbi, "release"
 }
 
 if (buildRustEnabled) {

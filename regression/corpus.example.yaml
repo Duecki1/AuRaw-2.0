@@ -3,7 +3,7 @@ color_space: linear-rec2020-d65
 raw_root: raw
 
 # Copy this file to regression/corpus.yaml, replace every placeholder, enable
-# the scenes, and run `python3 scripts/image_regression.py validate-corpus`.
+# the scenes, and run `python3 scripts/dev.py regression validate-corpus`.
 # Keep RAW licensing explicit. Non-redistributable files should live in a
 # private artifact store and never be committed.
 scenes:

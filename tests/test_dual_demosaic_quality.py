@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -10,13 +11,14 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS_PATH = ROOT / "regression/corpus.yaml"
-GENERATOR_PATH = ROOT / "regression/generate_synthetic_corpus.py"
+GENERATOR_PATH = ROOT / "scripts/dev.py"
 
 
 def load_generator() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("generate_synthetic_corpus", GENERATOR_PATH)
+    spec = importlib.util.spec_from_file_location("auraw_dev_corpus", GENERATOR_PATH)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -42,7 +44,7 @@ def test_synthetic_cfa_alias_suite_covers_four_distinct_failure_modes() -> None:
 def test_generated_scene_exercises_neutral_and_chromatic_alias_properties() -> None:
     generator = load_generator()
     scene = generator.build_scene()
-    assert scene.shape == (generator.HEIGHT, generator.WIDTH, 3)
+    assert scene.shape == (generator.CORPUS_HEIGHT, generator.CORPUS_WIDTH, 3)
     assert np.isfinite(scene).all()
 
     weave = scene[24:72, 136:188]
@@ -61,14 +63,14 @@ def test_generated_scene_exercises_neutral_and_chromatic_alias_properties() -> N
 def test_mosaics_sample_the_declared_cfa_plane_at_every_pixel() -> None:
     generator = load_generator()
     scene = generator.build_scene()
-    for pattern in (generator.BAYER, generator.XTRANS):
+    for pattern in (generator.CORPUS_BAYER, generator.CORPUS_XTRANS):
         mosaic = generator.mosaic(scene, pattern)
         yy, xx = np.indices(mosaic.shape)
         channels = pattern[yy % pattern.shape[0], xx % pattern.shape[1]]
         sampled = np.take_along_axis(scene, channels[..., None], axis=2)[..., 0]
         expected = np.rint(
-            generator.BLACK
-            + np.clip(sampled, 0.0, 1.0) * (generator.WHITE - generator.BLACK)
+            generator.CORPUS_BLACK
+            + np.clip(sampled, 0.0, 1.0) * (generator.CORPUS_WHITE - generator.CORPUS_BLACK)
         ).astype("<u2")
         np.testing.assert_array_equal(mosaic, expected)
 

@@ -220,7 +220,7 @@ fn configure_android_libraw() {
             return;
         }
         panic!(
-            "Android LibRaw is not built at {}. Run `scripts/build-android-libraw.sh {abi}` first, or use `scripts/build-android.sh {abi}` to build the complete APK native library.",
+            "Android LibRaw is not built at {}. Run `python3 scripts/dev.py build-android-libraw {abi}` first, or use `python3 scripts/dev.py build-android {abi}` to build the complete APK native library.",
             root.display()
         );
     }
@@ -252,7 +252,7 @@ fn configure_android_lensfun() {
 
     if !header.is_file() || !library.is_file() {
         panic!(
-            "Android Lensfun is not built at {}. Run `scripts/build-android-lensfun.sh {abi}` first, or use `scripts/build-android.sh {abi}` to build the complete APK native library.",
+            "Android Lensfun is not built at {}. Run `python3 scripts/dev.py build-android-lensfun {abi}` first, or use `python3 scripts/dev.py build-android {abi}` to build the complete APK native library.",
             root.display()
         );
     }

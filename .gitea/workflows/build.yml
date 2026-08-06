@@ -86,7 +86,7 @@ jobs:
           set -euxo pipefail
 
           download_verified() {
-            scripts/verified-download.sh "$1" "$2" "$3"
+            python3 scripts/dev.py verified-download "$1" "$2" "$3"
           }
 
           download_verified \
@@ -130,7 +130,7 @@ jobs:
 
           test "$(pkg-config --modversion libraw)" = "0.22.1"
           pkg-config --modversion lensfun
-          REVISION="$(scripts/verify-source-revision.sh)"
+          REVISION="$(python3 scripts/dev.py verify-source-revision)"
           export AURAW_REQUIRE_COMMITTED_SOURCE=1
           export AURAW_SOURCE_REVISION="$REVISION"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$REVISION")"
@@ -147,7 +147,7 @@ jobs:
           set -euxo pipefail
 
           download_verified() {
-            scripts/verified-download.sh "$1" "$2" "$3"
+            python3 scripts/dev.py verified-download "$1" "$2" "$3"
           }
 
           VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
@@ -348,7 +348,7 @@ jobs:
           set -euxo pipefail
 
           download_verified() {
-            scripts/verified-download.sh "$1" "$2" "$3"
+            python3 scripts/dev.py verified-download "$1" "$2" "$3"
           }
 
           install_sdk_packages() {
@@ -439,7 +439,7 @@ jobs:
           grep -q "application-icon-" /tmp/auraw-apk-badging.txt
           grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' \
             android/app/src/main/AndroidManifest.xml
-          sh scripts/verify-android-16kb.sh "$APK"
+          python3 scripts/dev.py verify-android-16kb "$APK"
           mkdir -p dist
           cp "$APK" dist/AuRaw-debug-arm64-v8a.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
