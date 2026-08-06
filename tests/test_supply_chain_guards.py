@@ -22,8 +22,9 @@ def test_all_workflow_actions_are_immutable_commit_pins() -> None:
 def test_verified_download_rejects_non_hex_digest_before_network_access() -> None:
     result = subprocess.run(
         [
-            "sh",
-            str(ROOT / "scripts/verified-download.sh"),
+            sys.executable,
+            str(ROOT / "scripts/dev.py"),
+            "verified-download",
             "https://example.invalid/file",
             str(ROOT / "target/invalid-download"),
             "0" * 63 + "z",
@@ -43,8 +44,9 @@ def test_verified_download_accepts_sha512_digest_for_cached_file(tmp_path) -> No
 
     result = subprocess.run(
         [
-            "sh",
-            str(ROOT / "scripts/verified-download.sh"),
+            sys.executable,
+            str(ROOT / "scripts/dev.py"),
+            "verified-download",
             "https://example.invalid/file",
             str(output),
             f"sha512:{digest}",
@@ -94,8 +96,9 @@ cp \"$FAKE_CURL_PAYLOAD\" \"$output\"
 
     result = subprocess.run(
         [
-            "sh",
-            str(ROOT / "scripts/verified-download.sh"),
+            sys.executable,
+            str(ROOT / "scripts/dev.py"),
+            "verified-download",
             "https://example.invalid/file",
             str(output),
             expected,

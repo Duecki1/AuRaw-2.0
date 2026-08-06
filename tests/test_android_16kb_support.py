@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -20,9 +21,9 @@ def read_properties(path: Path) -> dict[str, str]:
     return result
 
 
-def script_contract(script: str) -> dict[str, object]:
+def command_contract(command: str) -> dict[str, object]:
     completed = subprocess.run(
-        ["sh", script, "--print-build-contract"],
+        [sys.executable, "scripts/dev.py", command, "--print-build-contract"],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -37,13 +38,16 @@ def test_android_build_tools_share_one_executable_contract() -> None:
     ndk = properties["ndkVersion"]
     assert int(ndk.split(".", 1)[0]) >= 28
     assert properties["useLegacyPackaging"].lower() == "false"
-    for script in (
-        "scripts/build-android.sh",
-        "scripts/build-android-libraw.sh",
-        "scripts/verify-android-16kb.sh",
+    for command in (
+        "build-android",
+        "build-android-libraw",
+        "verify-android-16kb",
     ):
-        assert script_contract(script)["ndkVersion"] == ndk
-    assert script_contract("scripts/verify-android-16kb.sh")["buildToolsVersion"] == properties["buildToolsVersion"]
+        assert command_contract(command)["ndkVersion"] == ndk
+    assert (
+        command_contract("verify-android-16kb")["buildToolsVersion"]
+        == properties["buildToolsVersion"]
+    )
 
 
 def fake_android_toolchain(tmp_path: Path, alignment_power: int) -> tuple[Path, Path, dict[str, str]]:
@@ -78,7 +82,7 @@ def fake_android_toolchain(tmp_path: Path, alignment_power: int) -> tuple[Path, 
 def test_16kb_verifier_accepts_aligned_elf_and_apk(tmp_path: Path) -> None:
     apk, _, env = fake_android_toolchain(tmp_path, 14)
     completed = subprocess.run(
-        ["sh", "scripts/verify-android-16kb.sh", str(apk)],
+        [sys.executable, "scripts/dev.py", "verify-android-16kb", str(apk)],
         cwd=ROOT,
         env=env,
         check=False,
@@ -91,7 +95,7 @@ def test_16kb_verifier_accepts_aligned_elf_and_apk(tmp_path: Path) -> None:
 def test_16kb_verifier_rejects_under_aligned_elf(tmp_path: Path) -> None:
     apk, _, env = fake_android_toolchain(tmp_path, 13)
     completed = subprocess.run(
-        ["sh", "scripts/verify-android-16kb.sh", str(apk)],
+        [sys.executable, "scripts/dev.py", "verify-android-16kb", str(apk)],
         cwd=ROOT,
         env=env,
         check=False,

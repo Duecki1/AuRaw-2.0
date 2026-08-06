@@ -273,7 +273,7 @@ with an error rather than allowing unbounded memory or storage growth.
 
 ## Development quality gates
 
-Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `regression/README.md` and `benchmarks/README.md`. Dependency policy is documented in [DEPENDENCIES.md](DEPENDENCIES.md), with bundled-license details in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `docs/DEVELOPMENT.md` and `regression/README.md`. Dependency policy is documented in [DEPENDENCIES.md](DEPENDENCIES.md), with bundled-license details in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License and attribution
 

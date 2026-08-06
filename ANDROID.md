@@ -53,7 +53,7 @@ not force native-library extraction.
 After building an APK, verify both ELF LOAD alignment and APK zip alignment with:
 
 ```sh
-./scripts/verify-android-16kb.sh android/app/build/outputs/apk/debug/app-debug.apk
+python3 scripts/dev.py verify-android-16kb android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 The verifier checks every 64-bit `.so` with the pinned NDK's `llvm-objdump` and
@@ -64,7 +64,7 @@ or newer device/emulator (`adb shell getconf PAGE_SIZE` must report `16384`).
 To build only the native LibRaw, Lensfun, and Rust libraries without packaging an APK:
 
 ```sh
-./scripts/build-android.sh arm64-v8a release
+python3 scripts/dev.py build-android arm64-v8a release
 ```
 
 The first native build downloads LibRaw 0.22.1 and Lensfun 0.3.4, then

@@ -12,7 +12,8 @@ def test_benchmark_dry_run_covers_the_committed_scenes() -> None:
     result = subprocess.run(
         [
             sys.executable,
-            str(ROOT / "scripts/benchmark-regression-renderer.py"),
+            str(ROOT / "scripts/dev.py"),
+            "bench",
             "--dry-run",
             "--runs",
             "1",

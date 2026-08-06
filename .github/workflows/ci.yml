@@ -98,4 +98,4 @@ jobs:
       - name: Run deterministic synthetic-corpus gate
         env:
           WGPU_BACKEND: vulkan
-        run: scripts/smoke-regression-renderer.sh
+        run: python3 scripts/dev.py smoke-regression
