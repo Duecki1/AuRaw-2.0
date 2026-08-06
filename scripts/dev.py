@@ -21,7 +21,6 @@ import stat
 import statistics
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import tomllib
@@ -1858,19 +1857,6 @@ def directory_has_xml(path: Path) -> bool:
     return path.is_dir() and any(candidate.is_file() for candidate in path.rglob("*.xml"))
 
 
-def archive_cache_valid(source: Path, marker_file: str, expected_digest: str) -> bool:
-    """Check the source sentinel and recorded archive digest."""
-    marker = source / marker_file
-    digest_file = source / ".auraw-archive-sha256"
-    try:
-        return (
-            marker.is_file()
-            and digest_file.read_text(encoding="utf-8").strip() == expected_digest
-        )
-    except (OSError, UnicodeError):
-        return False
-
-
 class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Reject redirects that would downgrade a verified download to HTTP."""
 
@@ -1999,531 +1985,83 @@ def verify_digest(path: Path, algorithm: str, expected: str, *, report: bool = T
     return False
 
 
-def extract_tar_strip_one(archive: Path, destination: Path) -> None:
-    """Extract a tar archive after removing its top-level directory."""
-    with tempfile.TemporaryDirectory(prefix="auraw-archive-") as temporary:
-        extraction_root = Path(temporary)
-        try:
-            with tarfile.open(archive, mode="r:*") as bundle:
-                try:
-                    bundle.extractall(extraction_root, filter="data")
-                except TypeError:  # Python versions before extraction filters.
-                    root = extraction_root.resolve()
-                    for member in bundle.getmembers():
-                        target = (extraction_root / member.name).resolve()
-                        if target != root and root not in target.parents:
-                            fail(f"archive contains an unsafe path: {member.name}")
-                        if member.issym() or member.islnk():
-                            link = Path(member.linkname)
-                            if link.is_absolute() or ".." in link.parts:
-                                fail(f"archive contains an unsafe link: {member.name}")
-                    bundle.extractall(extraction_root)
-        except (OSError, tarfile.TarError) as error:
-            fail(f"cannot extract {archive}: {error}")
-
-        entries = list(extraction_root.iterdir())
-        if len(entries) != 1 or not entries[0].is_dir():
-            fail(f"archive does not contain one top-level directory: {archive}")
-        source_root = entries[0]
-        destination.mkdir(parents=True, exist_ok=True)
-        for entry in source_root.iterdir():
-            target = destination / entry.name
-            if entry.is_dir() and not entry.is_symlink():
-                shutil.copytree(entry, target, symlinks=True)
-            elif entry.is_symlink():
-                target.symlink_to(os.readlink(entry), target_is_directory=entry.is_dir())
-            else:
-                shutil.copy2(entry, target)
-
-
-def ensure_archive_source(
-    source: Path,
-    marker_file: str,
-    url: str,
-    expected_digest: str,
-    *,
-    temporary_prefix: str,
-) -> None:
-    """Populate one pinned third-party source tree from a verified archive."""
-    if archive_cache_valid(source, marker_file, expected_digest):
-        return
-
-    remove_path(source)
-    source.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        prefix=temporary_prefix,
-        suffix=".archive",
-        dir=source.parent,
-        delete=False,
-    ) as handle:
-        archive = Path(handle.name)
-    try:
-        download_https(url, archive, attempts=4, timeout=900)
-        if not verify_digest(archive, "sha256", expected_digest):
-            fail(f"downloaded archive failed SHA-256 verification: {url}")
-        extract_tar_strip_one(archive, source)
-        (source / ".auraw-archive-sha256").write_text(expected_digest + "\n", encoding="utf-8")
-    except Exception:
-        remove_path(source)
-        raise
-    finally:
-        archive.unlink(missing_ok=True)
-
-
 def compact_json(value: object) -> str:
     """Serialize build contracts identically to the previous shell commands."""
     return json.dumps(value, separators=(",", ":"))
 
 
 def android_abi_config(abi: str, api: int = 26) -> dict[str, str]:
-    """Return compiler/build metadata for a supported Android ABI."""
+    """Return Rust/NDK metadata for an Android ABI supported by AGP/CMake."""
     configs = {
         "arm64-v8a": {
             "clang_target": f"aarch64-linux-android{api}",
-            "autoconf_host": "aarch64-linux-android",
-            "meson_cpu_family": "aarch64",
-            "meson_cpu": "aarch64",
             "cxx_triple": "aarch64-linux-android",
-        },
-        "armeabi-v7a": {
-            "clang_target": f"armv7a-linux-androideabi{api}",
-            "autoconf_host": "arm-linux-androideabi",
-            "meson_cpu_family": "arm",
-            "meson_cpu": "armv7",
-            "cxx_triple": "arm-linux-androideabi",
-        },
-        "x86": {
-            "clang_target": f"i686-linux-android{api}",
-            "autoconf_host": "i686-linux-android",
-            "meson_cpu_family": "x86",
-            "meson_cpu": "i686",
-            "cxx_triple": "i686-linux-android",
         },
         "x86_64": {
             "clang_target": f"x86_64-linux-android{api}",
-            "autoconf_host": "x86_64-linux-android",
-            "meson_cpu_family": "x86_64",
-            "meson_cpu": "x86_64",
             "cxx_triple": "x86_64-linux-android",
         },
     }
     try:
         return configs[abi]
     except KeyError:
-        fail(
-            f"Unsupported ABI '{abi}' (use arm64-v8a, armeabi-v7a, x86, or x86_64)",
-            2,
-        )
+        fail(f"Unsupported ABI '{abi}' (use arm64-v8a or x86_64)", 2)
+
+
+def run_gradle_android_native_dependencies(abi: str, profile: str) -> None:
+    """Build pinned Android C/C++ dependencies through AGP externalNativeBuild."""
+    metadata = workspace_build_metadata()
+    android_abi_config(abi, metadata.android_min_sdk)
+    if profile not in {"debug", "release"}:
+        fail(f"Unknown profile '{profile}' (use release or debug)", 2)
+
+    gradlew = ROOT / ("gradlew.bat" if os.name == "nt" else "gradlew")
+    require_file(gradlew)
+    task = f":app:externalNativeBuild{profile.capitalize()}"
+    run_process(
+        [
+            gradlew,
+            task,
+            f"-PaurawAbis={abi}",
+            "-PaurawBuildRust=false",
+        ],
+        cwd=ROOT,
+    )
 
 
 def command_build_android_lensfun(args: argparse.Namespace) -> int:
-    """Build pinned Lensfun, GLib, and libiconv for one Android ABI."""
+    """Build pinned Lensfun and its minimal GLib stack through AGP/CMake."""
     metadata = workspace_build_metadata()
     if args.print_build_contract:
         print(compact_json(metadata.as_contract()))
         return 0
 
-    abi = args.abi
-    api = metadata.android_min_sdk
-    lensfun_version = metadata.lensfun_revision
-    lensfun_source_revision = "101c745e847a5de4a1e569a94368ce2027198598"
-    lensfun_digest = "a11cbe6aeec657839540448b253217c25d20b7a45b6aebfef406f7239933c7a6"
-    iconv_version = "1.17"
-    iconv_digest = "8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313"
-    glib_version = "2.78.6"
-    glib_digest = "244854654dd82c7ebcb2f8e246156d2a05eb9cd1ad07ed7a779659b4602c9fae"
-    meson_version = "1.7.0"
-    meson_digest = "ae3f12953045f3c7c60e27f2af1ad862f14dee125b4ed9bcb8a842a5080dbf85"
-    setuptools_version = "83.0.0"
-    setuptools_digest = "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3"
-    expected_ndk = metadata.android_ndk_version
-
-    abi_config = android_abi_config(abi, api)
-    ndk = android_ndk_root(expected_ndk)
-    ndk_revision = read_first_property(ndk / "source.properties", "Pkg.Revision")
-    ndk_host = ndk_host_root(ndk)
-    clang = ndk_host / "bin" / f"{abi_config['clang_target']}-clang"
-    if not os.access(clang, os.X_OK):
-        fail(f"The selected NDK has no compiler for {abi}: {ndk}")
-
-    require_executable("ninja", "Ninja is required to build Android Lensfun.")
-    sdk = android_sdk_root()
-    sdk_cmake = sdk / "cmake/3.22.1/bin/cmake" if sdk else None
-    if sdk_cmake is not None and os.access(sdk_cmake, os.X_OK):
-        cmake = os.fspath(sdk_cmake)
-    else:
-        cmake = require_executable("cmake", "CMake is required to build Android Lensfun.")
-
-    src_root = ROOT / "android/native/src"
-    glib_source = src_root / f"glib-{glib_version}"
-    iconv_source = src_root / f"libiconv-{iconv_version}"
-    lensfun_source = src_root / f"lensfun-{lensfun_version}"
-    build_root = ROOT / "android/native/build"
-    iconv_build = build_root / f"libiconv-{abi}"
-    glib_build = build_root / f"glib-{abi}"
-    lensfun_build = build_root / f"lensfun-{abi}"
-    install_dir = ROOT / f"android/native/lensfun/{abi}"
-    cross_file = build_root / f"glib-{abi}.cross"
-    tools_root = ROOT / "android/native/tools"
-    meson_venv = tools_root / f"meson-{meson_version}"
-    meson = meson_venv / "bin/meson"
-    venv_python = meson_venv / "bin/python"
-    src_root.mkdir(parents=True, exist_ok=True)
-    build_root.mkdir(parents=True, exist_ok=True)
-    tools_root.mkdir(parents=True, exist_ok=True)
-
-    build_key = (
-        f"Lensfun={lensfun_version}@{lensfun_source_revision} glib={glib_version} "
-        f"iconv={iconv_version} abi={abi} api={api} ndk={ndk_revision}"
-    )
-    cached_files = (
-        install_dir / "include/lensfun/lensfun.h",
-        install_dir / "lib/liblensfun.a",
-        install_dir / "lib/libiconv.a",
-        install_dir / "lib/libglib-2.0.a",
-        install_dir / "lib/libintl.a",
-    )
-    if (
-        os.environ.get("AURAW_REBUILD_LENSFUN", "0") != "1"
-        and all(path.is_file() for path in cached_files)
-        and directory_has_xml(install_dir / "apk-assets/lensfun")
-        and file_contains_line(install_dir / ".auraw-build", build_key)
-    ):
-        print(f"Using cached Lensfun {lensfun_version} for {abi} in {install_dir}")
-        return 0
-
-    meson_ready = False
-    if os.access(meson, os.X_OK) and venv_python.is_file():
-        version = captured_text([meson, "--version"], check=False, stderr=subprocess.DEVNULL)
-        distutils_check = run_process(
-            [venv_python, "-c", "import distutils.version"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        meson_ready = version == meson_version and distutils_check.returncode == 0
-    if not meson_ready:
-        remove_path(meson_venv)
-        completed = run_process([sys.executable, "-m", "venv", meson_venv], check=False)
-        if completed.returncode != 0:
-            fail("Python venv support is required to bootstrap Android Lensfun's build tool.")
-        requirements = tools_root / "meson-requirements.txt"
-        requirements.write_text(
-            f"meson=={meson_version} --hash=sha256:{meson_digest}\n"
-            f"setuptools=={setuptools_version} --hash=sha256:{setuptools_digest}\n",
-            encoding="utf-8",
-        )
-        completed = run_process(
-            [
-                venv_python,
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-cache-dir",
-                "--no-deps",
-                "--only-binary=:all:",
-                "--require-hashes",
-                "-r",
-                requirements,
-            ],
-            check=False,
-        )
-        if completed.returncode != 0:
-            remove_path(meson_venv)
-            fail("Could not bootstrap Meson for Android Lensfun.")
-
-    ensure_archive_source(
-        glib_source,
-        "meson.build",
-        f"https://download.gnome.org/sources/glib/2.78/glib-{glib_version}.tar.xz",
-        glib_digest,
-        temporary_prefix=".auraw-native.",
-    )
-    ensure_archive_source(
-        iconv_source,
-        "configure",
-        f"https://ftp.gnu.org/pub/gnu/libiconv/libiconv-{iconv_version}.tar.gz",
-        iconv_digest,
-        temporary_prefix=".auraw-native.",
-    )
-    ensure_archive_source(
-        lensfun_source,
-        "CMakeLists.txt",
-        f"https://github.com/lensfun/lensfun/archive/{lensfun_source_revision}.tar.gz",
-        lensfun_digest,
-        temporary_prefix=".auraw-native.",
-    )
-
-    cross_file.write_text(
-        "[binaries]\n"
-        f"c = '{ndk_host}/bin/{abi_config['clang_target']}-clang'\n"
-        f"cpp = '{ndk_host}/bin/{abi_config['clang_target']}-clang++'\n"
-        f"ar = '{ndk_host}/bin/llvm-ar'\n"
-        f"strip = '{ndk_host}/bin/llvm-strip'\n"
-        "pkg-config = 'pkg-config'\n\n"
-        "[properties]\n"
-        "needs_exe_wrapper = true\n\n"
-        "[built-in options]\n"
-        f"c_args = ['-I{install_dir}/include']\n"
-        f"cpp_args = ['-I{install_dir}/include']\n"
-        f"c_link_args = ['-L{install_dir}/lib']\n"
-        f"cpp_link_args = ['-L{install_dir}/lib']\n\n"
-        "[host_machine]\n"
-        "system = 'android'\n"
-        f"cpu_family = '{abi_config['meson_cpu_family']}'\n"
-        f"cpu = '{abi_config['meson_cpu']}'\n"
-        "endian = 'little'\n",
-        encoding="utf-8",
-    )
-
-    for path in (iconv_build, glib_build, lensfun_build, install_dir):
-        remove_path(path)
-    iconv_build.mkdir(parents=True, exist_ok=True)
-    iconv_env = os.environ.copy()
-    iconv_env.update(
-        {
-            "CC": os.fspath(ndk_host / "bin" / f"{abi_config['clang_target']}-clang"),
-            "CXX": os.fspath(ndk_host / "bin" / f"{abi_config['clang_target']}-clang++"),
-            "AR": os.fspath(ndk_host / "bin/llvm-ar"),
-            "RANLIB": os.fspath(ndk_host / "bin/llvm-ranlib"),
-        }
-    )
-    run_process(
-        [
-            iconv_source / "configure",
-            f"--host={abi_config['autoconf_host']}",
-            f"--prefix={install_dir}",
-            "--disable-shared",
-            "--enable-static",
-        ],
-        cwd=iconv_build,
-        env=iconv_env,
-    )
-    run_process(
-        ["make", f"-j{os.cpu_count() or 1}", "install"],
-        cwd=iconv_build,
-        env=iconv_env,
-    )
-
-    pkgconfig_dir = install_dir / "lib/pkgconfig"
-    pkgconfig_dir.mkdir(parents=True, exist_ok=True)
-    (pkgconfig_dir / "iconv.pc").write_text(
-        f"prefix={install_dir}\n"
-        "libdir=${prefix}/lib\n\n"
-        "Name: iconv\n"
-        "Description: GNU libiconv for Android Lensfun\n"
-        f"Version: {iconv_version}\n"
-        "Libs: -L${libdir} -liconv -lcharset\n",
-        encoding="utf-8",
-    )
-
-    pkg_env = os.environ.copy()
-    pkg_env["PKG_CONFIG_LIBDIR"] = os.fspath(pkgconfig_dir)
-    pkg_env["PKG_CONFIG_PATH"] = os.fspath(pkgconfig_dir)
-    run_process(
-        [
-            meson,
-            "setup",
-            glib_build,
-            glib_source,
-            "--cross-file",
-            cross_file,
-            "--wrap-mode=forcefallback",
-            "--prefix",
-            install_dir,
-            "--libdir",
-            "lib",
-            "--default-library",
-            "static",
-            "--buildtype",
-            "release",
-            "-Dtests=false",
-            "-Dnls=disabled",
-            "-Dglib_debug=disabled",
-            "-Dglib_assert=false",
-            "-Dglib_checks=false",
-            "-Dselinux=disabled",
-            "-Dxattr=false",
-            "-Dlibmount=disabled",
-            "-Dman=false",
-            "-Dgtk_doc=false",
-        ],
-        env=pkg_env,
-    )
-    run_process([meson, "compile", "-C", glib_build], env=pkg_env)
-    run_process([meson, "install", "-C", glib_build], env=pkg_env)
-
-    run_process(
-        [
-            cmake,
-            "-S",
-            lensfun_source,
-            "-B",
-            lensfun_build,
-            "-GNinja",
-            f"-DCMAKE_TOOLCHAIN_FILE={ndk / 'build/cmake/android.toolchain.cmake'}",
-            f"-DANDROID_ABI={abi}",
-            f"-DANDROID_PLATFORM=android-{api}",
-            "-DANDROID_STL=c++_shared",
-            "-DCMAKE_BUILD_TYPE=Release",
-            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-            "-DCMAKE_INSTALL_LIBDIR=lib",
-            "-DCMAKE_INSTALL_DATAROOTDIR=apk-assets",
-            "-DBUILD_STATIC=ON",
-            "-DBUILD_TESTS=OFF",
-            "-DBUILD_LENSTOOL=OFF",
-            "-DBUILD_DOC=OFF",
-            "-DINSTALL_PYTHON_MODULE=OFF",
-            "-DINSTALL_HELPER_SCRIPTS=OFF",
-            "-DBUILD_FOR_SSE=OFF",
-            "-DBUILD_FOR_SSE2=OFF",
-        ],
-        env=pkg_env,
-    )
-    run_process([cmake, "--build", lensfun_build, "--target", "install", "--parallel"], env=pkg_env)
-
+    run_gradle_android_native_dependencies(args.abi, "release")
+    root = ROOT / f"android/native/lensfun/{args.abi}"
     for relative in (
         "include/lensfun/lensfun.h",
         "lib/liblensfun.a",
-        "lib/libiconv.a",
-        "lib/libcharset.a",
         "lib/libglib-2.0.a",
-        "lib/libpcre2-8.a",
-        "lib/libffi.a",
-        "lib/libz.a",
-        "lib/libintl.a",
     ):
-        require_file(install_dir / relative)
-    if not directory_has_xml(install_dir / "apk-assets/lensfun"):
-        fail(f"Lensfun XML database was not installed in {install_dir / 'apk-assets/lensfun'}")
-    (install_dir / ".auraw-build").write_text(build_key + "\n", encoding="utf-8")
-    print(f"Lensfun {lensfun_version} and its database for {abi} installed in {install_dir}")
+        require_file(root / relative)
+    if not directory_has_xml(root / "apk-assets/lensfun"):
+        fail(f"Lensfun XML database is missing from {root / 'apk-assets/lensfun'}")
+    print(f"AGP/CMake staged Lensfun for {args.abi} in {root}")
     return 0
 
 
-def exact_cmake(expected_version: str) -> tuple[str, str]:
-    """Resolve CMake and require the exact pinned base version."""
-    sdk = android_sdk_root()
-    sdk_cmake = sdk / f"cmake/{expected_version}/bin/cmake" if sdk else None
-    if sdk_cmake is not None and os.access(sdk_cmake, os.X_OK):
-        cmake = os.fspath(sdk_cmake)
-    else:
-        cmake = require_executable(
-            "cmake", f"CMake {expected_version} is required to build LibRaw"
-        )
-    version_output = captured_text([cmake, "--version"])
-    first_line = version_output.splitlines()[0] if version_output else ""
-    version = first_line.removeprefix("cmake version ")
-    base_version = version.split("-", 1)[0]
-    if base_version != expected_version:
-        fail(f"CMake {expected_version} is required, found {version or 'unknown'}")
-    return cmake, version
-
-
 def command_build_android_libraw(args: argparse.Namespace) -> int:
-    """Build pinned LibRaw for one Android ABI."""
+    """Build pinned LibRaw through AGP/CMake."""
     metadata = workspace_build_metadata()
     if args.print_build_contract:
         print(compact_json(metadata.as_contract()))
         return 0
 
-    expected_ndk = metadata.android_ndk_version
-    abi = args.abi
-    api = metadata.android_min_sdk
-    libraw_version = metadata.libraw_revision
-    libraw_source_revision = "b860248a89d9082b8e0a1e202e516f46af9adb29"
-    libraw_digest = "f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b"
-    cmake_version = "3.22.1"
-    cmake_commit = "eb98e4325aef2ce85d2eb031c2ff18640ca616d3"
-    cmake_digest = "3cd218bf6d1254de86e27269541277fbfc5bae57a9002ce0b46fbe2a97088b43"
-
-    android_abi_config(abi, api)
-    ndk = android_ndk_root(expected_ndk)
-    ndk_revision = read_first_property(ndk / "source.properties", "Pkg.Revision")
-    cmake, actual_cmake_version = exact_cmake(cmake_version)
-
-    src_root = ROOT / "android/native/src"
-    libraw_source = src_root / f"LibRaw-{libraw_version}"
-    cmake_source = src_root / f"LibRaw-cmake-{cmake_commit}"
-    build_dir = ROOT / f"android/native/build/libraw-{abi}"
-    install_dir = ROOT / f"android/native/libraw/{abi}"
-    src_root.mkdir(parents=True, exist_ok=True)
-
-    build_key = (
-        f"LibRaw={libraw_version}@{libraw_source_revision} cmake-files={cmake_commit} "
-        f"cmake={actual_cmake_version} abi={abi} api={api} ndk={ndk_revision}"
-    )
-    if (
-        os.environ.get("AURAW_REBUILD_LIBRAW", "0") != "1"
-        and (install_dir / "include/libraw/libraw.h").is_file()
-        and (install_dir / "lib/libraw.a").is_file()
-        and file_contains_line(install_dir / ".auraw-build", build_key)
-    ):
-        print(f"Using cached LibRaw {libraw_version} for {abi} in {install_dir}")
-        return 0
-
-    ensure_archive_source(
-        libraw_source,
-        "libraw/libraw.h",
-        f"https://github.com/LibRaw/LibRaw/archive/{libraw_source_revision}.tar.gz",
-        libraw_digest,
-        temporary_prefix=".libraw.",
-    )
-    ensure_archive_source(
-        cmake_source,
-        "CMakeLists.txt",
-        f"https://github.com/LibRaw/LibRaw-cmake/archive/{cmake_commit}.tar.gz",
-        cmake_digest,
-        temporary_prefix=".libraw-cmake.",
-    )
-
-    shutil.copy2(cmake_source / "CMakeLists.txt", libraw_source / "CMakeLists.txt")
-    remove_path(libraw_source / "cmake")
-    shutil.copytree(cmake_source / "cmake", libraw_source / "cmake")
-
-    remove_path(build_dir)
-    remove_path(install_dir)
-    command: list[str | os.PathLike[str]] = [
-        cmake,
-        "-S",
-        libraw_source,
-        "-B",
-        build_dir,
-    ]
-    if shutil.which("ninja") is not None:
-        command.append("-GNinja")
-    command.extend(
-        [
-            f"-DCMAKE_TOOLCHAIN_FILE={ndk / 'build/cmake/android.toolchain.cmake'}",
-            f"-DANDROID_ABI={abi}",
-            f"-DANDROID_PLATFORM=android-{api}",
-            "-DANDROID_STL=c++_static",
-            "-DCMAKE_BUILD_TYPE=Release",
-            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-            "-DCMAKE_INSTALL_LIBDIR=lib",
-            "-DBUILD_SHARED_LIBS=OFF",
-            "-DENABLE_OPENMP=OFF",
-            "-DENABLE_LCMS=OFF",
-            "-DENABLE_JASPER=OFF",
-            "-DENABLE_EXAMPLES=OFF",
-            "-DENABLE_RAWSPEED=OFF",
-            "-DENABLE_X3FTOOLS=OFF",
-            "-DLIBRAW_INSTALL=ON",
-            "-DLIBRAW_UNINSTALL_TARGET=OFF",
-            "-DCMAKE_DISABLE_FIND_PACKAGE_JPEG=ON",
-        ]
-    )
-    clean_env = os.environ.copy()
-    for key in ("AR", "CC", "CFLAGS", "CPPFLAGS", "CXX", "CXXFLAGS", "LDFLAGS", "RANLIB"):
-        clean_env.pop(key, None)
-    run_process(command, env=clean_env)
-    run_process([cmake, "--build", build_dir, "--target", "install", "--parallel"], env=clean_env)
-
-    require_file(install_dir / "include/libraw/libraw.h")
-    require_file(install_dir / "lib/libraw.a")
-    (install_dir / ".auraw-build").write_text(build_key + "\n", encoding="utf-8")
-    print(f"LibRaw {libraw_version} for {abi} installed in {install_dir}")
+    run_gradle_android_native_dependencies(args.abi, "release")
+    root = ROOT / f"android/native/libraw/{args.abi}"
+    require_file(root / "include/libraw/libraw.h")
+    require_file(root / "lib/libraw.a")
+    print(f"AGP/CMake staged LibRaw for {args.abi} in {root}")
     return 0
 
 
@@ -2592,7 +2130,7 @@ def release_build_environment(revision: str) -> dict[str, str]:
 
 
 def command_build_android(args: argparse.Namespace) -> int:
-    """Build Android native dependencies and the AuRaw library."""
+    """Build AGP/CMake native dependencies and the AuRaw Rust library."""
     metadata = workspace_build_metadata()
     if args.print_build_contract:
         print(compact_json(metadata.as_contract()))
@@ -2655,16 +2193,16 @@ def command_build_android(args: argparse.Namespace) -> int:
     if profile == "release":
         revision = verify_source_revision(print_revision=False)
         env.update(release_build_environment(revision))
-        remove_path(ROOT / "android/native")
     else:
         env["CARGO_INCREMENTAL"] = "0"
         env["CARGO_TARGET_DIR"] = os.fspath(ROOT / "target")
     for key in ("CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTDOCFLAGS"):
         env.pop(key, None)
 
-    dev_script = ROOT / "scripts/dev.py"
-    run_process([sys.executable, dev_script, "build-android-libraw", abi], env=env)
-    run_process([sys.executable, dev_script, "build-android-lensfun", abi], env=env)
+    # Gradle sets this marker after externalNativeBuild has staged the static
+    # archives. Direct CLI use delegates to the same AGP/CMake task first.
+    if env.get("AURAW_NATIVE_DEPS_READY") != "1":
+        run_gradle_android_native_dependencies(abi, profile)
 
     if profile == "release":
         cargo_profile = ["--release"]
