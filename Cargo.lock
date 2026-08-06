@@ -4955,6 +4955,9 @@ dependencies = [
 name = "xtask"
 version = "2.0.0"
 dependencies = [
+ "image",
+ "ring",
+ "serde",
  "serde_json",
  "zip",
 ]

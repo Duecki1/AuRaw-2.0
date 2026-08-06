@@ -86,7 +86,7 @@ jobs:
           set -euxo pipefail
 
           bootstrap_download_verified() {
-            python3 scripts/dev.py verified-download "$1" "$2" "$3"
+            python3 scripts/bootstrap_download.py "$1" "$2" "$3"
           }
 
           bootstrap_download_verified \
@@ -266,7 +266,7 @@ jobs:
             ~/.cargo/bin/cargo-ndk-runner
             ~/.cargo/bin/cargo-ndk-test
             android/native
-          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/dev.py', 'xtask/src/main.rs') }}-v2
+          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/dev.py', 'scripts/bootstrap_download.py', 'xtask/src/main.rs') }}-v2
 
       - name: Restore Android dependency and build cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
@@ -345,7 +345,7 @@ jobs:
           set -euxo pipefail
 
           bootstrap_download_verified() {
-            python3 scripts/dev.py verified-download "$1" "$2" "$3"
+            python3 scripts/bootstrap_download.py "$1" "$2" "$3"
           }
 
           bootstrap_download_verified \

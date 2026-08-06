@@ -140,7 +140,7 @@ fn configure_android_libraw(android_min_sdk: u32) {
             return;
         }
         panic!(
-            "Android LibRaw is not staged at {}. Run `./gradlew :app:externalNativeBuildDebug -PaurawAbis={abi}` first, or use `python3 scripts/dev.py build-android {abi}`.",
+            "Android LibRaw is not staged at {}. Run `./gradlew :app:externalNativeBuildDebug -PaurawAbis={abi}` first, or use `cargo xtask build-android {abi}`.",
             root.display()
         );
     }
@@ -172,7 +172,7 @@ fn configure_android_lensfun(build_metadata: &workspace_metadata::WorkspaceMetad
 
     if !header.is_file() || !library.is_file() {
         panic!(
-            "Android Lensfun is not staged at {}. Run `./gradlew :app:externalNativeBuildDebug -PaurawAbis={abi}` first, or use `python3 scripts/dev.py build-android {abi}`.",
+            "Android Lensfun is not staged at {}. Run `./gradlew :app:externalNativeBuildDebug -PaurawAbis={abi}` first, or use `cargo xtask build-android {abi}`.",
             root.display()
         );
     }

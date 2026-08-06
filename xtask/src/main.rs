@@ -1,21 +1,18 @@
+use image::{imageops::FilterType, DynamicImage, ImageFormat, Rgba, RgbaImage};
+use ring::digest::{Context as DigestContext, SHA256, SHA512};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
-const CYAN: &str = "\x1b[36m";
-const BOLD: &str = "\x1b[1m";
-const RESET: &str = "\x1b[0m";
 
 const BENCHMARK_SCENES: [(&str, &str, u32, u32); 2] = [
     (
@@ -30,6 +27,31 @@ const BENCHMARK_SCENES: [(&str, &str, u32, u32); 2] = [
         256,
         256,
     ),
+];
+
+
+const CAMERA_PROFILE_TEST_FILTERS: &[&str] = &[
+    "pipeline::color_profile::tests",
+    "pipeline::color_profile::dcp::tests",
+    "pipeline::color_profile::icc::tests",
+    "pipeline::sigmoid::tests",
+    "gpu_params_follow_the_wgsl_uniform_layout",
+    "profile_shader_parses_with_the_profile_storage_contract",
+    "adjustments_shader_exposes_darktable_sigmoid_paths",
+    "scene_graph_preserves_native_call_order_and_stage_ownership",
+    "global_wb_changes_raw_multipliers_without_changing_the_camera_transform",
+];
+
+const DEMOSAIC_TEST_FILTERS: &[&str] = &[
+    "compute_shaders_parse_and_validate",
+    "demosaic_contracts_are_compiler_validated",
+    "demosaic_shaders_expose_every_dispatched_entry_point",
+    "inpaint_opposed",
+];
+
+const MATH_TEST_GROUPS: [(&str, &[&str]); 2] = [
+    ("camera profile", CAMERA_PROFILE_TEST_FILTERS),
+    ("demosaic", DEMOSAIC_TEST_FILTERS),
 ];
 
 const ANDROID_64_BIT_ABIS: [&str; 2] = ["arm64-v8a", "x86_64"];
@@ -71,7 +93,9 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{RED}{BOLD}FAIL{RESET} {error}");
+            if !error.message.is_empty() {
+                eprintln!("error: {error}");
+            }
             ExitCode::from(error.code.clamp(1, 255) as u8)
         }
     }
@@ -89,15 +113,45 @@ fn run() -> Result<()> {
     match command.to_string_lossy().as_ref() {
         "check-all" => {
             ensure_no_extra_args(&rest, "check-all")?;
-            command_check_all()
+            command_checks(&[CheckKind::Source, CheckKind::Workflows, CheckKind::Gradle])
         }
-        "print-metadata" => command_print_metadata(parse_print_metadata_args(rest)?),
+        "check-source" => {
+            ensure_no_extra_args(&rest, "check-source")?;
+            command_checks(&[CheckKind::Source])
+        }
+        "check-workflows" => {
+            ensure_no_extra_args(&rest, "check-workflows")?;
+            command_checks(&[CheckKind::Workflows])
+        }
+        "check-gradle" => {
+            ensure_no_extra_args(&rest, "check-gradle")?;
+            command_checks(&[CheckKind::Gradle])
+        }
+        "validate-math" => command_validate_math(parse_validate_math_args(rest)?),
+        "print-metadata" | "print-build-metadata" => {
+            command_print_metadata(parse_print_metadata_args(rest)?)
+        }
         "verified-download" => command_verified_download(parse_verified_download_args(rest)?),
         "verify-source-revision" => {
             ensure_no_extra_args(&rest, "verify-source-revision")?;
             command_verify_source_revision()
         }
         "bench" => command_bench(parse_bench_args(rest)?),
+        "icons" => {
+            ensure_no_extra_args(&rest, "icons")?;
+            command_icons()
+        }
+        "build-android" => command_build_android(parse_build_android_args(rest)?),
+        "build-android-libraw" => {
+            command_build_android_dependency(parse_build_dependency_args(rest, "build-android-libraw")?, AndroidDependency::LibRaw)
+        }
+        "build-android-lensfun" => {
+            command_build_android_dependency(parse_build_dependency_args(rest, "build-android-lensfun")?, AndroidDependency::Lensfun)
+        }
+        "build-linux" => {
+            ensure_no_extra_args(&rest, "build-linux")?;
+            command_build_linux()
+        }
         "verify-android-16kb" => command_verify_android_16kb(parse_android_args(rest)?),
         "help" | "--help" | "-h" => {
             print_help();
@@ -112,14 +166,28 @@ fn run() -> Result<()> {
 
 fn print_help() {
     println!(
-        "{BOLD}AuRaw developer tasks{RESET}\n\n\
-         {BOLD}USAGE{RESET}\n  cargo xtask <COMMAND> [OPTIONS]\n\n\
-         {BOLD}COMMANDS{RESET}\n  check-all\n      Validate the source tree, immutable workflow pins, and Gradle wrapper.\n\n\
-         print-metadata [--format json|shell]\n      Print the root Cargo.toml [workspace.metadata] table.\n\n\
-         verified-download <URL> <OUTPUT> <EXPECTED-SHA256>\n      Download an HTTPS artifact with retries and atomically verify SHA-256.\n\n\
-         verify-source-revision\n      Require a clean Git working tree and print the exact HEAD revision.\n\n\
-         bench [--renderer PATH] [--runs N] [--warmup-runs N]\n        [--budget-file PATH] [--output PATH] [--dry-run]\n      Benchmark the canonical GPU regression renderer and enforce its budget.\n\n\
-         verify-android-16kb <APK> [--objdump PATH] [--zipalign PATH]\n      Verify 16 KB ELF LOAD alignment and APK zip alignment."
+        "AuRaw development and CI validation commands.
+
+         Usage: cargo xtask <command> [options]
+
+         Commands:
+           check-all
+           check-source
+           check-workflows
+           check-gradle
+           validate-math [--release]
+           bench [--renderer PATH] [--runs N] [--output PATH]
+                 [--budget-file PATH] [--enforce-budget] [--dry-run]
+           icons
+           build-android [ABI] [PROFILE] [--print-build-contract]
+           build-android-libraw [ABI] [--print-build-contract]
+           build-android-lensfun [ABI] [--print-build-contract]
+           build-linux
+           print-metadata [--format json|shell] [--value FIELD]
+           verified-download <URL> <OUTPUT> <EXPECTED-DIGEST>
+           verify-source-revision
+           verify-android-16kb [APK] [--print-build-contract]
+                               [--objdump PATH] [--zipalign PATH]"
     );
 }
 
@@ -147,6 +215,13 @@ impl XtaskError {
     fn with_code(message: impl Into<String>, code: i32) -> Self {
         Self {
             message: message.into(),
+            code: if code == 0 { 1 } else { code },
+        }
+    }
+
+    fn silent(code: i32) -> Self {
+        Self {
+            message: String::new(),
             code: if code == 0 { 1 } else { code },
         }
     }
@@ -179,18 +254,6 @@ impl From<zip::result::ZipError> for XtaskError {
 }
 
 type Result<T> = std::result::Result<T, XtaskError>;
-
-fn pass(message: impl fmt::Display) {
-    println!("{GREEN}{BOLD}PASS{RESET} {message}");
-}
-
-fn info(message: impl fmt::Display) {
-    println!("{CYAN}{BOLD}INFO{RESET} {message}");
-}
-
-fn warn(message: impl fmt::Display) {
-    println!("{YELLOW}{BOLD}WARN{RESET} {message}");
-}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -236,155 +299,287 @@ fn next_value(args: &[OsString], index: &mut usize, option: &str) -> Result<OsSt
         .ok_or_else(|| XtaskError::usage(format!("{option} requires a value")))
 }
 
-fn parse_positive_usize(value: &OsStr, option: &str) -> Result<usize> {
-    let parsed = value
-        .to_string_lossy()
-        .parse::<usize>()
-        .map_err(|_| XtaskError::usage(format!("{option} must be a positive integer")))?;
-    if parsed == 0 {
-        return Err(XtaskError::usage(format!(
-            "{option} must be a positive integer"
-        )));
-    }
-    Ok(parsed)
-}
-
 #[derive(Debug, Clone, Copy)]
 enum MetadataFormat {
     Json,
     Shell,
 }
 
-fn parse_print_metadata_args(args: Vec<OsString>) -> Result<MetadataFormat> {
-    let mut format = MetadataFormat::Json;
+#[derive(Debug)]
+struct MetadataArgs {
+    format: MetadataFormat,
+    value: Option<String>,
+}
+
+const BUILD_METADATA_FIELDS: [&str; 8] = [
+    "ndkVersion",
+    "buildToolsVersion",
+    "compileSdk",
+    "minSdk",
+    "targetSdk",
+    "librawRevision",
+    "lensfunRevision",
+    "useLegacyPackaging",
+];
+
+fn parse_print_metadata_args(args: Vec<OsString>) -> Result<MetadataArgs> {
+    let mut parsed = MetadataArgs {
+        format: MetadataFormat::Json,
+        value: None,
+    };
     let mut index = 0usize;
     while index < args.len() {
         let argument = args[index].to_string_lossy();
-        let value = if argument == "--format" {
-            next_value(&args, &mut index, "--format")?
-                .to_string_lossy()
-                .into_owned()
+        if argument == "--format" {
+            let value = next_value(&args, &mut index, "--format")?;
+            parsed.format = parse_metadata_format(&value.to_string_lossy())?;
         } else if let Some(value) = argument.strip_prefix("--format=") {
-            value.to_owned()
+            parsed.format = parse_metadata_format(value)?;
+        } else if argument == "--value" {
+            let value = next_value(&args, &mut index, "--value")?
+                .to_string_lossy()
+                .into_owned();
+            validate_metadata_field(&value)?;
+            parsed.value = Some(value);
+        } else if let Some(value) = argument.strip_prefix("--value=") {
+            validate_metadata_field(value)?;
+            parsed.value = Some(value.to_owned());
+        } else if matches!(argument.as_ref(), "--help" | "-h") {
+            print_help();
+            std::process::exit(0);
         } else {
             return Err(XtaskError::usage(format!(
                 "unknown print-metadata option: {argument}"
             )));
-        };
-        format = match value.as_str() {
-            "json" => MetadataFormat::Json,
-            "shell" => MetadataFormat::Shell,
-            _ => {
-                return Err(XtaskError::usage(
-                    "--format must be either json or shell",
-                ))
-            }
-        };
-        index += 1;
-    }
-    Ok(format)
-}
-
-#[derive(Debug)]
-struct VerifiedDownloadArgs {
-    url: String,
-    output: PathBuf,
-    expected_sha256: String,
-}
-
-fn parse_verified_download_args(args: Vec<OsString>) -> Result<VerifiedDownloadArgs> {
-    if args.len() != 3 {
-        return Err(XtaskError::usage(
-            "verified-download requires <url> <output-path> <expected-sha256>",
-        ));
-    }
-    let url = args[0]
-        .to_str()
-        .ok_or_else(|| XtaskError::usage("download URL must be valid UTF-8"))?
-        .to_owned();
-    let expected_sha256 = args[2]
-        .to_str()
-        .ok_or_else(|| XtaskError::usage("expected SHA-256 must be valid UTF-8"))?
-        .to_owned();
-    Ok(VerifiedDownloadArgs {
-        url,
-        output: PathBuf::from(args[1].clone()),
-        expected_sha256,
-    })
-}
-
-#[derive(Debug)]
-struct BenchArgs {
-    renderer: PathBuf,
-    measured_runs: Option<usize>,
-    warmup_runs: Option<usize>,
-    budget_file: PathBuf,
-    output: PathBuf,
-    dry_run: bool,
-}
-
-fn parse_bench_args(args: Vec<OsString>) -> Result<BenchArgs> {
-    let mut parsed = BenchArgs {
-        renderer: PathBuf::from("target/release/auraw-regression-render"),
-        measured_runs: None,
-        warmup_runs: None,
-        budget_file: PathBuf::from("benchmarks/gpu-budget.json"),
-        output: PathBuf::from("target/benchmark-report.json"),
-        dry_run: false,
-    };
-
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].to_string_lossy().as_ref() {
-            "--renderer" => {
-                parsed.renderer = PathBuf::from(next_value(&args, &mut index, "--renderer")?)
-            }
-            "--runs" => {
-                let value = next_value(&args, &mut index, "--runs")?;
-                parsed.measured_runs = Some(parse_positive_usize(&value, "--runs")?);
-            }
-            "--warmup-runs" => {
-                let value = next_value(&args, &mut index, "--warmup-runs")?;
-                parsed.warmup_runs = Some(parse_positive_usize(&value, "--warmup-runs")?);
-            }
-            "--budget-file" => {
-                parsed.budget_file =
-                    PathBuf::from(next_value(&args, &mut index, "--budget-file")?)
-            }
-            "--output" => {
-                parsed.output = PathBuf::from(next_value(&args, &mut index, "--output")?)
-            }
-            "--dry-run" => parsed.dry_run = true,
-            "--help" | "-h" => {
-                print_help();
-                std::process::exit(0);
-            }
-            unknown => {
-                return Err(XtaskError::usage(format!(
-                    "unknown bench option: {unknown}"
-                )))
-            }
         }
         index += 1;
     }
     Ok(parsed)
 }
 
+fn parse_metadata_format(value: &str) -> Result<MetadataFormat> {
+    match value {
+        "json" => Ok(MetadataFormat::Json),
+        "shell" => Ok(MetadataFormat::Shell),
+        _ => Err(XtaskError::usage("--format must be either json or shell")),
+    }
+}
+
+fn validate_metadata_field(value: &str) -> Result<()> {
+    if BUILD_METADATA_FIELDS.contains(&value) {
+        Ok(())
+    } else {
+        Err(XtaskError::usage(format!(
+            "--value must be one of: {}",
+            BUILD_METADATA_FIELDS.join(", ")
+        )))
+    }
+}
+
+#[derive(Debug)]
+struct VerifiedDownloadArgs {
+    url: String,
+    output: PathBuf,
+    expected_digest: String,
+}
+
+fn parse_verified_download_args(args: Vec<OsString>) -> Result<VerifiedDownloadArgs> {
+    if args.len() != 3 {
+        return Err(XtaskError::usage(
+            "verified-download requires <url> <output> <expected-digest>",
+        ));
+    }
+    let url = args[0]
+        .to_str()
+        .ok_or_else(|| XtaskError::usage("download URL must be valid UTF-8"))?
+        .to_owned();
+    let expected_digest = args[2]
+        .to_str()
+        .ok_or_else(|| XtaskError::usage("expected digest must be valid UTF-8"))?
+        .to_owned();
+    Ok(VerifiedDownloadArgs {
+        url,
+        output: PathBuf::from(args[1].clone()),
+        expected_digest,
+    })
+}
+
+#[derive(Debug)]
+struct BenchArgs {
+    renderer: PathBuf,
+    runs: i64,
+    budget_file: PathBuf,
+    output: PathBuf,
+    enforce_budget: bool,
+    dry_run: bool,
+}
+
+fn parse_bench_args(args: Vec<OsString>) -> Result<BenchArgs> {
+    let mut parsed = BenchArgs {
+        renderer: PathBuf::from("target/release/auraw-regression-render"),
+        runs: 3,
+        budget_file: PathBuf::from("benchmarks/gpu-budget.json"),
+        output: PathBuf::from("target/benchmark-report.json"),
+        enforce_budget: false,
+        dry_run: false,
+    };
+
+    let mut index = 0usize;
+    while index < args.len() {
+        let argument = args[index].to_string_lossy();
+        if argument == "--renderer" {
+            parsed.renderer = PathBuf::from(next_value(&args, &mut index, "--renderer")?);
+        } else if let Some(value) = argument.strip_prefix("--renderer=") {
+            parsed.renderer = PathBuf::from(value);
+        } else if argument == "--runs" {
+            let value = next_value(&args, &mut index, "--runs")?;
+            parsed.runs = parse_i64(&value, "--runs")?;
+        } else if let Some(value) = argument.strip_prefix("--runs=") {
+            parsed.runs = value
+                .parse::<i64>()
+                .map_err(|_| XtaskError::usage("--runs must be an integer"))?;
+        } else if argument == "--budget-file" {
+            parsed.budget_file = PathBuf::from(next_value(&args, &mut index, "--budget-file")?);
+        } else if let Some(value) = argument.strip_prefix("--budget-file=") {
+            parsed.budget_file = PathBuf::from(value);
+        } else if argument == "--output" {
+            parsed.output = PathBuf::from(next_value(&args, &mut index, "--output")?);
+        } else if let Some(value) = argument.strip_prefix("--output=") {
+            parsed.output = PathBuf::from(value);
+        } else if argument == "--enforce-budget" {
+            parsed.enforce_budget = true;
+        } else if argument == "--dry-run" {
+            parsed.dry_run = true;
+        } else if matches!(argument.as_ref(), "--help" | "-h") {
+            print_help();
+            std::process::exit(0);
+        } else {
+            return Err(XtaskError::usage(format!("unknown bench option: {argument}")));
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn parse_i64(value: &OsStr, option: &str) -> Result<i64> {
+    value
+        .to_string_lossy()
+        .parse::<i64>()
+        .map_err(|_| XtaskError::usage(format!("{option} must be an integer")))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValidateMathArgs {
+    release: bool,
+}
+
+fn parse_validate_math_args(args: Vec<OsString>) -> Result<ValidateMathArgs> {
+    let mut release = false;
+    for argument in args {
+        match argument.to_string_lossy().as_ref() {
+            "--release" => release = true,
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            unknown => {
+                return Err(XtaskError::usage(format!(
+                    "unknown validate-math option: {unknown}"
+                )))
+            }
+        }
+    }
+    Ok(ValidateMathArgs { release })
+}
+
+#[derive(Debug)]
+struct BuildAndroidArgs {
+    abi: String,
+    profile: String,
+    print_build_contract: bool,
+}
+
+fn parse_build_android_args(args: Vec<OsString>) -> Result<BuildAndroidArgs> {
+    let mut positionals = Vec::new();
+    let mut print_build_contract = false;
+    for argument in args {
+        match argument.to_string_lossy().as_ref() {
+            "--print-build-contract" => print_build_contract = true,
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            value if value.starts_with('-') => {
+                return Err(XtaskError::usage(format!(
+                    "unknown build-android option: {value}"
+                )))
+            }
+            _ => positionals.push(argument.to_string_lossy().into_owned()),
+        }
+    }
+    if positionals.len() > 2 {
+        return Err(XtaskError::usage(
+            "build-android accepts at most ABI and PROFILE positional arguments",
+        ));
+    }
+    Ok(BuildAndroidArgs {
+        abi: positionals.first().cloned().unwrap_or_else(|| "arm64-v8a".to_owned()),
+        profile: positionals.get(1).cloned().unwrap_or_else(|| "release".to_owned()),
+        print_build_contract,
+    })
+}
+
+#[derive(Debug)]
+struct BuildDependencyArgs {
+    abi: String,
+    print_build_contract: bool,
+}
+
+fn parse_build_dependency_args(args: Vec<OsString>, command: &str) -> Result<BuildDependencyArgs> {
+    let mut abi = None;
+    let mut print_build_contract = false;
+    for argument in args {
+        match argument.to_string_lossy().as_ref() {
+            "--print-build-contract" => print_build_contract = true,
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            value if value.starts_with('-') => {
+                return Err(XtaskError::usage(format!("unknown {command} option: {value}")))
+            }
+            _ if abi.is_none() => abi = Some(argument.to_string_lossy().into_owned()),
+            _ => {
+                return Err(XtaskError::usage(format!(
+                    "{command} accepts at most one ABI positional argument"
+                )))
+            }
+        }
+    }
+    Ok(BuildDependencyArgs {
+        abi: abi.unwrap_or_else(|| "arm64-v8a".to_owned()),
+        print_build_contract,
+    })
+}
+
 #[derive(Debug)]
 struct AndroidArgs {
     apk: PathBuf,
+    print_build_contract: bool,
     objdump: Option<PathBuf>,
     zipalign: Option<PathBuf>,
 }
 
 fn parse_android_args(args: Vec<OsString>) -> Result<AndroidArgs> {
     let mut apk = None;
+    let mut print_build_contract = false;
     let mut objdump = None;
     let mut zipalign = None;
     let mut index = 0;
 
     while index < args.len() {
         match args[index].to_string_lossy().as_ref() {
+            "--print-build-contract" => print_build_contract = true,
             "--objdump" => {
                 objdump = Some(PathBuf::from(next_value(&args, &mut index, "--objdump")?));
             }
@@ -413,55 +608,151 @@ fn parse_android_args(args: Vec<OsString>) -> Result<AndroidArgs> {
     }
 
     Ok(AndroidArgs {
-        apk: apk.ok_or_else(|| {
-            XtaskError::usage("verify-android-16kb requires an APK path")
-        })?,
+        apk: apk.unwrap_or_else(|| {
+            PathBuf::from("android/app/build/outputs/apk/debug/app-debug.apk")
+        }),
+        print_build_contract,
         objdump,
         zipalign,
     })
 }
 
-fn command_check_all() -> Result<()> {
+#[derive(Debug, Clone, Copy)]
+enum CheckKind {
+    Source,
+    Workflows,
+    Gradle,
+}
+
+fn command_checks(checks: &[CheckKind]) -> Result<()> {
     let root = workspace_root();
-    let mut failure_count = 0usize;
+    let mut failed = 0usize;
+    for check in checks {
+        let (title, success_message, result) = match check {
+            CheckKind::Source => {
+                let result = (|| {
+                    let mut errors = validate_source_reachability(&root)?;
+                    errors.extend(validate_shader_imports(&root)?);
+                    errors.extend(validate_generated_binaries(&root)?);
+                    errors.sort();
+                    errors.dedup();
+                    Ok(errors)
+                })();
+                (
+                    "Source tree",
+                    "connected Rust modules, tracked shaders, and source-tree binaries verified",
+                    result,
+                )
+            }
+            CheckKind::Workflows => (
+                "Workflow pins",
+                "all third-party workflow actions are pinned to full commit SHAs",
+                validate_workflow_pins(&root),
+            ),
+            CheckKind::Gradle => (
+                "Gradle wrapper",
+                "Gradle wrapper 8.11.1 integrity verified (2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046)",
+                validate_gradle_wrapper(&root),
+            ),
+        };
 
-    info("checking source tree reachability, shaders, and generated binaries");
-    let mut source_errors = validate_source_reachability(&root)?;
-    source_errors.extend(validate_shader_imports(&root)?);
-    source_errors.extend(validate_generated_binaries(&root)?);
-    source_errors.sort();
-    source_errors.dedup();
-    failure_count += report_validation("source tree", &source_errors);
+        println!("== {title} ==");
+        let errors = match result {
+            Ok(errors) => errors,
+            Err(error) => vec![format!("unexpected XtaskError: {error}")],
+        };
+        if errors.is_empty() {
+            println!("PASS: {success_message}");
+        } else {
+            failed += 1;
+            eprintln!("FAIL: {} issue(s)", errors.len());
+            for error in errors {
+                eprintln!("  - {error}");
+            }
+        }
+        println!();
+    }
 
-    info("checking immutable workflow action pins");
-    let workflow_errors = validate_workflow_pins(&root)?;
-    failure_count += report_validation("workflow pins", &workflow_errors);
-
-    info("checking Gradle wrapper integrity");
-    let gradle_errors = validate_gradle_wrapper(&root)?;
-    failure_count += report_validation("Gradle wrapper", &gradle_errors);
-
-    if failure_count == 0 {
-        pass("all developer and CI checks completed");
+    if checks.len() > 1 {
+        println!(
+            "Validation summary: {} passed, {failed} failed",
+            checks.len() - failed
+        );
+    }
+    if failed == 0 {
         Ok(())
     } else {
-        Err(XtaskError::new(format!(
-            "check-all found {failure_count} error(s)"
-        )))
+        Err(XtaskError::silent(1))
     }
 }
 
-fn report_validation(name: &str, errors: &[String]) -> usize {
-    if errors.is_empty() {
-        pass(name);
-        return 0;
+fn command_validate_math(args: ValidateMathArgs) -> Result<()> {
+    if find_executable("cargo").is_none() {
+        return Err(XtaskError::usage(
+            "cargo is required because math validation compiles Rust and validates WGSL with Naga",
+        ));
+    }
+    let root = workspace_root();
+    let mut failed = Vec::new();
+    let total: usize = MATH_TEST_GROUPS.iter().map(|(_, filters)| filters.len()).sum();
+
+    for (group_name, filters) in MATH_TEST_GROUPS {
+        let title = group_name
+            .split_whitespace()
+            .map(|word| {
+                let mut characters = word.chars();
+                match characters.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("== {title} validation ({} test filters) ==", filters.len());
+        for filter in filters {
+            let filter = *filter;
+            let mut display = vec!["cargo", "test", "--locked", "--lib"];
+            if args.release {
+                display.push("--release");
+            }
+            display.extend([filter, "--", "--nocapture"]);
+            println!("  $ {}", display.join(" "));
+
+            let mut command = Command::new("cargo");
+            command.args(["test", "--locked", "--lib"]);
+            if args.release {
+                command.arg("--release");
+            }
+            let status = command
+                .args([filter, "--", "--nocapture"])
+                .current_dir(&root)
+                .status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(_) => failed.push(filter.to_owned()),
+                Err(error) => {
+                    eprintln!("  unable to execute cargo: {error}");
+                    failed.push(filter.to_owned());
+                }
+            }
+        }
+        println!();
     }
 
-    eprintln!("{RED}{BOLD}FAIL{RESET} {name}");
-    for error in errors {
-        eprintln!("{RED}  -{RESET} {error}");
+    if !failed.is_empty() {
+        eprintln!(
+            "Math validation failed for {} of {total} test filters:",
+            failed.len()
+        );
+        for filter in failed {
+            eprintln!("  - {filter}");
+        }
+        return Err(XtaskError::silent(1));
     }
-    errors.len()
+
+    let mode = if args.release { "release" } else { "debug" };
+    println!("PASS: all {total} compiler-backed math test filters passed ({mode} mode)");
+    Ok(())
 }
 
 fn validate_generated_binaries(root: &Path) -> Result<Vec<String>> {
@@ -1387,81 +1678,6 @@ fn is_simple_file_name(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-#[derive(Debug)]
-struct Budget {
-    scenes: Vec<String>,
-    warmup_runs: usize,
-    measured_runs: usize,
-    preview_p95_ms: f64,
-    export_mp_per_second_min: f64,
-    startup_shader_compile_p95_ms: f64,
-}
-
-fn read_budget(path: &Path) -> Result<Budget> {
-    let bytes = fs::read(path).map_err(|error| {
-        XtaskError::new(format!("cannot read benchmark budget {}: {error}", path.display()))
-    })?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-        XtaskError::new(format!("invalid benchmark budget {}: {error}", path.display()))
-    })?;
-
-    let schema = required_u64(&value, "schema")?;
-    if schema != 1 {
-        return Err(XtaskError::new(format!(
-            "unsupported benchmark budget schema {schema}; expected 1"
-        )));
-    }
-    let scenes = value
-        .get("scenes")
-        .and_then(Value::as_array)
-        .ok_or_else(|| XtaskError::new("benchmark budget scenes must be an array"))?
-        .iter()
-        .map(|scene| {
-            scene
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| XtaskError::new("benchmark scene names must be strings"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let budgets = value
-        .get("budgets")
-        .ok_or_else(|| XtaskError::new("benchmark budget is missing budgets"))?;
-
-    let budget = Budget {
-        scenes,
-        warmup_runs: usize::try_from(required_u64(&value, "warmup_runs")?)
-            .map_err(|_| XtaskError::new("warmup_runs is too large"))?,
-        measured_runs: usize::try_from(required_u64(&value, "measured_runs")?)
-            .map_err(|_| XtaskError::new("measured_runs is too large"))?,
-        preview_p95_ms: required_f64(budgets, "preview_p95_ms")?,
-        export_mp_per_second_min: required_f64(budgets, "export_mp_per_second_min")?,
-        startup_shader_compile_p95_ms: required_f64(
-            budgets,
-            "startup_shader_compile_p95_ms",
-        )?,
-    };
-
-    if budget.warmup_runs == 0 || budget.measured_runs == 0 {
-        return Err(XtaskError::new(
-            "benchmark warmup_runs and measured_runs must be positive",
-        ));
-    }
-    if budget.preview_p95_ms <= 0.0
-        || budget.export_mp_per_second_min <= 0.0
-        || budget.startup_shader_compile_p95_ms <= 0.0
-    {
-        return Err(XtaskError::new("benchmark budget values must be positive"));
-    }
-    Ok(budget)
-}
-
-fn required_u64(value: &Value, key: &str) -> Result<u64> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| XtaskError::new(format!("benchmark budget {key} must be an integer")))
-}
-
 fn required_f64(value: &Value, key: &str) -> Result<f64> {
     value
         .get(key)
@@ -1470,57 +1686,139 @@ fn required_f64(value: &Value, key: &str) -> Result<f64> {
         .ok_or_else(|| XtaskError::new(format!("benchmark budget {key} must be a number")))
 }
 
-#[derive(Debug)]
-struct SceneReport {
-    name: String,
-    width: u32,
-    height: u32,
-    megapixels: f64,
-    warmup_ms: Vec<f64>,
-    times_ms: Vec<f64>,
-    median_ms: f64,
-    p95_ms: f64,
-    median_mp_per_second: f64,
-    p95_mp_per_second: f64,
-    latency_pass: bool,
-    throughput_pass: bool,
+const ICON_BACKGROUND: Rgba<u8> = Rgba([17, 24, 39, 255]);
+const ICON_FOREGROUND: Rgba<u8> = Rgba([255, 255, 255, 255]);
+const ICON_OUTER_A: [(f64, f64); 7] = [
+    (54.0, 18.0),
+    (84.0, 88.0),
+    (69.0, 88.0),
+    (62.0, 70.0),
+    (46.0, 70.0),
+    (39.0, 88.0),
+    (24.0, 88.0),
+];
+const ICON_INNER_A: [(f64, f64); 3] = [(51.0, 57.0), (57.0, 57.0), (54.0, 44.0)];
+
+fn point_in_polygon(x: f64, y: f64, polygon: &[(f64, f64)]) -> bool {
+    let mut inside = false;
+    let mut previous = polygon.len() - 1;
+    for current in 0..polygon.len() {
+        let (xi, yi) = polygon[current];
+        let (xj, yj) = polygon[previous];
+        if ((yi > y) != (yj > y))
+            && x < (xj - xi) * (y - yi) / (yj - yi) + xi
+        {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
+fn render_icon(edge: u32) -> RgbaImage {
+    let supersampling = 4_u32;
+    let render_edge = edge * supersampling;
+    let scale = f64::from(render_edge) / 108.0;
+    let scaled_outer: Vec<_> = ICON_OUTER_A
+        .iter()
+        .map(|(x, y)| (x * scale, y * scale))
+        .collect();
+    let scaled_inner: Vec<_> = ICON_INNER_A
+        .iter()
+        .map(|(x, y)| (x * scale, y * scale))
+        .collect();
+    let mut image = RgbaImage::from_pixel(render_edge, render_edge, ICON_BACKGROUND);
+    for y in 0..render_edge {
+        for x in 0..render_edge {
+            let sample_x = f64::from(x) + 0.5;
+            let sample_y = f64::from(y) + 0.5;
+            if point_in_polygon(sample_x, sample_y, &scaled_outer)
+                && !point_in_polygon(sample_x, sample_y, &scaled_inner)
+            {
+                image.put_pixel(x, y, ICON_FOREGROUND);
+            }
+        }
+    }
+    image::imageops::resize(&image, edge, edge, FilterType::Lanczos3)
+}
+
+fn encode_png(image: RgbaImage) -> Result<Vec<u8>> {
+    let mut bytes = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut bytes, ImageFormat::Png)
+        .map_err(|error| XtaskError::new(format!("cannot encode icon PNG: {error}")))?;
+    Ok(bytes.into_inner())
+}
+
+fn write_ico(path: &Path) -> Result<()> {
+    let sizes = [16_u32, 24, 32, 48, 64, 128, 256];
+    let images: Vec<Vec<u8>> = sizes
+        .iter()
+        .map(|edge| encode_png(render_icon(*edge)))
+        .collect::<Result<_>>()?;
+    let mut file = File::create(path)
+        .map_err(|error| XtaskError::new(format!("cannot create {}: {error}", path.display())))?;
+    file.write_all(&0_u16.to_le_bytes())?;
+    file.write_all(&1_u16.to_le_bytes())?;
+    file.write_all(&(sizes.len() as u16).to_le_bytes())?;
+    let mut offset = 6_u32 + 16_u32 * sizes.len() as u32;
+    for (edge, bytes) in sizes.iter().zip(&images) {
+        file.write_all(&[if *edge == 256 { 0 } else { *edge as u8 }])?;
+        file.write_all(&[if *edge == 256 { 0 } else { *edge as u8 }])?;
+        file.write_all(&[0, 0])?;
+        file.write_all(&1_u16.to_le_bytes())?;
+        file.write_all(&32_u16.to_le_bytes())?;
+        file.write_all(&(bytes.len() as u32).to_le_bytes())?;
+        file.write_all(&offset.to_le_bytes())?;
+        offset += bytes.len() as u32;
+    }
+    for bytes in images {
+        file.write_all(&bytes)?;
+    }
+    Ok(())
+}
+
+fn command_icons() -> Result<()> {
+    let output = workspace_root().join("packaging/icons");
+    fs::create_dir_all(&output)?;
+    let icon_1024 = render_icon(1024);
+    DynamicImage::ImageRgba8(icon_1024)
+        .save_with_format(output.join("auraw-1024.png"), ImageFormat::Png)
+        .map_err(|error| XtaskError::new(format!("cannot write auraw-1024.png: {error}")))?;
+    DynamicImage::ImageRgba8(render_icon(256))
+        .save_with_format(output.join("auraw-256.png"), ImageFormat::Png)
+        .map_err(|error| XtaskError::new(format!("cannot write auraw-256.png: {error}")))?;
+    write_ico(&output.join("auraw.ico"))?;
+    Ok(())
 }
 
 fn command_bench(args: BenchArgs) -> Result<()> {
+    if args.runs < 1 {
+        return Err(XtaskError::usage("--runs must be positive"));
+    }
+
     let root = workspace_root();
     let renderer = rooted(&root, args.renderer);
+    let output = rooted(&root, args.output);
     let budget_file = rooted(&root, args.budget_file);
-    let output_path = rooted(&root, args.output);
-    let budget = read_budget(&budget_file)?;
-    let measured_runs = args.measured_runs.unwrap_or(budget.measured_runs);
-    let warmup_runs = args.warmup_runs.unwrap_or(budget.warmup_runs);
-
-    let supported: BTreeSet<&str> = BENCHMARK_SCENES.iter().map(|scene| scene.0).collect();
-    let requested: BTreeSet<&str> = budget.scenes.iter().map(String::as_str).collect();
-    if requested != supported {
-        return Err(XtaskError::new(format!(
-            "budget scenes do not match the canonical benchmark set: expected {:?}, found {:?}",
-            supported, requested
-        )));
-    }
 
     let mut scene_inputs = BTreeMap::new();
     for (name, filename, width, height) in BENCHMARK_SCENES {
-        let input = root.join("regression/raw").join(filename);
-        if !input.is_file() {
+        let source = root.join("regression/raw").join(filename);
+        if !source.is_file() {
             return Err(XtaskError::usage(format!(
                 "committed benchmark scene is missing: {}",
-                input.display()
+                source.display()
             )));
         }
-        scene_inputs.insert(name, (input, width, height));
+        scene_inputs.insert(name, (source, width, height));
     }
 
     if args.dry_run {
-        for (name, (input, _, _)) in &scene_inputs {
+        for (scene, (source, _, _)) in &scene_inputs {
             let target = root
                 .join("target/benchmarks")
-                .join(format!("{name}-measured-1.npz"));
+                .join(format!("{scene}-1.npz"));
             println!(
                 "{}",
                 display_command(
@@ -1529,7 +1827,7 @@ fn command_bench(args: BenchArgs) -> Result<()> {
                         OsStr::new("--backend"),
                         OsStr::new("gpu"),
                         OsStr::new("--input"),
-                        input.as_os_str(),
+                        source.as_os_str(),
                         OsStr::new("--output"),
                         target.as_os_str(),
                     ]
@@ -1541,107 +1839,109 @@ fn command_bench(args: BenchArgs) -> Result<()> {
 
     if !renderer.is_file() {
         return Err(XtaskError::usage(format!(
-            "renderer does not exist: {} (build it with `cargo build --release --bin auraw-regression-render`)",
+            "renderer does not exist: {}",
             renderer.display()
         )));
     }
 
+    let measured_runs = args.runs as usize;
     let benchmark_directory = root.join("target/benchmarks");
     fs::create_dir_all(&benchmark_directory)?;
-    let mut reports = Vec::new();
-    let mut startup_samples = Vec::new();
+    let mut warmups = BTreeMap::<String, f64>::new();
+    let mut measured = BTreeMap::<String, Vec<f64>>::new();
 
-    for (name, (input, width, height)) in &scene_inputs {
-        info(format!(
-            "benchmarking {name} ({warmup_runs} warmup, {measured_runs} measured)"
-        ));
-        let mut warmup_ms = Vec::with_capacity(warmup_runs);
-        let mut times_ms = Vec::with_capacity(measured_runs);
-
-        for run in 0..warmup_runs {
-            let target = benchmark_directory.join(format!("{name}-warmup-{}.npz", run + 1));
-            let elapsed = run_renderer(&renderer, input, &target)?;
-            warmup_ms.push(elapsed);
-            startup_samples.push(elapsed);
+    for (scene, (source, _, _)) in &scene_inputs {
+        let mut times = Vec::with_capacity(measured_runs);
+        for run in 0..=measured_runs {
+            let target = benchmark_directory.join(format!("{scene}-{run}.npz"));
+            let elapsed_ms = run_renderer(&renderer, source, &target)?;
+            if run == 0 {
+                warmups.insert((*scene).to_owned(), elapsed_ms);
+            } else {
+                times.push(elapsed_ms);
+            }
         }
-        for run in 0..measured_runs {
-            let target = benchmark_directory.join(format!("{name}-measured-{}.npz", run + 1));
-            times_ms.push(run_renderer(&renderer, input, &target)?);
-        }
+        measured.insert((*scene).to_owned(), times);
+    }
 
+    let mut scene_reports = serde_json::Map::new();
+    for (scene, times) in &measured {
+        let (_, width, height) = &scene_inputs[scene.as_str()];
         let megapixels = f64::from(*width) * f64::from(*height) / 1_000_000.0;
-        let median_ms = median(&times_ms);
-        let p95_ms = percentile_95(&times_ms);
-        let median_mp_per_second = megapixels / (median_ms / 1_000.0);
-        let p95_mp_per_second = megapixels / (p95_ms / 1_000.0);
-        let latency_pass = p95_ms <= budget.preview_p95_ms;
-        let throughput_pass = median_mp_per_second >= budget.export_mp_per_second_min;
-
-        let status = if latency_pass && throughput_pass {
-            format!("{GREEN}{BOLD}PASS{RESET}")
-        } else {
-            format!("{RED}{BOLD}FAIL{RESET}")
-        };
-        println!(
-            "{status} {name}: p95 {p95_ms:.2} ms (budget ≤ {:.2}), median {:.3} MP/s (budget ≥ {:.3})",
-            budget.preview_p95_ms, budget.export_mp_per_second_min, median_mp_per_second
+        let median_ms = median(times);
+        scene_reports.insert(
+            scene.clone(),
+            json!({
+                "width": width,
+                "height": height,
+                "megapixels": megapixels,
+                "warmup_ms": warmups[scene],
+                "times_ms": times,
+                "median_ms": median_ms,
+                "p95_ms": legacy_percentile_95(times),
+                "median_megapixels_per_second": megapixels / (median_ms / 1000.0),
+            }),
         );
-
-        reports.push(SceneReport {
-            name: (*name).to_owned(),
-            width: *width,
-            height: *height,
-            megapixels,
-            warmup_ms,
-            times_ms,
-            median_ms,
-            p95_ms,
-            median_mp_per_second,
-            p95_mp_per_second,
-            latency_pass,
-            throughput_pass,
-        });
     }
 
-    let startup_p95_ms = percentile_95(&startup_samples);
-    let startup_pass = startup_p95_ms <= budget.startup_shader_compile_p95_ms;
-    if startup_pass {
-        pass(format!(
-            "startup/shader compile p95 {startup_p95_ms:.2} ms (budget ≤ {:.2})",
-            budget.startup_shader_compile_p95_ms
-        ));
+    let budget: Value = serde_json::from_reader(File::open(&budget_file).map_err(|error| {
+        XtaskError::new(format!("cannot read {}: {error}", budget_file.display()))
+    })?)?;
+    let budgets = budget
+        .get("budgets")
+        .ok_or_else(|| XtaskError::new("benchmark budget is missing budgets"))?;
+    let minimum_throughput = required_f64(budgets, "export_mp_per_second_min")?;
+    let maximum_startup = required_f64(budgets, "startup_shader_compile_p95_ms")?;
+    let throughput_pass = scene_reports.values().all(|scene| {
+        scene["median_megapixels_per_second"]
+            .as_f64()
+            .is_some_and(|value| value >= minimum_throughput)
+    });
+    let startup_pass = warmups
+        .values()
+        .copied()
+        .reduce(f64::max)
+        .is_some_and(|value| value <= maximum_startup);
+    let passed = throughput_pass && startup_pass;
+    let budget_display = budget_file
+        .strip_prefix(&root)
+        .unwrap_or(&budget_file)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let report = json!({
+        "schema": 2,
+        "renderer": renderer.to_string_lossy(),
+        "runs": measured_runs,
+        "scenes": scene_reports,
+        "budget": {
+            "budget_file": budget_display,
+            "export_throughput_pass": throughput_pass,
+            "startup_pass": startup_pass,
+            "passed": passed,
+        },
+        "measurement_scope": "wall-clock process startup plus canonical GPU render/readback; use native GPU timestamp queries for per-pass diagnosis",
+    });
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = File::create(&output)?;
+    serde_json::to_writer_pretty(&mut file, &report)?;
+    file.write_all(b"\n")?;
+    println!("{}", output.display());
+
+    if args.enforce_budget && !passed {
+        Err(XtaskError::silent(1))
     } else {
-        eprintln!(
-            "{RED}{BOLD}FAIL{RESET} startup/shader compile p95 {startup_p95_ms:.2} ms (budget ≤ {:.2})",
-            budget.startup_shader_compile_p95_ms
-        );
-    }
-
-    let passed = startup_pass
-        && reports
-            .iter()
-            .all(|report| report.latency_pass && report.throughput_pass);
-    write_benchmark_report(
-        &root,
-        &output_path,
-        &renderer,
-        &budget_file,
-        &budget,
-        measured_runs,
-        warmup_runs,
-        startup_p95_ms,
-        startup_pass,
-        passed,
-        &reports,
-    )?;
-    info(format!("wrote {}", relative_display(&root, &output_path)));
-
-    if passed {
-        pass("GPU benchmark budget");
         Ok(())
-    } else {
-        Err(XtaskError::new("GPU benchmark budget exceeded"))
     }
+}
+
+fn legacy_percentile_95(values: &[f64]) -> f64 {
+    let mut ordered = values.to_vec();
+    ordered.sort_by(f64::total_cmp);
+    let index = ((ordered.len() as f64 * 0.95) as usize).max(1) - 1;
+    ordered[index]
 }
 
 fn run_renderer(renderer: &Path, input: &Path, output: &Path) -> Result<f64> {
@@ -1658,78 +1958,9 @@ fn run_renderer(renderer: &Path, input: &Path, output: &Path) -> Result<f64> {
         })?;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
     if !status.success() {
-        return Err(XtaskError::with_code(
-            format!(
-                "renderer failed for {} after {elapsed_ms:.2} ms",
-                input.display()
-            ),
-            status.code().unwrap_or(1),
-        ));
+        return Err(XtaskError::silent(status.code().unwrap_or(1)));
     }
     Ok(elapsed_ms)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_benchmark_report(
-    root: &Path,
-    output_path: &Path,
-    renderer: &Path,
-    budget_file: &Path,
-    budget: &Budget,
-    measured_runs: usize,
-    warmup_runs: usize,
-    startup_p95_ms: f64,
-    startup_pass: bool,
-    passed: bool,
-    reports: &[SceneReport],
-) -> Result<()> {
-    let scenes = reports
-        .iter()
-        .map(|report| {
-            (
-                report.name.clone(),
-                json!({
-                    "width": report.width,
-                    "height": report.height,
-                    "megapixels": report.megapixels,
-                    "warmup_ms": &report.warmup_ms,
-                    "times_ms": &report.times_ms,
-                    "median_ms": report.median_ms,
-                    "p95_ms": report.p95_ms,
-                    "median_megapixels_per_second": report.median_mp_per_second,
-                    "p95_megapixels_per_second": report.p95_mp_per_second,
-                    "latency_pass": report.latency_pass,
-                    "throughput_pass": report.throughput_pass,
-                }),
-            )
-        })
-        .collect::<serde_json::Map<String, Value>>();
-
-    let report = json!({
-        "schema": 3,
-        "renderer": relative_display(root, renderer),
-        "measured_runs": measured_runs,
-        "warmup_runs": warmup_runs,
-        "scenes": scenes,
-        "budget": {
-            "budget_file": relative_display(root, budget_file),
-            "preview_p95_ms_max": budget.preview_p95_ms,
-            "export_mp_per_second_min": budget.export_mp_per_second_min,
-            "startup_shader_compile_p95_ms_max": budget.startup_shader_compile_p95_ms,
-            "startup_shader_compile_p95_ms_measured": startup_p95_ms,
-            "startup_pass": startup_pass,
-            "passed": passed,
-        },
-        "measurement_scope": "wall-clock process startup plus canonical GPU render/readback; use native GPU timestamp queries for per-pass diagnosis",
-    });
-
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = File::create(output_path)?;
-    serde_json::to_writer_pretty(&mut file, &report)?;
-    file.write_all(b"\n")?;
-    Ok(())
 }
 
 fn median(values: &[f64]) -> f64 {
@@ -1774,84 +2005,61 @@ fn shell_escape(value: &OsStr) -> String {
 }
 
 fn command_verify_android_16kb(args: AndroidArgs) -> Result<()> {
+    let contract = load_build_contract()?;
+    if args.print_build_contract {
+        return print_build_contract(&contract);
+    }
     let root = workspace_root();
     let apk = rooted(&root, args.apk);
     if !apk.is_file() {
-        return Err(XtaskError::usage(format!("APK not found: {}", apk.display())));
+        return Err(XtaskError::new(format!("APK not found: {}", apk.display())));
     }
 
-    let contract_path = root.join("Cargo.toml");
-    let contract = read_workspace_metadata(&contract_path)?;
-    validate_required_workspace_metadata(&contract_path, &contract)?;
-    let ndk_version = metadata_string(&contract_path, &contract, "android_ndk_version")?;
-    let build_tools_version =
-        metadata_string(&contract_path, &contract, "android_build_tools_version")?;
-
-    let sdk = android_sdk_root();
-    let objdump = match args
+    let sdk = android_sdk_root_with_local_properties(&root)?.ok_or_else(|| {
+        XtaskError::new("Android SDK not found. Set ANDROID_SDK_ROOT (or ANDROID_HOME).")
+    })?;
+    let ndk = android_ndk_root(&root, &contract.ndk_version, false)?;
+    let ndk_host = ndk_host_root(&ndk)?;
+    let objdump = args
         .objdump
         .or_else(|| env::var_os("LLVM_OBJDUMP").map(PathBuf::from))
-    {
-        Some(path) => path,
-        None => {
-            let sdk = sdk.as_deref().ok_or_else(|| {
-                XtaskError::new(
-                    "Android SDK not found; set ANDROID_SDK_ROOT/ANDROID_HOME or --objdump",
-                )
-            })?;
-            find_llvm_objdump(sdk, ndk_version)?
-        }
-    };
-    let zipalign = match args
+        .unwrap_or_else(|| ndk_host.join("bin").join(executable_name("llvm-objdump")));
+    let zipalign = args
         .zipalign
         .or_else(|| env::var_os("ZIPALIGN").map(PathBuf::from))
-    {
-        Some(path) => path,
-        None => {
-            let sdk = sdk.as_deref().ok_or_else(|| {
-                XtaskError::new(
-                    "Android SDK not found; set ANDROID_SDK_ROOT/ANDROID_HOME or --zipalign",
-                )
-            })?;
+        .unwrap_or_else(|| {
             sdk.join("build-tools")
-                .join(build_tools_version)
+                .join(&contract.build_tools_version)
                 .join(executable_name("zipalign"))
-        }
-    };
-    require_tool(&objdump, "llvm-objdump")?;
-    require_tool(&zipalign, "zipalign")?;
+        });
+    if !objdump.is_file() {
+        return Err(XtaskError::new(format!("llvm-objdump not found: {}", objdump.display())));
+    }
+    if !zipalign.is_file() {
+        return Err(XtaskError::new(format!(
+            "zipalign {} not found: {}",
+            contract.build_tools_version,
+            zipalign.display()
+        )));
+    }
 
     let temporary = TemporaryDirectory::new("auraw-16kb")?;
     let libraries = extract_64_bit_libraries(&apk, temporary.path())?;
     if libraries.is_empty() {
-        warn("no arm64-v8a or x86_64 native libraries found; ELF check is not applicable");
+        println!("No 64-bit native libraries found; ELF 16 KB check not applicable.");
     }
-
     for (archive_path, library) in &libraries {
         verify_elf_alignment(&objdump, archive_path, library)?;
-        pass(format!("16 KB ELF aligned: {archive_path}"));
+        println!("16 KB ELF aligned: {archive_path}");
     }
 
-    info(format!("running zipalign {}", zipalign.display()));
-    let status = Command::new(&zipalign)
-        .args(["-c", "-P", "16", "-v", "4"])
-        .arg(&apk)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(|error| {
-            XtaskError::new(format!("could not execute {}: {error}", zipalign.display()))
-        })?;
-    if !status.success() {
-        return Err(XtaskError::with_code(
-            format!("APK 16 KB zip alignment failed: {}", apk.display()),
-            status.code().unwrap_or(1),
-        ));
-    }
-
-    pass(format!(
-        "Android 16 KB page-size checks: {}",
-        relative_display(&root, &apk)
-    ));
+    run_checked(
+        Command::new(&zipalign)
+            .args(["-c", "-P", "16", "-v", "4"])
+            .arg(&apk),
+        &zipalign.display().to_string(),
+    )?;
+    println!("Android 16 KB page-size checks passed: {}", apk.display());
     Ok(())
 }
 
@@ -1862,34 +2070,549 @@ enum MetadataKind {
     Boolean,
 }
 
-fn command_print_metadata(format: MetadataFormat) -> Result<()> {
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildContract {
+    ndk_version: String,
+    build_tools_version: String,
+    compile_sdk: u64,
+    min_sdk: u64,
+    target_sdk: u64,
+    libraw_revision: String,
+    lensfun_revision: String,
+    use_legacy_packaging: bool,
+}
+
+impl BuildContract {
+    fn value(&self, field: &str) -> Option<String> {
+        match field {
+            "ndkVersion" => Some(self.ndk_version.clone()),
+            "buildToolsVersion" => Some(self.build_tools_version.clone()),
+            "compileSdk" => Some(self.compile_sdk.to_string()),
+            "minSdk" => Some(self.min_sdk.to_string()),
+            "targetSdk" => Some(self.target_sdk.to_string()),
+            "librawRevision" => Some(self.libraw_revision.clone()),
+            "lensfunRevision" => Some(self.lensfun_revision.clone()),
+            "useLegacyPackaging" => Some(self.use_legacy_packaging.to_string()),
+            _ => None,
+        }
+    }
+}
+
+fn load_build_contract() -> Result<BuildContract> {
     let root = workspace_root();
     let manifest = root.join("Cargo.toml");
     let metadata = read_workspace_metadata(&manifest)?;
     validate_required_workspace_metadata(&manifest, &metadata)?;
+    Ok(BuildContract {
+        ndk_version: metadata["android_ndk_version"].as_str().unwrap().to_owned(),
+        build_tools_version: metadata["android_build_tools_version"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        compile_sdk: metadata["android_compile_sdk"].as_u64().unwrap(),
+        min_sdk: metadata["android_min_sdk"].as_u64().unwrap(),
+        target_sdk: metadata["android_target_sdk"].as_u64().unwrap(),
+        libraw_revision: metadata["libraw_revision"].as_str().unwrap().to_owned(),
+        lensfun_revision: metadata["lensfun_revision"].as_str().unwrap().to_owned(),
+        use_legacy_packaging: metadata["android_use_legacy_packaging"].as_bool().unwrap(),
+    })
+}
 
-    match format {
-        MetadataFormat::Json => {
-            let mut stdout = io::stdout().lock();
-            serde_json::to_writer_pretty(&mut stdout, &metadata)?;
-            stdout.write_all(b"\n")?;
-        }
-        MetadataFormat::Shell => {
-            for (key, value) in &metadata {
-                let encoded = metadata_scalar(value).ok_or_else(|| {
-                    XtaskError::new(format!(
-                        "{}: [workspace.metadata].{key} cannot be represented as a shell scalar",
-                        manifest.display()
-                    ))
-                })?;
-                let environment_key = format!("AURAW_{}", key.to_ascii_uppercase());
-                println!(
-                    "export {environment_key}={}",
-                    shell_escape(OsStr::new(&encoded))
-                );
+fn command_print_metadata(args: MetadataArgs) -> Result<()> {
+    let contract = load_build_contract()?;
+    if let Some(field) = args.value {
+        println!("{}", contract.value(&field).ok_or_else(|| {
+            XtaskError::usage(format!("unknown build metadata field: {field}"))
+        })?);
+    } else {
+        match args.format {
+            MetadataFormat::Json => println!("{}", serde_json::to_string(&contract)?),
+            MetadataFormat::Shell => {
+                let environment = [
+                    ("AURAW_ANDROID_NDK_VERSION", contract.ndk_version.clone()),
+                    (
+                        "AURAW_ANDROID_BUILD_TOOLS_VERSION",
+                        contract.build_tools_version.clone(),
+                    ),
+                    ("AURAW_ANDROID_COMPILE_SDK", contract.compile_sdk.to_string()),
+                    ("AURAW_ANDROID_MIN_SDK", contract.min_sdk.to_string()),
+                    ("AURAW_ANDROID_TARGET_SDK", contract.target_sdk.to_string()),
+                    ("AURAW_LIBRAW_REVISION", contract.libraw_revision.clone()),
+                    ("AURAW_LENSFUN_REVISION", contract.lensfun_revision.clone()),
+                    (
+                        "AURAW_ANDROID_USE_LEGACY_PACKAGING",
+                        contract.use_legacy_packaging.to_string(),
+                    ),
+                ];
+                for (key, value) in environment {
+                    println!("export {key}={}", shell_escape(OsStr::new(&value)));
+                }
             }
         }
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AndroidDependency {
+    LibRaw,
+    Lensfun,
+}
+
+fn print_build_contract(contract: &BuildContract) -> Result<()> {
+    println!("{}", serde_json::to_string(contract)?);
+    Ok(())
+}
+
+fn android_abi_config(abi: &str, api: u64) -> Result<(String, &'static str)> {
+    match abi {
+        "arm64-v8a" => Ok((format!("aarch64-linux-android{api}"), "aarch64-linux-android")),
+        "x86_64" => Ok((format!("x86_64-linux-android{api}"), "x86_64-linux-android")),
+        _ => Err(XtaskError::usage(format!(
+            "Unsupported ABI '{abi}' (use arm64-v8a or x86_64)"
+        ))),
+    }
+}
+
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 && candidate.is_file() {
+        return Some(candidate.to_path_buf());
+    }
+    let path = env::var_os("PATH")?;
+    for directory in env::split_paths(&path) {
+        let direct = directory.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        if cfg!(windows) {
+            let executable = directory.join(format!("{name}.exe"));
+            if executable.is_file() {
+                return Some(executable);
+            }
+        }
+    }
+    None
+}
+
+fn require_executable(name: &str, message: &str) -> Result<PathBuf> {
+    find_executable(name).ok_or_else(|| XtaskError::new(message))
+}
+
+fn run_checked(command: &mut Command, description: &str) -> Result<()> {
+    let status = command
+        .status()
+        .map_err(|error| XtaskError::new(format!("unable to execute {description}: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(XtaskError::with_code(String::new(), status.code().unwrap_or(1)))
+    }
+}
+
+fn remove_path(path: &Path) -> Result<()> {
+    if path.is_symlink() || path.is_file() {
+        fs::remove_file(path)?;
+    } else if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn require_file(path: &Path) -> Result<()> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(XtaskError::new(format!(
+            "required file was not produced: {}",
+            path.display()
+        )))
+    }
+}
+
+fn directory_has_extension(path: &Path, extension: &str) -> Result<bool> {
+    if !path.is_dir() {
+        return Ok(false);
+    }
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let candidate = entry.path();
+            if candidate.is_dir() {
+                stack.push(candidate);
+            } else if candidate.extension() == Some(OsStr::new(extension)) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn android_sdk_root_with_local_properties(root: &Path) -> Result<Option<PathBuf>> {
+    if let Some(configured) = env::var_os("ANDROID_SDK_ROOT").or_else(|| env::var_os("ANDROID_HOME")) {
+        return Ok(Some(rooted(root, configured)));
+    }
+    let local_properties = root.join("android/local.properties");
+    if !local_properties.is_file() {
+        return Ok(None);
+    }
+    let properties = parse_properties_file(&local_properties)?;
+    Ok(properties.get("sdk.dir").map(|value| rooted(root, value)))
+}
+
+fn android_ndk_root(root: &Path, expected_version: &str, require_toolchain: bool) -> Result<PathBuf> {
+    let sdk = android_sdk_root_with_local_properties(root)?;
+    let configured = env::var_os("ANDROID_NDK_HOME").or_else(|| env::var_os("ANDROID_NDK_ROOT"));
+    let ndk = configured
+        .map(|path| rooted(root, path))
+        .or_else(|| sdk.map(|sdk| sdk.join("ndk").join(expected_version)))
+        .ok_or_else(|| {
+            XtaskError::new("Android NDK not found. Set ANDROID_NDK_HOME (or ANDROID_SDK_ROOT).")
+        })?;
+    if require_toolchain && !ndk.join("build/cmake/android.toolchain.cmake").is_file() {
+        return Err(XtaskError::new(
+            "Android NDK not found. Set ANDROID_NDK_HOME (or ANDROID_SDK_ROOT).",
+        ));
+    }
+    let source_properties = ndk.join("source.properties");
+    if !source_properties.is_file() {
+        return Err(XtaskError::new(format!("Android NDK not found at {}", ndk.display())));
+    }
+    let properties = parse_properties_file(&source_properties)?;
+    let revision = properties.get("Pkg.Revision").map(String::as_str).unwrap_or("");
+    if revision != expected_version {
+        return Err(XtaskError::new(format!(
+            "Android NDK {expected_version} is required, found {} at {}",
+            if revision.is_empty() { "unknown" } else { revision },
+            ndk.display()
+        )));
+    }
+    Ok(ndk)
+}
+
+fn ndk_host_root(ndk: &Path) -> Result<PathBuf> {
+    let prebuilt = ndk.join("toolchains/llvm/prebuilt");
+    let mut candidates = if prebuilt.is_dir() {
+        fs::read_dir(&prebuilt)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    candidates.sort();
+    candidates.into_iter().next().ok_or_else(|| {
+        XtaskError::new(format!("The selected NDK has no LLVM toolchain: {}", ndk.display()))
+    })
+}
+
+fn find_named_file_recursive(root: &Path, prefix: &str) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let entries = fs::read_dir(directory).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.starts_with(prefix))
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn find_host_libclang(ndk_host: &Path) -> Option<PathBuf> {
+    for candidate in [ndk_host.join("lib64"), ndk_host.join("lib")] {
+        if find_named_file_recursive(&candidate, "libclang.so").is_some() {
+            return Some(candidate);
+        }
+    }
+    find_named_file_recursive(Path::new("/usr/lib"), "libclang.so")
+        .and_then(|library| library.parent().map(Path::to_path_buf))
+}
+
+fn run_gradle_android_native_dependencies(root: &Path, abi: &str, profile: &str, min_sdk: u64) -> Result<()> {
+    android_abi_config(abi, min_sdk)?;
+    if !matches!(profile, "debug" | "release") {
+        return Err(XtaskError::usage(format!(
+            "Unknown profile '{profile}' (use release or debug)"
+        )));
+    }
+    let gradlew = root.join(if cfg!(windows) { "gradlew.bat" } else { "gradlew" });
+    require_file(&gradlew)?;
+    let mut title = profile.to_owned();
+    if let Some(first) = title.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    let task = format!(":app:externalNativeBuild{title}");
+    run_checked(
+        Command::new(&gradlew)
+            .current_dir(root)
+            .arg(task)
+            .arg(format!("-PaurawAbis={abi}"))
+            .arg("-PaurawBuildRust=false"),
+        &gradlew.display().to_string(),
+    )
+}
+
+fn source_date_epoch(root: &Path, revision: &str) -> Result<String> {
+    Ok(run_command_output(
+        Command::new("git")
+            .args(["-C"])
+            .arg(root)
+            .args(["show", "-s", "--format=%ct", revision]),
+        "git show source date",
+    )?
+    .trim()
+    .to_owned())
+}
+
+fn release_build_environment(root: &Path, revision: &str) -> Result<BTreeMap<OsString, OsString>> {
+    let mut environment: BTreeMap<OsString, OsString> = env::vars_os().collect();
+    environment.insert("AURAW_REQUIRE_COMMITTED_SOURCE".into(), "1".into());
+    environment.insert("AURAW_SOURCE_REVISION".into(), revision.into());
+    environment.insert("SOURCE_DATE_EPOCH".into(), source_date_epoch(root, revision)?.into());
+    environment.insert("CARGO_INCREMENTAL".into(), "0".into());
+    environment.insert("CARGO_TARGET_DIR".into(), root.join("target").into_os_string());
+    for key in ["CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTDOCFLAGS"] {
+        environment.remove(OsStr::new(key));
+    }
+    Ok(environment)
+}
+
+fn command_build_android_dependency(args: BuildDependencyArgs, dependency: AndroidDependency) -> Result<()> {
+    let contract = load_build_contract()?;
+    if args.print_build_contract {
+        return print_build_contract(&contract);
+    }
+    let root = workspace_root();
+    run_gradle_android_native_dependencies(&root, &args.abi, "release", contract.min_sdk)?;
+    match dependency {
+        AndroidDependency::LibRaw => {
+            let staged = root.join("android/native/libraw").join(&args.abi);
+            require_file(&staged.join("include/libraw/libraw.h"))?;
+            require_file(&staged.join("lib/libraw.a"))?;
+            println!("AGP/CMake staged LibRaw for {} in {}", args.abi, staged.display());
+        }
+        AndroidDependency::Lensfun => {
+            let staged = root.join("android/native/lensfun").join(&args.abi);
+            require_file(&staged.join("include/lensfun/lensfun.h"))?;
+            require_file(&staged.join("lib/liblensfun.a"))?;
+            require_file(&staged.join("lib/libglib-2.0.a"))?;
+            let assets = staged.join("apk-assets/lensfun");
+            if !directory_has_extension(&assets, "xml")? {
+                return Err(XtaskError::new(format!(
+                    "Lensfun XML database is missing from {}",
+                    assets.display()
+                )));
+            }
+            println!("AGP/CMake staged Lensfun for {} in {}", args.abi, staged.display());
+        }
+    }
+    Ok(())
+}
+
+fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
+    let contract = load_build_contract()?;
+    if args.print_build_contract {
+        return print_build_contract(&contract);
+    }
+    let root = workspace_root();
+    let (clang_target, cxx_triple) = android_abi_config(&args.abi, contract.min_sdk)?;
+    if !matches!(args.profile.as_str(), "debug" | "release") {
+        return Err(XtaskError::usage(format!(
+            "Unknown profile '{}' (use release or debug)",
+            args.profile
+        )));
+    }
+    let ndk = android_ndk_root(&root, &contract.ndk_version, true)?;
+    let ndk_host = ndk_host_root(&ndk)?;
+    let sysroot = ndk_host.join("sysroot");
+    if !sysroot.is_dir() {
+        return Err(XtaskError::new(format!(
+            "The selected NDK has no LLVM sysroot: {}",
+            ndk.display()
+        )));
+    }
+    require_executable(
+        "cargo-ndk",
+        "cargo-ndk 4.1.2 is required. Install it with: cargo install cargo-ndk --version 4.1.2 --locked",
+    )?;
+    let cargo = require_executable("cargo", "cargo is required")?;
+    let mut base_environment: BTreeMap<OsString, OsString> = env::vars_os().collect();
+    base_environment.insert("ANDROID_NDK_HOME".into(), ndk.clone().into_os_string());
+    base_environment.insert(
+        "BINDGEN_EXTRA_CLANG_ARGS".into(),
+        format!("--target={clang_target} --sysroot={}", sysroot.display()).into(),
+    );
+    if !base_environment.contains_key(OsStr::new("LIBCLANG_PATH")) {
+        if let Some(libclang) = find_host_libclang(&ndk_host) {
+            base_environment.insert("LIBCLANG_PATH".into(), libclang.into_os_string());
+        }
+    }
+    let version_output = run_command_output(
+        Command::new(&cargo)
+            .arg("ndk")
+            .arg("--version")
+            .env_clear()
+            .envs(&base_environment),
+        "cargo ndk --version",
+    )?;
+    let cargo_ndk_version = version_output.trim().strip_prefix("cargo-ndk ").unwrap_or(version_output.trim());
+    if cargo_ndk_version != "4.1.2" {
+        return Err(XtaskError::new(format!(
+            "cargo-ndk 4.1.2 is required, found {}",
+            if cargo_ndk_version.is_empty() { "unknown" } else { cargo_ndk_version }
+        )));
+    }
+    if !base_environment.contains_key(OsStr::new("LIBCLANG_PATH")) {
+        if let Some(ldconfig) = find_executable("ldconfig") {
+            if let Ok(output) = Command::new(ldconfig).arg("-p").output() {
+                if !String::from_utf8_lossy(&output.stdout).contains("libclang.so") {
+                    eprintln!("Warning: bindgen needs host libclang; install libclang-dev or set LIBCLANG_PATH if the build cannot find it.");
+                }
+            }
+        }
+    }
+
+    let revision = if args.profile == "release" {
+        Some(verify_source_revision(false)?)
+    } else {
+        None
+    };
+    let mut build_environment = if let Some(revision) = revision.as_deref() {
+        let mut release = release_build_environment(&root, revision)?;
+        for key in ["ANDROID_NDK_HOME", "BINDGEN_EXTRA_CLANG_ARGS", "LIBCLANG_PATH"] {
+            if let Some(value) = base_environment.get(OsStr::new(key)) {
+                release.insert(key.into(), value.clone());
+            }
+        }
+        release
+    } else {
+        base_environment
+    };
+    build_environment.insert("CARGO_INCREMENTAL".into(), "0".into());
+    build_environment.insert("CARGO_TARGET_DIR".into(), root.join("target").into_os_string());
+    for key in ["CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTDOCFLAGS"] {
+        build_environment.remove(OsStr::new(key));
+    }
+    if env::var_os("AURAW_NATIVE_DEPS_READY").as_deref() != Some(OsStr::new("1")) {
+        run_gradle_android_native_dependencies(&root, &args.abi, &args.profile, contract.min_sdk)?;
+    }
+    let libraw_root = root.join("android/native/libraw").join(&args.abi);
+    let lensfun_root = root.join("android/native/lensfun").join(&args.abi);
+    build_environment.insert("AURAW_LIBRAW_ROOT".into(), libraw_root.into_os_string());
+    build_environment.insert("AURAW_LENSFUN_ROOT".into(), lensfun_root.clone().into_os_string());
+    let jni_root = root.join("android/app/src/main/jniLibs");
+    let abi_jni = jni_root.join(&args.abi);
+    remove_path(&abi_jni)?;
+    let mut command = Command::new(&cargo);
+    command
+        .current_dir(&root)
+        .env_clear()
+        .envs(&build_environment)
+        .args(["ndk", "-t"])
+        .arg(&args.abi)
+        .arg("-o")
+        .arg(&jni_root)
+        .args(["build", "--locked"]);
+    if args.profile == "release" {
+        command.arg("--release");
+    }
+    command
+        .args(["--package", "auraw-ui", "--lib", "--manifest-path"])
+        .arg(root.join("Cargo.toml"));
+    run_checked(&mut command, &cargo.display().to_string())?;
+
+    let cxx_runtime = ndk_host
+        .join("sysroot/usr/lib")
+        .join(cxx_triple)
+        .join("libc++_shared.so");
+    require_file(&cxx_runtime)?;
+    fs::create_dir_all(&abi_jni)?;
+    fs::copy(&cxx_runtime, abi_jni.join("libc++_shared.so"))?;
+    require_file(&abi_jni.join("libauraw.so"))?;
+    require_file(&abi_jni.join("libc++_shared.so"))?;
+    let lensfun_assets = lensfun_root.join("apk-assets/lensfun");
+    if !directory_has_extension(&lensfun_assets, "xml")? {
+        return Err(XtaskError::new(format!(
+            "Lensfun XML database is missing from {}",
+            lensfun_assets.display()
+        )));
+    }
+    if let Some(expected_revision) = revision {
+        match verify_source_revision(false) {
+            Ok(final_revision) if final_revision == expected_revision => {}
+            Ok(_) => {
+                remove_path(&abi_jni)?;
+                return Err(XtaskError::new(
+                    "source changed during the build; discarded the Android native library",
+                ));
+            }
+            Err(error) => {
+                remove_path(&abi_jni)?;
+                eprintln!("source changed during the build; discarded the Android native library");
+                return Err(error);
+            }
+        }
+    }
+    println!(
+        "Rust, LibRaw, and Lensfun Android libraries are ready for Gradle ({}, {}).",
+        args.abi, args.profile
+    );
+    Ok(())
+}
+
+fn command_build_linux() -> Result<()> {
+    let root = workspace_root();
+    let revision = verify_source_revision(false)?;
+    let environment = release_build_environment(&root, &revision)?;
+    let cargo = require_executable("cargo", "cargo is required")?;
+    run_checked(
+        Command::new(&cargo)
+            .current_dir(&root)
+            .env_clear()
+            .envs(&environment)
+            .args(["build", "--locked", "--release", "--manifest-path"])
+            .arg(root.join("Cargo.toml")),
+        &cargo.display().to_string(),
+    )?;
+    let outputs = [
+        root.join("target/release/auraw"),
+        root.join("target/release/auraw-regression-render"),
+    ];
+    for output in &outputs {
+        require_file(output)?;
+    }
+    match verify_source_revision(false) {
+        Ok(final_revision) if final_revision == revision => {}
+        Ok(_) => {
+            for output in &outputs {
+                let _ = fs::remove_file(output);
+            }
+            return Err(XtaskError::new(
+                "source changed during the build; discarded the Linux binary",
+            ));
+        }
+        Err(error) => {
+            for output in &outputs {
+                let _ = fs::remove_file(output);
+            }
+            eprintln!("source changed during the build; discarded the Linux binary");
+            return Err(error);
+        }
+    }
+    println!("Built AuRaw from {revision}");
     Ok(())
 }
 
@@ -1900,84 +2623,200 @@ fn command_verified_download(args: VerifiedDownloadArgs) -> Result<()> {
             args.url
         )));
     }
-    let expected = args.expected_sha256.to_ascii_lowercase();
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(XtaskError::usage(
-            "invalid checksum: expected SHA-256 must contain exactly 64 hexadecimal digits",
-        ));
-    }
-
     let root = workspace_root();
+    let (algorithm, expected) = parse_expected_digest(&args.expected_digest)?;
     let output = rooted(&root, args.output);
-    if output.is_file() && sha256_file(&output)? == expected {
+
+    if output.is_file() && digest_file(&output, algorithm)? == expected {
         println!("verified cached download: {}", output.display());
         return Ok(());
     }
-    let parent = output.parent().ok_or_else(|| {
-        XtaskError::new(format!("download output has no parent: {}", output.display()))
-    })?;
-    fs::create_dir_all(parent)?;
+
     let file_name = output
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or("download");
-    let temporary = parent.join(format!(
-        ".{file_name}.download.{}.{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
+    let temporary = output.with_file_name(format!(
+        "{file_name}.download.{}",
+        std::process::id()
     ));
-    let _cleanup = TemporaryFile::new(temporary.clone());
+    let cleanup = TemporaryFile::new(temporary.clone());
+    let previous_permissions = fs::metadata(&output).ok().map(|metadata| metadata.permissions());
+    download_https(&args.url, &temporary, 9, 900)?;
 
+    let actual = digest_file(&temporary, algorithm)?;
+    if actual != expected {
+        eprintln!(
+            "{} checksum mismatch for {}",
+            algorithm.name(),
+            temporary.display()
+        );
+        eprintln!("expected: {expected}");
+        eprintln!("actual:   {actual}");
+        return Err(XtaskError::silent(1));
+    }
+    if let Some(permissions) = previous_permissions {
+        fs::set_permissions(&temporary, permissions)?;
+    }
+    replace_file(&temporary, &output)?;
+    drop(cleanup);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DigestAlgorithm {
+    Sha256,
+    Sha512,
+}
+
+impl DigestAlgorithm {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sha256 => "sha256",
+            Self::Sha512 => "sha512",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sha256 => "SHA-256",
+            Self::Sha512 => "SHA-512",
+        }
+    }
+
+    fn hex_length(self) -> usize {
+        match self {
+            Self::Sha256 => 64,
+            Self::Sha512 => 128,
+        }
+    }
+}
+
+fn parse_expected_digest(source: &str) -> Result<(DigestAlgorithm, String)> {
+    let (algorithm, expected) = if source.starts_with("https://") {
+        let temporary = TemporaryDirectory::new("auraw-checksum")?;
+        let target = temporary.path().join("checksum.txt");
+        download_https(source, &target, 9, 300)?;
+        let text = fs::read_to_string(&target).map_err(|error| {
+            XtaskError::new(format!("cannot read checksum response from {source}: {error}"))
+        })?;
+        (DigestAlgorithm::Sha256, first_hex_digest(&text, 64).unwrap_or_default())
+    } else if let Some(value) = source.strip_prefix("sha256:") {
+        (DigestAlgorithm::Sha256, value.to_owned())
+    } else if let Some(value) = source.strip_prefix("sha512:") {
+        (DigestAlgorithm::Sha512, value.to_owned())
+    } else {
+        (DigestAlgorithm::Sha256, source.to_owned())
+    };
+
+    if expected.is_empty() || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(XtaskError::usage("invalid checksum value"));
+    }
+    if expected.len() != algorithm.hex_length() {
+        return Err(XtaskError::usage(format!(
+            "{} must contain {} hex digits",
+            algorithm.label(),
+            algorithm.hex_length()
+        )));
+    }
+    Ok((algorithm, expected.to_ascii_lowercase()))
+}
+
+fn first_hex_digest(text: &str, length: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    while start < bytes.len() {
+        while start < bytes.len() && !bytes[start].is_ascii_hexdigit() {
+            start += 1;
+        }
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+            end += 1;
+        }
+        if end.saturating_sub(start) >= length {
+            return String::from_utf8(bytes[start..start + length].to_vec()).ok();
+        }
+        start = end.saturating_add(1);
+    }
+    None
+}
+
+fn download_https(
+    url: &str,
+    destination: &Path,
+    attempts: usize,
+    timeout_seconds: usize,
+) -> Result<()> {
+    if !url.starts_with("https://") {
+        return Err(XtaskError::usage(format!("refusing non-HTTPS download: {url}")));
+    }
+    let retry_count = attempts.saturating_sub(1).to_string();
+    let timeout = timeout_seconds.max(1).to_string();
     let status = Command::new("curl")
         .args([
-            "--fail",
-            "--location",
             "--proto",
             "=https",
-            "--proto-redir",
-            "=https",
-            "--silent",
+            "--tlsv1.2",
+            "--http1.1",
+            "--fail",
+            "--location",
             "--show-error",
             "--retry",
-            "8",
+            retry_count.as_str(),
             "--retry-all-errors",
             "--retry-delay",
-            "2",
+            "3",
             "--connect-timeout",
             "30",
             "--max-time",
-            "900",
+            timeout.as_str(),
+            url,
             "-o",
         ])
-        .arg(&temporary)
-        .arg(&args.url)
+        .arg(destination)
         .stdin(Stdio::null())
         .status()
-        .map_err(|error| XtaskError::new(format!("could not execute curl: {error}")))?;
-    if !status.success() {
-        return Err(XtaskError::with_code(
-            format!("HTTPS download failed: {}", args.url),
+        .map_err(|error| XtaskError::new(format!("download failed for {url}: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        let _ = fs::remove_file(destination);
+        Err(XtaskError::with_code(
+            format!("download failed for {url}: curl exited with {status}"),
             status.code().unwrap_or(1),
-        ));
+        ))
     }
+}
 
-    let actual = sha256_file(&temporary)?;
-    if actual != expected {
-        return Err(XtaskError::new(format!(
-            "sha256 checksum mismatch for {}\n  expected: {expected}\n  actual:   {actual}",
-            args.url
-        )));
+fn digest_file(path: &Path, algorithm: DigestAlgorithm) -> Result<String> {
+    let file = File::open(path).map_err(|error| {
+        XtaskError::new(format!(
+            "{} checksum could not be read for {}: {error}",
+            algorithm.name(),
+            path.display()
+        ))
+    })?;
+    let digest_algorithm = match algorithm {
+        DigestAlgorithm::Sha256 => &SHA256,
+        DigestAlgorithm::Sha512 => &SHA512,
+    };
+    let mut context = DigestContext::new(digest_algorithm);
+    let mut reader = io::BufReader::new(file);
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let count = reader.read(&mut buffer).map_err(|error| {
+            XtaskError::new(format!(
+                "{} checksum could not be read for {}: {error}",
+                algorithm.name(),
+                path.display()
+            ))
+        })?;
+        if count == 0 {
+            break;
+        }
+        context.update(&buffer[..count]);
     }
-
-    if let Ok(metadata) = fs::metadata(&output) {
-        fs::set_permissions(&temporary, metadata.permissions())?;
-    }
-    replace_file(&temporary, &output)?;
-    println!("verified download: {}", output.display());
-    Ok(())
+    Ok(hex_encode(context.finish().as_ref()))
 }
 
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
@@ -2000,39 +2839,57 @@ fn replace_file(source: &Path, destination: &Path) -> Result<()> {
     })
 }
 
-fn command_verify_source_revision() -> Result<()> {
+fn verify_source_revision(print_revision: bool) -> Result<String> {
     let root = workspace_root();
+    let inside = Command::new("git")
+        .args(["-C"])
+        .arg(&root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match inside {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(XtaskError::new("git is required to verify the source revision"));
+        }
+        Err(error) => return Err(XtaskError::new(error.to_string())),
+        Ok(status) if !status.success() => {
+            return Err(XtaskError::new("release builds must run from a Git checkout"));
+        }
+        Ok(_) => {}
+    }
+
     let status = run_command_output(
         Command::new("git")
-            .args(["status", "--porcelain=v1", "--untracked-files=all"])
-            .current_dir(&root),
+            .args(["-C"])
+            .arg(&root)
+            .args(["status", "--porcelain=v1", "--untracked-files=all"]),
         "git status",
     )?;
-    if !status.trim().is_empty() {
-        let entries = status
-            .lines()
-            .map(|line| format!("  {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(XtaskError::new(format!(
-            "Git working tree is not clean:\n{entries}"
-        )));
+    let status = status.trim();
+    if !status.is_empty() {
+        eprintln!("release builds require a clean source tree:");
+        eprintln!("{status}");
+        return Err(XtaskError::silent(1));
     }
 
     let revision = run_command_output(
         Command::new("git")
-            .args(["rev-parse", "--verify", "HEAD"])
-            .current_dir(&root),
+            .args(["-C"])
+            .arg(&root)
+            .args(["rev-parse", "--verify", "HEAD"]),
         "git rev-parse HEAD",
-    )?;
-    let revision = revision.trim();
-    if !is_full_commit_sha(revision) {
-        return Err(XtaskError::new(format!(
-            "git rev-parse returned an invalid HEAD revision: {revision:?}"
-        )));
+    )?
+    .trim()
+    .to_owned();
+    if print_revision {
+        println!("{revision}");
     }
-    println!("{revision}");
-    Ok(())
+    Ok(revision)
+}
+
+fn command_verify_source_revision() -> Result<()> {
+    verify_source_revision(true).map(|_| ())
 }
 
 fn run_command_output(command: &mut Command, description: &str) -> Result<String> {
@@ -2145,28 +3002,6 @@ fn validate_required_workspace_metadata(
         )));
     }
     Ok(())
-}
-
-fn metadata_string<'a>(
-    path: &Path,
-    values: &'a BTreeMap<String, Value>,
-    key: &str,
-) -> Result<&'a str> {
-    values.get(key).and_then(Value::as_str).ok_or_else(|| {
-        XtaskError::new(format!(
-            "{}: [workspace.metadata].{key} must be a string",
-            path.display()
-        ))
-    })
-}
-
-fn metadata_scalar(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Bool(value) => Some(value.to_string()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
 }
 
 struct Sha256 {
@@ -2347,71 +3182,11 @@ impl Drop for TemporaryFile {
     }
 }
 
-fn android_sdk_root() -> Option<PathBuf> {
-    env::var_os("ANDROID_SDK_ROOT")
-        .or_else(|| env::var_os("ANDROID_HOME"))
-        .map(PathBuf::from)
-}
-
-fn find_llvm_objdump(sdk: &Path, expected_ndk: &str) -> Result<PathBuf> {
-    let ndk = env::var_os("ANDROID_NDK_HOME")
-        .or_else(|| env::var_os("ANDROID_NDK_ROOT"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| sdk.join("ndk").join(expected_ndk));
-    if !ndk.is_dir() {
-        return Err(XtaskError::new(format!(
-            "Android NDK {expected_ndk} not found: {}",
-            ndk.display()
-        )));
-    }
-
-    let prebuilt = ndk.join("toolchains/llvm/prebuilt");
-    let preferred = prebuilt.join(host_tag()).join("bin").join(executable_name("llvm-objdump"));
-    if preferred.is_file() {
-        return Ok(preferred);
-    }
-
-    if prebuilt.is_dir() {
-        for entry in fs::read_dir(&prebuilt)? {
-            let candidate = entry?
-                .path()
-                .join("bin")
-                .join(executable_name("llvm-objdump"));
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    Err(XtaskError::new(format!(
-        "llvm-objdump not found under {}",
-        prebuilt.display()
-    )))
-}
-
-fn host_tag() -> &'static str {
-    match (env::consts::OS, env::consts::ARCH) {
-        ("linux", _) => "linux-x86_64",
-        ("macos", "aarch64") => "darwin-aarch64",
-        ("macos", _) => "darwin-x86_64",
-        ("windows", _) => "windows-x86_64",
-        _ => "linux-x86_64",
-    }
-}
-
 fn executable_name(name: &str) -> OsString {
     if cfg!(windows) {
         OsString::from(format!("{name}.exe"))
     } else {
         OsString::from(name)
-    }
-}
-
-fn require_tool(path: &Path, name: &str) -> Result<()> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(XtaskError::new(format!("{name} not found: {}", path.display())))
     }
 }
 
@@ -2461,45 +3236,30 @@ fn native_library_path(path: &str) -> Option<(&str, &str)> {
     Some((abi, file))
 }
 
-fn verify_elf_alignment(objdump: &Path, archive_path: &str, library: &Path) -> Result<()> {
+fn verify_elf_alignment(objdump: &Path, _archive_path: &str, library: &Path) -> Result<()> {
     let output = Command::new(objdump)
         .arg("-p")
         .arg(library)
         .output()
-        .map_err(|error| {
-            XtaskError::new(format!("could not execute {}: {error}", objdump.display()))
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(XtaskError::with_code(
-            if stderr.is_empty() {
-                format!("llvm-objdump failed for {archive_path}")
-            } else {
-                format!("llvm-objdump failed for {archive_path}: {stderr}")
-            },
-            output.status.code().unwrap_or(1),
-        ));
-    }
-
+        .map_err(|error| XtaskError::new(format!("could not execute {}: {error}", objdump.display())))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let load_lines: Vec<&str> = stdout.lines().filter(|line| line.contains("LOAD")).collect();
     let alignments: Vec<u32> = load_lines
         .iter()
         .filter_map(|line| parse_alignment_power(line))
         .collect();
-    if alignments.is_empty() {
+    if !output.status.success() || alignments.is_empty() {
         return Err(XtaskError::new(format!(
-            "could not read ELF LOAD alignment from {archive_path}"
+            "Could not read ELF LOAD alignment from {}",
+            library.display()
         )));
     }
     if alignments.iter().any(|alignment| *alignment < 14) {
-        eprintln!("{RED}under-aligned ELF LOAD segments in {archive_path}:{RESET}");
+        eprintln!("16 KB ELF alignment check failed: {}", library.display());
         for line in load_lines {
-            eprintln!("  {line}");
+            eprintln!("{line}");
         }
-        return Err(XtaskError::new(format!(
-            "{archive_path} has an ELF LOAD segment aligned below 2**14 bytes"
-        )));
+        return Err(XtaskError::silent(1));
     }
     Ok(())
 }

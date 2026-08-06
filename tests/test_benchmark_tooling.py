@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -11,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_benchmark_dry_run_covers_the_committed_scenes() -> None:
     result = subprocess.run(
         [
-            sys.executable,
-            str(ROOT / "scripts/dev.py"),
+            "cargo",
+            "xtask",
             "bench",
             "--dry-run",
             "--runs",

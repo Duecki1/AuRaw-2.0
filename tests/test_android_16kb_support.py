@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import tomllib
 import zipfile
 from pathlib import Path
@@ -18,8 +17,11 @@ def workspace_metadata() -> dict[str, object]:
 
 
 def command_contract(command: str) -> dict[str, object]:
+    invocation = ["cargo", "xtask", command]
+    if command != "print-metadata":
+        invocation.append("--print-build-contract")
     completed = subprocess.run(
-        [sys.executable, "scripts/dev.py", command, "--print-build-contract"],
+        invocation,
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -49,6 +51,7 @@ def test_android_build_tools_share_cargo_workspace_metadata() -> None:
     assert contract["useLegacyPackaging"] is False
     assert contract["minSdk"] <= contract["targetSdk"] <= contract["compileSdk"]
     for command in (
+        "print-metadata",
         "build-android",
         "build-android-libraw",
         "build-android-lensfun",
@@ -128,7 +131,7 @@ def fake_android_toolchain(tmp_path: Path, alignment_power: int) -> tuple[Path, 
 def test_16kb_verifier_accepts_aligned_elf_and_apk(tmp_path: Path) -> None:
     apk, _, env = fake_android_toolchain(tmp_path, 14)
     completed = subprocess.run(
-        [sys.executable, "scripts/dev.py", "verify-android-16kb", str(apk)],
+        ["cargo", "xtask", "verify-android-16kb", str(apk)],
         cwd=ROOT,
         env=env,
         check=False,
@@ -141,7 +144,7 @@ def test_16kb_verifier_accepts_aligned_elf_and_apk(tmp_path: Path) -> None:
 def test_16kb_verifier_rejects_under_aligned_elf(tmp_path: Path) -> None:
     apk, _, env = fake_android_toolchain(tmp_path, 13)
     completed = subprocess.run(
-        [sys.executable, "scripts/dev.py", "verify-android-16kb", str(apk)],
+        ["cargo", "xtask", "verify-android-16kb", str(apk)],
         cwd=ROOT,
         env=env,
         check=False,
@@ -157,7 +160,7 @@ def test_agp_cmake_builds_pinned_static_dependencies() -> None:
         encoding="utf-8"
     )
     cargo_config = (ROOT / ".cargo/config.toml").read_text(encoding="utf-8")
-    dev_script = (ROOT / "scripts/dev.py").read_text(encoding="utf-8")
+    xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
 
     assert 'path file("src/main/cpp/CMakeLists.txt")' in gradle
     assert 'targets "auraw_native_deps"' in gradle
@@ -191,6 +194,6 @@ def test_agp_cmake_builds_pinned_static_dependencies() -> None:
     assert "[target.x86_64-linux-android]" in cargo_config
     assert "max-page-size=16384" in cargo_config
 
-    assert "run_gradle_android_native_dependencies" in dev_script
-    assert 'if env.get("AURAW_NATIVE_DEPS_READY") != "1"' in dev_script
-    assert "python3 -m venv" not in dev_script
+    assert "run_gradle_android_native_dependencies" in xtask
+    assert 'env::var_os("AURAW_NATIVE_DEPS_READY")' in xtask
+    assert "python3 -m venv" not in xtask

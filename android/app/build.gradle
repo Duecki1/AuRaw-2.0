@@ -480,15 +480,13 @@ aurawAbis.each { abi ->
         dependsOn("externalNativeBuildDebug")
         workingDir repositoryRoot
         environment "AURAW_NATIVE_DEPS_READY", "1"
-        commandLine "python3", new File(repositoryRoot, "scripts/dev.py"),
-            "build-android", abi, "debug"
+        commandLine "cargo", "xtask", "build-android", abi, "debug"
     }
     releaseRustTasks << tasks.register("buildRustRelease${suffix}", Exec) {
         dependsOn("externalNativeBuildRelease")
         workingDir repositoryRoot
         environment "AURAW_NATIVE_DEPS_READY", "1"
-        commandLine "python3", new File(repositoryRoot, "scripts/dev.py"),
-            "build-android", abi, "release"
+        commandLine "cargo", "xtask", "build-android", abi, "release"
     }
 }
 

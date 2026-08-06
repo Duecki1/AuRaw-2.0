@@ -80,7 +80,7 @@ The compatibility CLI now delegates native dependency work to that same Gradle
 task before invoking Cargo:
 
 ```sh
-python3 scripts/dev.py build-android arm64-v8a release
+cargo xtask build-android arm64-v8a release
 ```
 
 ### 16 KB memory-page support
