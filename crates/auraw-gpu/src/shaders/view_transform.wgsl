@@ -446,6 +446,8 @@ fn apply_local_display_blacks(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32>
     return rgb;
 }
 
+// ShaderManager specializes this default literal together with the matching
+// ceiling-divided dispatch dimensions when benchmarking alternate tile shapes.
 @compute @workgroup_size(8, 8, 1)
 fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }

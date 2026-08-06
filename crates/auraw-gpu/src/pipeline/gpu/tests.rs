@@ -1,7 +1,7 @@
 use super::{
     canonicalize_green_noise, color_grade_hue_turns, composite_inpaint_rgba16f,
     explicit_render_graph_contracts_are_contiguous, pack_local_point_curve, processing_work_format,
-    shader_manager::ShaderManager,
+    shader_manager::ShaderManager, specialize_compute_workgroup_size, ComputeWorkgroupSize,
     shader_highlight_method, work_shader_source, ProcessingQuality, COLOR_DENOISE_ENTRY_POINTS,
     SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
     SHADER_COLOR_DENOISE, SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS,
@@ -433,6 +433,33 @@ fn shader_specialization_fails_closed_without_marker() {
     )
     .expect_err("missing marker must be an error in release builds");
     assert!(error.to_string().contains("work-format marker"));
+}
+
+#[test]
+fn compute_workgroup_specialization_and_dispatch_cover_partial_tiles() {
+    let workgroup = ComputeWorkgroupSize::new(16, 8).expect("valid workgroup");
+    assert_eq!(workgroup.dispatch_for_extent(257, 259), [17, 33, 1]);
+
+    let specialized = specialize_compute_workgroup_size(SHADER_VIEW_TRANSFORM, workgroup);
+    assert!(specialized.contains("@workgroup_size(16, 8, 1)"));
+    assert!(specialized.contains(
+        "if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }"
+    ));
+
+    let mut manager = ShaderManager::new_with_workgroup_size(
+        processing_work_format(ProcessingQuality::Preview),
+        workgroup,
+    )
+    .expect("workgroup-aware shader manager");
+    let module = manager
+        .compose_naga_module(SHADER_VIEW_TRANSFORM, "view_transform.wgsl")
+        .expect("specialized view transform composes");
+    let entry = module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == "apply_view_node")
+        .expect("view entry point");
+    assert_eq!(entry.workgroup_size, [16, 8, 1]);
 }
 
 #[test]

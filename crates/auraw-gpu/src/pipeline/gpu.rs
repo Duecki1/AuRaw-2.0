@@ -38,9 +38,81 @@ const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 = CAMERA_UNIFORMS_SIZE_BYTES
 const GPU_STAGE_UNIFORM_ALLOCATION_BYTES: u64 = 512 + 768 + 256;
 const MASK_DATA_SIZE_BYTES: u64 = (std::mem::size_of::<MaskData>() * MAX_LOCAL_MASKS) as u64;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
+const DEFAULT_WORKGROUP_ATTRIBUTE: &str = "@workgroup_size(8, 8, 1)";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
+
+/// Two-dimensional compute workgroup shape used by image and tone-guide
+/// shaders. The Z dimension remains one because every dispatch targets a 2D
+/// texture. The default preserves AuRaw's historical 8x8 configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ComputeWorkgroupSize {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl ComputeWorkgroupSize {
+    pub const DEFAULT: Self = Self { x: 8, y: 8 };
+
+    pub fn new(x: u32, y: u32) -> Result<Self> {
+        if x == 0 || y == 0 {
+            return Err(anyhow!("compute workgroup dimensions must be non-zero"));
+        }
+        x.checked_mul(y)
+            .ok_or_else(|| anyhow!("compute workgroup dimensions overflow"))?;
+        Ok(Self { x, y })
+    }
+
+    pub fn validate_for_limits(self, limits: &wgpu::Limits) -> Result<()> {
+        let invocations = self
+            .x
+            .checked_mul(self.y)
+            .ok_or_else(|| anyhow!("compute workgroup dimensions overflow"))?;
+        if self.x > limits.max_compute_workgroup_size_x
+            || self.y > limits.max_compute_workgroup_size_y
+            || invocations > limits.max_compute_invocations_per_workgroup
+        {
+            return Err(anyhow!(
+                "compute workgroup {}x{} exceeds device limits ({}x{}, {} invocations)",
+                self.x,
+                self.y,
+                limits.max_compute_workgroup_size_x,
+                limits.max_compute_workgroup_size_y,
+                limits.max_compute_invocations_per_workgroup,
+            ));
+        }
+        Ok(())
+    }
+
+    fn dispatch_for_extent(self, width: u32, height: u32) -> [u32; 3] {
+        [width.div_ceil(self.x), height.div_ceil(self.y), 1]
+    }
+}
+
+impl Default for ComputeWorkgroupSize {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+pub(super) fn specialize_compute_workgroup_size<'a>(
+    source: &'a str,
+    workgroup_size: ComputeWorkgroupSize,
+) -> Cow<'a, str> {
+    if workgroup_size == ComputeWorkgroupSize::DEFAULT
+        || !source.contains(DEFAULT_WORKGROUP_ATTRIBUTE)
+    {
+        return Cow::Borrowed(source);
+    }
+    Cow::Owned(source.replace(
+        DEFAULT_WORKGROUP_ATTRIBUTE,
+        &format!(
+            "@workgroup_size({}, {}, 1)",
+            workgroup_size.x, workgroup_size.y
+        ),
+    ))
+}
 
 /// Logical domains carried by the post-demosaic graph. These contracts are
 /// independent of pass fusion: multiple adjacent nodes may execute in one GPU
@@ -1287,10 +1359,17 @@ struct Pass {
     workgroups: [u32; 3],
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct RawGpuPipelineConfig {
+    mask_atlas_edge_override: Option<u32>,
+    workgroup_size: ComputeWorkgroupSize,
+}
+
 #[derive(Clone)]
 pub struct RawGpuProgramTemplate {
     cfa_kind: CfaKind,
     processing_quality: ProcessingQuality,
+    workgroup_size: ComputeWorkgroupSize,
     pipelines: Vec<wgpu::ComputePipeline>,
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
 }
@@ -1346,6 +1425,7 @@ pub struct RawGpuPipeline {
     pub height: u32,
     cfa_kind: CfaKind,
     processing_quality: ProcessingQuality,
+    workgroup_size: ComputeWorkgroupSize,
     camera_uniforms_buffer: wgpu::Buffer,
     scene_tone_uniforms_buffer: wgpu::Buffer,
     effects_uniforms_buffer: wgpu::Buffer,
@@ -1491,6 +1571,7 @@ impl RawGpuPipeline {
         RawGpuProgramTemplate {
             cfa_kind: self.cfa_kind,
             processing_quality: self.processing_quality,
+            workgroup_size: self.workgroup_size,
             pipelines: self
                 .passes
                 .iter()
@@ -1505,6 +1586,7 @@ impl RawGpuPipeline {
         RawGpuProgramTemplate {
             cfa_kind: self.cfa_kind,
             processing_quality: self.processing_quality,
+            workgroup_size: self.workgroup_size,
             pipelines: self.passes.into_iter().map(|pass| pass.pipeline).collect(),
             pipeline_cache: self.pipeline_cache,
         }
@@ -1638,10 +1720,13 @@ impl RawGpuPipeline {
             &raw,
             &params,
             quality,
-            // When requested for the export template, keep the local-mask
-            // allocation small. Its textures are never rendered; only the
-            // compiled program handles are retained and reused later.
-            mask_atlas_edge_override,
+            RawGpuPipelineConfig {
+                // When requested for the export template, keep the local-mask
+                // allocation small. Its textures are never rendered; only the
+                // compiled program handles are retained and reused later.
+                mask_atlas_edge_override,
+                ..Default::default()
+            },
         )
     }
 
@@ -1687,7 +1772,7 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
-            None,
+            RawGpuPipelineConfig::default(),
         )
     }
 
@@ -1698,7 +1783,44 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(device, queue, None, None, None, raw, params, quality, None)
+        Self::new_internal(
+            device,
+            queue,
+            None,
+            None,
+            None,
+            raw,
+            params,
+            quality,
+            RawGpuPipelineConfig::default(),
+        )
+    }
+
+    /// Creates a headless pipeline whose 2D compute entrypoints and dispatch
+    /// counts use the same explicit workgroup shape. This is intended for
+    /// device-specific benchmarking; normal callers retain the 8x8 default.
+    pub fn new_headless_with_quality_and_workgroup_size(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &LoadedRaw,
+        params: &GpuParams,
+        quality: ProcessingQuality,
+        workgroup_size: ComputeWorkgroupSize,
+    ) -> Result<Self> {
+        Self::new_internal(
+            device,
+            queue,
+            None,
+            None,
+            None,
+            raw,
+            params,
+            quality,
+            RawGpuPipelineConfig {
+                workgroup_size,
+                ..Default::default()
+            },
+        )
     }
 
     /// Creates a headless pipeline with an explicit normalized-mask atlas edge.
@@ -1721,7 +1843,10 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
-            Some(mask_edge),
+            RawGpuPipelineConfig {
+                mask_atlas_edge_override: Some(mask_edge),
+                ..Default::default()
+            },
         )
     }
 
@@ -1747,7 +1872,10 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
-            None,
+            RawGpuPipelineConfig {
+                workgroup_size: program_template.workgroup_size,
+                ..Default::default()
+            },
         )
     }
 
@@ -1773,7 +1901,10 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
-            Some(mask_edge),
+            RawGpuPipelineConfig {
+                mask_atlas_edge_override: Some(mask_edge),
+                workgroup_size: program_template.workgroup_size,
+            },
         )
     }
 
@@ -1797,7 +1928,10 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
-            Some(mask_edge),
+            RawGpuPipelineConfig {
+                mask_atlas_edge_override: Some(mask_edge),
+                workgroup_size: template.workgroup_size,
+            },
         )
     }
 
@@ -1821,7 +1955,10 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
-            None,
+            RawGpuPipelineConfig {
+                workgroup_size: template.workgroup_size,
+                ..Default::default()
+            },
         )
     }
 
@@ -1835,12 +1972,14 @@ impl RawGpuPipeline {
         raw: &LoadedRaw,
         params: &GpuParams,
         quality: ProcessingQuality,
-        mask_atlas_edge_override: Option<u32>,
+        config: RawGpuPipelineConfig,
     ) -> Result<Self> {
         validate_raw(raw)?;
+        config.workgroup_size.validate_for_limits(&device.limits())?;
         if let Some(template) = program_template {
             if template.cfa_kind != raw.cfa_kind
                 || template.processing_quality != quality
+                || template.workgroup_size != config.workgroup_size
                 || template.pipelines.len() != expected_pass_count(raw.cfa_kind)
             {
                 return Err(anyhow!(
@@ -1859,15 +1998,20 @@ impl RawGpuPipeline {
             raw.height.div_ceil(tone_scale),
         );
         let tone_format = tone_guide_format();
-        let image_workgroups = [raw.width.div_ceil(8), raw.height.div_ceil(8), 1];
-        let tone_workgroups = [tone_size.width.div_ceil(8), tone_size.height.div_ceil(8), 1];
+        let image_workgroups = config
+            .workgroup_size
+            .dispatch_for_extent(raw.width, raw.height);
+        let tone_workgroups = config
+            .workgroup_size
+            .dispatch_for_extent(tone_size.width, tone_size.height);
         let single_workgroup = [1, 1, 1];
 
         let default_mask_atlas_edge = mask_atlas_edge();
-        let mask_atlas_edge = mask_atlas_edge_override
+        let mask_atlas_edge = config
+            .mask_atlas_edge_override
             .unwrap_or(default_mask_atlas_edge)
             .clamp(64, export_mask_atlas_edge_limit());
-        let mask_layer_capacity = if mask_atlas_edge_override.is_some() {
+        let mask_layer_capacity = if config.mask_atlas_edge_override.is_some() {
             // Viewport detail and export both use explicit atlas sizes and can
             // allocate exactly the layers they will sample. This is what makes
             // a dense cropped detail atlas affordable alongside the main
@@ -3515,7 +3659,9 @@ impl RawGpuPipeline {
 
         let mut shader_manager = program_template
             .is_none()
-            .then(|| ShaderManager::new(work_format))
+            .then(|| {
+                ShaderManager::new_with_workgroup_size(work_format, config.workgroup_size)
+            })
             .transpose()
             .context("initialize WGSL shader composer")?;
         let mut create_shader = |
@@ -3974,6 +4120,7 @@ impl RawGpuPipeline {
             height: raw.height,
             cfa_kind: raw.cfa_kind,
             processing_quality: quality,
+            workgroup_size: config.workgroup_size,
             camera_uniforms_buffer,
             scene_tone_uniforms_buffer,
             effects_uniforms_buffer,
@@ -4795,8 +4942,11 @@ impl RawGpuPipeline {
                 },
             ],
         });
-        let mut shader_manager = ShaderManager::new(processing_work_format(self.processing_quality))
-            .context("initialize regression-scene WGSL composer")?;
+        let mut shader_manager = ShaderManager::new_with_workgroup_size(
+            processing_work_format(self.processing_quality),
+            self.workgroup_size,
+        )
+        .context("initialize regression-scene WGSL composer")?;
         let shader = shader_manager.create_shader_module(
             device,
             "auraw scene conversion shader",
@@ -4828,7 +4978,10 @@ impl RawGpuPipeline {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+            let workgroups = self
+                .workgroup_size
+                .dispatch_for_extent(self.width, self.height);
+            pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
         // Submit the render first, then use the shared chunked RGBA32F readback.
         // Queue submission ordering guarantees every copy sees the completed
@@ -4935,9 +5088,11 @@ impl RawGpuPipeline {
                 },
             ],
         });
+        let resize_shader =
+            specialize_compute_workgroup_size(SHADER_INPAINT_DOWNSAMPLE, self.workgroup_size);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("auraw inpaint resize shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_INPAINT_DOWNSAMPLE.into()),
+            source: wgpu::ShaderSource::Wgsl(resize_shader),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("auraw inpaint resize pipeline layout"),
@@ -4964,7 +5119,10 @@ impl RawGpuPipeline {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(output_width.div_ceil(8), output_height.div_ceil(8), 1);
+            let workgroups = self
+                .workgroup_size
+                .dispatch_for_extent(output_width, output_height);
+            pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
         queue.submit(Some(encoder.finish()));
         read_rgba32_texture_rgb_blocking(
