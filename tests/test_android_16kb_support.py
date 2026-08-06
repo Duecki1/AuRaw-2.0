@@ -76,6 +76,8 @@ def test_gradle_and_rust_consume_cargo_workspace_metadata() -> None:
         "minSdk aurawMinSdk",
         "targetSdk aurawTargetSdk",
         "useLegacyPackaging aurawUseLegacyPackaging",
+        'path file("src/main/cpp/CMakeLists.txt")',
+        'targets "auraw_native_deps"',
     ):
         assert wiring in gradle
 
@@ -147,3 +149,48 @@ def test_16kb_verifier_rejects_under_aligned_elf(tmp_path: Path) -> None:
         text=True,
     )
     assert completed.returncode != 0
+
+
+def test_agp_cmake_builds_pinned_static_dependencies() -> None:
+    gradle = (ROOT / "android/app/build.gradle").read_text(encoding="utf-8")
+    cmake = (ROOT / "android/app/src/main/cpp/CMakeLists.txt").read_text(
+        encoding="utf-8"
+    )
+    cargo_config = (ROOT / ".cargo/config.toml").read_text(encoding="utf-8")
+    dev_script = (ROOT / "scripts/dev.py").read_text(encoding="utf-8")
+
+    assert 'path file("src/main/cpp/CMakeLists.txt")' in gradle
+    assert 'targets "auraw_native_deps"' in gradle
+    assert 'getOrElse("arm64-v8a,x86_64")' in gradle
+    assert 'dependsOn("externalNativeBuildDebug")' in gradle
+    assert 'environment "AURAW_NATIVE_DEPS_READY", "1"' in gradle
+
+    for pin in (
+        "b860248a89d9082b8e0a1e202e516f46af9adb29",
+        "101c745e847a5de4a1e569a94368ce2027198598",
+        "f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b",
+        "a11cbe6aeec657839540448b253217c25d20b7a45b6aebfef406f7239933c7a6",
+    ):
+        assert pin in cmake
+    for option in (
+        "-DBUILD_STATIC=ON",
+        "-DBUILD_TESTS=OFF",
+        "-DBUILD_LENSTOOL=OFF",
+        "-DBUILD_DOC=OFF",
+        "-DINSTALL_PYTHON_MODULE=OFF",
+        "-DINSTALL_HELPER_SCRIPTS=OFF",
+    ):
+        assert option in cmake
+    assert "add_subdirectory(" in cmake
+    assert "ExternalProject_Add(auraw_lensfun" in cmake
+    assert "add_library(auraw::native_static ALIAS auraw_native_static)" in cmake
+
+    assert "max-page-size=16384" in cmake
+    assert "common-page-size=16384" in cmake
+    assert "[target.aarch64-linux-android]" in cargo_config
+    assert "[target.x86_64-linux-android]" in cargo_config
+    assert "max-page-size=16384" in cargo_config
+
+    assert "run_gradle_android_native_dependencies" in dev_script
+    assert 'if env.get("AURAW_NATIVE_DEPS_READY") != "1"' in dev_script
+    assert "python3 -m venv" not in dev_script

@@ -101,10 +101,28 @@ def aurawUseLegacyPackaging = requireMetadata("android_use_legacy_packaging", Bo
 def aurawVersionCode = providers.gradleProperty("aurawVersionCode")
     .getOrElse("1")
     .toInteger()
-def rustAbi = providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")
+
+def requestedAbis = providers.gradleProperty("aurawAbis")
+    .orElse(providers.gradleProperty("aurawAbi"))
+    .getOrElse("arm64-v8a,x86_64")
+def aurawAbis = requestedAbis
+    .split(",")
+    .collect { it.trim() }
+    .findAll { !it.isEmpty() }
+    .unique()
+def supportedAbis = ["arm64-v8a", "x86_64"] as Set
+if (aurawAbis.isEmpty() || !supportedAbis.containsAll(aurawAbis)) {
+    throw new GradleException(
+        "aurawAbis must contain arm64-v8a and/or x86_64; found '${requestedAbis}'"
+    )
+}
+
+def nativeStageRoot = new File(repositoryRoot, "android/native")
+// Lensfun's XML database is architecture-independent. All ABI builds install
+// the same pinned database, so package the copy staged by the first requested ABI.
 def lensfunAssets = new File(
-    repositoryRoot,
-    "android/native/lensfun/${rustAbi}/apk-assets"
+    nativeStageRoot,
+    "lensfun/${aurawAbis.first()}/apk-assets"
 )
 
 android {
@@ -120,7 +138,19 @@ android {
         versionCode aurawVersionCode
         versionName "0.1.0"
         ndk {
-            abiFilters((providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")))
+            abiFilters(*aurawAbis)
+        }
+        externalNativeBuild {
+            cmake {
+                targets "auraw_native_deps"
+                arguments(
+                    "-DAURAW_NATIVE_STAGE_ROOT=${nativeStageRoot.absolutePath}",
+                    "-DAURAW_ANDROID_MIN_SDK=${aurawMinSdk}",
+                    "-DAURAW_LIBRAW_VERSION=${aurawLibrawRevision}",
+                    "-DAURAW_LENSFUN_VERSION=${aurawLensfunRevision}",
+                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+                )
+            }
         }
     }
 
@@ -144,6 +174,13 @@ android {
         }
     }
 
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -158,23 +195,69 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += ["-Xlint:deprecation"]
 }
 
-def buildRustEnabled = providers.gradleProperty("aurawBuildRust").map { it.toBoolean() }.getOrElse(true)
+def buildRustEnabled = providers.gradleProperty("aurawBuildRust")
+    .map { it.toBoolean() }
+    .getOrElse(true)
 
-tasks.register("buildRustDebug", Exec) {
-    workingDir repositoryRoot
-    commandLine "python3", new File(repositoryRoot, "scripts/dev.py"), "build-android", rustAbi, "debug"
+def abiTaskSuffix = { String abi ->
+    abi.split(/[-_]/)
+        .collect { token -> token.substring(0, 1).toUpperCase() + token.substring(1) }
+        .join("")
 }
 
-tasks.register("buildRustRelease", Exec) {
-    workingDir repositoryRoot
-    commandLine "python3", new File(repositoryRoot, "scripts/dev.py"), "build-android", rustAbi, "release"
+def debugRustTasks = []
+def releaseRustTasks = []
+aurawAbis.each { abi ->
+    def suffix = abiTaskSuffix(abi)
+    debugRustTasks << tasks.register("buildRustDebug${suffix}", Exec) {
+        dependsOn("externalNativeBuildDebug")
+        workingDir repositoryRoot
+        environment "AURAW_NATIVE_DEPS_READY", "1"
+        commandLine "python3", new File(repositoryRoot, "scripts/dev.py"),
+            "build-android", abi, "debug"
+    }
+    releaseRustTasks << tasks.register("buildRustRelease${suffix}", Exec) {
+        dependsOn("externalNativeBuildRelease")
+        workingDir repositoryRoot
+        environment "AURAW_NATIVE_DEPS_READY", "1"
+        commandLine "python3", new File(repositoryRoot, "scripts/dev.py"),
+            "build-android", abi, "release"
+    }
 }
 
+// Cargo shares a target directory and build-script outputs. Serialize ABI
+// invocations while still letting AGP build both CMake ABIs in parallel.
+for (int index = 1; index < debugRustTasks.size(); index++) {
+    debugRustTasks[index].configure { mustRunAfter(debugRustTasks[index - 1]) }
+    releaseRustTasks[index].configure { mustRunAfter(releaseRustTasks[index - 1]) }
+}
+
+tasks.register("buildRustDebug") {
+    dependsOn(debugRustTasks)
+}
+tasks.register("buildRustRelease") {
+    dependsOn(releaseRustTasks)
+}
+
+// The XML asset directory is produced by the external native build, and the
+// Rust cdylib must exist before AGP merges JNI libraries. Wiring at merge time
+// avoids a preBuild <-> externalNativeBuild dependency cycle. Native work is
+// omitted when aurawBuildRust=false so JVM-only unit tests remain host-only.
 if (buildRustEnabled) {
-    tasks.matching { it.name == "preDebugBuild" }.configureEach {
+    tasks.matching { it.name == "mergeDebugAssets" }.configureEach {
+        dependsOn("externalNativeBuildDebug")
+    }
+    tasks.matching { it.name == "mergeReleaseAssets" }.configureEach {
+        dependsOn("externalNativeBuildRelease")
+    }
+    tasks.matching {
+        it.name == "mergeDebugNativeLibs" || it.name == "mergeDebugJniLibFolders"
+    }.configureEach {
         dependsOn("buildRustDebug")
     }
-    tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    tasks.matching {
+        it.name == "mergeReleaseNativeLibs" || it.name == "mergeReleaseJniLibFolders"
+    }.configureEach {
         dependsOn("buildRustRelease")
     }
 }

@@ -1,2 +1,16 @@
 [alias]
 xtask = "run --quiet --locked --package xtask --"
+
+# NDK r28 already defaults to flexible 16 KiB ELF LOAD alignment. Keep the
+# linker contract explicit for the Rust cdylib because it is the final JNI .so.
+[target.aarch64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
+
+[target.x86_64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]

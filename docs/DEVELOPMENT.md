@@ -13,7 +13,7 @@ python3 scripts/dev.py check-all
 python3 scripts/dev.py bench --enforce-budget
 python3 scripts/dev.py icons
 python3 scripts/dev.py corpus
-python3 scripts/dev.py build-android arm64-v8a release
+./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 python3 scripts/dev.py smoke-regression
 ```
 
