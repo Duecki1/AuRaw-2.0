@@ -188,93 +188,6 @@ impl ColorGrading {
     }
 }
 
-/// Historical process milestones are retained for decoding old sidecars and
-/// documenting shader changes. Runtime rendering is canonical: every supported
-/// edit is migrated to `CURRENT_PROCESS_VERSION` before it can be rendered,
-/// copied, or saved, so identical adjustment values cannot select different
-/// image-processing graphs.
-pub const LEGACY_SCENE_DISPLAY_PROCESS_VERSION: u32 = 12;
-pub const SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION: u32 = 13;
-pub const SENSOR_DENOISE_PROCESS_VERSION: u32 = 14;
-pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;
-/// Process 17 separates the photographic roles of the two low-tone controls:
-/// Shadows is a bounded scene-EV zone remap with an actual-pixel-aware selector,
-/// while Blacks is a view-adjacent display-linear toe remap. This prevents DCP
-/// ProfileToneCurve/sigmoid compression from consuming most of the black-point
-/// authority and keeps low-key/high-key pivots from degenerating.
-pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;
-/// Process 18 calibrates the basic-control endpoints against isolated Adobe
-/// Camera Raw/Lightroom exports. Shadows becomes a monotone low-pass tonal
-/// range instead of a band-pass zone (so the deepest visible detail receives
-/// full authority), and Dehaze uses a bounded ambient-relative transfer that
-/// cannot collapse broad midtone ranges to black.
-pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;
-/// Process 19 calibrates the flat-field RAW-noise estimate and gives new or
-/// previously-default edits per-capture Detail starting values. Capture
-/// sharpening also uses that sensor model as a noise threshold, so its Amount
-/// 40 default restores acutance without crispening high-ISO speckle.
-pub const ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION: u32 = 19;
-/// Process 20 replaces sparse-ring chroma averaging with a dense, staged
-/// camera-space wavelet shrinker. It decorrelates the two opponent axes,
-/// preserves the camera signal exactly, and removes demosaic-correlated colour
-/// clouds across six multiscale passes.
-pub const MULTISCALE_COLOR_DENOISE_PROCESS_VERSION: u32 = 20;
-/// Process 21 adds a variance-normalized opponent-color guide to every
-/// multiscale chroma pass. Isoluminant color boundaries no longer look flat to
-/// the denoiser, preventing broad-scale chroma from bleeding into adjacent
-/// neutral or differently colored regions.
-pub const EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 21;
-/// Process 22 tracks the falling residual noise variance across the staged
-/// chroma wavelet passes and uses a profiled-noise dead zone in the color
-/// guide. High Color values can therefore reject subtle dark color boundaries
-/// without blocking the smoothing of stochastic chroma noise.
-pub const SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 22;
-/// Process 23 calibrates the default vignette shape against Lightroom while
-/// retaining the optional Midpoint, Roundness, Feather, and Highlights
-/// controls. Its final-frame geometry follows darktable's auto-ratio
-/// convention, so the default falloff is stable across aspect ratios.
-pub const LIGHTROOM_VIGNETTE_PROCESS_VERSION: u32 = 23;
-/// RawNIND AI denoise is a persisted, mutually-exclusive RAW reconstruction
-/// choice. Derived pixels live in a rebuildable, source-validated disk cache.
-pub const AI_DENOISE_PROCESS_VERSION: u32 = 24;
-/// Bayer RawNIND output follows darktable's production remosaic contract
-/// before entering AuRaw's ordinary demosaic stage.
-pub const AI_DENOISE_REMOSAIC_PROCESS_VERSION: u32 = 25;
-/// Process 26 is calibrated from aligned 16-bit AdobeRGB Lightroom endpoints.
-/// It narrows Highlights/Whites to their measured tonal zones, gives Contrast
-/// a photographic black-end response, bounds Dehaze's tone/chroma authority,
-/// and balances the presence and color-control endpoints without weakening the
-/// scene-linear, hue-preserving processing guarantees.
-pub const LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION: u32 = 26;
-/// Process 27 matches RawNIND's daylight-WB preprocessing, reconstructs
-/// clipped highlights before the scene boundary, overlap-blends every tile,
-/// and persists a versioned derived result for instant reopen.
-pub const AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION: u32 = 27;
-/// Process 28 retains Bayer RawNIND output as a denoised sensor mosaic. The
-/// ordinary full-frame highlight reconstruction and demosaic therefore remain
-/// live for every edit/export instead of baking tile-local RGB (and its false
-/// highlight colour) into the derived cache.
-pub const AI_DENOISE_CFA_CACHE_PROCESS_VERSION: u32 = 28;
-/// Process 29 replaces the former highlight solver with darktable's inpaint
-/// opposed method. Loading any supported history selects this method so older
-/// edits cannot retain a superseded reconstruction choice.
-pub const INPAINT_OPPOSED_PROCESS_VERSION: u32 = 29;
-/// Process 30 makes the Basic Contrast control the darktable sigmoid
-/// middle-grey slope itself. Older sidecars fold their retired -100..100
-/// pre-sigmoid contrast curve into the sigmoid parameter during migration.
-pub const SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 30;
-/// Process 31 restores the public Contrast domain to -100..100 while mapping
-/// it internally to darktable's sigmoid slope, and adopts darktable's default
-/// per-channel sigmoid colour processing.
-pub const PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 31;
-/// Process 32 calibrates the photographic Basic Contrast endpoints to
-/// darktable's 0.7..3.0 sigmoid slider soft range around its 1.5 default,
-/// rather than the module's technical 0.1..10.0 hard limits.
-pub const PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 32;
-/// Process 33 makes global white balance use darktable's camera-coefficient
-/// temperature/tint model and applies the selected multipliers before demosaic.
-pub const DARKTABLE_WHITE_BALANCE_PROCESS_VERSION: u32 = 33;
-pub const CURRENT_PROCESS_VERSION: u32 = DARKTABLE_WHITE_BALANCE_PROCESS_VERSION;
 const DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN: f32 = 0.7;
 const DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX: f32 = 3.0;
 /// Kelvin limits presented by the global white-balance control. These match
@@ -328,10 +241,6 @@ pub const HSL_HUE_LIMIT: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ExposureParams {
-    /// Serialized process marker. Supported historical values are accepted at
-    /// the sidecar boundary, then immediately canonicalized to the current
-    /// renderer so this field never changes image behaviour at runtime.
-    pub process_version: u32,
     /// Additional normalized sensor-space black-point correction. It is applied
     /// per CFA plane before white balance and demosaic, and is deliberately
     /// separate from the creative `blacks` control in the Basic panel.
@@ -392,7 +301,7 @@ pub struct ExposureParams {
     pub highlight_reconstruction: f32,
 
     // Basic tonal controls. Highlights/Whites and Shadows are scene-referred;
-    // Process 17+ Blacks is a view-adjacent display-linear toe/endpoint remap.
+    // Blacks is a view-adjacent display-linear toe/endpoint remap.
     pub highlights: f32,
     pub shadows: f32,
     pub whites: f32,
@@ -435,11 +344,6 @@ pub struct ExposureParams {
     pub color_grading: ColorGrading,
 }
 
-/// Historical renderer-only exposure lift used by process versions 8 and 9.
-/// New edits never receive this implicitly; it exists only so older sidecars
-/// can migrate their rendered brightness into the explicit Exposure value.
-pub const LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV: f32 = 0.7;
-
 pub(crate) fn sigmoid_contrast_from_percent(contrast: f32) -> f32 {
     let amount = if contrast.is_finite() {
         (contrast / 100.0).clamp(-1.0, 1.0)
@@ -459,80 +363,7 @@ pub(crate) fn sigmoid_contrast_from_percent(contrast: f32) -> f32 {
     }
 }
 
-fn percent_from_sigmoid_contrast(sigmoid_contrast: f32) -> f32 {
-    let default = SigmoidParams::default().contrast;
-    let slope = if sigmoid_contrast.is_finite() {
-        sigmoid_contrast.clamp(
-            DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN,
-            DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX,
-        )
-    } else {
-        default
-    };
-    let percent = if slope >= default {
-        100.0 * (slope / default).ln() / (DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX / default).ln()
-    } else {
-        -100.0 * (slope / default).ln() / (DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN / default).ln()
-    };
-    percent.clamp(-100.0, 100.0)
-}
-
-fn combined_legacy_sigmoid_contrast(sigmoid_contrast: f32, contrast: f32) -> f32 {
-    let base = if sigmoid_contrast.is_finite() {
-        sigmoid_contrast.clamp(0.1, 10.0)
-    } else {
-        SigmoidParams::default().contrast
-    };
-    let default = SigmoidParams::default().contrast;
-    (base * sigmoid_contrast_from_percent(contrast) / default).clamp(
-        DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN,
-        DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX,
-    )
-}
-
 impl ExposureParams {
-    pub fn migrate_to_current_process(&mut self) {
-        let source_process_version = self.process_version;
-        if source_process_version <= INPAINT_OPPOSED_PROCESS_VERSION {
-            let effective = combined_legacy_sigmoid_contrast(self.sigmoid.contrast, self.contrast);
-            self.contrast = percent_from_sigmoid_contrast(effective);
-        } else if source_process_version == SIGMOID_CONTRAST_PROCESS_VERSION {
-            // Process 30 briefly exposed darktable's backend 0.1..10 value in
-            // the Basic UI. Convert it into the photographic percentage range;
-            // expert values outside 0.7..3.0 land on the nearest endpoint.
-            self.contrast = percent_from_sigmoid_contrast(self.sigmoid.contrast);
-        }
-        if source_process_version <= SIGMOID_CONTRAST_PROCESS_VERSION {
-            self.sigmoid.contrast = SigmoidParams::default().contrast;
-            self.sigmoid.color_processing = SigmoidColorProcessing::PerChannel;
-        }
-
-        // Versions 8 and 9 stored a zero-centered Exposure control while the
-        // renderer secretly added +0.7 EV. Preserve that brightness by moving
-        // the hidden lift into the visible value once. Every supported process
-        // version then adopts the current graph and formulas. This deliberately
-        // favors one deterministic interpretation of an adjustment set over
-        // retaining multiple image-dependent compatibility renderers.
-        match self.process_version {
-            0..=7 => {
-                self.process_version = CURRENT_PROCESS_VERSION;
-            }
-            8 | 9 => {
-                self.exposure += LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV;
-                self.process_version = CURRENT_PROCESS_VERSION;
-            }
-            10..=CURRENT_PROCESS_VERSION => {
-                self.process_version = CURRENT_PROCESS_VERSION;
-            }
-            // Preserve unknown future versions so the sidecar boundary can
-            // reject them rather than reinterpret them with older formulas.
-            _ => {}
-        }
-        if self.process_version == CURRENT_PROCESS_VERSION {
-            self.highlight_method = HighlightReconstructionMethod::InpaintOpposed;
-        }
-    }
-
     pub fn sanitize_tone_curves(&mut self) {
         self.tone_curve.sanitize();
         self.tone_curve_red.sanitize();
@@ -550,27 +381,11 @@ impl ExposureParams {
     pub fn scene_referred_default() -> Self {
         Self::default()
     }
-
-    /// Detail settings used by process 18 and earlier before per-capture
-    /// defaults existed. This lets migration improve untouched defaults while
-    /// preserving any image where the photographer changed a Detail control.
-    pub(crate) fn has_legacy_default_detail_settings(&self) -> bool {
-        self.chroma_denoise == 0.0
-            && self.luminance_denoise == 0.0
-            && self.denoise_detail == default_denoise_detail()
-            && self.denoise_quality == DenoiseQuality::Balanced
-            && !self.ai_denoise_enabled
-            && self.sharpen_amount == default_sharpen_amount()
-            && self.sharpen_radius == default_sharpen_radius()
-            && self.sharpen_detail == default_sharpen_detail()
-            && self.sharpen_masking == 0.0
-    }
 }
 
 impl Default for ExposureParams {
     fn default() -> Self {
         Self {
-            process_version: CURRENT_PROCESS_VERSION,
             black_point: 0.0,
             exposure: 0.0,
             contrast: 0.0,
@@ -644,12 +459,10 @@ mod tests {
     use super::{
         sigmoid_contrast_from_percent, temperature_kelvin_from_offset,
         temperature_offset_from_kelvin, DemosaicMode, ExposureParams,
-        HighlightReconstructionMethod, PointCurve, CURRENT_PROCESS_VERSION,
-        INPAINT_OPPOSED_PROCESS_VERSION, LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
-        MAX_TEMPERATURE_KELVIN, MIN_TEMPERATURE_KELVIN, PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION,
-        SIGMOID_CONTRAST_PROCESS_VERSION,
+        HighlightReconstructionMethod, PointCurve, MAX_TEMPERATURE_KELVIN,
+        MIN_TEMPERATURE_KELVIN,
     };
-    use crate::pipeline::{SigmoidColorProcessing, SigmoidParams};
+    use crate::pipeline::SigmoidParams;
 
     #[test]
     fn kelvin_ui_round_trips_through_the_serialized_mired_offset() {
@@ -679,7 +492,6 @@ mod tests {
     #[test]
     fn global_exposure_defaults_to_zero_in_the_edit_model() {
         let neutral = ExposureParams::default();
-        assert_eq!(neutral.process_version, CURRENT_PROCESS_VERSION);
         assert_eq!(neutral.exposure, 0.0);
         assert_eq!(neutral.black_point, 0.0);
 
@@ -692,29 +504,10 @@ mod tests {
         assert_eq!(rendition.tint, 0.0);
         assert_eq!(rendition.saturation, 0.0);
         assert_eq!(rendition.vibrance, 0.0);
-    }
-
-    #[test]
-    fn every_supported_process_version_uses_the_current_renderer() {
-        for process_version in 0..=CURRENT_PROCESS_VERSION {
-            let mut previous = ExposureParams {
-                process_version,
-                highlight_method: HighlightReconstructionMethod::Off,
-                shadows: 42.0,
-                blacks: -31.0,
-                luminance_denoise: 55.0,
-                ..ExposureParams::default()
-            };
-            previous.migrate_to_current_process();
-            assert_eq!(previous.process_version, CURRENT_PROCESS_VERSION);
-            assert_eq!(previous.shadows, 42.0);
-            assert_eq!(previous.blacks, -31.0);
-            assert_eq!(previous.luminance_denoise, 55.0);
-            assert_eq!(
-                previous.highlight_method,
-                HighlightReconstructionMethod::InpaintOpposed
-            );
-        }
+        assert_eq!(
+            rendition.highlight_method,
+            HighlightReconstructionMethod::InpaintOpposed
+        );
     }
 
     #[test]
@@ -744,52 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_backend_exposure_is_migrated_into_the_visible_control() {
-        let mut pre_backend = ExposureParams {
-            process_version: 7,
-            exposure: LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV,
-            ..ExposureParams::default()
-        };
-        pre_backend.migrate_to_current_process();
-        assert_eq!(pre_backend.process_version, CURRENT_PROCESS_VERSION);
-        assert_eq!(
-            pre_backend.exposure,
-            LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV
-        );
-
-        let mut hidden_backend = ExposureParams {
-            process_version: 9,
-            exposure: 0.0,
-            ..ExposureParams::default()
-        };
-        hidden_backend.migrate_to_current_process();
-        assert_eq!(hidden_backend.process_version, CURRENT_PROCESS_VERSION);
-        assert_eq!(
-            hidden_backend.exposure,
-            LEGACY_GLOBAL_EXPOSURE_BACKEND_OFFSET_EV
-        );
-
-        let mut previous_tone_formula = ExposureParams {
-            process_version: 10,
-            exposure: 0.35,
-            contrast: 42.0,
-            ..ExposureParams::default()
-        };
-        previous_tone_formula.migrate_to_current_process();
-        assert_eq!(
-            previous_tone_formula.process_version,
-            CURRENT_PROCESS_VERSION
-        );
-        assert_eq!(previous_tone_formula.exposure, 0.35);
-        assert!((previous_tone_formula.contrast - 42.0).abs() < 1e-4);
-        assert_eq!(previous_tone_formula.sigmoid.contrast, 1.5);
-        assert_eq!(
-            previous_tone_formula.sigmoid.color_processing,
-            SigmoidColorProcessing::PerChannel
-        );
-    }
-
-    #[test]
     fn contrast_percent_endpoints_map_to_photographic_darktable_slopes() {
         for (percent, expected) in [(-100.0, 0.7), (0.0, 1.5), (100.0, 3.0)] {
             assert!((sigmoid_contrast_from_percent(percent) - expected).abs() < 1e-5);
@@ -799,65 +546,9 @@ mod tests {
     }
 
     #[test]
-    fn process_thirty_direct_contrast_migrates_back_to_percent() {
-        for (slope, expected_percent) in [(0.7, -100.0), (1.5, 0.0), (3.0, 100.0)] {
-            let mut exposure = ExposureParams {
-                process_version: SIGMOID_CONTRAST_PROCESS_VERSION,
-                ..ExposureParams::default()
-            };
-            exposure.sigmoid.contrast = slope;
-            exposure.sigmoid.color_processing = SigmoidColorProcessing::RgbRatio;
-            exposure.migrate_to_current_process();
-            assert!((exposure.contrast - expected_percent).abs() < 1e-4);
-            assert_eq!(exposure.sigmoid.contrast, 1.5);
-            assert_eq!(
-                exposure.sigmoid.color_processing,
-                SigmoidColorProcessing::PerChannel
-            );
-        }
-    }
-
-    #[test]
-    fn process_thirty_extreme_module_limits_clamp_to_basic_endpoints() {
-        for (slope, expected_percent) in [(0.1, -100.0), (10.0, 100.0)] {
-            let mut exposure = ExposureParams {
-                process_version: SIGMOID_CONTRAST_PROCESS_VERSION,
-                ..ExposureParams::default()
-            };
-            exposure.sigmoid.contrast = slope;
-            exposure.migrate_to_current_process();
-            assert_eq!(exposure.contrast, expected_percent);
-        }
-    }
-
-    #[test]
-    fn process_thirty_one_keeps_the_visible_percent_and_adopts_the_new_curve() {
-        let mut exposure = ExposureParams {
-            process_version: PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION,
-            contrast: 100.0,
-            ..ExposureParams::default()
-        };
-        exposure.migrate_to_current_process();
-        assert_eq!(exposure.process_version, CURRENT_PROCESS_VERSION);
-        assert_eq!(exposure.contrast, 100.0);
-        assert_eq!(sigmoid_contrast_from_percent(exposure.contrast), 3.0);
-    }
-
-    #[test]
-    fn current_serialization_keeps_percent_contrast() {
-        let current = serde_json::to_value(ExposureParams::default()).expect("serialize exposure");
-        assert_eq!(current["contrast"], 0.0);
-        assert_eq!(current["sigmoid"]["contrast"], 1.5);
-
-        let mut old = current;
-        old["process_version"] = INPAINT_OPPOSED_PROCESS_VERSION.into();
-        old["contrast"] = 100.0.into();
-        let mut decoded: ExposureParams =
-            serde_json::from_value(old).expect("decode process-29 exposure");
-        assert_eq!(decoded.contrast, 100.0);
-        decoded.migrate_to_current_process();
-        assert_eq!(decoded.process_version, CURRENT_PROCESS_VERSION);
-        assert!((decoded.contrast - 100.0).abs() < 1e-4);
-        assert_eq!(decoded.sigmoid.contrast, 1.5);
+    fn serialization_contains_only_modern_adjustment_fields() {
+        let serialized = serde_json::to_value(ExposureParams::default()).expect("serialize exposure");
+        assert_eq!(serialized["contrast"], 0.0);
+        assert_eq!(serialized["sigmoid"]["contrast"], 1.5);
     }
 }

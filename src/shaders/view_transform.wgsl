@@ -269,7 +269,6 @@ fn apply_color_grading_wheels(
     return adjusted;
 }
 
-
 fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
     let count = min(scene_tone_uniforms.mask_counts.x, 32u);
@@ -389,116 +388,18 @@ fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     return rgb;
 }
 
-
-
-fn profile_tone_scene_shoulder_knee() -> f32 {
-    // In the explicit-domain graph, tone statistics are measured after camera
-    // characterization plus fixed rendering exposure, before LookTable and the
-    // view transform. Legacy processes retain their historical profiled stats.
-    // Reapply only live user Exposure so the shoulder follows scene headroom
-    // without making Exposure trigger a new analysis pass.
-    let user_exposure_ev = adaptive_tone_user_exposure_ev();
-    let p95_over_white_ev = tone_stats.percentiles_0.w
-        + user_exposure_ev
-        + log2(SCENE_MIDDLE_GREY);
-    let p995_over_white_ev = tone_stats.percentiles_1.x
-        + user_exposure_ev
-        + log2(SCENE_MIDDLE_GREY);
-
-    // Broad bright content (p95) should pull the knee down sooner than a tiny
-    // isolated specular (p99.5). The percentile gap is therefore treated as a
-    // specular-isolation signal: a large gap delays the knee, protecting bright
-    // skin, flowers and sunsets from being flattened just because a few pixels
-    // sit far above display white.
-    let broad_highlight_pressure = smoothstep(-0.55, 1.25, p95_over_white_ev);
-    let peak_headroom_pressure = smoothstep(0.0, 3.5, p995_over_white_ev);
-    let specular_gap_ev = max(
-        tone_stats.percentiles_1.x - tone_stats.percentiles_0.w,
-        0.0,
-    );
-    let isolated_specular = smoothstep(0.65, 3.0, specular_gap_ev);
-    let peak_weight = peak_headroom_pressure * mix(1.0, 0.38, isolated_specular);
-    let scene_pressure = clamp(
-        broad_highlight_pressure * 0.74 + peak_weight * 0.26,
-        0.0,
-        1.0,
-    );
-
-    // Low-headroom scenes keep a late, nearly invisible shoulder. Scenes with
-    // genuinely broad highlight headroom progressively move the knee earlier,
-    // reserving enough display range for clouds and high-key texture. This is
-    // scene-adaptive rather than a universal fixed knee.
-    return mix(0.91, 0.62, scene_pressure);
-}
-
-fn profile_tone_display_shoulder(rgb: vec3<f32>) -> vec3<f32> {
-    let positive = gamut_project_nonnegative_rec2020(rgb);
-    let luma = safe_luma(positive);
-    if luma <= 1e-8 {
-        return vec3<f32>(0.0);
-    }
-
-    // The DCP ProfileToneCurve already supplies the camera/profile's intended
-    // midtone character. Add only a restrained display finish: a gentle toe
-    // deepens blacks without pinning shadow detail to zero, while a luminance-
-    // driven, scene-adaptive shoulder reserves display headroom according to
-    // the actual bright-end distribution. Using luminance instead of the
-    // brightest RGB channel avoids darkening saturated colors unnecessarily.
-    let toe_weight = 1.0 - smoothstep(0.018, 0.22, luma);
-    var mapped_luma = luma * mix(1.0, 0.91, toe_weight);
-    let shoulder_knee = profile_tone_scene_shoulder_knee();
-    if mapped_luma > shoulder_knee {
-        let distance = mapped_luma - shoulder_knee;
-        mapped_luma = shoulder_knee
-            + distance / (1.0 + distance / (1.0 - shoulder_knee));
-    }
-
-    // Preserve the scene/profile hue with one scalar luminance gain, then let
-    // the same perceptual boundary service used by the editing nodes approach
-    // the display gamut with a soft chroma knee. No per-channel view clamp.
-    let ratio_preserved = positive * (mapped_luma / luma);
-    return perceptual_gamut_compress_unit_rec2020(ratio_preserved);
-}
-
-fn apply_dcp_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
-    // ProfileToneCurve is a component of this one selected view operator, not
-    // an upstream scene edit. The shoulder completes its HDR-to-display range
-    // mapping without stacking the configurable sigmoid on top.
-    let profile_view = apply_profile_view_tone(scene_rgb);
-    return profile_tone_display_shoulder(profile_view);
-}
-
-fn apply_explicit_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
+fn apply_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
     // Optional creative profile look is the final scene-domain operation. It is
     // deliberately downstream of H/S/W/B, Contrast, curves, presence, mixer,
     // and grading so those controls mean the same thing across camera profiles.
     let looked = apply_optional_profile_look(scene_rgb);
     let view_input = gamut_project_nonnegative_rec2020(looked);
 
-    // Select exactly one view-transform path. A default DCP rendition uses its
-    // ProfileToneCurve inside the DCP-aware view node; a custom/user sigmoid is
-    // the complete view transform and therefore does not stack the profile tone
-    // curve ahead of it. This removes the previous double-tone behavior.
-    if (camera_uniforms.process_info.y & 1u) != 0u {
-        return apply_dcp_view_transform(view_input);
-    }
     return apply_sigmoid_view_transform(view_input);
-}
-
-fn apply_legacy_view_node(scene_rgb: vec3<f32>) -> vec3<f32> {
-    // Process <=12 compatibility: LookTable/ProfileToneCurve have already run
-    // upstream. Preserve the historical final view selection byte-for-byte.
-    if (camera_uniforms.process_info.y & 1u) != 0u {
-        return profile_tone_display_shoulder(scene_rgb);
-    }
-    return darktable_sigmoid(scene_rgb);
 }
 
 fn apply_local_display_blacks(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
-    if camera_uniforms.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
-        return rgb;
-    }
     let count = min(scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = mask_data[index].metadata;
@@ -529,16 +430,9 @@ fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
         scene_tone_uniforms.grade_options,
     );
     let graded = apply_local_color_grading(pos, globally_graded);
-    var display_linear = vec3<f32>(0.0);
-    if uses_explicit_scene_display_domains() {
-        display_linear = apply_explicit_view_node(graded);
-    } else {
-        display_linear = apply_legacy_view_node(graded);
-    }
-    if camera_uniforms.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
-        display_linear = apply_display_blacks_toe_value(display_linear, scene_tone_uniforms.basic_tone.w);
-        display_linear = apply_local_display_blacks(pos, display_linear);
-    }
+    var display_linear = apply_view_transform(graded);
+    display_linear = apply_display_blacks_toe_value(display_linear, scene_tone_uniforms.basic_tone.w);
+    display_linear = apply_local_display_blacks(pos, display_linear);
     display_linear = apply_vignette(pos, display_linear);
     textureStore(display_linear_out, pos, vec4<f32>(display_linear, 1.0));
     // Output ICC/device encoding is a separate display-domain operation, not a

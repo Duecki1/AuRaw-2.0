@@ -2,7 +2,6 @@
 // finishing shader so Bayer and X-Trans can reuse their native reconstructed
 // reference textures without adding another full-frame intermediate.
 
-const SENSOR_DENOISE_PROCESS_VERSION: u32 = 14u;
 // Denoise runs before camera characterization, so these are deliberately
 // camera-space signal/opponent weights rather than Rec.2020 luminance. The
 // green-heavy signal axis is reversible with the two green-referenced colour

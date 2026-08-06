@@ -38,26 +38,6 @@ fn finish_apply_ca(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return out;
 }
 
-fn finish_apply_legacy_chroma_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let strength = clamp(camera_uniforms.chroma_denoise, 0.0, 1.0);
-    if strength <= 1e-6 { return rgb; }
-    var sum = vec2<f32>(0.0);
-    var weight_sum = 0.0;
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            let sample = finish_reference_at(pos + vec2<i32>(dx, dy));
-            let spatial = 1.0 / (1.0 + f32(dx * dx + dy * dy));
-            let range = 1.0 / (1.0 + 24.0 * abs(sample.g - rgb.g));
-            let weight = spatial * range;
-            sum += vec2<f32>(sample.r - sample.g, sample.b - sample.g) * weight;
-            weight_sum += weight;
-        }
-    }
-    let center = vec2<f32>(rgb.r - rgb.g, rgb.b - rgb.g);
-    let chroma = mix(center, sum / max(weight_sum, 1e-6), strength);
-    return vec3<f32>(rgb.g + chroma.x, rgb.g, rgb.g + chroma.y);
-}
-
 fn finish_apply_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let signal_strength = nr_perceptual_strength(camera_uniforms.noise_options.x, 3.2);
     if signal_strength <= 1e-6 { return rgb; }

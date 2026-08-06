@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an analytical Process-18 Shadows/Blacks color-ramp report.
+"""Generate an analytical Shadows/Blacks color-ramp report.
 
 This is a policy/reference model, not executed WGSL. It mirrors the scalar
 low-tone transfer functions and uses a luminance-preserving approximation for

@@ -285,7 +285,7 @@ impl ResultCacheManifest {
         let version = read_u32(8);
         anyhow::ensure!(
             version == RESULT_CACHE_VERSION,
-            "AI-denoise cache process version {version} is stale"
+            "AI-denoise cache format version {version} is stale"
         );
         Ok(Self {
             width: read_u32(12),

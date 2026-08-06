@@ -240,13 +240,7 @@ fn xtrans_demosaic_finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         camera_rgb = xt_reference_false_color_guard(pos, reference);
     }
-    if camera_uniforms.process_info.x >= SENSOR_DENOISE_PROCESS_VERSION || camera_uniforms.noise_options.x > 1e-6 {
-        camera_rgb = finish_apply_sensor_denoise(pos, camera_rgb);
-        camera_rgb = finish_apply_ca(pos, camera_rgb);
-    } else {
-        // Preserve process-13-and-earlier chroma-NR rendering for existing edits.
-        camera_rgb = finish_apply_ca(pos, camera_rgb);
-        camera_rgb = finish_apply_legacy_chroma_denoise(pos, camera_rgb);
-    }
+    camera_rgb = finish_apply_sensor_denoise(pos, camera_rgb);
+    camera_rgb = finish_apply_ca(pos, camera_rgb);
     textureStore(xtrans_scene_write, pos, vec4<f32>(camera_rgb, 1.0));
 }

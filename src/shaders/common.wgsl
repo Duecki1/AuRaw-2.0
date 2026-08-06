@@ -77,10 +77,11 @@ struct CameraUniforms {
     // HueSat encoding, LookTable encoding, default exposure EV bits, and the
     // live DCP dual-illuminant interpolation weight as f32 bits.
     profile_flags: vec4<u32>,
-    // Processing version, selection flags, user exposure bits and render-graph
-    // contract flags. Kept in the camera/common block because all graph stages
-    // may need to branch on the process contract.
-    process_info: vec4<u32>,
+    // Runtime camera-stage switches and cached user Exposure bits.
+    ai_denoise_enabled: u32,
+    user_exposure_bits: u32,
+    _pad_camera_0: u32,
+    _pad_camera_1: u32,
 }
 
 struct SceneToneUniforms {
@@ -159,12 +160,6 @@ struct EffectsUniforms {
 
 @group(0) @binding(33) var<storage, read> mask_data: array<MaskData>;
 
-// Render-graph contract flags shared by tone analysis and output shaders.
-const RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY: u32 = 1u;
-
-fn uses_explicit_scene_display_domains() -> bool {
-    return (camera_uniforms.process_info.w & RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY) != 0u;
-}
 
 @group(0) @binding(1) var raw_tex: texture_2d<u32>;
 @group(0) @binding(2) var color_tex: texture_2d<u32>;

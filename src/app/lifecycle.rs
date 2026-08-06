@@ -2162,11 +2162,7 @@ impl AurawApp {
                                     "Loaded edits were migrated to the current sidecar format."
                                         .to_owned()
                                 });
-                                let use_adaptive_detail_defaults = loaded.process_migrated
-                                    && loaded
-                                        .edits
-                                        .exposure
-                                        .has_legacy_default_detail_settings();
+                                let use_adaptive_detail_defaults = false;
                                 (
                                     loaded.edits.exposure,
                                     Arc::unwrap_or_clone(loaded.edits.masks),
@@ -2210,8 +2206,7 @@ impl AurawApp {
                         original_raw.apply_adaptive_detail_defaults(&mut rendered_exposure);
                     }
                     crate::diagnostics::record(format!(
-                        "Edit state: process_version={} exposure={:.3} temperature={:.3} tint={:.3} saturation={:.3} vibrance={:.3} luminance_nr={:.1} color_nr={:.1} demosaic={:?} highlight={:?} masks={}",
-                        rendered_exposure.process_version,
+                        "Edit state: exposure={:.3} temperature={:.3} tint={:.3} saturation={:.3} vibrance={:.3} luminance_nr={:.1} color_nr={:.1} demosaic={:?} highlight={:?} masks={}",
                         rendered_exposure.exposure,
                         rendered_exposure.temperature,
                         rendered_exposure.tint,
