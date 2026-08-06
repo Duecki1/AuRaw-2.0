@@ -7,10 +7,16 @@ API=26
 LIBRAW_VERSION=0.22.1
 LIBRAW_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
 LIBRAW_ARCHIVE_SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
-EXPECTED_NDK_VERSION=28.2.13676358
+BUILD_CONTRACT="$ROOT/android/build-contract.properties"
+EXPECTED_NDK_VERSION=$(sed -n 's/^ndkVersion=//p' "$BUILD_CONTRACT")
 EXPECTED_CMAKE_VERSION=3.22.1
 LIBRAW_CMAKE_COMMIT=eb98e4325aef2ce85d2eb031c2ff18640ca616d3
 LIBRAW_CMAKE_ARCHIVE_SHA256=3cd218bf6d1254de86e27269541277fbfc5bae57a9002ce0b46fbe2a97088b43
+
+if [ "${1:-}" = "--print-build-contract" ]; then
+    printf '{"ndkVersion":"%s"}\n' "$EXPECTED_NDK_VERSION"
+    exit 0
+fi
 
 case "$ABI" in
     arm64-v8a|armeabi-v7a|x86|x86_64) ;;

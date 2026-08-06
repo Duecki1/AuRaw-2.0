@@ -97,6 +97,9 @@ fn explicit_render_graph_contracts_are_contiguous() -> bool {
         && EXPLICIT_RENDER_GRAPH[3].name == "view_transform"
 }
 
+#[cfg(test)]
+const SHADER_COMMON_FOR_TESTS: &str = include_str!("../shaders/common.wgsl");
+
 const SHADER_HIGHLIGHTS: &str = concat!(
     include_str!("../shaders/common.wgsl"),
     "\n",

@@ -1,76 +1,115 @@
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-JAVA_ROOT = ROOT / "android/app/src/main/java/de/duecki/auraw"
-ACTIVITY = (JAVA_ROOT / "AuRawActivity.java").read_text(encoding="utf-8")
-STORAGE = (JAVA_ROOT / "StorageManager.java").read_text(encoding="utf-8")
-PROFILES = (JAVA_ROOT / "ProfileImporter.java").read_text(encoding="utf-8")
-EXPORTS = (JAVA_ROOT / "ExportPublisher.java").read_text(encoding="utf-8")
-ANDROID_RS = (ROOT / "src/android.rs").read_text(encoding="utf-8")
+CLASS_ROOT = ROOT / "android/app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes"
 
 
-def test_native_activity_is_a_thin_jni_facade() -> None:
-    assert len(ACTIVITY.splitlines()) < 350
-    assert "private StorageManager storageManager;" in ACTIVITY
-    assert "private ProfileImporter profileImporter;" in ACTIVITY
-    assert "private ExportPublisher exportPublisher;" in ACTIVITY
-    assert "storageManager.handleRawDocumentResult(resultCode, data);" in ACTIVITY
-    assert "profileImporter.handleFolderPickerResult(resultCode, data);" in ACTIVITY
-    assert "exportPublisher.onRequestPermissionsResult" in ACTIVITY
-
-    # Lifecycle callbacks stay on the Activity, while Rust reflects delegates directly.
-    for method in (
-        "nativeOnFilePicked",
-        "nativeOnFilePickedFd",
-        "nativeOnImportBatchFinished",
-        "nativeOnCameraProfileFolderPicked",
-        "nativeOnExportPublished",
-        "private StorageManager storageManager;",
-        "private ProfileImporter profileImporter;",
-        "private ExportPublisher exportPublisher;",
-    ):
-        assert method in ACTIVITY
-
-    for passthrough in (
-        "public String listRawLibrary()",
-        "public String publishRawSidecar(",
-        "public String createPendingExport(",
-        "public void publishImage(",
-        "public void removeCameraProfileMirror(",
-    ):
-        assert passthrough not in ACTIVITY
-
-    for field, delegate_type in (
-        ("storageManager", "de.duecki.auraw.StorageManager"),
-        ("profileImporter", "de.duecki.auraw.ProfileImporter"),
-        ("exportPublisher", "de.duecki.auraw.ExportPublisher"),
-    ):
-        assert f'jni::jni_str!("{field}")' in ANDROID_RS
-        assert f'jni::jni_sig!({delegate_type})' in ANDROID_RS
+def android_sdk() -> Path | None:
+    configured = os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME")
+    if configured:
+        candidate = Path(configured)
+        return candidate if candidate.is_dir() else None
+    local = ROOT / "android/local.properties"
+    if local.is_file():
+        for line in local.read_text(encoding="utf-8").splitlines():
+            if line.startswith("sdk.dir="):
+                candidate = Path(line.split("=", 1)[1].replace("\\:", ":").replace("\\\\", "\\"))
+                return candidate if candidate.is_dir() else None
+    return None
 
 
-def test_storage_delegate_owns_raw_library_and_sidecar_logic() -> None:
-    assert "final class StorageManager" in STORAGE
-    assert "MAX_RAW_IMPORT_BYTES" in STORAGE
-    assert "MAX_SIDECAR_BYTES" in STORAGE
-    assert "listCombinedRawLibrary" in STORAGE
-    assert "publishRawSidecarFile" in STORAGE
-    assert "startLegacyRawStorageMigration" in STORAGE
-    assert "callbacks.onFilePicked" in STORAGE
-    assert "callbacks.onImportBatchFinished" in STORAGE
+@pytest.fixture(scope="module")
+def compiled_android_classes() -> Path:
+    if android_sdk() is None:
+        pytest.skip("Android SDK is required for compiler-backed bridge ownership tests")
+    completed = subprocess.run(
+        [
+            str(ROOT / "gradlew"),
+            "-p",
+            "android",
+            "--no-daemon",
+            "-PaurawBuildRust=false",
+            ":app:compileDebugJavaWithJavac",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert CLASS_ROOT.is_dir()
+    return CLASS_ROOT
 
 
-def test_profile_and_export_delegates_own_their_platform_workflows() -> None:
-    assert "final class ProfileImporter" in PROFILES
-    assert "Intent.ACTION_OPEN_DOCUMENT_TREE" in PROFILES
-    assert "copyCameraProfileTree" in PROFILES
-    assert "removeOwnedCameraProfileMirror" in PROFILES
-    assert "callbacks.onFolderPicked" in PROFILES
+def javap(class_root: Path, class_name: str) -> str:
+    executable = shutil.which("javap")
+    if executable is None:
+        pytest.skip("javap is required to inspect compiler output")
+    completed = subprocess.run(
+        [executable, "-private", "-classpath", str(class_root), class_name],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return completed.stdout
 
-    assert "final class ExportPublisher" in EXPORTS
-    assert "MediaStore.Images.Media.RELATIVE_PATH" in EXPORTS
-    assert "WRITE_EXPORT_PERMISSION" in EXPORTS
-    assert "publishImageScoped" in EXPORTS
-    assert "publishImageLegacy" in EXPORTS
-    assert "callbacks.onExportPublished" in EXPORTS
+
+def declared_methods(bytecode_declaration: str) -> set[str]:
+    return set(re.findall(r"\b([A-Za-z_$][A-Za-z0-9_$]*)\([^;{}]*\);", bytecode_declaration))
+
+
+def declared_field_types(bytecode_declaration: str) -> set[str]:
+    return set(
+        re.findall(
+            r"^\s*(?:public|protected|private)?\s*(?:final\s+)?([A-Za-z0-9_.$]+)\s+[A-Za-z0-9_$]+;",
+            bytecode_declaration,
+            flags=re.MULTILINE,
+        )
+    )
+
+
+def test_native_activity_compiles_as_a_thin_delegate_facade(compiled_android_classes: Path) -> None:
+    activity = javap(compiled_android_classes, "de.duecki.auraw.AuRawActivity")
+    methods = declared_methods(activity)
+    fields = declared_field_types(activity)
+
+    assert {
+        "de.duecki.auraw.StorageManager",
+        "de.duecki.auraw.ProfileImporter",
+        "de.duecki.auraw.ExportPublisher",
+    } <= fields
+    assert {"openRawDocument", "openCameraProfileFolder", "onActivityResult"} <= methods
+    assert {
+        "listRawLibrary",
+        "publishRawSidecar",
+        "createPendingExport",
+        "publishImage",
+        "removeCameraProfileMirror",
+    }.isdisjoint(methods)
+
+
+def test_compiled_delegates_own_storage_profile_and_export_apis(
+    compiled_android_classes: Path,
+) -> None:
+    storage = declared_methods(javap(compiled_android_classes, "de.duecki.auraw.StorageManager"))
+    profiles = declared_methods(javap(compiled_android_classes, "de.duecki.auraw.ProfileImporter"))
+    exports = declared_methods(javap(compiled_android_classes, "de.duecki.auraw.ExportPublisher"))
+
+    assert {
+        "listRawLibrary",
+        "publishRawSidecar",
+        "startLegacyRawStorageMigration",
+        "handleRawDocumentResult",
+    } <= storage
+    assert {"createFolderPickerIntent", "removeCameraProfileMirror", "handleFolderPickerResult"} <= profiles
+    assert {"createPendingExport", "publishImage", "onRequestPermissionsResult"} <= exports

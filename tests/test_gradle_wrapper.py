@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import configparser
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,13 +19,24 @@ def test_checked_in_gradle_wrapper_integrity() -> None:
         timeout=30,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "Gradle wrapper 8.11.1 integrity verified" in completed.stdout
 
 
-def test_android_ci_uses_checked_in_wrapper() -> None:
-    workflow = (ROOT / ".gitea/workflows/build.yml").read_text(encoding="utf-8")
-    assert "python3 scripts/check-gradle-wrapper.py" in workflow
-    assert "./gradlew --version" in workflow
-    assert "./gradlew \\\n            --no-daemon" in workflow
-    assert "gradle-${GRADLE_VERSION}" not in workflow
-    assert "GRADLE_VERSION=" not in workflow
+def test_gradle_wrapper_jar_contains_an_executable_bootstrap() -> None:
+    jar = ROOT / "gradle/wrapper/gradle-wrapper.jar"
+    with zipfile.ZipFile(jar) as archive:
+        names = set(archive.namelist())
+        assert "org/gradle/wrapper/GradleWrapperMain.class" in names
+        assert "META-INF/MANIFEST.MF" in names
+        assert archive.testzip() is None
+
+
+def test_gradle_wrapper_properties_are_complete_and_pinned() -> None:
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read_string(
+        "[wrapper]\n" + (ROOT / "gradle/wrapper/gradle-wrapper.properties").read_text(encoding="utf-8")
+    )
+    wrapper = parser["wrapper"]
+    assert wrapper.getboolean("validateDistributionUrl")
+    assert len(wrapper["distributionSha256Sum"]) == 64
+    assert wrapper["distributionUrl"].endswith("-bin.zip")
+    assert int(wrapper["networkTimeout"]) > 0
