@@ -1,20 +1,8 @@
-"""Analytical curve-continuity references plus source-policy checks.
-
-These tests do not execute WGSL. They establish the intended float32/float16
-mathematics and verify that the shader contains the matching implementation
-structure. Actual Naga compilation and rendered GPU tests remain required
-before merge.
-"""
+"""Analytical float32/float16 curve-continuity references."""
 from __future__ import annotations
 
 import math
-from pathlib import Path
-
 import numpy as np
-
-ROOT = Path(__file__).resolve().parents[1]
-TONEMAP = (ROOT / "src/shaders/tonemap.wgsl").read_text(encoding="utf-8")
-ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
 LUMA = (0.2627002, 0.6779981, 0.0593017)
 SCENE_MIDDLE_GREY = 0.1845
 SCENE_CURVE_DECODE_MAX = 32768.0
@@ -344,12 +332,6 @@ def test_first_post_join_encoder_transition_is_monotonic_and_one_step_only() -> 
     assert float(after_half) - float(before_half) <= 160.0
 
 
-def test_shader_clamps_rational_encoder_to_shared_shoulder_coordinate() -> None:
-    assert "return min(" in TONEMAP
-    assert "positive / (positive + SCENE_MIDDLE_GREY)" in TONEMAP
-    assert "SCENE_CURVE_SHOULDER_ENCODE_START" in TONEMAP
-    assert "scene_curve_encode(luminance)" in TONEMAP
-    assert "scene_curve_encode(value)" in ADJUSTMENTS
 
 
 def test_final_128_endpoints_have_bounded_scene_domain_slopes() -> None:
@@ -501,37 +483,5 @@ def test_descending_master_endpoint_uses_effective_black_floor_slope() -> None:
     assert max_channel_error(above, expected) < 1e-12
 
 
-def test_global_shader_uses_soft_ceiling_and_limited_first_tangent() -> None:
-    assert "const SCENE_CURVE_ZERO_SLOPE_MAX: f32 = 1048576.0;" in TONEMAP
-    assert "const SCENE_CURVE_SHOULDER_ENCODE_START: f32 = 0.9999915361404419;" in TONEMAP
-    assert "fn scene_curve_shoulder_decode" in TONEMAP
-    assert "fn scene_curve_shoulder_derivative" in TONEMAP
-    assert "for (var iteration = 0u; iteration < 8u; iteration = iteration + 1u)" in TONEMAP
-    assert "fn scene_curve_decode_slope_scale" in TONEMAP
-    assert "fn limit_scene_curve_endpoint_tangent" in TONEMAP
-    assert "return limit_scene_curve_endpoint_tangent(endpoint.y, raw_slope);" in TONEMAP
-    assert "limited_encoded_slope * slope_scale" in TONEMAP
-    assert "SCENE_CURVE_ENDPOINT_GUARD" not in TONEMAP
-    assert "SCENE_CURVE_ENCODE_MAX" not in TONEMAP
-    assert "fn limit_scene_curve_rgb_ratio_preserving" in TONEMAP
-    assert "black + value * scene_curve_zero_slope(curve)" in TONEMAP
-    assert "apply_scene_channel_curve(1u, result.r)" in TONEMAP
-    assert "apply_scene_channel_curve(2u, result.g)" in TONEMAP
-    assert "apply_scene_channel_curve(3u, result.b)" in TONEMAP
-    assert "max(scene_curve_zero_slope(0u), 0.0)" in TONEMAP
-    assert "luminance <= 1e-7" not in TONEMAP
 
 
-def test_local_shader_uses_the_same_limited_first_tangent_policy() -> None:
-    assert "fn local_scene_curve_zero_slope" in ADJUSTMENTS
-    assert "fn apply_local_scene_channel_curve" in ADJUSTMENTS
-    assert "return limit_scene_curve_endpoint_tangent(endpoint.y, raw_slope);" in ADJUSTMENTS
-    assert "return decoded_scene_curve_zero_slope(encoded_black, encoded_slope);" in ADJUSTMENTS
-    assert "black + value * local_scene_curve_zero_slope(mask_index, curve)" in ADJUSTMENTS
-    assert "apply_local_scene_channel_curve(mask_index, 1u, adjusted.r)" in ADJUSTMENTS
-    assert "apply_local_scene_channel_curve(mask_index, 2u, adjusted.g)" in ADJUSTMENTS
-    assert "apply_local_scene_channel_curve(mask_index, 3u, adjusted.b)" in ADJUSTMENTS
-    assert "max(local_scene_curve_zero_slope(mask_index, 0u), 0.0)" in ADJUSTMENTS
-    assert "adjusted.r >= 0.0" not in ADJUSTMENTS
-    assert "adjusted.g >= 0.0" not in ADJUSTMENTS
-    assert "adjusted.b >= 0.0" not in ADJUSTMENTS

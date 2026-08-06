@@ -197,7 +197,11 @@ def balanced(source: str) -> bool:
 
 
 def rust_struct_fields(source: str, name: str) -> list[str]:
-    match = re.search(rf"pub struct {re.escape(name)}\s*\{{(.*?)\n\}}", source, re.S)
+    match = re.search(
+        rf"(?:pub(?:\([^)]*\))?\s+)?struct {re.escape(name)}\s*\{{(.*?)\n\}}",
+        source,
+        re.S,
+    )
     if not match:
         return []
     return re.findall(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", match.group(1), re.M)
@@ -243,7 +247,10 @@ def main() -> int:
     build_rs = read("build.rs")
     common = read("src/shaders/common.wgsl")
     profile = read("src/shaders/profile.wgsl")
-    adjustments = read("src/shaders/adjustments.wgsl")
+    scene_adjustments = read("src/shaders/scene_adjustments.wgsl")
+    creative_effects = read("src/shaders/creative_effects.wgsl")
+    view_transform = read("src/shaders/view_transform.wgsl")
+    adjustments = scene_adjustments + creative_effects + view_transform
     tone_analysis = read("src/shaders/tone_analysis.wgsl")
     tonemap = read("src/shaders/tonemap.wgsl")
 
@@ -254,7 +261,9 @@ def main() -> int:
         ("build.rs", build_rs),
         ("src/shaders/common.wgsl", common),
         ("src/shaders/profile.wgsl", profile),
-        ("src/shaders/adjustments.wgsl", adjustments),
+        ("src/shaders/scene_adjustments.wgsl", scene_adjustments),
+        ("src/shaders/creative_effects.wgsl", creative_effects),
+        ("src/shaders/view_transform.wgsl", view_transform),
         ("src/shaders/tone_analysis.wgsl", tone_analysis),
         ("src/shaders/tonemap.wgsl", tonemap),
     ]:
@@ -280,9 +289,43 @@ def main() -> int:
         "build script tracks camera-profile shader changes",
     )
 
-    rust_fields = rust_struct_fields(gpu, "GpuParams")
+    rust_fields = rust_struct_fields(gpu, "GpuUniformParams")
     wgsl_fields = wgsl_struct_fields(common, "Params")
     c.check(bool(rust_fields) and rust_fields == wgsl_fields, "Rust/WGSL parameter ABI field order matches")
+    rust_mask_fields = rust_struct_fields(gpu, "MaskData")
+    wgsl_mask_fields = wgsl_struct_fields(common, "MaskData")
+    required_mask_prefix = [
+        "metadata",
+        "adjust_0",
+        "adjust_1",
+        "adjust_2",
+        "curves",
+        "grade_shadows",
+        "grade_midtones",
+        "grade_highlights",
+        "grade_global",
+        "grade_options",
+    ]
+    c.check(
+        bool(rust_mask_fields)
+        and rust_mask_fields == wgsl_mask_fields
+        and rust_mask_fields[: len(required_mask_prefix)] == required_mask_prefix,
+        "Rust/WGSL local-mask storage ABI field order matches",
+    )
+    c.check(
+        "array<vec4" not in re.search(r"struct Params\s*\{(.*?)\n\}", common, re.S).group(1)
+        and not any(field.startswith("mask_") and field != "mask_counts" for field in rust_fields),
+        "fixed local-mask arrays are absent from the uniform ABI",
+    )
+    c.check(
+        "@group(0) @binding(33) var<storage, read> mask_data: array<MaskData>;" in common
+        and "wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST" in gpu,
+        "local-mask records use a read-only WGSL storage buffer with a writable CPU upload buffer",
+    )
+    c.check(
+        re.search(r"params\.mask_(?!counts\b)", adjustments) is None,
+        "local-adjustment shaders read per-layer attributes from mask_data",
+    )
     profile_index = rust_fields.index("profile_hue_sat") if "profile_hue_sat" in rust_fields else -1
     c.check(
         profile_index >= 0
@@ -426,17 +469,18 @@ def main() -> int:
     )
     compact_gpu_tests = " ".join(gpu_tests.split())
     c.check(
-        "size_of::<super::GpuParams>(), 25136" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, sigmoid_curve), 80" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, sigmoid_power), 96" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_0), 240" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_meta), 304" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_red_0), 320" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_green_0), 400" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, tone_curve_blue_0), 480" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, profile_hue_sat), 848" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, profile_flags), 912" in compact_gpu_tests
-        and "offset_of!(super::GpuParams, process_info), 928" in compact_gpu_tests,
+        "size_of::<super::GpuUniformParams>(), 1072" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, sigmoid_curve), 80" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, sigmoid_power), 96" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, tone_curve_0), 240" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, tone_curve_meta), 304" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, tone_curve_red_0), 320" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, tone_curve_green_0), 400" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, tone_curve_blue_0), 480" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, profile_hue_sat), 848" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, profile_flags), 912" in compact_gpu_tests
+        and "offset_of!(super::GpuUniformParams, process_info), 928" in compact_gpu_tests
+        and "size_of::<super::MaskData>(), 752" in compact_gpu_tests,
         "camera-profile uniform ABI regression test covers the current metadata block",
     )
 

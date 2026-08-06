@@ -24,7 +24,9 @@ fn main() {
         "src/shaders/tone_common.wgsl",
         "src/shaders/tone_analysis.wgsl",
         "src/shaders/tonemap.wgsl",
-        "src/shaders/adjustments.wgsl",
+        "src/shaders/scene_adjustments.wgsl",
+        "src/shaders/creative_effects.wgsl",
+        "src/shaders/view_transform.wgsl",
         "src/shaders/detail_capture.wgsl",
         "src/shaders/detail_scale_space.wgsl",
         "src/shaders/regression_scene.wgsl",
@@ -33,14 +35,8 @@ fn main() {
         "src/shaders/pass3.wgsl",
         "src/shaders/pass4.wgsl",
         "src/shaders/dual_demosaic.wgsl",
-        "src/shaders/xtrans_pass1.wgsl",
-        "src/shaders/xtrans_pass2.wgsl",
-        "src/shaders/xtrans_pass3.wgsl",
-        "src/shaders/xtrans_candidate_common.wgsl",
-        "src/shaders/xtrans_pass4.wgsl",
-        "src/shaders/xtrans_pass5.wgsl",
-        "src/shaders/xtrans_pass6.wgsl",
-        "src/shaders/xtrans_pass7.wgsl",
+        "src/shaders/xtrans_demosaic.wgsl",
+        "src/shaders/xtrans_finish.wgsl",
     ] {
         println!("cargo:rerun-if-changed={shader}");
     }

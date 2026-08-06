@@ -1,3 +1,27 @@
+struct MaskData {
+    metadata: vec4<u32>,
+    adjust_0: vec4<f32>,
+    adjust_1: vec4<f32>,
+    adjust_2: vec4<f32>,
+    curves: array<vec4<f32>, 8>,
+    grade_shadows: vec4<f32>,
+    grade_midtones: vec4<f32>,
+    grade_highlights: vec4<f32>,
+    grade_global: vec4<f32>,
+    grade_options: vec4<f32>,
+    // Newer local-edit features share the same per-layer storage record so the
+    // uniform block stays compact as the local adjustment model evolves.
+    curves_red: array<vec4<f32>, 8>,
+    curves_green: array<vec4<f32>, 8>,
+    curves_blue: array<vec4<f32>, 8>,
+    hsl_hue_0: vec4<f32>,
+    hsl_hue_1: vec4<f32>,
+    hsl_saturation_0: vec4<f32>,
+    hsl_saturation_1: vec4<f32>,
+    hsl_luminance_0: vec4<f32>,
+    hsl_luminance_1: vec4<f32>,
+}
+
 struct Params {
     // Keep the scalar block at exactly 16 floats so the vec4 fields below
     // retain the same 16-byte alignment in Rust and WGSL uniforms. Two former
@@ -110,59 +134,15 @@ struct Params {
     // Camera/DNG default rendering exposure lives independently in profile_flags.z.
     process_info: vec4<u32>,
     // Local adjustments. Each mask index maps directly to one layer in the
-    // normalized R16F array texture sampled by adjustments.wgsl. y/z can hold
+    // normalized R16F array texture sampled by the adjustment shader modules.
+    // y/z can hold
     // packed UNORM16 min/max UV pairs for a viewport-local atlas and w enables
-    // that mapping. mask_meta.w is a feature bitset: bit 0 color mixer, bit 1
-    // color grading.
+    // that mapping. mask_data[index].metadata.w is a feature bitset: bit 0
+    // color mixer, bit 1 color grading.
     // x: active layers; y/z: optional source UV rectangle; w: 0 for a full
     // image atlas, 0xffffffff for a full cropped atlas, or packed valid
     // width/height when only its top-left texture region has been uploaded.
     mask_counts: vec4<u32>,
-    mask_meta: array<vec4<u32>, 32>,
-    // Exposure, contrast, highlights, shadows.
-    mask_adjust_0: array<vec4<f32>, 32>,
-    // Whites, blacks, temperature, tint.
-    mask_adjust_1: array<vec4<f32>, 32>,
-    // Saturation, texture, clarity, dehaze.
-    mask_adjust_2: array<vec4<f32>, 32>,
-    mask_curve_0: array<vec4<f32>, 32>,
-    mask_curve_1: array<vec4<f32>, 32>,
-    mask_curve_2: array<vec4<f32>, 32>,
-    mask_curve_3: array<vec4<f32>, 32>,
-    mask_curve_4: array<vec4<f32>, 32>,
-    mask_curve_5: array<vec4<f32>, 32>,
-    mask_curve_6: array<vec4<f32>, 32>,
-    mask_curve_7: array<vec4<f32>, 32>,
-    mask_curve_red_0: array<vec4<f32>, 32>,
-    mask_curve_red_1: array<vec4<f32>, 32>,
-    mask_curve_red_2: array<vec4<f32>, 32>,
-    mask_curve_red_3: array<vec4<f32>, 32>,
-    mask_curve_red_4: array<vec4<f32>, 32>,
-    mask_curve_red_5: array<vec4<f32>, 32>,
-    mask_curve_red_6: array<vec4<f32>, 32>,
-    mask_curve_red_7: array<vec4<f32>, 32>,
-    mask_curve_green_0: array<vec4<f32>, 32>,
-    mask_curve_green_1: array<vec4<f32>, 32>,
-    mask_curve_green_2: array<vec4<f32>, 32>,
-    mask_curve_green_3: array<vec4<f32>, 32>,
-    mask_curve_green_4: array<vec4<f32>, 32>,
-    mask_curve_green_5: array<vec4<f32>, 32>,
-    mask_curve_green_6: array<vec4<f32>, 32>,
-    mask_curve_green_7: array<vec4<f32>, 32>,
-    mask_curve_blue_0: array<vec4<f32>, 32>,
-    mask_curve_blue_1: array<vec4<f32>, 32>,
-    mask_curve_blue_2: array<vec4<f32>, 32>,
-    mask_curve_blue_3: array<vec4<f32>, 32>,
-    mask_curve_blue_4: array<vec4<f32>, 32>,
-    mask_curve_blue_5: array<vec4<f32>, 32>,
-    mask_curve_blue_6: array<vec4<f32>, 32>,
-    mask_curve_blue_7: array<vec4<f32>, 32>,
-    mask_hsl_hue_0: array<vec4<f32>, 32>,
-    mask_hsl_hue_1: array<vec4<f32>, 32>,
-    mask_hsl_saturation_0: array<vec4<f32>, 32>,
-    mask_hsl_saturation_1: array<vec4<f32>, 32>,
-    mask_hsl_luminance_0: array<vec4<f32>, 32>,
-    mask_hsl_luminance_1: array<vec4<f32>, 32>,
     // Four-way scene-referred grading. Wheels contain normalized hue,
     // saturation, luminance and a reserved slot. Options contain blending and
     // balance in normalized UI domains.
@@ -171,11 +151,6 @@ struct Params {
     grade_highlights: vec4<f32>,
     grade_global: vec4<f32>,
     grade_options: vec4<f32>,
-    mask_grade_shadows: array<vec4<f32>, 32>,
-    mask_grade_midtones: array<vec4<f32>, 32>,
-    mask_grade_highlights: array<vec4<f32>, 32>,
-    mask_grade_global: array<vec4<f32>, 32>,
-    mask_grade_options: array<vec4<f32>, 32>,
     // Post-crop vignette mapping. Frame = source-space crop center (xy) plus
     // final-frame pixel dimensions (zw). Transform maps normalized source
     // deltas to normalized final-frame deltas and includes orientation, fine
@@ -185,6 +160,7 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(33) var<storage, read> mask_data: array<MaskData>;
 
 // Render-graph contract flags shared by tone analysis and output shaders.
 const RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY: u32 = 1u;

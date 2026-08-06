@@ -7,6 +7,7 @@ ACTIVITY = (JAVA_ROOT / "AuRawActivity.java").read_text(encoding="utf-8")
 STORAGE = (JAVA_ROOT / "StorageManager.java").read_text(encoding="utf-8")
 PROFILES = (JAVA_ROOT / "ProfileImporter.java").read_text(encoding="utf-8")
 EXPORTS = (JAVA_ROOT / "ExportPublisher.java").read_text(encoding="utf-8")
+ANDROID_RS = (ROOT / "src/android.rs").read_text(encoding="utf-8")
 
 
 def test_native_activity_is_a_thin_jni_facade() -> None:
@@ -18,19 +19,35 @@ def test_native_activity_is_a_thin_jni_facade() -> None:
     assert "profileImporter.handleFolderPickerResult(resultCode, data);" in ACTIVITY
     assert "exportPublisher.onRequestPermissionsResult" in ACTIVITY
 
-    # JNI symbols and Rust-reflected public methods must remain on this class.
+    # Lifecycle callbacks stay on the Activity, while Rust reflects delegates directly.
     for method in (
         "nativeOnFilePicked",
         "nativeOnFilePickedFd",
         "nativeOnImportBatchFinished",
         "nativeOnCameraProfileFolderPicked",
         "nativeOnExportPublished",
+        "private StorageManager storageManager;",
+        "private ProfileImporter profileImporter;",
+        "private ExportPublisher exportPublisher;",
+    ):
+        assert method in ACTIVITY
+
+    for passthrough in (
         "public String listRawLibrary()",
         "public String publishRawSidecar(",
         "public String createPendingExport(",
         "public void publishImage(",
+        "public void removeCameraProfileMirror(",
     ):
-        assert method in ACTIVITY
+        assert passthrough not in ACTIVITY
+
+    for field, delegate_type in (
+        ("storageManager", "de.duecki.auraw.StorageManager"),
+        ("profileImporter", "de.duecki.auraw.ProfileImporter"),
+        ("exportPublisher", "de.duecki.auraw.ExportPublisher"),
+    ):
+        assert f'jni::jni_str!("{field}")' in ANDROID_RS
+        assert f'jni::jni_sig!({delegate_type})' in ANDROID_RS
 
 
 def test_storage_delegate_owns_raw_library_and_sidecar_logic() -> None:

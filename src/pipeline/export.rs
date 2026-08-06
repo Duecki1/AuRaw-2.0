@@ -2480,7 +2480,8 @@ struct OutputSampleWeight {
 // Capture sharpening restores sensor/acutance detail and creative scale-space
 // shapes Texture/Clarity before the view transform. Delivery sharpening belongs
 // here, after resize/geometry, so its radius is exactly one final-output pixel.
-// Keeping it out of adjustments.wgsl prevents previews and pre-resize exports
+// Keeping it out of the adjustment shader modules prevents previews and
+// pre-resize exports
 // from using creative presence as a substitute for final-size crispness.
 struct FinalSizeOutputSharpen {
     width: u32,

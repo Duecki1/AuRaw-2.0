@@ -159,16 +159,6 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    /** Removes one superseded app-private DCP mirror without trusting a persisted path. */
-    public void removeCameraProfileMirror(String mirrorPath) {
-        profileImporter.removeCameraProfileMirror(mirrorPath);
-    }
-
-    /** Clears the SAF start location when no camera-profile folder is selected. */
-    public void clearCameraProfileFolderPickerLocation() {
-        profileImporter.clearFolderPickerLocation();
-    }
-
     /** Mirrors the active Rust task into Android's notification shade. */
     public void updateBackgroundTaskNotification(
             String title,
@@ -270,61 +260,6 @@ public final class AuRawActivity extends NativeActivity {
             }
             output.getFD().sync();
         }
-    }
-
-    public String rawLibraryLocation() { return storageManager.rawLibraryLocation(); }
-    public String listRawLibrary() { return storageManager.listRawLibrary(); }
-    public int openRawLibraryFd(String uriText) throws Exception {
-        return storageManager.openRawLibraryFd(uriText);
-    }
-    public String rawThumbnailCachePath(
-            String uriText, long bytes, long modifiedSeconds, int maximumEdge) throws Exception {
-        return storageManager.rawThumbnailCachePath(uriText, bytes, modifiedSeconds, maximumEdge);
-    }
-    public String developedThumbnailCachePath(String uriText) throws Exception {
-        return storageManager.developedThumbnailCachePath(uriText);
-    }
-    public void clearThumbnailCache() { storageManager.clearThumbnailCache(); }
-    public long thumbnailCacheSizeBytes() { return storageManager.thumbnailCacheSizeBytes(); }
-    public String materializeRawLibraryThumbnail(String uriText, String displayName)
-            throws Exception {
-        return storageManager.materializeRawLibraryThumbnail(uriText, displayName);
-    }
-    public void openRawLibraryDocument(String uriText, String displayName) {
-        storageManager.openRawLibraryDocument(uriText, displayName);
-    }
-    public String duplicateRawLibraryDocument(String rawUriText, String displayName)
-            throws Exception {
-        return storageManager.duplicateRawLibraryDocument(rawUriText, displayName);
-    }
-    public void deleteRawLibraryDocument(String rawUriText, String displayName) throws Exception {
-        storageManager.deleteRawLibraryDocument(rawUriText, displayName);
-    }
-    public String materializeRawSidecar(String rawUriText, String displayName) throws Exception {
-        return storageManager.materializeRawSidecar(rawUriText, displayName);
-    }
-    public String createRawSidecarCache() throws Exception {
-        return storageManager.createRawSidecarCache();
-    }
-    public String publishRawSidecar(
-            String cachedPath, String rawUriText, String displayName) throws Exception {
-        return storageManager.publishRawSidecar(cachedPath, rawUriText, displayName);
-    }
-    public void removeRawSidecar(String rawUriText, String displayName) throws Exception {
-        storageManager.removeRawSidecar(rawUriText, displayName);
-    }
-
-    public String createPendingExport(String requestedName, String mimeType) throws Exception {
-        return exportPublisher.createPendingExport(requestedName, mimeType);
-    }
-    public void finishPendingExport(String uriText, int successFlag) throws Exception {
-        exportPublisher.finishPendingExport(uriText, successFlag);
-    }
-    public void publishImage(String cachedPath, String displayName, String mimeType) {
-        exportPublisher.publishImage(cachedPath, displayName, mimeType);
-    }
-    public void publishPng(String cachedPath, String displayName) {
-        exportPublisher.publishPng(cachedPath, displayName);
     }
 
     @Override

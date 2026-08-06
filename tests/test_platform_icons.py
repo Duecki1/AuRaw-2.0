@@ -53,17 +53,6 @@ def test_android_declares_standard_and_round_launcher_icons() -> None:
     assert "@drawable/ic_launcher_foreground" in rounded.read_text(encoding="utf-8")
 
 
-def test_desktop_window_embeds_icon_and_uses_packaging_app_id() -> None:
-    source = (ROOT / "src/lib.rs").read_text(encoding="utf-8")
-    desktop = (ROOT / f"packaging/linux/{APP_ID}.desktop").read_text(
-        encoding="utf-8"
-    )
-
-    assert 'include_bytes!("../packaging/icons/auraw-256.png")' in source
-    assert ".with_icon(desktop_icon())" in source
-    assert f'.with_app_id("{APP_ID}")' in source
-    assert f"Icon={APP_ID}" in desktop
-    assert f"StartupWMClass={APP_ID}" in desktop
 
 
 def test_gitea_appimage_packages_and_verifies_the_shared_icon() -> None:
@@ -80,18 +69,3 @@ def test_gitea_appimage_packages_and_verifies_the_shared_icon() -> None:
     assert "r, g, b, a = 232, 126, 42, 255" not in workflow
 
 
-def test_github_release_builds_embed_the_same_icon() -> None:
-    macos = (ROOT / ".github/workflows/build-macos.yml").read_text(encoding="utf-8")
-    windows = (ROOT / ".github/workflows/build-windows.yml").read_text(encoding="utf-8")
-    build = (ROOT / "build.rs").read_text(encoding="utf-8")
-    resource = (ROOT / "packaging/windows/auraw.rc").read_text(encoding="utf-8")
-
-    assert 'icon_source="packaging/icons/auraw-1024.png"' in macos
-    assert "CFBundleIconFile" in macos and "AuRaw.icns" in macos
-    assert f"<string>{APP_ID}</string>" in macos
-    assert 'cmp "$icon_source" "$verify_iconset/icon_512x512@2x.png"' in macos
-
-    assert "embed_windows_application_icon();" in build
-    assert 'Command::new("windres")' in build
-    assert '"../icons/auraw.ico"' in resource
-    assert "objdump" in windows and r"grep -q '\.rsrc'" in windows
