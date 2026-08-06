@@ -2,20 +2,17 @@ use super::{
     work_shader_source, SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON,
     SHADER_CREATIVE_EFFECTS, SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_NOISE,
     SHADER_NOISE_CA_FINISH, SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS,
-    SHADER_SCENE_DETAIL_OVERRIDES, SHADER_TONE_COMMON, SHADER_TONEMAP,
+    SHADER_TONE_COMMON, SHADER_TONEMAP,
 };
 use anyhow::{anyhow, Context, Result};
 use naga_oil::compose::{
-    ComposableModuleDescriptor, Composer, ComposerError, ImportDefinition, NagaModuleDescriptor,
-    ShaderDefValue, ShaderLanguage, ShaderType,
+    ComposableModuleDescriptor, Composer, ComposerError, NagaModuleDescriptor, ShaderLanguage,
+    ShaderType,
 };
-use std::{borrow::Cow, collections::HashMap};
+use std::borrow::Cow;
 
 const SHADER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders/");
 const SCENE_ADJUSTMENTS_IMPORT: &str = "auraw::scene_adjustments";
-const SCENE_DETAIL_OVERRIDES_IMPORT: &str = "auraw::scene_detail_overrides";
-const SCENE_TOP_LEVEL_DEF: &str = "AURAW_SCENE_TOP_LEVEL";
-const SCENE_TOP_LEVEL_DIRECTIVE: &str = "#ifdef AURAW_SCENE_TOP_LEVEL";
 
 /// Owns AuRaw's reusable WGSL module registry and composes validated Naga IR
 /// for each concrete compute-shader source.
@@ -67,11 +64,6 @@ impl ShaderManager {
             scene_adjustments.as_ref(),
         )?;
         manager.register(
-            SCENE_DETAIL_OVERRIDES_IMPORT,
-            "scene_detail_overrides.wgsl",
-            SHADER_SCENE_DETAIL_OVERRIDES,
-        )?;
-        manager.register(
             "auraw::detail_scale_space",
             "detail_scale_space.wgsl",
             SHADER_DETAIL_SCALE_SPACE,
@@ -108,17 +100,12 @@ impl ShaderManager {
         file_name: &str,
     ) -> Result<wgpu::naga::Module> {
         let file_path = format!("{SHADER_ROOT}{file_name}");
-        let additional_imports = Self::entrypoint_additional_imports(source);
-        let mut shader_defs = HashMap::new();
-        if source.contains(SCENE_TOP_LEVEL_DIRECTIVE) {
-            shader_defs.insert(SCENE_TOP_LEVEL_DEF.to_owned(), ShaderDefValue::Bool(true));
-        }
         let result = self.composer.make_naga_module(NagaModuleDescriptor {
             source,
             file_path: &file_path,
             shader_type: ShaderType::Wgsl,
-            shader_defs,
-            additional_imports: &additional_imports,
+            shader_defs: Default::default(),
+            additional_imports: &[],
         });
         match result {
             Ok(module) => Ok(module),
@@ -140,24 +127,6 @@ impl ShaderManager {
             label: Some(label),
             source: wgpu::ShaderSource::Naga(Cow::Owned(module)),
         }))
-    }
-
-    fn entrypoint_additional_imports(source: &str) -> Vec<ImportDefinition> {
-        let imports_scene_adjustments = source.lines().any(|line| {
-            line.trim_start()
-                .starts_with("#import auraw::scene_adjustments")
-        });
-        if imports_scene_adjustments {
-            vec![ImportDefinition {
-                import: SCENE_DETAIL_OVERRIDES_IMPORT.to_owned(),
-                // An empty item list requests no ordinary exports. naga_oil still
-                // retains override functions from an additional import, so this
-                // applies the adapter without exposing another WGSL namespace.
-                items: Vec::new(),
-            }]
-        } else {
-            Vec::new()
-        }
     }
 
     fn composer_error(&self, operation: &str, error: ComposerError) -> anyhow::Error {

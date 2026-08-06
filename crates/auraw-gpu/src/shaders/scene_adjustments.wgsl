@@ -237,27 +237,6 @@ fn soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
     return sign(detail) * max(abs(detail) - threshold, 0.0);
 }
 
-// The concrete entrypoint source owns these overrides. Reusable modules import
-// scene_detail_overrides.wgsl as an additional import so naga_oil retains the
-// same callback bindings after tree-shaking.
-#ifdef AURAW_SCENE_TOP_LEVEL
-override fn DetailCapture::adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
-    return adjustment_base_at(pos);
-}
-
-override fn DetailCapture::log_luminance(rgb: vec3<f32>) -> f32 {
-    return log_luminance(rgb);
-}
-
-override fn DetailCapture::presence_reference_scale() -> f32 {
-    return presence_reference_scale();
-}
-
-override fn DetailCapture::soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
-    return soft_detail_threshold(detail, threshold);
-}
-#endif
-
 fn local_curve_block(mask_index: u32, curve: u32, block: u32) -> vec4<f32> {
     if curve == 1u { return Common::mask_data[mask_index].curves_red[block]; }
     if curve == 2u { return Common::mask_data[mask_index].curves_green[block]; }
@@ -453,7 +432,7 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Capture sharpening and all H/S/W/B, Contrast, curve, and local tone
     // controls operate in the scene domain. ProfileToneCurve is excluded so
     // slider semantics remain profile-independent.
-    rgb = DetailCapture::apply_capture_sharpening(pos, rgb);
+    rgb = DetailCapture::apply_capture_sharpening(adjustment_base_tex, pos, rgb);
     rgb = Tonemap::apply_lightroom_tone(rgb, pos);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }

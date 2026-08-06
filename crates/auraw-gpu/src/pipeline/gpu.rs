@@ -159,7 +159,6 @@ const SHADER_TONE_ANALYSIS: &str = include_str!("../shaders/tone_analysis.wgsl")
 const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.wgsl");
 
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
-const SHADER_SCENE_DETAIL_OVERRIDES: &str = include_str!("../shaders/scene_detail_overrides.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
 

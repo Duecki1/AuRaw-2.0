@@ -13,7 +13,6 @@ fn main() {
         "tone_analysis.wgsl",
         "tonemap.wgsl",
         "scene_adjustments.wgsl",
-        "scene_detail_overrides.wgsl",
         "creative_effects.wgsl",
         "view_transform.wgsl",
         "detail_capture.wgsl",
