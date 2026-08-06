@@ -29,8 +29,8 @@ const GPU_PARAMS_ABI_VERSION: u32 = 5;
 // the runtime uses independently allocated stage uniforms.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
 const CAMERA_UNIFORMS_SIZE_BYTES: u32 = 416;
-const SCENE_TONE_UNIFORMS_SIZE_BYTES: u32 = 576;
-const EFFECTS_UNIFORMS_SIZE_BYTES: u32 = 96;
+const SCENE_TONE_UNIFORMS_SIZE_BYTES: u32 = 768;
+const EFFECTS_UNIFORMS_SIZE_BYTES: u32 = 208;
 const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 = CAMERA_UNIFORMS_SIZE_BYTES
     + SCENE_TONE_UNIFORMS_SIZE_BYTES
     + EFFECTS_UNIFORMS_SIZE_BYTES;
@@ -361,6 +361,12 @@ struct SceneToneUniforms {
     grade_highlights: [f32; 4],
     grade_global: [f32; 4],
     grade_options: [f32; 4],
+    // WGSL mat3x3 uniform columns have a 16-byte stride. The fourth value in
+    // every Rust column is explicit padding and is ignored by the shader.
+    rec2020_to_xyz: [[f32; 4]; 3],
+    xyz_to_rec2020: [[f32; 4]; 3],
+    xyz_to_bradford: [[f32; 4]; 3],
+    bradford_to_xyz: [[f32; 4]; 3],
 }
 
 const _: () = assert!(
@@ -376,11 +382,18 @@ struct EffectsUniforms {
     vignette_options: [f32; 4],
     vignette_frame: [f32; 4],
     vignette_transform: [f32; 4],
+    vignette_dark_half_fit: [f32; 4],
+    vignette_dark_full_fit: [f32; 4],
+    vignette_light_half_fit: [f32; 4],
+    vignette_light_full_fit: [f32; 4],
+    capture_scale_sigma: [f32; 4],
+    capture_thresholds: [f32; 4],
+    capture_mask_coherence: [f32; 4],
 }
 
 const _: () =
     assert!(std::mem::size_of::<EffectsUniforms>() == EFFECTS_UNIFORMS_SIZE_BYTES as usize);
-const _: () = assert!(GPU_STAGE_UNIFORM_SIZE_BYTES == 1_088);
+const _: () = assert!(GPU_STAGE_UNIFORM_SIZE_BYTES == 1_392);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -407,6 +420,57 @@ struct MaskData {
 }
 
 const _: () = assert!(std::mem::size_of::<MaskData>() == 752);
+
+/// Runtime-adjustable shader calibration values. The defaults are byte-for-byte
+/// equivalents of the former WGSL file-level constants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuShaderTuning {
+    pub rec2020_to_xyz: [[f32; 4]; 3],
+    pub xyz_to_rec2020: [[f32; 4]; 3],
+    pub xyz_to_bradford: [[f32; 4]; 3],
+    pub bradford_to_xyz: [[f32; 4]; 3],
+    pub vignette_dark_half_fit: [f32; 4],
+    pub vignette_dark_full_fit: [f32; 4],
+    pub vignette_light_half_fit: [f32; 4],
+    pub vignette_light_full_fit: [f32; 4],
+    pub capture_scale_sigma: [f32; 4],
+    pub capture_thresholds: [f32; 4],
+    pub capture_mask_coherence: [f32; 4],
+}
+
+impl Default for GpuShaderTuning {
+    fn default() -> Self {
+        Self {
+            rec2020_to_xyz: [
+                [0.6369580, 0.2627002, 0.0000000, 0.0],
+                [0.1446169, 0.6779981, 0.0280727, 0.0],
+                [0.1688809, 0.0593017, 1.0609851, 0.0],
+            ],
+            xyz_to_rec2020: [
+                [1.7166512, -0.6666844, 0.0176399, 0.0],
+                [-0.3556708, 1.6164812, -0.0427706, 0.0],
+                [-0.2533663, 0.0157685, 0.9421031, 0.0],
+            ],
+            xyz_to_bradford: [
+                [0.8951000, -0.7502000, 0.0389000, 0.0],
+                [0.2664000, 1.7135000, -0.0685000, 0.0],
+                [-0.1614000, 0.0367000, 1.0296000, 0.0],
+            ],
+            bradford_to_xyz: [
+                [0.9869929, 0.4323053, -0.0085287, 0.0],
+                [-0.1470543, 0.5183603, 0.0400428, 0.0],
+                [0.1599627, 0.0492912, 0.9684867, 0.0],
+            ],
+            vignette_dark_half_fit: [0.10, 1.235, 2.88, 0.86],
+            vignette_dark_full_fit: [0.02, 1.135, 3.46, 1.0],
+            vignette_light_half_fit: [0.305, 1.24, 4.36, 0.90],
+            vignette_light_full_fit: [0.13, 1.075, 5.66, 1.0],
+            capture_scale_sigma: [0.74, 1.75, 0.58, 1.65],
+            capture_thresholds: [0.015, 0.0045, 0.055, 0.28],
+            capture_mask_coherence: [0.035, 0.62, 0.055, 0.22],
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct GpuParams {
@@ -666,6 +730,7 @@ impl GpuParams {
         let mut sigmoid_params = exposure.sigmoid;
         sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);
         let sigmoid = sigmoid_coefficients(sigmoid_params);
+        let shader_tuning = GpuShaderTuning::default();
         // Sigmoid is the single view transform, so Contrast changes its
         // middle-grey slope without switching view operators.
         let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
@@ -982,6 +1047,10 @@ impl GpuParams {
             grade_highlights: pack_color_grade_wheel(exposure.color_grading.highlights),
             grade_global: pack_color_grade_wheel(exposure.color_grading.global),
             grade_options: pack_color_grade_options(exposure.color_grading),
+            rec2020_to_xyz: shader_tuning.rec2020_to_xyz,
+            xyz_to_rec2020: shader_tuning.xyz_to_rec2020,
+            xyz_to_bradford: shader_tuning.xyz_to_bradford,
+            bradford_to_xyz: shader_tuning.bradford_to_xyz,
         };
         let effects = EffectsUniforms {
             presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
@@ -1010,6 +1079,13 @@ impl GpuParams {
                 full_height.max(1) as f32,
             ],
             vignette_transform: [1.0, 0.0, 0.0, 1.0],
+            vignette_dark_half_fit: shader_tuning.vignette_dark_half_fit,
+            vignette_dark_full_fit: shader_tuning.vignette_dark_full_fit,
+            vignette_light_half_fit: shader_tuning.vignette_light_half_fit,
+            vignette_light_full_fit: shader_tuning.vignette_light_full_fit,
+            capture_scale_sigma: shader_tuning.capture_scale_sigma,
+            capture_thresholds: shader_tuning.capture_thresholds,
+            capture_mask_coherence: shader_tuning.capture_mask_coherence,
         };
         Self {
             camera,
@@ -1073,6 +1149,27 @@ impl GpuParams {
             forward[3] * source_height / output_height,
         ];
         self
+    }
+
+    /// Replaces shader calibration lanes. A subsequent `recompute` uploads only
+    /// the changed stage uniform buffers; compute pipelines are reused.
+    pub fn with_shader_tuning(mut self, tuning: GpuShaderTuning) -> Self {
+        self.set_shader_tuning(tuning);
+        self
+    }
+
+    pub fn set_shader_tuning(&mut self, tuning: GpuShaderTuning) {
+        self.scene_tone.rec2020_to_xyz = tuning.rec2020_to_xyz;
+        self.scene_tone.xyz_to_rec2020 = tuning.xyz_to_rec2020;
+        self.scene_tone.xyz_to_bradford = tuning.xyz_to_bradford;
+        self.scene_tone.bradford_to_xyz = tuning.bradford_to_xyz;
+        self.effects.vignette_dark_half_fit = tuning.vignette_dark_half_fit;
+        self.effects.vignette_dark_full_fit = tuning.vignette_dark_full_fit;
+        self.effects.vignette_light_half_fit = tuning.vignette_light_half_fit;
+        self.effects.vignette_light_full_fit = tuning.vignette_light_full_fit;
+        self.effects.capture_scale_sigma = tuning.capture_scale_sigma;
+        self.effects.capture_thresholds = tuning.capture_thresholds;
+        self.effects.capture_mask_coherence = tuning.capture_mask_coherence;
     }
 
     pub fn with_tone_histogram_bounds(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {

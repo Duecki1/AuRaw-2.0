@@ -722,9 +722,9 @@ fn stage_uniforms_follow_the_wgsl_uniform_layout() {
     }
 
     assert_eq!(std::mem::size_of::<super::CameraUniforms>(), 416);
-    assert_eq!(std::mem::size_of::<super::SceneToneUniforms>(), 576);
-    assert_eq!(std::mem::size_of::<super::EffectsUniforms>(), 96);
-    assert_eq!(super::GPU_STAGE_UNIFORM_SIZE_BYTES, 1_088);
+    assert_eq!(std::mem::size_of::<super::SceneToneUniforms>(), 768);
+    assert_eq!(std::mem::size_of::<super::EffectsUniforms>(), 208);
+    assert_eq!(super::GPU_STAGE_UNIFORM_SIZE_BYTES, 1_392);
     // Persisted process metadata intentionally retains the previous monolithic
     // ABI marker even though live GPU bindings are now stage-specific.
     assert_eq!(super::GPU_PARAMS_ABI_SIZE_BYTES, 1_072);
@@ -838,6 +838,10 @@ fn stage_uniforms_follow_the_wgsl_uniform_layout() {
             grade_highlights,
             grade_global,
             grade_options,
+            rec2020_to_xyz,
+            xyz_to_rec2020,
+            xyz_to_bradford,
+            bradford_to_xyz,
         ]
     );
 
@@ -856,6 +860,13 @@ fn stage_uniforms_follow_the_wgsl_uniform_layout() {
             vignette_options,
             vignette_frame,
             vignette_transform,
+            vignette_dark_half_fit,
+            vignette_dark_full_fit,
+            vignette_light_half_fit,
+            vignette_light_full_fit,
+            capture_scale_sigma,
+            capture_thresholds,
+            capture_mask_coherence,
         ]
     );
 
@@ -886,6 +897,63 @@ fn stage_uniforms_follow_the_wgsl_uniform_layout() {
             hsl_luminance_0,
             hsl_luminance_1,
         ]
+    );
+}
+
+#[test]
+fn shader_tuning_defaults_match_the_previous_wgsl_constants() {
+    let tuning = super::GpuShaderTuning::default();
+
+    assert_eq!(
+        tuning.rec2020_to_xyz,
+        [
+            [0.6369580, 0.2627002, 0.0000000, 0.0],
+            [0.1446169, 0.6779981, 0.0280727, 0.0],
+            [0.1688809, 0.0593017, 1.0609851, 0.0],
+        ]
+    );
+    assert_eq!(
+        tuning.xyz_to_rec2020,
+        [
+            [1.7166512, -0.6666844, 0.0176399, 0.0],
+            [-0.3556708, 1.6164812, -0.0427706, 0.0],
+            [-0.2533663, 0.0157685, 0.9421031, 0.0],
+        ]
+    );
+    assert_eq!(
+        tuning.xyz_to_bradford,
+        [
+            [0.8951000, -0.7502000, 0.0389000, 0.0],
+            [0.2664000, 1.7135000, -0.0685000, 0.0],
+            [-0.1614000, 0.0367000, 1.0296000, 0.0],
+        ]
+    );
+    assert_eq!(
+        tuning.bradford_to_xyz,
+        [
+            [0.9869929, 0.4323053, -0.0085287, 0.0],
+            [-0.1470543, 0.5183603, 0.0400428, 0.0],
+            [0.1599627, 0.0492912, 0.9684867, 0.0],
+        ]
+    );
+    assert_eq!(tuning.vignette_dark_half_fit, [0.10, 1.235, 2.88, 0.86]);
+    assert_eq!(tuning.vignette_dark_full_fit, [0.02, 1.135, 3.46, 1.0]);
+    assert_eq!(
+        tuning.vignette_light_half_fit,
+        [0.305, 1.24, 4.36, 0.90]
+    );
+    assert_eq!(
+        tuning.vignette_light_full_fit,
+        [0.13, 1.075, 5.66, 1.0]
+    );
+    assert_eq!(tuning.capture_scale_sigma, [0.74, 1.75, 0.58, 1.65]);
+    assert_eq!(
+        tuning.capture_thresholds,
+        [0.015, 0.0045, 0.055, 0.28]
+    );
+    assert_eq!(
+        tuning.capture_mask_coherence,
+        [0.035, 0.62, 0.055, 0.22]
     );
 }
 

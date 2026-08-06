@@ -6,30 +6,6 @@
 // camera/DCP transform on the CPU; the Bradford transform below remains useful
 // for local post-profile temperature/tint adjustments.
 
-const REC2020_TO_XYZ: mat3x3<f32> = mat3x3<f32>(
-    vec3<f32>(0.6369580, 0.2627002, 0.0000000),
-    vec3<f32>(0.1446169, 0.6779981, 0.0280727),
-    vec3<f32>(0.1688809, 0.0593017, 1.0609851),
-);
-
-const XYZ_TO_REC2020: mat3x3<f32> = mat3x3<f32>(
-    vec3<f32>( 1.7166512, -0.6666844,  0.0176399),
-    vec3<f32>(-0.3556708,  1.6164812, -0.0427706),
-    vec3<f32>(-0.2533663,  0.0157685,  0.9421031),
-);
-
-const XYZ_TO_BRADFORD: mat3x3<f32> = mat3x3<f32>(
-    vec3<f32>( 0.8951000, -0.7502000,  0.0389000),
-    vec3<f32>( 0.2664000,  1.7135000, -0.0685000),
-    vec3<f32>(-0.1614000,  0.0367000,  1.0296000),
-);
-
-const BRADFORD_TO_XYZ: mat3x3<f32> = mat3x3<f32>(
-    vec3<f32>( 0.9869929,  0.4323053, -0.0085287),
-    vec3<f32>(-0.1470543,  0.5183603,  0.0400428),
-    vec3<f32>( 0.1599627,  0.0492912,  0.9684867),
-);
-
 fn apply_temperature_tint_values(
     rgb: vec3<f32>,
     temperature_value: f32,
@@ -51,12 +27,14 @@ fn apply_temperature_tint_values(
         -0.34 * temperature + 0.08 * tint,
     ));
     let d65_xyz = vec3<f32>(0.9504559, 1.0, 1.0890578);
-    let adapted_white = BRADFORD_TO_XYZ * ((XYZ_TO_BRADFORD * d65_xyz) * gains);
+    let adapted_white = Common::scene_tone_uniforms.bradford_to_xyz
+        * ((Common::scene_tone_uniforms.xyz_to_bradford * d65_xyz) * gains);
     let normalization = 1.0 / max(adapted_white.y, 1e-6);
 
-    let xyz = REC2020_TO_XYZ * rgb;
-    let adapted_xyz = BRADFORD_TO_XYZ * ((XYZ_TO_BRADFORD * xyz) * gains);
-    return XYZ_TO_REC2020 * adapted_xyz * normalization;
+    let xyz = Common::scene_tone_uniforms.rec2020_to_xyz * rgb;
+    let adapted_xyz = Common::scene_tone_uniforms.bradford_to_xyz
+        * ((Common::scene_tone_uniforms.xyz_to_bradford * xyz) * gains);
+    return Common::scene_tone_uniforms.xyz_to_rec2020 * adapted_xyz * normalization;
 }
 
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
