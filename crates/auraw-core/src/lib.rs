@@ -1,6 +1,7 @@
 //! Platform-neutral AuRaw processing, metadata, persistence, and RAW decoding.
 
 pub mod build_metadata;
+pub mod color_math;
 pub mod diagnostics;
 pub mod file_ops;
 pub mod pipeline;

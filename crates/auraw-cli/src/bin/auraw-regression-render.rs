@@ -7,6 +7,7 @@ use auraw_cli::regression::write_linear_rgb_npz;
 use auraw_gpu::wgpu;
 use ring::digest::{Context as Sha256Context, SHA256};
 use std::env;
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -21,10 +22,147 @@ struct Args {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let result = if env::args().nth(1).as_deref() == Some("math-eval") {
+        run_math_eval()
+    } else {
+        run()
+    };
+    if let Err(error) = result {
         eprintln!("auraw-regression-render: {error:#}");
         std::process::exit(2);
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MathOperation {
+    CameraOpponentRoundtrip,
+    DisplayBlackToeAmount,
+    DisplayBlackToeValue,
+    ShadowsScene,
+    Rec2020ToOklab,
+    OklabToRec2020,
+}
+
+impl MathOperation {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "camera-opponent-roundtrip" => Ok(Self::CameraOpponentRoundtrip),
+            "display-black-toe-amount" => Ok(Self::DisplayBlackToeAmount),
+            "display-black-toe-value" => Ok(Self::DisplayBlackToeValue),
+            "shadows-scene" => Ok(Self::ShadowsScene),
+            "rec2020-to-oklab" => Ok(Self::Rec2020ToOklab),
+            "oklab-to-rec2020" => Ok(Self::OklabToRec2020),
+            other => bail!("unknown math operation {other:?}"),
+        }
+    }
+}
+
+fn run_math_eval() -> Result<()> {
+    let mut operation = None;
+    let mut arguments = env::args().skip(2);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--operation" => {
+                operation = Some(MathOperation::parse(&next_value(
+                    &mut arguments,
+                    "--operation",
+                )?)?)
+            }
+            "--help" | "-h" => {
+                print_math_eval_help();
+                return Ok(());
+            }
+            other => bail!("unknown math-eval argument {other:?}; use --help"),
+        }
+    }
+    let operation = operation.ok_or_else(|| anyhow!("math-eval requires --operation"))?;
+
+    let mut input = Vec::new();
+    io::stdin()
+        .read_to_end(&mut input)
+        .context("read f32x4 math samples from stdin")?;
+    if input.len() % 16 != 0 {
+        bail!(
+            "math-eval input length {} is not a whole number of little-endian f32x4 rows",
+            input.len()
+        );
+    }
+
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    for row in input.chunks_exact(16) {
+        let sample = [
+            f32::from_le_bytes(row[0..4].try_into().expect("four-byte slice")),
+            f32::from_le_bytes(row[4..8].try_into().expect("four-byte slice")),
+            f32::from_le_bytes(row[8..12].try_into().expect("four-byte slice")),
+            f32::from_le_bytes(row[12..16].try_into().expect("four-byte slice")),
+        ];
+        let output = evaluate_math_sample(operation, sample)?;
+        for value in output {
+            stdout
+                .write_all(&value.to_le_bytes())
+                .context("write f32 math response")?;
+        }
+    }
+    stdout.flush().context("flush math responses")?;
+    Ok(())
+}
+
+fn evaluate_math_sample(operation: MathOperation, sample: [f32; 4]) -> Result<[f32; 4]> {
+    use auraw_core::color_math;
+
+    let output = match operation {
+        MathOperation::CameraOpponentRoundtrip => {
+            let rgb = [sample[0], sample[1], sample[2]];
+            let reconstructed = color_math::camera_from_signal_opponents(
+                color_math::camera_signal_opponents(rgb),
+            );
+            [reconstructed[0], reconstructed[1], reconstructed[2], 0.0]
+        }
+        MathOperation::DisplayBlackToeAmount => [
+            color_math::display_black_toe_amount(sample[0], sample[1]),
+            0.0,
+            0.0,
+            0.0,
+        ],
+        MathOperation::DisplayBlackToeValue => [
+            color_math::display_black_toe_value(sample[0], sample[1]),
+            0.0,
+            0.0,
+            0.0,
+        ],
+        MathOperation::ShadowsScene => {
+            color_math::shadows_scene(sample[0], sample[1], sample[2], sample[3])
+        }
+        MathOperation::Rec2020ToOklab => {
+            let lab = color_math::rec2020_to_oklab([sample[0], sample[1], sample[2]]);
+            [lab[0], lab[1], lab[2], 0.0]
+        }
+        MathOperation::OklabToRec2020 => {
+            let rgb = color_math::rec2020_from_oklab([sample[0], sample[1], sample[2]]);
+            [rgb[0], rgb[1], rgb[2], 0.0]
+        }
+    };
+    if output.iter().any(|value| !value.is_finite()) {
+        bail!(
+            "math operation {operation:?} produced a non-finite output for sample {sample:?}"
+        );
+    }
+    Ok(output)
+}
+
+fn print_math_eval_help() {
+    println!(concat!(
+        "AuRaw color-science math evaluator\n\n",
+        "Usage:\n",
+        "  auraw-regression-render math-eval --operation NAME < samples.f32 > outputs.f32\n\n",
+        "Input and output are packed little-endian f32x4 rows. Supported operations:\n",
+        "  camera-opponent-roundtrip  [r,g,b,_] -> [r,g,b,_]\n",
+        "  display-black-toe-amount   [luma,normalized_amount,_,_] -> [luma,_,_,_]\n",
+        "  display-black-toe-value    [luma,slider_value,_,_] -> [luma,_,_,_]\n",
+        "  shadows-scene              [ev,slider_value,p05,p50] -> [ev,mask,lower,upper]\n",
+        "  rec2020-to-oklab           [r,g,b,_] -> [L,a,b,_]\n",
+        "  oklab-to-rec2020           [L,a,b,_] -> [r,g,b,_]"
+    ));
 }
 
 fn run() -> Result<()> {
@@ -216,7 +354,8 @@ fn print_help() {
         "Usage:\n",
         "  auraw-regression-render --backend gpu --input FILE --output FILE.npz\n",
         "  [--dcp PROFILE.dcp] [--workgroup-size WIDTHxHEIGHT]\n",
-        "  [--benchmark-json METRICS.json]\n\n",
+        "  [--benchmark-json METRICS.json]\n",
+        "  auraw-regression-render math-eval --operation NAME < samples.f32 > outputs.f32\n\n",
         "The output is full-resolution scene-linear D65 Rec.2020 RGB float32, before\n",
         "creative look/tone modules, display encoding, sharpening, or resizing.\n",
         "Workgroup size defaults to 8x8 and is validated against adapter limits."
