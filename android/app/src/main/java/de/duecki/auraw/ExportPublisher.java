@@ -105,11 +105,6 @@ final class ExportPublisher {
         activity.runOnUiThread(() -> beginPublishImage(cachedPath, displayName, mimeType));
     }
 
-    /** Backward-compatible entry point retained for older native builds. */
-    void publishPng(String cachedPath, String displayName) {
-        publishImage(cachedPath, displayName, "image/png");
-    }
-
     private void beginPublishImage(String cachedPath, String displayName, String mimeType) {
         String normalizedMime = normalizeExportMimeType(mimeType);
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P

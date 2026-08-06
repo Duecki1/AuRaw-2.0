@@ -29,12 +29,16 @@ serde_json = "1.0"
 egui-phosphor = "0.13"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+# Keep the workspace-facing Windows API crate on one exact modern release.
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }
-env_logger = "0.11"
-rfd = "0.15"
+# Rust 1.92 has std terminal detection; avoid env_logger's optional color stack,
+# which otherwise retains is_terminal_polyfill and once_cell_polyfill.
+env_logger = { version = "=0.11.11", default-features = false, features = ["humantime", "regex"] }
+# 0.17 aligns its platform dependencies with windows-sys 0.61 and objc2/block2 0.6.
+rfd = "=0.17.2"
 pollster = "0.4"
 lcms2 = { version = "6.1.1", features = ["static"] }
 # Exact RC pin: see DEPENDENCIES.md. Replace with stable 2.x when the required APIs are released.
@@ -51,7 +55,7 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "
 
 # THIS SECTION IS REQUIRED FOR build.rs:
 [build-dependencies]
-bindgen = "0.70"
+bindgen = "=0.72.1"
 pkg-config = "0.3"
 
 [dev-dependencies]

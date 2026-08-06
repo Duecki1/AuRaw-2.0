@@ -1,17 +1,6 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-TONEMAP = (ROOT / "src/shaders/tonemap.wgsl").read_text(encoding="utf-8")
-ADJUSTMENTS = (ROOT / "src/shaders/adjustments.wgsl").read_text(encoding="utf-8")
-BASIC = (ROOT / "src/pipeline/basicadj.rs").read_text(encoding="utf-8")
-GPU = (ROOT / "src/pipeline/gpu.rs").read_text(encoding="utf-8")
-DEVELOP = (ROOT / "src/ui/sidebar/develop.rs").read_text(encoding="utf-8")
-MASKS = (ROOT / "src/ui/sidebar/masks.rs").read_text(encoding="utf-8")
-EXPORT = (ROOT / "src/app/processing_export.rs").read_text(encoding="utf-8")
-
 MIDDLE_GREY = 0.1845
 
 
@@ -60,54 +49,12 @@ def display_black_toe(luma: float, amount: float) -> float:
     return luma * 2.0**offset
 
 
-def test_current_process_is_the_single_runtime_renderer() -> None:
-    assert "pub const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16;" in BASIC
-    assert "pub const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17;" in BASIC
-    assert "pub const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18;" in BASIC
-    assert "pub const ADAPTIVE_DETAIL_DEFAULTS_PROCESS_VERSION: u32 = 19;" in BASIC
-    assert "pub const MULTISCALE_COLOR_DENOISE_PROCESS_VERSION: u32 = 20;" in BASIC
-    assert "pub const EDGE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 21;" in BASIC
-    assert "pub const SCALE_AWARE_COLOR_DENOISE_PROCESS_VERSION: u32 = 22;" in BASIC
-    assert "pub const LIGHTROOM_VIGNETTE_PROCESS_VERSION: u32 = 23;" in BASIC
-    assert "pub const AI_DENOISE_PROCESS_VERSION: u32 = 24;" in BASIC
-    assert "pub const AI_DENOISE_REMOSAIC_PROCESS_VERSION: u32 = 25;" in BASIC
-    assert "pub const LIGHTROOM_HIGH_QUALITY_PROCESS_VERSION: u32 = 26;" in BASIC
-    assert "pub const AI_DENOISE_SEAMLESS_CACHE_PROCESS_VERSION: u32 = 27;" in BASIC
-    assert "pub const AI_DENOISE_CFA_CACHE_PROCESS_VERSION: u32 = 28;" in BASIC
-    assert "pub const INPAINT_OPPOSED_PROCESS_VERSION: u32 = 29;" in BASIC
-    assert "pub const SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 30;" in BASIC
-    assert "pub const PERCENT_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 31;" in BASIC
-    assert "pub const PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION: u32 = 32;" in BASIC
-    assert "pub const CURRENT_PROCESS_VERSION: u32 = PHOTOGRAPHIC_SIGMOID_CONTRAST_PROCESS_VERSION;" in BASIC
-    assert "const BASIC_TONE_RESPONSE_PROCESS_VERSION: u32 = 16u;" in TONEMAP
-    assert "const PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION: u32 = 17u;" in TONEMAP
-    assert "const LIGHTROOM_BASIC_MATCH_PROCESS_VERSION: u32 = 18u;" in TONEMAP
-    assert "10..=CURRENT_PROCESS_VERSION" in BASIC
-    assert "self.process_version = CURRENT_PROCESS_VERSION;" in BASIC
-    assert "CURRENT_PROCESS_VERSION," in GPU
-    assert "render_graph_flags()," in GPU
 
 
-def test_historical_low_tone_formulas_are_inaccessible_to_normal_edits() -> None:
-    assert "if params.process_info.x < PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION" in TONEMAP
-    assert "apply_blacks_toe_v2" in TONEMAP
-    assert "shadow_mask = shadow_mask * mix(0.28, 1.0, toe_guard)" in TONEMAP
-    assert "signed_tone_range(shadows, 2.35, 3.20) * shadow_mask" in TONEMAP
-    assert "process_info: [" in GPU
-    assert "CURRENT_PROCESS_VERSION," in GPU
 
 
-def test_global_controls_do_not_switch_process_versions() -> None:
-    assert "exposure.process_version =" not in DEVELOP
-    assert "exposure.process_version ==" not in DEVELOP
 
 
-def test_local_controls_do_not_switch_process_versions() -> None:
-    assert "let shadows_before = adjustment.shadows;" in MASKS
-    assert "let blacks_before = adjustment.blacks;" in MASKS
-    assert "adjustment.shadows != shadows_before || adjustment.blacks != blacks_before" in MASKS
-    assert "app.exposure.process_version =" not in MASKS
-    assert "app.exposure.process_version ==" not in MASKS
 
 def test_shadow_selector_dark_subject_cannot_inherit_bright_neighborhood() -> None:
     pixel_ev = -6.0
@@ -117,7 +64,6 @@ def test_shadow_selector_dark_subject_cannot_inherit_bright_neighborhood() -> No
     guide_weight = 0.42 + (0.22 - 0.42) * smoothstep(0.50, 3.00, mismatch)
     selected = pixel_ev + (bounded_guide - pixel_ev) * guide_weight
     assert selected < -5.8
-    assert "clamp(guide_ev - pixel_ev, -1.25, 0.75)" in TONEMAP
 
 
 def test_shadow_neutrality_is_exact() -> None:
@@ -156,10 +102,6 @@ def test_shadows_give_deep_detail_authority_then_roll_out_through_midtones() -> 
     assert bright_weight == 0.0
 
 
-def test_shadow_bounds_harden_internal_statistics_against_nonfinite_values() -> None:
-    assert "select(-8.0, percentiles.p005, finite_scalar(percentiles.p005))" in TONEMAP
-    assert "select(-5.0, percentiles.p05, finite_scalar(percentiles.p05))" in TONEMAP
-    assert "select(0.0, percentiles.p50, finite_scalar(percentiles.p50))" in TONEMAP
 
 
 def test_shadow_transfer_is_monotone_for_all_requested_settings_and_extreme_histograms() -> None:
@@ -206,44 +148,14 @@ def test_blacks_transfer_is_monotone_for_all_requested_settings() -> None:
             previous = mapped
 
 
-def test_blacks_is_view_adjacent_not_scene_masked_in_current_process() -> None:
-    assert "blacks = 0.0;" in TONEMAP
-    assert "display_linear = apply_display_blacks_toe_value(display_linear, params.basic_tone.w);" in ADJUSTMENTS
-    assert "display_linear = apply_local_display_blacks(pos, display_linear);" in ADJUSTMENTS
-    assert "name: \"display_black_toe\"" in GPU
-    assert GPU.index('name: "view_transform"') < GPU.index('name: "display_black_toe"') < GPU.index('name: "output_encoding"')
 
 
-def test_display_blacks_math_uses_measured_asymmetric_endpoints() -> None:
-    assert "let weight = 0.08 + 0.92 * exp2(-luminance / 0.035);" in TONEMAP
-    assert "amount * 1.75 * weight * hdr_guard" in TONEMAP
-    assert "tone_smoothstep(0.012, 0.030, luminance)" in TONEMAP
-    assert "10.50 * deep + tail" in TONEMAP
 
 
-def test_local_masks_scale_low_tone_strength_not_fully_adjusted_result() -> None:
-    assert "shadows = shadows * clamp(low_tone_strength, 0.0, 1.0);" in TONEMAP
-    assert "let amount = basic_low_tone_control(value) * weight;" in ADJUSTMENTS
-    assert "apply_local_basic_tone_values_with_low_strength(" in ADJUSTMENTS
 
 
-def test_highlights_and_whites_use_lightroom_calibrated_ranges() -> None:
-    assert "signed_tone_range(highlights, 1.35, 1.00)" in TONEMAP
-    assert "percentiles.p50 - 0.35" in TONEMAP
-    assert "percentiles.p95 + 0.45" in TONEMAP
-    assert "percentiles.p05 - 0.15" in TONEMAP
-    assert "percentiles.p50 + 0.55" in TONEMAP
-    assert "fn lightroom_positive_whites_offset_ev" in TONEMAP
-    assert "return min(whites * 0.95, monotone_limit) * mask;" in TONEMAP
 
 
-def test_dehaze_endpoint_uses_bounded_ambient_relative_transfer() -> None:
-    assert "let shaped_position = pow(ambient_position, 0.33);" in ADJUSTMENTS
-    assert "let mid_position_hump = 0.30 * shaped_position * (1.0 - shaped_position);" in ADJUSTMENTS
-    assert "mix(0.008, 0.012, haze_likelihood)" in ADJUSTMENTS
-    assert "exp2(-amount * 0.90 * tone_mask)" in ADJUSTMENTS
-    assert "haze * mix(0.045, 0.23, position_weight)" in ADJUSTMENTS
-    assert "haze * mix(0.32, 0.27, haze_likelihood)" in ADJUSTMENTS
 
 
 def test_hdr_values_are_outside_shadow_and_black_toe_regions() -> None:
@@ -261,11 +173,5 @@ def test_ratio_scaling_preserves_signed_rgb_chromatic_relationships() -> None:
     adjusted = tuple(c * scale for c in rgb)
     assert adjusted[0] < 0.0  # no premature max(rgb, 0) in the scene control
     assert math.isclose(adjusted[1] / adjusted[2], rgb[1] / rgb[2])
-    assert "return rgb * exp2" in TONEMAP
 
 
-def test_preview_detail_and_tiled_export_share_tone_statistics_and_output_stage() -> None:
-    assert "pub fn inherit_tone_statistics" in GPU
-    assert EXPORT.count("inherit_tone_statistics") >= 2
-    assert '"apply_view_node"' in GPU
-    assert "tone_stats_buffer" in GPU

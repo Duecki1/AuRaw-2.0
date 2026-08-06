@@ -193,10 +193,10 @@ pub fn open_camera_profile_folder(app: &AndroidApp) -> Result<(), String> {
 
 pub fn remove_camera_profile_mirror(app: &AndroidApp, path: &Path) -> Result<(), String> {
     let path = path.to_string_lossy().into_owned();
-    with_activity(app, |env, activity| {
+    with_profile_importer(app, |env, profile_importer| {
         let path = env.new_string(&path)?;
         env.call_method(
-            activity,
+            profile_importer,
             jni::jni_str!("removeCameraProfileMirror"),
             jni::jni_sig!((JString) -> void),
             &[JValue::Object(&path)],
@@ -207,10 +207,10 @@ pub fn remove_camera_profile_mirror(app: &AndroidApp, path: &Path) -> Result<(),
 }
 
 pub fn clear_camera_profile_folder_picker_location(app: &AndroidApp) -> Result<(), String> {
-    with_activity(app, |env, activity| {
+    with_profile_importer(app, |env, profile_importer| {
         env.call_method(
-            activity,
-            jni::jni_str!("clearCameraProfileFolderPickerLocation"),
+            profile_importer,
+            jni::jni_str!("clearFolderPickerLocation"),
             jni::jni_sig!(() -> void),
             &[],
         )?;
@@ -334,10 +334,10 @@ pub fn lensfun_database_dir(app: &AndroidApp) -> Result<PathBuf, String> {
 }
 
 pub fn library_location(app: &AndroidApp) -> Result<String, String> {
-    with_activity(app, |env, activity| {
+    with_storage_manager(app, |env, storage_manager| {
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("rawLibraryLocation"),
                 jni::jni_sig!(() -> JString),
                 &[],
@@ -350,10 +350,10 @@ pub fn library_location(app: &AndroidApp) -> Result<String, String> {
 }
 
 pub fn list_library_documents(app: &AndroidApp) -> Result<Vec<LibraryDocument>, String> {
-    let encoded = with_activity(app, |env, activity| {
+    let encoded = with_storage_manager(app, |env, storage_manager| {
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("listRawLibrary"),
                 jni::jni_sig!(() -> JString),
                 &[],
@@ -436,9 +436,9 @@ pub fn load_library_thumbnail(
 }
 
 pub fn clear_thumbnail_cache(app: &AndroidApp) -> Result<(), String> {
-    with_activity(app, |env, activity| {
+    with_storage_manager(app, |env, storage_manager| {
         env.call_method(
-            activity,
+            storage_manager,
             jni::jni_str!("clearThumbnailCache"),
             jni::jni_sig!(() -> void),
             &[],
@@ -449,9 +449,9 @@ pub fn clear_thumbnail_cache(app: &AndroidApp) -> Result<(), String> {
 }
 
 pub fn thumbnail_cache_size_bytes(app: &AndroidApp) -> Result<u64, String> {
-    let bytes = with_activity(app, |env, activity| {
+    let bytes = with_storage_manager(app, |env, storage_manager| {
         env.call_method(
-            activity,
+            storage_manager,
             jni::jni_str!("thumbnailCacheSizeBytes"),
             jni::jni_sig!(() -> i64),
             &[],
@@ -464,10 +464,10 @@ pub fn thumbnail_cache_size_bytes(app: &AndroidApp) -> Result<u64, String> {
 
 pub fn load_library_display_dimensions(app: &AndroidApp, uri: &str) -> Result<[u32; 2], String> {
     let uri_string = uri.to_owned();
-    let fd = with_activity(app, |env, activity| {
+    let fd = with_storage_manager(app, |env, storage_manager| {
         let uri = env.new_string(&uri_string)?;
         env.call_method(
-            activity,
+            storage_manager,
             jni::jni_str!("openRawLibraryFd"),
             jni::jni_sig!((JString) -> i32),
             &[JValue::Object(&uri)],
@@ -495,10 +495,10 @@ fn load_library_thumbnail_from_fd(
     maximum_edge: u32,
 ) -> Result<crate::pipeline::RawThumbnail, String> {
     let uri_string = uri.to_owned();
-    let fd = with_activity(app, |env, activity| {
+    let fd = with_storage_manager(app, |env, storage_manager| {
         let uri = env.new_string(&uri_string)?;
         env.call_method(
-            activity,
+            storage_manager,
             jni::jni_str!("openRawLibraryFd"),
             jni::jni_sig!((JString) -> i32),
             &[JValue::Object(&uri)],
@@ -528,11 +528,11 @@ fn raw_thumbnail_cache_path(
     maximum_edge: u32,
 ) -> Result<PathBuf, String> {
     let uri = uri.to_owned();
-    let path = with_activity(app, |env, activity| {
+    let path = with_storage_manager(app, |env, storage_manager| {
         let uri = env.new_string(&uri)?;
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("rawThumbnailCachePath"),
                 jni::jni_sig!((JString, i64, i64, i32) -> JString),
                 &[
@@ -556,11 +556,11 @@ fn raw_thumbnail_cache_path(
 
 fn developed_thumbnail_cache_path(app: &AndroidApp, uri: &str) -> Result<PathBuf, String> {
     let uri = uri.to_owned();
-    let path = with_activity(app, |env, activity| {
+    let path = with_storage_manager(app, |env, storage_manager| {
         let uri = env.new_string(&uri)?;
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("developedThumbnailCachePath"),
                 jni::jni_sig!((JString) -> JString),
                 &[JValue::Object(&uri)],
@@ -678,12 +678,12 @@ fn materialize_library_thumbnail(
 ) -> Result<PathBuf, String> {
     let raw_uri = raw_uri.to_owned();
     let display_name = display_name.to_owned();
-    let path = with_activity(app, |env, activity| {
+    let path = with_storage_manager(app, |env, storage_manager| {
         let raw_uri = env.new_string(&raw_uri)?;
         let display_name = env.new_string(&display_name)?;
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("materializeRawLibraryThumbnail"),
                 jni::jni_sig!((JString, JString) -> JString),
                 &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
@@ -707,11 +707,11 @@ pub fn open_library_document(
 ) -> Result<(), String> {
     let uri = uri.to_owned();
     let display_name = display_name.to_owned();
-    with_activity(app, |env, activity| {
+    with_storage_manager(app, |env, storage_manager| {
         let uri = env.new_string(&uri)?;
         let display_name = env.new_string(&display_name)?;
         env.call_method(
-            activity,
+            storage_manager,
             jni::jni_str!("openRawLibraryDocument"),
             jni::jni_sig!((JString, JString) -> void),
             &[JValue::Object(&uri), JValue::Object(&display_name)],
@@ -728,12 +728,12 @@ pub fn duplicate_library_document(
 ) -> Result<String, String> {
     let raw_uri_owned = raw_uri.to_owned();
     let display_name_owned = display_name.to_owned();
-    with_activity(app, |env, activity| {
+    with_storage_manager(app, |env, storage_manager| {
         let raw_uri = env.new_string(&raw_uri_owned)?;
         let display_name = env.new_string(&display_name_owned)?;
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("duplicateRawLibraryDocument"),
                 jni::jni_sig!((JString, JString) -> JString),
                 &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
@@ -752,11 +752,11 @@ pub fn delete_library_document(
 ) -> Result<(), String> {
     let raw_uri_owned = raw_uri.to_owned();
     let display_name_owned = display_name.to_owned();
-    with_activity(app, |env, activity| {
+    with_storage_manager(app, |env, storage_manager| {
         let raw_uri = env.new_string(&raw_uri_owned)?;
         let display_name = env.new_string(&display_name_owned)?;
         env.call_method(
-            activity,
+            storage_manager,
             jni::jni_str!("deleteRawLibraryDocument"),
             jni::jni_sig!((JString, JString) -> void),
             &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
@@ -775,11 +775,11 @@ pub fn remove_raw_sidecar(
 ) -> Result<(), String> {
     let raw_uri_owned = raw_uri.to_owned();
     let display_name_owned = display_name.to_owned();
-    with_activity(app, |env, activity| {
+    with_storage_manager(app, |env, storage_manager| {
         let raw_uri = env.new_string(&raw_uri_owned)?;
         let display_name = env.new_string(&display_name_owned)?;
         env.call_method(
-            activity,
+            storage_manager,
             jni::jni_str!("removeRawSidecar"),
             jni::jni_sig!((JString, JString) -> void),
             &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
@@ -810,12 +810,12 @@ pub fn materialize_raw_sidecar(
 ) -> Result<Option<PathBuf>, String> {
     let raw_uri = raw_uri.to_owned();
     let display_name = display_name.to_owned();
-    let path = with_activity(app, |env, activity| {
+    let path = with_storage_manager(app, |env, storage_manager| {
         let raw_uri = env.new_string(&raw_uri)?;
         let display_name = env.new_string(&display_name)?;
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("materializeRawSidecar"),
                 jni::jni_sig!((JString, JString) -> JString),
                 &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
@@ -829,10 +829,10 @@ pub fn materialize_raw_sidecar(
 }
 
 pub fn create_raw_sidecar_cache(app: &AndroidApp) -> Result<PathBuf, String> {
-    let path = with_activity(app, |env, activity| {
+    let path = with_storage_manager(app, |env, storage_manager| {
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("createRawSidecarCache"),
                 jni::jni_sig!(() -> JString),
                 &[],
@@ -861,13 +861,13 @@ pub fn publish_raw_sidecar(
         .to_owned();
     let raw_uri = raw_uri.to_owned();
     let display_name = display_name.to_owned();
-    with_activity(app, |env, activity| {
+    with_storage_manager(app, |env, storage_manager| {
         let cached_path = env.new_string(&cached_path)?;
         let raw_uri = env.new_string(&raw_uri)?;
         let display_name = env.new_string(&display_name)?;
         let object = env
             .call_method(
-                activity,
+                storage_manager,
                 jni::jni_str!("publishRawSidecar"),
                 jni::jni_sig!((JString, JString, JString) -> JString),
                 &[
@@ -991,6 +991,54 @@ fn with_activity<T>(
     })
 }
 
+fn with_storage_manager<T>(
+    app: &AndroidApp,
+    operation: impl FnOnce(&mut jni::Env<'_>, &JObject) -> jni::errors::Result<T>,
+) -> jni::errors::Result<T> {
+    with_activity(app, |env, activity| {
+        let storage_manager = env
+            .get_field(
+                activity,
+                jni::jni_str!("storageManager"),
+                jni::jni_sig!(de.duecki.auraw.StorageManager),
+            )?
+            .l()?;
+        operation(env, &storage_manager)
+    })
+}
+
+fn with_profile_importer<T>(
+    app: &AndroidApp,
+    operation: impl FnOnce(&mut jni::Env<'_>, &JObject) -> jni::errors::Result<T>,
+) -> jni::errors::Result<T> {
+    with_activity(app, |env, activity| {
+        let profile_importer = env
+            .get_field(
+                activity,
+                jni::jni_str!("profileImporter"),
+                jni::jni_sig!(de.duecki.auraw.ProfileImporter),
+            )?
+            .l()?;
+        operation(env, &profile_importer)
+    })
+}
+
+fn with_export_publisher<T>(
+    app: &AndroidApp,
+    operation: impl FnOnce(&mut jni::Env<'_>, &JObject) -> jni::errors::Result<T>,
+) -> jni::errors::Result<T> {
+    with_activity(app, |env, activity| {
+        let export_publisher = env
+            .get_field(
+                activity,
+                jni::jni_str!("exportPublisher"),
+                jni::jni_sig!(de.duecki.auraw.ExportPublisher),
+            )?
+            .l()?;
+        operation(env, &export_publisher)
+    })
+}
+
 fn decode_uri_component(encoded: &str) -> Result<String, String> {
     let bytes = encoded.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -1028,12 +1076,12 @@ pub fn prepare_direct_export(
     display_name: &str,
     mime_type: &str,
 ) -> Result<Option<PathBuf>, String> {
-    let encoded = with_activity(app, |env, activity| {
+    let encoded = with_export_publisher(app, |env, export_publisher| {
         let display_name = env.new_string(display_name)?;
         let mime_type = env.new_string(mime_type)?;
         let object = env
             .call_method(
-                activity,
+                export_publisher,
                 jni::jni_str!("createPendingExport"),
                 jni::jni_sig!((JString, JString) -> JString),
                 &[JValue::Object(&display_name), JValue::Object(&mime_type)],
@@ -1155,10 +1203,10 @@ pub fn cancel_all_direct_exports(app: &AndroidApp) {
 }
 
 fn finish_pending_export(app: &AndroidApp, uri: &str, success: bool) -> Result<(), String> {
-    with_activity(app, |env, activity| {
+    with_export_publisher(app, |env, export_publisher| {
         let uri = env.new_string(uri)?;
         env.call_method(
-            activity,
+            export_publisher,
             jni::jni_str!("finishPendingExport"),
             jni::jni_sig!((JString, i32) -> void),
             &[
@@ -1180,17 +1228,12 @@ pub fn publish_image(
     let path = path
         .to_str()
         .ok_or_else(|| "Android export cache path is not valid UTF-8".to_owned())?;
-    // SAFETY: Android owns the JavaVM for the process lifetime; `JavaVM` is a non-owning handle and does not destroy the VM on drop.
-    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
-        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
-        // SAFETY: `raw_activity` is the live NativeActivity object for this callback; converting it to a JNI global reference extends its lifetime safely.
-        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+    with_export_publisher(app, |env, export_publisher| {
         let path = env.new_string(path)?;
         let display_name = env.new_string(display_name)?;
         let mime_type = env.new_string(mime_type)?;
         env.call_method(
-            activity,
+            export_publisher,
             jni::jni_str!("publishImage"),
             jni::jni_sig!((JString, JString, JString) -> void),
             &[

@@ -69,6 +69,7 @@ pub(super) struct GpuResourcePlanInput {
     pub mask_layers: u32,
     pub profile_buffer_bytes: u64,
     pub params_buffer_bytes: u64,
+    pub mask_data_buffer_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -303,6 +304,12 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
         "pipeline parameter buffer",
         GpuResourceResidency::Persistent,
         aligned_buffer_bytes(input.params_buffer_bytes)?,
+    );
+    push_entry(
+        &mut entries,
+        "local-mask data buffer",
+        GpuResourceResidency::Persistent,
+        aligned_buffer_bytes(input.mask_data_buffer_bytes)?,
     );
     let histogram_bytes = u64::try_from(std::mem::size_of::<u32>())
         .ok()
@@ -1069,6 +1076,7 @@ mod resource_plan_tests {
             mask_layers: 4,
             profile_buffer_bytes: 4096,
             params_buffer_bytes: GPU_PARAMS_ABI_SIZE_BYTES as u64,
+            mask_data_buffer_bytes: MASK_DATA_SIZE_BYTES,
         }
     }
 
@@ -1218,6 +1226,7 @@ mod resource_plan_tests {
             "inpaint texture",
             "camera/output profile buffer",
             "pipeline parameter buffer",
+            "local-mask data buffer",
             "tone histogram buffer",
             "tone statistics buffer",
             "scene/inpaint conversion texture",

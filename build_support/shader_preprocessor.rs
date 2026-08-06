@@ -4,7 +4,7 @@ use std::path::Path;
 pub const INCLUDE_DIRECTIVE: &str = "// @include ";
 pub const GENERATED_SHADER_TEMPLATES: [(&str, &str); 2] = [
     ("pass4.wgsl", "pass4.generated.wgsl"),
-    ("xtrans_pass7.wgsl", "xtrans_pass7.generated.wgsl"),
+    ("xtrans_finish.wgsl", "xtrans_finish.generated.wgsl"),
 ];
 
 pub fn generate_shader_sources(shader_dir: &Path, output_dir: &Path) -> Result<(), String> {
@@ -118,7 +118,7 @@ mod tests {
             GENERATED_SHADER_TEMPLATES,
             [
                 ("pass4.wgsl", "pass4.generated.wgsl"),
-                ("xtrans_pass7.wgsl", "xtrans_pass7.generated.wgsl"),
+                ("xtrans_finish.wgsl", "xtrans_finish.generated.wgsl"),
             ]
         );
     }
