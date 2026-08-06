@@ -104,7 +104,7 @@ Install:
 
 - JDK 17
 - Gradle 8.11.1 or newer in the Gradle 8 series
-- Android SDK 35, Build Tools 35.0.0, NDK 28.2.13676358, and CMake 3.22.1
+- Android SDK platform, Build Tools, and NDK versions declared in `Cargo.toml` `[workspace.metadata]`, plus CMake 3.22.1
 - `libclang` and `cargo-ndk` 4.1.2
 
 Set up Rust and the Android environment:
@@ -114,7 +114,8 @@ rustup target add aarch64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+eval "$(python3 scripts/dev.py print-build-metadata --format shell)"
+export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$AURAW_ANDROID_NDK_VERSION"
 ```
 
 Build the APK from the repository root:

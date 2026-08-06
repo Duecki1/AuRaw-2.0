@@ -7,6 +7,7 @@ import argparse
 from collections.abc import Callable, Iterable, Sequence
 import csv
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -118,6 +119,87 @@ class CheckSpec:
     title: str
     success_message: str
     validate: Callable[[], list[str]]
+
+
+@dataclass(frozen=True)
+class WorkspaceBuildMetadata:
+    """Typed build contract loaded from Cargo.toml [workspace.metadata]."""
+
+    android_ndk_version: str
+    android_build_tools_version: str
+    android_compile_sdk: int
+    android_min_sdk: int
+    android_target_sdk: int
+    libraw_revision: str
+    lensfun_revision: str
+    android_use_legacy_packaging: bool
+
+    def as_contract(self) -> dict[str, object]:
+        """Return the stable JSON/Gradle-facing build contract."""
+        return {
+            "ndkVersion": self.android_ndk_version,
+            "buildToolsVersion": self.android_build_tools_version,
+            "compileSdk": self.android_compile_sdk,
+            "minSdk": self.android_min_sdk,
+            "targetSdk": self.android_target_sdk,
+            "librawRevision": self.libraw_revision,
+            "lensfunRevision": self.lensfun_revision,
+            "useLegacyPackaging": self.android_use_legacy_packaging,
+        }
+
+
+@lru_cache(maxsize=1)
+def workspace_build_metadata() -> WorkspaceBuildMetadata:
+    """Load and validate the repository-wide build contract once per process."""
+    manifest = ROOT / "Cargo.toml"
+    try:
+        with manifest.open("rb") as handle:
+            document = tomllib.load(handle)
+        values = document["workspace"]["metadata"]
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+        fail(f"cannot load [workspace.metadata] from {relative_display(manifest)}: {error}")
+    if not isinstance(values, dict):
+        fail(f"{relative_display(manifest)}: workspace.metadata must be a TOML table")
+
+    def required_string(key: str) -> str:
+        value = values.get(key)
+        if not isinstance(value, str) or not value:
+            fail(
+                f"{relative_display(manifest)}: workspace.metadata.{key} "
+                "must be a non-empty string"
+            )
+        return value
+
+    def required_integer(key: str) -> int:
+        value = values.get(key)
+        if type(value) is not int or value <= 0:
+            fail(
+                f"{relative_display(manifest)}: workspace.metadata.{key} "
+                "must be a positive integer"
+            )
+        return value
+
+    def required_boolean(key: str) -> bool:
+        value = values.get(key)
+        if type(value) is not bool:
+            fail(f"{relative_display(manifest)}: workspace.metadata.{key} must be a boolean")
+        return value
+
+    metadata = WorkspaceBuildMetadata(
+        android_ndk_version=required_string("android_ndk_version"),
+        android_build_tools_version=required_string("android_build_tools_version"),
+        android_compile_sdk=required_integer("android_compile_sdk"),
+        android_min_sdk=required_integer("android_min_sdk"),
+        android_target_sdk=required_integer("android_target_sdk"),
+        libraw_revision=required_string("libraw_revision"),
+        lensfun_revision=required_string("lensfun_revision"),
+        android_use_legacy_packaging=required_boolean("android_use_legacy_packaging"),
+    )
+    if metadata.android_min_sdk > metadata.android_target_sdk:
+        fail("workspace.metadata.android_min_sdk cannot exceed android_target_sdk")
+    if metadata.android_target_sdk > metadata.android_compile_sdk:
+        fail("workspace.metadata.android_target_sdk cannot exceed android_compile_sdk")
+    return metadata
 
 
 def relative_display(path: Path) -> str:
@@ -2036,10 +2118,15 @@ def android_abi_config(abi: str, api: int = 26) -> dict[str, str]:
 
 def command_build_android_lensfun(args: argparse.Namespace) -> int:
     """Build pinned Lensfun, GLib, and libiconv for one Android ABI."""
+    metadata = workspace_build_metadata()
+    if args.print_build_contract:
+        print(compact_json(metadata.as_contract()))
+        return 0
+
     abi = args.abi
-    api = 26
-    lensfun_version = "0.3.4"
-    lensfun_revision = "101c745e847a5de4a1e569a94368ce2027198598"
+    api = metadata.android_min_sdk
+    lensfun_version = metadata.lensfun_revision
+    lensfun_source_revision = "101c745e847a5de4a1e569a94368ce2027198598"
     lensfun_digest = "a11cbe6aeec657839540448b253217c25d20b7a45b6aebfef406f7239933c7a6"
     iconv_version = "1.17"
     iconv_digest = "8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313"
@@ -2049,7 +2136,7 @@ def command_build_android_lensfun(args: argparse.Namespace) -> int:
     meson_digest = "ae3f12953045f3c7c60e27f2af1ad862f14dee125b4ed9bcb8a842a5080dbf85"
     setuptools_version = "83.0.0"
     setuptools_digest = "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3"
-    expected_ndk = "28.2.13676358"
+    expected_ndk = metadata.android_ndk_version
 
     abi_config = android_abi_config(abi, api)
     ndk = android_ndk_root(expected_ndk)
@@ -2086,7 +2173,7 @@ def command_build_android_lensfun(args: argparse.Namespace) -> int:
     tools_root.mkdir(parents=True, exist_ok=True)
 
     build_key = (
-        f"Lensfun={lensfun_version}@{lensfun_revision} glib={glib_version} "
+        f"Lensfun={lensfun_version}@{lensfun_source_revision} glib={glib_version} "
         f"iconv={iconv_version} abi={abi} api={api} ndk={ndk_revision}"
     )
     cached_files = (
@@ -2163,7 +2250,7 @@ def command_build_android_lensfun(args: argparse.Namespace) -> int:
     ensure_archive_source(
         lensfun_source,
         "CMakeLists.txt",
-        f"https://github.com/lensfun/lensfun/archive/{lensfun_revision}.tar.gz",
+        f"https://github.com/lensfun/lensfun/archive/{lensfun_source_revision}.tar.gz",
         lensfun_digest,
         temporary_prefix=".auraw-native.",
     )
@@ -2336,15 +2423,16 @@ def exact_cmake(expected_version: str) -> tuple[str, str]:
 
 def command_build_android_libraw(args: argparse.Namespace) -> int:
     """Build pinned LibRaw for one Android ABI."""
-    expected_ndk = read_first_property(ROOT / "android/build-contract.properties", "ndkVersion")
+    metadata = workspace_build_metadata()
     if args.print_build_contract:
-        print(compact_json({"ndkVersion": expected_ndk}))
+        print(compact_json(metadata.as_contract()))
         return 0
 
+    expected_ndk = metadata.android_ndk_version
     abi = args.abi
-    api = 26
-    libraw_version = "0.22.1"
-    libraw_revision = "b860248a89d9082b8e0a1e202e516f46af9adb29"
+    api = metadata.android_min_sdk
+    libraw_version = metadata.libraw_revision
+    libraw_source_revision = "b860248a89d9082b8e0a1e202e516f46af9adb29"
     libraw_digest = "f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b"
     cmake_version = "3.22.1"
     cmake_commit = "eb98e4325aef2ce85d2eb031c2ff18640ca616d3"
@@ -2363,7 +2451,7 @@ def command_build_android_libraw(args: argparse.Namespace) -> int:
     src_root.mkdir(parents=True, exist_ok=True)
 
     build_key = (
-        f"LibRaw={libraw_version}@{libraw_revision} cmake-files={cmake_commit} "
+        f"LibRaw={libraw_version}@{libraw_source_revision} cmake-files={cmake_commit} "
         f"cmake={actual_cmake_version} abi={abi} api={api} ndk={ndk_revision}"
     )
     if (
@@ -2378,7 +2466,7 @@ def command_build_android_libraw(args: argparse.Namespace) -> int:
     ensure_archive_source(
         libraw_source,
         "libraw/libraw.h",
-        f"https://github.com/LibRaw/LibRaw/archive/{libraw_revision}.tar.gz",
+        f"https://github.com/LibRaw/LibRaw/archive/{libraw_source_revision}.tar.gz",
         libraw_digest,
         temporary_prefix=".libraw.",
     )
@@ -2505,14 +2593,15 @@ def release_build_environment(revision: str) -> dict[str, str]:
 
 def command_build_android(args: argparse.Namespace) -> int:
     """Build Android native dependencies and the AuRaw library."""
-    expected_ndk = read_first_property(ROOT / "android/build-contract.properties", "ndkVersion")
+    metadata = workspace_build_metadata()
     if args.print_build_contract:
-        print(compact_json({"ndkVersion": expected_ndk}))
+        print(compact_json(metadata.as_contract()))
         return 0
 
+    expected_ndk = metadata.android_ndk_version
     abi = args.abi
     profile = args.profile
-    api = 26
+    api = metadata.android_min_sdk
     expected_cargo_ndk = "4.1.2"
     abi_config = android_abi_config(abi, api)
     ndk = android_ndk_root(expected_ndk)
@@ -2949,24 +3038,43 @@ def command_verified_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_print_build_metadata(args: argparse.Namespace) -> int:
+    """Print the Cargo workspace build contract for CI and tooling."""
+    metadata = workspace_build_metadata()
+    contract = metadata.as_contract()
+    if args.value is not None:
+        try:
+            value = contract[args.value]
+        except KeyError:
+            fail(f"unknown build metadata field: {args.value}", 2)
+        print(str(value).lower() if isinstance(value, bool) else value)
+    elif args.format == "shell":
+        environment = {
+            "AURAW_ANDROID_NDK_VERSION": metadata.android_ndk_version,
+            "AURAW_ANDROID_BUILD_TOOLS_VERSION": metadata.android_build_tools_version,
+            "AURAW_ANDROID_COMPILE_SDK": metadata.android_compile_sdk,
+            "AURAW_ANDROID_MIN_SDK": metadata.android_min_sdk,
+            "AURAW_ANDROID_TARGET_SDK": metadata.android_target_sdk,
+            "AURAW_LIBRAW_REVISION": metadata.libraw_revision,
+            "AURAW_LENSFUN_REVISION": metadata.lensfun_revision,
+            "AURAW_ANDROID_USE_LEGACY_PACKAGING": metadata.android_use_legacy_packaging,
+        }
+        for key, value in environment.items():
+            encoded = str(value).lower() if isinstance(value, bool) else str(value)
+            print(f"export {key}={shlex.quote(encoded)}")
+    else:
+        print(compact_json(contract))
+    return 0
+
+
 def command_verify_android_16kb(args: argparse.Namespace) -> int:
     """Verify ELF LOAD alignment and APK zip alignment for 16 KB pages."""
-    contract = parse_properties(ROOT / "android/build-contract.properties")
-    try:
-        expected_ndk = contract["ndkVersion"]
-        build_tools_version = contract["buildToolsVersion"]
-    except KeyError as error:
-        fail(f"missing Android build-contract property: {error.args[0]}")
+    metadata = workspace_build_metadata()
+    expected_ndk = metadata.android_ndk_version
+    build_tools_version = metadata.android_build_tools_version
 
     if args.print_build_contract:
-        print(
-            compact_json(
-                {
-                    "ndkVersion": expected_ndk,
-                    "buildToolsVersion": build_tools_version,
-                }
-            )
-        )
+        print(compact_json(metadata.as_contract()))
         return 0
 
     apk = args.apk or ROOT / "android/app/build/outputs/apk/debug/app-debug.apk"
@@ -3137,7 +3245,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     build_lensfun = subparsers.add_parser("build-android-lensfun", help="build pinned Lensfun for one Android ABI")
     build_lensfun.add_argument("abi", nargs="?", default="arm64-v8a")
+    build_lensfun.add_argument("--print-build-contract", action="store_true")
     build_lensfun.set_defaults(handler=command_build_android_lensfun)
+
+    print_metadata = subparsers.add_parser(
+        "print-build-metadata", help="print Cargo workspace build metadata"
+    )
+    print_metadata.add_argument("--format", choices=("json", "shell"), default="json")
+    print_metadata.add_argument(
+        "--value",
+        choices=(
+            "ndkVersion",
+            "buildToolsVersion",
+            "compileSdk",
+            "minSdk",
+            "targetSdk",
+            "librawRevision",
+            "lensfunRevision",
+            "useLegacyPackaging",
+        ),
+    )
+    print_metadata.set_defaults(handler=command_print_build_metadata)
 
     build_linux = subparsers.add_parser("build-linux", help="build a revision-stamped Linux release")
     build_linux.set_defaults(handler=command_build_linux)

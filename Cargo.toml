@@ -18,6 +18,16 @@ default-members = [
     "crates/auraw-cli",
 ]
 
+[workspace.metadata]
+android_ndk_version = "28.2.13676358"
+android_build_tools_version = "35.0.0"
+android_compile_sdk = 36
+android_min_sdk = 26
+android_target_sdk = 36
+libraw_revision = "0.22.1"
+lensfun_revision = "0.3.4"
+android_use_legacy_packaging = false
+
 [workspace.package]
 version = "2.0.0"
 edition = "2021"
