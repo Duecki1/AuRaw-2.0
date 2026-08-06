@@ -3,7 +3,7 @@ use crate::file_ops::{replace_file, sync_parent_directory};
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
     ExposureParams, GeometryTransform, InpaintStroke, MaskGeometry, MaskImage, MaskKind, MaskStack,
-    CURRENT_PROCESS_VERSION, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -251,7 +251,6 @@ pub fn apply_copied_adjustments_with_mode(
     }
     if settings.adjustments {
         destination.exposure = source.exposure;
-        destination.exposure.migrate_to_current_process();
     }
     if settings.geometry {
         destination.geometry = source.geometry;
@@ -300,7 +299,6 @@ pub fn apply_copied_adjustments_with_mode(
 struct SidecarDocument {
     format: String,
     schema_version: u32,
-    process_version: u32,
     edits: EditState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mask_assets: Vec<SidecarMaskAsset>,
@@ -578,12 +576,9 @@ fn restore_mask_assets(
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedSidecar {
     pub edits: EditState,
-    /// True when an older supported schema or processing version was
-    /// canonicalized in memory and should be rewritten on load.
+    /// True when an older supported schema was canonicalized in memory and
+    /// should be rewritten on load.
     pub migrated: bool,
-    /// Storage-only schema rewrites must not opt an otherwise current edit into
-    /// processing migrations such as adaptive Detail defaults.
-    pub process_migrated: bool,
 }
 
 #[derive(Debug)]
@@ -947,19 +942,10 @@ pub fn remove_desktop_edits(raw_path: &Path) -> Result<bool, String> {
 
 pub fn encode(mut edits: EditState) -> Result<Vec<u8>, SidecarError> {
     validate_edit_state(&edits)?;
-    if edits.exposure.process_version > CURRENT_PROCESS_VERSION {
-        return Err(SidecarError::Unsupported(format!(
-            "edit uses future processing version {} (this build supports {})",
-            edits.exposure.process_version, CURRENT_PROCESS_VERSION
-        )));
-    }
-    edits.exposure.migrate_to_current_process();
-    validate_edit_state(&edits)?;
     let (mask_assets, mask_asset_refs) = extract_mask_assets(&mut edits)?;
     let document = SidecarDocument {
         format: SIDECAR_FORMAT.to_owned(),
         schema_version: SIDECAR_SCHEMA_VERSION,
-        process_version: edits.exposure.process_version,
         edits,
         mask_assets,
         mask_asset_refs,
@@ -992,18 +978,6 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
             document.schema_version, SIDECAR_SCHEMA_VERSION
         )));
     }
-    if document.process_version != document.edits.exposure.process_version {
-        return Err(SidecarError::Invalid(
-            "sidecar processing versions do not agree".to_owned(),
-        ));
-    }
-    if document.process_version > CURRENT_PROCESS_VERSION {
-        return Err(SidecarError::Unsupported(format!(
-            "sidecar uses future processing version {} (this build supports {})",
-            document.process_version, CURRENT_PROCESS_VERSION
-        )));
-    }
-
     let original_schema = document.schema_version;
     if original_schema == SIDECAR_SCHEMA_VERSION {
         restore_mask_assets(
@@ -1021,20 +995,15 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     }
 
     validate_edit_state(&document.edits)?;
-    let original_process = document.process_version;
-    document.edits.exposure.migrate_to_current_process();
-    let migrated_process = document.edits.exposure.process_version != original_process;
     document.edits.exposure.sanitize_tone_curves();
     for mask in &mut Arc::make_mut(&mut document.edits.masks).masks {
         mask.adjustments.sanitize_tone_curves();
     }
     validate_edit_state(&document.edits)?;
 
-    let process_migrated = original_process != CURRENT_PROCESS_VERSION || migrated_process;
     Ok(LoadedSidecar {
         edits: document.edits,
-        migrated: original_schema != SIDECAR_SCHEMA_VERSION || process_migrated,
-        process_migrated,
+        migrated: original_schema != SIDECAR_SCHEMA_VERSION,
     })
 }
 
@@ -1904,10 +1873,7 @@ fn invalid<T>(message: &str) -> Result<T, SidecarError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{
-        MaskKind, CURRENT_PROCESS_VERSION, LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
-        SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
-    };
+    use crate::pipeline::MaskKind;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_edits() -> EditState {
@@ -2189,7 +2155,6 @@ mod tests {
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits, edits);
         assert!(!loaded.migrated);
-        assert!(!loaded.process_migrated);
     }
 
     #[test]
@@ -2255,7 +2220,6 @@ mod tests {
         let legacy = SidecarDocument {
             format: SIDECAR_FORMAT.to_owned(),
             schema_version: 4,
-            process_version: CURRENT_PROCESS_VERSION,
             edits: edits.clone(),
             mask_assets: Vec::new(),
             mask_asset_refs: Vec::new(),
@@ -2267,7 +2231,6 @@ mod tests {
 
         let loaded = decode(&legacy_bytes).unwrap();
         assert!(loaded.migrated);
-        assert!(!loaded.process_migrated);
         assert_eq!(loaded.edits, edits);
 
         let rewritten = encode(loaded.edits).unwrap();
@@ -2455,7 +2418,6 @@ mod tests {
         let document = SidecarDocument {
             format: SIDECAR_FORMAT.to_owned(),
             schema_version: 1,
-            process_version: CURRENT_PROCESS_VERSION,
             edits: sample_edits(),
             mask_assets: Vec::new(),
             mask_asset_refs: Vec::new(),
@@ -2479,7 +2441,6 @@ mod tests {
         let encoded = serde_json::to_vec(&SidecarDocument {
             format: SIDECAR_FORMAT.to_owned(),
             schema_version: 2,
-            process_version: CURRENT_PROCESS_VERSION,
             edits,
             mask_assets: Vec::new(),
             mask_asset_refs: Vec::new(),
@@ -2488,96 +2449,6 @@ mod tests {
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits.inpainting[0].patch.raster_dimensions(), [2, 2]);
         assert!(loaded.migrated);
-    }
-
-    #[test]
-    fn old_processing_state_is_migrated_deliberately() {
-        let mut edits = sample_edits();
-        edits.exposure.process_version = 11;
-        let value = serde_json::to_vec(&SidecarDocument {
-            format: SIDECAR_FORMAT.to_owned(),
-            schema_version: 0,
-            process_version: 11,
-            edits,
-            mask_assets: Vec::new(),
-            mask_asset_refs: Vec::new(),
-        })
-        .unwrap();
-        let loaded = decode(&value).unwrap();
-        assert_eq!(
-            loaded.edits.exposure.process_version,
-            CURRENT_PROCESS_VERSION
-        );
-        assert!(loaded.migrated);
-        assert!(loaded.process_migrated);
-    }
-
-    #[test]
-    fn process_thirteen_sidecars_are_canonicalized_to_current() {
-        let mut edits = sample_edits();
-        edits.exposure.process_version = SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION;
-        edits.exposure.chroma_denoise = 0.6;
-        let value = serde_json::to_vec(&SidecarDocument {
-            format: SIDECAR_FORMAT.to_owned(),
-            schema_version: SIDECAR_SCHEMA_VERSION,
-            process_version: SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION,
-            edits,
-            mask_assets: Vec::new(),
-            mask_asset_refs: Vec::new(),
-        })
-        .unwrap();
-        let loaded = decode(&value).unwrap();
-        assert_eq!(
-            loaded.edits.exposure.process_version,
-            CURRENT_PROCESS_VERSION
-        );
-        assert!(loaded.migrated);
-    }
-
-    #[test]
-    fn process_twelve_sidecars_are_canonicalized_to_current() {
-        let mut edits = sample_edits();
-        edits.exposure.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
-        let value = serde_json::to_vec(&SidecarDocument {
-            format: SIDECAR_FORMAT.to_owned(),
-            schema_version: SIDECAR_SCHEMA_VERSION,
-            process_version: LEGACY_SCENE_DISPLAY_PROCESS_VERSION,
-            edits,
-            mask_assets: Vec::new(),
-            mask_asset_refs: Vec::new(),
-        })
-        .unwrap();
-        let loaded = decode(&value).unwrap();
-        assert_eq!(
-            loaded.edits.exposure.process_version,
-            CURRENT_PROCESS_VERSION
-        );
-        assert!(loaded.migrated);
-    }
-
-    #[test]
-    fn saving_an_old_process_writes_the_current_process() {
-        let mut edits = sample_edits();
-        edits.exposure.process_version = LEGACY_SCENE_DISPLAY_PROCESS_VERSION;
-        let encoded = encode(edits).unwrap();
-        let document: SidecarDocument = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(document.process_version, CURRENT_PROCESS_VERSION);
-        assert_eq!(
-            document.edits.exposure.process_version,
-            CURRENT_PROCESS_VERSION
-        );
-    }
-
-    #[test]
-    fn copied_adjustments_cannot_reintroduce_a_legacy_process() {
-        let mut source = sample_edits();
-        source.exposure.process_version = SCENE_DISPLAY_BOUNDARY_PROCESS_VERSION;
-        let mut destination = sample_edits();
-        apply_copied_adjustments(&mut destination, &source, AdjustmentCopySettings::default());
-        assert_eq!(
-            destination.exposure.process_version,
-            CURRENT_PROCESS_VERSION
-        );
     }
 
     #[test]
@@ -2591,7 +2462,6 @@ mod tests {
         let future = SidecarDocument {
             format: SIDECAR_FORMAT.to_owned(),
             schema_version: SIDECAR_SCHEMA_VERSION + 1,
-            process_version: CURRENT_PROCESS_VERSION,
             edits,
             mask_assets: Vec::new(),
             mask_asset_refs: Vec::new(),

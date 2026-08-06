@@ -2,12 +2,11 @@
 // presence controls, and global/local point curves. Creative and display-domain
 // operations are deliberately defined in their own shader files.
 
-// Post-demosaic render graph with explicit domain boundaries. New-process
-// pixels flow through camera characterization -> scene edits -> optional look ->
-// exactly one view transform -> output encoding. The physical passes below may
-// fuse adjacent logical nodes, but they never move scene-style controls across
-// the scene/display boundary. Legacy process versions branch inside the same
-// entry points to preserve the historical DCP ordering.
+// Post-demosaic render graph with explicit domain boundaries. Pixels flow through
+// camera characterization -> scene edits -> optional look -> exactly one view
+// transform -> output encoding. The physical passes below may fuse adjacent
+// logical nodes, but they never move scene-style controls across the
+// scene/display boundary.
 
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
@@ -231,7 +230,6 @@ fn soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
     return sign(detail) * max(abs(detail) - threshold, 0.0);
 }
 
-
 fn local_curve_block(mask_index: u32, curve: u32, block: u32) -> vec4<f32> {
     if curve == 1u { return mask_data[mask_index].curves_red[block]; }
     if curve == 2u { return mask_data[mask_index].curves_green[block]; }
@@ -367,61 +365,40 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
         // scene-tone node, not a weighted parameter contribution to a shared
         // aggregate. This keeps overlap behavior deterministic for nonlinear
         // tone, contrast, WB, and curve operations.
-        if camera_uniforms.process_info.x >= PHOTOGRAPHIC_LOW_TONE_PROCESS_VERSION {
-            // Shadows is an EV-zone remap, so feather/opacity scales the
-            // adjustment parameter itself. Mixing an already nonlinear fully-
-            // adjusted result would produce a different transfer at mask edges.
-            rgb = apply_local_basic_tone_values_with_low_strength(
-                rgb,
-                pos,
-                0.0,
-                mask_data[index].adjust_0.w,
-                0.0,
-                0.0,
-                weight,
-            );
+        // Shadows is an EV-zone remap, so feather/opacity scales the
+        // adjustment parameter itself. Mixing an already nonlinear fully-
+        // adjusted result would produce a different transfer at mask edges.
+        rgb = apply_local_basic_tone_values_with_low_strength(
+            rgb,
+            pos,
+            0.0,
+            mask_data[index].adjust_0.w,
+            0.0,
+            0.0,
+            weight,
+        );
 
-            // Preserve historical masked-result interpolation for unrelated
-            // local tone/WB/curve controls. Blacks is deferred to display-linear.
-            var adjusted = apply_local_basic_tone_values(
-                rgb,
-                pos,
-                mask_data[index].adjust_0.z,
-                0.0,
-                mask_data[index].adjust_1.x,
-                0.0,
-            );
-            adjusted = apply_mask_contrast_value(adjusted, mask_data[index].adjust_0.y);
-            adjusted = apply_temperature_tint_values(
-                adjusted,
-                mask_data[index].adjust_1.z,
-                mask_data[index].adjust_1.w,
-            );
-            adjusted = apply_local_curves_for_mask(index, adjusted);
-            rgb = mix(rgb, adjusted, weight);
-        } else {
-            var adjusted = rgb;
-            adjusted = apply_local_basic_tone_values(
-                adjusted,
-                pos,
-                mask_data[index].adjust_0.z,
-                mask_data[index].adjust_0.w,
-                mask_data[index].adjust_1.x,
-                mask_data[index].adjust_1.y,
-            );
-            adjusted = apply_mask_contrast_value(adjusted, mask_data[index].adjust_0.y);
-            adjusted = apply_temperature_tint_values(
-                adjusted,
-                mask_data[index].adjust_1.z,
-                mask_data[index].adjust_1.w,
-            );
-            adjusted = apply_local_curves_for_mask(index, adjusted);
-            rgb = mix(rgb, adjusted, weight);
-        }
+        // Preserve masked-result interpolation for unrelated
+        // local tone/WB/curve controls. Blacks is deferred to display-linear.
+        var adjusted = apply_local_basic_tone_values(
+            rgb,
+            pos,
+            mask_data[index].adjust_0.z,
+            0.0,
+            mask_data[index].adjust_1.x,
+            0.0,
+        );
+        adjusted = apply_mask_contrast_value(adjusted, mask_data[index].adjust_0.y);
+        adjusted = apply_temperature_tint_values(
+            adjusted,
+            mask_data[index].adjust_1.z,
+            mask_data[index].adjust_1.w,
+        );
+        adjusted = apply_local_curves_for_mask(index, adjusted);
+        rgb = mix(rgb, adjusted, weight);
     }
     return rgb;
 }
-
 
 @compute @workgroup_size(8, 8, 1)
 fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -429,17 +406,13 @@ fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
     // Camera characterization is the only DCP color component allowed before
-    // scene edits in the new graph. Fixed profile exposure and editable global/
-    // local Exposure are also scene-linear. The LookTable is deferred until all
-    // scene controls have finished. Legacy edits retain the old pre-edit look.
+    // scene edits. Fixed profile exposure and editable global/local Exposure are
+    // also scene-linear. The LookTable is deferred until scene controls finish.
     var rgb = apply_camera_characterization(scene_working_at(pos));
     let profile_exposure_ev = bitcast<f32>(camera_uniforms.profile_flags.z);
     rgb = rgb * exp2(profile_exposure_ev);
     rgb = apply_exposure(rgb);
     rgb = apply_local_exposure_nodes(pos, rgb);
-    if !uses_explicit_scene_display_domains() {
-        rgb = apply_optional_profile_look(rgb);
-    }
     textureStore(adjustment_base_out, pos, vec4<f32>(rgb, 1.0));
 }
 
@@ -450,13 +423,9 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rgb = adjustment_base_at(pos);
 
     // Capture sharpening and all H/S/W/B, Contrast, curve, and local tone
-    // controls operate in the scene domain. ProfileToneCurve is excluded from
-    // this node for process 13+, which makes slider semantics profile-independent.
-    // Process 12 and earlier preserve the historical curve-before-edits order.
+    // controls operate in the scene domain. ProfileToneCurve is excluded so
+    // slider semantics remain profile-independent.
     rgb = apply_capture_sharpening(pos, rgb);
-    if !uses_explicit_scene_display_domains() {
-        rgb = apply_profile_view_tone(rgb);
-    }
     rgb = apply_lightroom_tone(rgb, pos);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }

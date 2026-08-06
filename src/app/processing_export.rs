@@ -417,11 +417,7 @@ fn prepare_desktop_library_export_request(
                 .camera_profile
                 .as_ref()
                 .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
-            let use_adaptive = loaded.process_migrated
-                && loaded
-                    .edits
-                    .exposure
-                    .has_legacy_default_detail_settings();
+            let use_adaptive = false;
             (loaded.edits, requested, use_adaptive)
         }
         Ok(None) => {

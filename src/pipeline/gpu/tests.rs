@@ -1,8 +1,7 @@
 use super::{
     canonicalize_green_noise, color_grade_hue_turns, composite_inpaint_rgba16f,
     explicit_render_graph_contracts_are_contiguous, pack_local_point_curve, processing_work_format,
-    render_graph_flags, shader_highlight_method, work_shader_source, ProcessingQuality,
-    COLOR_DENOISE_ENTRY_POINTS, RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY,
+    shader_highlight_method, work_shader_source, ProcessingQuality, COLOR_DENOISE_ENTRY_POINTS,
     SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
     SHADER_COLOR_DENOISE, SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS,
     SHADER_REGRESSION_SCENE, SHADER_SCENE_ADJUSTMENTS, SHADER_TONE_ANALYSIS,
@@ -227,20 +226,18 @@ fn scene_graph_preserves_native_call_order_and_stage_ownership() {
         call_position(&prepare_calls, "apply_exposure")
             < call_position(&prepare_calls, "apply_local_exposure_nodes")
     );
-    assert!(
-        call_position(&prepare_calls, "uses_explicit_scene_display_domains")
-            < call_position(&prepare_calls, "apply_optional_profile_look")
-    );
+    assert!(!prepare_calls
+        .iter()
+        .any(|call| call == "apply_optional_profile_look"));
 
     let tone_calls = entry_point_call_names(&scene_module, "apply_scene_tone_node");
     assert!(
         call_position(&tone_calls, "apply_capture_sharpening")
-            < call_position(&tone_calls, "apply_profile_view_tone")
-    );
-    assert!(
-        call_position(&tone_calls, "apply_profile_view_tone")
             < call_position(&tone_calls, "apply_lightroom_tone")
     );
+    assert!(!tone_calls
+        .iter()
+        .any(|call| call == "apply_profile_view_tone"));
 
     let local_calls = entry_point_call_names(&scene_module, "apply_local_scene_tone_node");
     assert!(local_calls
@@ -252,9 +249,8 @@ fn scene_graph_preserves_native_call_order_and_stage_ownership() {
         .iter()
         .any(|call| call == "apply_capture_sharpening"));
 
-    let view_calls = function_call_names(&view_module, "apply_explicit_view_node");
+    let view_calls = function_call_names(&view_module, "apply_view_transform");
     let look = call_position(&view_calls, "apply_optional_profile_look");
-    assert!(look < call_position(&view_calls, "apply_dcp_view_transform"));
     assert!(look < call_position(&view_calls, "apply_sigmoid_view_transform"));
 }
 
@@ -269,7 +265,6 @@ fn generated_finish_shaders_define_each_shared_routine_once() {
             "finish_warped_pos",
             "finish_reference_bilinear",
             "finish_apply_ca",
-            "finish_apply_legacy_chroma_denoise",
             "finish_apply_sensor_denoise",
         ] {
             assert_eq!(
@@ -392,8 +387,7 @@ fn green_noise_is_averaged_once_and_stored_symmetrically() {
 }
 
 #[test]
-fn every_edit_uses_the_current_scene_display_contract_graph() {
-    assert_eq!(render_graph_flags(), RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY);
+fn unified_scene_display_contract_graph_is_contiguous() {
     assert!(explicit_render_graph_contracts_are_contiguous());
 }
 
@@ -537,11 +531,11 @@ fn basic_contrast_drives_sigmoid_without_switching_view_operators() {
 
     let low_params = super::GpuParams::new(&low, &masks, &raw);
     let high_params = super::GpuParams::new(&high, &masks, &raw);
-    assert_eq!(low_params.process_info[1] & 1, 0);
-    assert_eq!(high_params.process_info[1] & 1, 0);
-    assert_eq!(low_params.presence[3], 0.0);
-    assert_eq!(high_params.presence[3], 0.0);
-    assert!(low_params.sigmoid_power[0] < high_params.sigmoid_power[0]);
+    assert_eq!(low_params.camera.ai_denoise_enabled, 0);
+    assert_eq!(high_params.camera.ai_denoise_enabled, 0);
+    assert_eq!(low_params.effects.presence[3], 0.0);
+    assert_eq!(high_params.effects.presence[3], 0.0);
+    assert!(low_params.scene_tone.sigmoid_power[0] < high_params.scene_tone.sigmoid_power[0]);
 }
 
 #[test]
@@ -732,7 +726,10 @@ fn stage_uniforms_follow_the_wgsl_uniform_layout() {
             profile_tone,
             output_lut,
             profile_flags,
-            process_info,
+            ai_denoise_enabled,
+            user_exposure_bits,
+            _pad_camera_0,
+            _pad_camera_1,
         ]
     );
 

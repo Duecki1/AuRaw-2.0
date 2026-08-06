@@ -16,14 +16,12 @@ struct ToneHistogram {
 fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = textureLoad(tone_scene_tex, clamp_pos(pos), 0).xyz;
 
-    // Sensor black calibration has already happened per CFA plane. In the
-    // explicit-domain graph, tone statistics are measured after camera
-    // characterization and fixed DNG rendering exposure only. Profile LookTable
-    // and ProfileToneCurve are intentionally excluded so H/S/W/B, Contrast,
-    // curves, and presence controls keep stable scene semantics across profiles.
-    // Legacy process versions retain their historical fully-profiled analysis
-    // path so existing edits do not change appearance. User Exposure remains
-    // omitted in both paths and is reintroduced analytically by tonemap.wgsl.
+    // Sensor black calibration has already happened per CFA plane. Tone
+    // statistics are measured after camera characterization and fixed DNG
+    // rendering exposure only. Profile LookTable and ProfileToneCurve are
+    // excluded so H/S/W/B, Contrast, curves, and presence controls keep stable
+    // scene semantics across profiles. User Exposure is reintroduced
+    // analytically by tonemap.wgsl.
     var working = cam_to_working(camera_rgb);
     // Tone masks and histogram anchors must analyze the same inpainted scene
     // that the adjustment graph renders. Reading the original scene here made
@@ -41,12 +39,7 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let characterized = apply_camera_characterization(working);
     let profile_exposure_ev = bitcast<f32>(camera_uniforms.profile_flags.z);
     let exposed = characterized * exp2(profile_exposure_ev);
-    if uses_explicit_scene_display_domains() {
-        return map_negative_gamut(exposed);
-    }
-    let looked = apply_optional_profile_look(exposed);
-    let curved = apply_profile_view_tone(looked);
-    return map_negative_gamut(curved);
+    return map_negative_gamut(exposed);
 }
 
 @compute @workgroup_size(8, 8, 1)

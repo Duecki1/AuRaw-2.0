@@ -4,7 +4,7 @@ use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
-    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, CURRENT_PROCESS_VERSION,
+    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
     GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
@@ -24,8 +24,8 @@ use resources::*;
 mod tests;
 
 const GPU_PARAMS_ABI_VERSION: u32 = 5;
-// Persisted/process metadata still advertises the legacy monolithic payload so
-// existing edits and regression fixtures keep their byte-for-byte ABI marker.
+// The public ABI marker retains the historical monolithic payload size while
+// the runtime uses independently allocated stage uniforms.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
 const CAMERA_UNIFORMS_SIZE_BYTES: u32 = 416;
 const SCENE_TONE_UNIFORMS_SIZE_BYTES: u32 = 576;
@@ -40,8 +40,6 @@ const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
-
-const RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY: u32 = 1 << 0;
 
 /// Logical domains carried by the post-demosaic graph. These contracts are
 /// independent of pass fusion: multiple adjacent nodes may execute in one GPU
@@ -94,10 +92,6 @@ const EXPLICIT_RENDER_GRAPH: [RenderStageContract; 6] = [
         output: RenderDomain::OutputEncoded,
     },
 ];
-
-fn render_graph_flags() -> u32 {
-    RENDER_GRAPH_EXPLICIT_SCENE_DISPLAY
-}
 
 fn explicit_render_graph_contracts_are_contiguous() -> bool {
     EXPLICIT_RENDER_GRAPH
@@ -461,7 +455,10 @@ struct CameraUniforms {
     profile_tone: [u32; 4],
     output_lut: [u32; 4],
     profile_flags: [u32; 4],
-    process_info: [u32; 4],
+    ai_denoise_enabled: u32,
+    user_exposure_bits: u32,
+    _pad_camera_0: u32,
+    _pad_camera_1: u32,
 }
 
 const _: () =
@@ -814,11 +811,8 @@ impl GpuParams {
         let mut sigmoid_params = exposure.sigmoid;
         sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);
         let sigmoid = sigmoid_coefficients(sigmoid_params);
-        // Process 31 always uses sigmoid as the single view transform. If the
-        // default 1.5 value selected a DCP ProfileToneCurve instead, the first
-        // Contrast movement would switch view operators and visibly jump rather
-        // than continuously changing darktable's middle-grey slope.
-        let raw_selection_flags = u32::from(exposure.ai_denoise_enabled) << 1;
+        // Sigmoid is the single view transform, so Contrast changes its
+        // middle-grey slope without switching view operators.
         let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
             let adjustment = mask.adjustments;
@@ -957,12 +951,10 @@ impl GpuParams {
             profile_tone: profile_stages.view.profile_tone,
             output_lut: profile_stages.output.output_lut,
             profile_flags: profile_layout.flags,
-            process_info: [
-                CURRENT_PROCESS_VERSION,
-                raw_selection_flags,
-                exposure.exposure.to_bits(),
-                render_graph_flags(),
-            ],
+            ai_denoise_enabled: u32::from(exposure.ai_denoise_enabled),
+            user_exposure_bits: exposure.exposure.to_bits(),
+            _pad_camera_0: 0,
+            _pad_camera_1: 0,
         };
         let scene_tone = SceneToneUniforms {
             exposure: exposure.exposure,
@@ -1277,7 +1269,7 @@ impl GpuParams {
     }
 
     fn uses_ai_denoise(&self) -> bool {
-        (self.camera.process_info[1] & 2) != 0
+        self.camera.ai_denoise_enabled != 0
     }
 
     fn needs_dual_demosaic_passes(&self) -> bool {
