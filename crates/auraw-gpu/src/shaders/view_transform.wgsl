@@ -384,12 +384,12 @@ fn apply_color_mixer(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return apply_color_mixer_values(
         pos,
         rgb,
-        Common::scene_tone_uniforms.hsl_hue_0,
-        Common::scene_tone_uniforms.hsl_hue_1,
-        Common::scene_tone_uniforms.hsl_saturation_0,
-        Common::scene_tone_uniforms.hsl_saturation_1,
-        Common::scene_tone_uniforms.hsl_luminance_0,
-        Common::scene_tone_uniforms.hsl_luminance_1,
+        Common::scene_tone_uniforms.hsl_hue_0_field,
+        Common::scene_tone_uniforms.hsl_hue_1_field,
+        Common::scene_tone_uniforms.hsl_saturation_0_field,
+        Common::scene_tone_uniforms.hsl_saturation_1_field,
+        Common::scene_tone_uniforms.hsl_luminance_0_field,
+        Common::scene_tone_uniforms.hsl_luminance_1_field,
     );
 }
 
@@ -408,12 +408,12 @@ fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
         let adjusted = apply_color_mixer_values(
             pos,
             rgb,
-            Common::mask_data[index].hsl_hue_0,
-            Common::mask_data[index].hsl_hue_1,
-            Common::mask_data[index].hsl_saturation_0,
-            Common::mask_data[index].hsl_saturation_1,
-            Common::mask_data[index].hsl_luminance_0,
-            Common::mask_data[index].hsl_luminance_1,
+            Common::mask_data[index].hsl_hue_0_field,
+            Common::mask_data[index].hsl_hue_1_field,
+            Common::mask_data[index].hsl_saturation_0_field,
+            Common::mask_data[index].hsl_saturation_1_field,
+            Common::mask_data[index].hsl_luminance_0_field,
+            Common::mask_data[index].hsl_luminance_1_field,
         );
         rgb = mix(rgb, adjusted, weight);
     }
@@ -436,7 +436,7 @@ fn apply_local_display_blacks(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32>
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
-        let value = Common::mask_data[index].adjust_1.y;
+        let value = Common::mask_data[index].adjust_1_field.y;
         if abs(value) < 1e-7 { continue; }
         let weight = SceneAdjustments::local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }

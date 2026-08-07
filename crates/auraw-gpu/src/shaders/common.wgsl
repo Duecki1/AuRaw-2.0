@@ -1,8 +1,12 @@
+// naga_oil composable modules are round-tripped through Naga's WGSL writer.
+// Keep exported struct member names from ending in a digit: Naga reserves
+// trailing numeric suffixes for name disambiguation and would rewrite them.
+
 struct MaskData {
     metadata: vec4<u32>,
-    adjust_0: vec4<f32>,
-    adjust_1: vec4<f32>,
-    adjust_2: vec4<f32>,
+    adjust_0_field: vec4<f32>,
+    adjust_1_field: vec4<f32>,
+    adjust_2_field: vec4<f32>,
     curves: array<vec4<f32>, 8>,
     grade_shadows: vec4<f32>,
     grade_midtones: vec4<f32>,
@@ -14,12 +18,12 @@ struct MaskData {
     curves_red: array<vec4<f32>, 8>,
     curves_green: array<vec4<f32>, 8>,
     curves_blue: array<vec4<f32>, 8>,
-    hsl_hue_0: vec4<f32>,
-    hsl_hue_1: vec4<f32>,
-    hsl_saturation_0: vec4<f32>,
-    hsl_saturation_1: vec4<f32>,
-    hsl_luminance_0: vec4<f32>,
-    hsl_luminance_1: vec4<f32>,
+    hsl_hue_0_field: vec4<f32>,
+    hsl_hue_1_field: vec4<f32>,
+    hsl_saturation_0_field: vec4<f32>,
+    hsl_saturation_1_field: vec4<f32>,
+    hsl_luminance_0_field: vec4<f32>,
+    hsl_luminance_1_field: vec4<f32>,
 }
 
 struct CameraUniforms {
@@ -38,9 +42,9 @@ struct CameraUniforms {
     dual_threshold: f32,
     frequency_chroma: f32,
     tint: f32,
-    _pad_0: f32,
-    _pad_1: f32,
-    _pad_2: f32,
+    _pad_0_field: f32,
+    _pad_1_field: f32,
+    _pad_2_field: f32,
     // Reconstruction method followed by inpaint-opposed RGB chrominance offsets.
     highlight_options: vec4<f32>,
     // Per-CFA-plane sensor noise model: variance = shot * signal + read.
@@ -49,14 +53,14 @@ struct CameraUniforms {
     // Luma strength, detail protection, quality tier, profile confidence.
     noise_options: vec4<f32>,
     wb: vec4<f32>,
-    cam_to_srgb_0: vec4<f32>,
-    cam_to_srgb_1: vec4<f32>,
-    cam_to_srgb_2: vec4<f32>,
+    cam_to_srgb_0_field: vec4<f32>,
+    cam_to_srgb_1_field: vec4<f32>,
+    cam_to_srgb_2_field: vec4<f32>,
     // Neutral scene-working -> current camera-WB scene-working transform used
     // only for persisted/generated inpaint replacement pixels.
-    inpaint_wb_0: vec4<f32>,
-    inpaint_wb_1: vec4<f32>,
-    inpaint_wb_2: vec4<f32>,
+    inpaint_wb_0_field: vec4<f32>,
+    inpaint_wb_1_field: vec4<f32>,
+    inpaint_wb_2_field: vec4<f32>,
     black_levels: vec4<f32>,
     white_levels: vec4<f32>,
     width: u32,
@@ -80,8 +84,8 @@ struct CameraUniforms {
     // Runtime camera-stage switches and cached user Exposure bits.
     ai_denoise_enabled: u32,
     user_exposure_bits: u32,
-    _pad_camera_0: u32,
-    _pad_camera_1: u32,
+    _pad_camera_0_field: u32,
+    _pad_camera_1_field: u32,
 }
 
 struct SceneToneUniforms {
@@ -90,7 +94,7 @@ struct SceneToneUniforms {
     exposure: f32,
     saturation: f32,
     vibrance: f32,
-    _pad_0: f32,
+    _pad_0_field: f32,
     // Highlights, shadows, whites, blacks.
     basic_tone: vec4<f32>,
     // darktable sigmoid: white target, black target, paper exposure, film fog.
@@ -98,34 +102,34 @@ struct SceneToneUniforms {
     // darktable sigmoid: film power, paper power, hue preservation, method.
     sigmoid_power: vec4<f32>,
     // Eight editable point-curve coordinates, packed as x0,y0,x1,y1.
-    tone_curve_0: vec4<f32>,
-    tone_curve_1: vec4<f32>,
-    tone_curve_2: vec4<f32>,
-    tone_curve_3: vec4<f32>,
+    tone_curve_0_field: vec4<f32>,
+    tone_curve_1_field: vec4<f32>,
+    tone_curve_2_field: vec4<f32>,
+    tone_curve_3_field: vec4<f32>,
     tone_curve_meta: vec4<f32>,
     // Independent scene-referred red, green and blue point curves.
-    tone_curve_red_0: vec4<f32>,
-    tone_curve_red_1: vec4<f32>,
-    tone_curve_red_2: vec4<f32>,
-    tone_curve_red_3: vec4<f32>,
+    tone_curve_red_0_field: vec4<f32>,
+    tone_curve_red_1_field: vec4<f32>,
+    tone_curve_red_2_field: vec4<f32>,
+    tone_curve_red_3_field: vec4<f32>,
     tone_curve_red_meta: vec4<f32>,
-    tone_curve_green_0: vec4<f32>,
-    tone_curve_green_1: vec4<f32>,
-    tone_curve_green_2: vec4<f32>,
-    tone_curve_green_3: vec4<f32>,
+    tone_curve_green_0_field: vec4<f32>,
+    tone_curve_green_1_field: vec4<f32>,
+    tone_curve_green_2_field: vec4<f32>,
+    tone_curve_green_3_field: vec4<f32>,
     tone_curve_green_meta: vec4<f32>,
-    tone_curve_blue_0: vec4<f32>,
-    tone_curve_blue_1: vec4<f32>,
-    tone_curve_blue_2: vec4<f32>,
-    tone_curve_blue_3: vec4<f32>,
+    tone_curve_blue_0_field: vec4<f32>,
+    tone_curve_blue_1_field: vec4<f32>,
+    tone_curve_blue_2_field: vec4<f32>,
+    tone_curve_blue_3_field: vec4<f32>,
     tone_curve_blue_meta: vec4<f32>,
     // Red, orange, yellow, green / aqua, blue, purple, magenta.
-    hsl_hue_0: vec4<f32>,
-    hsl_hue_1: vec4<f32>,
-    hsl_saturation_0: vec4<f32>,
-    hsl_saturation_1: vec4<f32>,
-    hsl_luminance_0: vec4<f32>,
-    hsl_luminance_1: vec4<f32>,
+    hsl_hue_0_field: vec4<f32>,
+    hsl_hue_1_field: vec4<f32>,
+    hsl_saturation_0_field: vec4<f32>,
+    hsl_saturation_1_field: vec4<f32>,
+    hsl_luminance_0_field: vec4<f32>,
+    hsl_luminance_1_field: vec4<f32>,
     // Local mask count/atlas metadata shared by scene tone and view-adjacent
     // local edits.
     mask_counts: vec4<u32>,
@@ -139,7 +143,7 @@ struct SceneToneUniforms {
     // rebuilding the shader module. WGSL uniform matrices use a 16-byte stride
     // per vec3 column; Rust mirrors each column with a padded [f32; 4].
     rec2020_to_xyz: mat3x3<f32>,
-    xyz_to_rec2020: mat3x3<f32>,
+    xyz_to_rec2020_field: mat3x3<f32>,
     xyz_to_bradford: mat3x3<f32>,
     bradford_to_xyz: mat3x3<f32>,
 }

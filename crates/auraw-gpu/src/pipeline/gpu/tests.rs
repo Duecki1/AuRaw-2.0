@@ -5,7 +5,8 @@ use super::{
     shader_highlight_method, work_shader_source, ProcessingQuality, COLOR_DENOISE_ENTRY_POINTS,
     SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
     SHADER_COLOR_DENOISE, SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS,
-    SHADER_REGRESSION_SCENE, SHADER_SCENE_ADJUSTMENTS, SHADER_TONE_ANALYSIS,
+    SHADER_NOISE_CA_FINISH, SHADER_REGRESSION_SCENE, SHADER_SCENE_ADJUSTMENTS,
+    SHADER_TONE_ANALYSIS,
     SHADER_VIEW_TRANSFORM, SHADER_XTRANS_DEMOSAIC, SHADER_XTRANS_FINISH,
 };
 use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
@@ -313,6 +314,14 @@ fn scene_graph_preserves_native_call_order_and_stage_ownership() {
     let view_calls = function_call_names(&view_module, "apply_view_transform");
     let look = call_position(&view_calls, "apply_optional_profile_look");
     assert!(look < call_position(&view_calls, "apply_sigmoid_view_transform"));
+}
+
+#[test]
+fn noise_ca_virtual_declaration_stays_at_source_start() {
+    assert!(
+        SHADER_NOISE_CA_FINISH.starts_with("virtual fn finish_reference_at"),
+        "naga_oil 0.22 requires this virtual declaration before any line comment"
+    );
 }
 
 #[test]

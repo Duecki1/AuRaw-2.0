@@ -34,7 +34,7 @@ fn apply_temperature_tint_values(
     let xyz = Common::scene_tone_uniforms.rec2020_to_xyz * rgb;
     let adapted_xyz = Common::scene_tone_uniforms.bradford_to_xyz
         * ((Common::scene_tone_uniforms.xyz_to_bradford * xyz) * gains);
-    return Common::scene_tone_uniforms.xyz_to_rec2020 * adapted_xyz * normalization;
+    return Common::scene_tone_uniforms.xyz_to_rec2020_field * adapted_xyz * normalization;
 }
 
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {

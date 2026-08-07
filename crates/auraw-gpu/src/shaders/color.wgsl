@@ -1,9 +1,9 @@
 #import auraw::common as Common
 
 fn cam_to_working(rgb: vec3<f32>) -> vec3<f32> {
-    let r = dot(Common::camera_uniforms.cam_to_srgb_0.xyz, rgb);
-    let g = dot(Common::camera_uniforms.cam_to_srgb_1.xyz, rgb);
-    let b = dot(Common::camera_uniforms.cam_to_srgb_2.xyz, rgb);
+    let r = dot(Common::camera_uniforms.cam_to_srgb_0_field.xyz, rgb);
+    let g = dot(Common::camera_uniforms.cam_to_srgb_1_field.xyz, rgb);
+    let b = dot(Common::camera_uniforms.cam_to_srgb_2_field.xyz, rgb);
     return vec3<f32>(r, g, b);
 }
 

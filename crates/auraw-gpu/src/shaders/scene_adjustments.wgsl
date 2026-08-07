@@ -98,7 +98,7 @@ fn apply_local_exposure_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32>
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
-        let value = clamp(Common::mask_data[index].adjust_0.x, -5.0, 5.0);
+        let value = clamp(Common::mask_data[index].adjust_0_field.x, -5.0, 5.0);
         if abs(value) <= 1e-7 { continue; }
         let weight = local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
@@ -130,9 +130,9 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     // basis. Remap them through the live camera transform so global
     // temperature/tint changes remain non-destructive after the erase.
     let replacement_working = vec3<f32>(
-        dot(Common::camera_uniforms.inpaint_wb_0.xyz, replacement_neutral),
-        dot(Common::camera_uniforms.inpaint_wb_1.xyz, replacement_neutral),
-        dot(Common::camera_uniforms.inpaint_wb_2.xyz, replacement_neutral),
+        dot(Common::camera_uniforms.inpaint_wb_0_field.xyz, replacement_neutral),
+        dot(Common::camera_uniforms.inpaint_wb_1_field.xyz, replacement_neutral),
+        dot(Common::camera_uniforms.inpaint_wb_2_field.xyz, replacement_neutral),
     );
     return mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
 }
@@ -379,7 +379,7 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
             rgb,
             pos,
             0.0,
-            Common::mask_data[index].adjust_0.w,
+            Common::mask_data[index].adjust_0_field.w,
             0.0,
             0.0,
             weight,
@@ -390,16 +390,16 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
         var adjusted = Tonemap::apply_local_basic_tone_values(
             rgb,
             pos,
-            Common::mask_data[index].adjust_0.z,
+            Common::mask_data[index].adjust_0_field.z,
             0.0,
-            Common::mask_data[index].adjust_1.x,
+            Common::mask_data[index].adjust_1_field.x,
             0.0,
         );
-        adjusted = Tonemap::apply_mask_contrast_value(adjusted, Common::mask_data[index].adjust_0.y);
+        adjusted = Tonemap::apply_mask_contrast_value(adjusted, Common::mask_data[index].adjust_0_field.y);
         adjusted = BasicAdjustments::apply_temperature_tint_values(
             adjusted,
-            Common::mask_data[index].adjust_1.z,
-            Common::mask_data[index].adjust_1.w,
+            Common::mask_data[index].adjust_1_field.z,
+            Common::mask_data[index].adjust_1_field.w,
         );
         adjusted = apply_local_curves_for_mask(index, adjusted);
         rgb = mix(rgb, adjusted, weight);
