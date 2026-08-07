@@ -78,13 +78,16 @@ const BINARY_SUFFIXES: [&str; 13] = [
     "rmeta", "so",
 ];
 const ALLOWED_BINARY_PATHS: [&str; 1] = ["gradle/wrapper/gradle-wrapper.jar"];
-const IGNORED_BINARY_ROOTS: [&str; 8] = [
+const IGNORED_BINARY_ROOTS: [&str; 9] = [
     ".git",
     ".gradle",
     "dist",
     "target",
     "android/.gradle",
     "android/build",
+    // Android Gradle Plugin CMake staging output. It is generated locally and
+    // restored by the Gitea native-build cache before source validation runs.
+    "android/app/.cxx",
     "android/app/build",
     "android/native",
 ];
@@ -3309,8 +3312,10 @@ impl Drop for TemporaryDirectory {
 #[cfg(test)]
 mod tests {
     use super::{
-        hex_encode, median, native_library_path, parse_alignment_power, percentile_95, Sha256,
+        hex_encode, median, native_library_path, parse_alignment_power, percentile_95,
+        validate_generated_binaries, Sha256, TemporaryDirectory,
     };
+    use std::fs;
 
     #[test]
     fn statistics_are_deterministic() {
@@ -3332,6 +3337,30 @@ mod tests {
         assert_eq!(
             hex_encode(&hasher.finalize()),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn ignores_android_cmake_outputs_but_rejects_source_binaries() {
+        let directory = TemporaryDirectory::new("auraw-generated-binary-test").unwrap();
+        let generated = directory
+            .path()
+            .join("android/app/.cxx/Debug/arm64-v8a/CMakeFiles/raw.dir/colorconst.cpp.o");
+        fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        fs::write(&generated, b"generated object").unwrap();
+
+        assert!(validate_generated_binaries(directory.path()).unwrap().is_empty());
+
+        let source_binary = directory.path().join("crates/auraw-core/src/accidental.o");
+        fs::create_dir_all(source_binary.parent().unwrap()).unwrap();
+        fs::write(&source_binary, b"unexpected object").unwrap();
+
+        assert_eq!(
+            validate_generated_binaries(directory.path()).unwrap(),
+            vec![String::from(concat!(
+                "generated binary is present in the source tree: ",
+                "crates/auraw-core/src/accidental.o"
+            ))]
         );
     }
 
