@@ -14,4 +14,10 @@ pub mod pipeline {
 
 pub mod ai_denoise;
 pub mod ai_masks;
+pub mod execution_provider;
 pub mod inpainting;
+
+pub use execution_provider::{
+    active_execution_providers, create_session_with_fallback, CpuFallbackProfile,
+    ExecutionProviderStatus, FallbackSession, ModelSource, SessionOptions,
+};
