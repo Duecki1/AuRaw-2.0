@@ -99,7 +99,9 @@ jobs:
 
           # Match the LibRaw checkout and default Autotools configuration
           # installed in /usr/local on the development PC.
-          eval "$(cargo xtask print-metadata --format shell)"
+          # Assign before eval so a failed metadata command is not masked by eval.
+          build_metadata="$(cargo xtask print-metadata --format shell)"
+          eval "$build_metadata"
           LIBRAW_SOURCE_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
           LIBRAW_ARCHIVE_SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
           if [ -f "$LIBRAW_PREFIX/lib/pkgconfig/libraw.pc" ] \
@@ -360,7 +362,9 @@ jobs:
             cargo install cargo-ndk --version 4.1.2 --locked
           fi
 
-          eval "$(cargo xtask print-metadata --format shell)"
+          # Assign before eval so a failed metadata command is not masked by eval.
+          build_metadata="$(cargo xtask print-metadata --format shell)"
+          eval "$build_metadata"
 
           install_sdk_packages() {
             local attempt
