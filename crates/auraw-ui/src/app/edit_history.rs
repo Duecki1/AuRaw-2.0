@@ -665,6 +665,12 @@ impl AurawApp {
             .selected_component()
             .map(|component| component.kind)
             .filter(|kind| kind.is_available());
+        self.subject_refinement_active &= self.active_mask_tool.is_some_and(|kind| {
+            matches!(
+                kind,
+                crate::pipeline::MaskKind::Subject | crate::pipeline::MaskKind::Background
+            )
+        });
         self.mask_drag = None;
         self.last_brush_point = None;
         self.mask_touch_gesture_backup = None;

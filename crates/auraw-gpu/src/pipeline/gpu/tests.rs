@@ -1423,6 +1423,7 @@ fn local_mask_scheduling_stack(
         masks: vec![mask],
         selected_mask: None,
         selected_component: None,
+        subject_refinement: Default::default(),
     }
 }
 

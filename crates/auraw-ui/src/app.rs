@@ -17,8 +17,8 @@ use crate::pipeline::{
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
     GpuParams, InpaintLayer, InpaintStroke, LensfunCatalog, LensfunLens,
     LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality,
-    ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate, TileSpec, EXPORT_TILE_HALO,
-    MAX_LOCAL_MASKS,
+    ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate, SubjectRefinement, TileSpec,
+    EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
@@ -498,6 +498,7 @@ pub(crate) struct MaskTouchGestureBackup {
     mask_index: usize,
     component_index: usize,
     geometry: MaskGeometry,
+    subject_refinement: Option<SubjectRefinement>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
 }
 
@@ -787,6 +788,7 @@ pub struct AurawApp {
     pub masks: MaskStack,
     pub(crate) active_mask_tool: Option<MaskKind>,
     pub(crate) brush_mode: BrushMode,
+    pub(crate) subject_refinement_active: bool,
     pub(crate) mask_drag: Option<MaskDragState>,
     pub(crate) last_brush_point: Option<[f32; 2]>,
     mask_touch_gesture_backup: Option<MaskTouchGestureBackup>,

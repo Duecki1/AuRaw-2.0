@@ -94,6 +94,7 @@ impl AurawApp {
     }
 
     pub(super) fn capture_sidecar_edit_state(&self) -> SidecarEditState {
+        let masks = self.committed_mask_state_for_persistence();
         let camera_profile = self.selected_camera_profile.as_ref().and_then(|selected| {
             let root = self.camera_profile_folder.as_ref()?;
             if selected == root {
@@ -106,7 +107,9 @@ impl AurawApp {
             exposure: self.exposure,
             geometry: self.geometry.sanitized(),
             camera_profile,
-            masks: self.committed_mask_state_for_persistence(),
+            subject_refinement: (!masks.subject_refinement.is_empty())
+                .then(|| masks.subject_refinement.clone()),
+            masks,
             inpainting: Arc::new(self.inpaint_strokes.clone()),
             lens: SidecarLensEditState {
                 enabled: self.lens_correction.enabled,

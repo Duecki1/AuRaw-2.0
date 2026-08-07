@@ -1268,6 +1268,19 @@ impl Sidebar {
         let mut request_subject = false;
         let mut request_object = false;
         let mut brush_mode = app.brush_mode;
+        let selected_is_subject = app
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .is_some_and(|component| {
+                matches!(component.kind, MaskKind::Subject | MaskKind::Background)
+            });
+        let mut refinement_active = app.subject_refinement_active && selected_is_subject;
+        let mut refinement_size = app.masks.subject_refinement.size;
+        let mut refinement_feather = app.masks.subject_refinement.feather;
+        let mut refinement_flow = app.masks.subject_refinement.flow;
+        let mut clear_refinement = false;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
         let mut birefnet_quality = app.birefnet_quality;
@@ -1286,6 +1299,13 @@ impl Sidebar {
                         &mut request_subject,
                         &mut birefnet_quality,
                         birefnet_quality_change_enabled,
+                    ),
+                    (
+                        &mut refinement_active,
+                        &mut refinement_size,
+                        &mut refinement_feather,
+                        &mut refinement_flow,
+                        &mut clear_refinement,
                     ),
                     &mut request_object,
                 );
@@ -1333,6 +1353,19 @@ impl Sidebar {
         app.tone_curve_tab = local_curve_tab;
         app.color_grade_tab = local_color_grade_tab;
         app.brush_mode = brush_mode;
+        app.subject_refinement_active = refinement_active;
+        let refinement_settings_changed = app.masks.subject_refinement.size != refinement_size
+            || app.masks.subject_refinement.feather != refinement_feather
+            || app.masks.subject_refinement.flow != refinement_flow;
+        app.masks.subject_refinement.size = refinement_size;
+        app.masks.subject_refinement.feather = refinement_feather;
+        app.masks.subject_refinement.flow = refinement_flow;
+        if clear_refinement && !app.masks.subject_refinement.is_empty() {
+            app.masks.subject_refinement.clear();
+            app.mark_all_mask_layers_dirty();
+        } else if refinement_settings_changed {
+            app.note_mask_edit_changed();
+        }
         if birefnet_quality != app.birefnet_quality {
             app.set_birefnet_quality(birefnet_quality);
             request_subject = true;
@@ -1379,6 +1412,19 @@ impl Sidebar {
         let mut request_subject = false;
         let mut request_object = false;
         let mut brush_mode = app.brush_mode;
+        let selected_is_subject = app
+            .masks
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .is_some_and(|component| {
+                matches!(component.kind, MaskKind::Subject | MaskKind::Background)
+            });
+        let mut refinement_active = app.subject_refinement_active && selected_is_subject;
+        let mut refinement_size = app.masks.subject_refinement.size;
+        let mut refinement_feather = app.masks.subject_refinement.feather;
+        let mut refinement_flow = app.masks.subject_refinement.flow;
+        let mut clear_refinement = false;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
         let mut birefnet_quality = app.birefnet_quality;
@@ -1397,6 +1443,13 @@ impl Sidebar {
                             &mut request_subject,
                             &mut birefnet_quality,
                             birefnet_quality_change_enabled,
+                        ),
+                        (
+                            &mut refinement_active,
+                            &mut refinement_size,
+                            &mut refinement_feather,
+                            &mut refinement_flow,
+                            &mut clear_refinement,
                         ),
                         &mut request_object,
                     );
@@ -1442,6 +1495,19 @@ impl Sidebar {
         app.tone_curve_tab = local_curve_tab;
         app.color_grade_tab = local_color_grade_tab;
         app.brush_mode = brush_mode;
+        app.subject_refinement_active = refinement_active;
+        let refinement_settings_changed = app.masks.subject_refinement.size != refinement_size
+            || app.masks.subject_refinement.feather != refinement_feather
+            || app.masks.subject_refinement.flow != refinement_flow;
+        app.masks.subject_refinement.size = refinement_size;
+        app.masks.subject_refinement.feather = refinement_feather;
+        app.masks.subject_refinement.flow = refinement_flow;
+        if clear_refinement && !app.masks.subject_refinement.is_empty() {
+            app.masks.subject_refinement.clear();
+            app.mark_all_mask_layers_dirty();
+        } else if refinement_settings_changed {
+            app.note_mask_edit_changed();
+        }
         if birefnet_quality != app.birefnet_quality {
             app.set_birefnet_quality(birefnet_quality);
             request_subject = true;
@@ -1482,10 +1548,18 @@ impl Sidebar {
             &mut crate::ai_masks::BiRefNetQuality,
             bool,
         ),
+        refinement_controls: (&mut bool, &mut f32, &mut f32, &mut f32, &mut bool),
         request_object: &mut bool,
     ) -> bool {
         let (request_subject, birefnet_quality, birefnet_quality_change_enabled) =
             subject_controls;
+        let (
+            refinement_active,
+            refinement_size,
+            refinement_feather,
+            refinement_flow,
+            clear_refinement,
+        ) = refinement_controls;
         let mut geometry_changed = adjustment_slider(
             ui,
             "Mask opacity",
@@ -1630,6 +1704,71 @@ impl Sidebar {
                     grow,
                     feather,
                 } => {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(
+                                *refinement_active,
+                                if *refinement_active { "Done" } else { "Refine" },
+                            )
+                            .on_hover_text(
+                                "Fine-tune the shared Subject / Not Subject boundary with a brush.",
+                            )
+                            .clicked()
+                        {
+                            *refinement_active = !*refinement_active;
+                        }
+                    });
+                    if *refinement_active {
+                        ui.group(|ui| {
+                            ui.set_width(ui.available_width());
+                            ui.strong("Subject refinement");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(brush_mode, BrushMode::Paint, "Add subject");
+                                ui.selectable_value(brush_mode, BrushMode::Erase, "Subtract subject");
+                            });
+                            adjustment_slider(
+                                ui,
+                                "Size",
+                                refinement_size,
+                                0.0025..=0.25,
+                                3,
+                                0.0025,
+                                Some(
+                                    "Brush stays the same size on screen; zoom in for finer image-space detail.",
+                                ),
+                            );
+                            adjustment_slider_with_reset(
+                                ui,
+                                "Feather",
+                                refinement_feather,
+                                0.0..=1.0,
+                                2,
+                                0.01,
+                                Some("Softness of newly painted refinement strokes."),
+                                0.55,
+                            );
+                            adjustment_slider_with_reset(
+                                ui,
+                                "Flow / opacity",
+                                refinement_flow,
+                                0.01..=1.0,
+                                2,
+                                0.01,
+                                Some("Strength captured by newly painted add/subtract strokes."),
+                                1.0,
+                            );
+                            if crate::ui::icons::phosphor_icon_button(
+                                ui,
+                                egui_phosphor::regular::ERASER,
+                                egui::vec2(28.0, 22.0),
+                                "Clear subject refinement",
+                            )
+                            .clicked()
+                            {
+                                *clear_refinement = true;
+                            }
+                        });
+                    }
                     ui.add_enabled_ui(birefnet_quality_change_enabled, |ui| {
                         egui::ComboBox::from_label("Subject quality")
                             .selected_text(birefnet_quality.label())

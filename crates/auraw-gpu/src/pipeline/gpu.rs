@@ -4184,8 +4184,10 @@ impl RawGpuPipeline {
     }
 
     /// Uploads one normalized, anti-aliased local-mask layer as IEEE-754 half
-    /// floats. Preview and export share the same shader path, while export can
-    /// allocate a larger atlas for higher spatial fidelity.
+    /// floats. Subject / Not Subject refinement is already composited by the
+    /// core rasterizer before this upload, so the atlas remains the single mask
+    /// source consumed by preview and export shaders. Export can allocate a
+    /// larger atlas for higher spatial fidelity.
     pub fn update_mask_layer(
         &self,
         queue: &wgpu::Queue,

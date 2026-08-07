@@ -400,6 +400,7 @@ impl AurawApp {
             masks,
             active_mask_tool: None,
             brush_mode: BrushMode::Paint,
+            subject_refinement_active: false,
             mask_drag: None,
             last_brush_point: None,
             mask_touch_gesture_backup: None,
@@ -676,6 +677,7 @@ impl AurawApp {
             masks,
             active_mask_tool: None,
             brush_mode: BrushMode::Paint,
+            subject_refinement_active: false,
             mask_drag: None,
             last_brush_point: None,
             mask_touch_gesture_backup: None,
@@ -1891,6 +1893,7 @@ impl AurawApp {
         self.reset_inpainting_state();
         self.active_mask_tool = None;
         self.brush_mode = BrushMode::Paint;
+        self.subject_refinement_active = false;
         self.mask_drag = None;
         self.last_brush_point = None;
         self.mask_touch_gesture_backup = None;

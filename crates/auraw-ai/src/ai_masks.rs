@@ -1,6 +1,7 @@
 use crate::execution_provider::{
     create_session_with_fallback, CpuFallbackProfile, FallbackSession, SessionOptions,
 };
+use crate::pipeline::{MaskImage};
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::value::Tensor;
@@ -136,6 +137,34 @@ type RuntimeProbeResult = (PathBuf, String);
 #[cfg(not(target_os = "android"))]
 static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
 
+#[derive(Debug)]
+pub enum SubjectMaskEvent {
+    DownloadProgress {
+        label: &'static str,
+        downloaded: u64,
+        total: u64,
+    },
+    Inferencing,
+    Finished(Result<SubjectMaskResult, String>),
+}
+
+#[derive(Debug)]
+pub struct SubjectMaskResult {
+    pub width: u32,
+    pub height: u32,
+    pub mask: Vec<u8>,
+}
+
+impl SubjectMaskResult {
+    /// Converts BiRefNet output into the raw shared subject-probability image.
+    /// Subject refinement deliberately stays outside inference: `MaskStack`
+    /// composites its persisted delta at atlas raster time, so regenerating or
+    /// switching quality tiers can replace this raw probability map without
+    /// destroying the user's refinement history.
+    pub fn into_probability_mask(self) -> Option<MaskImage> {
+        MaskImage::new(self.width, self.height, self.mask)
+    }
+}
 ", path.display()))?;
     anyhow::ensure!(
         metadata.len()
