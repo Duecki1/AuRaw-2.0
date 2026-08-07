@@ -113,3 +113,16 @@ cp \"$FAKE_CURL_PAYLOAD\" \"$output\"
     assert f"expected: {expected}" in result.stderr
     assert f"actual:   {actual}" in result.stderr
     assert not output.exists()
+
+
+def test_appimage_packaging_restores_cargo_path_between_gitea_steps() -> None:
+    workflow = (ROOT / ".gitea/workflows/build.yml").read_text(encoding="utf-8")
+    package_step = workflow.split("- name: Package AppImage", 1)[1].split(
+        "- name: Upload AppImage", 1
+    )[0]
+
+    cargo_env = 'source "$HOME/.cargo/env"'
+    xtask_download = "cargo xtask verified-download"
+    assert cargo_env in package_step
+    assert xtask_download in package_step
+    assert package_step.index(cargo_env) < package_step.index(xtask_download)

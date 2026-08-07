@@ -149,6 +149,10 @@ jobs:
         run: |
           set -euxo pipefail
 
+          # Rust was installed in the preceding step, but Gitea/act starts each
+          # run block with a fresh PATH. Restore Cargo before invoking xtask.
+          source "$HOME/.cargo/env"
+
           VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           test -n "$VERSION"
 

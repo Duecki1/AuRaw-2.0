@@ -66,25 +66,25 @@ find_program(AURAW_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
 
 # Immutable source pins. URL hashes protect archive downloads in addition to the
 # Git commit pins used by LibRaw, LibRaw-cmake, and Lensfun.
+# Android pins CMake 3.22.1. Do not pass DOWNLOAD_EXTRACT_TIMESTAMP here:
+# that option is not understood by 3.22 and is folded into URL_HASH, making
+# configuration fail before any native dependency is downloaded.
 FetchContent_Declare(
     auraw_libraw_source
     URL https://github.com/LibRaw/LibRaw/archive/b860248a89d9082b8e0a1e202e516f46af9adb29.tar.gz
     URL_HASH SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     SOURCE_SUBDIR _auraw_do_not_add
 )
 FetchContent_Declare(
     auraw_libraw_cmake
     URL https://github.com/LibRaw/LibRaw-cmake/archive/eb98e4325aef2ce85d2eb031c2ff18640ca616d3.tar.gz
     URL_HASH SHA256=3cd218bf6d1254de86e27269541277fbfc5bae57a9002ce0b46fbe2a97088b43
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     SOURCE_SUBDIR _auraw_do_not_add
 )
 FetchContent_Declare(
     auraw_lensfun_source
     URL https://github.com/lensfun/lensfun/archive/101c745e847a5de4a1e569a94368ce2027198598.tar.gz
     URL_HASH SHA256=a11cbe6aeec657839540448b253217c25d20b7a45b6aebfef406f7239933c7a6
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     SOURCE_SUBDIR _auraw_do_not_add
 )
 # GLib uses Meson. Fetch Meson's pinned source and invoke meson.py directly;
@@ -93,7 +93,6 @@ FetchContent_Declare(
     auraw_meson_source
     URL https://files.pythonhosted.org/packages/02/98/bbcaf6caaaa0510a68834f119ac793a8abade6ff827fc2791eeb6f8b4a66/meson-1.7.0.tar.gz
     URL_HASH SHA256=08efbe84803eed07f863b05092d653a9d348f7038761d900412fddf56deb0284
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     SOURCE_SUBDIR _auraw_do_not_add
 )
 FetchContent_MakeAvailable(
@@ -226,7 +225,6 @@ file(WRITE "${AURAW_GLIB_CROSS_FILE}"
 ExternalProject_Add(auraw_iconv
     URL https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.17.tar.gz
     URL_HASH SHA256=8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     PREFIX "${AURAW_EXTERNAL_ROOT}/iconv-prefix"
     BINARY_DIR "${AURAW_EXTERNAL_ROOT}/iconv-build"
     CONFIGURE_COMMAND
@@ -265,7 +263,6 @@ set(AURAW_MESON "${Python3_EXECUTABLE};${auraw_meson_source_SOURCE_DIR}/meson.py
 ExternalProject_Add(auraw_glib
     URL https://download.gnome.org/sources/glib/2.78/glib-2.78.6.tar.xz
     URL_HASH SHA256=244854654dd82c7ebcb2f8e246156d2a05eb9cd1ad07ed7a779659b4602c9fae
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     PREFIX "${AURAW_EXTERNAL_ROOT}/glib-prefix"
     BINARY_DIR "${AURAW_EXTERNAL_ROOT}/glib-build"
     DEPENDS auraw_iconv
