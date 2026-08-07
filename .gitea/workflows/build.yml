@@ -271,7 +271,6 @@ jobs:
             ~/.cargo/bin/cargo-ndk-env
             ~/.cargo/bin/cargo-ndk-runner
             ~/.cargo/bin/cargo-ndk-test
-            android/native
           key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/dev.py', 'scripts/bootstrap_download.py', 'xtask/src/main.rs') }}-v2
 
       - name: Restore Android dependency and build cache
@@ -287,6 +286,16 @@ jobs:
           key: auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'android/build.gradle', 'android/app/build.gradle') }}
           restore-keys: |
             auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-
+
+      - name: Restore Android native build cache
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        with:
+          path: |
+            android/app/.cxx
+            android/native
+          key: android-native-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'android/app/src/main/cpp/CMakeLists.txt') }}
+          restore-keys: |
+            android-native-${{ runner.os }}-
 
       - name: Set up Java 17
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
