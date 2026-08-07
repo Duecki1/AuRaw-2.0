@@ -190,6 +190,11 @@ def test_agp_cmake_builds_pinned_static_dependencies() -> None:
 
     assert "max-page-size=16384" in cmake
     assert "common-page-size=16384" in cmake
+    # CMake 3.22.1 treats this newer option as part of URL_HASH.
+    assert not any(
+        line.strip().startswith("DOWNLOAD_EXTRACT_TIMESTAMP")
+        for line in cmake.splitlines()
+    )
     assert "[target.aarch64-linux-android]" in cargo_config
     assert "[target.x86_64-linux-android]" in cargo_config
     assert "max-page-size=16384" in cargo_config

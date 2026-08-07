@@ -55,3 +55,8 @@ __pycache__/
 
 STATIC_CHECKS_CAMERA_PROFILE.txt
 STATIC_CHECKS.txt
+
+# Android generated build files
+android/app/.cxx/
+android/app/build/
+android/.gradle/
