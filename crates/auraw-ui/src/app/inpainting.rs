@@ -19,6 +19,7 @@ impl AurawApp {
         }
         self.inpaint_stroke.clear();
         self.inpaint_strokes.clear();
+        self.inpaint_replace_index = None;
         self.note_inpainting_edit_changed();
         self.last_inpaint_brush_point = None;
         self.inpaint_layer = None;
@@ -60,6 +61,7 @@ impl AurawApp {
         self.inpaint_focus_texture_key = None;
         self.inpaint_source_cache = None;
         self.inpaint_pending_source = None;
+        self.inpaint_replace_index = None;
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.inpaint_consent_open = false;
         if !worker_still_running {
@@ -83,11 +85,13 @@ impl AurawApp {
             return;
         }
 
+        self.inpaint_replace_index = None;
+
         // Capture only the full-resolution RAW region needed by this stroke.
         // This avoids the old preview-proxy source while keeping brush release
         // fast: shader programs are reused and only a small local crop is
         // allocated/read back.
-        let source = match self.capture_inpaint_source(frame, &self.inpaint_stroke) {
+        let source = match self.capture_inpaint_source(frame, &self.inpaint_stroke, None) {
             Ok(source) => source,
             Err(error) => {
                 self.notice = Some(error);
@@ -106,10 +110,42 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn regenerate_inpaint_stroke(&mut self, frame: &eframe::Frame, index: usize) {
+        if self.inpaint_busy() || index >= self.inpaint_strokes.len() {
+            return;
+        }
+        #[cfg(not(target_os = "android"))]
+        if !self.validate_onnx_runtime_for_ai() {
+            return;
+        }
+
+        let dabs = self.inpaint_strokes[index].dabs.clone();
+        let source = match self.capture_inpaint_source(frame, &dabs, Some(index)) {
+            Ok(source) => source,
+            Err(error) => {
+                self.notice = Some(error);
+                return;
+            }
+        };
+
+        self.inpaint_stroke = dabs;
+        self.last_inpaint_brush_point = None;
+        self.inpaint_pending_source = Some(source);
+        self.inpaint_replace_index = Some(index);
+        let model_path = self.lama_model_path();
+        if model_path.exists() {
+            self.start_inpaint_worker(model_path);
+        } else {
+            self.inpaint_consent_open = true;
+            self.egui_ctx.request_repaint();
+        }
+    }
+
     fn capture_inpaint_source(
         &self,
         frame: &eframe::Frame,
         dabs: &[BrushDab],
+        excluded_stroke: Option<usize>,
     ) -> Result<PreparedInpaintSource, String> {
         let render_state = frame
             .wgpu_render_state()
@@ -171,7 +207,22 @@ impl AurawApp {
         if scene.len() != expected || scene.iter().any(|value| !value.is_finite()) {
             return Err("The inpainting crop has an invalid Rec.2020 working buffer.".to_owned());
         }
-        let rgb_rec2020 = if let Some(layer) = &self.inpaint_layer {
+        let replacement_base = excluded_stroke.map(|excluded| {
+            compose_inpaint_strokes(
+                &self
+                    .inpaint_strokes
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != excluded)
+                    .map(|(_, stroke)| stroke.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        let source_layer = replacement_base
+            .as_ref()
+            .and_then(|layer| layer.as_ref())
+            .or(self.inpaint_layer.as_ref().filter(|_| excluded_stroke.is_none()));
+        let rgb_rec2020 = if let Some(layer) = source_layer {
             flatten_inpaint_source_model_region(
                 scene,
                 layer,
@@ -200,10 +251,12 @@ impl AurawApp {
             return;
         }
         let Some(source) = self.inpaint_pending_source.take() else {
+            self.inpaint_replace_index = None;
             self.notice = Some("The image could not be prepared for inpainting.".to_owned());
             return;
         };
         if self.inpaint_stroke.is_empty() {
+            self.inpaint_replace_index = None;
             return;
         }
         let dabs = std::mem::take(&mut self.inpaint_stroke);
@@ -339,6 +392,7 @@ impl AurawApp {
 
         if cancelled || stale {
             self.inpaint_active_dabs = None;
+            self.inpaint_replace_index = None;
             self.finish_background_task(task_id);
             self.egui_ctx.request_repaint();
             return;
@@ -348,19 +402,49 @@ impl AurawApp {
             Ok(result) => {
                 let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
                 if let Some(stroke) = InpaintStroke::from_result(dabs, result) {
-                    match crate::sidecar::preflight_inpaint_addition(
-                        &self.masks,
-                        &self.inpaint_strokes,
-                        &stroke,
-                    ) {
+                    let replace_index = self.inpaint_replace_index.take();
+                    let mut pending_stroke = Some(stroke);
+                    let preflight = if let Some(index) = replace_index {
+                        if index >= self.inpaint_strokes.len() {
+                            Err(crate::sidecar::SidecarError::Invalid(
+                                "inpainting replacement target no longer exists".to_owned(),
+                            ))
+                        } else {
+                            let replacement = pending_stroke.take().expect("inpaint result exists");
+                            let previous =
+                                std::mem::replace(&mut self.inpaint_strokes[index], replacement);
+                            let result = crate::sidecar::preflight_mask_change(
+                                &self.masks,
+                                &self.inpaint_strokes,
+                            );
+                            if result.is_err() {
+                                self.inpaint_strokes[index] = previous;
+                            }
+                            result
+                        }
+                    } else {
+                        crate::sidecar::preflight_inpaint_addition(
+                            &self.masks,
+                            &self.inpaint_strokes,
+                            pending_stroke.as_ref().expect("inpaint result exists"),
+                        )
+                    };
+
+                    match preflight {
                         Ok(()) => {
-                            self.inpaint_strokes.push(stroke);
+                            if let Some(stroke) = pending_stroke.take() {
+                                self.inpaint_strokes.push(stroke);
+                            }
                             self.note_inpainting_edit_changed();
                             self.rebuild_inpaint_layer();
                             self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
                             self.note_inpainting_changed_for_ai_masks();
                             self.queue_preview_processing(ProcessingStage::Tone);
-                            self.notice = Some("Erase complete.".to_owned());
+                            self.notice = Some(if replace_index.is_some() {
+                                "Inpainting stroke regenerated.".to_owned()
+                            } else {
+                                "Erase complete.".to_owned()
+                            });
                             self.finish_background_task(task_id);
                         }
                         Err(error) => {
@@ -376,6 +460,7 @@ impl AurawApp {
                         }
                     }
                 } else {
+                    self.inpaint_replace_index = None;
                     let message = "Inpainting returned an empty result.".to_owned();
                     self.notice = Some(message.clone());
                     if failed_during_inference {
@@ -388,6 +473,7 @@ impl AurawApp {
             Err(error) => {
                 log::error!("Inpainting failed: {error}");
                 self.inpaint_active_dabs = None;
+                self.inpaint_replace_index = None;
                 let message = format!("Inpainting failed: {error}");
                 self.notice = Some(message.clone());
                 if failed_during_inference {
@@ -498,6 +584,7 @@ impl AurawApp {
                             self.inpaint_consent_open = false;
                             self.inpaint_pending_source = None;
                             self.inpaint_active_dabs = None;
+                            self.inpaint_replace_index = None;
                             self.inpaint_stroke.clear();
                             self.last_inpaint_brush_point = None;
                         }

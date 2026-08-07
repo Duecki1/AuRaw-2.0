@@ -3,7 +3,7 @@ impl Sidebar {
         ui: &mut Ui,
         app: &mut AurawApp,
         _layout: ScreenLayout,
-        _frame: &eframe::Frame,
+        frame: &eframe::Frame,
     ) {
         // This action used to share a horizontal row with the removed heading.
         // Preserve that compact row so the right-to-left child cannot consume and
@@ -57,6 +57,7 @@ impl Sidebar {
                     .color(ui.visuals().weak_text_color()),
             );
         } else {
+            let mut regenerate_stroke = None;
             let mut delete_stroke = None;
             egui::ScrollArea::vertical()
                 .id_salt("inpainting-stroke-list")
@@ -98,12 +99,25 @@ impl Sidebar {
                                     {
                                         delete_stroke = Some(index);
                                     }
+                                    if crate::ui::icons::phosphor_icon_button_enabled(
+                                        ui,
+                                        !app.inpaint_busy(),
+                                        egui_phosphor::regular::ARROW_CLOCKWISE,
+                                        egui::vec2(28.0, 22.0),
+                                        "Regenerate this inpainting stroke",
+                                    )
+                                    .clicked()
+                                    {
+                                        regenerate_stroke = Some(index);
+                                    }
                                 },
                             );
                         });
                     }
                 });
-            if let Some(index) = delete_stroke {
+            if let Some(index) = regenerate_stroke {
+                app.regenerate_inpaint_stroke(frame, index);
+            } else if let Some(index) = delete_stroke {
                 app.delete_inpaint_stroke(index);
             }
         }
