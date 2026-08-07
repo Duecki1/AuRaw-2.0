@@ -1,3 +1,5 @@
+import groovy.json.JsonSlurper
+
 plugins {
     id "com.android.application"
 }
@@ -5,342 +7,75 @@ plugins {
 def repositoryRoot = rootProject.projectDir.parentFile
 def cargoManifest = new File(repositoryRoot, "Cargo.toml")
 
-def parseWorkspaceMetadata = { File manifest ->
-    if (!manifest.isFile()) {
-        throw new GradleException("Cargo workspace manifest not found: ${manifest}")
+def loadWorkspaceMetadata = {
+    if (!cargoManifest.isFile()) {
+        throw new GradleException("Cargo workspace manifest not found: ${cargoManifest}")
     }
 
-    def requiredKeys = [
-        "android_ndk_version",
-        "android_build_tools_version",
-        "android_compile_sdk",
-        "android_min_sdk",
-        "android_target_sdk",
-        "android_use_legacy_packaging",
-        "libraw_revision",
-        "lensfun_revision",
+    def metadataCommand = providers.exec {
+        workingDir(repositoryRoot)
+        commandLine("cargo", "xtask", "print-metadata", "--format", "json")
+        ignoreExitValue = true
+    }
+
+    def executionResult
+    try {
+        executionResult = metadataCommand.result.get()
+    } catch (Exception error) {
+        throw new GradleException(
+            "Unable to run `cargo xtask print-metadata` while configuring the Android build. " +
+            "Install Rust with Cargo, ensure `cargo` is available in PATH, and retry from " +
+            "${repositoryRoot}.",
+            error
+        )
+    }
+
+    def stderr = metadataCommand.standardError.asText.get().trim()
+    if (executionResult.exitValue != 0) {
+        def details = stderr.isEmpty() ? "No error output was produced." : stderr
+        throw new GradleException(
+            "`cargo xtask print-metadata` failed with exit code ${executionResult.exitValue}. " +
+            "Ensure the pinned Rust toolchain is installed and the xtask can build.\n${details}"
+        )
+    }
+
+    def stdout = metadataCommand.standardOutput.asText.get().trim()
+    if (stdout.isEmpty()) {
+        throw new GradleException(
+            "`cargo xtask print-metadata` completed successfully but produced no JSON output."
+        )
+    }
+
+    def buildContract
+    try {
+        buildContract = new JsonSlurper().parseText(stdout)
+    } catch (Exception error) {
+        throw new GradleException(
+            "Unable to parse JSON from `cargo xtask print-metadata`. Output was:\n${stdout}",
+            error
+        )
+    }
+    if (!(buildContract instanceof Map)) {
+        throw new GradleException(
+            "`cargo xtask print-metadata` must output a JSON object; received ${buildContract?.getClass()?.simpleName ?: 'null'}."
+        )
+    }
+
+    // Preserve the existing Gradle-facing metadata names so the rest of this
+    // script and all property overrides continue to behave exactly as before.
+    return [
+        android_ndk_version: buildContract.ndkVersion,
+        android_build_tools_version: buildContract.buildToolsVersion,
+        android_compile_sdk: buildContract.compileSdk,
+        android_min_sdk: buildContract.minSdk,
+        android_target_sdk: buildContract.targetSdk,
+        libraw_revision: buildContract.librawRevision,
+        lensfun_revision: buildContract.lensfunRevision,
+        android_use_legacy_packaging: buildContract.useLegacyPackaging,
     ]
-
-    // Convert physical TOML lines into complete statements. This keeps comments,
-    // table-like text, and newlines inside quoted/multiline values from confusing
-    // the small build-contract reader while avoiding a Gradle TOML dependency.
-    def source = manifest.getText("UTF-8")
-    def statements = []
-    def buffer = new StringBuilder()
-    def stringState = "none"
-    def escaped = false
-    def squareDepth = 0
-    def braceDepth = 0
-    def lineNumber = 1
-    def statementLine = 1
-    def statementStarted = false
-    def index = 0
-
-    while (index < source.length()) {
-        def character = source.charAt(index)
-        if (stringState == "none") {
-            if (character == '#') {
-                while (index < source.length() && source.charAt(index) != '\n') {
-                    index++
-                }
-                continue
-            }
-            if (source.startsWith('"""', index)) {
-                if (!statementStarted) {
-                    statementLine = lineNumber
-                    statementStarted = true
-                }
-                buffer.append('"""')
-                stringState = "multi-basic"
-                index += 3
-                continue
-            }
-            if (source.startsWith("'''", index)) {
-                if (!statementStarted) {
-                    statementLine = lineNumber
-                    statementStarted = true
-                }
-                buffer.append("'''")
-                stringState = "multi-literal"
-                index += 3
-                continue
-            }
-
-            if (character == '"') {
-                stringState = "basic"
-            } else if (character == '\'') {
-                stringState = "literal"
-            } else if (character == '[') {
-                squareDepth++
-            } else if (character == ']') {
-                squareDepth = Math.max(0, squareDepth - 1)
-            } else if (character == '{') {
-                braceDepth++
-            } else if (character == '}') {
-                braceDepth = Math.max(0, braceDepth - 1)
-            } else if (character == '\n' && squareDepth == 0 && braceDepth == 0) {
-                def statement = buffer.toString().trim()
-                if (!statement.isEmpty()) {
-                    statements << [line: statementLine, text: statement]
-                }
-                buffer.setLength(0)
-                statementStarted = false
-                lineNumber++
-                index++
-                continue
-            }
-
-            if (!statementStarted && !Character.isWhitespace(character)) {
-                statementLine = lineNumber
-                statementStarted = true
-            }
-            if (statementStarted || !Character.isWhitespace(character)) {
-                buffer.append(character)
-            }
-            if (character == '\n') {
-                lineNumber++
-            }
-            index++
-            continue
-        }
-
-        if (stringState == "basic") {
-            buffer.append(character)
-            if (escaped) {
-                escaped = false
-            } else if (character == '\\') {
-                escaped = true
-            } else if (character == '"') {
-                stringState = "none"
-            }
-            if (character == '\n') {
-                lineNumber++
-            }
-            index++
-            continue
-        }
-        if (stringState == "literal") {
-            buffer.append(character)
-            if (character == '\'') {
-                stringState = "none"
-            }
-            if (character == '\n') {
-                lineNumber++
-            }
-            index++
-            continue
-        }
-        if (stringState == "multi-basic") {
-            if (escaped) {
-                buffer.append(character)
-                escaped = false
-                if (character == '\n') {
-                    lineNumber++
-                }
-                index++
-            } else if (character == '\\') {
-                buffer.append(character)
-                escaped = true
-                index++
-            } else if (source.startsWith('"""', index)) {
-                buffer.append('"""')
-                stringState = "none"
-                index += 3
-            } else {
-                buffer.append(character)
-                if (character == '\n') {
-                    lineNumber++
-                }
-                index++
-            }
-            continue
-        }
-        if (stringState == "multi-literal") {
-            if (source.startsWith("'''", index)) {
-                buffer.append("'''")
-                stringState = "none"
-                index += 3
-            } else {
-                buffer.append(character)
-                if (character == '\n') {
-                    lineNumber++
-                }
-                index++
-            }
-        }
-    }
-
-    if (stringState != "none" || squareDepth != 0 || braceDepth != 0) {
-        throw new GradleException(
-            "${manifest}:${statementLine}: unterminated TOML value while reading [workspace.metadata]"
-        )
-    }
-    def finalStatement = buffer.toString().trim()
-    if (!finalStatement.isEmpty()) {
-        statements << [line: statementLine, text: finalStatement]
-    }
-
-    def decodeBasicString = { String body, boolean multiline, String key, int valueLine ->
-        def decoded = new StringBuilder()
-        def cursor = 0
-        while (cursor < body.length()) {
-            def character = body.charAt(cursor++)
-            if (character != '\\') {
-                decoded.append(character)
-                continue
-            }
-            if (cursor >= body.length()) {
-                throw new GradleException(
-                    "${manifest}:${valueLine}: [workspace.metadata].${key} has a trailing backslash"
-                )
-            }
-            def escapedCharacter = body.charAt(cursor++)
-            switch (String.valueOf(escapedCharacter)) {
-                case 'b': decoded.append('\b'); break
-                case 't': decoded.append('\t'); break
-                case 'n': decoded.append('\n'); break
-                case 'f': decoded.append('\f'); break
-                case 'r': decoded.append('\r'); break
-                case '"': decoded.append('"'); break
-                case '\\': decoded.append('\\'); break
-                case 'u':
-                case 'U':
-                    def digits = String.valueOf(escapedCharacter) == 'u' ? 4 : 8
-                    if (cursor + digits > body.length()) {
-                        throw new GradleException(
-                            "${manifest}:${valueLine}: [workspace.metadata].${key} has an incomplete Unicode escape"
-                        )
-                    }
-                    def encodedScalar = body.substring(cursor, cursor + digits)
-                    if (!(encodedScalar ==~ /[0-9A-Fa-f]+/)) {
-                        throw new GradleException(
-                            "${manifest}:${valueLine}: [workspace.metadata].${key} has an invalid Unicode escape"
-                        )
-                    }
-                    decoded.append(new String(Character.toChars(Integer.parseUnsignedInt(encodedScalar, 16))))
-                    cursor += digits
-                    break
-                case '\n':
-                    if (!multiline) {
-                        throw new GradleException(
-                            "${manifest}:${valueLine}: [workspace.metadata].${key} contains an invalid escape"
-                        )
-                    }
-                    while (cursor < body.length() && Character.isWhitespace(body.charAt(cursor))) {
-                        cursor++
-                    }
-                    break
-                case '\r':
-                    if (!multiline || cursor >= body.length() || body.charAt(cursor) != '\n') {
-                        throw new GradleException(
-                            "${manifest}:${valueLine}: [workspace.metadata].${key} contains an invalid escape"
-                        )
-                    }
-                    cursor++
-                    while (cursor < body.length() && Character.isWhitespace(body.charAt(cursor))) {
-                        cursor++
-                    }
-                    break
-                default:
-                    throw new GradleException(
-                        "${manifest}:${valueLine}: [workspace.metadata].${key} contains unsupported escape \\${escapedCharacter}"
-                    )
-            }
-        }
-        return decoded.toString()
-    }
-
-    def decodeRequiredValue = { String key, String encoded, int valueLine ->
-        if (encoded.startsWith('"""') && encoded.endsWith('"""') && encoded.length() >= 6) {
-            def body = encoded.substring(3, encoded.length() - 3)
-            if (body.startsWith("\r\n")) {
-                body = body.substring(2)
-            } else if (body.startsWith("\n")) {
-                body = body.substring(1)
-            }
-            return decodeBasicString(body, true, key, valueLine)
-        }
-        if (encoded.startsWith("'''") && encoded.endsWith("'''") && encoded.length() >= 6) {
-            def body = encoded.substring(3, encoded.length() - 3)
-            if (body.startsWith("\r\n")) {
-                body = body.substring(2)
-            } else if (body.startsWith("\n")) {
-                body = body.substring(1)
-            }
-            return body
-        }
-        if (encoded.startsWith('"') && encoded.endsWith('"') && encoded.length() >= 2) {
-            return decodeBasicString(encoded.substring(1, encoded.length() - 1), false, key, valueLine)
-        }
-        if (encoded.startsWith("'") && encoded.endsWith("'") && encoded.length() >= 2) {
-            return encoded.substring(1, encoded.length() - 1)
-        }
-        if (encoded ==~ /[+]?[0-9](?:_?[0-9])*/) {
-            try {
-                return encoded.replace("_", "").toInteger()
-            } catch (NumberFormatException error) {
-                throw new GradleException(
-                    "${manifest}:${valueLine}: [workspace.metadata].${key} is outside Gradle's integer range",
-                    error
-                )
-            }
-        }
-        if (encoded == "true" || encoded == "false") {
-            return encoded.toBoolean()
-        }
-        throw new GradleException(
-            "${manifest}:${valueLine}: [workspace.metadata].${key} must be a TOML string, integer, or boolean"
-        )
-    }
-
-    def values = [:]
-    def inWorkspaceMetadata = false
-    def foundWorkspaceMetadata = false
-    statements.each { statement ->
-        def table = statement.text =~ /^\[{1,2}([A-Za-z0-9_.-]+)\]{1,2}$/
-        if (table.matches()) {
-            inWorkspaceMetadata = table.group(1) == "workspace.metadata"
-            foundWorkspaceMetadata = foundWorkspaceMetadata || inWorkspaceMetadata
-            return
-        }
-        if (!inWorkspaceMetadata) {
-            return
-        }
-
-        def assignment = statement.text =~ /(?s)^([^=]+?)\s*=\s*(.*)$/
-        if (!assignment.matches()) {
-            throw new GradleException(
-                "${manifest}:${statement.line}: invalid assignment in [workspace.metadata]"
-            )
-        }
-        def key = assignment.group(1).trim()
-        if (!requiredKeys.contains(key)) {
-            return
-        }
-        if (values.containsKey(key)) {
-            throw new GradleException(
-                "${manifest}:${statement.line}: duplicate [workspace.metadata] key '${key}'"
-            )
-        }
-        values[key] = decodeRequiredValue(key, assignment.group(2).trim(), statement.line as int)
-    }
-
-    if (!foundWorkspaceMetadata) {
-        throw new GradleException(
-            "${manifest}: missing [workspace.metadata] table; define the Android build contract in Cargo.toml"
-        )
-    }
-    def missingKeys = requiredKeys.findAll { !values.containsKey(it) }
-    if (!missingKeys.isEmpty()) {
-        throw new GradleException(
-            "${manifest}: [workspace.metadata] is missing required key(s): ${missingKeys.join(', ')}. " +
-            "Add the missing values to Cargo.toml."
-        )
-    }
-    return values
 }
 
-def workspaceMetadata = parseWorkspaceMetadata(cargoManifest)
+def workspaceMetadata = loadWorkspaceMetadata()
 def requireMetadata = { String key, Class expectedType ->
     if (!workspaceMetadata.containsKey(key)) {
         throw new GradleException(
