@@ -3,9 +3,10 @@
 //! The downloaded `.dtmodel` package is the published darktable-ai 5.6 release
 //! asset. AuRaw pins both the archive and extracted ONNX graphs by SHA-256.
 
+use crate::execution_provider::{create_session_with_fallback, FallbackSession, SessionOptions};
 use anyhow::{Context, Result};
 use auraw_gpu::wgpu;
-use ort::{session::Session, value::Tensor};
+use ort::value::Tensor;
 use ring::digest::{Context as Sha256Context, SHA256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -745,22 +746,14 @@ fn extract_model(
     result
 }
 
-fn create_bayer_session(model_path: &Path) -> Result<Session> {
-    // The published model card documents FP16 activation overflow on Apple
-    // CoreML GPU/ANE for this graph. Keep Bayer on CPU there; the linear graph
-    // does not have that limitation.
-    #[cfg(target_os = "macos")]
-    {
-        crate::ai_masks::create_cpu_session(model_path)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        crate::ai_masks::create_session(model_path)
-    }
+fn create_bayer_session(model_path: &Path) -> Result<FallbackSession> {
+    // CoreML/CUDA/ROCm failures, including activation overflow detected by the
+    // output validation below, are recovered through the same Tier-2 CPU path.
+    create_session_with_fallback(model_path, SessionOptions::new("RawNIND Bayer"))
 }
 
 fn run_model_tile(
-    session: &mut Session,
+    session: &mut FallbackSession,
     channels: usize,
     values: Vec<f32>,
     output_edge: usize,
@@ -771,26 +764,28 @@ fn run_model_tile(
     );
     let input = Tensor::from_array(([1usize, channels, TILE_EDGE, TILE_EDGE], values))
         .context("create RawNIND input tensor")?;
-    let outputs = session
-        .run(ort::inputs![input])
-        .context("run RawNIND ONNX inference")?;
-    let output = outputs
-        .values()
-        .next()
-        .context("RawNIND returned no output tensor")?;
-    let (shape, values) = output
-        .try_extract_tensor::<f32>()
-        .context("read RawNIND output tensor")?;
-    anyhow::ensure!(
-        shape.as_ref() == [1, 3, output_edge as i64, output_edge as i64],
-        "unexpected RawNIND output shape {shape:?}"
-    );
-    let non_finite = values.iter().filter(|value| !value.is_finite()).count();
-    anyhow::ensure!(
-        non_finite == 0,
-        "RawNIND produced {non_finite} non-finite output values"
-    );
-    Ok(values.to_vec())
+    session.run_with_fallback("RawNIND ONNX tile inference", |ort_session, _accelerated| {
+        let outputs = ort_session
+            .run(ort::inputs![&input])
+            .context("run RawNIND ONNX inference")?;
+        let output = outputs
+            .values()
+            .next()
+            .context("RawNIND returned no output tensor")?;
+        let (shape, values) = output
+            .try_extract_tensor::<f32>()
+            .context("read RawNIND output tensor")?;
+        anyhow::ensure!(
+            shape.as_ref() == [1, 3, output_edge as i64, output_edge as i64],
+            "unexpected RawNIND output shape {shape:?}"
+        );
+        let non_finite = values.iter().filter(|value| !value.is_finite()).count();
+        anyhow::ensure!(
+            non_finite == 0,
+            "RawNIND produced {non_finite} non-finite output values"
+        );
+        Ok(values.to_vec())
+    })
 }
 
 fn infer_bayer(
@@ -1089,7 +1084,10 @@ fn infer_linear(
         .and_then(|elements| usize::try_from(elements).ok())
         .context("RawNIND linear output dimensions overflow")?;
     let mut stored = vec![0u16; output_elements];
-    let mut session = crate::ai_masks::create_session(model_path)?;
+    let mut session = create_session_with_fallback(
+        model_path,
+        SessionOptions::new("RawNIND linear"),
+    )?;
     let mut neutral = ExposureParams::scene_referred_default();
     neutral.ai_denoise_enabled = false;
     neutral.luminance_denoise = 0.0;
@@ -1490,6 +1488,7 @@ mod tests {
         save_result_cache, seam_weight, spawn_rawnind_denoise, AiDenoiseEvent, CORE_EDGE,
         SRGB_TO_REC2020, TILE_EDGE,
     };
+    use crate::execution_provider::{create_session_with_fallback, SessionOptions};
     use crate::pipeline::{
         build_proxy, AiDenoisedImage, CameraProfile, CfaKind, CompactPixelMap, ExposureParams,
         GpuParams, LoadedRaw, MaskStack, NoiseProfile, ProcessingQuality, ProxySpec,
@@ -1782,7 +1781,11 @@ mod tests {
         let sha = crate::ai_masks::sha256_file_hex(&runtime).unwrap();
         crate::ai_masks::initialize_runtime(Some(&runtime), Some(&sha)).unwrap();
         let mut session =
-            crate::ai_masks::create_session(&model_dir.join("model_linear.onnx")).unwrap();
+            create_session_with_fallback(
+                &model_dir.join("model_linear.onnx"),
+                SessionOptions::new("RawNIND linear"),
+            )
+            .unwrap();
         let input = vec![0.1; 3 * TILE_EDGE * TILE_EDGE];
         let mut output = run_model_tile(&mut session, 3, input.clone(), TILE_EDGE).unwrap();
         match_gain_tile(&input, &mut output).unwrap();

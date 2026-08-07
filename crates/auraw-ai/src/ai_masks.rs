@@ -1,7 +1,10 @@
+use crate::execution_provider::{
+    create_session_with_fallback, CpuFallbackProfile, FallbackSession, SessionOptions,
+};
 use crate::pipeline::LandscapeCategory;
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
-use ort::{session::Session, value::Tensor};
+use ort::value::Tensor;
 use rayon::prelude::*;
 use ring::digest::{Context as Sha256Context, SHA256};
 use serde::{Deserialize, Serialize};
@@ -140,11 +143,11 @@ const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 #[cfg(not(target_os = "android"))]
-static SESSION: OnceLock<Mutex<Option<(BiRefNetQuality, Session)>>> = OnceLock::new();
+static SESSION: OnceLock<Mutex<Option<(BiRefNetQuality, FallbackSession)>>> = OnceLock::new();
 #[cfg(not(target_os = "android"))]
-static VITMATTE_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+static VITMATTE_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
 #[cfg(not(target_os = "android"))]
-static LANDSCAPE_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+static LANDSCAPE_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
 #[cfg(not(target_os = "android"))]
 static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
@@ -846,87 +849,6 @@ pub fn initialize_runtime(
     Ok(())
 }
 
-#[cfg(target_os = "android")]
-pub fn create_session(model_path: &Path) -> Result<Session> {
-    let xnnpack_result = (|| -> Result<Session> {
-        let mut builder = Session::builder()
-            .context("create XNNPACK ONNX Runtime session")?
-            .with_memory_pattern(false)
-            .map_err(|error| anyhow::anyhow!("disable Android memory pattern: {error}"))?
-            .with_execution_providers([
-                ort::ep::XNNPACK::default().build(),
-                ort::ep::CPU::default().with_arena_allocator(false).build(),
-            ])
-            .map_err(|error| anyhow::anyhow!("configure Android XNNPACK: {error}"))?;
-        builder
-            .commit_from_file(model_path)
-            .context("compile ONNX model for Android XNNPACK")
-    })();
-    let xnnpack_error = match xnnpack_result {
-        Ok(session) => return Ok(session),
-        Err(error) => {
-            log::warn!("XNNPACK could not compile the ONNX model; trying CPU: {error:#}");
-            format!("{error:#}")
-        }
-    };
-
-    let mut builder = Session::builder()
-        .context("create CPU ONNX Runtime session")?
-        .with_memory_pattern(false)
-        .map_err(|error| anyhow::anyhow!("disable Android memory pattern: {error}"))?
-        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
-        .map_err(|error| anyhow::anyhow!("configure Android CPU fallback: {error}"))?;
-    builder.commit_from_file(model_path).with_context(|| {
-        format!("load ONNX model with Android CPU fallback (XNNPACK failed: {xnnpack_error})")
-    })
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn create_cpu_session(model_path: &Path) -> Result<Session> {
-    let mut builder = Session::builder()
-        .context("create CPU ONNX Runtime session")?
-        .with_memory_pattern(false)
-        .map_err(|error| anyhow::anyhow!("disable desktop ONNX memory pattern: {error}"))?
-        .with_execution_providers([ort::ep::CPU::default().build()])
-        .map_err(|error| anyhow::anyhow!("configure ONNX CPU execution provider: {error}"))?;
-    builder
-        .commit_from_file(model_path)
-        .with_context(|| format!("load ONNX model on CPU from {}", model_path.display()))
-}
-
-/// SAM 2.1's Hiera encoder is unusually sensitive to CPU graph/layout fusions in
-/// some Windows ONNX Runtime builds. A runtime can load successfully and run
-/// simpler models while still producing NaN/Inf feature maps for this encoder.
-/// Keep this one session deliberately conservative so object selection remains
-/// deterministic across user-selected Windows runtimes.
-#[cfg(windows)]
-fn create_windows_sam_encoder_session(model_path: &Path) -> Result<Session> {
-    use ort::session::builder::GraphOptimizationLevel;
-
-    let mut builder = Session::builder()
-        .context("create conservative Windows SAM encoder session")?
-        .with_memory_pattern(false)
-        .map_err(|error| anyhow::anyhow!("disable Windows SAM memory pattern: {error}"))?
-        .with_parallel_execution(false)
-        .map_err(|error| anyhow::anyhow!("force sequential Windows SAM execution: {error}"))?
-        .with_intra_threads(1)
-        .map_err(|error| {
-            anyhow::anyhow!("limit Windows SAM encoder to one inference thread: {error}")
-        })?
-        .with_optimization_level(GraphOptimizationLevel::Disable)
-        .map_err(|error| anyhow::anyhow!("disable Windows SAM graph optimizations: {error}"))?
-        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
-        .map_err(|error| {
-            anyhow::anyhow!("configure conservative Windows SAM CPU provider: {error}")
-        })?;
-    builder.commit_from_file(model_path).with_context(|| {
-        format!(
-            "load SAM 2.1 encoder with conservative Windows CPU settings from {}",
-            model_path.display()
-        )
-    })
-}
-
 #[cfg(target_os = "linux")]
 fn running_from_appimage() -> bool {
     std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some()
@@ -936,122 +858,14 @@ fn running_from_appimage() -> bool {
 fn cache_object_ai_sessions() -> bool {
     #[cfg(target_os = "linux")]
     {
-        // AppImages frequently use a user-selected external ONNX Runtime. Keep
-        // the object-mask pipeline conservative there: do not retain the SAM
-        // encoder/decoder/ViTMatte sessions simultaneously between runs. This
-        // reduces peak resident memory and avoids stale provider state.
+        // AppImages frequently use a user-selected external ONNX Runtime. Do
+        // not retain all object-mask sessions simultaneously; each temporary
+        // session still gets the full GPU -> CPU fallback behavior.
         !running_from_appimage()
     }
     #[cfg(not(target_os = "linux"))]
     {
         true
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
-    if running_from_appimage() {
-        log::info!(
-            "Running from AppImage; using the CPU ONNX provider for stable AI-mask inference"
-        );
-        return Ok(None);
-    }
-    // Only register provider libraries that actually ship beside the selected
-    // libonnxruntime. The ort crate/ONNX Runtime will fall back unsupported graph
-    // nodes to CPU automatically inside a successfully-created session.
-    let runtime_dir = DESKTOP_RUNTIME_IDENTITY
-        .get()
-        .and_then(|(runtime_path, _)| runtime_path.parent());
-    let has_provider = |filename: &str| {
-        runtime_dir
-            .map(|directory| directory.join(filename).is_file())
-            .unwrap_or(false)
-    };
-    let mut providers = Vec::new();
-    if has_provider("libonnxruntime_providers_cuda.so") {
-        providers.push(ort::ep::CUDA::default().build());
-    }
-    if has_provider("libonnxruntime_providers_openvino.so") {
-        providers.push(ort::ep::OpenVINO::default().build());
-    }
-    if has_provider("libonnxruntime_providers_rocm.so") {
-        providers.push(ort::ep::ROCm::default().build());
-    }
-    // Do not auto-register TensorRT simply because its provider .so exists. It
-    // also requires an external matching TensorRT installation; CUDA is the
-    // safer general-purpose NVIDIA accelerator and CPU remains the final fallback.
-    if providers.is_empty() {
-        return Ok(None);
-    }
-
-    let mut builder = Session::builder()
-        .context("create accelerated ONNX Runtime session")?
-        .with_execution_providers(providers)
-        .map_err(|error| anyhow::anyhow!("configure Linux ONNX execution providers: {error}"))?;
-    builder
-        .commit_from_file(model_path)
-        .map(Some)
-        .with_context(|| {
-            format!(
-                "load ONNX model with Linux acceleration from {}",
-                model_path.display()
-            )
-        })
-}
-
-#[cfg(target_os = "windows")]
-fn create_accelerated_session(_model_path: &Path) -> Result<Option<Session>> {
-    // A user-selected `onnxruntime.dll` may come from the CPU, CUDA, TensorRT,
-    // or DirectML distribution. Calling provider factory APIs that are absent
-    // from that exact build can cross a native ABI boundary before Rust gets a
-    // recoverable error. The CPU provider is guaranteed by the core runtime,
-    // so Windows uses it unless AuRaw later grows an explicit, validated
-    // provider-package selection UI.
-    Ok(None)
-}
-
-#[cfg(target_os = "macos")]
-fn create_accelerated_session(model_path: &Path) -> Result<Option<Session>> {
-    let mut builder = Session::builder()
-        .context("create accelerated ONNX Runtime session")?
-        .with_execution_providers([ort::ep::CoreML::default().build()])
-        .map_err(|error| anyhow::anyhow!("configure macOS ONNX execution provider: {error}"))?;
-    builder
-        .commit_from_file(model_path)
-        .map(Some)
-        .with_context(|| format!("load ONNX model with CoreML from {}", model_path.display()))
-}
-
-#[cfg(all(
-    not(target_os = "android"),
-    not(any(target_os = "linux", target_os = "windows", target_os = "macos"))
-))]
-fn create_accelerated_session(_model_path: &Path) -> Result<Option<Session>> {
-    Ok(None)
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn create_session(model_path: &Path) -> Result<Session> {
-    match create_accelerated_session(model_path) {
-        Ok(Some(session)) => Ok(session),
-        Ok(None) => {
-            log::info!(
-                "No usable accelerated ONNX execution provider was found; using CPU for {}",
-                model_path.display()
-            );
-            create_cpu_session(model_path)
-        }
-        Err(accelerated_error) => {
-            log::warn!(
-                "Accelerated ONNX session failed; retrying on CPU for {}: {accelerated_error:#}",
-                model_path.display()
-            );
-            create_cpu_session(model_path).with_context(|| {
-                format!(
-                    "CPU fallback also failed after accelerated ONNX session error: {accelerated_error:#}"
-                )
-            })
-        }
     }
 }
 
@@ -1111,7 +925,8 @@ fn infer_subject(
     let (output_width, output_height, logits) = {
         // Mobile memory is more important than avoiding session startup. Drop
         // all model weights and allocator state immediately after inference.
-        let mut session = create_session(model_path)?;
+        let mut session =
+            create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?;
         run_subject_session(&mut session, input, model.input_width, model.input_height)?
     };
 
@@ -1125,7 +940,10 @@ fn infer_subject(
             .as_ref()
             .is_none_or(|(cached_quality, _)| *cached_quality != quality)
         {
-            *session = Some((quality, create_session(model_path)?));
+            *session = Some((
+                quality,
+                create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?,
+            ));
         }
         let (_, session) = session.as_mut().ok_or_else(|| {
             anyhow::anyhow!("BiRefNet session initialization produced no session")
@@ -1147,35 +965,36 @@ fn infer_subject(
 }
 
 fn run_subject_session(
-    session: &mut Session,
+    session: &mut FallbackSession,
     input: Tensor<f32>,
     input_width: u32,
     input_height: u32,
 ) -> Result<(u32, u32, Vec<f32>)> {
-    let outputs = session
-        .run(ort::inputs![input])
-        .context("run BiRefNet ONNX inference")?;
-    let output = outputs
-        .values()
-        .next()
-        .context("BiRefNet returned no output tensors")?;
-    let (shape, logits) = output
-        .try_extract_tensor::<f32>()
-        .context("read BiRefNet output tensor")?;
-    let (output_width, output_height, output_elements) =
-        validate_birefnet_output_shape(shape, logits.len(), input_width, input_height)?;
-    anyhow::ensure!(
-        logits.iter().all(|value| value.is_finite()),
-        "BiRefNet output contains non-finite logits"
-    );
-    let mut owned_logits = Vec::new();
-    owned_logits
-        .try_reserve_exact(output_elements)
-        .context("reserve BiRefNet output logits")?;
-    owned_logits.extend_from_slice(logits);
-    Ok((output_width, output_height, owned_logits))
+    session.run_with_fallback("BiRefNet ONNX inference", |ort_session, _accelerated| {
+        let outputs = ort_session
+            .run(ort::inputs![&input])
+            .context("run BiRefNet ONNX inference")?;
+        let output = outputs
+            .values()
+            .next()
+            .context("BiRefNet returned no output tensors")?;
+        let (shape, logits) = output
+            .try_extract_tensor::<f32>()
+            .context("read BiRefNet output tensor")?;
+        let (output_width, output_height, output_elements) =
+            validate_birefnet_output_shape(shape, logits.len(), input_width, input_height)?;
+        anyhow::ensure!(
+            logits.iter().all(|value| value.is_finite()),
+            "BiRefNet output contains non-finite logits"
+        );
+        let mut owned_logits = Vec::new();
+        owned_logits
+            .try_reserve_exact(output_elements)
+            .context("reserve BiRefNet output logits")?;
+        owned_logits.extend_from_slice(logits);
+        Ok((output_width, output_height, owned_logits))
+    })
 }
-
 fn validate_birefnet_output_shape(
     shape: &[i64],
     logits_len: usize,
@@ -1305,7 +1124,8 @@ fn infer_landscape(
 
     #[cfg(target_os = "android")]
     let (output_width, output_height, probabilities) = {
-        let mut session = create_session(model_path)?;
+        let mut session =
+            create_session_with_fallback(model_path, SessionOptions::new("MaskFormer"))?;
         run_landscape_session(&mut session, input, category, layout)?
     };
 
@@ -1316,7 +1136,10 @@ fn infer_landscape(
             .lock()
             .map_err(|_| anyhow::anyhow!("MaskFormer session lock was poisoned"))?;
         if session.is_none() {
-            *session = Some(create_session(model_path)?);
+            *session = Some(create_session_with_fallback(
+                model_path,
+                SessionOptions::new("MaskFormer"),
+            )?);
         }
         let session = session.as_mut().ok_or_else(|| {
             anyhow::anyhow!("MaskFormer session initialization produced no session")
@@ -1347,73 +1170,75 @@ fn infer_landscape(
 }
 
 fn run_landscape_session(
-    session: &mut Session,
+    session: &mut FallbackSession,
     input: Tensor<f32>,
     category: LandscapeCategory,
     layout: MaskFormerInputLayout,
 ) -> Result<(u32, u32, Vec<f32>)> {
-    let outputs = session
-        .run(ort::inputs![input])
-        .context("run MaskFormer ONNX inference")?;
-    let class_output = outputs
-        .get("class_queries_logits")
-        .context("MaskFormer returned no class_queries_logits tensor")?;
-    let mask_output = outputs
-        .get("masks_queries_logits")
-        .context("MaskFormer returned no masks_queries_logits tensor")?;
-    let (class_shape, class_logits) = class_output
-        .try_extract_tensor::<f32>()
-        .context("read MaskFormer class-query output tensor")?;
-    let (mask_shape, mask_logits) = mask_output
-        .try_extract_tensor::<f32>()
-        .context("read MaskFormer mask-query output tensor")?;
-    let queries = validate_maskformer_class_output_shape(class_shape, class_logits.len())?;
-    let (width, height) =
-        validate_maskformer_mask_output_shape(mask_shape, mask_logits.len(), queries)?;
-    anyhow::ensure!(
-        class_logits.iter().all(|value| value.is_finite())
-            && mask_logits.iter().all(|value| value.is_finite()),
-        "MaskFormer output contains non-finite logits"
-    );
-    let plane = width as usize * height as usize;
-    let class_ids = category.ade20k_class_ids();
-    anyhow::ensure!(
-        class_ids.iter().all(|class| *class < ADE20K_CLASS_COUNT),
-        "landscape category contains an invalid ADE20K class"
-    );
+    session.run_with_fallback("MaskFormer ONNX inference", |ort_session, _accelerated| {
+        let outputs = ort_session
+            .run(ort::inputs![&input])
+            .context("run MaskFormer ONNX inference")?;
+        let class_output = outputs
+            .get("class_queries_logits")
+            .context("MaskFormer returned no class_queries_logits tensor")?;
+        let mask_output = outputs
+            .get("masks_queries_logits")
+            .context("MaskFormer returned no masks_queries_logits tensor")?;
+        let (class_shape, class_logits) = class_output
+            .try_extract_tensor::<f32>()
+            .context("read MaskFormer class-query output tensor")?;
+        let (mask_shape, mask_logits) = mask_output
+            .try_extract_tensor::<f32>()
+            .context("read MaskFormer mask-query output tensor")?;
+        let queries = validate_maskformer_class_output_shape(class_shape, class_logits.len())?;
+        let (width, height) =
+            validate_maskformer_mask_output_shape(mask_shape, mask_logits.len(), queries)?;
+        anyhow::ensure!(
+            class_logits.iter().all(|value| value.is_finite())
+                && mask_logits.iter().all(|value| value.is_finite()),
+            "MaskFormer output contains non-finite logits"
+        );
+        let plane = width as usize * height as usize;
+        let class_ids = category.ade20k_class_ids();
+        anyhow::ensure!(
+            class_ids.iter().all(|class| *class < ADE20K_CLASS_COUNT),
+            "landscape category contains an invalid ADE20K class"
+        );
 
-    let query_class_probabilities = (0..queries)
-        .map(|query| {
-            let logits = &class_logits[query * MASKFORMER_CLASS_OUTPUT_COUNT
-                ..(query + 1) * MASKFORMER_CLASS_OUTPUT_COUNT];
-            let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let denominator = logits
-                .iter()
-                .map(|logit| (*logit - maximum).exp())
-                .sum::<f32>();
-            anyhow::ensure!(
-                denominator.is_finite() && denominator > 0.0,
-                "MaskFormer class-query softmax is invalid"
-            );
-            Ok(logits[..ADE20K_CLASS_COUNT]
-                .iter()
-                .enumerate()
-                .filter_map(|(class, logit)| {
-                    let probability = (*logit - maximum).exp() / denominator;
-                    (probability >= MASKFORMER_CLASS_PROBABILITY_EPSILON)
-                        .then_some((class, probability))
-                })
-                .collect::<Vec<_>>())
-        })
-        .collect::<Result<Vec<Vec<(usize, f32)>>>>()?;
+        let query_class_probabilities = (0..queries)
+            .map(|query| {
+                let logits = &class_logits[query * MASKFORMER_CLASS_OUTPUT_COUNT
+                    ..(query + 1) * MASKFORMER_CLASS_OUTPUT_COUNT];
+                let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let denominator = logits
+                    .iter()
+                    .map(|logit| (*logit - maximum).exp())
+                    .sum::<f32>();
+                anyhow::ensure!(
+                    denominator.is_finite() && denominator > 0.0,
+                    "MaskFormer class-query softmax is invalid"
+                );
+                Ok(logits[..ADE20K_CLASS_COUNT]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(class, logit)| {
+                        let probability = (*logit - maximum).exp() / denominator;
+                        (probability >= MASKFORMER_CLASS_PROBABILITY_EPSILON)
+                            .then_some((class, probability))
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .collect::<Result<Vec<Vec<(usize, f32)>>>>()?;
 
-    let padded_probabilities = maskformer_semantic_category_mask(
-        mask_logits,
-        plane,
-        &query_class_probabilities,
-        class_ids,
-    );
-    crop_maskformer_probabilities(&padded_probabilities, width, height, layout)
+        let padded_probabilities = maskformer_semantic_category_mask(
+            mask_logits,
+            plane,
+            &query_class_probabilities,
+            class_ids,
+        );
+        crop_maskformer_probabilities(&padded_probabilities, width, height, layout)
+    })
 }
 
 fn maskformer_semantic_category_mask(
@@ -2054,7 +1879,8 @@ fn refine_mask_with_vitmatte(
 
     #[cfg(target_os = "android")]
     let (output_width, output_height, alpha) = {
-        let mut session = create_session(model_path)?;
+        let mut session =
+            create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
         run_vitmatte_session(&mut session, input)?
     };
     #[cfg(not(target_os = "android"))]
@@ -2065,7 +1891,10 @@ fn refine_mask_with_vitmatte(
                 .lock()
                 .map_err(|_| anyhow::anyhow!("ViTMatte session lock was poisoned"))?;
             if session.is_none() {
-                *session = Some(create_session(model_path)?);
+                *session = Some(create_session_with_fallback(
+                    model_path,
+                    SessionOptions::new("ViTMatte"),
+                )?);
             }
             run_vitmatte_session(
                 session
@@ -2074,7 +1903,8 @@ fn refine_mask_with_vitmatte(
                 input,
             )?
         } else {
-            let mut session = create_session(model_path)?;
+            let mut session =
+            create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
             run_vitmatte_session(&mut session, input)?
         }
     };
@@ -2116,39 +1946,44 @@ fn refine_mask_with_vitmatte(
     Ok(output)
 }
 
-fn run_vitmatte_session(session: &mut Session, input: Tensor<f32>) -> Result<(u32, u32, Vec<f32>)> {
-    let outputs = session
-        .run(ort::inputs![input])
-        .context("run ViTMatte ONNX inference")?;
-    let output = outputs
-        .values()
-        .next()
-        .context("ViTMatte returned no output tensors")?;
-    let (shape, alphas) = output
-        .try_extract_tensor::<f32>()
-        .context("read ViTMatte output tensor")?;
-    anyhow::ensure!(
-        shape.len() == 4 && shape[0] == 1 && shape[1] == 1,
-        "unexpected ViTMatte output shape {shape:?}; expected [1, 1, H, W]"
-    );
-    let height = usize::try_from(shape[2]).context("ViTMatte output height is invalid")?;
-    let width = usize::try_from(shape[3]).context("ViTMatte output width is invalid")?;
-    let elements = width
-        .checked_mul(height)
-        .context("ViTMatte output dimensions overflow")?;
-    anyhow::ensure!(
-        alphas.len() == elements,
-        "ViTMatte output tensor length mismatch"
-    );
-    anyhow::ensure!(
-        alphas.iter().all(|value| value.is_finite()),
-        "ViTMatte output contains non-finite alpha values"
-    );
-    Ok((
-        u32::try_from(width).context("ViTMatte output width exceeds u32")?,
-        u32::try_from(height).context("ViTMatte output height exceeds u32")?,
-        alphas.to_vec(),
-    ))
+fn run_vitmatte_session(
+    session: &mut FallbackSession,
+    input: Tensor<f32>,
+) -> Result<(u32, u32, Vec<f32>)> {
+    session.run_with_fallback("ViTMatte ONNX inference", |ort_session, _accelerated| {
+        let outputs = ort_session
+            .run(ort::inputs![&input])
+            .context("run ViTMatte ONNX inference")?;
+        let output = outputs
+            .values()
+            .next()
+            .context("ViTMatte returned no output tensors")?;
+        let (shape, alphas) = output
+            .try_extract_tensor::<f32>()
+            .context("read ViTMatte output tensor")?;
+        anyhow::ensure!(
+            shape.len() == 4 && shape[0] == 1 && shape[1] == 1,
+            "unexpected ViTMatte output shape {shape:?}; expected [1, 1, H, W]"
+        );
+        let height = usize::try_from(shape[2]).context("ViTMatte output height is invalid")?;
+        let width = usize::try_from(shape[3]).context("ViTMatte output width is invalid")?;
+        let elements = width
+            .checked_mul(height)
+            .context("ViTMatte output dimensions overflow")?;
+        anyhow::ensure!(
+            alphas.len() == elements,
+            "ViTMatte output tensor length mismatch"
+        );
+        anyhow::ensure!(
+            alphas.iter().all(|value| value.is_finite()),
+            "ViTMatte output contains non-finite alpha values"
+        );
+        Ok((
+            u32::try_from(width).context("ViTMatte output width exceeds u32")?,
+            u32::try_from(height).context("ViTMatte output height exceeds u32")?,
+            alphas.to_vec(),
+        ))
+    })
 }
 
 fn sigmoid_probability(logit: f32) -> f32 {
@@ -2256,9 +2091,9 @@ const SAM21_DECODER_MAX_BYTES: u64 = 32_000_000;
 const MAX_OBJECT_MASK_PIXELS: u64 = 17_000_000;
 
 #[cfg(not(target_os = "android"))]
-static SAM_ENCODER_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+static SAM_ENCODER_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
 #[cfg(not(target_os = "android"))]
-static SAM_DECODER_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+static SAM_DECODER_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObjectCropRect {
@@ -3110,25 +2945,31 @@ fn encode_sam_image(
 
     #[cfg(target_os = "android")]
     let tensors = {
-        let mut session = create_session(encoder_path)?;
+        let mut session = create_session_with_fallback(
+            encoder_path,
+            SessionOptions::new("SAM 2.1 encoder")
+                .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
+        )?;
         run_sam_encoder(&mut session, input)?
     };
     #[cfg(not(target_os = "android"))]
     let tensors = {
         #[cfg(target_os = "windows")]
         {
-            // Do not use the generic desktop session for the SAM image encoder
-            // on Windows. Some otherwise-valid ONNX Runtime CPU DLLs produce
-            // non-finite Hiera feature maps when the default graph/layout
-            // optimizations are enabled. The conservative session is slower but
-            // avoids the native-runtime numerical failure that makes Object Mask
-            // unusable.
+            // Windows still gets GPU acceleration first. If DirectML/CUDA/TensorRT
+            // setup or inference fails, the managed session rebuilds on CPU using
+            // the conservative graph/thread settings required by some third-party
+            // ONNX Runtime CPU DLLs for the Hiera encoder.
             let sessions = SAM_ENCODER_SESSION.get_or_init(|| Mutex::new(None));
             let mut guard = sessions
                 .lock()
                 .map_err(|_| anyhow::anyhow!("SAM encoder session lock was poisoned"))?;
             if guard.is_none() {
-                *guard = Some(create_windows_sam_encoder_session(encoder_path)?);
+                *guard = Some(create_session_with_fallback(
+                    encoder_path,
+                    SessionOptions::new("SAM 2.1 encoder")
+                        .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
+                )?);
             }
             run_sam_encoder(
                 guard
@@ -3145,7 +2986,11 @@ fn encode_sam_image(
                     .lock()
                     .map_err(|_| anyhow::anyhow!("SAM encoder session lock was poisoned"))?;
                 if guard.is_none() {
-                    *guard = Some(create_session(encoder_path)?);
+                    *guard = Some(create_session_with_fallback(
+                        encoder_path,
+                        SessionOptions::new("SAM 2.1 encoder")
+                            .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
+                    )?);
                 }
                 run_sam_encoder(
                     guard
@@ -3154,7 +2999,11 @@ fn encode_sam_image(
                     input,
                 )?
             } else {
-                let mut session = create_session(encoder_path)?;
+                let mut session = create_session_with_fallback(
+                    encoder_path,
+                    SessionOptions::new("SAM 2.1 encoder")
+                        .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
+                )?;
                 run_sam_encoder(&mut session, input)?
             }
         }
@@ -3174,23 +3023,26 @@ fn encode_sam_image(
 }
 
 fn run_sam_encoder(
-    session: &mut Session,
+    session: &mut FallbackSession,
     input: Tensor<f32>,
 ) -> Result<(SamTensorData, SamTensorData, SamTensorData)> {
-    let outputs = session
-        .run(ort::inputs![input])
-        .context("run SAM 2.1 image encoder")?;
-    Ok((
-        extract_sam_encoder_output(&outputs, 0, "high-resolution feature 0")?,
-        extract_sam_encoder_output(&outputs, 1, "high-resolution feature 1")?,
-        extract_sam_encoder_output(&outputs, 2, "image embedding")?,
-    ))
+    session.run_with_fallback("SAM 2.1 image encoder inference", |ort_session, accelerated| {
+        let outputs = ort_session
+            .run(ort::inputs![&input])
+            .context("run SAM 2.1 image encoder")?;
+        Ok((
+            extract_sam_encoder_output(&outputs, 0, "high-resolution feature 0", accelerated)?,
+            extract_sam_encoder_output(&outputs, 1, "high-resolution feature 1", accelerated)?,
+            extract_sam_encoder_output(&outputs, 2, "image embedding", accelerated)?,
+        ))
+    })
 }
 
 fn extract_sam_encoder_output(
     outputs: &ort::session::SessionOutputs<'_>,
     index: usize,
     label: &str,
+    _accelerated: bool,
 ) -> Result<SamTensorData> {
     let value = outputs
         .values()
@@ -3203,18 +3055,22 @@ fn extract_sam_encoder_output(
     let non_finite = data.iter().filter(|value| !value.is_finite()).count();
     #[cfg(target_os = "windows")]
     let values = if non_finite > 0 {
+        anyhow::ensure!(
+            !_accelerated,
+            "SAM 2.1 {label} produced {non_finite} non-finite values on the accelerated execution provider"
+        );
         // A very small number of isolated NaN/Inf values has been observed from
         // third-party Windows ORT CPU DLLs even with conservative session
         // settings. Replacing a handful with neutral zeros is safer than making
-        // Object Mask unusable, but never accept broadly-corrupted feature maps.
+        // Object Mask unusable, but never accept broadly-corrupted CPU features.
         let repair_limit = 64usize.max(data.len() / 100_000);
         anyhow::ensure!(
             non_finite <= repair_limit,
-            "SAM 2.1 {label} is numerically corrupted: {non_finite} of {} values are non-finite even with conservative Windows CPU inference. Select a current Microsoft x64 CPU onnxruntime.dll and restart AuRaw",
+            "SAM 2.1 {label} is numerically corrupted on CPU: {non_finite} of {} values are non-finite. Select a current Microsoft x64 CPU onnxruntime.dll and restart AuRaw",
             data.len()
         );
         log::warn!(
-            "SAM 2.1 {label} contained {non_finite} isolated non-finite values on Windows; replacing them with zero"
+            "SAM 2.1 {label} contained {non_finite} isolated non-finite values on Windows CPU; replacing them with zero"
         );
         data.iter()
             .map(|value| if value.is_finite() { *value } else { 0.0 })
@@ -3348,7 +3204,10 @@ fn decode_sam_mask(
 
     #[cfg(target_os = "android")]
     let (masks, scores) = {
-        let mut session = create_session(decoder_path)?;
+        let mut session = create_session_with_fallback(
+            decoder_path,
+            SessionOptions::new("SAM 2.1 decoder"),
+        )?;
         run_sam_decoder(
             &mut session,
             image_embedding,
@@ -3368,7 +3227,10 @@ fn decode_sam_mask(
                 .lock()
                 .map_err(|_| anyhow::anyhow!("SAM decoder session lock was poisoned"))?;
             if guard.is_none() {
-                *guard = Some(create_session(decoder_path)?);
+                *guard = Some(create_session_with_fallback(
+                    decoder_path,
+                    SessionOptions::new("SAM 2.1 decoder"),
+                )?);
             }
             run_sam_decoder(
                 guard
@@ -3383,7 +3245,10 @@ fn decode_sam_mask(
                 has_mask,
             )?
         } else {
-            let mut session = create_session(decoder_path)?;
+            let mut session = create_session_with_fallback(
+            decoder_path,
+            SessionOptions::new("SAM 2.1 decoder"),
+        )?;
             run_sam_decoder(
                 &mut session,
                 image_embedding,
@@ -3406,7 +3271,7 @@ fn tensor_from_sam_data(data: &SamTensorData, label: &str) -> Result<Tensor<f32>
 
 #[allow(clippy::too_many_arguments)]
 fn run_sam_decoder(
-    session: &mut Session,
+    session: &mut FallbackSession,
     image_embedding: Tensor<f32>,
     high_res_0: Tensor<f32>,
     high_res_1: Tensor<f32>,
@@ -3415,21 +3280,23 @@ fn run_sam_decoder(
     mask_input: Tensor<f32>,
     has_mask: Tensor<f32>,
 ) -> Result<(SamTensorData, SamTensorData)> {
-    let outputs = session
-        .run(ort::inputs![
-            image_embedding,
-            high_res_0,
-            high_res_1,
-            point_coords,
-            point_labels,
-            mask_input,
-            has_mask
-        ])
-        .context("run SAM 2.1 mask decoder")?;
-    Ok((
-        extract_f32_output(&outputs, 0, "mask logits")?,
-        extract_f32_output(&outputs, 1, "mask scores")?,
-    ))
+    session.run_with_fallback("SAM 2.1 mask decoder inference", |ort_session, _accelerated| {
+        let outputs = ort_session
+            .run(ort::inputs![
+                &image_embedding,
+                &high_res_0,
+                &high_res_1,
+                &point_coords,
+                &point_labels,
+                &mask_input,
+                &has_mask
+            ])
+            .context("run SAM 2.1 mask decoder")?;
+        Ok((
+            extract_f32_output(&outputs, 0, "mask logits")?,
+            extract_f32_output(&outputs, 1, "mask scores")?,
+        ))
+    })
 }
 
 fn select_sam_candidate(
