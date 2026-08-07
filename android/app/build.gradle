@@ -1,30 +1,158 @@
+import groovy.json.JsonSlurper
+
 plugins {
     id "com.android.application"
 }
 
+def repositoryRoot = rootProject.projectDir.parentFile
+def cargoManifest = new File(repositoryRoot, "Cargo.toml")
+
+def loadWorkspaceMetadata = {
+    if (!cargoManifest.isFile()) {
+        throw new GradleException("Cargo workspace manifest not found: ${cargoManifest}")
+    }
+
+    def metadataCommand = providers.exec {
+        workingDir(repositoryRoot)
+        commandLine("cargo", "xtask", "print-metadata", "--format", "json")
+        ignoreExitValue = true
+    }
+
+    def executionResult
+    try {
+        executionResult = metadataCommand.result.get()
+    } catch (Exception error) {
+        throw new GradleException(
+            "Unable to run `cargo xtask print-metadata` while configuring the Android build. " +
+            "Install Rust with Cargo, ensure `cargo` is available in PATH, and retry from " +
+            "${repositoryRoot}.",
+            error
+        )
+    }
+
+    def stderr = metadataCommand.standardError.asText.get().trim()
+    if (executionResult.exitValue != 0) {
+        def details = stderr.isEmpty() ? "No error output was produced." : stderr
+        throw new GradleException(
+            "`cargo xtask print-metadata` failed with exit code ${executionResult.exitValue}. " +
+            "Ensure the pinned Rust toolchain is installed and the xtask can build.\n${details}"
+        )
+    }
+
+    def stdout = metadataCommand.standardOutput.asText.get().trim()
+    if (stdout.isEmpty()) {
+        throw new GradleException(
+            "`cargo xtask print-metadata` completed successfully but produced no JSON output."
+        )
+    }
+
+    def buildContract
+    try {
+        buildContract = new JsonSlurper().parseText(stdout)
+    } catch (Exception error) {
+        throw new GradleException(
+            "Unable to parse JSON from `cargo xtask print-metadata`. Output was:\n${stdout}",
+            error
+        )
+    }
+    if (!(buildContract instanceof Map)) {
+        throw new GradleException(
+            "`cargo xtask print-metadata` must output a JSON object; received ${buildContract?.getClass()?.simpleName ?: 'null'}."
+        )
+    }
+
+    // Preserve the existing Gradle-facing metadata names so the rest of this
+    // script and all property overrides continue to behave exactly as before.
+    return [
+        android_ndk_version: buildContract.ndkVersion,
+        android_build_tools_version: buildContract.buildToolsVersion,
+        android_compile_sdk: buildContract.compileSdk,
+        android_min_sdk: buildContract.minSdk,
+        android_target_sdk: buildContract.targetSdk,
+        libraw_revision: buildContract.librawRevision,
+        lensfun_revision: buildContract.lensfunRevision,
+        android_use_legacy_packaging: buildContract.useLegacyPackaging,
+    ]
+}
+
+def workspaceMetadata = loadWorkspaceMetadata()
+def requireMetadata = { String key, Class expectedType ->
+    if (!workspaceMetadata.containsKey(key)) {
+        throw new GradleException(
+            "${cargoManifest}: [workspace.metadata] is missing required key '${key}'"
+        )
+    }
+    def value = workspaceMetadata[key]
+    if (!expectedType.isInstance(value)) {
+        throw new GradleException(
+            "${cargoManifest}: [workspace.metadata].${key} must be ${expectedType.simpleName}"
+        )
+    }
+    return value
+}
+
+def aurawNdkVersion = requireMetadata("android_ndk_version", String)
+def aurawBuildToolsVersion = requireMetadata("android_build_tools_version", String)
+def aurawCompileSdk = requireMetadata("android_compile_sdk", Integer)
+def aurawMinSdk = requireMetadata("android_min_sdk", Integer)
+def aurawTargetSdk = requireMetadata("android_target_sdk", Integer)
+def aurawLibrawRevision = requireMetadata("libraw_revision", String)
+def aurawLensfunRevision = requireMetadata("lensfun_revision", String)
+def aurawUseLegacyPackaging = requireMetadata("android_use_legacy_packaging", Boolean)
+
 def aurawVersionCode = providers.gradleProperty("aurawVersionCode")
     .getOrElse("1")
     .toInteger()
-def rustAbi = providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")
-def repositoryRoot = rootProject.projectDir.parentFile
+
+def requestedAbis = providers.gradleProperty("aurawAbis")
+    .orElse(providers.gradleProperty("aurawAbi"))
+    .getOrElse("arm64-v8a,x86_64")
+def aurawAbis = requestedAbis
+    .split(",")
+    .collect { it.trim() }
+    .findAll { !it.isEmpty() }
+    .unique()
+def supportedAbis = ["arm64-v8a", "x86_64"] as Set
+if (aurawAbis.isEmpty() || !supportedAbis.containsAll(aurawAbis)) {
+    throw new GradleException(
+        "aurawAbis must contain arm64-v8a and/or x86_64; found '${requestedAbis}'"
+    )
+}
+
+def nativeStageRoot = new File(repositoryRoot, "android/native")
+// Lensfun's XML database is architecture-independent. All ABI builds install
+// the same pinned database, so package the copy staged by the first requested ABI.
 def lensfunAssets = new File(
-    repositoryRoot,
-    "android/native/lensfun/${rustAbi}/apk-assets"
+    nativeStageRoot,
+    "lensfun/${aurawAbis.first()}/apk-assets"
 )
 
 android {
     namespace "de.duecki.auraw"
-    compileSdk 36
-    ndkVersion "28.2.13676358"
+    compileSdk aurawCompileSdk
+    buildToolsVersion aurawBuildToolsVersion
+    ndkVersion aurawNdkVersion
 
     defaultConfig {
         applicationId "de.duecki.auraw"
-        minSdk 26
-        targetSdk 36
+        minSdk aurawMinSdk
+        targetSdk aurawTargetSdk
         versionCode aurawVersionCode
         versionName "0.1.0"
         ndk {
-            abiFilters((providers.gradleProperty("aurawAbi").getOrElse("arm64-v8a")))
+            abiFilters(*aurawAbis)
+        }
+        externalNativeBuild {
+            cmake {
+                targets "auraw_native_deps"
+                arguments(
+                    "-DAURAW_NATIVE_STAGE_ROOT=${nativeStageRoot.absolutePath}",
+                    "-DAURAW_ANDROID_MIN_SDK=${aurawMinSdk}",
+                    "-DAURAW_LIBRAW_VERSION=${aurawLibrawRevision}",
+                    "-DAURAW_LENSFUN_VERSION=${aurawLensfunRevision}",
+                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+                )
+            }
         }
     }
 
@@ -37,7 +165,7 @@ android {
     // Keep this explicit so a future packaging-default change cannot regress support.
     packagingOptions {
         jniLibs {
-            useLegacyPackaging false
+            useLegacyPackaging aurawUseLegacyPackaging
         }
     }
 
@@ -48,33 +176,104 @@ android {
         }
     }
 
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
 }
 
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+}
+
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += ["-Xlint:deprecation"]
 }
 
-def buildRustEnabled = providers.gradleProperty("aurawBuildRust").map { it.toBoolean() }.getOrElse(true)
+def buildRustEnabled = providers.gradleProperty("aurawBuildRust")
+    .map { it.toBoolean() }
+    .getOrElse(true)
 
-tasks.register("buildRustDebug", Exec) {
-    workingDir repositoryRoot
-    commandLine "sh", new File(repositoryRoot, "scripts/build-android.sh"), rustAbi, "debug"
+def abiTaskSuffix = { String abi ->
+    abi.split(/[-_]/)
+        .collect { token -> token.substring(0, 1).toUpperCase() + token.substring(1) }
+        .join("")
 }
 
-tasks.register("buildRustRelease", Exec) {
-    workingDir repositoryRoot
-    commandLine "sh", new File(repositoryRoot, "scripts/build-android.sh"), rustAbi, "release"
+def debugRustTasks = []
+def releaseRustTasks = []
+aurawAbis.each { abi ->
+    def suffix = abiTaskSuffix(abi)
+    debugRustTasks << tasks.register("buildRustDebug${suffix}", Exec) {
+        dependsOn("externalNativeBuildDebug")
+        workingDir repositoryRoot
+        environment "AURAW_NATIVE_DEPS_READY", "1"
+        commandLine "cargo", "xtask", "build-android", abi, "debug"
+    }
+    releaseRustTasks << tasks.register("buildRustRelease${suffix}", Exec) {
+        dependsOn("externalNativeBuildRelease")
+        workingDir repositoryRoot
+        environment "AURAW_NATIVE_DEPS_READY", "1"
+        commandLine "cargo", "xtask", "build-android", abi, "release"
+    }
 }
 
+// Cargo shares a target directory and build-script outputs. Serialize ABI
+// invocations while still letting AGP build both CMake ABIs in parallel.
+for (int index = 1; index < debugRustTasks.size(); index++) {
+    debugRustTasks[index].configure { mustRunAfter(debugRustTasks[index - 1]) }
+    releaseRustTasks[index].configure { mustRunAfter(releaseRustTasks[index - 1]) }
+}
+
+tasks.register("buildRustDebug") {
+    dependsOn(debugRustTasks)
+}
+tasks.register("buildRustRelease") {
+    dependsOn(releaseRustTasks)
+}
+
+// The XML asset directory is produced by the external native build, and the
+// Rust cdylib must exist before AGP merges JNI libraries. Wiring at merge time
+// avoids a preBuild <-> externalNativeBuild dependency cycle. Native work is
+// omitted when aurawBuildRust=false so JVM-only unit tests remain host-only.
 if (buildRustEnabled) {
-    tasks.matching { it.name == "preDebugBuild" }.configureEach {
+    tasks.matching { it.name == "mergeDebugAssets" }.configureEach {
+        dependsOn("externalNativeBuildDebug")
+    }
+    tasks.matching { it.name == "mergeReleaseAssets" }.configureEach {
+        dependsOn("externalNativeBuildRelease")
+    }
+    tasks.matching {
+        it.name == "mergeDebugNativeLibs" || it.name == "mergeDebugJniLibFolders"
+    }.configureEach {
         dependsOn("buildRustDebug")
     }
-    tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    tasks.matching {
+        it.name == "mergeReleaseNativeLibs" || it.name == "mergeReleaseJniLibFolders"
+    }.configureEach {
         dependsOn("buildRustRelease")
+    }
+}
+
+
+tasks.register("printAndroidBuildContract") {
+    doLast {
+        println groovy.json.JsonOutput.toJson([
+            ndkVersion: aurawNdkVersion,
+            buildToolsVersion: aurawBuildToolsVersion,
+            compileSdk: aurawCompileSdk,
+            minSdk: aurawMinSdk,
+            targetSdk: aurawTargetSdk,
+            useLegacyPackaging: aurawUseLegacyPackaging,
+            librawRevision: aurawLibrawRevision,
+            lensfunRevision: aurawLensfunRevision,
+        ])
     }
 }

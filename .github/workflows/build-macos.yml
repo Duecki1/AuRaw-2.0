@@ -80,6 +80,7 @@ jobs:
           cargo build \
             --locked \
             --release \
+            --package auraw-ui \
             --target "${{ matrix.target }}" \
             --bin auraw
 
@@ -124,9 +125,13 @@ jobs:
           iconutil -c icns "$iconset" -o "$contents/Resources/AuRaw.icns"
           rm -rf "$iconset"
           test -s "$contents/Resources/AuRaw.icns"
+          # iconutil re-encodes PNG entries, so validate content dimensions rather than bytes.
           verify_iconset="$(mktemp -d)/AuRaw.iconset"
           iconutil -c iconset "$contents/Resources/AuRaw.icns" -o "$verify_iconset"
-          cmp "$icon_source" "$verify_iconset/icon_512x512@2x.png"
+          verify_icon="$verify_iconset/icon_512x512@2x.png"
+          test -s "$verify_icon"
+          test "$(sips -g pixelWidth "$verify_icon" | awk '/pixelWidth/ { print $2 }')" = "1024"
+          test "$(sips -g pixelHeight "$verify_icon" | awk '/pixelHeight/ { print $2 }')" = "1024"
           rm -rf "$(dirname "$verify_iconset")"
 
           lensfun_db="$(find "$(brew --prefix lensfun)/share/lensfun" -type f -name '*.xml' -print | head -n 1)"

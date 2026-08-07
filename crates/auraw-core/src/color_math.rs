@@ -1,0 +1,195 @@
+//! Canonical CPU-accessible color and tone math used by headless regression tools.
+//!
+//! These functions intentionally match the corresponding WGSL helpers in
+//! `auraw-gpu/src/shaders/{color,noise,tone_common,tonemap}.wgsl`. Keeping the
+//! evaluator in Rust lets external tests exercise AuRaw-owned math instead of
+//! maintaining independent Python translations.
+
+const DISPLAY_BLACKS_LIFT_DECAY: f32 = 0.035;
+const DISPLAY_BLACKS_CRUSH_TAIL_DECAY: f32 = 0.070;
+const DISPLAY_BLACKS_DEEP_CRUSH_EV: f32 = 10.50;
+
+fn mul3(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0][0] * vector[0]
+            + matrix[0][1] * vector[1]
+            + matrix[0][2] * vector[2],
+        matrix[1][0] * vector[0]
+            + matrix[1][1] * vector[1]
+            + matrix[1][2] * vector[2],
+        matrix[2][0] * vector[0]
+            + matrix[2][1] * vector[1]
+            + matrix[2][2] * vector[2],
+    ]
+}
+
+fn signed_cuberoot(value: f32) -> f32 {
+    value.signum() * value.abs().powf(1.0 / 3.0)
+}
+
+fn linear_srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+    let lms = mul3(
+        [
+            [0.412_221_46, 0.536_332_55, 0.051_445_99],
+            [0.211_903_5, 0.680_699_5, 0.107_396_96],
+            [0.088_302_46, 0.281_718_85, 0.629_978_7],
+        ],
+        rgb,
+    )
+    .map(signed_cuberoot);
+    mul3(
+        [
+            [0.210_454_26, 0.793_617_8, -0.004_072_05],
+            [1.977_998_5, -2.428_592_2, 0.450_593_7],
+            [0.025_904_04, 0.782_771_77, -0.808_675_77],
+        ],
+        lms,
+    )
+}
+
+fn oklab_to_linear_srgb(lab: [f32; 3]) -> [f32; 3] {
+    let root = mul3(
+        [
+            [1.0, 0.396_337_78, 0.215_803_76],
+            [1.0, -0.105_561_35, -0.063_854_17],
+            [1.0, -0.089_484_18, -1.291_485_5],
+        ],
+        lab,
+    );
+    let lms = root.map(|value| value * value * value);
+    mul3(
+        [
+            [4.076_741_7, -3.307_711_6, 0.230_969_94],
+            [-1.268_438, 2.609_757_4, -0.341_319_4],
+            [-0.004_196_09, -0.703_418_6, 1.707_614_7],
+        ],
+        lms,
+    )
+}
+
+/// Convert scene-linear D65 Rec.2020 RGB to OKLab.
+pub fn rec2020_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+    linear_srgb_to_oklab(mul3(
+        [
+            [1.660_491, -0.587_641_1, -0.072_849_9],
+            [-0.124_550_5, 1.132_899_9, -0.008_349_4],
+            [-0.018_150_8, -0.100_578_9, 1.118_729_7],
+        ],
+        rgb,
+    ))
+}
+
+/// Convert OKLab to scene-linear D65 Rec.2020 RGB.
+pub fn rec2020_from_oklab(lab: [f32; 3]) -> [f32; 3] {
+    mul3(
+        [
+            [0.627_403_9, 0.329_283, 0.043_313_1],
+            [0.069_097_3, 0.919_540_4, 0.011_362_3],
+            [0.016_391_4, 0.088_013_3, 0.895_595_3],
+        ],
+        oklab_to_linear_srgb(lab),
+    )
+}
+
+/// Camera-signal/opponent transform used by the WGSL denoise path.
+pub fn camera_signal_opponents(rgb: [f32; 3]) -> [f32; 3] {
+    let signal = 0.25 * rgb[0] + 0.50 * rgb[1] + 0.25 * rgb[2];
+    let opponent_u = 0.5 * (rgb[0] - rgb[2]);
+    let opponent_v = 0.25 * rgb[0] - 0.5 * rgb[1] + 0.25 * rgb[2];
+    [signal, opponent_u, opponent_v]
+}
+
+/// Inverse of [`camera_signal_opponents`].
+pub fn camera_from_signal_opponents(values: [f32; 3]) -> [f32; 3] {
+    let signal = values[0];
+    let opponent_u = values[1];
+    let opponent_v = values[2];
+    [
+        signal + opponent_v + opponent_u,
+        signal - opponent_v,
+        signal + opponent_v - opponent_u,
+    ]
+}
+
+/// Lightroom-style concave slider response used by Shadows and Blacks.
+pub fn basic_low_tone_control(value: f32) -> f32 {
+    let normalized = (value / 100.0).clamp(-1.0, 1.0);
+    let magnitude = normalized.abs();
+    let shaped = magnitude * (1.45 - 0.45 * magnitude);
+    normalized.signum() * shaped
+}
+
+/// Smoothstep variant used by the tone-analysis and tone-map shaders.
+pub fn tone_smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let width = (edge1 - edge0).max(1e-4);
+    let x = ((value - edge0) / width).clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// Evaluate the scene-EV Shadows transfer for one histogram position.
+///
+/// Returns `[mapped_ev, mask, lower_join, upper_join]`.
+pub fn shadows_scene(ev: f32, value: f32, p05: f32, p50: f32) -> [f32; 4] {
+    let lower = p05 - 0.90;
+    let upper = p50 + 1.35;
+    let mask = 1.0 - tone_smoothstep(lower, upper, ev);
+    let shadows = basic_low_tone_control(value);
+    let monotone_limit = 0.64 * (upper - lower).max(0.25);
+    let requested = shadows.abs() * 2.20;
+    let offset = if shadows.abs() < 1e-7 || mask <= 0.0 {
+        0.0
+    } else {
+        shadows.signum() * requested.min(monotone_limit) * mask
+    };
+    [ev + offset, mask, lower, upper]
+}
+
+/// Evaluate the display-linear Blacks toe from an already-normalized amount.
+pub fn display_black_toe_amount(luminance: f32, amount: f32) -> f32 {
+    if luminance <= 0.0 || amount.abs() < 1e-7 {
+        return luminance;
+    }
+    let amount = amount.clamp(-1.0, 1.0);
+    let hdr_guard = 1.0 - tone_smoothstep(0.35, 1.0, luminance);
+    if hdr_guard <= 0.0 {
+        return luminance;
+    }
+
+    let offset_ev = if amount >= 0.0 {
+        let weight = 0.08 + 0.92 * (-luminance / DISPLAY_BLACKS_LIFT_DECAY).exp2();
+        amount * 1.75 * weight * hdr_guard
+    } else {
+        let deep = 1.0 - tone_smoothstep(0.012, 0.030, luminance);
+        let tail = 0.10 + 2.35 * (-luminance / DISPLAY_BLACKS_CRUSH_TAIL_DECAY).exp2();
+        -(-amount) * (DISPLAY_BLACKS_DEEP_CRUSH_EV * deep + tail) * hdr_guard
+    };
+    luminance * offset_ev.exp2()
+}
+
+/// Evaluate the display-linear Blacks toe from the public -100..100 slider.
+pub fn display_black_toe_value(luminance: f32, value: f32) -> f32 {
+    display_black_toe_amount(luminance, basic_low_tone_control(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opponent_basis_round_trips() {
+        let sample = [0.1, 0.2, 0.3];
+        let reconstructed = camera_from_signal_opponents(camera_signal_opponents(sample));
+        for (actual, expected) in reconstructed.into_iter().zip(sample) {
+            assert!((actual - expected).abs() <= 2e-7);
+        }
+    }
+
+    #[test]
+    fn rec2020_oklab_round_trips() {
+        let sample = [0.2, 0.4, 0.8];
+        let reconstructed = rec2020_from_oklab(rec2020_to_oklab(sample));
+        for (actual, expected) in reconstructed.into_iter().zip(sample) {
+            assert!((actual - expected).abs() <= 2e-5);
+        }
+    }
+}

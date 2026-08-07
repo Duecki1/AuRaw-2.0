@@ -3,7 +3,7 @@ color_space: linear-rec2020-d65
 raw_root: raw
 
 # These compact DNGs are generated from the same deterministic scene by
-# regression/generate_synthetic_corpus.py. They are CC0 fixtures owned by the
+# python3 scripts/dev.py corpus. They are CC0 fixtures owned by the
 # AuRaw project and intentionally exercise both supported CFA families.
 scenes:
   - id: synthetic-bayer-multitarget

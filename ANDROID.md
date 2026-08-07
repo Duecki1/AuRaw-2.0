@@ -6,83 +6,102 @@ the application entry point and the system file-picker bridge.
 
 ## Prerequisites
 
-- Rust with the Android target for the device (normally
-  `aarch64-linux-android`)
-- Android SDK 35 and Android NDK 28.2.13676358
-- Android SDK CMake 3.22.1 (with its bundled Ninja), a JDK, host `libclang`, and Gradle 8.11.1 or newer in the Gradle 8 series (CI uses 8.11.1). The first Lensfun build automatically bootstraps a pinned Meson build tool in `android/native/tools/`.
+- Rust with both Android targets used by the default build:
+  `aarch64-linux-android` and `x86_64-linux-android`
+- Android SDK platform and NDK versions declared in `Cargo.toml` `[workspace.metadata]`
+- Android SDK CMake 3.22.1 with Ninja, a JDK, Python 3, host `libclang`,
+  `make`, and `pkg-config`
 - `cargo-ndk` 4.1.2 (`cargo install cargo-ndk --version 4.1.2 --locked`)
 
 Set `ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME`, for example:
 
 ```sh
 export ANDROID_SDK_ROOT="/home/duecki/Android/Sdk"
-export ANDROID_NDK_HOME="/home/duecki/Android/Sdk/ndk/28.2.13676358"
-rustup target add aarch64-linux-android
+eval "$(cargo xtask print-metadata --format shell)"
+export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$AURAW_ANDROID_NDK_VERSION"
+rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 ```
 
-On Debian/Ubuntu, the bindgen prerequisite is provided by `libclang-dev`. If
-libclang is installed somewhere nonstandard, set `LIBCLANG_PATH` to the
-directory containing `libclang.so`. The build script automatically uses the
-NDK's copy when that NDK distribution includes one.
+On Debian/Ubuntu, install the host tools with `libclang-dev`, `make`,
+`pkg-config`, and Python 3. If libclang is installed somewhere nonstandard, set
+`LIBCLANG_PATH` to the directory containing `libclang.so`. No project-local
+Python virtualenv or system Meson installation is required: CMake fetches the
+pinned Meson source and invokes `meson.py` directly for GLib.
 
 ## Build and run
 
-The simplest route is to open the `android` directory in Android Studio and
-press Run. The variant pre-build task builds LibRaw and the matching debug or
-release Rust library before Gradle packages the app.
-
-For a command-line build from the repository root:
+Open the `android` directory in Android Studio and press Run, or build from the
+repository root:
 
 ```sh
-gradle assembleDebug -PaurawAbi=arm64-v8a
+./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 ```
 
-Running the same command from the `android` directory remains supported.
+This builds both supported 64-bit ABIs. The legacy single-value `aurawAbi`
+property remains accepted for compatibility, but new documentation and CI use
+the comma-separated `aurawAbis` contract. The
+debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+### Native dependency graph
+
+`android/app/src/main/cpp/CMakeLists.txt` is registered through AGP
+`externalNativeBuild`. For each active ABI, it uses the NDK toolchain to:
+
+1. Fetch SHA-256-pinned LibRaw 0.22.1 and its pinned CMake overlay, then build
+   the PIC `raw` static target with optional codecs and examples disabled.
+2. Fetch SHA-256-pinned Lensfun 0.3.4 and build it with tests, lenstool,
+   documentation, Python, helper scripts, and SSE-specific paths disabled.
+3. Build only Lensfun's mandatory static support stack (libiconv and GLib with
+   fallback PCRE2, libffi, and zlib) as CMake `ExternalProject` dependencies.
+4. Stage headers and archives under `android/native/{libraw,lensfun}/<abi>`.
+5. Run `cargo-ndk` after CMake and statically link those archives into
+   `libauraw.so`; only `libc++_shared.so` remains a separate runtime library.
+
+Lensfun 0.3.4 cannot be made completely GLib-free using its upstream options:
+the core target itself requires GLib. The standalone switches remove optional
+programs and test-only dependencies, while the minimal GLib stack above keeps
+the core API intact. CMake also exposes `auraw::libraw`, `auraw::lensfun`, and
+`auraw::native_static` for a future C++ JNI target. Prefab is not needed for the
+current app because the final Rust JNI library consumes the static archives.
+
+Lensfun's architecture-independent XML database is installed as APK assets and
+copied to app-private storage on first launch, because Lensfun loads profiles
+from filesystem paths. Generated sources, libraries, and APKs remain ignored by
+Git.
+
+To run only the native CMake stage:
+
+```sh
+./gradlew :app:externalNativeBuildDebug -PaurawAbis=arm64-v8a,x86_64
+```
+
+The compatibility CLI now delegates native dependency work to that same Gradle
+task before invoking Cargo:
+
+```sh
+cargo xtask build-android arm64-v8a release
+```
 
 ### 16 KB memory-page support
 
-Android builds use NDK r28c, whose linker emits 16 KB-compatible ELF LOAD
-segments by default. AGP 8.9.2 packages JNI libraries uncompressed with legacy
-packaging disabled, allowing the APK to retain 16 KB zip alignment for direct
-loading on Android 15+ devices that use 16 KB memory pages. The manifest does
-not force native-library extraction.
+The project pins NDK r28 and AGP 8.9.2, disables legacy JNI packaging, and adds
+explicit `-Wl,-z,max-page-size=16384` and
+`-Wl,-z,common-page-size=16384` linker arguments to both CMake and Rust Android
+targets. Static archives are compiled as PIC and become part of the final JNI
+ELF; AGP packages the resulting uncompressed `.so` files with 16 KB zip
+alignment.
 
-After building an APK, verify both ELF LOAD alignment and APK zip alignment with:
+After building an APK, verify both ELF LOAD alignment and APK zip alignment:
 
 ```sh
-./scripts/verify-android-16kb.sh android/app/build/outputs/apk/debug/app-debug.apk
+cargo xtask verify-android-16kb android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 The verifier checks every 64-bit `.so` with the pinned NDK's `llvm-objdump` and
-runs Build Tools 35.0.0 `zipalign -c -P 16 -v 4`. CI runs the same check on the
-arm64 debug APK. Runtime testing should also be performed on a 16 KB Android 15
-or newer device/emulator (`adb shell getconf PAGE_SIZE` must report `16384`).
-
-To build only the native LibRaw, Lensfun, and Rust libraries without packaging an APK:
-
-```sh
-./scripts/build-android.sh arm64-v8a release
-```
-
-The first native build downloads LibRaw 0.22.1 and Lensfun 0.3.4, then
-cross-compiles static libraries with the pinned NDK. Lensfun's profile XML
-database is staged as APK assets and copied to app-private storage on first
-launch, because Lensfun loads its database from filesystem paths. Generated
-sources, libraries, and APKs are ignored by Git. The native build
-also copies `libc++_shared.so` from the pinned NDK instead of storing it in the
-repository. No LibRaw installation on the Linux host is required. LibRaw is
-cached for development builds until its version, ABI, API level, or NDK
-revision changes; set `AURAW_REBUILD_LIBRAW=1` to force a clean native rebuild.
-Set `AURAW_REBUILD_LENSFUN=1` to rebuild the cached Lensfun and GLib libraries.
-Release builds always discard the ignored native cache and rebuild it from the
-pinned source revisions.
-
-Other supported ABI names are `armeabi-v7a`, `x86`, and `x86_64`. Build and
-package one ABI at a time by passing the same name to the script and the Gradle
-`aurawAbi` property.
+runs the pinned Build Tools `zipalign -c -P 16 -v 4`. Runtime testing should
+also be performed on a 16 KB Android device or emulator; `adb shell getconf
+PAGE_SIZE` must report `16384`.
 
 ## Touch preview controls
 
@@ -165,7 +184,7 @@ On the computer where LibRaw is installed in `/usr/local`, continue to use:
 ```sh
 LIBRARY_PATH=/usr/local/lib \
 PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
-cargo run --release
+cargo run -p auraw-ui --bin auraw --release
 ```
 
 On a computer without desktop LibRaw, the build now fails by default. For a
@@ -174,7 +193,7 @@ deliberate non-production check that does not exercise RAW loading, explicitly s
 `false`, or an empty value do not disable the requirement. Production and release
 builds must provide LibRaw.
 
-Normal local commands such as `cargo run --release` may build uncommitted work.
+Normal local commands such as `cargo run -p auraw-ui --bin auraw --release` may build uncommitted work.
 The reproducible Linux and Android release scripts still require a clean Git
 checkout, embed the full commit ID, and discard native output if the source
 changes while compilation is running.

@@ -72,6 +72,13 @@ that DCP while preserving the live edits. Explicit per-image profile choices are
 stored in the `.auraw` sidecar as a path relative to the configured profile root,
 so reopening the image restores the same rendering choice.
 
+## Cargo workspace
+
+The repository is organized as six crates: `auraw-core`, `auraw-gpu`, `auraw-ai`,
+`auraw-ui`, `auraw-ffi`, and `auraw-cli`. See
+[`docs/CARGO_WORKSPACE.md`](docs/CARGO_WORKSPACE.md) for ownership rules, the
+dependency graph, and workspace-wide validation commands.
+
 ## Linux (Debian/Ubuntu)
 
 Install the build dependencies:
@@ -88,7 +95,7 @@ Install Rust with [rustup](https://rustup.rs/), then run from the repository
 root:
 
 ```sh
-cargo run --release
+cargo run -p auraw-ui --bin auraw --release
 ```
 
 ## Android
@@ -97,7 +104,7 @@ Install:
 
 - JDK 17
 - Gradle 8.11.1 or newer in the Gradle 8 series
-- Android SDK 35, Build Tools 35.0.0, NDK 28.2.13676358, and CMake 3.22.1
+- Android SDK platform, Build Tools, and NDK versions declared in `Cargo.toml` `[workspace.metadata]`, plus CMake 3.22.1
 - `libclang` and `cargo-ndk` 4.1.2
 
 Set up Rust and the Android environment:
@@ -107,13 +114,14 @@ rustup target add aarch64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+eval "$(cargo xtask print-metadata --format shell)"
+export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$AURAW_ANDROID_NDK_VERSION"
 ```
 
 Build the APK from the repository root:
 
 ```sh
-gradle assembleDebug -PaurawAbi=arm64-v8a
+./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 ```
 
 Install it on a connected device:
@@ -273,7 +281,7 @@ with an error rather than allowing unbounded memory or storage growth.
 
 ## Development quality gates
 
-Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `regression/README.md` and `benchmarks/README.md`. Dependency policy is documented in [DEPENDENCIES.md](DEPENDENCIES.md), with bundled-license details in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `docs/DEVELOPMENT.md` and `regression/README.md`. Dependency policy is documented in [DEPENDENCIES.md](DEPENDENCIES.md), with bundled-license details in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License and attribution
 

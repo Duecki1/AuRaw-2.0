@@ -20,9 +20,6 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -42,15 +39,8 @@ final class StorageManager {
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
     private static final String LEGACY_MEDIASTORE_RAW_RELATIVE_PATH =
             Environment.DIRECTORY_DOWNLOADS + "/AuRaw/";
-    private static final String RAW_LIBRARY_DIRECTORY_NAME = ".library";
     private static final String PICKER_PREFERENCES = "auraw-picker-locations";
     private static final String RAW_PICKER_URI_KEY = "raw-document-uri";
-    private static final Set<String> RAW_SUFFIXES = new HashSet<>(Arrays.asList(
-            "3fr", "ari", "arw", "bay", "bmq", "cap", "cine", "cr2", "cr3", "crw",
-            "cs1", "dc2", "dcr", "dcs", "dng", "drf", "eip", "erf", "fff", "gpr",
-            "iiq", "k25", "kc2", "kdc", "mdc", "mef", "mos", "mrw", "nef", "nrw",
-            "obm", "orf", "pef", "ptx", "pxn", "qtk", "r3d", "raf", "raw", "rdc",
-            "rw2", "rwl", "rwz", "sr2", "srf", "srw", "sti", "x3f"));
 
     interface Callbacks {
         void onFilePicked(
@@ -358,11 +348,8 @@ final class StorageManager {
             removeRawSidecarLegacyMediaStore(displayName);
             return;
         }
-        File sidecar = new File(
-                new File(rawUri.getPath()).getParentFile(), sidecarDisplayName(displayName));
-        if (sidecar.exists() && !sidecar.delete()) {
-            throw new IllegalStateException("Could not delete the RAW sidecar");
-        }
+        AndroidStorageContract.deleteSidecar(
+                new File(rawUri.getPath()).getParentFile(), displayName);
     }
 
     private void removeRawSidecarLegacyMediaStore(String rawDisplayName) {
@@ -584,40 +571,8 @@ final class StorageManager {
             File cached,
             File directory,
             String rawDisplayName) throws Exception {
-        if (!directory.isDirectory() && !directory.mkdirs()) {
-            throw new IllegalStateException("Could not create " + directory);
-        }
-        File destination = new File(directory, sidecarDisplayName(rawDisplayName));
-        File temporary = File.createTempFile(".auraw-sidecar-", ".part", directory);
-        boolean published = false;
-        try {
-            try (FileInputStream input = new FileInputStream(cached);
-                 FileOutputStream output = new FileOutputStream(temporary)) {
-                copy(input, output, MAX_SIDECAR_BYTES);
-                output.getFD().sync();
-            }
-            try {
-                Files.move(
-                        temporary.toPath(),
-                        destination.toPath(),
-                        StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException unsupported) {
-                // Some removable/external filesystems do not advertise atomic
-                // moves. This remains a same-directory replacement and avoids
-                // making persistence unavailable on those devices.
-                Files.move(
-                        temporary.toPath(),
-                        destination.toPath(),
-                        StandardCopyOption.REPLACE_EXISTING);
-            }
-            published = true;
-            return destination.getAbsolutePath();
-        } finally {
-            if (!published && !temporary.delete() && temporary.exists()) {
-                temporary.deleteOnExit();
-            }
-        }
+        return AndroidStorageContract.publishSidecarAtomically(
+                cached, directory, rawDisplayName, MAX_SIDECAR_BYTES);
     }
 
     private ArrayList<Uri> legacyMediaStoreSidecarUris(String rawDisplayName) {
@@ -711,13 +666,9 @@ final class StorageManager {
         if (rawUri.getPath() == null || expectedDisplayName == null) {
             throw new IllegalArgumentException("The RAW library URI is invalid");
         }
-        File raw = new File(rawUri.getPath()).getCanonicalFile();
-        File parent = raw.getParentFile();
-        File library = rawLibraryDirectory().getCanonicalFile();
-        File legacyRoot = externalMediaRootDirectory().getCanonicalFile();
-        if (!expectedDisplayName.equals(raw.getName())
-                || parent == null
-                || (!library.equals(parent) && !legacyRoot.equals(parent))) {
+        File raw = new File(rawUri.getPath());
+        if (!AndroidStorageContract.isAllowedRawFile(
+                raw, expectedDisplayName, rawLibraryDirectory(), externalMediaRootDirectory())) {
             throw new IllegalArgumentException("The RAW is outside AuRaw's library");
         }
     }
@@ -773,24 +724,24 @@ final class StorageManager {
                     MediaStore.Downloads.OWNER_PACKAGE_NAME));
             int pending = cursor.getInt(cursor.getColumnIndexOrThrow(
                     MediaStore.Downloads.IS_PENDING));
-            if (storedId != expectedId
-                    || !expectedDisplayName.equals(storedName)
-                    || !LEGACY_MEDIASTORE_RAW_RELATIVE_PATH.equals(storedPath)
-                    || !activity.getPackageName().equals(storedOwner)
-                    || pending != 0
-                    || cursor.moveToNext()) {
+            if (!AndroidStorageContract.isAllowedLegacyMediaStoreRow(
+                    expectedId,
+                    storedId,
+                    expectedDisplayName,
+                    storedName,
+                    LEGACY_MEDIASTORE_RAW_RELATIVE_PATH,
+                    storedPath,
+                    activity.getPackageName(),
+                    storedOwner,
+                    pending,
+                    cursor.moveToNext())) {
                 throw new IllegalArgumentException("The RAW is outside AuRaw's library");
             }
         }
     }
 
     private static String sidecarDisplayName(String rawDisplayName) {
-        String name = safeRawName(rawDisplayName);
-        if (!name.equals(rawDisplayName)
-                || name.getBytes(StandardCharsets.UTF_8).length > 240) {
-            throw new IllegalArgumentException("The RAW name cannot be used for a sidecar");
-        }
-        return name + ".auraw";
+        return AndroidStorageContract.sidecarDisplayName(rawDisplayName);
     }
 
     private File thumbnailCachePath(String identity, String suffix) throws Exception {
@@ -943,20 +894,7 @@ final class StorageManager {
     }
 
     private static String sidecarStagePrefix(String rawDisplayName) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(
-                    rawDisplayName.getBytes(StandardCharsets.UTF_8));
-            StringBuilder prefix = new StringBuilder(".auraw-stage-");
-            for (int index = 0; index < 16; index++) {
-                prefix.append(String.format(Locale.ROOT, "%02x", digest[index] & 0xff));
-            }
-            return prefix.append('-').toString();
-        } catch (Exception impossible) {
-            // SHA-256 is mandatory on Android. Keep a deterministic fallback
-            // so a vendor provider cannot disable sidecar saving entirely.
-            return ".auraw-stage-"
-                    + Integer.toUnsignedString(rawDisplayName.hashCode(), 16) + '-';
-        }
+        return AndroidStorageContract.sidecarStagePrefix(rawDisplayName);
     }
 
     private static String escapeLike(String value) {
@@ -975,7 +913,7 @@ final class StorageManager {
         File destination = uniqueRawFile(directory, safeRawName(requestedName));
         File partial = uniqueRawFile(
                 directory,
-                ".auraw-import-" + destination.getName() + ".part");
+                AndroidStorageContract.importPartialName(destination.getName()));
         boolean completed = false;
         try {
             try (InputStream input = openLibraryInput(source);
@@ -1181,11 +1119,11 @@ final class StorageManager {
     }
 
     private File rawLibraryDirectory() {
-        File directory = new File(externalMediaRootDirectory(), RAW_LIBRARY_DIRECTORY_NAME);
+        File directory = AndroidStorageContract.rawLibraryDirectory(externalMediaRootDirectory());
         if (!directory.isDirectory() && !directory.mkdirs()) {
             throw new IllegalStateException("Could not create " + directory);
         }
-        File noMedia = new File(directory, ".nomedia");
+        File noMedia = AndroidStorageContract.noMediaMarker(directory);
         try {
             if (!noMedia.exists() && !noMedia.createNewFile()) {
                 Log.w(LOG_TAG, "Could not create .nomedia marker in " + directory);
@@ -1335,44 +1273,7 @@ final class StorageManager {
 
     private static void moveOrCopyLegacyFile(File source, File destination, long maximumBytes)
             throws Exception {
-        try {
-            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE);
-            return;
-        } catch (AtomicMoveNotSupportedException unsupported) {
-            try {
-                Files.move(source.toPath(), destination.toPath());
-                return;
-            } catch (Exception ignored) {
-                // Fall through to bounded copy for odd vendor filesystems.
-            }
-        } catch (Exception ignored) {
-            // Fall through to bounded copy for odd vendor filesystems.
-        }
-
-        File partial = new File(destination.getParentFile(), ".auraw-move-" + destination.getName() + ".part");
-        boolean published = false;
-        try {
-            try (FileInputStream input = new FileInputStream(source);
-                 FileOutputStream output = new FileOutputStream(partial)) {
-                copy(input, output, maximumBytes);
-                output.getFD().sync();
-            }
-            if (!partial.renameTo(destination)) {
-                throw new IllegalStateException("Could not publish migrated file " + destination);
-            }
-            published = true;
-            if (!source.delete() && source.exists()) {
-                if (!destination.delete() && destination.exists()) {
-                    destination.deleteOnExit();
-                }
-                published = false;
-                throw new IllegalStateException("Could not remove old file " + source);
-            }
-        } finally {
-            if (!published && !partial.delete() && partial.exists()) {
-                partial.deleteOnExit();
-            }
-        }
+        AndroidStorageContract.moveOrCopyLegacyFile(source, destination, maximumBytes);
     }
 
     private void deleteStoredRaw(Uri uri) {
@@ -1404,18 +1305,11 @@ final class StorageManager {
     }
 
     private static String safeRawName(String requestedName) {
-        String name = requestedName == null ? "imported.raw" : requestedName.trim();
-        name = name.replace('/', '_').replace('\\', '_').replace('\0', '_');
-        return name.isEmpty() ? "imported.raw" : name;
+        return AndroidStorageContract.safeRawName(requestedName);
     }
 
     private static boolean isRawName(String displayName) {
-        if (displayName == null) {
-            return false;
-        }
-        int dot = displayName.lastIndexOf('.');
-        return dot >= 0 && dot < displayName.length() - 1
-                && RAW_SUFFIXES.contains(displayName.substring(dot + 1).toLowerCase(Locale.ROOT));
+        return AndroidStorageContract.isRawName(displayName);
     }
 
     private static final class RawLibraryRecord {

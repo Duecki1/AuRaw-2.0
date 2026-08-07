@@ -49,20 +49,17 @@ jobs:
       - name: Install Python test dependencies
         run: python3 -m pip install --disable-pip-version-check pytest -r requirements-regression.txt
 
-      - name: Check source connectivity
-        run: python3 scripts/check-source-connectivity.py
-
-      - name: Check immutable workflow action pins
-        run: python3 scripts/check-workflow-pins.py
+      - name: Run repository validation checks
+        run: cargo xtask check-all
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run Rust tests and WGSL validation
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --workspace --all-targets
 
       - name: Run full Python suite
         run: python3 -m pytest -q
@@ -96,9 +93,9 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check -r requirements-regression.txt
 
       - name: Build regression renderer
-        run: cargo build --locked --bin auraw-regression-render
+        run: cargo build --locked -p auraw-cli --bin auraw-regression-render
 
       - name: Run deterministic synthetic-corpus gate
         env:
           WGPU_BACKEND: vulkan
-        run: scripts/smoke-regression-renderer.sh
+        run: python3 scripts/dev.py smoke-regression
