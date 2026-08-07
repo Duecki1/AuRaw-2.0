@@ -78,6 +78,9 @@ impl AurawApp {
         if self.inpaint_stroke.is_empty() || self.inpaint_busy() {
             return;
         }
+        self.inpaint_selected_stroke = None;
+        self.inpaint_focus_texture = None;
+        self.inpaint_focus_texture_key = None;
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
             self.inpaint_stroke.clear();
@@ -114,6 +117,9 @@ impl AurawApp {
         if self.inpaint_busy() || index >= self.inpaint_strokes.len() {
             return;
         }
+        self.inpaint_selected_stroke = None;
+        self.inpaint_focus_texture = None;
+        self.inpaint_focus_texture_key = None;
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
             return;
@@ -492,11 +498,7 @@ impl AurawApp {
         }
         self.inpaint_strokes.remove(index);
         self.inpaint_hovered_stroke = None;
-        self.inpaint_selected_stroke = match self.inpaint_selected_stroke {
-            Some(selected) if selected == index => None,
-            Some(selected) if selected > index => Some(selected - 1),
-            selected => selected,
-        };
+        self.inpaint_selected_stroke = None;
         self.inpaint_focus_texture = None;
         self.inpaint_focus_texture_key = None;
         self.note_inpainting_edit_changed();
