@@ -287,15 +287,17 @@ jobs:
           restore-keys: |
             auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-
 
-      - name: Restore Android native build cache
+      - name: Restore Android native dependency cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
         with:
-          path: |
-            android/app/.cxx
-            android/native
-          key: android-native-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'android/app/src/main/cpp/CMakeLists.txt') }}
+          # Cache downloaded/built native dependencies, but not AGP's .cxx
+          # staging tree. CMake stores workspace-specific state there, and
+          # restoring it before source validation makes generated objects look
+          # like committed source-tree binaries.
+          path: android/native
+          key: android-native-deps-v1-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'android/app/src/main/cpp/CMakeLists.txt', 'xtask/src/main.rs') }}
           restore-keys: |
-            android-native-${{ runner.os }}-
+            android-native-deps-v1-${{ runner.os }}-
 
       - name: Set up Java 17
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
