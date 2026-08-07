@@ -315,11 +315,11 @@ pub struct InpaintPatch {
     /// Legacy AuRaw 2.0 8-bit sRGB storage. New patches leave this empty.
     #[serde(
         default,
-        with = "base64_arc_bytes",
+        with = "compressed_base64_arc_bytes",
         skip_serializing_if = "arc_u8_is_empty"
     )]
     pub rgba: Arc<[u8]>,
-    #[serde(with = "base64_arc_bytes")]
+    #[serde(with = "compressed_base64_arc_bytes")]
     pub mask: Arc<[u8]>,
 }
 
@@ -587,6 +587,56 @@ pub fn compose_inpaint_strokes(strokes: &[InpaintStroke]) -> Option<InpaintLayer
     InpaintLayer::new(strokes.iter().map(|stroke| stroke.patch.clone()).collect())
 }
 
+const COMPRESSED_BINARY_PREFIX: &str = "z1:";
+const MAX_INPAINT_BINARY_FIELD_BYTES: u64 = if cfg!(target_os = "android") {
+    128 * 1024 * 1024
+} else {
+    512 * 1024 * 1024
+};
+
+fn encode_binary_field(bytes: &[u8]) -> Result<String, std::io::Error> {
+    use base64::Engine as _;
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write as _;
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(bytes)?;
+    let compressed = encoder.finish()?;
+    let engine = &base64::engine::general_purpose::STANDARD;
+    if compressed.len().saturating_add(COMPRESSED_BINARY_PREFIX.len()) < bytes.len() {
+        Ok(format!(
+            "{COMPRESSED_BINARY_PREFIX}{}",
+            engine.encode(compressed)
+        ))
+    } else {
+        Ok(engine.encode(bytes))
+    }
+}
+
+fn decode_binary_field(encoded: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    use flate2::read::ZlibDecoder;
+    use std::io::Read as _;
+
+    let engine = &base64::engine::general_purpose::STANDARD;
+    let Some(compressed) = encoded.strip_prefix(COMPRESSED_BINARY_PREFIX) else {
+        return engine.decode(encoded).map_err(|error| error.to_string());
+    };
+    let compressed = engine
+        .decode(compressed)
+        .map_err(|error| error.to_string())?;
+    let decoder = ZlibDecoder::new(compressed.as_slice());
+    let mut limited = decoder.take(MAX_INPAINT_BINARY_FIELD_BYTES + 1);
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_INPAINT_BINARY_FIELD_BYTES {
+        return Err("compressed inpainting payload exceeds the decoded safety limit".to_owned());
+    }
+    Ok(bytes)
+}
+
 mod base64_arc_bytes {
     use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -614,8 +664,31 @@ mod base64_arc_bytes {
     }
 }
 
+mod compressed_base64_arc_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(
+            &super::encode_binary_field(bytes.as_ref()).map_err(serde::ser::Error::custom)?,
+        )
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        super::decode_binary_field(&encoded)
+            .map(Arc::from)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 mod base64_arc_u16 {
-    use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
     use std::sync::Arc;
 
@@ -627,10 +700,9 @@ mod base64_arc_u16 {
         for value in values.iter().copied() {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        serializer.collect_str(&base64::display::Base64Display::new(
-            &bytes,
-            &base64::engine::general_purpose::STANDARD,
-        ))
+        serializer.serialize_str(
+            &super::encode_binary_field(&bytes).map_err(serde::ser::Error::custom)?,
+        )
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u16]>, D::Error>
@@ -638,9 +710,7 @@ mod base64_arc_u16 {
         D: Deserializer<'de>,
     {
         let encoded = String::deserialize(deserializer)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(serde::de::Error::custom)?;
+        let bytes = super::decode_binary_field(&encoded).map_err(serde::de::Error::custom)?;
         if bytes.len() % 2 != 0 {
             return Err(serde::de::Error::custom(
                 "RGBA16F payload has an odd byte length",

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 5;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 6;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0004;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
@@ -28,16 +28,15 @@ pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str = crate::thumbnail_cache::DESKTOP_
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-thumb.fingerprint";
 pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
-    32 * 1024 * 1024
+    128 * 1024 * 1024
 } else {
-    64 * 1024 * 1024
+    256 * 1024 * 1024
 };
 
 const SIDECAR_FORMAT: &str = "AuRaw edit sidecar";
 const MAX_BRUSH_DABS: usize = 1_000_000;
 const MAX_OBJECT_STROKES: usize = 4096;
 const MAX_OBJECT_STROKE_POINTS: usize = 1_000_000;
-const MAX_INPAINT_STROKES: usize = 4096;
 const MAX_INPAINT_DABS: usize = 1_000_000;
 const MAX_MASK_IMAGE_EDGE: u32 = 8192;
 const MAX_MASK_ASSET_REFS: usize = MAX_LOCAL_MASKS * MAX_MASK_COMPONENTS;
@@ -984,7 +983,11 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
         )));
     }
     let original_schema = document.schema_version;
-    if original_schema == SIDECAR_SCHEMA_VERSION {
+    // Schema 5 introduced extracted PNG mask assets. Schema 6 keeps that
+    // layout and only changes inpainting binary fields to lossless compressed
+    // Base64 strings, whose deserializers remain backward-compatible with the
+    // raw schema-5 representation.
+    if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
             &document.mask_assets,
@@ -993,7 +996,7 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     } else {
         // TODO(pre-release cleanup): Remove this beta-only schema <= 4 inline-mask migration
         // once AuRaw is published. It exists only so beta testers keep their edits and masks;
-        // `LoadedSidecar::migrated` immediately queues a schema-5 rewrite after opening the RAW.
+        // `LoadedSidecar::migrated` immediately queues a schema-6 rewrite after opening the RAW.
         if !document.mask_assets.is_empty() || !document.mask_asset_refs.is_empty() {
             return invalid("legacy sidecar unexpectedly contains current mask assets");
         }
@@ -1349,9 +1352,6 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
             }
         }
     }
-    if edits.inpainting.len() > MAX_INPAINT_STROKES {
-        return invalid("sidecar contains too many inpainting strokes");
-    }
     let mut inpaint_dabs = 0usize;
     for stroke in edits.inpainting.iter() {
         inpaint_dabs = inpaint_dabs
@@ -1447,11 +1447,11 @@ impl Write for CappedVec {
     }
 }
 
-/// Rejects an inpainting result before it becomes visible state when adding it
-/// would make the edit impossible to persist on the current platform. This is
-/// intentionally a compression-independent upper bound: generated masks are
-/// content-deduplicated, then measured from their lengths instead of being PNG-
-/// compressed or Base64-encoded on the UI thread.
+/// Rejects an inpainting result before it becomes visible state only when the
+/// persisted edit would exceed the platform's corruption/memory safety bound.
+/// The fast path uses conservative raw-size estimates; borderline edits are
+/// re-measured with the same lossless compression used by the sidecar writer so
+/// compressible AI masks or inpainting patches cannot create false rejections.
 pub fn preflight_inpaint_addition(
     masks: &MaskStack,
     existing: &[InpaintStroke],
@@ -1460,14 +1460,13 @@ pub fn preflight_inpaint_addition(
     preflight_inpaint_addition_with_limit(masks, existing, candidate, MAX_SIDECAR_BYTES)
 }
 
-/// Rejects a mask copy/duplicate before it becomes live state if even the
-/// conservative deduplicated asset bound could not fit beside current inpainting data.
+/// Rejects a mask copy/duplicate before it becomes live state only when the
+/// prospective persisted edit cannot fit after exact compressed re-measurement.
 pub fn preflight_mask_change(
     masks: &MaskStack,
     inpainting: &[InpaintStroke],
 ) -> Result<(), SidecarError> {
-    let estimated = estimate_sidecar_bytes(masks, inpainting)?;
-    enforce_size_limit(estimated, MAX_SIDECAR_BYTES)
+    preflight_sidecar_dynamic_data_with_limit(masks, inpainting, MAX_SIDECAR_BYTES)
 }
 
 fn preflight_inpaint_addition_with_limit(
@@ -1476,9 +1475,30 @@ fn preflight_inpaint_addition_with_limit(
     candidate: &InpaintStroke,
     limit: u64,
 ) -> Result<(), SidecarError> {
-    let estimated =
-        estimate_sidecar_bytes(masks, existing.iter().chain(std::iter::once(candidate)))?;
-    enforce_size_limit(estimated, limit)
+    preflight_sidecar_dynamic_data_with_limit(
+        masks,
+        existing.iter().chain(std::iter::once(candidate)),
+        limit,
+    )
+}
+
+fn preflight_sidecar_dynamic_data_with_limit<'a>(
+    masks: &MaskStack,
+    inpainting: impl IntoIterator<Item = &'a InpaintStroke> + Clone,
+    limit: u64,
+) -> Result<(), SidecarError> {
+    let conservative = estimate_sidecar_bytes(masks, inpainting.clone())?;
+    if conservative <= limit {
+        return Ok(());
+    }
+
+    // Generated AI masks are persisted as PNG assets and schema-6 inpainting
+    // payloads are losslessly zlib-compressed. The cheap estimator above uses
+    // raw-size bounds so normal editing never pays compression work. If that
+    // pessimistic bound crosses the safety limit, retry using the actual
+    // serialized dynamic payload sizes before rejecting a valid edit.
+    let measured = measure_sidecar_dynamic_bytes(masks, inpainting)?;
+    enforce_size_limit(measured, limit)
 }
 
 fn enforce_size_limit(estimated: u64, limit: u64) -> Result<(), SidecarError> {
@@ -1503,8 +1523,8 @@ fn estimate_sidecar_bytes<'a>(
     const BRUSH_DAB_HEADROOM: u64 = 256;
     const OBJECT_STROKE_HEADROOM: u64 = 128;
     const OBJECT_POINT_HEADROOM: u64 = 96;
-    // PNG adds scanline filters, chunks, and DEFLATE framing. The real schema-5
-    // encoder normally makes masks much smaller, but preflight deliberately uses
+    // PNG adds scanline filters, chunks, and DEFLATE framing. The real schema-6
+    // encoder normally makes masks much smaller, but the fast preflight uses
     // a compression-independent upper bound so an accepted edit is always savable.
     const MASK_PNG_FIXED_HEADROOM: u64 = 64 * 1024;
 
@@ -1581,6 +1601,109 @@ fn estimate_sidecar_bytes<'a>(
         )?;
     }
     Ok(estimated)
+}
+
+fn measure_sidecar_dynamic_bytes<'a>(
+    masks: &MaskStack,
+    inpainting: impl IntoIterator<Item = &'a InpaintStroke>,
+) -> Result<u64, SidecarError> {
+    const DOCUMENT_HEADROOM: u64 = 1024 * 1024;
+    const MASK_HEADROOM: u64 = 16 * 1024;
+    const COMPONENT_HEADROOM: u64 = 2 * 1024;
+    const OBJECT_STROKE_HEADROOM: u64 = 128;
+    const OBJECT_POINT_HEADROOM: u64 = 96;
+    const BRUSH_DAB_HEADROOM: u64 = 256;
+    const INPAINT_STROKE_HEADROOM: u64 = 512;
+
+    let mut measured = DOCUMENT_HEADROOM;
+    let mut unique_images = Vec::<&MaskImage>::new();
+    let mut image_buckets = HashMap::<u64, Vec<usize>>::new();
+    for mask in &masks.masks {
+        checked_add(&mut measured, MASK_HEADROOM)?;
+        checked_add(&mut measured, escaped_json_string_bound(&mask.name)?)?;
+        for component in &mask.components {
+            checked_add(&mut measured, COMPONENT_HEADROOM)?;
+            checked_add(
+                &mut measured,
+                escaped_json_string_bound(&component.name)?,
+            )?;
+            match &component.geometry {
+                MaskGeometry::Brush { dabs, .. } => {
+                    checked_add_scaled(&mut measured, dabs.len(), BRUSH_DAB_HEADROOM)?
+                }
+                MaskGeometry::Ai {
+                    mask: Some(image), ..
+                }
+                | MaskGeometry::Landscape {
+                    mask: Some(image), ..
+                } => add_unique_mask_asset_measured(
+                    &mut measured,
+                    image,
+                    &mut unique_images,
+                    &mut image_buckets,
+                )?,
+                MaskGeometry::Object { mask, strokes, .. } => {
+                    if let Some(image) = mask {
+                        add_unique_mask_asset_measured(
+                            &mut measured,
+                            image,
+                            &mut unique_images,
+                            &mut image_buckets,
+                        )?;
+                    }
+                    checked_add_scaled(
+                        &mut measured,
+                        strokes.len(),
+                        OBJECT_STROKE_HEADROOM,
+                    )?;
+                    for stroke in strokes {
+                        checked_add_scaled(
+                            &mut measured,
+                            stroke.points.len(),
+                            OBJECT_POINT_HEADROOM,
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for stroke in inpainting {
+        checked_add(&mut measured, INPAINT_STROKE_HEADROOM)?;
+        let serialized = serde_json::to_vec(stroke).map_err(|error| {
+            SidecarError::Invalid(format!(
+                "could not measure compressed inpainting payload: {error}"
+            ))
+        })?;
+        checked_add(
+            &mut measured,
+            u64::try_from(serialized.len()).map_err(|_| SidecarError::TooLarge(u64::MAX))?,
+        )?;
+    }
+    Ok(measured)
+}
+
+fn add_unique_mask_asset_measured<'a>(
+    measured: &mut u64,
+    image: &'a MaskImage,
+    unique_images: &mut Vec<&'a MaskImage>,
+    buckets: &mut HashMap<u64, Vec<usize>>,
+) -> Result<(), SidecarError> {
+    let fingerprint = mask_image_fingerprint(image);
+    if buckets.get(&fingerprint).is_some_and(|candidates| {
+        candidates
+            .iter()
+            .any(|index| *unique_images[*index] == *image)
+    }) {
+        return Ok(());
+    }
+
+    let index = unique_images.len();
+    unique_images.push(image);
+    buckets.entry(fingerprint).or_default().push(index);
+    let png = encode_mask_png(image)?;
+    checked_add(measured, base64_json_string_bytes(png.len())?)
 }
 
 fn add_unique_mask_asset_bound<'a>(
@@ -2276,16 +2399,80 @@ mod tests {
         use half::f16;
 
         let mut edits = sample_edits();
-        let rgba16f = vec![f16::from_f32(0.25).to_bits(); 4];
-        let patch =
-            InpaintPatch::new_linear_resampled([4, 4], [1, 1], [2, 2], [1, 1], rgba16f, vec![255])
-                .unwrap();
+        let rgba16f = vec![f16::from_f32(0.25).to_bits(); 16 * 16 * 4];
+        let patch = InpaintPatch::new_linear_resampled(
+            [32, 32],
+            [8, 8],
+            [16, 16],
+            [16, 16],
+            rgba16f,
+            vec![255; 16 * 16],
+        )
+        .unwrap();
         let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
         edits.inpainting = Arc::new(vec![stroke]);
 
         let encoded = encode(edits.clone()).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(document["edits"]["inpainting"][0]["patch"]["rgba16f"]
+            .as_str()
+            .unwrap()
+            .starts_with("z1:"));
+        assert!(document["edits"]["inpainting"][0]["patch"]["mask"]
+            .as_str()
+            .unwrap()
+            .starts_with("z1:"));
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits.inpainting, edits.inpainting);
+    }
+
+    #[test]
+    fn schema_five_raw_inpainting_payload_migrates_to_compressed_schema_six() {
+        use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke};
+        use base64::Engine as _;
+        use half::f16;
+
+        let mut edits = sample_edits();
+        let rgba16f = vec![f16::from_f32(0.25).to_bits(); 16 * 16 * 4];
+        let patch = InpaintPatch::new_linear_resampled(
+            [32, 32],
+            [8, 8],
+            [16, 16],
+            [16, 16],
+            rgba16f.clone(),
+            vec![255; 16 * 16],
+        )
+        .unwrap();
+        edits.inpainting = Arc::new(vec![
+            InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap(),
+        ]);
+
+        let encoded = encode(edits.clone()).unwrap();
+        let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        document["schema_version"] = 5.into();
+        let rgba_bytes = rgba16f
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        document["edits"]["inpainting"][0]["patch"]["rgba16f"] =
+            base64::engine::general_purpose::STANDARD.encode(rgba_bytes).into();
+        document["edits"]["inpainting"][0]["patch"]["mask"] =
+            base64::engine::general_purpose::STANDARD
+                .encode(vec![255u8; 16 * 16])
+                .into();
+
+        let legacy = serde_json::to_vec(&document).unwrap();
+        let loaded = decode(&legacy).unwrap();
+        assert!(loaded.migrated);
+        assert_eq!(loaded.edits, edits);
+
+        let rewritten = encode(loaded.edits).unwrap();
+        let current: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(current["schema_version"], SIDECAR_SCHEMA_VERSION);
+        assert!(current["edits"]["inpainting"][0]["patch"]["rgba16f"]
+            .as_str()
+            .unwrap()
+            .starts_with("z1:"));
     }
 
     #[test]
@@ -2322,11 +2509,20 @@ mod tests {
         let candidate_only =
             estimate_sidecar_bytes(&MaskStack::default(), std::iter::once(&candidate)).unwrap();
         let prospective = estimate_sidecar_bytes(&masks, [&existing, &candidate]).unwrap();
+        let measured = measure_sidecar_dynamic_bytes(&masks, [&existing, &candidate]).unwrap();
         assert!(prospective > candidate_only);
+        assert!(prospective > measured);
 
         assert!(preflight_inpaint_addition_with_limit(
             &MaskStack::default(),
             &[],
+            &candidate,
+            prospective - 1,
+        )
+        .is_ok());
+        assert!(preflight_inpaint_addition_with_limit(
+            &masks,
+            std::slice::from_ref(&existing),
             &candidate,
             prospective - 1,
         )
@@ -2336,9 +2532,9 @@ mod tests {
                 &masks,
                 std::slice::from_ref(&existing),
                 &candidate,
-                prospective - 1,
+                measured - 1,
             ),
-            Err(SidecarError::TooLarge(bytes)) if bytes == prospective
+            Err(SidecarError::TooLarge(bytes)) if bytes == measured
         ));
 
         let mut edits = sample_edits();
@@ -2349,35 +2545,72 @@ mod tests {
     }
 
     #[test]
-    fn native_resolution_patches_round_trip_as_sequential_android_strokes() {
+    fn compressed_mask_measurement_prevents_false_inpaint_budget_rejection() {
+        use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke, MaskImage};
+
+        let mut masks = MaskStack::default();
+        for kind in [MaskKind::Subject, MaskKind::Object, MaskKind::Landscape] {
+            masks.add_mask(kind);
+            let component = masks.masks.last_mut().unwrap().components.first_mut().unwrap();
+            let image = MaskImage::new(1024, 1024, vec![0; 1024 * 1024]).unwrap();
+            match &mut component.geometry {
+                MaskGeometry::Ai { mask, .. }
+                | MaskGeometry::Landscape { mask, .. }
+                | MaskGeometry::Object { mask, .. } => *mask = Some(image),
+                _ => panic!("generated mask kind should have generated mask storage"),
+            }
+        }
+
+        let patch = InpaintPatch::new_linear_resampled(
+            [6000, 4000],
+            [100, 100],
+            [64, 64],
+            [16, 16],
+            vec![0; 16 * 16 * 4],
+            vec![255; 16 * 16],
+        )
+        .unwrap();
+        let candidate = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
+        let conservative = estimate_sidecar_bytes(&masks, std::iter::once(&candidate)).unwrap();
+        let measured = measure_sidecar_dynamic_bytes(&masks, std::iter::once(&candidate)).unwrap();
+        assert!(conservative > measured);
+        let limit = measured + (conservative - measured) / 2;
+        assert!(preflight_inpaint_addition_with_limit(&masks, &[], &candidate, limit).is_ok());
+    }
+
+    #[test]
+    fn compressed_native_resolution_patches_exceed_old_android_stroke_ceiling() {
         use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke};
 
-        let raster_pixels = 512usize * 512;
+        let raster_pixels = 256usize * 256;
         let patch = InpaintPatch::new_linear_resampled(
             [6000, 4000],
             [500, 500],
-            [1600, 1600],
-            [512, 512],
+            [800, 800],
+            [256, 256],
             vec![0u16; raster_pixels * 4],
             vec![255; raster_pixels],
         )
         .unwrap();
         let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
         let android_limit = 32 * 1024 * 1024;
-        let mut strokes = Vec::new();
-        for index in 0..8 {
-            let mut candidate = stroke.clone();
-            candidate.patch.x += index * 10;
-            candidate.dabs[0].center[0] = index as f32 / 8.0;
-            preflight_inpaint_addition_with_limit(
-                &MaskStack::default(),
-                &strokes,
-                &candidate,
-                android_limit,
-            )
-            .unwrap();
-            strokes.push(candidate);
-        }
+        let strokes = (0..48)
+            .map(|index| {
+                let mut candidate = stroke.clone();
+                candidate.patch.x += index * 10;
+                candidate.dabs[0].center[0] = index as f32 / 48.0;
+                candidate
+            })
+            .collect::<Vec<_>>();
+        let old_raw_bound = estimate_sidecar_bytes(&MaskStack::default(), strokes.iter()).unwrap();
+        assert!(old_raw_bound > android_limit);
+        preflight_inpaint_addition_with_limit(
+            &MaskStack::default(),
+            &strokes[..47],
+            &strokes[47],
+            android_limit,
+        )
+        .unwrap();
 
         let mut edits = sample_edits();
         edits.inpainting = Arc::new(strokes.clone());
