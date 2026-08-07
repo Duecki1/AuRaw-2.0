@@ -9,19 +9,21 @@ const TONE_EV_MIN: f32 = -16.0;
 const TONE_EV_MAX: f32 = 12.0;
 const TONE_EV_RANGE: f32 = TONE_EV_MAX - TONE_EV_MIN;
 
+// As in common.wgsl, exported composable-module struct members must not end
+// in a digit or Naga's WGSL writeback will substitute their identifiers.
 struct ToneStats {
     // 0.5%, 5%, 50%, 95% scene-luminance percentiles in EV.
-    percentiles_0: vec4<f32>,
+    percentiles_0_field: vec4<f32>,
     // 99.5%, robust dynamic range, sampled-pixel count, reserved.
-    percentiles_1: vec4<f32>,
+    percentiles_1_field: vec4<f32>,
 }
 
 struct TonePercentiles {
-    p005: f32,
-    p05: f32,
-    p50: f32,
-    p95: f32,
-    p995: f32,
+    p005_field: f32,
+    p05_field: f32,
+    p50_field: f32,
+    p95_field: f32,
+    p995_field: f32,
 }
 
 fn tone_ev_to_bin(ev: f32) -> u32 {

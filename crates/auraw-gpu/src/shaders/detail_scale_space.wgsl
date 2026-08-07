@@ -89,11 +89,11 @@ fn apply_texture_and_clarity_values(
     let clarity_scene_gate = ToneCommon::tone_smoothstep(
         1.0,
         2.5,
-        percentiles.p995 - percentiles.p005,
+        percentiles.p995_field - percentiles.p005_field,
     );
     let clarity_tone_position = ToneCommon::tone_smoothstep(
-        percentiles.p05 + 0.50,
-        percentiles.p50 - 0.10,
+        percentiles.p05_field + 0.50,
+        percentiles.p50_field - 0.10,
         center_relative_ev,
     );
     let positive_clarity_tone = select(

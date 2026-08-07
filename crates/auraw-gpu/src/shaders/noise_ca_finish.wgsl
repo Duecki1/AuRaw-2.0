@@ -1,12 +1,14 @@
-#import auraw::common as Common
-#import auraw::noise as Noise
-
-// The CFA-specific finishing shader overrides this adapter. The fallback is
-// never reachable in a composed entrypoint, but gives the reusable module a
-// complete WGSL signature for independent Naga validation.
 virtual fn finish_reference_at(_pos: vec2<i32>) -> vec3<f32> {
     return vec3<f32>(0.0);
 }
+
+#import auraw::common as Common
+#import auraw::noise as Noise
+
+// Keep the virtual declaration at byte zero. naga_oil 0.22 consumes leading
+// whitespace while removing `virtual`; after a line comment that would place
+// the rewritten `fn` header inside the comment and leave its body at globals.
+// The CFA-specific finishing shader overrides this fallback in each entrypoint.
 
 // Shared post-demosaic noise reduction and lateral chromatic-aberration
 // correction. Each finishing shader supplies finish_reference_at() so the

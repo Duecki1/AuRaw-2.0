@@ -52,8 +52,8 @@ fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
 }
 
 fn tone_percentiles() -> ToneCommon::TonePercentiles {
-    let p0 = tone_stats.percentiles_0;
-    let p1 = tone_stats.percentiles_1;
+    let p0 = tone_stats.percentiles_0_field;
+    let p1 = tone_stats.percentiles_1_field;
     // Partially follow base Exposure instead of shifting the entire analysis
     // by the same amount. A full equal shift would cancel out and reproduce
     // the old pre-exposure masks; keeping 65% of the relative movement gives
@@ -108,25 +108,25 @@ fn adaptive_tone_masks(
     // its mask is retained only for diagnostics/future use. Shadows reaches
     // farther into lower midtones while still rolling out before the bright
     // half of the image. Highlight/White semantics remain unchanged.
-    let black_fade_end = min(percentiles.p50 - 0.55, percentiles.p05 + 3.35);
+    let black_fade_end = min(percentiles.p50_field - 0.55, percentiles.p05_field + 3.35);
     let black_mask = 1.0 - ToneCommon::tone_smoothstep(
-        percentiles.p005 - 0.75,
-        max(black_fade_end, percentiles.p05 + 0.90),
+        percentiles.p005_field - 0.75,
+        max(black_fade_end, percentiles.p05_field + 0.90),
         low_ev,
     );
     let shadow_mask = 1.0 - ToneCommon::tone_smoothstep(
-        percentiles.p05 - 0.90,
-        percentiles.p50 + 1.35,
+        percentiles.p05_field - 0.90,
+        percentiles.p50_field + 1.35,
         low_ev,
     );
     let highlight_mask = ToneCommon::tone_smoothstep(
-        percentiles.p005 - 0.40,
-        percentiles.p50 - 0.30,
+        percentiles.p005_field - 0.40,
+        percentiles.p50_field - 0.30,
         high_ev,
     );
     let white_mask = ToneCommon::tone_smoothstep(
-        percentiles.p05 - 0.10,
-        percentiles.p50 + 0.50,
+        percentiles.p05_field - 0.10,
+        percentiles.p50_field + 0.50,
         high_ev,
     );
     return vec4<f32>(black_mask, shadow_mask, highlight_mask, white_mask);
@@ -148,8 +148,8 @@ fn lightroom_shadow_offset_ev(
     // reaches those endpoints after the default view transform. Cap that request by the
     // complete transition width so 1 - smoothstep(...) remains strictly
     // monotone even for an unusually compressed histogram.
-    let lower = percentiles.p05 - 0.90;
-    let upper = percentiles.p50 + 1.35;
+    let lower = percentiles.p05_field - 0.90;
+    let upper = percentiles.p50_field + 1.35;
     let monotone_limit = 0.64 * max(upper - lower, 0.25);
     let requested = abs(shadows) * 2.20;
     return sign(shadows) * min(requested, monotone_limit) * mask;
@@ -169,12 +169,12 @@ fn lightroom_positive_whites_offset_ev(
     // white, then rolling away from the clipped endpoint. The previous 20%
     // floor and 2.35 EV request turned Whites into a second Exposure control.
     let rise = ToneCommon::tone_smoothstep(
-        percentiles.p05 - 0.15,
-        percentiles.p50 + 0.55,
+        percentiles.p05_field - 0.15,
+        percentiles.p50_field + 0.55,
         low_ev,
     );
-    let fall_start = percentiles.p50 + 0.10;
-    let fall_end = percentiles.p995 + 0.60;
+    let fall_start = percentiles.p50_field + 0.10;
+    let fall_end = percentiles.p995_field + 0.60;
     let fall = 1.0 - 0.35 * ToneCommon::tone_smoothstep(fall_start, fall_end, low_ev);
     let mask = (0.025 + 0.975 * rise) * fall;
     let monotone_limit = 0.90 * max(fall_end - fall_start, 0.25) / (1.5 * 0.35);
@@ -212,8 +212,8 @@ fn apply_local_basic_tone_values_with_low_strength(
     let shadow_ev = lightroom_shadow_offset_ev(shadows, masks.y, percentiles);
     // Highlights peak in the top decile while staying gentle below the median.
     let highlight_mask = 0.10 + 0.90 * ToneCommon::tone_smoothstep(
-        percentiles.p50 - 0.35,
-        percentiles.p95 + 0.45,
+        percentiles.p50_field - 0.35,
+        percentiles.p95_field + 0.45,
         guide_ev,
     );
     let highlight_ev = signed_tone_range(highlights, 1.35, 1.00) * highlight_mask;
@@ -266,7 +266,7 @@ fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
 
     let luminance = Common::safe_luma(rgb);
     let scene_ev = log2(luminance / ToneCommon::SCENE_MIDDLE_GREY);
-    let contrast_pivot_ev = tone_percentiles().p50 + 0.12;
+    let contrast_pivot_ev = tone_percentiles().p50_field + 0.12;
     let relative_ev = scene_ev - contrast_pivot_ev;
 
     // Contrast is a protected S-curve in scene EV rather than a global EV
@@ -300,49 +300,49 @@ fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
 fn tone_curve_point(curve: u32, index: u32) -> vec2<f32> {
     if curve == 1u {
         switch index {
-            case 0u: { return Common::scene_tone_uniforms.tone_curve_red_0.xy; }
-            case 1u: { return Common::scene_tone_uniforms.tone_curve_red_0.zw; }
-            case 2u: { return Common::scene_tone_uniforms.tone_curve_red_1.xy; }
-            case 3u: { return Common::scene_tone_uniforms.tone_curve_red_1.zw; }
-            case 4u: { return Common::scene_tone_uniforms.tone_curve_red_2.xy; }
-            case 5u: { return Common::scene_tone_uniforms.tone_curve_red_2.zw; }
-            case 6u: { return Common::scene_tone_uniforms.tone_curve_red_3.xy; }
-            default: { return Common::scene_tone_uniforms.tone_curve_red_3.zw; }
+            case 0u: { return Common::scene_tone_uniforms.tone_curve_red_0_field.xy; }
+            case 1u: { return Common::scene_tone_uniforms.tone_curve_red_0_field.zw; }
+            case 2u: { return Common::scene_tone_uniforms.tone_curve_red_1_field.xy; }
+            case 3u: { return Common::scene_tone_uniforms.tone_curve_red_1_field.zw; }
+            case 4u: { return Common::scene_tone_uniforms.tone_curve_red_2_field.xy; }
+            case 5u: { return Common::scene_tone_uniforms.tone_curve_red_2_field.zw; }
+            case 6u: { return Common::scene_tone_uniforms.tone_curve_red_3_field.xy; }
+            default: { return Common::scene_tone_uniforms.tone_curve_red_3_field.zw; }
         }
     }
     if curve == 2u {
         switch index {
-            case 0u: { return Common::scene_tone_uniforms.tone_curve_green_0.xy; }
-            case 1u: { return Common::scene_tone_uniforms.tone_curve_green_0.zw; }
-            case 2u: { return Common::scene_tone_uniforms.tone_curve_green_1.xy; }
-            case 3u: { return Common::scene_tone_uniforms.tone_curve_green_1.zw; }
-            case 4u: { return Common::scene_tone_uniforms.tone_curve_green_2.xy; }
-            case 5u: { return Common::scene_tone_uniforms.tone_curve_green_2.zw; }
-            case 6u: { return Common::scene_tone_uniforms.tone_curve_green_3.xy; }
-            default: { return Common::scene_tone_uniforms.tone_curve_green_3.zw; }
+            case 0u: { return Common::scene_tone_uniforms.tone_curve_green_0_field.xy; }
+            case 1u: { return Common::scene_tone_uniforms.tone_curve_green_0_field.zw; }
+            case 2u: { return Common::scene_tone_uniforms.tone_curve_green_1_field.xy; }
+            case 3u: { return Common::scene_tone_uniforms.tone_curve_green_1_field.zw; }
+            case 4u: { return Common::scene_tone_uniforms.tone_curve_green_2_field.xy; }
+            case 5u: { return Common::scene_tone_uniforms.tone_curve_green_2_field.zw; }
+            case 6u: { return Common::scene_tone_uniforms.tone_curve_green_3_field.xy; }
+            default: { return Common::scene_tone_uniforms.tone_curve_green_3_field.zw; }
         }
     }
     if curve == 3u {
         switch index {
-            case 0u: { return Common::scene_tone_uniforms.tone_curve_blue_0.xy; }
-            case 1u: { return Common::scene_tone_uniforms.tone_curve_blue_0.zw; }
-            case 2u: { return Common::scene_tone_uniforms.tone_curve_blue_1.xy; }
-            case 3u: { return Common::scene_tone_uniforms.tone_curve_blue_1.zw; }
-            case 4u: { return Common::scene_tone_uniforms.tone_curve_blue_2.xy; }
-            case 5u: { return Common::scene_tone_uniforms.tone_curve_blue_2.zw; }
-            case 6u: { return Common::scene_tone_uniforms.tone_curve_blue_3.xy; }
-            default: { return Common::scene_tone_uniforms.tone_curve_blue_3.zw; }
+            case 0u: { return Common::scene_tone_uniforms.tone_curve_blue_0_field.xy; }
+            case 1u: { return Common::scene_tone_uniforms.tone_curve_blue_0_field.zw; }
+            case 2u: { return Common::scene_tone_uniforms.tone_curve_blue_1_field.xy; }
+            case 3u: { return Common::scene_tone_uniforms.tone_curve_blue_1_field.zw; }
+            case 4u: { return Common::scene_tone_uniforms.tone_curve_blue_2_field.xy; }
+            case 5u: { return Common::scene_tone_uniforms.tone_curve_blue_2_field.zw; }
+            case 6u: { return Common::scene_tone_uniforms.tone_curve_blue_3_field.xy; }
+            default: { return Common::scene_tone_uniforms.tone_curve_blue_3_field.zw; }
         }
     }
     switch index {
-        case 0u: { return Common::scene_tone_uniforms.tone_curve_0.xy; }
-        case 1u: { return Common::scene_tone_uniforms.tone_curve_0.zw; }
-        case 2u: { return Common::scene_tone_uniforms.tone_curve_1.xy; }
-        case 3u: { return Common::scene_tone_uniforms.tone_curve_1.zw; }
-        case 4u: { return Common::scene_tone_uniforms.tone_curve_2.xy; }
-        case 5u: { return Common::scene_tone_uniforms.tone_curve_2.zw; }
-        case 6u: { return Common::scene_tone_uniforms.tone_curve_3.xy; }
-        default: { return Common::scene_tone_uniforms.tone_curve_3.zw; }
+        case 0u: { return Common::scene_tone_uniforms.tone_curve_0_field.xy; }
+        case 1u: { return Common::scene_tone_uniforms.tone_curve_0_field.zw; }
+        case 2u: { return Common::scene_tone_uniforms.tone_curve_1_field.xy; }
+        case 3u: { return Common::scene_tone_uniforms.tone_curve_1_field.zw; }
+        case 4u: { return Common::scene_tone_uniforms.tone_curve_2_field.xy; }
+        case 5u: { return Common::scene_tone_uniforms.tone_curve_2_field.zw; }
+        case 6u: { return Common::scene_tone_uniforms.tone_curve_3_field.xy; }
+        default: { return Common::scene_tone_uniforms.tone_curve_3_field.zw; }
     }
 }
 

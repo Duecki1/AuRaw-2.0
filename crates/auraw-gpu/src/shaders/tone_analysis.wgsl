@@ -35,9 +35,9 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let replacement = textureLoad(tone_inpaint_tex, Common::clamp_pos(pos), 0);
     if replacement.a > 1e-6 {
         let replacement_working = vec3<f32>(
-            dot(Common::camera_uniforms.inpaint_wb_0.xyz, replacement.rgb),
-            dot(Common::camera_uniforms.inpaint_wb_1.xyz, replacement.rgb),
-            dot(Common::camera_uniforms.inpaint_wb_2.xyz, replacement.rgb),
+            dot(Common::camera_uniforms.inpaint_wb_0_field.xyz, replacement.rgb),
+            dot(Common::camera_uniforms.inpaint_wb_1_field.xyz, replacement.rgb),
+            dot(Common::camera_uniforms.inpaint_wb_2_field.xyz, replacement.rgb),
         );
         working = mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
     }
@@ -170,8 +170,8 @@ fn tone_reduce_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if total == 0u {
-        tone_stats_out.percentiles_0 = vec4<f32>(-8.0, -5.0, 0.0, 2.5);
-        tone_stats_out.percentiles_1 = vec4<f32>(4.0, 12.0, 0.0, 0.0);
+        tone_stats_out.percentiles_0_field = vec4<f32>(-8.0, -5.0, 0.0, 2.5);
+        tone_stats_out.percentiles_1_field = vec4<f32>(4.0, 12.0, 0.0, 0.0);
         return;
     }
 
@@ -182,11 +182,11 @@ fn tone_reduce_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
     let target_995 = max(1u, u32(ceil(f32(total) * 0.995)));
 
     var cumulative = 0u;
-    var p005 = ToneCommon::TONE_EV_MIN;
-    var p05 = ToneCommon::TONE_EV_MIN;
-    var p50 = 0.0;
-    var p95 = ToneCommon::TONE_EV_MAX;
-    var p995 = ToneCommon::TONE_EV_MAX;
+    var p005_field = ToneCommon::TONE_EV_MIN;
+    var p05_field = ToneCommon::TONE_EV_MIN;
+    var p50_field = 0.0;
+    var p95_field = ToneCommon::TONE_EV_MAX;
+    var p995_field = ToneCommon::TONE_EV_MAX;
     var found_005 = false;
     var found_05 = false;
     var found_50 = false;
@@ -196,13 +196,13 @@ fn tone_reduce_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var index = 0u; index < ToneCommon::TONE_HISTOGRAM_BIN_COUNT; index = index + 1u) {
         cumulative = cumulative + atomicLoad(&tone_histogram.bins[index]);
         let ev = ToneCommon::tone_bin_to_ev(index);
-        if !found_005 && cumulative >= target_005 { p005 = ev; found_005 = true; }
-        if !found_05 && cumulative >= target_05 { p05 = ev; found_05 = true; }
-        if !found_50 && cumulative >= target_50 { p50 = ev; found_50 = true; }
-        if !found_95 && cumulative >= target_95 { p95 = ev; found_95 = true; }
-        if !found_995 && cumulative >= target_995 { p995 = ev; found_995 = true; }
+        if !found_005 && cumulative >= target_005 { p005_field = ev; found_005 = true; }
+        if !found_05 && cumulative >= target_05 { p05_field = ev; found_05 = true; }
+        if !found_50 && cumulative >= target_50 { p50_field = ev; found_50 = true; }
+        if !found_95 && cumulative >= target_95 { p95_field = ev; found_95 = true; }
+        if !found_995 && cumulative >= target_995 { p995_field = ev; found_995 = true; }
     }
 
-    tone_stats_out.percentiles_0 = vec4<f32>(p005, p05, p50, p95);
-    tone_stats_out.percentiles_1 = vec4<f32>(p995, max(p995 - p005, 1.0), f32(total), 0.0);
+    tone_stats_out.percentiles_0_field = vec4<f32>(p005_field, p05_field, p50_field, p95_field);
+    tone_stats_out.percentiles_1_field = vec4<f32>(p995_field, max(p995_field - p005_field, 1.0), f32(total), 0.0);
 }

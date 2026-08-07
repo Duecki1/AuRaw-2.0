@@ -774,6 +774,17 @@ dependencies = [
 
 [[package]]
 name = "codespan-reporting"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
+dependencies = [
+ "serde",
+ "termcolor",
+ "unicode-width",
+]
+
+[[package]]
+name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
@@ -2217,7 +2228,7 @@ dependencies = [
  "bitflags 2.13.0",
  "cfg-if",
  "cfg_aliases",
- "codespan-reporting",
+ "codespan-reporting 0.13.1",
  "half",
  "hashbrown 0.16.1",
  "hexf-parse",
@@ -2238,7 +2249,7 @@ version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "319f03062940ed85c03da020042618356bb8ca5263020322930883b05e30208e"
 dependencies = [
- "codespan-reporting",
+ "codespan-reporting 0.12.0",
  "data-encoding",
  "indexmap",
  "naga",
@@ -4752,6 +4763,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
+name = "xtask"
+version = "2.0.0"
+dependencies = [
+ "image",
+ "ring",
+ "serde",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4949,17 +4971,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "xtask"
-version = "2.0.0"
-dependencies = [
- "image",
- "ring",
- "serde",
- "serde_json",
- "zip",
 ]
 
 [[package]]

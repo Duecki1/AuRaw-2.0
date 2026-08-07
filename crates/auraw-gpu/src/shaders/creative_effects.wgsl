@@ -75,7 +75,7 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
     // tile-safe approximation of that global ambient energy. The old shader
     // promoted each pixel's local brightest neighbour to A, causing colour and
     // contrast to pump across edges and export tiles.
-    let ambient_ev = clamp(Tonemap::tone_stats.percentiles_1.x + Common::scene_tone_uniforms.exposure, -16.0, 16.0);
+    let ambient_ev = clamp(Tonemap::tone_stats.percentiles_1_field.x + Common::scene_tone_uniforms.exposure, -16.0, 16.0);
     let airlight_luma = max(ToneCommon::SCENE_MIDDLE_GREY * exp2(ambient_ev), 1e-5);
     let haze_step = SceneAdjustments::presence_step(2.0, 6);
     let neighborhood = haze_neighborhood(pos, haze_step, airlight_luma);
@@ -428,7 +428,7 @@ fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
-        let local = Common::mask_data[index].adjust_2;
+        let local = Common::mask_data[index].adjust_2_field;
         if max(max(abs(local.x), abs(local.y)), max(abs(local.z), abs(local.w))) <= 1e-7 {
             continue;
         }
