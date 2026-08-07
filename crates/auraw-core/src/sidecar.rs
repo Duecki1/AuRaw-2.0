@@ -3,7 +3,7 @@ use crate::file_ops::{replace_file, sync_parent_directory};
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
     ExposureParams, GeometryTransform, InpaintStroke, MaskGeometry, MaskImage, MaskKind, MaskStack,
-    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    SubjectRefinement, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 6;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 7;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0004;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
@@ -124,6 +124,10 @@ pub struct EditState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_profile: Option<PathBuf>,
     pub masks: Arc<MaskStack>,
+    /// Shared signed brush correction for every AI Subject / Not Subject mask.
+    /// Missing on schema <= 6, which cleanly defaults to no refinement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_refinement: Option<SubjectRefinement>,
     #[serde(default)]
     pub inpainting: Arc<Vec<InpaintStroke>>,
     pub lens: LensEditState,
@@ -139,6 +143,7 @@ pub fn default_edit_state() -> EditState {
         geometry: GeometryTransform::default(),
         camera_profile: None,
         masks: Arc::new(MaskStack::default()),
+        subject_refinement: None,
         inpainting: Arc::new(Vec::new()),
         lens: LensEditState::default(),
         ai_masks_need_update: false,
@@ -174,6 +179,11 @@ fn filtered_mask_stack(masks: &MaskStack, include_manual: bool, include_ai: bool
                 (!selected.components.is_empty()).then_some(selected)
             })
             .collect(),
+        subject_refinement: if include_ai {
+            masks.subject_refinement.clone()
+        } else {
+            Default::default()
+        },
         ..Default::default()
     }
 }
@@ -191,6 +201,9 @@ fn replace_selected_mask_categories(
 
     let mut merged = filtered_mask_stack(destination, !include_manual, !include_ai);
     let copied = filtered_mask_stack(source, include_manual, include_ai);
+    if include_ai {
+        merged.subject_refinement = copied.subject_refinement.clone();
+    }
     merged.masks.extend(copied.masks);
     *destination = merged;
 }
@@ -220,6 +233,7 @@ pub fn edit_state_has_adjustments(edits: &EditState) -> bool {
         || edits.geometry != default.geometry
         || edits.camera_profile != default.camera_profile
         || edits.masks != default.masks
+        || edits.subject_refinement != default.subject_refinement
         || edits.inpainting != default.inpainting
         || edits.lens != default.lens
 }
@@ -264,6 +278,7 @@ pub fn apply_copied_adjustments_with_mode(
     }
     if settings.masks || settings.ai_masks {
         let previous_ai_masks_need_update = destination.ai_masks_need_update;
+        let previous_subject_refinement = destination.subject_refinement.clone();
         let mut masks = destination.masks.as_ref().clone();
         replace_selected_mask_categories(
             &mut masks,
@@ -272,6 +287,14 @@ pub fn apply_copied_adjustments_with_mode(
             settings.ai_masks,
         );
         destination.masks = Arc::new(masks);
+        destination.subject_refinement = if settings.ai_masks {
+            source.subject_refinement.clone().or_else(|| {
+                (!source.masks.subject_refinement.is_empty())
+                    .then(|| source.masks.subject_refinement.clone())
+            })
+        } else {
+            previous_subject_refinement
+        };
         destination.ai_masks_need_update = if settings.ai_masks {
             source.ai_masks_need_update
                 || masks_contain_content_aware_components(&destination.masks)
@@ -293,6 +316,17 @@ pub fn apply_copied_adjustments_with_mode(
             destination.ai_masks_need_update = true;
         }
     }
+}
+
+fn synchronize_subject_refinement(edits: &mut EditState) {
+    let refinement = edits.subject_refinement.clone().or_else(|| {
+        (!edits.masks.subject_refinement.is_empty())
+            .then(|| edits.masks.subject_refinement.clone())
+    });
+    let refinement = refinement.filter(|refinement| !refinement.is_empty());
+    Arc::make_mut(&mut edits.masks).subject_refinement =
+        refinement.clone().unwrap_or_default();
+    edits.subject_refinement = refinement;
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -945,6 +979,7 @@ pub fn remove_desktop_edits(raw_path: &Path) -> Result<bool, String> {
 }
 
 pub fn encode(mut edits: EditState) -> Result<Vec<u8>, SidecarError> {
+    synchronize_subject_refinement(&mut edits);
     validate_edit_state(&edits)?;
     let (mask_assets, mask_asset_refs) = extract_mask_assets(&mut edits)?;
     let document = SidecarDocument {
@@ -983,10 +1018,10 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
         )));
     }
     let original_schema = document.schema_version;
-    // Schema 5 introduced extracted PNG mask assets. Schema 6 keeps that
-    // layout and only changes inpainting binary fields to lossless compressed
-    // Base64 strings, whose deserializers remain backward-compatible with the
-    // raw schema-5 representation.
+    // Schema 5 introduced extracted PNG mask assets. Schema 6 kept that layout
+    // and changed inpainting binary fields to lossless compressed Base64
+    // strings. Schema 7 adds the optional shared Subject refinement field;
+    // serde defaults keep every earlier sidecar backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
@@ -996,11 +1031,13 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     } else {
         // TODO(pre-release cleanup): Remove this beta-only schema <= 4 inline-mask migration
         // once AuRaw is published. It exists only so beta testers keep their edits and masks;
-        // `LoadedSidecar::migrated` immediately queues a schema-6 rewrite after opening the RAW.
+        // `LoadedSidecar::migrated` immediately queues a current-schema rewrite after opening the RAW.
         if !document.mask_assets.is_empty() || !document.mask_asset_refs.is_empty() {
             return invalid("legacy sidecar unexpectedly contains current mask assets");
         }
     }
+
+    synchronize_subject_refinement(&mut document.edits);
 
     validate_edit_state(&document.edits)?;
     document.edits.exposure.sanitize_tone_curves();
@@ -1136,6 +1173,44 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
     if edits.lens.maker.len() > MAX_EDIT_NAME_BYTES || edits.lens.model.len() > MAX_EDIT_NAME_BYTES
     {
         return invalid("lens name is unreasonably long");
+    }
+
+    let refinement = &stack.subject_refinement;
+    finite(
+        "subject refinement settings",
+        &[refinement.size, refinement.feather, refinement.flow],
+    )?;
+    bounded("subject refinement size", refinement.size, 0.0, 16.0)?;
+    bounded("subject refinement feather", refinement.feather, 0.0, 1.0)?;
+    bounded("subject refinement flow", refinement.flow, 0.0, 1.0)?;
+    if refinement.dabs.len() > MAX_BRUSH_DABS {
+        return invalid("subject refinement contains too many dabs");
+    }
+    let mut previous_start = None;
+    for &start in &refinement.stroke_starts {
+        if start >= refinement.dabs.len()
+            || previous_start.is_some_and(|previous| start <= previous)
+        {
+            return invalid("subject refinement contains invalid stroke boundaries");
+        }
+        previous_start = Some(start);
+    }
+    for dab in &refinement.dabs {
+        finite(
+            "subject refinement dab",
+            &[
+                dab.center[0],
+                dab.center[1],
+                dab.opacity,
+                dab.size,
+                dab.feather,
+            ],
+        )?;
+        bounded("subject refinement dab x", dab.center[0], -16.0, 16.0)?;
+        bounded("subject refinement dab y", dab.center[1], -16.0, 16.0)?;
+        bounded("subject refinement dab opacity", dab.opacity, -1.0, 1.0)?;
+        bounded("subject refinement dab size", dab.size, 0.0, 16.0)?;
+        bounded("subject refinement dab feather", dab.feather, 0.0, 1.0)?;
     }
 
     for (mask_index, mask) in stack.masks.iter().enumerate() {
@@ -1529,6 +1604,11 @@ fn estimate_sidecar_bytes<'a>(
     const MASK_PNG_FIXED_HEADROOM: u64 = 64 * 1024;
 
     let mut estimated = DOCUMENT_HEADROOM;
+    checked_add_scaled(
+        &mut estimated,
+        masks.subject_refinement.dabs.len(),
+        BRUSH_DAB_HEADROOM,
+    )?;
     let mut unique_images = Vec::<&MaskImage>::new();
     let mut image_buckets = HashMap::<u64, Vec<usize>>::new();
     for mask in &masks.masks {
@@ -1616,6 +1696,11 @@ fn measure_sidecar_dynamic_bytes<'a>(
     const INPAINT_STROKE_HEADROOM: u64 = 512;
 
     let mut measured = DOCUMENT_HEADROOM;
+    checked_add_scaled(
+        &mut measured,
+        masks.subject_refinement.dabs.len(),
+        BRUSH_DAB_HEADROOM,
+    )?;
     let mut unique_images = Vec::<&MaskImage>::new();
     let mut image_buckets = HashMap::<u64, Vec<usize>>::new();
     for mask in &masks.masks {
@@ -1983,6 +2068,7 @@ mod tests {
             geometry: GeometryTransform::default(),
             camera_profile: None,
             masks: Arc::new(masks),
+            subject_refinement: None,
             inpainting: Arc::new(Vec::new()),
             lens: LensEditState {
                 enabled: true,
@@ -2077,6 +2163,14 @@ mod tests {
         if let MaskGeometry::Ai { mask, .. } = &mut source_masks.masks[1].components[0].geometry {
             *mask = Some(crate::pipeline::MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap());
         }
+        source_masks.subject_refinement.stroke_starts.push(0);
+        source_masks.subject_refinement.dabs.push(crate::pipeline::BrushDab {
+            center: [0.5, 0.5],
+            opacity: 0.6,
+            size: 0.08,
+            feather: 0.4,
+        });
+        source.subject_refinement = Some(source_masks.subject_refinement.clone());
         source.masks = Arc::new(source_masks);
 
         let mut destination = default_edit_state();
@@ -2100,6 +2194,8 @@ mod tests {
             MaskKind::Brush
         );
         assert!(!destination.ai_masks_need_update);
+        assert!(destination.masks.subject_refinement.is_empty());
+        assert!(destination.subject_refinement.is_none());
 
         apply_copied_adjustments(
             &mut destination,
@@ -2126,6 +2222,11 @@ mod tests {
             .masks
             .iter()
             .any(|mask| mask.components[0].kind == MaskKind::Subject));
+        assert_eq!(
+            destination.masks.subject_refinement,
+            source.masks.subject_refinement
+        );
+        assert_eq!(destination.subject_refinement, source.subject_refinement);
         assert!(destination.ai_masks_need_update);
     }
 
@@ -2252,6 +2353,51 @@ mod tests {
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits, edits);
         assert!(!loaded.migrated);
+    }
+
+    #[test]
+    fn sidecar_round_trip_preserves_shared_subject_refinement() {
+        let mut edits = sample_edits();
+        let refinement = {
+            let masks = Arc::make_mut(&mut edits.masks);
+            masks.subject_refinement.size = 0.07;
+            masks.subject_refinement.feather = 0.3;
+            masks.subject_refinement.flow = 0.45;
+            masks.subject_refinement.stroke_starts.push(0);
+            masks.subject_refinement.dabs.push(crate::pipeline::BrushDab {
+                center: [0.25, 0.75],
+                opacity: -0.45,
+                size: 0.07,
+                feather: 0.3,
+            });
+            masks.subject_refinement.clone()
+        };
+        edits.subject_refinement = Some(refinement);
+
+        let encoded = encode(edits.clone()).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(document.pointer("/edits/subject_refinement").is_some());
+        assert!(document.pointer("/edits/masks/subject_refinement").is_none());
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+    }
+
+    #[test]
+    fn schema_six_sidecar_without_subject_refinement_loads_empty_layer() {
+        let edits = sample_edits();
+        let encoded = encode(edits).unwrap();
+        let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        document["schema_version"] = 6.into();
+        document
+            .pointer_mut("/edits")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("subject_refinement");
+
+        let legacy = serde_json::to_vec(&document).unwrap();
+        let loaded = decode(&legacy).unwrap();
+        assert!(loaded.migrated);
+        assert!(loaded.edits.masks.subject_refinement.is_empty());
     }
 
     #[test]

@@ -126,6 +126,31 @@ impl AurawApp {
         }
     }
 
+    /// Shared Subject refinement can affect every Subject and Not Subject
+    /// layer simultaneously, so its interactive atlas refresh uses a sentinel
+    /// instead of pretending only the selected local-mask layer changed.
+    pub(crate) fn note_subject_refinement_interaction(&mut self) {
+        const INTERACTIVE_MASK_INTERVAL: Duration = Duration::from_millis(45);
+        const SHARED_REFINEMENT_LAYER: usize = MAX_LOCAL_MASKS;
+
+        if self.mask_interaction_dirty_layer != Some(SHARED_REFINEMENT_LAYER) {
+            self.finish_mask_geometry_interaction();
+            self.mask_interaction_dirty_layer = Some(SHARED_REFINEMENT_LAYER);
+            self.mask_interaction_last_upload = None;
+        }
+
+        self.mask_interaction_has_uncommitted_change = true;
+        let now = Instant::now();
+        let upload_due = self
+            .mask_interaction_last_upload
+            .is_none_or(|last| now.duration_since(last) >= INTERACTIVE_MASK_INTERVAL);
+        if upload_due {
+            self.mark_all_mask_layers_dirty();
+            self.mask_interaction_last_upload = Some(now);
+            self.mask_interaction_has_uncommitted_change = false;
+        }
+    }
+
     pub(crate) fn finish_mask_geometry_interaction(&mut self) {
         let layer = self.mask_interaction_dirty_layer.take();
         let should_commit = self.mask_interaction_has_uncommitted_change;
@@ -133,7 +158,11 @@ impl AurawApp {
         self.mask_interaction_has_uncommitted_change = false;
         if should_commit {
             if let Some(layer) = layer {
-                self.mark_mask_geometry_dirty(layer);
+                if layer == MAX_LOCAL_MASKS {
+                    self.mark_all_mask_layers_dirty();
+                } else {
+                    self.mark_mask_geometry_dirty(layer);
+                }
             }
         }
     }
@@ -155,6 +184,9 @@ impl AurawApp {
             mask_index,
             component_index,
             geometry,
+            subject_refinement: self
+                .subject_refinement_active
+                .then(|| self.masks.subject_refinement.clone()),
             object_cache: self.object_cache.clone(),
         });
     }
@@ -182,6 +214,12 @@ impl AurawApp {
                 component.geometry = backup.geometry;
                 true
             });
+        let refinement_restored = if let Some(subject_refinement) = backup.subject_refinement {
+            self.masks.subject_refinement = subject_refinement;
+            true
+        } else {
+            false
+        };
         self.object_cache = backup.object_cache;
         self.object_generation = self.object_generation.wrapping_add(1);
         self.last_brush_point = None;
@@ -189,7 +227,9 @@ impl AurawApp {
         self.mask_interaction_dirty_layer = None;
         self.mask_interaction_last_upload = None;
         self.mask_interaction_has_uncommitted_change = false;
-        if restored {
+        if refinement_restored {
+            self.mark_all_mask_layers_dirty();
+        } else if restored {
             self.mark_mask_geometry_dirty(backup.mask_index);
         }
     }
@@ -208,6 +248,9 @@ impl AurawApp {
         self.mask_drag = None;
         self.last_brush_point = None;
         self.mask_touch_gesture_backup = None;
+        if !matches!(kind, MaskKind::Subject | MaskKind::Background) {
+            self.subject_refinement_active = false;
+        }
         if matches!(kind, MaskKind::Brush | MaskKind::Object) {
             self.brush_mode = BrushMode::Paint;
         }
@@ -219,6 +262,9 @@ impl AurawApp {
         self.mask_drag = None;
         self.last_brush_point = None;
         self.mask_touch_gesture_backup = None;
+        if !matches!(kind, MaskKind::Subject | MaskKind::Background) {
+            self.subject_refinement_active = false;
+        }
     }
 
     pub(crate) fn blink_selected_mask(&mut self) {
@@ -908,6 +954,9 @@ impl AurawApp {
     }
 
     fn apply_subject_mask(&mut self, mask: MaskImage) {
+        // Keep BiRefNet output raw. The shared SubjectRefinement is composited
+        // while each dirty atlas layer is rasterized, so a regenerated mask or
+        // a newly added Subject/Background component inherits it automatically.
         self.subject_mask_cache = Some(mask.clone());
         for local_mask in &mut self.masks.masks {
             for component in &mut local_mask.components {
@@ -1019,7 +1068,7 @@ impl AurawApp {
         if !cancelled && !stale {
             match result {
                 Ok(result) => {
-                    if let Some(mask) = MaskImage::new(result.width, result.height, result.mask) {
+                    if let Some(mask) = result.into_probability_mask() {
                         self.apply_subject_mask(mask);
                         succeeded = true;
                     } else {

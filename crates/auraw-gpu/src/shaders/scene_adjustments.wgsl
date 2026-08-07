@@ -83,6 +83,9 @@ fn local_mask_weight(pos: vec2<i32>, index: u32) -> f32 {
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
         return 0.0;
     }
+    // CPU mask rasterization has already composited the shared Subject
+    // refinement (and inverted Not Subject) before this atlas upload. Sampling
+    // the atlas directly here therefore preserves the exact refined weights.
     return textureSampleLevel(
         local_mask_tex,
         local_mask_sampler,

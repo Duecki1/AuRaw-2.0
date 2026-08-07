@@ -199,6 +199,82 @@ pub struct BrushDab {
     pub feather: f32,
 }
 
+/// Shared, non-destructive correction layer for BiRefNet subject probability.
+///
+/// The stored dabs are resolution independent and always describe corrections
+/// to the *subject* probability. Positive opacity paints subject; negative
+/// opacity paints background. Subject and Not Subject components consume this
+/// same layer, so the latter can remain the exact complement of the former.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SubjectRefinement {
+    /// Radius as a fraction of the image's shorter edge for newly drawn dabs.
+    #[serde(default = "default_subject_refinement_size")]
+    pub size: f32,
+    #[serde(default = "default_subject_refinement_feather")]
+    pub feather: f32,
+    /// Signed dab magnitude is captured when painted; this is the default for
+    /// newly emitted dabs only and changing it never alters existing strokes.
+    #[serde(default = "default_subject_refinement_flow")]
+    pub flow: f32,
+    /// Dab indexes that begin pointer/touch strokes. Within one continuous
+    /// stroke, overlapping dabs collapse to one coverage field so a slow drag
+    /// does not accidentally become stronger than a fast drag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stroke_starts: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dabs: Vec<BrushDab>,
+}
+
+impl Default for SubjectRefinement {
+    fn default() -> Self {
+        Self {
+            size: default_subject_refinement_size(),
+            feather: default_subject_refinement_feather(),
+            flow: default_subject_refinement_flow(),
+            stroke_starts: Vec::new(),
+            dabs: Vec::new(),
+        }
+    }
+}
+
+impl SubjectRefinement {
+    pub fn is_empty(&self) -> bool {
+        self.dabs.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.dabs.clear();
+        self.stroke_starts.clear();
+    }
+
+    /// Applies the stored signed delta to a raw 8-bit AI probability map.
+    /// This helper is useful for non-atlas consumers; the normal mask pipeline
+    /// applies the same math directly at its target raster resolution.
+    pub fn composite(&self, raw_ai_mask: &MaskImage) -> Option<MaskImage> {
+        if self.is_empty() {
+            return Some(raw_ai_mask.clone());
+        }
+        let delta = rasterize_subject_refinement_delta(
+            raw_ai_mask.width,
+            raw_ai_mask.height,
+            raw_ai_mask.width,
+            raw_ai_mask.height,
+            self,
+        );
+        let pixels = raw_ai_mask
+            .pixels
+            .iter()
+            .copied()
+            .zip(delta)
+            .map(|(raw, delta)| {
+                let probability = raw as f32 / 255.0;
+                ((probability + delta).clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+            })
+            .collect();
+        MaskImage::new(raw_ai_mask.width, raw_ai_mask.height, pixels)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ObjectStroke {
     /// Normalized full-image coordinates. Positive strokes add foreground;
@@ -824,6 +900,18 @@ fn default_object_brush_size() -> f32 {
     0.055
 }
 
+fn default_subject_refinement_size() -> f32 {
+    0.035
+}
+
+fn default_subject_refinement_feather() -> f32 {
+    0.55
+}
+
+fn default_subject_refinement_flow() -> f32 {
+    1.0
+}
+
 fn default_brush_opacity() -> f32 {
     1.0
 }
@@ -1061,6 +1149,11 @@ pub struct MaskStack {
     pub masks: Vec<LocalMask>,
     pub selected_mask: Option<usize>,
     pub selected_component: Option<usize>,
+    /// One shared correction layer for every Subject / Not Subject component.
+    /// Sidecars persist this at `EditState.subject_refinement`; the runtime
+    /// stack keeps a synchronized copy so all rasterization paths see it.
+    #[serde(skip, default)]
+    pub subject_refinement: SubjectRefinement,
 }
 
 impl MaskStack {
@@ -1171,6 +1264,11 @@ impl MaskStack {
                     MaskGeometry::Placeholder => {}
                 }
             }
+        }
+        cropped.subject_refinement.size *= image_scale;
+        for dab in &mut cropped.subject_refinement.dabs {
+            remap_point(&mut dab.center);
+            dab.size *= image_scale;
         }
         cropped
     }
@@ -1384,6 +1482,7 @@ impl MaskStack {
                 atlas_height,
                 image_width,
                 image_height,
+                &self.subject_refinement,
             );
             if component.invert {
                 coverage
@@ -1483,7 +1582,14 @@ impl MaskStack {
         else {
             return vec![0; width as usize * height as usize];
         };
-        let mut coverage = rasterize_component(component, width, height, image_width, image_height);
+        let mut coverage = rasterize_component(
+            component,
+            width,
+            height,
+            image_width,
+            image_height,
+            &self.subject_refinement,
+        );
         if component.invert {
             for value in &mut coverage {
                 *value = 1.0 - *value;
@@ -1537,6 +1643,7 @@ fn rasterize_component(
     height: u32,
     image_width: u32,
     image_height: u32,
+    subject_refinement: &SubjectRefinement,
 ) -> Vec<f32> {
     match &component.geometry {
         MaskGeometry::Brush {
@@ -1589,6 +1696,23 @@ fn rasterize_component(
             feather,
         } => {
             let mut coverage = rasterize_mask_image(width, height, mask);
+            if matches!(component.kind, MaskKind::Subject | MaskKind::Background)
+                && !subject_refinement.is_empty()
+            {
+                let delta = rasterize_subject_refinement_delta(
+                    width,
+                    height,
+                    image_width,
+                    image_height,
+                    subject_refinement,
+                );
+                coverage
+                    .par_iter_mut()
+                    .zip(delta.into_par_iter())
+                    .for_each(|(probability, delta)| {
+                        *probability = (*probability + delta).clamp(0.0, 1.0);
+                    });
+            }
             let grow = if component.kind == MaskKind::Background {
                 -*grow
             } else {
@@ -2319,6 +2443,109 @@ fn rasterize_recorded_brush(
     out
 }
 
+fn rasterize_subject_refinement_delta(
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+    refinement: &SubjectRefinement,
+) -> Vec<f32> {
+    if width == 0 || height == 0 || refinement.dabs.is_empty() {
+        return vec![0.0; width as usize * height as usize];
+    }
+
+    let (legacy_end, groups) = recorded_brush_groups(&refinement.dabs, &refinement.stroke_starts);
+    let specs = brush_raster_specs(
+        width,
+        height,
+        image_width,
+        image_height,
+        &refinement.dabs,
+    );
+    const ROW_BAND_HEIGHT: usize = 64;
+    let row_stride = width as usize;
+    let mut out = vec![0.0f32; row_stride * height as usize];
+
+    out.par_chunks_mut(row_stride * ROW_BAND_HEIGHT)
+        .enumerate()
+        .for_each(|(band_index, band)| {
+            let band_start_y = band_index * ROW_BAND_HEIGHT;
+            let band_height = band.len() / row_stride;
+            let band_end_y = band_start_y + band_height - 1;
+
+            let apply_spec = |band: &mut [f32], spec: &BrushRasterSpec| {
+                if spec.max_y < band_start_y as i32 || spec.min_y > band_end_y as i32 {
+                    return;
+                }
+                let min_y = spec.min_y.max(band_start_y as i32);
+                let max_y = spec.max_y.min(band_end_y as i32);
+                for y in min_y..=max_y {
+                    let dy = (y as f32 + 0.5 - spec.center_y) / spec.radius_y.max(0.5);
+                    let row_offset = (y as usize - band_start_y) * row_stride;
+                    for x in spec.min_x..=spec.max_x {
+                        let dx = (x as f32 + 0.5 - spec.center_x) / spec.radius_x.max(0.5);
+                        let distance = (dx * dx + dy * dy).sqrt();
+                        if distance >= 1.0 + spec.antialias {
+                            continue;
+                        }
+                        let coverage =
+                            1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
+                        let index = row_offset + x as usize;
+                        band[index] = (band[index]
+                            + coverage * spec.opacity.clamp(-1.0, 1.0))
+                            .clamp(-1.0, 1.0);
+                    }
+                }
+            };
+
+            // A refinement sidecar should always have stroke starts, but this
+            // prefix keeps manually constructed/forward-compatible data useful.
+            for spec in &specs[..legacy_end] {
+                apply_spec(band, spec);
+            }
+
+            let grouped_specs = &specs[legacy_end..];
+            let mut stroke_coverage = vec![0.0f32; band.len()];
+            let mut touched = Vec::new();
+            for group in &groups {
+                for spec in &grouped_specs[group.start..group.end] {
+                    if spec.max_y < band_start_y as i32 || spec.min_y > band_end_y as i32 {
+                        continue;
+                    }
+                    let min_y = spec.min_y.max(band_start_y as i32);
+                    let max_y = spec.max_y.min(band_end_y as i32);
+                    for y in min_y..=max_y {
+                        let dy = (y as f32 + 0.5 - spec.center_y) / spec.radius_y.max(0.5);
+                        let row_offset = (y as usize - band_start_y) * row_stride;
+                        for x in spec.min_x..=spec.max_x {
+                            let dx = (x as f32 + 0.5 - spec.center_x) / spec.radius_x.max(0.5);
+                            let distance = (dx * dx + dy * dy).sqrt();
+                            if distance >= 1.0 + spec.antialias {
+                                continue;
+                            }
+                            let coverage =
+                                1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
+                            let alpha = coverage * spec.opacity.abs().clamp(0.0, 1.0);
+                            let index = row_offset + x as usize;
+                            if alpha > stroke_coverage[index] {
+                                if stroke_coverage[index] == 0.0 {
+                                    touched.push(index);
+                                }
+                                stroke_coverage[index] = alpha;
+                            }
+                        }
+                    }
+                }
+                let sign = if group.positive { 1.0 } else { -1.0 };
+                for index in touched.drain(..) {
+                    band[index] = (band[index] + sign * stroke_coverage[index]).clamp(-1.0, 1.0);
+                    stroke_coverage[index] = 0.0;
+                }
+            }
+        });
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rasterize_radial(
     width: u32,
@@ -2892,6 +3119,98 @@ mod tests {
             .iter()
             .zip(background.iter())
             .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255));
+    }
+
+    #[test]
+    fn shared_subject_refinement_updates_subject_and_background_as_exact_inverses() {
+        let raw = MaskImage::new(32, 32, vec![128; 32 * 32]).unwrap();
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Subject);
+        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = Some(raw.clone());
+        }
+        stack.add_mask(MaskKind::Background);
+        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = Some(raw);
+        }
+        stack.subject_refinement.stroke_starts.push(0);
+        stack.subject_refinement.dabs.push(BrushDab {
+            center: [0.5, 0.5],
+            opacity: 0.5,
+            size: 0.25,
+            feather: 0.5,
+        });
+
+        let subject = stack.rasterize_layer(0, 32, 32, 32, 32);
+        let background = stack.rasterize_layer(1, 32, 32, 32, 32);
+        assert!(subject[16 * 32 + 16] > 128);
+        assert!(subject
+            .iter()
+            .zip(background.iter())
+            .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255));
+
+        stack.subject_refinement.stroke_starts.push(1);
+        stack.subject_refinement.dabs.push(BrushDab {
+            center: [0.5, 0.5],
+            opacity: -1.0,
+            size: 0.12,
+            feather: 0.0,
+        });
+        let subject_after_subtract = stack.rasterize_layer(0, 32, 32, 32, 32);
+        assert!(subject_after_subtract[16 * 32 + 16] < subject[16 * 32 + 16]);
+
+        // Replacing the raw BiRefNet result (for example after a quality-tier
+        // switch) must not consume or clear the shared refinement history.
+        let regenerated = MaskImage::new(32, 32, vec![64; 32 * 32]).unwrap();
+        for mask in &mut stack.masks {
+            if let MaskGeometry::Ai { mask: target, .. } = &mut mask.components[0].geometry {
+                *target = Some(regenerated.clone());
+            }
+        }
+        let regenerated_subject = stack.rasterize_layer(0, 32, 32, 32, 32);
+        let regenerated_background = stack.rasterize_layer(1, 32, 32, 32, 32);
+        assert!(regenerated_subject
+            .iter()
+            .zip(regenerated_background.iter())
+            .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255));
+
+        stack.add_mask(MaskKind::Subject);
+        if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
+        {
+            *mask = Some(regenerated);
+        }
+        let inherited = stack.rasterize_layer(2, 32, 32, 32, 32);
+        assert_eq!(inherited, regenerated_subject);
+    }
+
+    #[test]
+    fn subject_refinement_composite_applies_signed_delta_to_raw_probability() {
+        let raw = MaskImage::new(16, 16, vec![128; 16 * 16]).unwrap();
+        let refinement = SubjectRefinement {
+            stroke_starts: vec![0],
+            dabs: vec![BrushDab {
+                center: [0.5, 0.5],
+                opacity: 0.4,
+                size: 0.3,
+                feather: 0.0,
+            }],
+            ..Default::default()
+        };
+        let refined = refinement.composite(&raw).unwrap();
+        assert!(refined.pixels[8 * 16 + 8] > 128);
+        assert_eq!(refined.pixels[0], 128);
+    }
+
+    #[test]
+    fn legacy_mask_stack_without_subject_refinement_deserializes_empty_layer() {
+        let stack: MaskStack = serde_json::from_str(
+            r#"{"masks":[],"selected_mask":null,"selected_component":null}"#,
+        )
+        .unwrap();
+        assert!(stack.subject_refinement.is_empty());
+        assert_eq!(stack.subject_refinement, SubjectRefinement::default());
     }
 
     #[test]

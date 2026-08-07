@@ -1378,6 +1378,8 @@ impl Preview {
         if !kind.is_available() {
             return;
         }
+        let subject_refining = app.subject_refinement_active
+            && matches!(kind, MaskKind::Subject | MaskKind::Background);
         app.active_mask_tool = Some(kind);
         let geometry_can_leave_image = matches!(kind, MaskKind::Radial | MaskKind::Linear)
             && (app.mask_drag.is_some()
@@ -1407,7 +1409,7 @@ impl Preview {
             if primary_is_down {
                 // Leaving the preview while still dragging must not connect the
                 // last valid dab to a later re-entry point through hidden space.
-                if matches!(kind, MaskKind::Brush | MaskKind::Object) {
+                if subject_refining || matches!(kind, MaskKind::Brush | MaskKind::Object) {
                     app.last_brush_point = None;
                 }
                 return;
@@ -1418,6 +1420,7 @@ impl Preview {
             // the pointer re-enters. On the actual release frame, detect
             // completion from the unrefined prompt strokes themselves.
             let object_stroke_finished = primary_released
+                && !subject_refining
                 && kind == MaskKind::Object
                 && app
                     .masks
@@ -1462,11 +1465,74 @@ impl Preview {
             // Brush/object strokes must be discontinuous across transformed
             // pasteboard. Otherwise a stroke that leaves and re-enters the image
             // gets interpolated through an area the user could not actually draw.
-            if matches!(kind, MaskKind::Brush | MaskKind::Object) {
+            if subject_refining || matches!(kind, MaskKind::Brush | MaskKind::Object) {
                 app.last_brush_point = None;
             }
             return;
         };
+
+        if subject_refining {
+            let refinement = &mut app.masks.subject_refinement;
+            let opacity = app.brush_mode.dab_opacity(true, refinement.flow);
+            let first_dab = app.last_brush_point.is_none();
+            let previous = app.last_brush_point.unwrap_or(uv);
+            let dx = uv[0] - previous[0];
+            let dy = uv[1] - previous[1];
+            let previous_screen = final_geometry_native_source_to_screen(
+                image_rect,
+                app.geometry,
+                lens_geometry.as_deref(),
+                source_width,
+                source_height,
+                previous,
+            );
+            let distance_px = pointer.distance(previous_screen);
+            let dab_size = zoom_scaled_brush_size(refinement.size, app.preview_zoom);
+            let radius_px = geometry_brush_radius_screen(
+                image_rect,
+                app.geometry,
+                lens_geometry.as_deref(),
+                source_width,
+                source_height,
+                uv,
+                dab_size,
+            );
+            let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
+            let mut changed = false;
+            if first_dab {
+                if refinement.dabs.len() < 65_536 {
+                    refinement.stroke_starts.push(refinement.dabs.len());
+                    refinement.dabs.push(BrushDab {
+                        center: uv,
+                        opacity,
+                        size: dab_size,
+                        feather: refinement.feather,
+                    });
+                    changed = true;
+                }
+            } else if distance_px >= spacing_px * 0.80 {
+                let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
+                for step in 1..=steps {
+                    if refinement.dabs.len() >= 65_536 {
+                        break;
+                    }
+                    let t = step as f32 / steps as f32;
+                    refinement.dabs.push(BrushDab {
+                        center: [previous[0] + dx * t, previous[1] + dy * t],
+                        opacity,
+                        size: dab_size,
+                        feather: refinement.feather,
+                    });
+                    changed = true;
+                }
+            }
+            if changed {
+                app.last_brush_point = Some(uv);
+                app.note_subject_refinement_interaction();
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
         let color_was_sampled = app
             .masks
             .masks
@@ -1878,6 +1944,11 @@ impl Preview {
                         // drawing even when the group already has adjustments: the
                         // painted prompt is exactly what the AI model will see.
                         component.kind == MaskKind::Object
+                            || (app.subject_refinement_active
+                                && matches!(
+                                    component.kind,
+                                    MaskKind::Subject | MaskKind::Background
+                                ))
                             || (neutral
                                 && !matches!(
                                     component.kind,
@@ -2079,19 +2150,75 @@ impl Preview {
             }
         }
 
-        if app.masks.selected_component().is_some_and(|component| {
-            matches!(component.kind, MaskKind::Brush | MaskKind::Object) && component.enabled
-        }) {
+        let refining_subject = app.subject_refinement_active
+            && app.masks.selected_component().is_some_and(|component| {
+                matches!(component.kind, MaskKind::Subject | MaskKind::Background)
+                    && component.enabled
+            });
+        if refining_subject
+            || app.masks.selected_component().is_some_and(|component| {
+                matches!(component.kind, MaskKind::Brush | MaskKind::Object) && component.enabled
+            })
+        {
             if let Some(pointer) = ui
                 .ctx()
                 .pointer_hover_pos()
+                .or_else(|| ui.ctx().pointer_interact_pos())
                 .filter(|position| preview_rect.contains(*position))
             {
-                if let Some(component) = app.masks.selected_component() {
-                    let cursor_color = match app.brush_mode {
-                        BrushMode::Paint => Color32::WHITE,
-                        BrushMode::Erase => subtract,
-                    };
+                let cursor_color = match app.brush_mode {
+                    BrushMode::Paint => Color32::WHITE,
+                    BrushMode::Erase => subtract,
+                };
+                if refining_subject {
+                    let source_uv = final_geometry_screen_to_native_source(
+                        image_rect,
+                        app.geometry,
+                        lens_geometry.as_deref(),
+                        source_width,
+                        source_height,
+                        pointer,
+                    );
+                    if let Some(uv) = editable_source_uv(source_uv) {
+                        let brush_size = zoom_scaled_brush_size(
+                            app.masks.subject_refinement.size,
+                            app.preview_zoom,
+                        );
+                        let outline = brush_outline_geometry_screen_points(
+                            image_rect,
+                            app.geometry,
+                            lens_geometry.as_deref(),
+                            source_width,
+                            source_height,
+                            uv,
+                            brush_size,
+                            64,
+                        );
+                        let cursor_painter = ui.painter_at(preview_rect.intersect(image_rect));
+                        cursor_painter.add(Shape::line(
+                            outline,
+                            Stroke::new(1.5, cursor_color),
+                        ));
+                        let inner_size = brush_size
+                            * (1.0 - app.masks.subject_refinement.feather.clamp(0.0, 1.0));
+                        if inner_size > brush_size * 0.04 {
+                            let inner = brush_outline_geometry_screen_points(
+                                image_rect,
+                                app.geometry,
+                                lens_geometry.as_deref(),
+                                source_width,
+                                source_height,
+                                uv,
+                                inner_size,
+                                64,
+                            );
+                            cursor_painter.add(Shape::line(
+                                inner,
+                                Stroke::new(1.0, cursor_color.gamma_multiply(0.65)),
+                            ));
+                        }
+                    }
+                } else if let Some(component) = app.masks.selected_component() {
                     match &component.geometry {
                         MaskGeometry::Brush { size, .. } => {
                             let source_uv = final_geometry_screen_to_native_source(
@@ -2251,6 +2378,12 @@ impl Preview {
             return;
         };
         let text = match kind {
+            MaskKind::Subject | MaskKind::Background if app.subject_refinement_active => {
+                match app.brush_mode {
+                    BrushMode::Paint => "Refine: paint subject",
+                    BrushMode::Erase => "Refine: subtract subject / paint background",
+                }
+            }
             MaskKind::Brush => return,
             MaskKind::Object
                 if app.masks.selected_component().is_some_and(|component| {
