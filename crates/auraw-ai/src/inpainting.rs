@@ -1,5 +1,6 @@
+use crate::execution_provider::{create_session_with_fallback, FallbackSession, SessionOptions};
 use anyhow::{Context, Result};
-use ort::{session::Session, value::Tensor};
+use ort::value::Tensor;
 use rayon::prelude::*;
 use ring::digest::{Context as Sha256Context, SHA256};
 use std::{
@@ -39,7 +40,7 @@ const MAX_INPAINT_PIXELS: u64 = 20_000_000;
 const REC2020_LUMA: [f32; 3] = [0.262_700_2, 0.677_998_1, 0.059_301_7];
 
 #[cfg(not(target_os = "android"))]
-static LAMA_SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+static LAMA_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
 static LAMA_VERIFIED_MODEL: OnceLock<Mutex<Option<LamaModelIdentity>>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -488,7 +489,7 @@ fn infer_lama(
 
     #[cfg(target_os = "android")]
     let output = {
-        let mut session = crate::ai_masks::create_session(model_path)?;
+        let mut session = create_session_with_fallback(model_path, SessionOptions::new("LaMa"))?;
         run_lama_session(&mut session, image_tensor, mask_tensor)?
     };
 
@@ -499,7 +500,10 @@ fn infer_lama(
             .lock()
             .map_err(|_| anyhow::anyhow!("LaMa session lock was poisoned"))?;
         if session.is_none() {
-            *session = Some(crate::ai_masks::create_session(model_path)?);
+            *session = Some(create_session_with_fallback(
+                model_path,
+                SessionOptions::new("LaMa"),
+            )?);
         }
         let session = session
             .as_mut()
@@ -1080,40 +1084,42 @@ fn build_resampled_inpaint_patch(
 }
 
 fn run_lama_session(
-    session: &mut Session,
+    session: &mut FallbackSession,
     image: Tensor<f32>,
     mask: Tensor<f32>,
 ) -> Result<Vec<f32>> {
-    let outputs = session
-        .run(ort::inputs![image, mask])
-        .context("run LaMa ONNX inference")?;
-    let output = outputs
-        .values()
-        .next()
-        .context("LaMa returned no output tensors")?;
-    let (shape, values) = output
-        .try_extract_tensor::<f32>()
-        .context("read LaMa output tensor")?;
-    let shape = &**shape;
-    anyhow::ensure!(
-        shape.len() == 4
-            && shape[0] == 1
-            && shape[1] == 3
-            && shape[2] == LAMA_EDGE as i64
-            && shape[3] == LAMA_EDGE as i64,
-        "unexpected LaMa output shape {shape:?}"
-    );
-    anyhow::ensure!(
-        values.len() == (3 * LAMA_EDGE * LAMA_EDGE) as usize,
-        "LaMa returned {} values, expected {}",
-        values.len(),
-        3 * LAMA_EDGE * LAMA_EDGE
-    );
-    anyhow::ensure!(
-        values.iter().all(|value| value.is_finite()),
-        "LaMa output contains non-finite values"
-    );
-    Ok(values.to_vec())
+    session.run_with_fallback("LaMa ONNX inference", |ort_session, _accelerated| {
+        let outputs = ort_session
+            .run(ort::inputs![&image, &mask])
+            .context("run LaMa ONNX inference")?;
+        let output = outputs
+            .values()
+            .next()
+            .context("LaMa returned no output tensors")?;
+        let (shape, values) = output
+            .try_extract_tensor::<f32>()
+            .context("read LaMa output tensor")?;
+        let shape = &**shape;
+        anyhow::ensure!(
+            shape.len() == 4
+                && shape[0] == 1
+                && shape[1] == 3
+                && shape[2] == LAMA_EDGE as i64
+                && shape[3] == LAMA_EDGE as i64,
+            "unexpected LaMa output shape {shape:?}"
+        );
+        anyhow::ensure!(
+            values.len() == (3 * LAMA_EDGE * LAMA_EDGE) as usize,
+            "LaMa returned {} values, expected {}",
+            values.len(),
+            3 * LAMA_EDGE * LAMA_EDGE
+        );
+        anyhow::ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "LaMa output contains non-finite values"
+        );
+        Ok(values.to_vec())
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

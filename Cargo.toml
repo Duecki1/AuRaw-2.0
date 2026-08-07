@@ -71,7 +71,7 @@ naga_oil = { version = "=0.22.0", default-features = false }
 env_logger = { version = "=0.11.11", default-features = false, features = ["humantime", "regex"] }
 rfd = "=0.17.2"
 lcms2 = { version = "6.1.1", features = ["static"] }
-ort = { version = "=2.0.0-rc.12", default-features = false }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "api-18"] }
 
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"

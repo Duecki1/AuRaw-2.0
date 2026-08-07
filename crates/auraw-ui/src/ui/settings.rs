@@ -7,6 +7,30 @@ use eframe::egui::{self, ComboBox, Ui};
 
 pub struct Settings;
 
+fn diagnostics_snapshot_with_ai_backends() -> String {
+    let mut diagnostic_log = crate::diagnostics::snapshot();
+    let providers = auraw_ai::active_execution_providers();
+    if providers.is_empty() {
+        return diagnostic_log;
+    }
+
+    if !diagnostic_log.ends_with('\n') && !diagnostic_log.is_empty() {
+        diagnostic_log.push('\n');
+    }
+    diagnostic_log.push_str("AI execution providers (current):\n");
+    for provider in providers {
+        diagnostic_log.push_str("- ");
+        diagnostic_log.push_str(&provider.model_name);
+        diagnostic_log.push_str(": ");
+        diagnostic_log.push_str(&provider.active_provider);
+        if provider.degraded {
+            diagnostic_log.push_str(" [degraded/fallback]");
+        }
+        diagnostic_log.push('\n');
+    }
+    diagnostic_log
+}
+
 impl Settings {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
         let content_width = match layout {
@@ -469,7 +493,7 @@ impl Settings {
             );
             ui.add_space(4.0);
 
-            let mut diagnostic_log = crate::diagnostics::snapshot();
+            let mut diagnostic_log = diagnostics_snapshot_with_ai_backends();
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Copy log").clicked() {
                     #[cfg(target_os = "android")]
@@ -486,7 +510,7 @@ impl Settings {
                 }
                 if ui.button("Clear events").clicked() {
                     crate::diagnostics::clear();
-                    diagnostic_log = crate::diagnostics::snapshot();
+                    diagnostic_log = diagnostics_snapshot_with_ai_backends();
                 }
             });
 

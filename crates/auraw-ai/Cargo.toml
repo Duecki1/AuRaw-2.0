@@ -21,11 +21,20 @@ serde.workspace = true
 ureq.workspace = true
 zip.workspace = true
 
-[target.'cfg(not(target_os = "android"))'.dependencies]
-ort = { workspace = true, features = ["std", "load-dynamic", "api-18"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+ort = { workspace = true, features = ["load-dynamic", "directml", "cuda", "tensorrt"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { workspace = true, features = ["load-dynamic", "coreml"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ort = { workspace = true, features = ["load-dynamic", "cuda", "tensorrt", "rocm"] }
+
+[target.'cfg(all(not(target_os = "android"), not(any(target_os = "windows", target_os = "macos", target_os = "linux"))))'.dependencies]
+ort = { workspace = true, features = ["load-dynamic"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-ort = { workspace = true, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-18", "xnnpack"] }
+ort = { workspace = true, features = ["download-binaries", "copy-dylibs", "tls-rustls", "nnapi", "xnnpack"] }
 
 [dev-dependencies]
 pollster.workspace = true
