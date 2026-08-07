@@ -1,0 +1,20 @@
+[package]
+name = "auraw-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "AuRaw C ABI and Android JNI bridge"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+auraw-core.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity.workspace = true
+egui.workspace = true
+jni.workspace = true
+log.workspace = true

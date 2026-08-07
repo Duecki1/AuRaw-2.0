@@ -110,6 +110,7 @@ jobs:
           cargo build \
             --locked \
             --release \
+            --package auraw-ui \
             --target x86_64-pc-windows-gnu \
             --bin auraw
 

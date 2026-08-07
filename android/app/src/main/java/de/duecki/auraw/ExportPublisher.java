@@ -16,13 +16,12 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.Locale;
 
 /** Publishes completed exports through MediaStore or the Android 8/9 legacy path. */
 final class ExportPublisher {
     static final int WRITE_EXPORT_PERMISSION = 1002;
     private static final String EXPORT_RELATIVE_PATH =
-            Environment.DIRECTORY_PICTURES + "/AuRaw";
+            AndroidStorageContract.exportRelativePath(Environment.DIRECTORY_PICTURES);
 
     interface Callbacks {
         void onExportPublished(String location, String error);
@@ -71,7 +70,8 @@ final class ExportPublisher {
             } finally {
                 descriptor.close();
             }
-            String location = EXPORT_RELATIVE_PATH + "/" + displayName;
+            String location = AndroidStorageContract.exportLocation(
+                    Environment.DIRECTORY_PICTURES, displayName);
             return fd + "\t" + uri + "\t" + location;
         } finally {
             if (!transferred) {
@@ -103,11 +103,6 @@ final class ExportPublisher {
     /** Publishes a completed cache image to Pictures/AuRaw without showing a picker. */
     void publishImage(String cachedPath, String displayName, String mimeType) {
         activity.runOnUiThread(() -> beginPublishImage(cachedPath, displayName, mimeType));
-    }
-
-    /** Backward-compatible entry point retained for older native builds. */
-    void publishPng(String cachedPath, String displayName) {
-        publishImage(cachedPath, displayName, "image/png");
     }
 
     private void beginPublishImage(String cachedPath, String displayName, String mimeType) {
@@ -189,7 +184,8 @@ final class ExportPublisher {
                 throw new IllegalStateException("Android MediaStore could not publish the image");
             }
             published = true;
-            return EXPORT_RELATIVE_PATH + "/" + displayName;
+            return AndroidStorageContract.exportLocation(
+                    Environment.DIRECTORY_PICTURES, displayName);
         } finally {
             if (!published) {
                 resolver.delete(uri, null, null);
@@ -238,27 +234,11 @@ final class ExportPublisher {
     }
 
     private static String normalizeExportMimeType(String mimeType) {
-        return "image/jpeg".equalsIgnoreCase(mimeType) ? "image/jpeg" : "image/png";
+        return AndroidStorageContract.normalizeExportMimeType(mimeType);
     }
 
     private static String safeImageName(String requestedName, String mimeType) {
-        boolean jpeg = "image/jpeg".equalsIgnoreCase(mimeType);
-        String extension = jpeg ? ".jpg" : ".png";
-        String fallback = jpeg ? "AuRaw-export.jpg" : "AuRaw-export.png";
-        String name = requestedName == null ? fallback : requestedName;
-        name = name.replaceAll("[^A-Za-z0-9._-]", "_");
-        if (name.isEmpty()) {
-            name = fallback;
-        }
-        String lower = name.toLowerCase(Locale.ROOT);
-        if (jpeg) {
-            if (!lower.endsWith(".jpg") && !lower.endsWith(".jpeg")) {
-                name += extension;
-            }
-        } else if (!lower.endsWith(extension)) {
-            name += extension;
-        }
-        return name;
+        return AndroidStorageContract.safeImageName(requestedName, mimeType);
     }
 
     private static void copy(InputStream input, OutputStream output, long maximumBytes)

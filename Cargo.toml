@@ -1,61 +1,85 @@
-[package]
-name = "auraw"
+[workspace]
+resolver = "2"
+members = [
+    "xtask",
+    "crates/auraw-core",
+    "crates/auraw-gpu",
+    "crates/auraw-ai",
+    "crates/auraw-ui",
+    "crates/auraw-ffi",
+    "crates/auraw-cli",
+]
+default-members = [
+    "crates/auraw-core",
+    "crates/auraw-gpu",
+    "crates/auraw-ai",
+    "crates/auraw-ui",
+    "crates/auraw-ffi",
+    "crates/auraw-cli",
+]
+
+[workspace.metadata]
+android_ndk_version = "28.2.13676358"
+android_build_tools_version = "35.0.0"
+android_compile_sdk = 36
+android_min_sdk = 26
+android_target_sdk = 36
+libraw_revision = "0.22.1"
+lensfun_revision = "0.3.4"
+android_use_legacy_packaging = false
+
+[workspace.package]
 version = "2.0.0"
 edition = "2021"
 rust-version = "1.92.0"
 authors = ["Duecki <dueckis@dueckis.de>"]
-description = "A GPU-first RAW image editor in Rust"
 license = "GPL-3.0-or-later"
-default-run = "auraw"
+repository = "https://github.com/duecki/AuRaw"
 
-[lib]
-crate-type = ["cdylib", "rlib"]
+[workspace.dependencies]
+auraw-core = { path = "crates/auraw-core" }
+auraw-gpu = { path = "crates/auraw-gpu" }
+auraw-ai = { path = "crates/auraw-ai" }
+auraw-ui = { path = "crates/auraw-ui" }
+auraw-ffi = { path = "crates/auraw-ffi" }
+auraw-cli = { path = "crates/auraw-cli" }
 
-[dependencies]
-bytemuck = { version = "1.16", features = ["derive"] }
-half = "2.7"
-rayon = "1.10"
-log = "0.4"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-png = "0.18"
-memmap2 = "0.9"
 anyhow = "1.0"
 base64 = "0.22"
-ureq = { version = "3.1", default-features = false, features = ["rustls"] }
+bytemuck = { version = "1.16", features = ["derive"] }
+half = "2.7"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+log = "0.4"
+memmap2 = "0.9"
+png = "0.18"
+pollster = "0.4"
+rayon = "1.10"
 ring = "0.17.14"
-zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+
+eframe = { version = "0.35", default-features = false }
+egui = "0.35"
 egui-phosphor = "0.13"
+egui-wgpu = "0.35"
+wgpu = "29"
+naga = { version = "29", features = ["wgsl-in"] }
+naga_oil = { version = "=0.22.0", default-features = false }
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
-eframe = { version = "0.35", default-features = false, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }
-env_logger = "0.11"
-rfd = "0.15"
-pollster = "0.4"
+env_logger = { version = "=0.11.11", default-features = false, features = ["humantime", "regex"] }
+rfd = "=0.17.2"
 lcms2 = { version = "6.1.1", features = ["static"] }
-# Exact RC pin: see DEPENDENCIES.md. Replace with stable 2.x when the required APIs are released.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-18"] }
+ort = { version = "=2.0.0-rc.12", default-features = false }
 
-
-[target.'cfg(target_os = "android")'.dependencies]
-eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "android-native-activity"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 jni = "0.22"
-# Exact RC pin: see DEPENDENCIES.md. Replace with stable 2.x when the required APIs are released.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-18", "xnnpack"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
 
-# THIS SECTION IS REQUIRED FOR build.rs:
-[build-dependencies]
-bindgen = "0.70"
+bindgen = "=0.72.1"
 pkg-config = "0.3"
-
-[dev-dependencies]
-naga = { version = "29", features = ["wgsl-in"] }
 
 [profile.release]
 opt-level = 3

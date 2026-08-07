@@ -1,62 +1,63 @@
-"""Executable mathematical references for selected processing policies.
+"""Executable regression gates for AuRaw-owned color-science math.
 
-The formulas here are independent Python references, not executions of the Rust
-or WGSL implementations. They can catch policy regressions but cannot detect
-shader drift; Naga compilation and rendered GPU comparisons remain required.
+All values are evaluated by ``auraw-regression-render math-eval``. The tests
+therefore exercise the canonical Rust math shared with the pipeline instead of
+maintaining independent Python translations of shader formulas.
 """
 
 from __future__ import annotations
 
-import math
+import numpy as np
 
-
-def camera_opponent(rgb: tuple[float, float, float]) -> tuple[float, float, float]:
-    r, g, b = rgb
-    signal = 0.25 * r + 0.50 * g + 0.25 * b
-    return signal, r - g, b - g
-
-
-def camera_opponent_inverse(values: tuple[float, float, float]) -> tuple[float, float, float]:
-    signal, rg, bg = values
-    g = signal - 0.25 * (rg + bg)
-    return g + rg, g, g + bg
-
-
-def display_black_toe(y: float, amount: float) -> float:
-    if y <= 0.0 or abs(amount) < 1e-7:
-        return y
-    amount = max(-1.0, min(1.0, amount))
-    guard_t = max(0.0, min(1.0, (y - 0.35) / 0.65))
-    hdr_guard = 1.0 - guard_t * guard_t * (3.0 - 2.0 * guard_t)
-    if amount >= 0.0:
-        offset = amount * 1.75 * (0.08 + 0.92 * 2.0 ** (-y / 0.035)) * hdr_guard
-    else:
-        deep_t = max(0.0, min(1.0, (y - 0.012) / 0.018))
-        deep = 1.0 - deep_t * deep_t * (3.0 - 2.0 * deep_t)
-        tail = 0.10 + 2.35 * 2.0 ** (-y / 0.070)
-        offset = -(-amount) * (10.50 * deep + tail) * hdr_guard
-    return y * 2.0**offset
+from tests.auraw_math_eval import evaluate_math
 
 
 def test_camera_space_opponent_basis_is_exactly_reversible() -> None:
-    samples = [
-        (0.0, 0.0, 0.0),
-        (0.1, 0.2, 0.3),
-        (-0.05, 0.12, 0.9),
-        (1.4, 0.4, -0.2),
-    ]
-    for sample in samples:
-        reconstructed = camera_opponent_inverse(camera_opponent(sample))
-        assert all(math.isclose(a, b, abs_tol=1e-12) for a, b in zip(sample, reconstructed))
+    samples = np.asarray(
+        [
+            (0.0, 0.0, 0.0),
+            (0.1, 0.2, 0.3),
+            (-0.05, 0.12, 0.9),
+            (1.4, 0.4, -0.2),
+        ],
+        dtype=np.float32,
+    )
+    reconstructed = evaluate_math("camera-opponent-roundtrip", samples)[:, :3]
+    assert np.allclose(reconstructed, samples, rtol=0.0, atol=2e-7)
+
+
+def test_rec2020_oklab_basis_is_reversible() -> None:
+    samples = np.asarray(
+        [
+            (0.0, 0.0, 0.0),
+            (0.1, 0.2, 0.3),
+            (-0.05, 0.12, 0.9),
+            (1.4, 0.4, -0.2),
+        ],
+        dtype=np.float32,
+    )
+    lab = evaluate_math("rec2020-to-oklab", samples)[:, :3]
+    reconstructed = evaluate_math("oklab-to-rec2020", lab)[:, :3]
+    assert np.allclose(reconstructed, samples, rtol=2e-5, atol=2e-5)
 
 
 def test_black_toe_is_continuous_and_monotone_above_zero() -> None:
-    for amount in (-1.0, -0.5, 0.5, 1.0):
-        previous = 0.0
-        for i in range(1, 100_001):
-            y = i / 100_000
-            mapped = display_black_toe(y, amount)
-            assert mapped >= previous - 1e-12
-            previous = mapped
-        epsilon = 1e-12
-        assert abs(display_black_toe(epsilon, amount) - 0.0) < 1e-8
+    y = np.arange(1, 100_001, dtype=np.float32) / np.float32(100_000.0)
+    amounts = np.asarray((-1.0, -0.5, 0.5, 1.0), dtype=np.float32)
+    samples = np.column_stack(
+        (
+            np.tile(y, amounts.size),
+            np.repeat(amounts, y.size),
+        )
+    )
+    mapped = evaluate_math("display-black-toe-amount", samples)[:, 0].reshape(
+        amounts.size, y.size
+    )
+    for curve in mapped:
+        assert np.all(np.diff(curve.astype(np.float64)) >= 0.0)
+
+    epsilon_samples = np.column_stack(
+        (np.full(amounts.shape, 1e-12, dtype=np.float32), amounts)
+    )
+    epsilon_output = evaluate_math("display-black-toe-amount", epsilon_samples)[:, 0]
+    assert np.all(np.abs(epsilon_output.astype(np.float64)) < 1e-8)
