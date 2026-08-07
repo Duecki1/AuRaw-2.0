@@ -11,6 +11,7 @@ build = "build.rs"
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+flate2.workspace = true
 half.workspace = true
 image.workspace = true
 log.workspace = true
