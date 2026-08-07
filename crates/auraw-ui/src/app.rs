@@ -911,6 +911,7 @@ pub struct AurawApp {
     inpaint_source_cache: Option<MaskRgbImage>,
     inpaint_pending_source: Option<PreparedInpaintSource>,
     inpaint_active_dabs: Option<Vec<crate::pipeline::BrushDab>>,
+    inpaint_replace_index: Option<usize>,
     inpaint_revision: u64,
     inpaint_job_document_id: u64,
     inpaint_job_generation: u64,
