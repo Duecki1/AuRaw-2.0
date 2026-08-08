@@ -60,7 +60,7 @@ impl Sidebar {
 
     fn show_masks(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
         if app.ai_masks_need_update() {
-            ui.group(|ui| {
+            crate::ui::theme::card_frame(ui).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
                     "The image used by existing masks changed. Refresh masks to rebuild content-aware masks and mask sources without deleting your edits.",
@@ -971,8 +971,7 @@ impl Sidebar {
         candidate.masks.insert(insert_at, mask);
         candidate.selected_mask = Some(insert_at);
         candidate.selected_component = Some(0);
-        if let Err(error) =
-            crate::sidecar::preflight_mask_change(&candidate, &app.inpaint_strokes)
+        if let Err(error) = crate::sidecar::preflight_mask_change(&candidate, &app.inpaint_strokes)
         {
             app.report_mask_persistence_limit("Mask-group copy", &error);
             return false;
@@ -1046,8 +1045,7 @@ impl Sidebar {
             .insert(insert_at, component);
         candidate.selected_mask = Some(mask_index);
         candidate.selected_component = Some(insert_at);
-        if let Err(error) =
-            crate::sidecar::preflight_mask_change(&candidate, &app.inpaint_strokes)
+        if let Err(error) = crate::sidecar::preflight_mask_change(&candidate, &app.inpaint_strokes)
         {
             app.report_mask_persistence_limit("Sub-mask copy", &error);
             return false;
@@ -1318,7 +1316,7 @@ impl Sidebar {
                     if crate::ui::icons::phosphor_icon_button(
                         ui,
                         egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                        egui::vec2(28.0, 22.0),
+                        crate::ui::theme::toolbar_icon_size(),
                         "Reset local adjustments",
                     )
                     .clicked()
@@ -1469,7 +1467,7 @@ impl Sidebar {
                             if crate::ui::icons::phosphor_icon_button(
                                 ui,
                                 egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                                egui::vec2(28.0, 22.0),
+                                crate::ui::theme::toolbar_icon_size(),
                                 "Reset local adjustments",
                             )
                             .clicked()
@@ -1543,16 +1541,11 @@ impl Sidebar {
         mask: &mut crate::pipeline::LocalMask,
         component_index: usize,
         brush_mode: &mut BrushMode,
-        subject_controls: (
-            &mut bool,
-            &mut crate::ai_masks::BiRefNetQuality,
-            bool,
-        ),
+        subject_controls: (&mut bool, &mut crate::ai_masks::BiRefNetQuality, bool),
         refinement_controls: (&mut bool, &mut f32, &mut f32, &mut f32, &mut bool),
         request_object: &mut bool,
     ) -> bool {
-        let (request_subject, birefnet_quality, birefnet_quality_change_enabled) =
-            subject_controls;
+        let (request_subject, birefnet_quality, birefnet_quality_change_enabled) = subject_controls;
         let (
             refinement_active,
             refinement_size,
@@ -1575,7 +1568,7 @@ impl Sidebar {
         };
 
         ui.add_space(4.0);
-        ui.group(|ui| {
+        crate::ui::theme::card_frame(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 ui.strong(component.name.as_str());
@@ -1609,8 +1602,28 @@ impl Sidebar {
                     dabs,
                 } => {
                     ui.horizontal(|ui| {
-                        ui.selectable_value(brush_mode, BrushMode::Paint, "Brush");
-                        ui.selectable_value(brush_mode, BrushMode::Erase, "Eraser");
+                        let width = ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5)
+                            .max(1.0);
+                        if crate::ui::theme::segmented_button(
+                            ui,
+                            "Brush",
+                            *brush_mode == BrushMode::Paint,
+                            width,
+                        )
+                        .clicked()
+                        {
+                            *brush_mode = BrushMode::Paint;
+                        }
+                        if crate::ui::theme::segmented_button(
+                            ui,
+                            "Eraser",
+                            *brush_mode == BrushMode::Erase,
+                            width,
+                        )
+                        .clicked()
+                        {
+                            *brush_mode = BrushMode::Erase;
+                        }
                     });
                     geometry_changed |= adjustment_slider(
                         ui,
@@ -1664,7 +1677,7 @@ impl Sidebar {
                     if crate::ui::icons::phosphor_icon_button(
                         ui,
                         egui_phosphor::regular::ERASER,
-                        egui::vec2(28.0, 22.0),
+                        crate::ui::theme::toolbar_icon_size(),
                         "Clear brush strokes",
                     )
                     .clicked()
@@ -1719,12 +1732,34 @@ impl Sidebar {
                         }
                     });
                     if *refinement_active {
-                        ui.group(|ui| {
+                        crate::ui::theme::card_frame(ui).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.strong("Subject refinement");
                             ui.horizontal(|ui| {
-                                ui.selectable_value(brush_mode, BrushMode::Paint, "Add subject");
-                                ui.selectable_value(brush_mode, BrushMode::Erase, "Subtract subject");
+                                let width = ((ui.available_width()
+                                    - ui.spacing().item_spacing.x)
+                                    * 0.5)
+                                    .max(1.0);
+                                if crate::ui::theme::segmented_button(
+                                    ui,
+                                    "Add subject",
+                                    *brush_mode == BrushMode::Paint,
+                                    width,
+                                )
+                                .clicked()
+                                {
+                                    *brush_mode = BrushMode::Paint;
+                                }
+                                if crate::ui::theme::segmented_button(
+                                    ui,
+                                    "Subtract subject",
+                                    *brush_mode == BrushMode::Erase,
+                                    width,
+                                )
+                                .clicked()
+                                {
+                                    *brush_mode = BrushMode::Erase;
+                                }
                             });
                             adjustment_slider(
                                 ui,
@@ -1760,7 +1795,7 @@ impl Sidebar {
                             if crate::ui::icons::phosphor_icon_button(
                                 ui,
                                 egui_phosphor::regular::ERASER,
-                                egui::vec2(28.0, 22.0),
+                                    crate::ui::theme::toolbar_icon_size(),
                                 "Clear subject refinement",
                             )
                             .clicked()
@@ -1770,9 +1805,13 @@ impl Sidebar {
                         });
                     }
                     ui.add_enabled_ui(birefnet_quality_change_enabled, |ui| {
-                        egui::ComboBox::from_label("Subject quality")
-                            .selected_text(birefnet_quality.label())
-                            .show_ui(ui, |ui| {
+                        crate::ui::theme::form_combo(
+                            ui,
+                            "Subject quality",
+                            "mask-subject-quality",
+                            birefnet_quality.label(),
+                            150.0,
+                            |ui| {
                                 for quality in crate::ai_masks::BiRefNetQuality::ALL {
                                     ui.selectable_value(
                                         birefnet_quality,
@@ -1780,7 +1819,8 @@ impl Sidebar {
                                         quality.label(),
                                     );
                                 }
-                            });
+                            },
+                        );
                     });
                     ui.add(
                         egui::Label::new(birefnet_quality.model().explanation)
@@ -1879,7 +1919,7 @@ impl Sidebar {
                         if crate::ui::icons::phosphor_icon_button(
                             ui,
                             egui_phosphor::regular::ARROW_CLOCKWISE,
-                            egui::vec2(28.0, 22.0),
+                            crate::ui::theme::toolbar_icon_size(),
                             "Recalculate object selection",
                         )
                         .clicked()
@@ -1889,7 +1929,7 @@ impl Sidebar {
                         if crate::ui::icons::phosphor_icon_button(
                             ui,
                             egui_phosphor::regular::X,
-                            egui::vec2(28.0, 22.0),
+                            crate::ui::theme::toolbar_icon_size(),
                             "Clear object selection",
                         )
                         .clicked()
@@ -2441,6 +2481,11 @@ impl Sidebar {
     ) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
+            let spacing = ui.spacing().item_spacing.x;
+            let segment_width =
+                ((ui.available_width() - crate::ui::theme::TOOLBAR_ICON_EDGE - spacing * 4.0)
+                    / 4.0)
+                    .max(32.0);
             for (tab, label, color) in [
                 (ToneCurveTab::Rgb, "RGB", egui::Color32::WHITE),
                 (ToneCurveTab::Red, "R", egui::Color32::from_rgb(238, 84, 84)),
@@ -2455,13 +2500,22 @@ impl Sidebar {
                     egui::Color32::from_rgb(88, 150, 245),
                 ),
             ] {
-                ui.selectable_value(selected_tab, tab, egui::RichText::new(label).color(color));
+                if crate::ui::theme::segmented_button(
+                    ui,
+                    egui::RichText::new(label).color(color),
+                    *selected_tab == tab,
+                    segment_width,
+                )
+                .clicked()
+                {
+                    *selected_tab = tab;
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
                     ui,
                     egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                    egui::vec2(28.0, 22.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Reset the selected tone curve",
                 )
                 .clicked()

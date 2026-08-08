@@ -70,27 +70,27 @@ impl Sidebar {
             ui.add_enabled_ui(
                 state.catalog.available && !makers.is_empty() && !lens_correction_busy,
                 |ui| {
-                ui.label("Brand");
-                egui::ComboBox::from_id_salt("lens-correction-brand")
-                    .selected_text(if state.selected_maker.is_empty() {
-                        if state.selected_model.is_empty() {
-                            "Select a brand"
+                    ui.label("Brand");
+                    egui::ComboBox::from_id_salt("lens-correction-brand")
+                        .selected_text(if state.selected_maker.is_empty() {
+                            if state.selected_model.is_empty() {
+                                "Select a brand"
+                            } else {
+                                "Unknown"
+                            }
                         } else {
-                            "Unknown"
-                        }
-                    } else {
-                        state.selected_maker.as_str()
-                    })
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for maker in &makers {
-                            ui.selectable_value(
-                                &mut state.selected_maker,
-                                maker.clone(),
-                                if maker.is_empty() { "Unknown" } else { maker },
-                            );
-                        }
-                    });
+                            state.selected_maker.as_str()
+                        })
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for maker in &makers {
+                                ui.selectable_value(
+                                    &mut state.selected_maker,
+                                    maker.clone(),
+                                    if maker.is_empty() { "Unknown" } else { maker },
+                                );
+                            }
+                        });
                 },
             );
             let mut selection_changed = state.selected_maker != previous_maker;
@@ -108,19 +108,23 @@ impl Sidebar {
             ui.add_enabled_ui(
                 state.catalog.available && !models.is_empty() && !lens_correction_busy,
                 |ui| {
-                ui.label("Lens");
-                egui::ComboBox::from_id_salt("lens-correction-model")
-                    .selected_text(if state.selected_model.is_empty() {
-                        "Select a lens"
-                    } else {
-                        state.selected_model.as_str()
-                    })
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for model in &models {
-                            ui.selectable_value(&mut state.selected_model, model.clone(), model);
-                        }
-                    });
+                    ui.label("Lens");
+                    egui::ComboBox::from_id_salt("lens-correction-model")
+                        .selected_text(if state.selected_model.is_empty() {
+                            "Select a lens"
+                        } else {
+                            state.selected_model.as_str()
+                        })
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for model in &models {
+                                ui.selectable_value(
+                                    &mut state.selected_model,
+                                    model.clone(),
+                                    model,
+                                );
+                            }
+                        });
                 },
             );
             selection_changed |= state.selected_model != previous_model;
@@ -227,6 +231,11 @@ impl Sidebar {
         let mut changed = false;
         Self::adjustment_section(ui, "Tone Curve", true, foldable, |ui| {
             ui.horizontal(|ui| {
+                let spacing = ui.spacing().item_spacing.x;
+                let segment_width =
+                    ((ui.available_width() - crate::ui::theme::TOOLBAR_ICON_EDGE - spacing * 4.0)
+                        / 4.0)
+                        .max(32.0);
                 for (tab, label, color) in [
                     (ToneCurveTab::Rgb, "RGB", egui::Color32::WHITE),
                     (ToneCurveTab::Red, "R", egui::Color32::from_rgb(238, 84, 84)),
@@ -242,13 +251,22 @@ impl Sidebar {
                     ),
                 ] {
                     let text = egui::RichText::new(label).color(color);
-                    ui.selectable_value(selected_tab, tab, text);
+                    if crate::ui::theme::segmented_button(
+                        ui,
+                        text,
+                        *selected_tab == tab,
+                        segment_width,
+                    )
+                    .clicked()
+                    {
+                        *selected_tab = tab;
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::ui::icons::phosphor_icon_button(
                         ui,
                         egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                        egui::vec2(28.0, 22.0),
+                        crate::ui::theme::toolbar_icon_size(),
                         "Reset the selected tone curve",
                     )
                     .clicked()
@@ -325,20 +343,19 @@ impl Sidebar {
                         .is_some_and(|candidate| matches_current(candidate))
                 }) {
                     preset.name.clone()
-                } else if let Some(temperature) =
-                    [2500.0, 3200.0, 4500.0, 6000.0, 8500.0]
-                        .into_iter()
-                        .find(|temperature| {
-                            raw.white_balance_offsets_from_temperature_tint(*temperature, 1.0)
-                                .is_some_and(|candidate| matches_current(candidate))
-                        })
+                } else if let Some(temperature) = [2500.0, 3200.0, 4500.0, 6000.0, 8500.0]
+                    .into_iter()
+                    .find(|temperature| {
+                        raw.white_balance_offsets_from_temperature_tint(*temperature, 1.0)
+                            .is_some_and(|candidate| matches_current(candidate))
+                    })
                 {
                     format!("{temperature:.0}K")
                 } else {
                     "user modified".to_owned()
                 };
                 ui.horizontal(|ui| {
-                    let picker_width = 34.0;
+                    let picker_width = crate::ui::theme::TOOLBAR_ICON_EDGE;
                     egui::ComboBox::from_id_salt("global-white-balance-preset")
                         .selected_text(selection)
                         .width((ui.available_width() - picker_width).max(120.0))
@@ -357,9 +374,12 @@ impl Sidebar {
                                     .strong()
                                     .color(ui.visuals().weak_text_color()),
                             );
-                            if ui.selectable_label(false, "camera reference (D65)").clicked() {
-                                if let Some((temperature, tint)) = raw
-                                    .white_balance_offsets_from_temperature_tint(6504.0, 1.0)
+                            if ui
+                                .selectable_label(false, "camera reference (D65)")
+                                .clicked()
+                            {
+                                if let Some((temperature, tint)) =
+                                    raw.white_balance_offsets_from_temperature_tint(6504.0, 1.0)
                                 {
                                     exposure.temperature = temperature;
                                     exposure.tint = tint;
@@ -418,9 +438,12 @@ impl Sidebar {
                         });
                     let picker = ui
                         .add_sized(
-                            [picker_width, 24.0],
-                            egui::Button::new(egui_phosphor::regular::EYEDROPPER)
-                                .selected(*white_balance_picker_active),
+                            [picker_width, crate::ui::theme::CONTROL_HEIGHT],
+                            egui::Button::new(
+                                egui::RichText::new(egui_phosphor::regular::EYEDROPPER)
+                                    .size(crate::ui::theme::TOOLBAR_ICON_EDGE * 0.55),
+                            )
+                            .selected(*white_balance_picker_active),
                         )
                         .on_hover_text("Pick a neutral gray or white area in the image");
                     if picker.clicked() {
@@ -614,9 +637,13 @@ impl Sidebar {
                     Some("Higher values protect edges and microtexture more strongly; lower values permit smoother denoising."),
                 );
                 let previous_quality = exposure.denoise_quality;
-                egui::ComboBox::from_label("Denoise Quality")
-                    .selected_text(exposure.denoise_quality.label())
-                    .show_ui(ui, |ui| {
+                crate::ui::theme::form_combo(
+                    ui,
+                    "Denoise quality",
+                    "develop-denoise-quality",
+                    exposure.denoise_quality.label(),
+                    150.0,
+                    |ui| {
                         ui.selectable_value(
                             &mut exposure.denoise_quality,
                             DenoiseQuality::Fast,
@@ -632,7 +659,8 @@ impl Sidebar {
                             DenoiseQuality::High,
                             DenoiseQuality::High.label(),
                         );
-                    });
+                    },
+                );
                 changed |= previous_quality != exposure.denoise_quality;
                 ui.label(
                     egui::RichText::new(
@@ -901,9 +929,13 @@ impl Sidebar {
             );
 
             let old_method = exposure.sigmoid.color_processing;
-            egui::ComboBox::from_label("Color processing")
-                .selected_text(exposure.sigmoid.color_processing.label())
-                .show_ui(ui, |ui| {
+            crate::ui::theme::form_combo(
+                ui,
+                "Color processing",
+                "develop-sigmoid-color-processing",
+                exposure.sigmoid.color_processing.label(),
+                150.0,
+                |ui| {
                     ui.selectable_value(
                         &mut exposure.sigmoid.color_processing,
                         SigmoidColorProcessing::PerChannel,
@@ -914,7 +946,8 @@ impl Sidebar {
                         SigmoidColorProcessing::RgbRatio,
                         SigmoidColorProcessing::RgbRatio.label(),
                     );
-                });
+                },
+            );
             changed |= old_method != exposure.sigmoid.color_processing;
 
             if exposure.sigmoid.color_processing == SigmoidColorProcessing::PerChannel {
@@ -945,9 +978,13 @@ impl Sidebar {
                 None,
             );
             let previous_mode = exposure.demosaic_mode;
-            egui::ComboBox::from_label("Demosaic")
-                .selected_text(exposure.demosaic_mode.label())
-                .show_ui(ui, |ui| {
+            crate::ui::theme::form_combo(
+                ui,
+                "Demosaic",
+                "develop-demosaic-mode",
+                exposure.demosaic_mode.label(),
+                170.0,
+                |ui| {
                     ui.selectable_value(
                         &mut exposure.demosaic_mode,
                         DemosaicMode::Reference,
@@ -963,7 +1000,8 @@ impl Sidebar {
                         DemosaicMode::Dual,
                         DemosaicMode::Dual.label(),
                     );
-                });
+                },
+            );
             changed |= previous_mode != exposure.demosaic_mode;
 
             if exposure.demosaic_mode == DemosaicMode::FrequencyDomainChroma {

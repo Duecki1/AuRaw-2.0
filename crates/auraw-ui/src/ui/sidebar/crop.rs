@@ -12,11 +12,12 @@ impl Sidebar {
         // friendliness is handled by egui's platform spacing and by the larger
         // invisible crop handles in the preview, not by oversized visible widgets.
         ui.horizontal(|ui| {
+            ui.strong("Crop geometry");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
                     ui,
                     egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                    egui::vec2(28.0, 22.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Reset crop and geometry",
                 )
                 .clicked()
@@ -37,9 +38,13 @@ impl Sidebar {
             app.crop_constraint_reference = Some(app.geometry.crop);
         }
         let previous_aspect = app.geometry.aspect_ratio;
-        egui::ComboBox::from_label("Aspect ratio")
-            .selected_text(app.geometry.aspect_ratio.label())
-            .show_ui(ui, |ui| {
+        crate::ui::theme::form_combo(
+            ui,
+            "Aspect ratio",
+            "crop-aspect-ratio",
+            app.geometry.aspect_ratio.label(),
+            150.0,
+            |ui| {
                 for aspect in [
                     CropAspectRatio::Free,
                     CropAspectRatio::Original,
@@ -53,7 +58,8 @@ impl Sidebar {
                 ] {
                     ui.selectable_value(&mut app.geometry.aspect_ratio, aspect, aspect.label());
                 }
-            });
+            },
+        );
         if app.geometry.aspect_ratio != previous_aspect {
             Self::apply_crop_aspect(app, source_dimensions.0, source_dimensions.1);
             app.crop_constraint_reference = Some(app.geometry.crop);

@@ -7,12 +7,16 @@ pub(crate) fn export_settings_controls(
 ) {
     #[cfg(target_os = "android")]
     let _ = fallback_picker_directory;
-    ui.group(|ui| {
+    crate::ui::theme::card_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.strong("Image sizing");
-        egui::ComboBox::from_label("Resize to fit")
-            .selected_text(settings.resize_mode.label())
-            .show_ui(ui, |ui| {
+        crate::ui::theme::form_combo(
+            ui,
+            "Resize to fit",
+            "export-resize-mode",
+            settings.resize_mode.label(),
+            150.0,
+            |ui| {
                 for mode in [
                     ExportResizeMode::Original,
                     ExportResizeMode::LongEdge,
@@ -23,7 +27,8 @@ pub(crate) fn export_settings_controls(
                 ] {
                     ui.selectable_value(&mut settings.resize_mode, mode, mode.label());
                 }
-            });
+            },
+        );
 
         match settings.resize_mode {
             ExportResizeMode::Original => {
@@ -84,13 +89,17 @@ pub(crate) fn export_settings_controls(
         }
     });
 
-    ui.add_space(6.0);
-    ui.group(|ui| {
+    ui.add_space(crate::ui::theme::CARD_GAP);
+    crate::ui::theme::card_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.strong("Precision");
-        egui::ComboBox::from_label("Bit depth")
-            .selected_text(settings.bit_depth.label())
-            .show_ui(ui, |ui| {
+        crate::ui::theme::form_combo(
+            ui,
+            "Bit depth",
+            "export-bit-depth",
+            settings.bit_depth.label(),
+            150.0,
+            |ui| {
                 for depth in [
                     ExportBitDepth::Eight,
                     ExportBitDepth::Sixteen,
@@ -98,7 +107,8 @@ pub(crate) fn export_settings_controls(
                 ] {
                     ui.selectable_value(&mut settings.bit_depth, depth, depth.label());
                 }
-            });
+            },
+        );
         ui.label(
             egui::RichText::new(match settings.bit_depth {
                 ExportBitDepth::Eight => "Standard delivery. JPEG is always 8-bit.",
@@ -114,17 +124,21 @@ pub(crate) fn export_settings_controls(
         );
     });
 
-    ui.add_space(6.0);
-    ui.group(|ui| {
+    ui.add_space(crate::ui::theme::CARD_GAP);
+    crate::ui::theme::card_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.strong("Color profile");
-        egui::ComboBox::from_label("Output profile")
-            .selected_text(if settings.bit_depth.is_float() {
+        crate::ui::theme::form_combo(
+            ui,
+            "Output profile",
+            "export-output-profile",
+            if settings.bit_depth.is_float() {
                 "Linear Rec.2020"
             } else {
                 settings.color_profile.label()
-            })
-            .show_ui(ui, |ui| {
+            },
+            150.0,
+            |ui| {
                 ui.add_enabled_ui(!settings.bit_depth.is_float(), |ui| {
                     ui.selectable_value(
                         &mut settings.color_profile,
@@ -138,7 +152,8 @@ pub(crate) fn export_settings_controls(
                         "Custom ICC",
                     );
                 });
-            });
+            },
+        );
 
         if settings.bit_depth.is_float() {
             ui.label(
@@ -150,8 +165,8 @@ pub(crate) fn export_settings_controls(
             #[cfg(not(target_os = "android"))]
             {
                 if ui.button("Choose ICC profile…").clicked() {
-                    let mut dialog = rfd::FileDialog::new()
-                        .add_filter("ICC profiles", &["icc", "icm"]);
+                    let mut dialog =
+                        rfd::FileDialog::new().add_filter("ICC profiles", &["icc", "icm"]);
                     let selected_directory = settings
                         .custom_icc_path
                         .as_deref()
@@ -184,8 +199,8 @@ pub(crate) fn export_settings_controls(
         }
     });
 
-    ui.add_space(6.0);
-    ui.group(|ui| {
+    ui.add_space(crate::ui::theme::CARD_GAP);
+    crate::ui::theme::card_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.strong("Metadata");
         ui.checkbox(&mut settings.keep_metadata, "Keep metadata")
@@ -194,8 +209,8 @@ pub(crate) fn export_settings_controls(
             );
     });
 
-    ui.add_space(6.0);
-    ui.group(|ui| {
+    ui.add_space(crate::ui::theme::CARD_GAP);
+    crate::ui::theme::card_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.strong("JPEG");
         adjustment_slider(
@@ -294,7 +309,10 @@ impl Sidebar {
                 let action_width = ui.available_width();
                 let png_response = ui
                     .add_enabled_ui(png_enabled, |ui| {
-                        ui.add_sized([action_width, 30.0], egui::Button::new("Export PNG…"))
+                        ui.add_sized(
+                            [action_width, crate::ui::theme::CONTROL_HEIGHT],
+                            egui::Button::new("Export PNG…"),
+                        )
                     })
                     .inner;
                 if png_response.clicked() {
@@ -303,7 +321,10 @@ impl Sidebar {
                 ui.add_space(4.0);
                 let tiff_response = ui
                     .add_enabled_ui(export_enabled && profile_ready, |ui| {
-                        ui.add_sized([action_width, 30.0], egui::Button::new("Export TIFF…"))
+                        ui.add_sized(
+                            [action_width, crate::ui::theme::CONTROL_HEIGHT],
+                            egui::Button::new("Export TIFF…"),
+                        )
                     })
                     .inner;
                 if tiff_response.clicked() {
@@ -315,7 +336,10 @@ impl Sidebar {
                     && app.export_settings.bit_depth != ExportBitDepth::Float32Linear;
                 let jpeg_response = ui
                     .add_enabled_ui(jpeg_enabled, |ui| {
-                        ui.add_sized([action_width, 30.0], egui::Button::new("Export JPEG…"))
+                        ui.add_sized(
+                            [action_width, crate::ui::theme::CONTROL_HEIGHT],
+                            egui::Button::new("Export JPEG…"),
+                        )
                     })
                     .inner;
                 if jpeg_response.clicked() {
