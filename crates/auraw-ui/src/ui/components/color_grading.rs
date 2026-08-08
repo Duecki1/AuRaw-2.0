@@ -21,7 +21,7 @@ pub fn color_grading_editor(
             if crate::ui::icons::phosphor_icon_button(
                 ui,
                 egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                egui::vec2(28.0, 22.0),
+                crate::ui::theme::toolbar_icon_size(),
                 "Reset all color grading",
             )
             .clicked()
@@ -33,6 +33,8 @@ pub fn color_grading_editor(
     });
 
     ui.horizontal_wrapped(|ui| {
+        let segment_width =
+            ((ui.available_width() - ui.spacing().item_spacing.x * 3.0) / 4.0).max(64.0);
         for (tab, label, tooltip) in [
             (
                 ColorGradeTab::Shadows,
@@ -51,8 +53,12 @@ pub fn color_grading_editor(
             ),
             (ColorGradeTab::Global, "Global", "Grade all tones uniformly"),
         ] {
-            ui.selectable_value(selected, tab, label)
-                .on_hover_text(tooltip);
+            if crate::ui::theme::segmented_button(ui, label, *selected == tab, segment_width)
+                .on_hover_text(tooltip)
+                .clicked()
+            {
+                *selected = tab;
+            }
         }
     });
     ui.add_space(4.0);
@@ -100,7 +106,7 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
             if crate::ui::icons::phosphor_icon_button(
                 ui,
                 egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                egui::vec2(28.0, 22.0),
+                crate::ui::theme::toolbar_icon_size(),
                 "Reset this color wheel",
             )
             .clicked()

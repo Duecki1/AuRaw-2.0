@@ -67,7 +67,7 @@ impl MaskCardSize {
 
 impl Sidebar {
     const SCROLLBAR_GUTTER: f32 = 18.0;
-    // 42 px tool buttons plus balanced outside breathing room. The panel frame
+    // 40 px tool buttons plus balanced outside breathing room. The panel frame
     // also contributes its normal inset, so this prevents selected buttons from
     // visually touching the rail's left/right edges.
     #[cfg(not(target_os = "android"))]
@@ -77,6 +77,7 @@ impl Sidebar {
     const MASK_THUMBNAIL_EDGE: u32 = 64;
     pub(crate) const VERTICAL_MASK_STRIP_HEIGHT: f32 = 92.0;
     pub(crate) const HORIZONTAL_MASK_STRIP_WIDTH: f32 = 92.0;
+    const CONTEXT_TAB_WIDTH: f32 = 64.0;
 }
 
 include!("sidebar/navigation.rs");

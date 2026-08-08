@@ -3,7 +3,7 @@ use crate::pipeline::{CameraProfileMode, HighlightReconstructionMethod};
 use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::maximum_thumbnail_worker_count;
-use eframe::egui::{self, ComboBox, Ui};
+use eframe::egui::{self, Ui};
 
 pub struct Settings;
 
@@ -33,13 +33,26 @@ fn diagnostics_snapshot_with_ai_backends() -> String {
 
 impl Settings {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
+        let available_width = ui.available_width().max(1.0);
         let content_width = match layout {
-            ScreenLayout::Horizontal => ui.available_width().min(720.0),
-            ScreenLayout::Vertical => ui.available_width(),
+            ScreenLayout::Horizontal => available_width.min(760.0),
+            ScreenLayout::Vertical => available_width,
         }
         .max(1.0);
-        ui.set_width(content_width);
-        ui.set_max_width(content_width);
+        let left_margin = ((available_width - content_width) * 0.5).max(0.0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(left_margin);
+            ui.vertical(|ui| {
+                ui.set_width(content_width);
+                ui.set_max_width(content_width);
+                Self::show_content(ui, app, layout, content_width);
+            });
+        });
+    }
+
+    fn show_content(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, content_width: f32) {
         if layout == ScreenLayout::Vertical {
             ui.spacing_mut().item_spacing = egui::vec2(7.0, 6.0);
         }
@@ -70,14 +83,19 @@ impl Settings {
 
             ui.separator();
             let previous_quality = app.preview_quality;
-            ComboBox::from_label("Preview quality")
-                .selected_text(app.preview_quality.label())
-                .show_ui(ui, |ui| {
+            crate::ui::theme::form_combo(
+                ui,
+                "Preview quality",
+                "settings-preview-quality",
+                app.preview_quality.label(),
+                160.0,
+                |ui| {
                     ui.selectable_value(&mut app.preview_quality, PreviewQuality::Low, "Low");
                     ui.selectable_value(&mut app.preview_quality, PreviewQuality::Medium, "Medium");
                     ui.selectable_value(&mut app.preview_quality, PreviewQuality::High, "High");
                     ui.selectable_value(&mut app.preview_quality, PreviewQuality::Max, "Max");
-                });
+                },
+            );
             if app.preview_quality != previous_quality {
                 app.preview_quality_changed();
             }
@@ -91,20 +109,17 @@ impl Settings {
             ui.separator();
             ui.strong("Library performance");
             let mut raw_cache_files = app.raw_cache_limit();
-            if ui
-                .add(
-                    egui::Slider::new(
-                        &mut raw_cache_files,
-                        0..=maximum_raw_cache_limit(),
-                    )
-                    .integer()
-                    .text("Decoded RAW cache"),
-                )
-                .on_hover_text(
+            if adjustment_slider(
+                ui,
+                "Decoded RAW cache",
+                &mut raw_cache_files,
+                0..=maximum_raw_cache_limit(),
+                0,
+                1.0,
+                Some(
                     "Number of fully decoded RAW files kept in memory for faster switching. Zero disables the cache. The default is 2 on desktop and 1 on Android.",
-                )
-                .changed()
-            {
+                ),
+            ) {
                 app.set_raw_cache_limit(raw_cache_files);
             }
             let raw_cache_description = if raw_cache_files == 0 {
@@ -119,20 +134,17 @@ impl Settings {
             ui.add(egui::Label::new(raw_cache_description).wrap());
 
             let mut thumbnail_workers = app.thumbnail_worker_count();
-            if ui
-                .add(
-                    egui::Slider::new(
-                        &mut thumbnail_workers,
-                        1..=maximum_thumbnail_worker_count(),
-                    )
-                    .integer()
-                    .text("Thumbnail workers"),
-                )
-                .on_hover_text(
+            if adjustment_slider(
+                ui,
+                "Thumbnail workers",
+                &mut thumbnail_workers,
+                1..=maximum_thumbnail_worker_count(),
+                0,
+                1.0,
+                Some(
                     "Concurrent background thumbnail jobs, including embedded previews, preview-less RAW fallback renders, and edited-thumbnail rebuilding.",
-                )
-                .changed()
-            {
+                ),
+            ) {
                 app.set_thumbnail_worker_count(thumbnail_workers);
             }
             ui.add(
@@ -294,9 +306,13 @@ impl Settings {
 
             let previous_mode = app.camera_profile_mode;
             let mut mode = previous_mode;
-            ComboBox::from_label("Profile mode")
-                .selected_text(mode.label())
-                .show_ui(ui, |ui| {
+            crate::ui::theme::form_combo(
+                ui,
+                "Profile mode",
+                "settings-camera-profile-mode",
+                mode.label(),
+                190.0,
+                |ui| {
                     ui.selectable_value(&mut mode, CameraProfileMode::Automatic, "Automatic");
                     ui.selectable_value(
                         &mut mode,
@@ -308,7 +324,8 @@ impl Settings {
                         CameraProfileMode::MatrixOnly,
                         "Embedded matrix only",
                     );
-                });
+                },
+            );
             if mode != previous_mode {
                 app.set_camera_profile_mode(mode);
             }
@@ -545,13 +562,17 @@ impl Settings {
             );
             ui.add_space(4.0);
 
-            ComboBox::from_label("Method")
-                .selected_text(match app.exposure.highlight_method {
+            crate::ui::theme::form_combo(
+                ui,
+                "Method",
+                "settings-highlight-reconstruction-method",
+                match app.exposure.highlight_method {
                     HighlightReconstructionMethod::Off => "Off",
                     HighlightReconstructionMethod::Lch => "LCh (fast)",
                     HighlightReconstructionMethod::InpaintOpposed => "Inpaint opposed",
-                })
-                .show_ui(ui, |ui| {
+                },
+                180.0,
+                |ui| {
                     changed |= ui
                         .selectable_value(
                             &mut app.exposure.highlight_method,
@@ -573,7 +594,8 @@ impl Settings {
                             "Inpaint opposed",
                         )
                         .changed();
-                });
+                },
+            );
 
             let enabled = app.exposure.highlight_method != HighlightReconstructionMethod::Off;
             ui.add_enabled_ui(enabled, |ui| {
@@ -611,8 +633,8 @@ impl Settings {
     }
 
     fn group(ui: &mut Ui, total_width: f32, contents: impl FnOnce(&mut Ui)) {
-        let inner_width = (total_width - 16.0).max(1.0);
-        ui.group(|ui| {
+        let inner_width = (total_width - 26.0).max(1.0);
+        crate::ui::theme::card_frame(ui).show(ui, |ui| {
             ui.set_width(inner_width);
             ui.set_max_width(inner_width);
             contents(ui);

@@ -9,7 +9,7 @@ impl Sidebar {
         };
         ui.set_width(content_width);
         ui.set_max_width(content_width);
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
 
         if layout == ScreenLayout::Vertical {
             Self::show_vertical_mobile_shell(ui, app, frame);
@@ -17,6 +17,7 @@ impl Sidebar {
         }
 
         ui.horizontal(|ui| {
+            crate::ui::theme::prepare_toolbar(ui);
             ui.heading(match app.sidebar_tab {
                 SidebarTab::Adjustments => "Edit",
                 SidebarTab::Crop => "Crop & Straighten",
@@ -80,10 +81,7 @@ impl Sidebar {
 
     fn paint_mobile_navigation_separators(ui: &Ui) {
         let rect = ui.max_rect();
-        let stroke = egui::Stroke::new(
-            1.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        );
+        let stroke = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
         ui.painter().hline(rect.x_range(), rect.top(), stroke);
         ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
     }
@@ -103,7 +101,12 @@ impl Sidebar {
                     "Edit",
                     "Edit adjustments",
                 ),
-                (SidebarTab::Crop, regular::CROP, "Crop", "Crop and straighten"),
+                (
+                    SidebarTab::Crop,
+                    regular::CROP,
+                    "Crop",
+                    "Crop and straighten",
+                ),
                 (SidebarTab::Masks, regular::SELECTION, "Mask", "Masking"),
                 (
                     SidebarTab::Inpainting,
@@ -141,37 +144,26 @@ impl Sidebar {
                 ui.spacing_mut().item_spacing.x = 1.0;
                 ui.horizontal(|ui| match app.sidebar_tab {
                     SidebarTab::Adjustments => {
-                        for (section, icon, label, width) in [
-                            (AdjustmentSection::Light, regular::SUN, "Light", 58.0),
-                            (
-                                AdjustmentSection::ToneCurve,
-                                regular::WAVE_SINE,
-                                "Curve",
-                                58.0,
-                            ),
-                            (AdjustmentSection::Color, regular::DROP, "Color", 58.0),
+                        for (section, icon, label) in [
+                            (AdjustmentSection::Light, regular::SUN, "Light"),
+                            (AdjustmentSection::ToneCurve, regular::WAVE_SINE, "Curve"),
+                            (AdjustmentSection::Color, regular::DROP, "Color"),
                             (
                                 AdjustmentSection::ColorGrading,
                                 regular::CIRCLES_THREE,
                                 "Grading",
-                                64.0,
                             ),
-                            (AdjustmentSection::Detail, regular::APERTURE, "Detail", 58.0),
-                            (AdjustmentSection::Effects, regular::SPARKLE, "Effects", 60.0),
-                            (
-                                AdjustmentSection::ColorMixer,
-                                regular::SWATCHES,
-                                "Mixer",
-                                58.0,
-                            ),
-                            (AdjustmentSection::Optics, regular::EYE, "Optics", 58.0),
+                            (AdjustmentSection::Detail, regular::APERTURE, "Detail"),
+                            (AdjustmentSection::Effects, regular::SPARKLE, "Effects"),
+                            (AdjustmentSection::ColorMixer, regular::SWATCHES, "Mixer"),
+                            (AdjustmentSection::Optics, regular::EYE, "Optics"),
                         ] {
                             if Self::mobile_icon_tab(
                                 ui,
                                 icon,
                                 label,
                                 app.adjustment_section == section,
-                                egui::vec2(width, 52.0),
+                                egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
                                 label,
                             )
                             .clicked()
@@ -184,21 +176,20 @@ impl Sidebar {
                             }
                         }
                         if app.expert_mode {
-                            for (section, icon, label, width) in [
+                            for (section, icon, label) in [
                                 (
                                     AdjustmentSection::AdvancedRendering,
                                     regular::SLIDERS,
                                     "Advanced",
-                                    72.0,
                                 ),
-                                (AdjustmentSection::Raw, regular::IMAGE, "Raw", 54.0),
+                                (AdjustmentSection::Raw, regular::IMAGE, "Raw"),
                             ] {
                                 if Self::mobile_icon_tab(
                                     ui,
                                     icon,
                                     label,
                                     app.adjustment_section == section,
-                                    egui::vec2(width, 52.0),
+                                    egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
                                     label,
                                 )
                                 .clicked()
@@ -211,26 +202,21 @@ impl Sidebar {
                         }
                     }
                     SidebarTab::Masks => {
-                        for (section, icon, label, width) in [
-                            (MaskSection::Properties, regular::SELECTION, "Mask", 58.0),
-                            (MaskSection::Light, regular::SUN, "Light", 58.0),
-                            (MaskSection::ToneCurve, regular::WAVE_SINE, "Curve", 58.0),
-                            (MaskSection::Color, regular::DROP, "Color", 58.0),
-                            (
-                                MaskSection::ColorGrading,
-                                regular::CIRCLES_THREE,
-                                "Grading",
-                                64.0,
-                            ),
-                            (MaskSection::Effects, regular::SPARKLE, "Effects", 60.0),
-                            (MaskSection::ColorMixer, regular::SWATCHES, "Mixer", 58.0),
+                        for (section, icon, label) in [
+                            (MaskSection::Properties, regular::SELECTION, "Mask"),
+                            (MaskSection::Light, regular::SUN, "Light"),
+                            (MaskSection::ToneCurve, regular::WAVE_SINE, "Curve"),
+                            (MaskSection::Color, regular::DROP, "Color"),
+                            (MaskSection::ColorGrading, regular::CIRCLES_THREE, "Grading"),
+                            (MaskSection::Effects, regular::SPARKLE, "Effects"),
+                            (MaskSection::ColorMixer, regular::SWATCHES, "Mixer"),
                         ] {
                             if Self::mobile_icon_tab(
                                 ui,
                                 icon,
                                 label,
                                 app.mask_section == section,
-                                egui::vec2(width, 52.0),
+                                egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
                                 label,
                             )
                             .clicked()
@@ -298,7 +284,6 @@ impl Sidebar {
         layout: ScreenLayout,
         frame: &eframe::Frame,
     ) {
-
         let sidebar_scroll_source = if slider_scroll_locked(ui.ctx()) {
             egui::scroll_area::ScrollSource::NONE
         } else {
@@ -337,7 +322,7 @@ impl Sidebar {
                     ui,
                     icon,
                     app.sidebar_tab == tab,
-                    egui::vec2(38.0, 38.0),
+                    crate::ui::theme::tool_rail_icon_size(),
                     tooltip,
                 )
                 .clicked()
@@ -365,7 +350,7 @@ impl Sidebar {
                 ui,
                 UiIcon::Filmstrip,
                 app.develop_filmstrip_open,
-                egui::vec2(38.0, 38.0),
+                crate::ui::theme::tool_rail_icon_size(),
                 filmstrip_tooltip,
             )
             .clicked()
@@ -382,7 +367,7 @@ impl Sidebar {
                 ui,
                 UiIcon::Sidebar,
                 app.develop_sidebar_open,
-                egui::vec2(38.0, 38.0),
+                crate::ui::theme::tool_rail_icon_size(),
                 sidebar_tooltip,
             )
             .clicked()
@@ -408,7 +393,12 @@ impl Sidebar {
                     "Edit",
                     "Edit adjustments",
                 ),
-                (SidebarTab::Crop, regular::CROP, "Crop", "Crop and straighten"),
+                (
+                    SidebarTab::Crop,
+                    regular::CROP,
+                    "Crop",
+                    "Crop and straighten",
+                ),
                 (SidebarTab::Masks, regular::SELECTION, "Mask", "Masking"),
                 (
                     SidebarTab::Inpainting,
@@ -453,10 +443,9 @@ impl Sidebar {
         layout: ScreenLayout,
         frame: &eframe::Frame,
     ) {
-        // Keep the action in a single compact row. Calling `with_layout` directly
-        // on the scroll area's vertical UI lets the child inherit the full remaining
-        // height, so `Align::Center` vertically centers the button and stretches the
-        // whole Develop panel after the title row was removed.
+        // Keep the context label and reset action in one predictable header row.
+        // Nesting the right-aligned action inside a horizontal row also prevents
+        // it from consuming the scroll area's remaining vertical height.
         ui.horizontal(|ui| {
             if layout == ScreenLayout::Vertical {
                 ui.strong(match app.adjustment_section {
@@ -471,12 +460,14 @@ impl Sidebar {
                     AdjustmentSection::AdvancedRendering => "Advanced Rendering",
                     AdjustmentSection::Raw => "Raw",
                 });
+            } else {
+                ui.strong("Global adjustments");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
                     ui,
                     egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                    egui::vec2(28.0, 22.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Reset all develop adjustments",
                 )
                 .clicked()
@@ -524,8 +515,7 @@ impl Sidebar {
                     );
                 }
                 AdjustmentSection::Detail => {
-                    let (detail_changed, request) =
-                        Self::show_detail(ui, &mut app.exposure, false);
+                    let (detail_changed, request) = Self::show_detail(ui, &mut app.exposure, false);
                     changed |= detail_changed;
                     ai_denoise_request = request;
                 }
@@ -617,14 +607,14 @@ impl Sidebar {
             .is_some_and(|(selected, root)| selected == root);
         let selected_text = embedded_matrix_selected
             .then_some("Embedded Matrix".to_owned())
-            .or_else(|| previous
-            .as_ref()
-            .and_then(|selected| {
-                candidates
-                    .iter()
-                    .find(|candidate| candidate.path == *selected)
-                    .map(|candidate| candidate.name.clone())
-            }))
+            .or_else(|| {
+                previous.as_ref().and_then(|selected| {
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.path == *selected)
+                        .map(|candidate| candidate.name.clone())
+                })
+            })
             .unwrap_or_else(|| format!("Automatic — {active_name}"));
 
         ui.horizontal(|ui| {
@@ -636,12 +626,10 @@ impl Sidebar {
                     ui.selectable_value(&mut selection, None, "Automatic (recommended)")
                         .on_hover_text("Use the RAW's embedded camera matrix by default.");
                     if let Some(root) = app.camera_profile_folder.as_ref() {
-                        ui.selectable_value(
-                            &mut selection,
-                            Some(root.clone()),
-                            "Embedded Matrix",
-                        )
-                        .on_hover_text("Use the RAW's embedded camera matrix without a DCP profile.");
+                        ui.selectable_value(&mut selection, Some(root.clone()), "Embedded Matrix")
+                            .on_hover_text(
+                                "Use the RAW's embedded camera matrix without a DCP profile.",
+                            );
                     }
                     ui.separator();
                     for candidate in &candidates {
