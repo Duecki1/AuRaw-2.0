@@ -243,10 +243,14 @@ fn needs_canonical_mask_source(masks: &MaskStack) -> bool {
 }
 
 impl AurawApp {
-    fn install_lightroom_visuals(ctx: &egui::Context) {
+    fn install_ui_fonts(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         ctx.set_fonts(fonts);
+    }
+
+    fn install_lightroom_visuals(ctx: &egui::Context) {
+        Self::install_ui_fonts(ctx);
 
         // Start from egui's robust dark palette, then make the editor panels a
         // little calmer and denser for a Lightroom-like darkroom layout.
@@ -346,13 +350,15 @@ impl AurawApp {
             original_preview_rendered_state: None,
             android_original_hold: None,
             exposure,
-            library: LibraryState::new_with_workers(
+            library: LibraryState::new_desktop_with_preferences(
                 ctx,
                 performance.thumbnail_workers,
                 performance.library_thumbnail_size,
+                performance.library_sort_order,
+                performance.library_folder_sidebar_open,
             ),
             develop_reference: DevelopReferenceState::default(),
-            develop_filmstrip_open: true,
+            develop_filmstrip_open: performance.develop_filmstrip_open,
             develop_filmstrip_centered_path: None,
             develop_sidebar_open: true,
             adjustment_copy_settings: performance.adjustment_copy_settings,
@@ -557,7 +563,10 @@ impl AurawApp {
         android_app: auraw_ffi::AndroidApp,
     ) -> Self {
         crate::android::install_context(&cc.egui_ctx);
-        Self::install_lightroom_visuals(&cc.egui_ctx);
+        // Android keeps the same AuRaw layout, but intentionally uses eframe's
+        // native/default widget styling instead of the desktop Lightroom-like
+        // palette and spacing overrides. We only install the icon font here.
+        Self::install_ui_fonts(&cc.egui_ctx);
         match crate::android::device_diagnostics(&android_app) {
             Ok(info) => crate::diagnostics::set_device_info(info),
             Err(error) => crate::diagnostics::record(error),
@@ -631,6 +640,7 @@ impl AurawApp {
                 &cc.egui_ctx,
                 performance.thumbnail_workers,
                 performance.library_thumbnail_size,
+                performance.library_sort_order,
             ),
             adjustment_copy_settings: performance.adjustment_copy_settings,
             adjustment_clipboard: None,
@@ -1368,6 +1378,37 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn set_library_sort_order(
+        &mut self,
+        sort_order: crate::ui::library::LibrarySortOrder,
+    ) {
+        if self.library.set_sort_order(sort_order) {
+            self.persist_performance_settings();
+            self.egui_ctx.request_repaint();
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn set_library_folder_sidebar_open(&mut self, open: bool) {
+        if self.library.set_folder_sidebar_open(open) {
+            self.persist_performance_settings();
+            self.egui_ctx.request_repaint();
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn set_develop_filmstrip_open(&mut self, open: bool) {
+        if self.develop_filmstrip_open == open {
+            return;
+        }
+        self.develop_filmstrip_open = open;
+        if open {
+            self.develop_filmstrip_centered_path = None;
+        }
+        self.persist_performance_settings();
+        self.egui_ctx.request_repaint();
+    }
+
     #[cfg(not(target_os = "android"))]
     pub(crate) fn select_library_folder(&mut self, folder: PathBuf) {
         if self.library.select_folder(folder, &self.egui_ctx) {
@@ -1691,6 +1732,7 @@ impl AurawApp {
             raw_cache_files: self.raw_cache_limit,
             thumbnail_workers: self.library.thumbnail_worker_count(),
             library_thumbnail_size: self.library.thumbnail_size(),
+            library_sort_order: self.library.sort_order(),
             preview_quality: self.preview_quality,
             birefnet_quality: self.birefnet_quality,
             camera_profile_mode: self.camera_profile_mode,
@@ -1713,6 +1755,10 @@ impl AurawApp {
                 .library
                 .folder()
                 .map(|folder| folder.to_path_buf()),
+            #[cfg(not(target_os = "android"))]
+            library_folder_sidebar_open: self.library.folder_sidebar_open(),
+            #[cfg(not(target_os = "android"))]
+            develop_filmstrip_open: self.develop_filmstrip_open,
             ..Default::default()
         };
         let Some(settings_path) = self.performance_settings_path.as_deref() else {

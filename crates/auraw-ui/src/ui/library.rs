@@ -50,8 +50,9 @@ const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
 pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 8;
 pub(crate) const MAX_ANDROID_THUMBNAIL_WORKERS: usize = 2;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum LibrarySortOrder {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySortOrder {
     #[default]
     NewestFirst,
     OldestFirst,
@@ -551,6 +552,23 @@ impl LibraryState {
         workers: usize,
         thumbnail_size: LibraryThumbnailSize,
     ) -> Self {
+        Self::new_desktop_with_preferences(
+            context,
+            workers,
+            thumbnail_size,
+            LibrarySortOrder::default(),
+            true,
+        )
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn new_desktop_with_preferences(
+        context: &egui::Context,
+        workers: usize,
+        thumbnail_size: LibraryThumbnailSize,
+        sort_order: LibrarySortOrder,
+        folder_sidebar_open: bool,
+    ) -> Self {
         let _ = context;
         let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
@@ -560,7 +578,7 @@ impl LibraryState {
             root_folder: None,
             folder_tree: None,
             expanded_folders: HashSet::new(),
-            folder_sidebar_open: true,
+            folder_sidebar_open,
             entries: Vec::new(),
             entry_indices: HashMap::new(),
             event_receiver: None,
@@ -573,7 +591,7 @@ impl LibraryState {
             status: "Open a folder to build your RAW library.".to_owned(),
             usage_clock: 0,
             thumbnail_workers,
-            sort_order: LibrarySortOrder::default(),
+            sort_order,
             thumbnail_size,
             selected_sources: HashSet::new(),
             selection_mode: false,
@@ -595,6 +613,7 @@ impl LibraryState {
         context: &egui::Context,
         workers: usize,
         thumbnail_size: LibraryThumbnailSize,
+        sort_order: LibrarySortOrder,
     ) -> Self {
         let location = crate::android::library_location(&android_app).unwrap_or_else(|error| {
             log::warn!("{error}");
@@ -617,7 +636,7 @@ impl LibraryState {
             status: String::new(),
             usage_clock: 0,
             thumbnail_workers,
-            sort_order: LibrarySortOrder::default(),
+            sort_order,
             thumbnail_size,
             selected_sources: HashSet::new(),
             selection_mode: false,
@@ -702,8 +721,12 @@ impl LibraryState {
     }
 
     #[cfg(not(target_os = "android"))]
-    pub(crate) fn set_folder_sidebar_open(&mut self, open: bool) {
+    pub(crate) fn set_folder_sidebar_open(&mut self, open: bool) -> bool {
+        if self.folder_sidebar_open == open {
+            return false;
+        }
         self.folder_sidebar_open = open;
+        true
     }
 
     #[cfg(not(target_os = "android"))]
@@ -746,12 +769,17 @@ impl LibraryState {
         true
     }
 
-    fn set_sort_order(&mut self, sort_order: LibrarySortOrder) {
+    pub(crate) fn sort_order(&self) -> LibrarySortOrder {
+        self.sort_order
+    }
+
+    pub(crate) fn set_sort_order(&mut self, sort_order: LibrarySortOrder) -> bool {
         if self.sort_order == sort_order {
-            return;
+            return false;
         }
         self.sort_order = sort_order;
         self.sort_entries();
+        true
     }
 
     fn sort_entries(&mut self) {
@@ -1105,6 +1133,7 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn open_folder(&mut self, folder: PathBuf, context: &egui::Context) {
+        self.folder_sidebar_open = true;
         self.open_folder_at(folder.clone(), folder, context);
     }
 
@@ -1143,7 +1172,6 @@ impl LibraryState {
             }
             ancestor = path.parent();
         }
-        self.folder_sidebar_open = true;
         if folder_changed {
             self.entries.clear();
             self.entry_indices.clear();
@@ -4406,24 +4434,28 @@ impl Library {
     pub(crate) fn show_folder_sidebar(ui: &mut Ui, app: &mut AurawApp) {
         let action_in_progress = app.library.file_action_in_progress();
         let mut requested_action = None;
+        // Match the folder-sidebar header height to the Library toolbar.
+        // The Library toolbar is driven by its 26-point controls, so keeping
+        // this row at the same height makes the two header separators align.
         ui.horizontal(|ui| {
+            ui.set_min_height(26.0);
             ui.strong("Folders");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
                     ui,
                     egui_phosphor::regular::X,
-                    egui::vec2(28.0, 24.0),
+                    egui::vec2(28.0, 26.0),
                     "Close folder sidebar",
                 )
                 .clicked()
                 {
-                    app.library.set_folder_sidebar_open(false);
+                    app.set_library_folder_sidebar_open(false);
                 }
                 if crate::ui::icons::phosphor_icon_button_enabled(
                     ui,
                     app.library.root_folder.is_some() && !action_in_progress,
                     egui_phosphor::regular::ARROW_CLOCKWISE,
-                    egui::vec2(28.0, 24.0),
+                    egui::vec2(28.0, 26.0),
                     "Refresh folders",
                 )
                 .clicked()
@@ -4434,7 +4466,7 @@ impl Library {
                     ui,
                     app.library.folder.is_some() && !action_in_progress,
                     egui_phosphor::regular::FOLDER_PLUS,
-                    egui::vec2(28.0, 24.0),
+                    egui::vec2(28.0, 26.0),
                     "Create folder here",
                 )
                 .clicked()
@@ -4525,7 +4557,7 @@ impl Library {
                 )
                 .clicked()
             {
-                app.library.set_folder_sidebar_open(true);
+                app.set_library_folder_sidebar_open(true);
             }
 
             #[cfg(target_os = "android")]
@@ -4618,7 +4650,7 @@ impl Library {
                     refresh = true;
                 }
 
-                let mut selected_sort = app.library.sort_order;
+                let mut selected_sort = app.library.sort_order();
                 egui::ComboBox::from_id_salt("library-sort-order")
                     .selected_text(selected_sort.label())
                     .width(if compact_header { 96.0 } else { 128.0 })
@@ -4627,7 +4659,7 @@ impl Library {
                             ui.selectable_value(&mut selected_sort, sort_order, sort_order.label());
                         }
                     });
-                app.library.set_sort_order(selected_sort);
+                app.set_library_sort_order(selected_sort);
 
                 let mut selected_size = app.library.thumbnail_size();
                 egui::ComboBox::from_id_salt("library-thumbnail-size")
