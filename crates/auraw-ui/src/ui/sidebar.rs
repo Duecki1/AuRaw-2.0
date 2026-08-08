@@ -8,7 +8,7 @@ use crate::pipeline::{
     MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
 };
 use crate::ui::components::adjustment_slider::{
-    adjustment_slider, adjustment_slider_with_reset, slider_scroll_locked,
+    adjustment_slider, adjustment_slider_with_reset, hue_adjustment_slider, slider_scroll_locked,
 };
 use crate::ui::components::color_grading::color_grading_editor;
 use crate::ui::components::hsl_mixer::hsl_mixer;

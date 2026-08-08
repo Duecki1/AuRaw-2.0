@@ -1861,6 +1861,7 @@ fn validate_exposure(exposure: &ExposureParams) -> Result<(), SidecarError> {
             exposure.contrast,
             exposure.temperature,
             exposure.tint,
+            exposure.hue,
             exposure.saturation,
             exposure.vibrance,
             exposure.chroma_denoise,
@@ -1927,6 +1928,7 @@ fn validate_local_adjustments(
             adjustments.blacks,
             adjustments.temperature,
             adjustments.tint,
+            adjustments.hue,
             adjustments.saturation,
             adjustments.texture,
             adjustments.clarity,
@@ -2323,7 +2325,9 @@ mod tests {
 
     #[test]
     fn sidecar_round_trip_preserves_edit_state() {
-        let edits = sample_edits();
+        let mut edits = sample_edits();
+        edits.exposure.hue = 37.5;
+        Arc::make_mut(&mut edits.masks).masks[0].adjustments.hue = -82.25;
         let encoded = encode(edits.clone()).unwrap();
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits, edits);

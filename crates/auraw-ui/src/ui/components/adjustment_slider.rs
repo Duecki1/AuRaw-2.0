@@ -24,6 +24,7 @@ const HANDLE_RADIUS: f32 = 8.0;
 const HANDLE_TOUCH_RADIUS: f32 = 18.0;
 const TRACK_DRAG_THRESHOLD: f32 = 8.0;
 const HANDLE_DRAG_THRESHOLD: f32 = 2.0;
+const FINE_HUE_DRAG_SCALE: f64 = 1.0 / 12.0;
 #[cfg(not(target_os = "android"))]
 const LABEL_SIZE: f32 = 12.5;
 #[cfg(target_os = "android")]
@@ -89,7 +90,7 @@ where
     Num: egui::emath::Numeric + Copy,
 {
     adjustment_slider_impl(
-        ui, label, value, range, decimals, speed, hover_text, None, None,
+        ui, label, value, range, decimals, speed, hover_text, None, None, false, 1.0,
     )
 }
 
@@ -121,7 +122,40 @@ where
         hover_text,
         None,
         Some(accent),
+        false,
+        1.0,
     )
+}
+
+/// Lightroom-style whole-spectrum Hue control.
+///
+/// Hue is stored in degrees. The optional fine mode only changes interaction
+/// sensitivity; it never changes the saved value or the available half-turn
+/// range, so toggling it cannot alter an edit.
+pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&str>) -> bool {
+    let fine_id = ui.id().with("hue-fine-adjustment");
+    let mut fine = ui.data(|data| data.get_temp::<bool>(fine_id).unwrap_or(false));
+    let changed = adjustment_slider_impl(
+        ui,
+        "Hue",
+        value,
+        -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES..=crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+        1,
+        if fine { 0.1 } else { 1.0 },
+        hover_text,
+        Some(0.0),
+        None,
+        true,
+        if fine { FINE_HUE_DRAG_SCALE } else { 1.0 },
+    );
+    let fine_response = ui.checkbox(&mut fine, "Use fine adjustment").on_hover_text(
+        "Slows Hue dragging for precise corrections without changing the saved adjustment.",
+    );
+    if fine_response.changed() {
+        ui.data_mut(|data| data.insert_temp(fine_id, fine));
+    }
+    ui.add_space(ROW_BOTTOM_SPACE);
+    changed
 }
 
 /// Adjustment slider with an explicit semantic reset value.
@@ -153,6 +187,8 @@ where
         hover_text,
         Some(reset_value.to_f64()),
         None,
+        false,
+        1.0,
     )
 }
 
@@ -167,6 +203,8 @@ fn adjustment_slider_impl<Num>(
     hover_text: Option<&str>,
     explicit_reset_value: Option<f64>,
     accent: Option<egui::Color32>,
+    hue_track: bool,
+    drag_sensitivity: f64,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -249,6 +287,8 @@ where
                 hover_text,
                 reset_value,
                 accent,
+                hue_track,
+                drag_sensitivity,
             );
             ui.add_space(ROW_BOTTOM_SPACE);
         });
@@ -305,6 +345,8 @@ fn guarded_slider<Num>(
     hover_text: Option<&str>,
     reset_value: f64,
     accent: Option<egui::Color32>,
+    hue_track: bool,
+    drag_sensitivity: f64,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -364,6 +406,24 @@ where
     });
     let mut slider_drag_active = pointer.2
         && slider_scroll_lock_owner(ui.ctx()).is_some_and(|owner| owner == slider_drag_id);
+    let drag_start_value_id = ui.id().with("guarded-slider-drag-start-value");
+    if !pointer.2 {
+        ui.data_mut(|data| data.remove::<f64>(drag_start_value_id));
+    }
+    let drag_start_value =
+        if drag_sensitivity < 1.0 && pointer.0.is_some_and(|origin| rect.contains(origin)) {
+            Some(ui.data_mut(|data| {
+                if let Some(initial) = data.get_temp::<f64>(drag_start_value_id) {
+                    initial
+                } else {
+                    let initial = value.to_f64();
+                    data.insert_temp(drag_start_value_id, initial);
+                    initial
+                }
+            }))
+        } else {
+            None
+        };
 
     if !reset_requested {
         if let (Some(origin), Some(position), true) = pointer {
@@ -372,7 +432,17 @@ where
                 // if the finger moves vertically or leaves the original hit rect.
                 // This prevents the parent ScrollArea from waking up mid-drag.
                 lock_slider_scroll(ui.ctx(), slider_drag_id);
-                changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
+                changed |= set_from_pointer_with_sensitivity(
+                    value,
+                    start,
+                    end,
+                    decimals,
+                    track_rect,
+                    origin.x,
+                    position.x,
+                    drag_start_value,
+                    drag_sensitivity,
+                );
             } else if rect.contains(origin) {
                 let delta = position - origin;
                 let began_on_handle = handle_hit_rect.contains(origin);
@@ -387,8 +457,17 @@ where
                     slider_drag_active = true;
                     lock_slider_scroll(ui.ctx(), slider_drag_id);
                     track_response.request_focus();
-                    changed |=
-                        set_from_pointer(value, start, end, decimals, track_rect, position.x);
+                    changed |= set_from_pointer_with_sensitivity(
+                        value,
+                        start,
+                        end,
+                        decimals,
+                        track_rect,
+                        origin.x,
+                        position.x,
+                        drag_start_value,
+                        drag_sensitivity,
+                    );
                 }
             }
         }
@@ -426,13 +505,22 @@ where
     };
 
     let painter = ui.painter();
+    let visual_accent = if hue_track {
+        Some(hue_shift_color(fraction))
+    } else {
+        accent
+    };
     #[cfg(target_os = "android")]
     {
-        painter.rect_filled(
-            track_rect,
-            TRACK_HEIGHT * 0.5,
-            ui.visuals().weak_text_color().gamma_multiply(0.72),
-        );
+        if hue_track {
+            paint_hue_track(painter, track_rect);
+        } else {
+            painter.rect_filled(
+                track_rect,
+                TRACK_HEIGHT * 0.5,
+                ui.visuals().weak_text_color().gamma_multiply(0.72),
+            );
+        }
         painter.circle_filled(handle_center, HANDLE_RADIUS, ui.visuals().panel_fill);
         painter.circle_stroke(
             handle_center,
@@ -440,7 +528,7 @@ where
             Stroke::new(
                 if active { 2.0 } else { 1.5 },
                 if active {
-                    accent.unwrap_or(ui.visuals().selection.bg_fill)
+                    visual_accent.unwrap_or(ui.visuals().selection.bg_fill)
                 } else {
                     ui.visuals().weak_text_color()
                 },
@@ -449,11 +537,15 @@ where
     }
     #[cfg(not(target_os = "android"))]
     {
-        painter.rect_filled(
-            track_rect,
-            TRACK_HEIGHT * 0.5,
-            ui.visuals().widgets.inactive.bg_fill,
-        );
+        if hue_track {
+            paint_hue_track(painter, track_rect);
+        } else {
+            painter.rect_filled(
+                track_rect,
+                TRACK_HEIGHT * 0.5,
+                ui.visuals().widgets.inactive.bg_fill,
+            );
+        }
         // Signed adjustment ranges use zero as their visual origin. This keeps
         // neutral values neutral instead of showing a misleading half-filled
         // blue track, while one-sided controls continue filling from the left.
@@ -466,7 +558,7 @@ where
         };
         let fill_left = fill_origin.min(handle_x);
         let fill_right = fill_origin.max(handle_x);
-        if fill_right - fill_left > 0.25 {
+        if !hue_track && fill_right - fill_left > 0.25 {
             let fill_rect = egui::Rect::from_min_max(
                 egui::pos2(fill_left, track_rect.top()),
                 egui::pos2(fill_right, track_rect.bottom()),
@@ -474,7 +566,7 @@ where
             painter.rect_filled(
                 fill_rect,
                 TRACK_HEIGHT * 0.5,
-                accent.unwrap_or(ui.visuals().selection.bg_fill),
+                visual_accent.unwrap_or(ui.visuals().selection.bg_fill),
             );
         }
         if bipolar {
@@ -487,7 +579,7 @@ where
         painter.circle_filled(
             handle_center,
             HANDLE_RADIUS,
-            accent.unwrap_or(widget_visuals.bg_fill),
+            visual_accent.unwrap_or(widget_visuals.bg_fill),
         );
         painter.circle_stroke(
             handle_center,
@@ -526,6 +618,78 @@ where
     set_numeric(value, start + (end - start) * fraction as f64, decimals)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn set_from_pointer_with_sensitivity<Num>(
+    value: &mut Num,
+    start: f64,
+    end: f64,
+    decimals: usize,
+    track_rect: egui::Rect,
+    pointer_origin_x: f32,
+    pointer_x: f32,
+    drag_start_value: Option<f64>,
+    sensitivity: f64,
+) -> bool
+where
+    Num: egui::emath::Numeric + Copy,
+{
+    let Some(initial) = drag_start_value.filter(|_| sensitivity < 1.0) else {
+        return set_from_pointer(value, start, end, decimals, track_rect, pointer_x);
+    };
+    let delta = f64::from(pointer_x - pointer_origin_x) / f64::from(track_rect.width().max(1.0));
+    let next =
+        (initial + (end - start) * delta * sensitivity).clamp(start.min(end), start.max(end));
+    set_numeric(value, next, decimals)
+}
+
+fn paint_hue_track(painter: &egui::Painter, rect: egui::Rect) {
+    const SEGMENTS: usize = 48;
+    for segment in 0..SEGMENTS {
+        let left_fraction = segment as f32 / SEGMENTS as f32;
+        let right_fraction = (segment + 1) as f32 / SEGMENTS as f32;
+        let left = egui::lerp(rect.left()..=rect.right(), left_fraction);
+        let right = egui::lerp(rect.left()..=rect.right(), right_fraction);
+        let color = hue_shift_color((left_fraction + right_fraction) * 0.5);
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(left - 0.25, rect.top()),
+                egui::pos2(right + 0.25, rect.bottom()),
+            ),
+            0.0,
+            color,
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        TRACK_HEIGHT * 0.5,
+        Stroke::new(0.75, egui::Color32::from_black_alpha(100)),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn hue_shift_color(fraction: f32) -> egui::Color32 {
+    let hue = (fraction + 0.5).fract() * 6.0;
+    let sector = hue.floor() as u32;
+    let blend = hue - sector as f32;
+    let value = 0.92;
+    let low = 0.10;
+    let rise = low + (value - low) * blend;
+    let fall = value - (value - low) * blend;
+    let (red, green, blue) = match sector % 6 {
+        0 => (value, rise, low),
+        1 => (fall, value, low),
+        2 => (low, value, rise),
+        3 => (low, fall, value),
+        4 => (rise, low, value),
+        _ => (value, low, fall),
+    };
+    egui::Color32::from_rgb(
+        (red * 255.0) as u8,
+        (green * 255.0) as u8,
+        (blue * 255.0) as u8,
+    )
+}
+
 fn set_numeric<Num>(value: &mut Num, raw: f64, decimals: usize) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -538,5 +702,29 @@ where
     } else {
         *value = next;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{set_from_pointer_with_sensitivity, FINE_HUE_DRAG_SCALE};
+    use eframe::egui;
+
+    #[test]
+    fn fine_hue_drag_covers_thirty_degrees_per_track_width() {
+        let track = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(360.0, 4.0));
+        let mut hue = 0.0f32;
+        assert!(set_from_pointer_with_sensitivity(
+            &mut hue,
+            -180.0,
+            180.0,
+            1,
+            track,
+            180.0,
+            540.0,
+            Some(0.0),
+            FINE_HUE_DRAG_SCALE,
+        ));
+        assert!((hue - 30.0).abs() < 0.01);
     }
 }

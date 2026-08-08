@@ -3,6 +3,7 @@
 // trailing numeric suffixes for name disambiguation and would rewrite them.
 
 struct MaskData {
+    // Enabled, has any edit, curve flags, color feature flags (mixer/grading/hue).
     metadata: vec4<u32>,
     adjust_0_field: vec4<f32>,
     adjust_1_field: vec4<f32>,
@@ -12,6 +13,7 @@ struct MaskData {
     grade_midtones: vec4<f32>,
     grade_highlights: vec4<f32>,
     grade_global: vec4<f32>,
+    // Color-grading blending, balance, uniform hue rotation in degrees, reserved.
     grade_options: vec4<f32>,
     // Newer local-edit features share the same per-layer storage record so the
     // uniform block stays compact as the local adjustment model evolves.
@@ -137,6 +139,7 @@ struct SceneToneUniforms {
     grade_midtones: vec4<f32>,
     grade_highlights: vec4<f32>,
     grade_global: vec4<f32>,
+    // Color-grading blending, balance, uniform hue rotation in degrees, reserved.
     grade_options: vec4<f32>,
     // Fixed scene-working colour transforms are stored as uniform matrices so
     // alternate working-space/adaptation calibrations can be supplied without
