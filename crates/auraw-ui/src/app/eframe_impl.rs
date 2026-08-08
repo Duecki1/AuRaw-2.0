@@ -134,19 +134,21 @@ impl eframe::App for AurawApp {
                             .show(ui, |ui| Sidebar::show_desktop_tool_rail(ui, self));
 
                         if self.develop_sidebar_open {
-                            let remembered_width =
-                                self.desktop_sidebar_width.unwrap_or(sidebar_size);
-                            let sidebar_response = egui::Panel::right("develop_sidebar_right")
+                            let panel_max = (viewport_size.x * 0.48).clamp(
+                                ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
+                                ScreenLayout::MAX_HORIZONTAL_SIDEBAR_WIDTH,
+                            );
+                            // `Panel` persists its own drag size. Feeding its
+                            // content response back into `default_size` creates
+                            // a width feedback loop: a wide child becomes the
+                            // next frame's default and the panel springs open
+                            // again after the user shrinks it.
+                            egui::Panel::right("develop_sidebar_right")
                                 .resizable(true)
                                 .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
-                                .max_size(
-                                    (viewport_size.x * 0.65)
-                                        .max(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH),
-                                )
-                                .default_size(remembered_width)
+                                .max_size(panel_max)
+                                .default_size(sidebar_size.min(panel_max))
                                 .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
-                            self.desktop_sidebar_width =
-                                Some(sidebar_response.response.rect.width());
                         }
                     }
 

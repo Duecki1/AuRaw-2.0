@@ -368,6 +368,37 @@ pub enum ColorGradeTab {
     Global,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(usize)]
+pub enum HslMixerColor {
+    #[default]
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Aqua,
+    Blue,
+    Purple,
+    Magenta,
+}
+
+impl HslMixerColor {
+    pub const ALL: [Self; 8] = [
+        Self::Red,
+        Self::Orange,
+        Self::Yellow,
+        Self::Green,
+        Self::Aqua,
+        Self::Blue,
+        Self::Purple,
+        Self::Magenta,
+    ];
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LensCorrectionState {
     pub enabled: bool,
@@ -867,8 +898,6 @@ pub struct AurawApp {
     pub(crate) selected_camera_profile: Option<PathBuf>,
     pub active_tab: AppTab,
     pub sidebar_tab: SidebarTab,
-    #[cfg(not(target_os = "android"))]
-    pub(crate) desktop_sidebar_width: Option<f32>,
     pub(crate) geometry: GeometryTransform,
     /// Runtime-only crop before automatic rotation/keystone containment. This
     /// lets the crop expand again when the user reduces the straighten angle.
@@ -884,6 +913,7 @@ pub struct AurawApp {
     pub mask_section: MaskSection,
     pub tone_curve_tab: ToneCurveTab,
     pub color_grade_tab: ColorGradeTab,
+    pub hsl_mixer_color: HslMixerColor,
     pub export_settings: ExportSettings,
     pub masks: MaskStack,
     pub(crate) active_mask_tool: Option<MaskKind>,

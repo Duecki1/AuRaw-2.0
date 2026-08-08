@@ -1,16 +1,17 @@
 use crate::app::{
-    AdjustmentSection, AurawApp, ColorGradeTab, MaskSection, SidebarTab, ToneCurveTab,
+    AdjustmentSection, AurawApp, ColorGradeTab, HslMixerColor, MaskSection, SidebarTab, ToneCurveTab,
 };
 use crate::pipeline::{
     BrushMode, DemosaicMode, DenoiseQuality, ExportBitDepth, ExportColorProfile, ExportResizeMode,
     ExposureParams, LoadedRaw, LocalMask, MaskCombineMode, MaskComponent, MaskGeometry, MaskKind,
-    SigmoidColorProcessing, HSL_HUE_LIMIT, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    SigmoidColorProcessing, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
     MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
 };
 use crate::ui::components::adjustment_slider::{
     adjustment_slider, adjustment_slider_with_reset, slider_scroll_locked,
 };
 use crate::ui::components::color_grading::color_grading_editor;
+use crate::ui::components::hsl_mixer::hsl_mixer;
 use crate::ui::components::tone_curve_editor::tone_curve_editor;
 use crate::ui::layout::ScreenLayout;
 use eframe::egui::{self, Ui};
@@ -66,7 +67,6 @@ impl MaskCardSize {
 }
 
 impl Sidebar {
-    const SCROLLBAR_GUTTER: f32 = 18.0;
     // 40 px tool buttons plus balanced outside breathing room. The panel frame
     // also contributes its normal inset, so this prevents selected buttons from
     // visually touching the rail's left/right edges.

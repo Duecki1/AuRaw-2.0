@@ -1,10 +1,9 @@
 use crate::app::ColorGradeTab;
 use crate::pipeline::{ColorGradeWheel, ColorGrading};
 use crate::ui::components::adjustment_slider::adjustment_slider;
-use eframe::egui::{self, Color32, DragValue, Mesh, Pos2, Sense, Shape, Stroke, Ui};
+use eframe::egui::{self, Color32, Mesh, Pos2, Sense, Shape, Stroke, Ui};
 
 const WHEEL_MAX_SIZE: f32 = 190.0;
-const WHEEL_MIN_SIZE: f32 = 150.0;
 const ANGULAR_SEGMENTS: usize = 96;
 const RADIAL_SEGMENTS: usize = 12;
 
@@ -32,9 +31,9 @@ pub fn color_grading_editor(
         });
     });
 
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         let segment_width =
-            ((ui.available_width() - ui.spacing().item_spacing.x * 3.0) / 4.0).max(64.0);
+            ((ui.available_width() - ui.spacing().item_spacing.x * 3.0).max(4.0)) / 4.0;
         for (tab, label, tooltip) in [
             (
                 ColorGradeTab::Shadows,
@@ -43,12 +42,12 @@ pub fn color_grading_editor(
             ),
             (
                 ColorGradeTab::Midtones,
-                "Midtones",
+                "Mid",
                 "Grade the middle tonal range",
             ),
             (
                 ColorGradeTab::Highlights,
-                "Highlights",
+                "High",
                 "Grade the brighter tonal range",
             ),
             (ColorGradeTab::Global, "Global", "Grade all tones uniformly"),
@@ -98,7 +97,9 @@ pub fn color_grading_editor(
 
 fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     let mut changed = false;
-    let size = ui.available_width().clamp(WHEEL_MIN_SIZE, WHEEL_MAX_SIZE);
+    // Respect the true remaining content width. A forced minimum can place the
+    // wheel under the scrollbar when the Develop panel is narrowed.
+    let size = ui.available_width().min(WHEEL_MAX_SIZE).max(1.0);
 
     ui.horizontal(|ui| {
         ui.strong("Hue / Saturation");
@@ -187,28 +188,24 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     });
     let _ = wheel_response;
 
-    ui.horizontal(|ui| {
-        ui.label("Hue");
-        changed |= ui
-            .add(
-                DragValue::new(&mut wheel.hue)
-                    .range(0.0..=360.0)
-                    .speed(1.0)
-                    .fixed_decimals(0)
-                    .suffix("°"),
-            )
-            .changed();
-        ui.separator();
-        ui.label("Saturation");
-        changed |= ui
-            .add(
-                DragValue::new(&mut wheel.saturation)
-                    .range(0.0..=100.0)
-                    .speed(1.0)
-                    .fixed_decimals(0),
-            )
-            .changed();
-    });
+    changed |= adjustment_slider(
+        ui,
+        "Hue",
+        &mut wheel.hue,
+        0.0..=360.0,
+        0,
+        1.0,
+        Some("Sets the color-wheel angle in degrees."),
+    );
+    changed |= adjustment_slider(
+        ui,
+        "Saturation",
+        &mut wheel.saturation,
+        0.0..=100.0,
+        0,
+        1.0,
+        Some("Sets the distance from the neutral center of the wheel."),
+    );
     wheel.hue = wheel.hue.rem_euclid(360.0);
     wheel.saturation = wheel.saturation.clamp(0.0, 100.0);
 

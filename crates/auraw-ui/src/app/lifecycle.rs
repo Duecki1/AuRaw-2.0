@@ -346,8 +346,6 @@ impl AurawApp {
             selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
-            #[cfg(not(target_os = "android"))]
-            desktop_sidebar_width: None,
             geometry: GeometryTransform::default(),
             crop_constraint_reference: None,
             crop_drag: None,
@@ -360,6 +358,7 @@ impl AurawApp {
             mask_section: MaskSection::default(),
             tone_curve_tab: ToneCurveTab::default(),
             color_grade_tab: ColorGradeTab::default(),
+            hsl_mixer_color: HslMixerColor::default(),
             export_settings: ExportSettings::default(),
             masks,
             active_mask_tool: None,
@@ -625,8 +624,6 @@ impl AurawApp {
             selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
-            #[cfg(not(target_os = "android"))]
-            desktop_sidebar_width: None,
             geometry: GeometryTransform::default(),
             crop_constraint_reference: None,
             crop_drag: None,
@@ -639,6 +636,7 @@ impl AurawApp {
             mask_section: MaskSection::default(),
             tone_curve_tab: ToneCurveTab::default(),
             color_grade_tab: ColorGradeTab::default(),
+            hsl_mixer_color: HslMixerColor::default(),
             export_settings: ExportSettings::default(),
             masks,
             active_mask_tool: None,

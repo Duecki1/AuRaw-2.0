@@ -1,14 +1,10 @@
 impl Sidebar {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
-        let available_width = ui.available_width().max(1.0);
-        let content_width = match layout {
-            ScreenLayout::Horizontal => (available_width - Self::SCROLLBAR_GUTTER)
-                .max(220.0)
-                .min(available_width),
-            ScreenLayout::Vertical => (available_width - Self::SCROLLBAR_GUTTER).max(1.0),
-        };
-        ui.set_width(content_width);
-        ui.set_max_width(content_width);
+        // The scroll area below uses a solid scrollbar that reserves its own
+        // width. Let the resizable panel own this dimension and only consume
+        // what it assigned us; reporting a larger desired width makes the panel
+        // fight the user's resize gesture.
+        ui.take_available_width();
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
 
         if layout == ScreenLayout::Vertical {
@@ -289,17 +285,30 @@ impl Sidebar {
         } else {
             egui::scroll_area::ScrollSource::default()
         };
-        egui::ScrollArea::vertical()
-            .id_salt("develop-sidebar-content")
-            .scroll_source(sidebar_scroll_source)
-            .auto_shrink([false, false])
-            .show(ui, |ui| match app.sidebar_tab {
-                SidebarTab::Adjustments => Self::show_adjustments(ui, app, layout, frame),
-                SidebarTab::Crop => Self::show_crop(ui, app),
-                SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
-                SidebarTab::Inpainting => Self::show_inpainting(ui, app, layout, frame),
-                SidebarTab::Export => Self::show_export(ui, app, frame),
-            });
+        ui.scope(|ui| {
+            // A solid bar owns real layout space, so wide sliders, curves, and
+            // dropdowns can never sit underneath its hit area.
+            let mut scroll_style = egui::style::ScrollStyle::solid();
+            scroll_style.bar_width = 7.0;
+            scroll_style.bar_inner_margin = 7.0;
+            ui.spacing_mut().scroll = scroll_style;
+
+            egui::ScrollArea::vertical()
+                .id_salt("develop-sidebar-content")
+                .scroll_source(sidebar_scroll_source)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    match app.sidebar_tab {
+                        SidebarTab::Adjustments => Self::show_adjustments(ui, app, layout, frame),
+                        SidebarTab::Crop => Self::show_crop(ui, app),
+                        SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
+                        SidebarTab::Inpainting => Self::show_inpainting(ui, app, layout, frame),
+                        SidebarTab::Export => Self::show_export(ui, app, frame),
+                    }
+                    ui.add_space(10.0);
+                });
+        });
     }
 
     #[cfg(not(target_os = "android"))]
@@ -520,7 +529,12 @@ impl Sidebar {
                     changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, false);
                 }
                 AdjustmentSection::ColorMixer => {
-                    changed |= Self::show_hsl(ui, &mut app.exposure, false);
+                    changed |= Self::show_hsl(
+                        ui,
+                        &mut app.exposure,
+                        &mut app.hsl_mixer_color,
+                        false,
+                    );
                 }
                 AdjustmentSection::Optics => {
                     lens_changed |= Self::show_optics(ui, app, false);
@@ -553,7 +567,12 @@ impl Sidebar {
             changed |= detail_changed;
             ai_denoise_request = request;
             changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, true);
-            changed |= Self::show_hsl(ui, &mut app.exposure, true);
+            changed |= Self::show_hsl(
+                ui,
+                &mut app.exposure,
+                &mut app.hsl_mixer_color,
+                true,
+            );
             lens_changed |= Self::show_optics(ui, app, true);
             if app.expert_mode {
                 changed |= Self::show_rendering(ui, &mut app.exposure, true);
@@ -614,31 +633,32 @@ impl Sidebar {
             })
             .unwrap_or_else(|| format!("Automatic — {active_name}"));
 
-        ui.horizontal(|ui| {
-            ui.strong("Camera profile");
-            egui::ComboBox::from_id_salt("current-image-camera-profile")
-                .selected_text(selected_text)
-                .width(ui.available_width().max(140.0))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut selection, None, "Automatic (recommended)")
-                        .on_hover_text("Use the RAW's embedded camera matrix by default.");
-                    if let Some(root) = app.camera_profile_folder.as_ref() {
-                        ui.selectable_value(&mut selection, Some(root.clone()), "Embedded Matrix")
-                            .on_hover_text(
-                                "Use the RAW's embedded camera matrix without a DCP profile.",
-                            );
-                    }
-                    ui.separator();
-                    for candidate in &candidates {
-                        ui.selectable_value(
-                            &mut selection,
-                            Some(candidate.path.clone()),
-                            &candidate.name,
-                        )
-                        .on_hover_text(candidate.path.display().to_string());
-                    }
-                });
-        });
+        crate::ui::theme::form_combo(
+            ui,
+            egui::RichText::new("Camera profile").strong(),
+            "current-image-camera-profile",
+            selected_text,
+            240.0,
+            |ui| {
+                ui.selectable_value(&mut selection, None, "Automatic (recommended)")
+                    .on_hover_text("Use the RAW's embedded camera matrix by default.");
+                if let Some(root) = app.camera_profile_folder.as_ref() {
+                    ui.selectable_value(&mut selection, Some(root.clone()), "Embedded Matrix")
+                        .on_hover_text(
+                            "Use the RAW's embedded camera matrix without a DCP profile.",
+                        );
+                }
+                ui.separator();
+                for candidate in &candidates {
+                    ui.selectable_value(
+                        &mut selection,
+                        Some(candidate.path.clone()),
+                        &candidate.name,
+                    )
+                    .on_hover_text(candidate.path.display().to_string());
+                }
+            },
+        );
         let profile_count = if candidates.len() == 1 {
             "1 matching DCP profile".to_owned()
         } else {
@@ -667,8 +687,9 @@ impl Sidebar {
         contents: impl FnOnce(&mut Ui),
     ) {
         if foldable {
-            egui::CollapsingHeader::new(title)
+            egui::CollapsingHeader::new(egui::RichText::new(title).strong())
                 .default_open(default_open)
+                .show_background(true)
                 .show(ui, contents);
         } else {
             contents(ui);

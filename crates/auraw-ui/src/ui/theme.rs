@@ -84,6 +84,7 @@ pub fn form_combo(
             egui::ComboBox::from_id_salt(id_salt)
                 .selected_text(selected_text)
                 .width(width)
+                .truncate()
                 .show_ui(ui, add_contents);
         });
     });
