@@ -2486,6 +2486,11 @@ impl Sidebar {
             1.0,
             None,
         );
+        changed |= hue_adjustment_slider(
+            ui,
+            &mut adjustment.hue,
+            Some("Rotates colors inside the mask around the perceptual color wheel."),
+        );
         changed |= adjustment_slider(
             ui,
             "Saturation",

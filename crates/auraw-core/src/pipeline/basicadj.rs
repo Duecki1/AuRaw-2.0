@@ -238,6 +238,9 @@ pub fn white_balance_tint_offset(base_tint: f32, target_tint: f32) -> f32 {
 /// response for sidecar compatibility, while the extra travel allows stronger
 /// creative shifts toward and beyond the neighbouring named hue.
 pub const HSL_HUE_LIMIT: f32 = 200.0;
+/// Whole-image and local-mask hue rotation, expressed in degrees. The signed
+/// half-turn range can reach every target hue from the source color.
+pub const HUE_ROTATION_LIMIT_DEGREES: f32 = 180.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ExposureParams {
@@ -261,6 +264,11 @@ pub struct ExposureParams {
     /// Zero preserves the as-shot neutral for both controls.
     pub temperature: f32,
     pub tint: f32,
+    /// Perceptual hue rotation in degrees. This is distinct from the
+    /// eight-channel Color Mixer and leaves lightness/chroma unchanged until
+    /// gamut compression is required.
+    #[serde(default)]
+    pub hue: f32,
     pub saturation: f32,
     pub vibrance: f32,
     /// Composite luminance curve followed by independent scene-referred RGB channel curves.
@@ -392,6 +400,7 @@ impl Default for ExposureParams {
             sigmoid: SigmoidParams::default(),
             temperature: 0.0,
             tint: 0.0,
+            hue: 0.0,
             saturation: 0.0,
             vibrance: 0.0,
             tone_curve: PointCurve::linear(),
@@ -502,6 +511,7 @@ mod tests {
         assert_eq!(rendition.contrast, 0.0);
         assert_eq!(rendition.temperature, 0.0);
         assert_eq!(rendition.tint, 0.0);
+        assert_eq!(rendition.hue, 0.0);
         assert_eq!(rendition.saturation, 0.0);
         assert_eq!(rendition.vibrance, 0.0);
         assert_eq!(
@@ -549,6 +559,20 @@ mod tests {
     fn serialization_contains_only_modern_adjustment_fields() {
         let serialized = serde_json::to_value(ExposureParams::default()).expect("serialize exposure");
         assert_eq!(serialized["contrast"], 0.0);
+        assert_eq!(serialized["hue"], 0.0);
         assert_eq!(serialized["sigmoid"]["contrast"], 1.5);
+    }
+
+    #[test]
+    fn exposure_without_hue_deserializes_to_a_neutral_rotation() {
+        let mut serialized =
+            serde_json::to_value(ExposureParams::default()).expect("serialize exposure");
+        serialized
+            .as_object_mut()
+            .expect("exposure is a JSON object")
+            .remove("hue");
+        let decoded: ExposureParams =
+            serde_json::from_value(serialized).expect("deserialize legacy exposure");
+        assert_eq!(decoded.hue, 0.0);
     }
 }

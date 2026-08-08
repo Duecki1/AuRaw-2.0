@@ -524,6 +524,11 @@ impl Sidebar {
                     .color(ui.visuals().weak_text_color()),
                 );
             }
+            changed |= hue_adjustment_slider(
+                ui,
+                &mut exposure.hue,
+                Some("Rotates every color around the perceptual color wheel while preserving lightness and chroma."),
+            );
             changed |= adjustment_slider(
                 ui,
                 "Vibrance",

@@ -3,6 +3,7 @@ use auraw_cli::pipeline::{
     crop_raw, export_mask_atlas_edge, load_raw_file, load_raw_file_with_dcp,
     spawn_tiled_png_export, DenoiseQuality, ExportEvent, ExportMetadata, ExportSettings,
     ExposureParams, GeometryTransform, MaskStack, TileSpec, GLOBAL_TINT_OFFSET_LIMIT,
+    HUE_ROTATION_LIMIT_DEGREES,
 };
 use auraw_gpu::wgpu;
 use std::env;
@@ -260,6 +261,9 @@ fn set_adjustment(exposure: &mut ExposureParams, name: &str, value: f32) -> Resu
         "vignette" | "vignette_amount" => exposure.vignette_amount = value.clamp(-100.0, 100.0),
         "vibrance" => exposure.vibrance = value.clamp(-100.0, 100.0),
         "saturation" => exposure.saturation = value.clamp(-100.0, 100.0),
+        "hue" => {
+            exposure.hue = value.clamp(-HUE_ROTATION_LIMIT_DEGREES, HUE_ROTATION_LIMIT_DEGREES)
+        }
         "temperature" => exposure.temperature = value.clamp(-500.0, 500.0),
         "tint" => exposure.tint = value.clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
         "luminance_denoise" => exposure.luminance_denoise = value.clamp(0.0, 100.0),
@@ -393,7 +397,7 @@ fn print_help() {
         "  auraw-develop-export --input FILE --suite-output DIRECTORY [--dcp PROFILE.dcp]\n",
         "    [--only ENDPOINT]... [--skip-existing]\n\n",
         "Supported adjustment names: exposure, contrast, highlights, shadows, whites,\n",
-        "blacks, texture, clarity, dehaze, vignette, vibrance, saturation, temperature, tint,\n",
+        "blacks, texture, clarity, dehaze, vignette, hue, vibrance, saturation, temperature, tint,\n",
         "luminance_denoise, color_denoise, denoise_detail, denoise_quality (0/1/2),\n",
         "sharpen_amount, sharpen_radius, sharpen_detail, and sharpen_masking. The suite\n",
         "exports isolated endpoints matching the standard\n",
