@@ -371,6 +371,12 @@ impl Sidebar {
             .clicked()
             {
                 app.develop_filmstrip_open = !app.develop_filmstrip_open;
+                if app.develop_filmstrip_open {
+                    // Reopening the strip should bring the current Develop
+                    // target back to the center, even if the user manually
+                    // scrolled somewhere else before hiding it.
+                    app.develop_filmstrip_centered_path = None;
+                }
             }
 
             let sidebar_tooltip = if app.develop_sidebar_open {

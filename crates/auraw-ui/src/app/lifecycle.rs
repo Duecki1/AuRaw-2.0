@@ -369,6 +369,7 @@ impl AurawApp {
             ),
             develop_reference: DevelopReferenceState::default(),
             develop_filmstrip_open: true,
+            develop_filmstrip_centered_path: None,
             develop_sidebar_open: true,
             adjustment_copy_settings: performance.adjustment_copy_settings,
             adjustment_clipboard: None,

@@ -804,6 +804,8 @@ pub struct AurawApp {
     #[cfg(not(target_os = "android"))]
     pub(crate) develop_filmstrip_open: bool,
     #[cfg(not(target_os = "android"))]
+    pub(crate) develop_filmstrip_centered_path: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
     pub(crate) develop_sidebar_open: bool,
     pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
     adjustment_clipboard: Option<LibraryAdjustmentClipboard>,
