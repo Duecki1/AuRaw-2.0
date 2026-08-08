@@ -1,4 +1,6 @@
 pub mod components;
+#[cfg(not(target_os = "android"))]
+pub mod develop;
 pub mod icons;
 pub mod layout;
 pub mod library;

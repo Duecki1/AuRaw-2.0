@@ -20,11 +20,15 @@ use crate::pipeline::{
     ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate, SubjectRefinement, TileSpec,
     EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
+#[cfg(not(target_os = "android"))]
+use crate::pipeline::RawThumbnail;
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
     LensEditState as SidecarLensEditState,
 };
 use crate::ui::components::adjustment_slider::slider_scroll_locked;
+#[cfg(not(target_os = "android"))]
+use crate::ui::develop::Develop;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::{Library, LibraryState};
 use crate::ui::preview::Preview;
@@ -62,6 +66,51 @@ pub(crate) struct AndroidOriginalHold {
     pub start: egui::Pos2,
     pub started_at: Instant,
     pub showing_original: bool,
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) struct DevelopReferenceState {
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) label: Option<String>,
+    pub(crate) texture: Option<egui::TextureHandle>,
+    pub(crate) texture_size: Option<[u32; 2]>,
+    pub(crate) high_quality: bool,
+    pub(crate) loading_path: Option<PathBuf>,
+    pub(crate) preview_receiver:
+        Option<mpsc::Receiver<(PathBuf, Result<RawThumbnail, String>)>>,
+    pub(crate) error: Option<String>,
+    pub(crate) split_ratio: f32,
+}
+
+#[cfg(not(target_os = "android"))]
+impl Default for DevelopReferenceState {
+    fn default() -> Self {
+        Self {
+            path: None,
+            label: None,
+            texture: None,
+            texture_size: None,
+            high_quality: false,
+            loading_path: None,
+            preview_receiver: None,
+            error: None,
+            split_ratio: 0.5,
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+impl DevelopReferenceState {
+    pub(crate) fn clear(&mut self) {
+        self.path = None;
+        self.label = None;
+        self.texture = None;
+        self.texture_size = None;
+        self.high_quality = false;
+        self.loading_path = None;
+        self.preview_receiver = None;
+        self.error = None;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -733,6 +782,12 @@ pub struct AurawApp {
     pub(crate) android_original_hold: Option<AndroidOriginalHold>,
     pub exposure: ExposureParams,
     pub(crate) library: LibraryState,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) develop_reference: DevelopReferenceState,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) develop_filmstrip_open: bool,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) develop_sidebar_open: bool,
     pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
     adjustment_clipboard: Option<LibraryAdjustmentClipboard>,
     raw_cache: VecDeque<CachedRawDecode>,
