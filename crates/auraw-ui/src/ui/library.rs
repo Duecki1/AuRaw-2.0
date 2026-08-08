@@ -216,6 +216,15 @@ pub(crate) struct LibraryEntry {
     last_used: u64,
 }
 
+#[cfg(not(target_os = "android"))]
+#[derive(Clone)]
+pub(crate) struct DesktopFilmstripItem {
+    pub(crate) path: PathBuf,
+    pub(crate) name: String,
+    pub(crate) texture: Option<egui::TextureHandle>,
+    pub(crate) thumbnail_size: Option<[u32; 2]>,
+}
+
 struct LoadedLibraryThumbnail {
     thumbnail: RawThumbnail,
     resident_thumbnail: RawThumbnail,
@@ -697,6 +706,30 @@ impl LibraryState {
         self.folder_sidebar_open = open;
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn filmstrip_len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn filmstrip_item(&self, index: usize) -> Option<DesktopFilmstripItem> {
+        let entry = self.entries.get(index)?;
+        let LibrarySource::File(path) = &entry.info.source;
+        Some(DesktopFilmstripItem {
+            path: path.clone(),
+            name: entry.info.name.clone(),
+            texture: entry.texture.clone(),
+            thumbnail_size: entry.thumbnail_size,
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn filmstrip_index_for_path(&self, path: &Path) -> Option<usize> {
+        self.entry_indices
+            .get(&LibrarySource::File(path.to_owned()))
+            .copied()
+    }
+
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
         self.thumbnail_workers
     }
@@ -749,9 +782,10 @@ impl LibraryState {
         }
     }
 
-    /// Stops the thumbnail worker from beginning another decode while a full
-    /// RAW is opened. Catalog-wide background work and visible-card requests
-    /// remain queued and continue when the Library tab is shown again.
+    /// Stops catalog-wide background thumbnail decoding while Develop owns the
+    /// full RAW. Explicit display-priority requests from the desktop filmstrip
+    /// may still run through the shared decode gate, which preserves full-RAW
+    /// decode exclusivity while keeping visible Develop thumbnails responsive.
     pub(crate) fn prepare_for_develop(&mut self) {
         self.decoding_paused.store(true, Ordering::Release);
         #[cfg(target_os = "android")]
@@ -1322,7 +1356,7 @@ impl LibraryState {
         }
     }
 
-    fn poll(&mut self, context: &egui::Context) {
+    pub(crate) fn poll(&mut self, context: &egui::Context) {
         #[cfg(not(target_os = "android"))]
         {
             self.poll_dropped_raw_import(context);
@@ -1520,7 +1554,7 @@ impl LibraryState {
         let _ = context;
     }
 
-    fn touch_and_request_thumbnail(&mut self, index: usize, context: &egui::Context) {
+    pub(crate) fn touch_and_request_thumbnail(&mut self, index: usize, context: &egui::Context) {
         let generation = self.generation.load(Ordering::Acquire);
         self.usage_clock = self.usage_clock.wrapping_add(1).max(1);
         let usage_clock = self.usage_clock;
@@ -1683,7 +1717,7 @@ impl LibraryState {
         self.entries[index].developed_thumbnail = true;
     }
 
-    fn evict_old_textures(&mut self, protected_indices: &HashSet<usize>) {
+    pub(crate) fn evict_old_textures(&mut self, protected_indices: &HashSet<usize>) {
         let limit = if cfg!(target_os = "android") {
             ANDROID_TEXTURE_CACHE_LIMIT
         } else {
@@ -2036,7 +2070,11 @@ fn render_uncached_developed_thumbnail(
     // A different worker may have completed the cache while this request was
     // waiting for a rendered-thumbnail permit.
     if let Some(thumbnail) = crate::sidecar::load_developed_thumbnail_cache(path, maximum_edge)? {
-        return Ok(Some(thumbnail));
+        let cached_edge = thumbnail.width.max(thumbnail.height);
+        let minimum_edge = maximum_edge.saturating_mul(3) / 4;
+        if maximum_edge <= THUMBNAIL_EDGE || cached_edge >= minimum_edge {
+            return Ok(Some(thumbnail));
+        }
     }
 
     let performance =
@@ -2066,11 +2104,12 @@ fn render_uncached_developed_thumbnail(
         requested_camera_profile.as_deref(),
     )
     .map_err(|error| format!("could not decode edited RAW {}: {error:#}", path.display()))?;
-    let mut preview_raw = if full_raw.width.max(full_raw.height) > DEVELOPED_THUMBNAIL_PROXY_EDGE {
+    let render_proxy_edge = DEVELOPED_THUMBNAIL_PROXY_EDGE.max(maximum_edge);
+    let mut preview_raw = if full_raw.width.max(full_raw.height) > render_proxy_edge {
         build_proxy(
             &full_raw,
             ProxySpec {
-                max_edge: DEVELOPED_THUMBNAIL_PROXY_EDGE,
+                max_edge: render_proxy_edge,
             },
         )
     } else {
@@ -2176,6 +2215,36 @@ fn render_uncached_developed_thumbnail(
     );
     crate::sidecar::save_developed_thumbnail_cache(path, &thumbnail, sidecar_fingerprint)?;
     Ok(Some(thumbnail))
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn load_desktop_reference_preview(
+    path: &Path,
+    maximum_edge: u32,
+) -> Result<RawThumbnail, String> {
+    if maximum_edge == 0 {
+        return Err("reference preview edge must be non-zero".to_owned());
+    }
+
+    // Preserve developed edits when a sidecar exists. The reference request is
+    // allowed to ask for a larger render than the 512 px catalog card;
+    // `render_uncached_developed_thumbnail` regenerates an undersized cache.
+    match render_uncached_developed_thumbnail(path, maximum_edge) {
+        Ok(Some(thumbnail)) => return Ok(thumbnail),
+        Ok(None) => {}
+        Err(error) => {
+            log::warn!(
+                "could not render developed reference preview for {}: {error}",
+                path.display()
+            );
+        }
+    }
+
+    // Unedited references use the same RAW preview loader as the catalog but
+    // at a much larger edge. Most cameras embed a full-resolution JPEG; when
+    // they do not, the loader retains its LibRaw processed fallback.
+    load_raw_thumbnail(path, maximum_edge)
+        .map_err(|error| format!("could not render reference preview: {error:#}"))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -2361,6 +2430,14 @@ fn run_one_thumbnail_worker(
         let (request, initial_background) = match received {
             Ok(request) => (request, false),
             Err(mpsc::TryRecvError::Empty) => {
+                // Develop pauses catalog-wide background decoding, but visible
+                // filmstrip/reference requests still arrive through the explicit
+                // request channel. Do not let workers get stuck holding ordinary
+                // background entries while those display-priority requests wait.
+                if decoding_paused.load(Ordering::Acquire) {
+                    std::thread::sleep(THUMBNAIL_PAUSE_POLL_INTERVAL);
+                    continue;
+                }
                 let background = work_queue
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2373,6 +2450,9 @@ fn run_one_thumbnail_worker(
                 (request, true)
             }
             Err(mpsc::TryRecvError::Disconnected) => {
+                if decoding_paused.load(Ordering::Acquire) {
+                    break;
+                }
                 let background = work_queue
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2395,24 +2475,24 @@ fn run_one_thumbnail_worker(
             continue;
         }
         let result = loop {
-            // Keep the request while Develop owns the exclusive writer lock.
-            while decoding_paused.load(Ordering::Acquire) {
+            // Ordinary catalog requests remain paused in Develop. Explicit
+            // display-priority requests (filmstrip/reference) may proceed, but
+            // still take the shared decode gate so an active full RAW open keeps
+            // exclusive priority and the application's peak memory stays bounded.
+            while decoding_paused.load(Ordering::Acquire) && !request.display_priority {
                 if cancellation.load(Ordering::Acquire) != generation {
                     return;
                 }
                 std::thread::sleep(THUMBNAIL_PAUSE_POLL_INTERVAL);
             }
 
-            // Thumbnail workers share read access with one another. A full RAW
-            // decode takes the writer lock, so it remains exclusive and gets a
-            // clean memory budget even when many thumbnail workers are enabled.
             let decode_guard = decode_gate
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if cancellation.load(Ordering::Acquire) != generation {
                 return;
             }
-            if decoding_paused.load(Ordering::Acquire) {
+            if decoding_paused.load(Ordering::Acquire) && !request.display_priority {
                 drop(decode_guard);
                 continue;
             }
@@ -2465,13 +2545,538 @@ fn catalog_status(count: usize, warning_count: usize, truncated: bool) -> String
 }
 
 #[cfg(not(target_os = "android"))]
-enum LibraryCardAction {
+pub(crate) enum LibraryCardAction {
     Export(Vec<PathBuf>),
     CopyAdjustments(PathBuf),
     PasteAdjustments(Vec<PathBuf>),
     Duplicate(Vec<PathBuf>),
     ResetAdjustments(Vec<PathBuf>),
     Delete(Vec<PathBuf>),
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn desktop_image_context_menu(
+    ui: &mut Ui,
+    app: &AurawApp,
+    context_source_path: &Path,
+    context_paths: &[PathBuf],
+) -> Option<LibraryCardAction> {
+    let selected_count = context_paths.len();
+    let action_enabled = !app.library.file_action_in_progress()
+        && app.library_batch_export_progress().is_none()
+        && app.library_ai_mask_refresh_status().is_none()
+        && !context_paths.is_empty();
+    let can_paste_adjustments = action_enabled && app.has_copied_adjustments();
+    let mut action = None;
+
+    let export_label = if selected_count > 1 {
+        "Export selected…"
+    } else {
+        "Export…"
+    };
+    if ui
+        .add_enabled(action_enabled, egui::Button::new(export_label))
+        .clicked()
+    {
+        action = Some(LibraryCardAction::Export(context_paths.to_vec()));
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add_enabled(action_enabled, egui::Button::new("Copy adjustments"))
+        .clicked()
+    {
+        action = Some(LibraryCardAction::CopyAdjustments(
+            context_source_path.to_path_buf(),
+        ));
+        ui.close();
+    }
+    let paste_label = if selected_count > 1 {
+        "Paste adjustments to selected"
+    } else {
+        "Paste adjustments"
+    };
+    if ui
+        .add_enabled(can_paste_adjustments, egui::Button::new(paste_label))
+        .on_disabled_hover_text("Copy adjustments from an image first")
+        .clicked()
+    {
+        action = Some(LibraryCardAction::PasteAdjustments(context_paths.to_vec()));
+        ui.close();
+    }
+    ui.separator();
+    let duplicate_label = if selected_count > 1 {
+        "Duplicate selected (RAW + sidecars)"
+    } else {
+        "Duplicate (RAW + sidecar)"
+    };
+    if ui
+        .add_enabled(action_enabled, egui::Button::new(duplicate_label))
+        .clicked()
+    {
+        action = Some(LibraryCardAction::Duplicate(context_paths.to_vec()));
+        ui.close();
+    }
+    let reset_label = if selected_count > 1 {
+        "Reset adjustments for selected"
+    } else {
+        "Reset all adjustments"
+    };
+    if ui
+        .add_enabled(
+            action_enabled,
+            egui::Button::new(format!(
+                "{}  {reset_label}",
+                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+            )),
+        )
+        .clicked()
+    {
+        action = Some(LibraryCardAction::ResetAdjustments(context_paths.to_vec()));
+        ui.close();
+    }
+    ui.separator();
+    let delete_label = if selected_count > 1 {
+        "Delete selected"
+    } else {
+        "Delete"
+    };
+    if ui
+        .add_enabled(action_enabled, egui::Button::new(delete_label))
+        .clicked()
+    {
+        action = Some(LibraryCardAction::Delete(context_paths.to_vec()));
+        ui.close();
+    }
+
+    action
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn apply_desktop_image_action(
+    ui: &mut Ui,
+    app: &mut AurawApp,
+    frame: &eframe::Frame,
+    action: LibraryCardAction,
+) {
+    match action {
+        LibraryCardAction::Export(paths) => {
+            if !paths.is_empty() {
+                app.library.export_dialog = Some(LibraryExportDialog {
+                    paths,
+                    settings: app.export_settings.clone(),
+                    format: ExportFormat::Jpeg,
+                });
+            }
+        }
+        LibraryCardAction::CopyAdjustments(path) => {
+            let status = match app.copy_library_adjustments_from_path(&path) {
+                Ok(()) => format!(
+                    "Copied adjustments from {}",
+                    app.copied_adjustments_source_label().unwrap_or("image")
+                ),
+                Err(error) => format!("Could not copy adjustments: {error}"),
+            };
+            app.library.status = status;
+        }
+        LibraryCardAction::PasteAdjustments(paths) => {
+            let (edited_count, failures) = app.library_adjustment_edit_count_paths(&paths);
+            if failures.is_empty() {
+                if edited_count > 0 {
+                    app.library.adjustment_paste_dialog = Some(LibraryAdjustmentPasteDialog {
+                        paths,
+                        edited_count,
+                    });
+                } else {
+                    apply_library_adjustment_paste(
+                        app,
+                        paths,
+                        crate::sidecar::AdjustmentPasteMode::Merge,
+                        ui.ctx(),
+                        frame,
+                    );
+                }
+            } else {
+                app.library.status = format!(
+                    "Could not inspect selected adjustments. {}",
+                    failures.join(" · ")
+                );
+            }
+        }
+        LibraryCardAction::Duplicate(paths) => {
+            app.library.clear_selection();
+            app.library.duplicate_raws_with_sidecars(paths, ui.ctx());
+        }
+        LibraryCardAction::ResetAdjustments(paths) => {
+            let current_to_reopen = app
+                .current_path
+                .as_ref()
+                .and_then(|current| paths.iter().find(|path| *path == current).cloned());
+            if let Some(path) = current_to_reopen.as_deref() {
+                app.detach_current_file_for_library_action(path);
+            }
+
+            let total = paths.len();
+            let mut failures = Vec::new();
+            let mut reset_count = 0usize;
+            for path in &paths {
+                match crate::sidecar::reset_desktop_adjustments(path) {
+                    Ok(reset) => {
+                        app.library.invalidate_adjustment_thumbnail_for_path(path);
+                        if reset {
+                            reset_count += 1;
+                        }
+                    }
+                    Err(error) => failures.push(format!("{}: {error}", path.display())),
+                }
+            }
+            app.library.clear_selection();
+            app.library.refresh(ui.ctx());
+            app.library.status = if failures.is_empty() {
+                format!(
+                    "Cleared all adjustments for {total} selected {} ({reset_count} changed)",
+                    if total == 1 { "image" } else { "images" }
+                )
+            } else {
+                format!(
+                    "Cleared all adjustments for {} of {total} selected images. {}",
+                    total.saturating_sub(failures.len()),
+                    failures.join(" · ")
+                )
+            };
+            if let Some(path) = current_to_reopen {
+                app.reload_desktop_library_document_after_reset(path, frame);
+            }
+        }
+        LibraryCardAction::Delete(paths) => {
+            let current_target = app
+                .current_path
+                .as_ref()
+                .and_then(|current| paths.iter().find(|path| *path == current).cloned());
+            if let Some(path) = current_target.as_deref() {
+                app.detach_current_file_for_library_action(path);
+            }
+
+            let total = paths.len();
+            let mut failures = Vec::new();
+            let mut cleanup_warnings = Vec::new();
+            let mut deleted_current = false;
+            for path in &paths {
+                match fs::remove_file(path) {
+                    Ok(()) => {
+                        if current_target.as_ref() == Some(path) {
+                            deleted_current = true;
+                        }
+                        if let Err(error) = crate::sidecar::remove_desktop_edits(path) {
+                            cleanup_warnings.push(format!("{}: {error}", path.display()));
+                        }
+                    }
+                    Err(error) => failures.push(format!("{}: {error}", path.display())),
+                }
+            }
+            if deleted_current {
+                app.current_path = None;
+            }
+            app.library.clear_selection();
+            app.library.refresh(ui.ctx());
+            let deleted = total.saturating_sub(failures.len());
+            app.library.status = if failures.is_empty() && cleanup_warnings.is_empty() {
+                format!(
+                    "Deleted {deleted} selected {}",
+                    if deleted == 1 { "image" } else { "images" }
+                )
+            } else {
+                let mut details = failures;
+                details.extend(cleanup_warnings);
+                format!(
+                    "Deleted {deleted} of {total} selected images. {}",
+                    details.join(" · ")
+                )
+            };
+            if !deleted_current {
+                if let Some(path) = current_target {
+                    app.open_path(path, frame);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn show_desktop_image_action_overlays(
+    ui: &mut Ui,
+    app: &mut AurawApp,
+    frame: &eframe::Frame,
+) {
+    // These overlays normally live in `Library::show`. Develop's filmstrip now
+    // exposes the same image actions, so keep their modal follow-up UI available
+    // without forcing a tab switch back to Library.
+    let mut paste_action = 0u8;
+    if let Some(dialog) = app.library.adjustment_paste_dialog.as_ref() {
+        let target_count = dialog.paths.len();
+        crate::ui::responsive_popup(egui::Window::new("Paste adjustments"), ui.ctx(), 480.0)
+            .id(egui::Id::new("library-adjustment-paste-conflict-dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!(
+                    "{} of the {} selected {} already contain edits.",
+                    dialog.edited_count,
+                    target_count,
+                    if target_count == 1 { "image" } else { "images" }
+                ));
+                ui.add_space(4.0);
+                ui.label(
+                    "Merge overwrites only the copied categories and preserves every unchecked category already on the destination.",
+                );
+                ui.label(
+                    "Replace clears the destination edit state first, then applies the categories stored in the adjustment clipboard.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        paste_action = 1;
+                    }
+                    if ui.button("Merge").clicked() {
+                        paste_action = 2;
+                    }
+                    if ui.button("Replace").clicked() {
+                        paste_action = 3;
+                    }
+                });
+            });
+    }
+    if paste_action != 0 {
+        if let Some(dialog) = app.library.adjustment_paste_dialog.take() {
+            match paste_action {
+                2 => apply_library_adjustment_paste(
+                    app,
+                    dialog.paths,
+                    crate::sidecar::AdjustmentPasteMode::Merge,
+                    ui.ctx(),
+                    frame,
+                ),
+                3 => apply_library_adjustment_paste(
+                    app,
+                    dialog.paths,
+                    crate::sidecar::AdjustmentPasteMode::Replace,
+                    ui.ctx(),
+                    frame,
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    let mut refresh_action = 0u8;
+    let can_regenerate = app.can_start_library_ai_mask_refresh();
+    if let Some(prompt) = app.library.ai_mask_refresh_prompt.as_ref() {
+        let target_count = prompt.paths.len();
+        crate::ui::responsive_popup(egui::Window::new("Regenerate AI masks?"), ui.ctx(), 460.0)
+            .id(egui::Id::new("library-ai-mask-refresh-prompt"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!(
+                    "{} pasted {} contain content-aware masks that belong to the source image.",
+                    target_count,
+                    if target_count == 1 { "image" } else { "images" }
+                ));
+                ui.label(
+                    "Regenerate them now for each destination image? Mask groups, settings, object strokes, and local adjustments are preserved.",
+                );
+                if !can_regenerate {
+                    ui.label(
+                        egui::RichText::new(
+                            "Waiting for the current RAW load or edit save to finish…",
+                        )
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Not now").clicked() {
+                        refresh_action = 1;
+                    }
+                    if ui
+                        .add_enabled(can_regenerate, egui::Button::new("Regenerate"))
+                        .clicked()
+                    {
+                        refresh_action = 2;
+                    }
+                });
+            });
+    }
+    if refresh_action != 0 {
+        if let Some(prompt) = app.library.ai_mask_refresh_prompt.take() {
+            if refresh_action == 2 {
+                app.start_library_ai_mask_refresh_paths(prompt.paths, frame);
+            }
+        }
+    }
+
+    if let Some((completed, total, failed, current_name)) = app.library_ai_mask_refresh_status() {
+        if app.library_ai_mask_refresh_progress_open() {
+            let fraction = if total == 0 {
+                0.0
+            } else {
+                (completed as f32 / total as f32).clamp(0.0, 1.0)
+            };
+            let mut minimize = false;
+            let mut cancel = false;
+            crate::ui::responsive_popup(
+                egui::Window::new("Regenerating AI masks"),
+                ui.ctx(),
+                360.0,
+            )
+            .id(egui::Id::new("library-ai-mask-refresh-progress"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{completed} / {total} AI masks updated"))
+                        .strong(),
+                );
+                ui.add_space(6.0);
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .show_percentage()
+                        .animate(completed < total),
+                );
+                if let Some(name) = current_name.as_deref() {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("Refreshing {name}…"));
+                    });
+                }
+                if failed > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{failed} {} failed",
+                            if failed == 1 { "image" } else { "images" }
+                        ))
+                        .small()
+                        .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    minimize = ui.button("Minimize").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+            if minimize {
+                app.minimize_library_ai_mask_refresh_progress();
+            }
+            if cancel {
+                app.cancel_library_ai_mask_refresh();
+            }
+        }
+    }
+
+    let mut close_export_dialog = false;
+    let mut confirm_export = false;
+    if let Some(dialog) = app.library.export_dialog.as_mut() {
+        let count = dialog.paths.len();
+        let export_picker_directory = dialog
+            .paths
+            .first()
+            .and_then(|path| path.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
+        let title = if count == 1 {
+            "Export image".to_owned()
+        } else {
+            format!("Export {count} images")
+        };
+        crate::ui::responsive_popup(egui::Window::new(title), ui.ctx(), 480.0)
+            .id(egui::Id::new("library-export-dialog"))
+            .collapsible(false)
+            .resizable(true)
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Format");
+                    ui.selectable_value(&mut dialog.format, ExportFormat::Jpeg, "JPEG");
+                    ui.selectable_value(&mut dialog.format, ExportFormat::Png, "PNG");
+                    ui.selectable_value(&mut dialog.format, ExportFormat::Tiff, "TIFF");
+                });
+                match dialog.format {
+                    ExportFormat::Jpeg => {
+                        dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                    }
+                    ExportFormat::Png
+                        if dialog.settings.bit_depth
+                            == crate::pipeline::ExportBitDepth::Float32Linear =>
+                    {
+                        dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                    }
+                    _ => {}
+                }
+                ui.add_space(6.0);
+                crate::ui::sidebar::export_settings_controls(
+                    ui,
+                    &mut dialog.settings,
+                    None,
+                    false,
+                    export_picker_directory.as_deref(),
+                );
+                match dialog.format {
+                    ExportFormat::Jpeg => {
+                        dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
+                    }
+                    ExportFormat::Png
+                        if dialog.settings.bit_depth
+                            == crate::pipeline::ExportBitDepth::Float32Linear =>
+                    {
+                        dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
+                    }
+                    _ => {}
+                }
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(if count > 1 {
+                        "A destination folder will be selected for the batch. File names are generated from each RAW name."
+                    } else {
+                        "Choose the output file after pressing Export."
+                    })
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close_export_dialog = true;
+                    }
+                    let label = if count == 1 {
+                        "Export 1 image…".to_owned()
+                    } else {
+                        format!("Export {count} images…")
+                    };
+                    if ui.button(label).clicked() {
+                        confirm_export = true;
+                    }
+                });
+            });
+    }
+
+    if confirm_export {
+        if let Some(dialog) = app.library.export_dialog.clone() {
+            if let Some(jobs) = library_export_jobs(&dialog.paths, dialog.format) {
+                app.library.clear_selection();
+                app.library.export_dialog = None;
+                app.start_library_exports(jobs, dialog.settings.clone(), dialog.format, frame);
+            }
+        }
+    } else if close_export_dialog {
+        app.library.export_dialog = None;
+    }
+
+    show_library_batch_export_progress(ui, app);
 }
 
 #[cfg(target_os = "android")]
@@ -4197,105 +4802,14 @@ impl Library {
                             } else {
                                 vec![path.clone()]
                             };
-                            let selected_count = context_paths.len();
-                            let action_enabled = !app.library.file_action_in_progress()
-                                && app.library_batch_export_progress().is_none()
-                                && app.library_ai_mask_refresh_status().is_none()
-                                && !context_paths.is_empty();
-                            let can_paste_adjustments =
-                                action_enabled && app.has_copied_adjustments();
                             response.context_menu(|ui| {
-                                let export_label = if selected_count > 1 {
-                                    "Export selected…"
-                                } else {
-                                    "Export…"
-                                };
-                                if ui
-                                    .add_enabled(action_enabled, egui::Button::new(export_label))
-                                    .clicked()
-                                {
-                                    library_action =
-                                        Some(LibraryCardAction::Export(context_paths.clone()));
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui
-                                    .add_enabled(
-                                        action_enabled,
-                                        egui::Button::new("Copy adjustments"),
-                                    )
-                                    .clicked()
-                                {
-                                    library_action = Some(LibraryCardAction::CopyAdjustments(
-                                        context_source_path.clone(),
-                                    ));
-                                    ui.close();
-                                }
-                                let paste_label = if selected_count > 1 {
-                                    "Paste adjustments to selected"
-                                } else {
-                                    "Paste adjustments"
-                                };
-                                if ui
-                                    .add_enabled(
-                                        can_paste_adjustments,
-                                        egui::Button::new(paste_label),
-                                    )
-                                    .on_disabled_hover_text("Copy adjustments from an image first")
-                                    .clicked()
-                                {
-                                    library_action = Some(LibraryCardAction::PasteAdjustments(
-                                        context_paths.clone(),
-                                    ));
-                                    ui.close();
-                                }
-                                ui.separator();
-                                let duplicate_label = if selected_count > 1 {
-                                    "Duplicate selected (RAW + sidecars)"
-                                } else {
-                                    "Duplicate (RAW + sidecar)"
-                                };
-                                if ui
-                                    .add_enabled(action_enabled, egui::Button::new(duplicate_label))
-                                    .clicked()
-                                {
-                                    library_action =
-                                        Some(LibraryCardAction::Duplicate(context_paths.clone()));
-                                    ui.close();
-                                }
-                                let reset_label = if selected_count > 1 {
-                                    "Reset adjustments for selected"
-                                } else {
-                                    "Reset all adjustments"
-                                };
-                                if ui
-                                    .add_enabled(
-                                        action_enabled,
-                                        egui::Button::new(format!(
-                                            "{}  {reset_label}",
-                                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
-                                        )),
-                                    )
-                                    .clicked()
-                                {
-                                    library_action = Some(LibraryCardAction::ResetAdjustments(
-                                        context_paths.clone(),
-                                    ));
-                                    ui.close();
-                                }
-                                ui.separator();
-                                let delete_label = if selected_count > 1 {
-                                    "Delete selected"
-                                } else {
-                                    "Delete"
-                                };
-                                if ui
-                                    .add_enabled(action_enabled, egui::Button::new(delete_label))
-                                    .clicked()
-                                {
-                                    library_action =
-                                        Some(LibraryCardAction::Delete(context_paths.clone()));
-                                    ui.close();
+                                if let Some(action) = desktop_image_context_menu(
+                                    ui,
+                                    app,
+                                    &context_source_path,
+                                    &context_paths,
+                                ) {
+                                    library_action = Some(action);
                                 }
                             });
                         }
@@ -4306,148 +4820,7 @@ impl Library {
 
         #[cfg(not(target_os = "android"))]
         if let Some(action) = library_action {
-            match action {
-                LibraryCardAction::Export(paths) => {
-                    if !paths.is_empty() {
-                        app.library.export_dialog = Some(LibraryExportDialog {
-                            paths,
-                            settings: app.export_settings.clone(),
-                            format: ExportFormat::Jpeg,
-                        });
-                    }
-                }
-                LibraryCardAction::CopyAdjustments(path) => {
-                    let status = match app.copy_library_adjustments_from_path(&path) {
-                        Ok(()) => format!(
-                            "Copied adjustments from {}",
-                            app.copied_adjustments_source_label().unwrap_or("image")
-                        ),
-                        Err(error) => format!("Could not copy adjustments: {error}"),
-                    };
-                    app.library.status = status;
-                }
-                LibraryCardAction::PasteAdjustments(paths) => {
-                    let (edited_count, failures) = app.library_adjustment_edit_count_paths(&paths);
-                    if failures.is_empty() {
-                        if edited_count > 0 {
-                            app.library.adjustment_paste_dialog =
-                                Some(LibraryAdjustmentPasteDialog {
-                                    paths,
-                                    edited_count,
-                                });
-                        } else {
-                            apply_library_adjustment_paste(
-                                app,
-                                paths,
-                                crate::sidecar::AdjustmentPasteMode::Merge,
-                                ui.ctx(),
-                                frame,
-                            );
-                        }
-                    } else {
-                        app.library.status = format!(
-                            "Could not inspect selected adjustments. {}",
-                            failures.join(" · ")
-                        );
-                    }
-                }
-                LibraryCardAction::Duplicate(paths) => {
-                    app.library.clear_selection();
-                    app.library.duplicate_raws_with_sidecars(paths, ui.ctx());
-                }
-                LibraryCardAction::ResetAdjustments(paths) => {
-                    let current_to_reopen = app
-                        .current_path
-                        .as_ref()
-                        .and_then(|current| paths.iter().find(|path| *path == current).cloned());
-                    if let Some(path) = current_to_reopen.as_deref() {
-                        app.detach_current_file_for_library_action(path);
-                    }
-
-                    let total = paths.len();
-                    let mut failures = Vec::new();
-                    let mut reset_count = 0usize;
-                    for path in &paths {
-                        match crate::sidecar::reset_desktop_adjustments(path) {
-                            Ok(reset) => {
-                                app.library.invalidate_adjustment_thumbnail_for_path(path);
-                                if reset {
-                                    reset_count += 1;
-                                }
-                            }
-                            Err(error) => failures.push(format!("{}: {error}", path.display())),
-                        }
-                    }
-                    app.library.clear_selection();
-                    app.library.refresh(ui.ctx());
-                    app.library.status = if failures.is_empty() {
-                        format!(
-                            "Cleared all adjustments for {total} selected {} ({reset_count} changed)",
-                            if total == 1 { "image" } else { "images" }
-                        )
-                    } else {
-                        format!(
-                            "Cleared all adjustments for {} of {total} selected images. {}",
-                            total.saturating_sub(failures.len()),
-                            failures.join(" · ")
-                        )
-                    };
-                    if let Some(path) = current_to_reopen {
-                        app.reload_desktop_library_document_after_reset(path, frame);
-                    }
-                }
-                LibraryCardAction::Delete(paths) => {
-                    let current_target = app
-                        .current_path
-                        .as_ref()
-                        .and_then(|current| paths.iter().find(|path| *path == current).cloned());
-                    if let Some(path) = current_target.as_deref() {
-                        app.detach_current_file_for_library_action(path);
-                    }
-
-                    let total = paths.len();
-                    let mut failures = Vec::new();
-                    let mut cleanup_warnings = Vec::new();
-                    let mut deleted_current = false;
-                    for path in &paths {
-                        match fs::remove_file(path) {
-                            Ok(()) => {
-                                if current_target.as_ref() == Some(path) {
-                                    deleted_current = true;
-                                }
-                                if let Err(error) = crate::sidecar::remove_desktop_edits(path) {
-                                    cleanup_warnings.push(format!("{}: {error}", path.display()));
-                                }
-                            }
-                            Err(error) => failures.push(format!("{}: {error}", path.display())),
-                        }
-                    }
-                    if deleted_current {
-                        app.current_path = None;
-                    }
-                    app.library.clear_selection();
-                    app.library.refresh(ui.ctx());
-                    let deleted = total.saturating_sub(failures.len());
-                    app.library.status = if failures.is_empty() && cleanup_warnings.is_empty() {
-                        format!(
-                            "Deleted {deleted} selected {}",
-                            if deleted == 1 { "image" } else { "images" }
-                        )
-                    } else {
-                        let mut details = failures;
-                        details.extend(cleanup_warnings);
-                        format!(
-                            "Deleted {deleted} of {total} selected images. {}",
-                            details.join(" · ")
-                        )
-                    };
-                    if !deleted_current {
-                        if let Some(path) = current_target {
-                            app.open_path(path, frame);
-                        }
-                    }
-                }
-            }
+            apply_desktop_image_action(ui, app, frame, action);
         }
 
         #[cfg(target_os = "android")]
@@ -4574,114 +4947,7 @@ impl Library {
         }
 
         #[cfg(not(target_os = "android"))]
-        {
-            let mut paste_action = 0u8;
-            if let Some(dialog) = app.library.adjustment_paste_dialog.as_ref() {
-                let target_count = dialog.paths.len();
-                crate::ui::responsive_popup(egui::Window::new("Paste adjustments"), ui.ctx(), 480.0)
-                    .id(egui::Id::new("library-adjustment-paste-conflict-dialog"))
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ui.ctx(), |ui| {
-                        ui.label(format!(
-                            "{} of the {} selected {} already contain edits.",
-                            dialog.edited_count,
-                            target_count,
-                            if target_count == 1 { "image" } else { "images" }
-                        ));
-                        ui.add_space(4.0);
-                        ui.label(
-                            "Merge overwrites only the copied categories and preserves every unchecked category already on the destination.",
-                        );
-                        ui.label(
-                            "Replace clears the destination edit state first, then applies the categories stored in the adjustment clipboard.",
-                        );
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Cancel").clicked() {
-                                paste_action = 1;
-                            }
-                            if ui.button("Merge").clicked() {
-                                paste_action = 2;
-                            }
-                            if ui.button("Replace").clicked() {
-                                paste_action = 3;
-                            }
-                        });
-                    });
-            }
-            if paste_action != 0 {
-                if let Some(dialog) = app.library.adjustment_paste_dialog.take() {
-                    match paste_action {
-                        2 => apply_library_adjustment_paste(
-                            app,
-                            dialog.paths,
-                            crate::sidecar::AdjustmentPasteMode::Merge,
-                            ui.ctx(),
-                            frame,
-                        ),
-                        3 => apply_library_adjustment_paste(
-                            app,
-                            dialog.paths,
-                            crate::sidecar::AdjustmentPasteMode::Replace,
-                            ui.ctx(),
-                            frame,
-                        ),
-                        _ => {}
-                    }
-                }
-            }
-
-            let mut refresh_action = 0u8;
-            let can_regenerate = app.can_start_library_ai_mask_refresh();
-            if let Some(prompt) = app.library.ai_mask_refresh_prompt.as_ref() {
-                let target_count = prompt.paths.len();
-                crate::ui::responsive_popup(egui::Window::new("Regenerate AI masks?"), ui.ctx(), 460.0)
-                    .id(egui::Id::new("library-ai-mask-refresh-prompt"))
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ui.ctx(), |ui| {
-                        ui.label(format!(
-                            "{} pasted {} contain content-aware masks that belong to the source image.",
-                            target_count,
-                            if target_count == 1 { "image" } else { "images" }
-                        ));
-                        ui.label(
-                            "Regenerate them now for each destination image? Mask groups, settings, object strokes, and local adjustments are preserved.",
-                        );
-                        if !can_regenerate {
-                            ui.label(
-                                egui::RichText::new(
-                                    "Waiting for the current RAW load or edit save to finish…",
-                                )
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                            );
-                        }
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Not now").clicked() {
-                                refresh_action = 1;
-                            }
-                            if ui
-                                .add_enabled(can_regenerate, egui::Button::new("Regenerate"))
-                                .clicked()
-                            {
-                                refresh_action = 2;
-                            }
-                        });
-                    });
-            }
-            if refresh_action != 0 {
-                if let Some(prompt) = app.library.ai_mask_refresh_prompt.take() {
-                    if refresh_action == 2 {
-                        app.start_library_ai_mask_refresh_paths(prompt.paths, frame);
-                    }
-                }
-            }
-        }
+        show_desktop_image_action_overlays(ui, app, frame);
 
         #[cfg(target_os = "android")]
         {
@@ -4795,6 +5061,7 @@ impl Library {
             }
         }
 
+        #[cfg(target_os = "android")]
         if let Some((completed, total, failed, current_name)) = app.library_ai_mask_refresh_status()
         {
             if app.library_ai_mask_refresh_progress_open() {
@@ -4862,112 +5129,6 @@ impl Library {
             }
         }
 
-        #[cfg(not(target_os = "android"))]
-        {
-            let mut close_export_dialog = false;
-            let mut confirm_export = false;
-            if let Some(dialog) = app.library.export_dialog.as_mut() {
-                let count = dialog.paths.len();
-                let export_picker_directory = dialog
-                    .paths
-                    .first()
-                    .and_then(|path| path.parent())
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .map(std::path::Path::to_path_buf);
-                let title = if count == 1 {
-                    "Export image".to_owned()
-                } else {
-                    format!("Export {count} images")
-                };
-                crate::ui::responsive_popup(egui::Window::new(title), ui.ctx(), 480.0)
-                    .id(egui::Id::new("library-export-dialog"))
-                    .collapsible(false)
-                    .resizable(true)
-                    .show(ui.ctx(), |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Format");
-                            ui.selectable_value(&mut dialog.format, ExportFormat::Jpeg, "JPEG");
-                            ui.selectable_value(&mut dialog.format, ExportFormat::Png, "PNG");
-                            ui.selectable_value(&mut dialog.format, ExportFormat::Tiff, "TIFF");
-                        });
-                        match dialog.format {
-                            ExportFormat::Jpeg => {
-                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
-                            }
-                            ExportFormat::Png
-                                if dialog.settings.bit_depth
-                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
-                            {
-                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
-                            }
-                            _ => {}
-                        }
-                        ui.add_space(6.0);
-                        crate::ui::sidebar::export_settings_controls(
-                            ui,
-                            &mut dialog.settings,
-                            None,
-                            false,
-                            export_picker_directory.as_deref(),
-                        );
-                        match dialog.format {
-                            ExportFormat::Jpeg => {
-                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Eight;
-                            }
-                            ExportFormat::Png
-                                if dialog.settings.bit_depth
-                                    == crate::pipeline::ExportBitDepth::Float32Linear =>
-                            {
-                                dialog.settings.bit_depth = crate::pipeline::ExportBitDepth::Sixteen;
-                            }
-                            _ => {}
-                        }
-                        ui.add_space(10.0);
-                        ui.label(
-                            egui::RichText::new(if count > 1 {
-                                "A destination folder will be selected for the batch. File names are generated from each RAW name."
-                            } else {
-                                "Choose the output file after pressing Export."
-                            })
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
-                        );
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Cancel").clicked() {
-                                close_export_dialog = true;
-                            }
-                            let label = if count == 1 {
-                                "Export 1 image…".to_owned()
-                            } else {
-                                format!("Export {count} images…")
-                            };
-                            if ui.button(label).clicked() {
-                                confirm_export = true;
-                            }
-                        });
-                    });
-            }
-
-            if confirm_export {
-                if let Some(dialog) = app.library.export_dialog.clone() {
-                    if let Some(jobs) = library_export_jobs(&dialog.paths, dialog.format) {
-                        app.library.clear_selection();
-                        app.library.export_dialog = None;
-                        app.start_library_exports(
-                            jobs,
-                            dialog.settings.clone(),
-                            dialog.format,
-                            frame,
-                        );
-                    }
-                }
-            } else if close_export_dialog {
-                app.library.export_dialog = None;
-            }
-
-            show_library_batch_export_progress(ui, app);
-        }
 
         #[cfg(target_os = "android")]
         {
@@ -6005,7 +6166,7 @@ mod tests {
     }
 
     #[test]
-    fn develop_pause_preserves_a_received_thumbnail_request() {
+    fn develop_pause_preserves_a_received_non_priority_thumbnail_request() {
         let generation = 1;
         let cancellation = Arc::new(AtomicU64::new(generation));
         let decoding_paused = Arc::new(AtomicBool::new(true));
@@ -6056,7 +6217,7 @@ mod tests {
             .send(ThumbnailRequest {
                 generation,
                 source: source.clone(),
-                display_priority: true,
+                display_priority: false,
             })
             .unwrap();
         assert!(matches!(
@@ -6077,10 +6238,84 @@ mod tests {
             }) => {
                 assert_eq!(event_generation, generation);
                 assert_eq!(event_source, source);
-                assert!(display_priority);
+                assert!(!display_priority);
                 assert_eq!((loaded.thumbnail.width, loaded.thumbnail.height), (1, 1));
             }
             _ => panic!("thumbnail worker did not preserve the paused request"),
+        }
+        drop(request_sender);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn develop_pause_allows_display_priority_thumbnail_request() {
+        let generation = 2;
+        let cancellation = Arc::new(AtomicU64::new(generation));
+        let decoding_paused = Arc::new(AtomicBool::new(true));
+        let (event_sender, event_receiver) = mpsc::sync_channel(2);
+        let (request_sender, request_receiver) = mpsc::sync_channel(0);
+        let (decode_started_sender, decode_started_receiver) = mpsc::sync_channel(1);
+        let worker_pause = Arc::clone(&decoding_paused);
+        let worker = std::thread::spawn(move || {
+            run_thumbnail_workers(
+                ThumbnailWorker {
+                    files: Vec::new(),
+                    warning_count: 0,
+                    truncated: false,
+                    generation,
+                    cancellation,
+                    decoding_paused: worker_pause,
+                    decode_gate: Arc::new(RwLock::new(())),
+                    event_sender,
+                    request_receiver,
+                    repaint: eframe::egui::Context::default(),
+                },
+                1,
+                Arc::new(move |_| {
+                    decode_started_sender.send(()).unwrap();
+                    Ok(loaded_library_thumbnail(
+                        RawThumbnail {
+                            width: 1,
+                            height: 1,
+                            rgba: vec![0, 0, 0, 255],
+                        },
+                        false,
+                    ))
+                }),
+            );
+        });
+
+        match event_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(ScanEvent::Catalog {
+                generation: event_generation,
+                ..
+            }) => assert_eq!(event_generation, generation),
+            _ => panic!("thumbnail worker did not publish its catalog"),
+        }
+        let source = LibrarySource::File(PathBuf::from("filmstrip.dng"));
+        request_sender
+            .send(ThumbnailRequest {
+                generation,
+                source: source.clone(),
+                display_priority: true,
+            })
+            .unwrap();
+        decode_started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("display-priority thumbnail should run while Develop is paused");
+        match event_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(ScanEvent::Thumbnail {
+                generation: event_generation,
+                source: event_source,
+                display_priority,
+                result: Ok(loaded),
+            }) => {
+                assert_eq!(event_generation, generation);
+                assert_eq!(event_source, source);
+                assert!(display_priority);
+                assert_eq!((loaded.thumbnail.width, loaded.thumbnail.height), (1, 1));
+            }
+            _ => panic!("thumbnail worker did not service the display-priority request"),
         }
         drop(request_sender);
         worker.join().unwrap();

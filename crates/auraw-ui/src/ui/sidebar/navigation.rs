@@ -343,7 +343,51 @@ impl Sidebar {
                 .clicked()
                 {
                     app.sidebar_tab = tab;
+                    // Choosing a tool while the properties panel is hidden is a
+                    // natural request to reveal that tool's controls again.
+                    app.develop_sidebar_open = true;
                 }
+            }
+        });
+
+        // Keep both Develop visibility controls pinned to the bottom of the
+        // right-hand icon rail. `bottom_up` lays out the first button closest
+        // to the window edge, so Filmstrip is below Sidebar as requested.
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            ui.add_space(5.0);
+
+            let filmstrip_tooltip = if app.develop_filmstrip_open {
+                "Hide filmstrip"
+            } else {
+                "Show filmstrip"
+            };
+            if icon_toggle_button(
+                ui,
+                UiIcon::Filmstrip,
+                app.develop_filmstrip_open,
+                egui::vec2(38.0, 38.0),
+                filmstrip_tooltip,
+            )
+            .clicked()
+            {
+                app.develop_filmstrip_open = !app.develop_filmstrip_open;
+            }
+
+            let sidebar_tooltip = if app.develop_sidebar_open {
+                "Hide editing sidebar"
+            } else {
+                "Show editing sidebar"
+            };
+            if icon_toggle_button(
+                ui,
+                UiIcon::Sidebar,
+                app.develop_sidebar_open,
+                egui::vec2(38.0, 38.0),
+                sidebar_tooltip,
+            )
+            .clicked()
+            {
+                app.develop_sidebar_open = !app.develop_sidebar_open;
             }
         });
         Self::finish_sidebar_tab_change(app, previous);
