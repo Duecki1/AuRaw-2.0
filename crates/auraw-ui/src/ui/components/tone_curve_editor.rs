@@ -7,7 +7,9 @@ const PICK_RADIUS: f32 = 16.0;
 
 pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color32) -> bool {
     curve.sanitize();
-    let width = ui.available_width().max(180.0);
+    // Stay inside the scroll area's reserved content column even when the
+    // sidebar is resized narrower than the preferred curve width.
+    let width = ui.available_width().max(1.0);
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, CURVE_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);

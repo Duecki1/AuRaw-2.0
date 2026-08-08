@@ -1283,6 +1283,7 @@ impl Sidebar {
         let mut clear_refinement = false;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
+        let mut local_hsl_mixer_color = app.hsl_mixer_color;
         let mut birefnet_quality = app.birefnet_quality;
         let birefnet_quality_change_enabled = app.birefnet_quality_change_enabled();
 
@@ -1345,6 +1346,7 @@ impl Sidebar {
                         section,
                         &mut local_curve_tab,
                         &mut local_color_grade_tab,
+                        &mut local_hsl_mixer_color,
                     );
                     adjustments_changed |= section_changed;
                 });
@@ -1353,6 +1355,7 @@ impl Sidebar {
 
         app.tone_curve_tab = local_curve_tab;
         app.color_grade_tab = local_color_grade_tab;
+        app.hsl_mixer_color = local_hsl_mixer_color;
         app.brush_mode = brush_mode;
         app.subject_refinement_active = refinement_active;
         let refinement_settings_changed = app.masks.subject_refinement.size != refinement_size
@@ -1431,6 +1434,7 @@ impl Sidebar {
         let mut clear_refinement = false;
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
+        let mut local_hsl_mixer_color = app.hsl_mixer_color;
         let mut birefnet_quality = app.birefnet_quality;
         let birefnet_quality_change_enabled = app.birefnet_quality_change_enabled();
 
@@ -1491,6 +1495,7 @@ impl Sidebar {
                         section,
                         &mut local_curve_tab,
                         &mut local_color_grade_tab,
+                        &mut local_hsl_mixer_color,
                     );
                     adjustments_changed |= section_changed;
                 }
@@ -1499,6 +1504,7 @@ impl Sidebar {
 
         app.tone_curve_tab = local_curve_tab;
         app.color_grade_tab = local_color_grade_tab;
+        app.hsl_mixer_color = local_hsl_mixer_color;
         app.brush_mode = brush_mode;
         app.subject_refinement_active = refinement_active;
         let refinement_settings_changed = app.masks.subject_refinement.size != refinement_size
@@ -2368,6 +2374,7 @@ impl Sidebar {
         section: MaskSection,
         selected_tab: &mut ToneCurveTab,
         selected_grade_tab: &mut ColorGradeTab,
+        selected_hsl_color: &mut HslMixerColor,
     ) -> (bool, bool) {
         match section {
             MaskSection::Properties => (false, false),
@@ -2382,7 +2389,10 @@ impl Sidebar {
                 false,
             ),
             MaskSection::Effects => (Self::show_local_mask_effects(ui, adjustment), false),
-            MaskSection::ColorMixer => (Self::show_local_mask_color_mixer(ui, adjustment), false),
+            MaskSection::ColorMixer => (
+                Self::show_local_mask_color_mixer(ui, adjustment, selected_hsl_color),
+                false,
+            ),
         }
     }
 
@@ -2624,46 +2634,14 @@ impl Sidebar {
     fn show_local_mask_color_mixer(
         ui: &mut Ui,
         adjustment: &mut crate::pipeline::LocalAdjustments,
+        selected_color: &mut HslMixerColor,
     ) -> bool {
-        const COLORS: [&str; 8] = [
-            "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
-        ];
-        let mut changed = false;
-        for (index, color) in COLORS.iter().enumerate() {
-            ui.push_id(("local-hsl", index), |ui| {
-                ui.strong(*color);
-                changed |= adjustment_slider(
-                    ui,
-                    "Hue",
-                    &mut adjustment.hsl_hue[index],
-                    -HSL_HUE_LIMIT..=HSL_HUE_LIMIT,
-                    0,
-                    1.0,
-                    None,
-                );
-                changed |= adjustment_slider(
-                    ui,
-                    "Saturation",
-                    &mut adjustment.hsl_saturation[index],
-                    -100.0..=100.0,
-                    0,
-                    1.0,
-                    None,
-                );
-                changed |= adjustment_slider(
-                    ui,
-                    "Luminance",
-                    &mut adjustment.hsl_luminance[index],
-                    -100.0..=100.0,
-                    0,
-                    1.0,
-                    None,
-                );
-            });
-            if index + 1 < COLORS.len() {
-                ui.separator();
-            }
-        }
-        changed
+        hsl_mixer(
+            ui,
+            selected_color,
+            &mut adjustment.hsl_hue,
+            &mut adjustment.hsl_saturation,
+            &mut adjustment.hsl_luminance,
+        )
     }
 }

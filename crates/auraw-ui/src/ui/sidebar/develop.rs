@@ -81,7 +81,8 @@ impl Sidebar {
                         } else {
                             state.selected_maker.as_str()
                         })
-                        .width(ui.available_width())
+                        .width(ui.available_width().min(240.0).max(1.0))
+                        .truncate()
                         .show_ui(ui, |ui| {
                             for maker in &makers {
                                 ui.selectable_value(
@@ -115,7 +116,8 @@ impl Sidebar {
                         } else {
                             state.selected_model.as_str()
                         })
-                        .width(ui.available_width())
+                        .width(ui.available_width().min(240.0).max(1.0))
+                        .truncate()
                         .show_ui(ui, |ui| {
                             for model in &models {
                                 ui.selectable_value(
@@ -229,13 +231,13 @@ impl Sidebar {
         foldable: bool,
     ) -> bool {
         let mut changed = false;
-        Self::adjustment_section(ui, "Tone Curve", true, foldable, |ui| {
+        Self::adjustment_section(ui, "Tone Curve", false, foldable, |ui| {
             ui.horizontal(|ui| {
                 let spacing = ui.spacing().item_spacing.x;
                 let segment_width =
                     ((ui.available_width() - crate::ui::theme::TOOLBAR_ICON_EDGE - spacing * 4.0)
-                        / 4.0)
-                        .max(32.0);
+                        .max(4.0))
+                        / 4.0;
                 for (tab, label, color) in [
                     (ToneCurveTab::Rgb, "RGB", egui::Color32::WHITE),
                     (ToneCurveTab::Red, "R", egui::Color32::from_rgb(238, 84, 84)),
@@ -322,7 +324,7 @@ impl Sidebar {
         foldable: bool,
     ) -> bool {
         let mut changed = false;
-        Self::adjustment_section(ui, "Color", true, foldable, |ui| {
+        Self::adjustment_section(ui, "Color", false, foldable, |ui| {
             if let Some(raw) = raw.filter(|raw| raw.as_shot_white_balance().is_some()) {
                 let presets = raw.camera_white_balance_presets();
                 let matches_current = |candidate: (f32, f32)| {
@@ -356,9 +358,14 @@ impl Sidebar {
                 };
                 ui.horizontal(|ui| {
                     let picker_width = crate::ui::theme::TOOLBAR_ICON_EDGE;
+                    let combo_width =
+                        (ui.available_width() - picker_width - ui.spacing().item_spacing.x)
+                            .min(240.0)
+                            .max(1.0);
                     egui::ComboBox::from_id_salt("global-white-balance-preset")
                         .selected_text(selection)
-                        .width((ui.available_width() - picker_width).max(120.0))
+                        .width(combo_width)
+                        .truncate()
                         .show_ui(ui, |ui| {
                             if ui.selectable_label(false, "as shot").clicked() {
                                 exposure.temperature = 0.0;
@@ -546,7 +553,7 @@ impl Sidebar {
         foldable: bool,
     ) -> bool {
         let mut changed = false;
-        let mut contents = |ui: &mut Ui| {
+        let contents = |ui: &mut Ui| {
             ui.label(
                 egui::RichText::new("Perceptual four-way grading in scene-linear Rec.2020")
                     .size(11.5)
@@ -554,13 +561,7 @@ impl Sidebar {
             );
             changed |= color_grading_editor(ui, grading, selected_tab);
         };
-        if foldable {
-            egui::CollapsingHeader::new("Color Grading")
-                .default_open(false)
-                .show(ui, contents);
-        } else {
-            contents(ui);
-        }
+        Self::adjustment_section(ui, "Color Grading", false, foldable, contents);
         changed
     }
 
@@ -845,49 +846,21 @@ impl Sidebar {
         changed
     }
 
-    fn show_hsl(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
-        const COLORS: [&str; 8] = [
-            "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
-        ];
-
+    fn show_hsl(
+        ui: &mut Ui,
+        exposure: &mut ExposureParams,
+        selected_color: &mut HslMixerColor,
+        foldable: bool,
+    ) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Color Mixer", false, foldable, |ui| {
-            for (index, color) in COLORS.iter().enumerate() {
-                ui.push_id(index, |ui| {
-                    ui.strong(*color);
-                    changed |= adjustment_slider(
-                        ui,
-                        "Hue",
-                        &mut exposure.hsl_hue[index],
-                        -HSL_HUE_LIMIT..=HSL_HUE_LIMIT,
-                        0,
-                        1.0,
-                        None,
-                    );
-                    changed |= adjustment_slider(
-                        ui,
-                        "Saturation",
-                        &mut exposure.hsl_saturation[index],
-                        -100.0..=100.0,
-                        0,
-                        1.0,
-                        None,
-                    );
-                    changed |= adjustment_slider(
-                        ui,
-                        "Luminance",
-                        &mut exposure.hsl_luminance[index],
-                        -100.0..=100.0,
-                        0,
-                        1.0,
-                        None,
-                    );
-                });
-
-                if index + 1 < COLORS.len() {
-                    ui.separator();
-                }
-            }
+            changed |= hsl_mixer(
+                ui,
+                selected_color,
+                &mut exposure.hsl_hue,
+                &mut exposure.hsl_saturation,
+                &mut exposure.hsl_luminance,
+            );
         });
         changed
     }

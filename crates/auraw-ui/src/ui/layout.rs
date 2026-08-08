@@ -8,6 +8,7 @@ pub enum ScreenLayout {
 
 impl ScreenLayout {
     pub const MIN_HORIZONTAL_SIDEBAR_WIDTH: f32 = 320.0;
+    pub const MAX_HORIZONTAL_SIDEBAR_WIDTH: f32 = 520.0;
     pub const MIN_VERTICAL_SIDEBAR_HEIGHT: f32 = 240.0;
 
     pub fn from_size(size: Vec2) -> Self {

@@ -88,7 +88,40 @@ pub fn adjustment_slider<Num>(
 where
     Num: egui::emath::Numeric + Copy,
 {
-    adjustment_slider_impl(ui, label, value, range, decimals, speed, hover_text, None)
+    adjustment_slider_impl(
+        ui, label, value, range, decimals, speed, hover_text, None, None,
+    )
+}
+
+/// Adjustment slider with a color accent for channel-based controls.
+///
+/// The geometry and interaction remain identical to [`adjustment_slider`];
+/// only the channel swatch, active track, and handle use the supplied color.
+#[allow(clippy::too_many_arguments)]
+pub fn accented_adjustment_slider<Num>(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Num,
+    range: RangeInclusive<Num>,
+    decimals: usize,
+    speed: f64,
+    hover_text: Option<&str>,
+    accent: egui::Color32,
+) -> bool
+where
+    Num: egui::emath::Numeric + Copy,
+{
+    adjustment_slider_impl(
+        ui,
+        label,
+        value,
+        range,
+        decimals,
+        speed,
+        hover_text,
+        None,
+        Some(accent),
+    )
 }
 
 /// Adjustment slider with an explicit semantic reset value.
@@ -119,6 +152,7 @@ where
         speed,
         hover_text,
         Some(reset_value.to_f64()),
+        None,
     )
 }
 
@@ -132,6 +166,7 @@ fn adjustment_slider_impl<Num>(
     speed: f64,
     hover_text: Option<&str>,
     explicit_reset_value: Option<f64>,
+    accent: Option<egui::Color32>,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -151,7 +186,9 @@ where
                 }
             })
         });
-        let control_width = ui.available_width().max(VALUE_FIELD_WIDTH + 96.0);
+        // Never manufacture width inside a scroll area. A forced minimum here
+        // can extend a slider beneath a floating scrollbar on a narrow panel.
+        let control_width = ui.available_width().max(1.0);
 
         ui.vertical(|ui| {
             ui.set_width(control_width);
@@ -161,7 +198,20 @@ where
                 egui::vec2(control_width, HEADER_HEIGHT),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    let mut label_response = ui.label(RichText::new(label).size(LABEL_SIZE));
+                    let mut label_response = if let Some(accent) = accent {
+                        let (swatch_rect, swatch_response) =
+                            ui.allocate_exact_size(egui::vec2(9.0, 9.0), Sense::hover());
+                        ui.painter()
+                            .circle_filled(swatch_rect.center(), 4.5, accent);
+                        ui.painter().circle_stroke(
+                            swatch_rect.center(),
+                            4.5,
+                            Stroke::new(1.0, egui::Color32::from_white_alpha(90)),
+                        );
+                        swatch_response.union(ui.label(RichText::new(label).size(LABEL_SIZE)))
+                    } else {
+                        ui.label(RichText::new(label).size(LABEL_SIZE))
+                    };
                     label_response = label_response.on_hover_text(reset_tooltip(hover_text));
                     if label_response.double_clicked() {
                         changed |= set_numeric(value, reset_value, decimals);
@@ -198,6 +248,7 @@ where
                 control_width,
                 hover_text,
                 reset_value,
+                accent,
             );
             ui.add_space(ROW_BOTTOM_SPACE);
         });
@@ -253,6 +304,7 @@ fn guarded_slider<Num>(
     width: f32,
     hover_text: Option<&str>,
     reset_value: f64,
+    accent: Option<egui::Color32>,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -276,7 +328,8 @@ where
     let handle_hit_rect = egui::Rect::from_center_size(
         handle_center,
         egui::vec2(HANDLE_TOUCH_RADIUS * 2.0, HANDLE_TOUCH_RADIUS * 2.0),
-    );
+    )
+    .intersect(rect);
 
     // Both overlapping hit regions only request click sensing. In egui this
     // lets a parent ScrollArea claim a vertical drag, while we still inspect
@@ -387,7 +440,7 @@ where
             Stroke::new(
                 if active { 2.0 } else { 1.5 },
                 if active {
-                    ui.visuals().selection.bg_fill
+                    accent.unwrap_or(ui.visuals().selection.bg_fill)
                 } else {
                     ui.visuals().weak_text_color()
                 },
@@ -401,16 +454,41 @@ where
             TRACK_HEIGHT * 0.5,
             ui.visuals().widgets.inactive.bg_fill,
         );
-        let fill_rect = egui::Rect::from_min_max(
-            track_rect.left_top(),
-            egui::pos2(handle_x, track_rect.bottom()),
+        // Signed adjustment ranges use zero as their visual origin. This keeps
+        // neutral values neutral instead of showing a misleading half-filled
+        // blue track, while one-sided controls continue filling from the left.
+        let bipolar = start < 0.0 && end > 0.0;
+        let fill_origin = if bipolar {
+            let zero_fraction = ((-start) / span).clamp(0.0, 1.0) as f32;
+            egui::lerp(track_rect.left()..=track_rect.right(), zero_fraction)
+        } else {
+            track_rect.left()
+        };
+        let fill_left = fill_origin.min(handle_x);
+        let fill_right = fill_origin.max(handle_x);
+        if fill_right - fill_left > 0.25 {
+            let fill_rect = egui::Rect::from_min_max(
+                egui::pos2(fill_left, track_rect.top()),
+                egui::pos2(fill_right, track_rect.bottom()),
+            );
+            painter.rect_filled(
+                fill_rect,
+                TRACK_HEIGHT * 0.5,
+                accent.unwrap_or(ui.visuals().selection.bg_fill),
+            );
+        }
+        if bipolar {
+            painter.vline(
+                fill_origin,
+                (track_rect.center().y - 5.0)..=(track_rect.center().y + 5.0),
+                Stroke::new(1.0, egui::Color32::from_white_alpha(75)),
+            );
+        }
+        painter.circle_filled(
+            handle_center,
+            HANDLE_RADIUS,
+            accent.unwrap_or(widget_visuals.bg_fill),
         );
-        painter.rect_filled(
-            fill_rect,
-            TRACK_HEIGHT * 0.5,
-            ui.visuals().selection.bg_fill,
-        );
-        painter.circle_filled(handle_center, HANDLE_RADIUS, widget_visuals.bg_fill);
         painter.circle_stroke(
             handle_center,
             HANDLE_RADIUS,
