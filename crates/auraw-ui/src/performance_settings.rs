@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 7;
+const SETTINGS_VERSION: u32 = 8;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,6 +15,8 @@ pub struct PerformanceSettings {
     pub thumbnail_workers: usize,
     #[serde(default)]
     pub library_thumbnail_size: crate::ui::library::LibraryThumbnailSize,
+    #[serde(default)]
+    pub library_sort_order: crate::ui::library::LibrarySortOrder,
     #[serde(default)]
     pub preview_quality: crate::app::PreviewQuality,
     #[serde(default)]
@@ -51,6 +53,12 @@ pub struct PerformanceSettings {
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_library_selected_folder: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default = "default_true")]
+    pub library_folder_sidebar_open: bool,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default = "default_true")]
+    pub develop_filmstrip_open: bool,
 }
 
 const fn settings_version() -> u32 {
@@ -70,6 +78,11 @@ const fn default_camera_profile_auto_detect() -> bool {
 }
 
 #[cfg(not(target_os = "android"))]
+const fn default_true() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "android"))]
 const fn default_display_color_management() -> bool {
     true
 }
@@ -81,6 +94,7 @@ impl Default for PerformanceSettings {
             raw_cache_files: default_raw_cache_files(),
             thumbnail_workers: default_thumbnail_workers(),
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::default(),
+            library_sort_order: crate::ui::library::LibrarySortOrder::default(),
             preview_quality: crate::app::PreviewQuality::default(),
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
             camera_profile_mode: CameraProfileMode::default(),
@@ -97,6 +111,10 @@ impl Default for PerformanceSettings {
             last_library_folder: None,
             #[cfg(not(target_os = "android"))]
             last_library_selected_folder: None,
+            #[cfg(not(target_os = "android"))]
+            library_folder_sidebar_open: true,
+            #[cfg(not(target_os = "android"))]
+            develop_filmstrip_open: true,
         }
     }
 }
@@ -272,6 +290,7 @@ mod tests {
             raw_cache_files: usize::MAX,
             thumbnail_workers: 0,
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Large,
+            library_sort_order: crate::ui::library::LibrarySortOrder::NameAscending,
             preview_quality: crate::app::PreviewQuality::High,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
@@ -296,6 +315,10 @@ mod tests {
             last_library_folder: None,
             #[cfg(not(target_os = "android"))]
             last_library_selected_folder: None,
+            #[cfg(not(target_os = "android"))]
+            library_folder_sidebar_open: false,
+            #[cfg(not(target_os = "android"))]
+            develop_filmstrip_open: false,
         }
         .sanitized();
         assert_eq!(settings.version, SETTINGS_VERSION);
@@ -307,6 +330,10 @@ mod tests {
         assert_eq!(
             settings.library_thumbnail_size,
             crate::ui::library::LibraryThumbnailSize::Large
+        );
+        assert_eq!(
+            settings.library_sort_order,
+            crate::ui::library::LibrarySortOrder::NameAscending
         );
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::High);
         assert_eq!(
@@ -381,6 +408,15 @@ mod tests {
             crate::ui::library::LibraryThumbnailSize::Medium
         );
         assert_eq!(
+            settings.library_sort_order,
+            crate::ui::library::LibrarySortOrder::NewestFirst
+        );
+        #[cfg(not(target_os = "android"))]
+        {
+            assert!(settings.library_folder_sidebar_open);
+            assert!(settings.develop_filmstrip_open);
+        }
+        assert_eq!(
             settings.adjustment_copy_settings,
             crate::sidecar::AdjustmentCopySettings::default()
         );
@@ -390,6 +426,7 @@ mod tests {
     fn library_view_preferences_round_trip() {
         let mut settings = PerformanceSettings {
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Enormous,
+            library_sort_order: crate::ui::library::LibrarySortOrder::SmallestFirst,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             ..Default::default()
         };
@@ -397,6 +434,8 @@ mod tests {
         {
             settings.last_library_folder = Some(PathBuf::from("photos"));
             settings.last_library_selected_folder = Some(PathBuf::from("photos/2026/trip"));
+            settings.library_folder_sidebar_open = false;
+            settings.develop_filmstrip_open = false;
         }
 
         let json = serde_json::to_string(&settings).unwrap();
@@ -405,6 +444,10 @@ mod tests {
         assert_eq!(
             restored.library_thumbnail_size,
             crate::ui::library::LibraryThumbnailSize::Enormous
+        );
+        assert_eq!(
+            restored.library_sort_order,
+            crate::ui::library::LibrarySortOrder::SmallestFirst
         );
         assert_eq!(
             restored.birefnet_quality,
@@ -417,6 +460,8 @@ mod tests {
                 restored.last_library_selected_folder,
                 Some(PathBuf::from("photos/2026/trip"))
             );
+            assert!(!restored.library_folder_sidebar_open);
+            assert!(!restored.develop_filmstrip_open);
         }
     }
 
