@@ -358,6 +358,7 @@ impl AurawApp {
                 performance.library_folder_sidebar_open,
             ),
             develop_reference: DevelopReferenceState::default(),
+            develop_loading_thumbnail: DevelopLoadingThumbnailState::default(),
             develop_filmstrip_open: performance.develop_filmstrip_open,
             develop_filmstrip_centered_path: None,
             develop_sidebar_open: true,
@@ -642,6 +643,7 @@ impl AurawApp {
                 performance.library_thumbnail_size,
                 performance.library_sort_order,
             ),
+            develop_loading_thumbnail: DevelopLoadingThumbnailState::default(),
             adjustment_copy_settings: performance.adjustment_copy_settings,
             adjustment_clipboard: None,
             raw_cache: VecDeque::new(),
@@ -1133,6 +1135,7 @@ impl AurawApp {
         if self.picker_pending {
             return;
         }
+        self.develop_loading_thumbnail.clear();
         match crate::android::open_raw_document(&self.android_app) {
             Ok(()) => {
                 self.picker_pending = true;
@@ -1179,6 +1182,8 @@ impl AurawApp {
             return;
         }
 
+        self.prepare_android_develop_loading_thumbnail(uri);
+
         // This is a user-owned picker result. Keep it distinct from the
         // Android batch exporter's internal document-load result routing.
         self.android_batch_load_pending = false;
@@ -1188,7 +1193,10 @@ impl AurawApp {
                 self.notice = None;
                 self.status = format!("Opening {display_name}…");
             }
-            Err(error) => self.notice = Some(error),
+            Err(error) => {
+                self.develop_loading_thumbnail.clear();
+                self.notice = Some(error);
+            }
         }
     }
 
@@ -1813,6 +1821,136 @@ impl AurawApp {
         exposure
     }
 
+    #[cfg(not(target_os = "android"))]
+    fn prepare_develop_loading_thumbnail(&mut self, path: &std::path::Path) {
+        const LOADING_THUMBNAIL_EDGE: u32 = 512;
+
+        self.develop_loading_thumbnail.clear();
+        self.develop_loading_thumbnail.path = Some(path.to_owned());
+
+        if let Some((texture, size)) = self
+            .library
+            .desktop_loading_thumbnail_for_path(path, &self.egui_ctx)
+        {
+            self.develop_loading_thumbnail.texture = Some(texture);
+            self.develop_loading_thumbnail.texture_size = Some(size);
+        }
+
+        if self.develop_loading_thumbnail.texture.is_some() {
+            return;
+        }
+
+        let worker_path = path.to_owned();
+        let repaint = self.egui_ctx.clone();
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("auraw-loading-thumbnail".to_owned())
+            .spawn(move || {
+                let result = crate::ui::library::load_desktop_cached_thumbnail(
+                    &worker_path,
+                    LOADING_THUMBNAIL_EDGE,
+                );
+                let _ = sender.send((worker_path, result));
+                repaint.request_repaint();
+            })
+        {
+            Ok(_) => self.develop_loading_thumbnail.receiver = Some(receiver),
+            Err(error) => log::warn!("could not start loading-thumbnail worker: {error}"),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn refresh_develop_loading_thumbnail(&mut self, context: &egui::Context) {
+        let Some(path) = self.develop_loading_thumbnail.path.clone() else {
+            return;
+        };
+
+        // The selected Library card is usually already resident. Polling also
+        // picks up a request that was already in flight when the RAW was opened.
+        // A cache miss never queues another sensor decode beside the real load.
+        self.library.poll(context);
+        if self.develop_loading_thumbnail.texture.is_none() {
+            if let Some((texture, size)) = self
+                .library
+                .desktop_loading_thumbnail_for_path(&path, context)
+            {
+                self.develop_loading_thumbnail.texture = Some(texture);
+                self.develop_loading_thumbnail.texture_size = Some(size);
+            }
+        }
+
+        let event = self
+            .develop_loading_thumbnail
+            .receiver
+            .as_ref()
+            .and_then(|receiver| match receiver.try_recv() {
+                Ok(event) => Some(Ok(event)),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(())),
+            });
+        let Some(event) = event else {
+            return;
+        };
+        self.develop_loading_thumbnail.receiver = None;
+
+        let Ok((loaded_path, result)) = event else {
+            return;
+        };
+        if loaded_path != path || self.develop_loading_thumbnail.texture.is_some() {
+            return;
+        }
+        match result {
+            Ok(Some(thumbnail)) => {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [thumbnail.width as usize, thumbnail.height as usize],
+                    &thumbnail.rgba,
+                );
+                self.develop_loading_thumbnail.texture = Some(context.load_texture(
+                    format!("develop-loading-thumbnail-{}", loaded_path.display()),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+                self.develop_loading_thumbnail.texture_size =
+                    Some([thumbnail.width, thumbnail.height]);
+            }
+            Ok(None) => {}
+            Err(error) => log::warn!(
+                "could not load cached thumbnail for {}: {error}",
+                loaded_path.display()
+            ),
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn prepare_android_develop_loading_thumbnail(&mut self, uri: &str) {
+        self.develop_loading_thumbnail.clear();
+        self.develop_loading_thumbnail.source_uri = Some(uri.to_owned());
+        if let Some((texture, size)) = self
+            .library
+            .android_loading_thumbnail_for_uri(uri, &self.egui_ctx)
+        {
+            self.develop_loading_thumbnail.texture = Some(texture);
+            self.develop_loading_thumbnail.texture_size = Some(size);
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn refresh_develop_loading_thumbnail(&mut self, context: &egui::Context) {
+        let Some(uri) = self.develop_loading_thumbnail.source_uri.clone() else {
+            return;
+        };
+        self.library.poll(context);
+        if self.develop_loading_thumbnail.texture.is_none() {
+            if let Some((texture, size)) = self
+                .library
+                .android_loading_thumbnail_for_uri(&uri, context)
+            {
+                self.develop_loading_thumbnail.texture = Some(texture);
+                self.develop_loading_thumbnail.texture_size = Some(size);
+            }
+        }
+    }
+
     fn open_path_labeled(
         &mut self,
         path: PathBuf,
@@ -1862,6 +2000,29 @@ impl AurawApp {
             self.refresh_status();
             return;
         };
+
+        #[cfg(not(target_os = "android"))]
+        {
+            if self.active_tab == AppTab::Develop {
+                let crate::sidecar::SidecarTarget::Desktop { raw_path } = &sidecar_target;
+                self.prepare_develop_loading_thumbnail(raw_path);
+            } else {
+                self.develop_loading_thumbnail.clear();
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            let loading_thumbnail_matches = self.active_tab == AppTab::Develop
+                && matches!(
+                    &sidecar_target,
+                    crate::sidecar::SidecarTarget::Android { raw_uri, .. }
+                        if self.develop_loading_thumbnail.source_uri.as_deref()
+                            == Some(raw_uri.as_str())
+                );
+            if !loading_thumbnail_matches {
+                self.develop_loading_thumbnail.clear();
+            }
+        }
 
         let device = render_state.device.clone();
         let queue = render_state.queue.clone();
@@ -2606,6 +2767,7 @@ impl AurawApp {
             }
             self.load_receiver = None;
             self.loading_label = None;
+            self.develop_loading_thumbnail.clear();
             self.notice = Some(format!("could not start RAW decode worker: {error}"));
             self.refresh_status();
         }
@@ -2744,6 +2906,7 @@ impl AurawApp {
                     failed,
                     errors,
                 } => {
+                    self.develop_loading_thumbnail.clear();
                     self.pending_android_library_reset_reload = false;
                     self.active_tab = AppTab::Library;
                     self.library.refresh(&self.egui_ctx);
@@ -2769,6 +2932,7 @@ impl AurawApp {
                     };
                 }
                 crate::android::PickerResult::Cancelled => {
+                    self.develop_loading_thumbnail.clear();
                     self.pending_android_profile_reload = None;
                     let was_reset_reload =
                         std::mem::take(&mut self.pending_android_library_reset_reload);
@@ -2792,6 +2956,7 @@ impl AurawApp {
                     }
                 }
                 crate::android::PickerResult::Failed(error) => {
+                    self.develop_loading_thumbnail.clear();
                     let was_profile_reload = self.pending_android_profile_reload.take().is_some();
                     let was_reset_reload =
                         std::mem::take(&mut self.pending_android_library_reset_reload);
@@ -2827,6 +2992,7 @@ impl AurawApp {
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
                 self.load_receiver = None;
                 self.loading_label = None;
+                self.develop_loading_thumbnail.clear();
                 self.notice = Some("RAW decode worker stopped unexpectedly.".to_owned());
                 self.on_library_ai_mask_refresh_load_finished(false, frame);
                 #[cfg(target_os = "android")]
@@ -2845,6 +3011,7 @@ impl AurawApp {
 
         self.load_receiver = None;
         self.loading_label = None;
+        self.develop_loading_thumbnail.clear();
         #[cfg(target_os = "android")]
         let batch_owned_load = std::mem::take(&mut self.android_batch_load_pending);
 

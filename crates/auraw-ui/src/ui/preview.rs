@@ -31,6 +31,9 @@ pub struct Preview;
 impl Preview {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         let available = ui.available_size();
+        if app.preview_base_pipeline().is_none() && app.preview_is_preparing() {
+            app.refresh_develop_loading_thumbnail(ui.ctx());
+        }
         let base_pipeline = app.preview_base_pipeline().and_then(|pipeline| {
             pipeline
                 .egui_texture_id
@@ -46,6 +49,9 @@ impl Preview {
 
         let Some((texture_id, pipeline_width, pipeline_height)) = base_pipeline else {
             if app.preview_is_preparing() {
+                if show_loading_thumbnail(ui, app, available) {
+                    return;
+                }
                 ui.centered_and_justified(|ui| {
                     ui.spinner();
                     ui.label("Preparing preview…");
@@ -2430,6 +2436,43 @@ impl Preview {
             Color32::WHITE,
         );
     }
+}
+
+fn show_loading_thumbnail(ui: &mut Ui, app: &AurawApp, available: egui::Vec2) -> bool {
+    let (Some(texture), Some([width, height])) = (
+        app.develop_loading_thumbnail.texture.as_ref(),
+        app.develop_loading_thumbnail.texture_size,
+    ) else {
+        return false;
+    };
+    if available.x <= 0.0 || available.y <= 0.0 || width == 0 || height == 0 {
+        return false;
+    }
+
+    let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
+    let image_size = fitted_image_size(outer_rect.size(), width as f32 / height as f32);
+    let image_rect = Rect::from_center_size(outer_rect.center(), image_size);
+    ui.painter().image(
+        texture.id(),
+        image_rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+
+    if outer_rect.width() >= 104.0 && outer_rect.height() >= 48.0 {
+        let badge_width = 132.0_f32.min(outer_rect.width() - 16.0);
+        let badge_rect = Rect::from_center_size(outer_rect.center(), egui::vec2(badge_width, 32.0));
+        ui.painter()
+            .rect_filled(badge_rect, 16.0, Color32::from_black_alpha(190));
+        ui.painter().text(
+            badge_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Loading RAW…",
+            egui::FontId::proportional(13.0),
+            Color32::WHITE,
+        );
+    }
+    true
 }
 
 fn begin_mask_drag(
