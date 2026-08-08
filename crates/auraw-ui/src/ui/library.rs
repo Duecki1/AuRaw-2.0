@@ -753,6 +753,43 @@ impl LibraryState {
             .copied()
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn desktop_loading_thumbnail_for_path(
+        &mut self,
+        path: &Path,
+        context: &egui::Context,
+    ) -> Option<(egui::TextureHandle, [u32; 2])> {
+        let index = self.filmstrip_index_for_path(path)?;
+        self.restore_resident_thumbnail_texture(index, context);
+        self.loading_thumbnail_for_index(index)
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn android_loading_thumbnail_for_uri(
+        &mut self,
+        uri: &str,
+        context: &egui::Context,
+    ) -> Option<(egui::TextureHandle, [u32; 2])> {
+        let index = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.info.source,
+                LibrarySource::Android { uri: entry_uri, .. } if entry_uri == uri
+            )
+        })?;
+        self.restore_resident_thumbnail_texture(index, context);
+        self.loading_thumbnail_for_index(index)
+    }
+
+    fn loading_thumbnail_for_index(&self, index: usize) -> Option<(egui::TextureHandle, [u32; 2])> {
+        let entry = self.entries.get(index)?;
+        let texture = entry.texture.clone()?;
+        let size = entry.thumbnail_size.unwrap_or_else(|| {
+            let [width, height] = texture.size();
+            [width as u32, height as u32]
+        });
+        Some((texture, size))
+    }
+
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
         self.thumbnail_workers
     }
@@ -1583,32 +1620,14 @@ impl LibraryState {
     }
 
     pub(crate) fn touch_and_request_thumbnail(&mut self, index: usize, context: &egui::Context) {
+        self.restore_resident_thumbnail_texture(index, context);
+
         let generation = self.generation.load(Ordering::Acquire);
-        self.usage_clock = self.usage_clock.wrapping_add(1).max(1);
-        let usage_clock = self.usage_clock;
         let request_sender = self.request_sender.clone();
 
         let Some(entry) = self.entries.get_mut(index) else {
             return;
         };
-        entry.last_used = usage_clock;
-
-        if entry.texture.is_none() {
-            if let Some(resident) = entry.resident_thumbnail.as_ref() {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [resident.width as usize, resident.height as usize],
-                    &resident.rgba,
-                );
-                entry.texture = Some(context.load_texture(
-                    format!("library-resident-thumbnail-{generation}-{index}-{usage_clock}"),
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
-                entry.texture_is_resident = entry
-                    .thumbnail_size
-                    .is_some_and(|size| size != [resident.width, resident.height]);
-            }
-        }
 
         // A full GPU texture needs no work. A resident fallback remains visible
         // while we opportunistically queue the full thumbnail again, so revisiting
@@ -1636,6 +1655,33 @@ impl LibraryState {
             .is_some_and(|sender| sender.try_send(request).is_ok())
         {
             entry.thumbnail_queued = true;
+        }
+    }
+
+    fn restore_resident_thumbnail_texture(&mut self, index: usize, context: &egui::Context) {
+        let generation = self.generation.load(Ordering::Acquire);
+        self.usage_clock = self.usage_clock.wrapping_add(1).max(1);
+        let usage_clock = self.usage_clock;
+        let Some(entry) = self.entries.get_mut(index) else {
+            return;
+        };
+        entry.last_used = usage_clock;
+
+        if entry.texture.is_none() {
+            if let Some(resident) = entry.resident_thumbnail.as_ref() {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [resident.width as usize, resident.height as usize],
+                    &resident.rgba,
+                );
+                entry.texture = Some(context.load_texture(
+                    format!("library-resident-thumbnail-{generation}-{index}-{usage_clock}"),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+                entry.texture_is_resident = entry
+                    .thumbnail_size
+                    .is_some_and(|size| size != [resident.width, resident.height]);
+            }
         }
     }
 
@@ -2273,6 +2319,25 @@ pub(crate) fn load_desktop_reference_preview(
     // they do not, the loader retains its LibRaw processed fallback.
     load_raw_thumbnail(path, maximum_edge)
         .map_err(|error| format!("could not render reference preview: {error:#}"))
+}
+
+/// Loads only an already-rendered desktop thumbnail. This deliberately avoids
+/// the embedded-preview and sensor-decode fallbacks used to populate Library
+/// cards, so it is safe to run alongside the full RAW open worker.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn load_desktop_cached_thumbnail(
+    path: &Path,
+    maximum_edge: u32,
+) -> Result<Option<RawThumbnail>, String> {
+    match crate::sidecar::load_developed_thumbnail_cache(path, maximum_edge) {
+        Ok(Some(thumbnail)) => return Ok(Some(thumbnail)),
+        Ok(None) => {}
+        Err(error) => log::warn!(
+            "could not use developed loading thumbnail for {}: {error}",
+            path.display()
+        ),
+    }
+    crate::thumbnail_cache::load_desktop_raw_thumbnail(path, maximum_edge)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -6139,6 +6204,39 @@ mod tests {
         library.touch_and_request_thumbnail(0, &context);
 
         assert!(library.entries[0].texture.is_some());
+        assert!(library.entries[0].texture_is_resident);
+        assert!(!library.entries[0].thumbnail_queued);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn develop_loading_thumbnail_uses_resident_pixels_without_queuing_decode() {
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+        let path = PathBuf::from("develop-loading-resident.dng");
+        let info = LibraryFileInfo {
+            source: LibrarySource::File(path.clone()),
+            display_path: "develop-loading-resident.dng".to_owned(),
+            name: "develop-loading-resident.dng".to_owned(),
+            bytes: 1,
+            dimensions_hint: Some([6000, 4000]),
+            modified: None,
+        };
+        let mut entry = new_library_entry(info);
+        entry.thumbnail_size = Some([512, 341]);
+        entry.resident_thumbnail = Some(RawThumbnail {
+            width: 384,
+            height: 256,
+            rgba: vec![127; 384 * 256 * 4],
+        });
+        library.entries.push(entry);
+        library.rebuild_entry_indices();
+
+        let (_, size) = library
+            .desktop_loading_thumbnail_for_path(&path, &context)
+            .expect("resident thumbnail");
+
+        assert_eq!(size, [512, 341]);
         assert!(library.entries[0].texture_is_resident);
         assert!(!library.entries[0].thumbnail_queued);
     }

@@ -114,6 +114,48 @@ impl DevelopReferenceState {
     }
 }
 
+pub(crate) struct DevelopLoadingThumbnailState {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) path: Option<PathBuf>,
+    #[cfg(target_os = "android")]
+    pub(crate) source_uri: Option<String>,
+    pub(crate) texture: Option<egui::TextureHandle>,
+    pub(crate) texture_size: Option<[u32; 2]>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) receiver: Option<mpsc::Receiver<(PathBuf, Result<Option<RawThumbnail>, String>)>>,
+}
+
+impl Default for DevelopLoadingThumbnailState {
+    fn default() -> Self {
+        Self {
+            #[cfg(not(target_os = "android"))]
+            path: None,
+            #[cfg(target_os = "android")]
+            source_uri: None,
+            texture: None,
+            texture_size: None,
+            #[cfg(not(target_os = "android"))]
+            receiver: None,
+        }
+    }
+}
+
+impl DevelopLoadingThumbnailState {
+    pub(crate) fn clear(&mut self) {
+        #[cfg(not(target_os = "android"))]
+        {
+            self.path = None;
+            self.receiver = None;
+        }
+        #[cfg(target_os = "android")]
+        {
+            self.source_uri = None;
+        }
+        self.texture = None;
+        self.texture_size = None;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PreviewQuality {
@@ -801,6 +843,7 @@ pub struct AurawApp {
     pub(crate) library: LibraryState,
     #[cfg(not(target_os = "android"))]
     pub(crate) develop_reference: DevelopReferenceState,
+    pub(crate) develop_loading_thumbnail: DevelopLoadingThumbnailState,
     #[cfg(not(target_os = "android"))]
     pub(crate) develop_filmstrip_open: bool,
     #[cfg(not(target_os = "android"))]
