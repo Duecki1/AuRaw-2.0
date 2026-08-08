@@ -24,6 +24,53 @@ static REFERENCE_PREVIEW_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 pub(crate) struct Develop;
 
 impl Develop {
+    pub(crate) fn handle_image_navigation_shortcuts(
+        context: &egui::Context,
+        app: &mut AurawApp,
+        frame: &eframe::Frame,
+    ) {
+        // Do not steal arrow keys from focused text fields/sliders or other
+        // widgets that currently own keyboard input. Outside such focused
+        // controls, Left/Right mirrors clicking the previous/next filmstrip
+        // thumbnail and therefore follows the normal document-switch path.
+        if context.egui_wants_keyboard_input() {
+            return;
+        }
+
+        let previous =
+            egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowLeft);
+        let next = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowRight);
+        let direction = if context.input_mut(|input| input.consume_shortcut(&previous)) {
+            -1_i8
+        } else if context.input_mut(|input| input.consume_shortcut(&next)) {
+            1_i8
+        } else {
+            return;
+        };
+
+        let Some(current_path) = app.current_path.as_deref() else {
+            return;
+        };
+        let Some(current_index) = app.library.filmstrip_index_for_path(current_path) else {
+            return;
+        };
+        let target_index = if direction < 0 {
+            current_index.checked_sub(1)
+        } else {
+            current_index
+                .checked_add(1)
+                .filter(|index| *index < app.library.filmstrip_len())
+        };
+        let Some(target_index) = target_index else {
+            return;
+        };
+        let Some(item) = app.library.filmstrip_item(target_index) else {
+            return;
+        };
+
+        app.open_path(item.path, frame);
+    }
+
     pub(crate) fn show_filmstrip(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         // Develop normally pauses catalog-wide thumbnail decoding. Polling here
         // installs only work that was already queued or explicitly requested by
@@ -150,11 +197,21 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
 
     let active_path = app.current_path.clone();
     let reference_path = app.develop_reference.path.clone();
+    let center_request = active_path.as_ref().and_then(|path| {
+        if app.develop_filmstrip_centered_path.as_ref() == Some(path) {
+            None
+        } else {
+            app.library
+                .filmstrip_index_for_path(path)
+                .map(|index| (index, path.clone()))
+        }
+    });
+    let mut centered_path = None;
     let mut open_path: Option<PathBuf> = None;
     let mut library_action = None;
     let mut protected_indices = HashSet::new();
     let stride = FILMSTRIP_CARD_WIDTH + FILMSTRIP_GAP;
-    let content_width = count as f32 * stride - FILMSTRIP_GAP;
+    let cards_width = count as f32 * stride - FILMSTRIP_GAP;
 
     // On desktop, a one-axis horizontal ScrollArea should consume a normal
     // vertical mouse-wheel gesture while the pointer is over it. Keep this
@@ -167,16 +224,53 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
         .id_salt("develop-filmstrip-scroll")
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {
+            // Keep the content bounds equal to the real thumbnail run. That
+            // lets egui clamp a center request naturally at either end: the
+            // active image is centered only when there are enough thumbnails
+            // on both sides, while first/last-nearby images stay edge-aligned
+            // instead of gaining artificial blank padding.
             let content_height = ui.available_height().max(FILMSTRIP_CARD_HEIGHT);
             let (content_rect, _) = ui.allocate_exact_size(
-                egui::vec2(content_width.max(1.0), content_height),
+                egui::vec2(cards_width.max(1.0), content_height),
                 Sense::hover(),
             );
-            let preload = viewport.expand(FILMSTRIP_PRELOAD_POINTS);
+            let items_left = content_rect.left();
 
-            let first = ((preload.left().max(0.0) / stride).floor() as usize)
+            // This is deliberately a one-shot request. It fires when Develop is
+            // first shown for an image, when another thumbnail becomes active,
+            // or after the filmstrip is reopened. Align::Center is clamped by
+            // the real content bounds above, so manual wheel/drag scrolling
+            // remains under user control and edge images are not force-centered.
+            if let Some((index, path)) = center_request.as_ref() {
+                let x = items_left + *index as f32 * stride;
+                let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
+                let active_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, y),
+                    egui::vec2(FILMSTRIP_CARD_WIDTH, FILMSTRIP_CARD_HEIGHT),
+                );
+                ui.scroll_to_rect(active_rect, Some(egui::Align::Center));
+                centered_path = Some(path.clone());
+                protected_indices.insert(*index);
+                app.library.touch_and_request_thumbnail(*index, ui.ctx());
+                ui.ctx().request_repaint();
+            }
+
+            // `show_viewport` reports `viewport` in scroll-content coordinates,
+            // while `content_rect`/`items_left` are screen coordinates after egui
+            // has translated the child UI by the current scroll offset. Mixing
+            // those spaces makes the offset get counted twice: as the user
+            // scrolls, the virtualized range advances faster than the cards and
+            // thumbnails disappear one-by-one. Convert the item-run origin back
+            // into the viewport's content-relative coordinate space first.
+            let items_origin_in_content = items_left - ui.max_rect().left();
+            let preload = viewport.expand(FILMSTRIP_PRELOAD_POINTS);
+            let relative_left = (preload.left() - items_origin_in_content)
+                .clamp(0.0, cards_width.max(0.0));
+            let relative_right = (preload.right() - items_origin_in_content)
+                .clamp(0.0, cards_width.max(0.0));
+            let first = ((relative_left / stride).floor() as usize)
                 .min(count.saturating_sub(1));
-            let last = (((preload.right().max(0.0) / stride).ceil() as usize) + 1).min(count);
+            let last = (((relative_right / stride).ceil() as usize) + 1).min(count);
 
             for index in first..last {
                 protected_indices.insert(index);
@@ -185,7 +279,7 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
                     continue;
                 };
 
-                let x = content_rect.left() + index as f32 * stride;
+                let x = items_left + index as f32 * stride;
                 let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
                 let rect = egui::Rect::from_min_size(
                     egui::pos2(x, y),
@@ -224,6 +318,10 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
                 });
             }
         });
+
+    if let Some(path) = centered_path {
+        app.develop_filmstrip_centered_path = Some(path);
+    }
 
     app.library.evict_old_textures(&protected_indices);
 

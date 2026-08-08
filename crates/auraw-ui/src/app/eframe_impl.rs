@@ -95,6 +95,9 @@ impl eframe::App for AurawApp {
         {
             self.handle_edit_history_shortcuts(ui.ctx());
             self.handle_sidecar_shortcut(ui.ctx());
+            if self.active_tab == AppTab::Develop {
+                Develop::handle_image_navigation_shortcuts(ui.ctx(), self, frame);
+            }
         }
         #[cfg(target_os = "android")]
         if !self.android_foreground_task_active() {
