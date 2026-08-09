@@ -84,9 +84,7 @@ fn spawn_gpu_preview_prewarm(
     export_prewarm: Arc<crate::pipeline::GpuProgramPrewarm>,
 ) -> Option<mpsc::Receiver<Result<RawGpuPipeline, String>>> {
     let Some(render_state) = cc.wgpu_render_state.as_ref() else {
-        export_prewarm.publish(Err(
-            "eframe is not running with the wgpu backend".to_owned(),
-        ));
+        export_prewarm.publish(Err("eframe is not running with the wgpu backend".to_owned()));
         return None;
     };
     let device = render_state.device.clone();
@@ -207,9 +205,7 @@ fn spawn_gpu_preview_prewarm(
     match spawn_result {
         Ok(_) => Some(receiver),
         Err(error) => {
-            export_prewarm.publish(Err(format!(
-                "GPU prewarm thread could not start: {error}"
-            )));
+            export_prewarm.publish(Err(format!("GPU prewarm thread could not start: {error}")));
             crate::diagnostics::record(format!(
                 "GPU preview prewarm thread could not start: {error}"
             ));
@@ -259,49 +255,6 @@ fn install_missing_range_sources(masks: &mut MaskStack, source: &MaskRgbImage) {
 }
 
 impl AurawApp {
-    fn install_ui_fonts(ctx: &egui::Context) {
-        let mut fonts = egui::FontDefinitions::default();
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-        ctx.set_fonts(fonts);
-    }
-
-    fn install_lightroom_visuals(ctx: &egui::Context) {
-        Self::install_ui_fonts(ctx);
-
-        // Start from egui's robust dark palette, then make the editor panels a
-        // little calmer and denser for a Lightroom-like darkroom layout.
-        let mut visuals = egui::Visuals::dark();
-        let accent = egui::Color32::from_rgb(56, 139, 253);
-
-        visuals.panel_fill = egui::Color32::from_rgb(24, 26, 29);
-        visuals.window_fill = egui::Color32::from_rgb(27, 29, 33);
-        visuals.faint_bg_color = egui::Color32::from_rgb(35, 38, 43);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(16, 18, 20);
-        visuals.selection.bg_fill = accent;
-        visuals.hyperlink_color = accent;
-        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(42, 45, 50);
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(54, 58, 65);
-        visuals.widgets.active.bg_fill = accent;
-        ctx.set_visuals(visuals);
-
-        let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(12.5));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Small, egui::FontId::proportional(11.5));
-        style.spacing.slider_width = 220.0;
-        style.spacing.item_spacing = egui::vec2(7.0, 4.0);
-        style.spacing.button_padding = egui::vec2(9.0, 4.0);
-        style.spacing.interact_size.y = 24.0;
-        style.spacing.indent = 12.0;
-        ctx.set_style_of(egui::Theme::Dark, style);
-    }
-
     #[cfg(not(target_os = "android"))]
     fn empty(ctx: &egui::Context) -> Self {
         let performance_settings_path = crate::performance_settings::desktop_path();
@@ -409,8 +362,6 @@ impl AurawApp {
             selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
-            #[cfg(not(target_os = "android"))]
-            desktop_sidebar_width: None,
             geometry: GeometryTransform::default(),
             crop_constraint_reference: None,
             crop_drag: None,
@@ -423,6 +374,7 @@ impl AurawApp {
             mask_section: MaskSection::default(),
             tone_curve_tab: ToneCurveTab::default(),
             color_grade_tab: ColorGradeTab::default(),
+            hsl_mixer_color: HslMixerColor::default(),
             export_settings: ExportSettings::default(),
             masks,
             active_mask_tool: None,
@@ -581,7 +533,7 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        Self::install_lightroom_visuals(&cc.egui_ctx);
+        crate::ui::theme::install(&cc.egui_ctx);
         crate::diagnostics::record("AuRaw desktop UI initialized");
         Self::empty(&cc.egui_ctx)
     }
@@ -592,10 +544,9 @@ impl AurawApp {
         android_app: auraw_ffi::AndroidApp,
     ) -> Self {
         crate::android::install_context(&cc.egui_ctx);
-        // Android keeps the same AuRaw layout, but intentionally uses eframe's
-        // native/default widget styling instead of the desktop Lightroom-like
-        // palette and spacing overrides. We only install the icon font here.
-        Self::install_ui_fonts(&cc.egui_ctx);
+        // Share AuRaw's palette, typography, icon font, and widget styling with
+        // desktop. Portrait/landscape composition remains Android-specific.
+        crate::ui::theme::install(&cc.egui_ctx);
         match crate::android::device_diagnostics(&android_app) {
             Ok(info) => crate::diagnostics::set_device_info(info),
             Err(error) => crate::diagnostics::record(error),
@@ -622,11 +573,8 @@ impl AurawApp {
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
         let gpu_export_prewarm = Arc::new(crate::pipeline::GpuProgramPrewarm::new());
-        let gpu_preview_prewarm_receiver = spawn_gpu_preview_prewarm(
-            cc,
-            gpu_pipeline_cache_root,
-            Arc::clone(&gpu_export_prewarm),
-        );
+        let gpu_preview_prewarm_receiver =
+            spawn_gpu_preview_prewarm(cc, gpu_pipeline_cache_root, Arc::clone(&gpu_export_prewarm));
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
@@ -703,8 +651,6 @@ impl AurawApp {
             selected_camera_profile: None,
             active_tab: AppTab::default(),
             sidebar_tab: SidebarTab::default(),
-            #[cfg(not(target_os = "android"))]
-            desktop_sidebar_width: None,
             geometry: GeometryTransform::default(),
             crop_constraint_reference: None,
             crop_drag: None,
@@ -717,6 +663,7 @@ impl AurawApp {
             mask_section: MaskSection::default(),
             tone_curve_tab: ToneCurveTab::default(),
             color_grade_tab: ColorGradeTab::default(),
+            hsl_mixer_color: HslMixerColor::default(),
             export_settings: ExportSettings::default(),
             masks,
             active_mask_tool: None,
@@ -889,8 +836,8 @@ impl AurawApp {
         let (sender, receiver) = mpsc::channel();
         let context = self.egui_ctx.clone();
         std::thread::spawn(move || {
-            let path = pollster::block_on(dialog.pick_file())
-                .map(|handle| handle.path().to_path_buf());
+            let path =
+                pollster::block_on(dialog.pick_file()).map(|handle| handle.path().to_path_buf());
             let _ = sender.send(crate::app::DesktopPickerEvent::RawFile(path));
             context.request_repaint();
         });
@@ -909,8 +856,8 @@ impl AurawApp {
         let (sender, receiver) = mpsc::channel();
         let context = self.egui_ctx.clone();
         std::thread::spawn(move || {
-            let folder = pollster::block_on(dialog.pick_folder())
-                .map(|handle| handle.path().to_path_buf());
+            let folder =
+                pollster::block_on(dialog.pick_folder()).map(|handle| handle.path().to_path_buf());
             let _ = sender.send(crate::app::DesktopPickerEvent::LibraryFolder(folder));
             context.request_repaint();
         });
@@ -981,9 +928,9 @@ impl AurawApp {
             self.last_camera_profile = None;
             self.raw_cache.clear();
             #[cfg(target_os = "android")]
-            if let Err(error) = crate::android::clear_camera_profile_folder_picker_location(
-                &self.android_app,
-            ) {
+            if let Err(error) =
+                crate::android::clear_camera_profile_folder_picker_location(&self.android_app)
+            {
                 log::warn!("{error}");
             }
             if self.persist_performance_settings() {
@@ -1799,10 +1746,7 @@ impl AurawApp {
                 .root_folder()
                 .map(|folder| folder.to_path_buf()),
             #[cfg(not(target_os = "android"))]
-            last_library_selected_folder: self
-                .library
-                .folder()
-                .map(|folder| folder.to_path_buf()),
+            last_library_selected_folder: self.library.folder().map(|folder| folder.to_path_buf()),
             #[cfg(not(target_os = "android"))]
             library_folder_sidebar_open: self.library.folder_sidebar_open(),
             #[cfg(not(target_os = "android"))]
@@ -1892,8 +1836,7 @@ impl AurawApp {
                 );
                 let _ = sender.send((worker_path, result));
                 repaint.request_repaint();
-            })
-        {
+            }) {
             Ok(_) => self.develop_loading_thumbnail.receiver = Some(receiver),
             Err(error) => log::warn!("could not start loading-thumbnail worker: {error}"),
         }
@@ -2132,8 +2075,7 @@ impl AurawApp {
         let camera_profile_mode = self.camera_profile_mode;
         let camera_profile_folder = self.camera_profile_folder.clone();
         let last_camera_profile = self.last_camera_profile.clone();
-        let ai_denoise_cache_path =
-            self.rawnind_result_cache_path_for_target(&sidecar_target);
+        let ai_denoise_cache_path = self.rawnind_result_cache_path_for_target(&sidecar_target);
         self.original_preview_exposure = initial_exposure;
         self.original_preview_requested = false;
         self.original_preview_rendered_state = None;
@@ -3087,8 +3029,7 @@ impl AurawApp {
                 // epaint 10-second deadlock panic.
                 let previous_pipeline = {
                     let mut renderer = render_state.renderer.write();
-                    let previous =
-                        self.take_preview_pipeline_and_release_textures(&mut renderer);
+                    let previous = self.take_preview_pipeline_and_release_textures(&mut renderer);
                     loaded
                         .pipeline
                         .register_egui_texture(&render_state.device, &mut renderer);
@@ -3171,8 +3112,7 @@ impl AurawApp {
                 self.dirty_mask_layers.fill(false);
                 self.lens_correction = loaded.lens_correction;
                 self.lens_correction_dirty = false;
-                self.lens_correction_generation =
-                    self.lens_correction_generation.wrapping_add(1);
+                self.lens_correction_generation = self.lens_correction_generation.wrapping_add(1);
                 #[cfg(target_os = "android")]
                 {
                     if self.lens_correction.applied {

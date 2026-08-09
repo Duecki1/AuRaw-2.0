@@ -2094,9 +2094,13 @@ impl AurawApp {
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     let mut quality = self.birefnet_quality;
-                    egui::ComboBox::from_label("Subject quality")
-                        .selected_text(quality.label())
-                        .show_ui(ui, |ui| {
+                    crate::ui::theme::form_combo(
+                        ui,
+                        "Subject quality",
+                        "subject-download-quality",
+                        quality.label(),
+                        180.0,
+                        |ui| {
                             for option in BiRefNetQuality::ALL {
                                 ui.selectable_value(
                                     &mut quality,
@@ -2104,7 +2108,8 @@ impl AurawApp {
                                     option.label(),
                                 );
                             }
-                        });
+                        },
+                    );
                     if quality != self.birefnet_quality {
                         self.set_birefnet_quality(quality);
                     }

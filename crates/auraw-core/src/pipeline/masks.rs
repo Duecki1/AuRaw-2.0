@@ -1036,6 +1036,9 @@ pub struct LocalAdjustments {
     pub blacks: f32,
     pub temperature: f32,
     pub tint: f32,
+    /// Lightroom-style uniform hue rotation in degrees.
+    #[serde(default)]
+    pub hue: f32,
     pub saturation: f32,
     pub texture: f32,
     pub clarity: f32,
@@ -1061,6 +1064,7 @@ impl Default for LocalAdjustments {
             blacks: 0.0,
             temperature: 0.0,
             tint: 0.0,
+            hue: 0.0,
             saturation: 0.0,
             texture: 0.0,
             clarity: 0.0,
@@ -3211,6 +3215,20 @@ mod tests {
         .unwrap();
         assert!(stack.subject_refinement.is_empty());
         assert_eq!(stack.subject_refinement, SubjectRefinement::default());
+    }
+
+    #[test]
+    fn local_adjustments_without_hue_deserialize_to_a_neutral_rotation() {
+        let mut serialized =
+            serde_json::to_value(LocalAdjustments::default()).expect("serialize adjustments");
+        serialized
+            .as_object_mut()
+            .expect("local adjustments are a JSON object")
+            .remove("hue");
+        let decoded: LocalAdjustments =
+            serde_json::from_value(serialized).expect("deserialize legacy adjustments");
+        assert_eq!(decoded.hue, 0.0);
+        assert!(decoded.is_neutral());
     }
 
     #[test]

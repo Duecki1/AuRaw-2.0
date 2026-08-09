@@ -1,4 +1,5 @@
 use crate::app::{AppTab, AurawApp};
+use crate::ui::theme;
 use eframe::egui::{self, Ui};
 
 pub struct TopBar;
@@ -17,8 +18,7 @@ impl TopBar {
             size,
             egui::Button::new(
                 egui::RichText::new(egui_phosphor::regular::ARROW_LEFT).size(size.y * 0.55),
-            )
-            .frame(false),
+            ),
         )
         .on_hover_text("Back to Library")
     }
@@ -37,16 +37,14 @@ impl TopBar {
         };
         ui.add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new(icon).size(size.y * 0.55))
-                .min_size(size)
-                .frame(!cfg!(target_os = "android")),
+            egui::Button::new(egui::RichText::new(icon).size(size.y * 0.55)).min_size(size),
         )
         .on_hover_text(hover_text)
     }
 
     #[cfg(target_os = "android")]
     fn show_android(ui: &mut Ui, app: &mut AurawApp, _frame: &eframe::Frame) {
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
+        theme::prepare_toolbar(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             app.show_global_task_control(ui);
 
@@ -66,7 +64,7 @@ impl TopBar {
                 .add_enabled_ui(app.can_save_edits(), |ui| {
                     ui.add_sized(
                         egui::vec2(42.0, 36.0),
-                        egui::Button::new(egui::RichText::new(save_icon).size(19.8)).frame(false),
+                        egui::Button::new(egui::RichText::new(save_icon).size(19.8)),
                     )
                 })
                 .inner
@@ -107,101 +105,120 @@ impl TopBar {
 
     #[cfg(not(target_os = "android"))]
     fn show_desktop(ui: &mut Ui, app: &mut AurawApp, _frame: &eframe::Frame) {
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
+        theme::prepare_toolbar(ui);
+        let compact = ui.available_width() < 620.0;
+        let brand_width = if compact { 52.0 } else { 68.0 };
+        let tab_width = if compact { 72.0 } else { 82.0 };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             app.show_global_task_control(ui);
-            ui.with_layout(
-                egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
-                |ui| {
-                    ui.strong("AuRaw");
-                    ui.separator();
-                    let previous_tab = app.active_tab;
-                    let mut selected_tab = app.active_tab;
-                    ui.selectable_value(&mut selected_tab, AppTab::Library, "Library");
-                    ui.selectable_value(&mut selected_tab, AppTab::Develop, "Develop");
-                    ui.selectable_value(&mut selected_tab, AppTab::Settings, "Settings");
-                    if selected_tab != previous_tab {
-                        app.activate_tab(selected_tab);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add_sized(
+                    [brand_width, theme::CONTROL_HEIGHT],
+                    egui::Label::new(egui::RichText::new("AuRaw").strong()),
+                );
+                ui.separator();
+                for (tab, label) in [
+                    (AppTab::Library, "Library"),
+                    (AppTab::Develop, "Develop"),
+                    (AppTab::Settings, "Settings"),
+                ] {
+                    if theme::tab_button(ui, label, app.active_tab == tab, tab_width).clicked() {
+                        app.activate_tab(tab);
                     }
+                }
 
-                    ui.separator();
-                    if app.active_tab == AppTab::Library && ui.button("Open Folder").clicked() {
+                ui.separator();
+                if app.active_tab == AppTab::Library {
+                    let open = if compact {
+                        crate::ui::icons::phosphor_icon_button(
+                            ui,
+                            egui_phosphor::regular::FOLDER_OPEN,
+                            theme::toolbar_icon_size(),
+                            "Open photo folder",
+                        )
+                    } else {
+                        theme::toolbar_button(ui, "Open Folder…", 108.0)
+                            .on_hover_text("Open photo folder")
+                    };
+                    if open.clicked() {
                         app.open_library_folder_dialog();
                     }
+                }
 
-                    if app.active_tab == AppTab::Develop {
-                        ui.separator();
-                        if Self::history_icon_button(
-                            ui,
-                            app.can_undo_edit(),
-                            false,
-                            egui::vec2(32.0, 26.0),
-                            "Undo the last edit (Ctrl/Cmd+Z)",
-                        )
-                        .clicked()
-                        {
-                            app.undo_edit();
-                        }
-                        if Self::history_icon_button(
-                            ui,
-                            app.can_redo_edit(),
-                            true,
-                            egui::vec2(32.0, 26.0),
-                            "Redo the last edit (Ctrl/Cmd+Shift+Z or Ctrl+Y)",
-                        )
-                        .clicked()
-                        {
-                            app.redo_edit();
-                        }
-                        let save_tooltip = if app.sidecar_save_in_progress() {
-                            "Saving non-destructive edits…"
-                        } else if app.sidecar_save_succeeded_recently() {
-                            "Edits saved"
-                        } else {
-                            "Save non-destructive edits beside the RAW (Ctrl/Cmd+S)"
-                        };
-                        let save_icon = if app.sidecar_save_succeeded_recently() {
-                            egui_phosphor::regular::CHECK
-                        } else {
-                            egui_phosphor::regular::FLOPPY_DISK
-                        };
-                        let save_response = ui
-                            .add_enabled_ui(app.can_save_edits(), |ui| {
-                                ui.add_sized(
-                                    egui::vec2(32.0, 26.0),
-                                    egui::Button::new(egui::RichText::new(save_icon).size(14.3)),
-                                )
-                            })
-                            .inner
-                            .on_hover_text(save_tooltip);
-                        if save_response.clicked() {
-                            app.save_edits_now();
-                        }
-                        let original_visible = app.original_preview_visible();
-                        let preview_icon = if original_visible {
-                            egui_phosphor::regular::EYE
-                        } else {
-                            egui_phosphor::regular::EYE_SLASH
-                        };
-                        let preview_tooltip = if original_visible {
-                            "Show edited preview"
-                        } else {
-                            "Show original preview"
-                        };
-                        if crate::ui::icons::phosphor_icon_button_enabled(
-                            ui,
-                            app.gpu_pipeline.is_some(),
-                            preview_icon,
-                            egui::vec2(32.0, 26.0),
-                            preview_tooltip,
-                        )
-                        .clicked()
-                        {
-                            app.toggle_original_preview();
-                        }
+                if app.active_tab == AppTab::Develop {
+                    if Self::history_icon_button(
+                        ui,
+                        app.can_undo_edit(),
+                        false,
+                        theme::toolbar_icon_size(),
+                        "Undo the last edit (Ctrl/Cmd+Z)",
+                    )
+                    .clicked()
+                    {
+                        app.undo_edit();
                     }
-                },
-            );
+                    if Self::history_icon_button(
+                        ui,
+                        app.can_redo_edit(),
+                        true,
+                        theme::toolbar_icon_size(),
+                        "Redo the last edit (Ctrl/Cmd+Shift+Z or Ctrl+Y)",
+                    )
+                    .clicked()
+                    {
+                        app.redo_edit();
+                    }
+                    let save_tooltip = if app.sidecar_save_in_progress() {
+                        "Saving non-destructive edits…"
+                    } else if app.sidecar_save_succeeded_recently() {
+                        "Edits saved"
+                    } else {
+                        "Save non-destructive edits beside the RAW (Ctrl/Cmd+S)"
+                    };
+                    let save_icon = if app.sidecar_save_succeeded_recently() {
+                        egui_phosphor::regular::CHECK
+                    } else {
+                        egui_phosphor::regular::FLOPPY_DISK
+                    };
+                    let save_response = ui
+                        .add_enabled_ui(app.can_save_edits(), |ui| {
+                            ui.add_sized(
+                                theme::toolbar_icon_size(),
+                                egui::Button::new(
+                                    egui::RichText::new(save_icon)
+                                        .size(theme::TOOLBAR_ICON_EDGE * 0.55),
+                                ),
+                            )
+                        })
+                        .inner
+                        .on_hover_text(save_tooltip);
+                    if save_response.clicked() {
+                        app.save_edits_now();
+                    }
+                    let original_visible = app.original_preview_visible();
+                    let preview_icon = if original_visible {
+                        egui_phosphor::regular::EYE
+                    } else {
+                        egui_phosphor::regular::EYE_SLASH
+                    };
+                    let preview_tooltip = if original_visible {
+                        "Show edited preview"
+                    } else {
+                        "Show original preview"
+                    };
+                    if crate::ui::icons::phosphor_icon_button_enabled(
+                        ui,
+                        app.gpu_pipeline.is_some(),
+                        preview_icon,
+                        theme::toolbar_icon_size(),
+                        preview_tooltip,
+                    )
+                    .clicked()
+                    {
+                        app.toggle_original_preview();
+                    }
+                }
+            });
         });
     }
 }

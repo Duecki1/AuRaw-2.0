@@ -100,9 +100,9 @@ impl LibraryThumbnailSize {
     const fn label(self) -> &'static str {
         match self {
             Self::Small => "Small",
-            Self::Medium => "Average",
-            Self::Large => "Huge",
-            Self::Enormous => "Enourmous",
+            Self::Medium => "Medium",
+            Self::Large => "Large",
+            Self::Enormous => "Extra large",
         }
     }
 
@@ -3031,8 +3031,7 @@ pub(crate) fn show_desktop_image_action_overlays(
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ui.ctx(), |ui| {
                 ui.label(
-                    egui::RichText::new(format!("{completed} / {total} AI masks updated"))
-                        .strong(),
+                    egui::RichText::new(format!("{completed} / {total} AI masks updated")).strong(),
                 );
                 ui.add_space(6.0);
                 ui.add(
@@ -4062,7 +4061,7 @@ fn show_library_folder_node(
 
     ui.push_id(&node.path, |ui| {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().item_spacing.x = 4.0;
             if has_children {
                 let caret = if expanded {
                     egui_phosphor::regular::CARET_DOWN
@@ -4071,7 +4070,7 @@ fn show_library_folder_node(
                 };
                 if ui
                     .add_sized(
-                        egui::vec2(20.0, 22.0),
+                        egui::vec2(24.0, 28.0),
                         egui::Button::new(egui::RichText::new(caret).size(12.0)).frame(false),
                     )
                     .on_hover_text(if expanded {
@@ -4088,7 +4087,7 @@ fn show_library_folder_node(
                     }
                 }
             } else {
-                ui.allocate_space(egui::vec2(20.0, 22.0));
+                ui.allocate_space(egui::vec2(24.0, 28.0));
             }
 
             let folder_icon = if expanded && has_children {
@@ -4499,17 +4498,16 @@ impl Library {
     pub(crate) fn show_folder_sidebar(ui: &mut Ui, app: &mut AurawApp) {
         let action_in_progress = app.library.file_action_in_progress();
         let mut requested_action = None;
-        // Match the folder-sidebar header height to the Library toolbar.
-        // The Library toolbar is driven by its 26-point controls, so keeping
-        // this row at the same height makes the two header separators align.
+        // The folder header and Library toolbar share the same dimensions so
+        // their controls and separators stay aligned across the split view.
         ui.horizontal(|ui| {
-            ui.set_min_height(26.0);
+            crate::ui::theme::prepare_toolbar(ui);
             ui.strong("Folders");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
                     ui,
                     egui_phosphor::regular::X,
-                    egui::vec2(28.0, 26.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Close folder sidebar",
                 )
                 .clicked()
@@ -4520,7 +4518,7 @@ impl Library {
                     ui,
                     app.library.root_folder.is_some() && !action_in_progress,
                     egui_phosphor::regular::ARROW_CLOCKWISE,
-                    egui::vec2(28.0, 26.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Refresh folders",
                 )
                 .clicked()
@@ -4531,7 +4529,7 @@ impl Library {
                     ui,
                     app.library.folder.is_some() && !action_in_progress,
                     egui_phosphor::regular::FOLDER_PLUS,
-                    egui::vec2(28.0, 26.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Create folder here",
                 )
                 .clicked()
@@ -4542,6 +4540,21 @@ impl Library {
                 }
             });
         });
+        let root_label = app
+            .library
+            .root_folder
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "No top-level folder selected".to_owned());
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(&root_label)
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            )
+            .truncate(),
+        )
+        .on_hover_text(root_label);
         ui.separator();
 
         let mut requested_folder = None;
@@ -4609,6 +4622,7 @@ impl Library {
 
         let compact_header = ui.available_width() < 520.0;
         ui.horizontal(|ui| {
+            crate::ui::theme::prepare_toolbar(ui);
             if compact_header {
                 ui.spacing_mut().item_spacing.x = 4.0;
             }
@@ -4617,7 +4631,7 @@ impl Library {
                 && crate::ui::icons::phosphor_icon_button(
                     ui,
                     egui_phosphor::regular::SIDEBAR_SIMPLE,
-                    egui::vec2(32.0, 26.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Open folder sidebar",
                 )
                 .clicked()
@@ -4674,40 +4688,31 @@ impl Library {
                 ));
             }
 
+            let mut selected_sort = app.library.sort_order();
+            let mut selected_size = app.library.thumbnail_size();
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 #[cfg(target_os = "android")]
                 if (if compact_header {
                     crate::ui::icons::phosphor_icon_button(
                         ui,
                         egui_phosphor::regular::GEAR,
-                        egui::vec2(30.0, 26.0),
+                        crate::ui::theme::toolbar_icon_size(),
                         "Settings",
                     )
                 } else {
-                    ui.button("Settings")
+                    crate::ui::theme::toolbar_button(ui, "Settings", 82.0)
                 })
                 .clicked()
                 {
                     app.activate_tab(AppTab::Settings);
                 }
 
-                #[cfg(not(target_os = "android"))]
-                if ui
-                    .button(desktop_selection_toggle_label(desktop_selection_mode))
-                    .clicked()
-                {
-                    if desktop_selection_mode {
-                        app.library.clear_selection();
-                    } else {
-                        app.library.begin_selection();
-                    }
-                }
-
                 if crate::ui::icons::phosphor_icon_button_enabled(
                     ui,
                     app.library.location.is_some() && !app.library.scanning,
                     egui_phosphor::regular::ARROW_CLOCKWISE,
-                    egui::vec2(32.0, 26.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Refresh library",
                 )
                 .clicked()
@@ -4715,32 +4720,93 @@ impl Library {
                     refresh = true;
                 }
 
-                let mut selected_sort = app.library.sort_order();
-                egui::ComboBox::from_id_salt("library-sort-order")
-                    .selected_text(selected_sort.label())
-                    .width(if compact_header { 96.0 } else { 128.0 })
-                    .show_ui(ui, |ui| {
-                        for sort_order in LibrarySortOrder::ALL {
-                            ui.selectable_value(&mut selected_sort, sort_order, sort_order.label());
-                        }
-                    });
-                app.set_library_sort_order(selected_sort);
+                if compact_header {
+                    ui.menu_button(
+                        egui::RichText::new(egui_phosphor::regular::SLIDERS_HORIZONTAL).size(17.0),
+                        |ui| {
+                            ui.set_min_width(220.0);
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                if ui
+                                    .button(desktop_selection_toggle_label(desktop_selection_mode))
+                                    .clicked()
+                                {
+                                    if desktop_selection_mode {
+                                        app.library.clear_selection();
+                                    } else {
+                                        app.library.begin_selection();
+                                    }
+                                    ui.close();
+                                }
+                                ui.separator();
+                            }
 
-                let mut selected_size = app.library.thumbnail_size();
-                egui::ComboBox::from_id_salt("library-thumbnail-size")
-                    .selected_text(selected_size.label())
-                    .width(if compact_header { 68.0 } else { 88.0 })
-                    .show_ui(ui, |ui| {
-                        for thumbnail_size in LibraryThumbnailSize::ALL {
-                            ui.selectable_value(
-                                &mut selected_size,
-                                thumbnail_size,
-                                thumbnail_size.label(),
-                            );
+                            ui.strong("Thumbnail size");
+                            for thumbnail_size in LibraryThumbnailSize::ALL {
+                                ui.selectable_value(
+                                    &mut selected_size,
+                                    thumbnail_size,
+                                    thumbnail_size.label(),
+                                );
+                            }
+                            ui.separator();
+                            ui.strong("Sort order");
+                            for sort_order in LibrarySortOrder::ALL {
+                                ui.selectable_value(
+                                    &mut selected_sort,
+                                    sort_order,
+                                    sort_order.label(),
+                                );
+                            }
+                        },
+                    )
+                    .response
+                    .on_hover_text("Library view options");
+                } else {
+                    #[cfg(not(target_os = "android"))]
+                    if crate::ui::theme::toolbar_button(
+                        ui,
+                        desktop_selection_toggle_label(desktop_selection_mode),
+                        76.0,
+                    )
+                    .clicked()
+                    {
+                        if desktop_selection_mode {
+                            app.library.clear_selection();
+                        } else {
+                            app.library.begin_selection();
                         }
-                    });
-                app.set_library_thumbnail_size(selected_size);
+                    }
+
+                    egui::ComboBox::from_id_salt("library-sort-order")
+                        .selected_text(format!("Sort: {}", selected_sort.label()))
+                        .width(154.0)
+                        .show_ui(ui, |ui| {
+                            for sort_order in LibrarySortOrder::ALL {
+                                ui.selectable_value(
+                                    &mut selected_sort,
+                                    sort_order,
+                                    sort_order.label(),
+                                );
+                            }
+                        });
+
+                    egui::ComboBox::from_id_salt("library-thumbnail-size")
+                        .selected_text(format!("Size: {}", selected_size.label()))
+                        .width(118.0)
+                        .show_ui(ui, |ui| {
+                            for thumbnail_size in LibraryThumbnailSize::ALL {
+                                ui.selectable_value(
+                                    &mut selected_size,
+                                    thumbnail_size,
+                                    thumbnail_size.label(),
+                                );
+                            }
+                        });
+                }
             });
+            app.set_library_sort_order(selected_sort);
+            app.set_library_thumbnail_size(selected_size);
         });
 
         #[cfg(not(target_os = "android"))]
@@ -5225,7 +5291,6 @@ impl Library {
                 }
             }
         }
-
 
         #[cfg(target_os = "android")]
         {

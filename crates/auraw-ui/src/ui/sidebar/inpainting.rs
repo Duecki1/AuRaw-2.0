@@ -5,16 +5,17 @@ impl Sidebar {
         _layout: ScreenLayout,
         frame: &eframe::Frame,
     ) {
-        // This action used to share a horizontal row with the removed heading.
-        // Preserve that compact row so the right-to-left child cannot consume and
-        // center itself inside the entire remaining scroll-area height.
+        // Keep the context label and clear action in one predictable header row.
+        // The horizontal parent prevents the right-aligned action from consuming
+        // the scroll area's remaining vertical height.
         ui.horizontal(|ui| {
+            ui.strong("Brush and strokes");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let clear = crate::ui::icons::phosphor_icon_button_enabled(
                     ui,
                     !app.inpaint_strokes.is_empty() && !app.inpaint_busy(),
                     egui_phosphor::regular::TRASH,
-                    egui::vec2(28.0, 22.0),
+                    crate::ui::theme::toolbar_icon_size(),
                     "Clear all inpainting strokes",
                 );
                 if clear.clicked() {
@@ -92,7 +93,7 @@ impl Sidebar {
                                         ui,
                                         !app.inpaint_busy(),
                                         egui_phosphor::regular::TRASH,
-                                        egui::vec2(28.0, 22.0),
+                                        crate::ui::theme::toolbar_icon_size(),
                                         "Delete this inpainting stroke",
                                     )
                                     .clicked()
@@ -103,7 +104,7 @@ impl Sidebar {
                                         ui,
                                         !app.inpaint_busy(),
                                         egui_phosphor::regular::ARROW_CLOCKWISE,
-                                        egui::vec2(28.0, 22.0),
+                                        crate::ui::theme::toolbar_icon_size(),
                                         "Regenerate this inpainting stroke",
                                     )
                                     .clicked()

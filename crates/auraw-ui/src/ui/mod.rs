@@ -7,6 +7,7 @@ pub mod library;
 pub mod preview;
 pub mod settings;
 pub mod sidebar;
+pub mod theme;
 pub mod top_bar;
 
 /// Keep desktop dialogs compact while constraining them to the usable viewport.
