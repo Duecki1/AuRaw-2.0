@@ -689,6 +689,17 @@ pub fn load_developed_thumbnail_cache(
     crate::thumbnail_cache::load_jpeg(&cache_path, maximum_edge)
 }
 
+pub fn developed_thumbnail_cache_file(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+) -> Result<Option<PathBuf>, String> {
+    if load_developed_thumbnail_cache(app, raw_uri, display_name, 8192)?.is_none() {
+        return Ok(None);
+    }
+    developed_thumbnail_cache_path(app, raw_uri).map(Some)
+}
+
 pub fn save_developed_thumbnail_cache(
     app: &AndroidApp,
     raw_uri: &str,
@@ -812,17 +823,22 @@ pub fn duplicate_library_document(
     .map_err(|error| format!("could not duplicate Android RAW library item: {error:#}"))
 }
 
+pub struct ImportedLibraryDocument {
+    pub uri: String,
+    pub display_name: String,
+}
+
 pub fn import_cached_library_document(
     app: &AndroidApp,
     raw_path: &std::path::Path,
     display_name: &str,
-) -> Result<String, String> {
+) -> Result<ImportedLibraryDocument, String> {
     let raw_path = raw_path
         .to_str()
         .ok_or_else(|| "Cloud cache path is not valid UTF-8".to_owned())?
         .to_owned();
     let display_name = display_name.to_owned();
-    with_storage_manager(app, |env, storage_manager| {
+    let identity = with_storage_manager(app, |env, storage_manager| {
         let raw_path = env.new_string(&raw_path)?;
         let display_name = env.new_string(&display_name)?;
         let object = env
@@ -833,10 +849,23 @@ pub fn import_cached_library_document(
                 &[JValue::Object(&raw_path), JValue::Object(&display_name)],
             )?
             .l()?;
-        let imported_name = env.cast_local::<JString>(object)?;
-        Ok(imported_name.to_string())
+        Ok(env.cast_local::<JString>(object)?.to_string())
     })
-    .map_err(|error| format!("could not import cloud RAW into Android library: {error:#}"))
+    .map_err(|error| format!("could not import cloud RAW into Android library: {error:#}"))?;
+    let (uri, display_name) = identity.split_once('\n').ok_or_else(|| {
+        "could not import cloud RAW into Android library: Android returned an invalid document identity"
+            .to_owned()
+    })?;
+    if uri.is_empty() || display_name.is_empty() {
+        return Err(
+            "could not import cloud RAW into Android library: Android returned an empty document identity"
+                .to_owned(),
+        );
+    }
+    Ok(ImportedLibraryDocument {
+        uri: uri.to_owned(),
+        display_name: display_name.to_owned(),
+    })
 }
 
 pub fn delete_imported_library_document(

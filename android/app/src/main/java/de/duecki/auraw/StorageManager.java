@@ -353,6 +353,43 @@ final class StorageManager {
         return thumbnailCachePath("developed\n" + uriText, ".developed.jpg").getAbsolutePath();
     }
 
+    private void copyDevelopedThumbnailCache(String sourceUri, String destinationUri)
+            throws Exception {
+        File source = new File(developedThumbnailCachePath(sourceUri));
+        File sourceFingerprint = new File(source.getPath() + ".fingerprint");
+        if (!source.isFile() || !sourceFingerprint.isFile()) {
+            return;
+        }
+        File destination = new File(developedThumbnailCachePath(destinationUri));
+        File destinationFingerprint = new File(destination.getPath() + ".fingerprint");
+        try {
+            copyThumbnailCacheFile(source, destination);
+            copyThumbnailCacheFile(sourceFingerprint, destinationFingerprint);
+        } catch (Exception error) {
+            deleteCacheFile(destination);
+            deleteCacheFile(destinationFingerprint);
+            throw error;
+        }
+    }
+
+    private void clearDevelopedThumbnailCache(String uriText) {
+        try {
+            File thumbnail = new File(developedThumbnailCachePath(uriText));
+            deleteCacheFile(thumbnail);
+            deleteCacheFile(new File(thumbnail.getPath() + ".fingerprint"));
+        } catch (Exception error) {
+            Log.w(LOG_TAG, "Could not clear developed thumbnail cache for " + uriText, error);
+        }
+    }
+
+    private static void copyThumbnailCacheFile(File source, File destination) throws Exception {
+        try (FileInputStream input = new FileInputStream(source);
+             FileOutputStream output = new FileOutputStream(destination)) {
+            copy(input, output, MAX_THUMBNAIL_CACHE_BYTES);
+            output.getFD().sync();
+        }
+    }
+
     /** Clears regenerable RAW and edited library previews from both cache generations. */
     void clearThumbnailCache() {
         clearThumbnailCacheDirectory(persistentThumbnailCacheDirectory());
@@ -446,9 +483,11 @@ final class StorageManager {
             if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
                 publishRawSidecar(cachedSidecar, duplicate.uri.toString(), duplicate.displayName);
             }
+            copyDevelopedThumbnailCache(rawUriText, duplicate.uri.toString());
             return duplicate.displayName;
         } catch (Exception error) {
             if (duplicate != null) {
+                clearDevelopedThumbnailCache(duplicate.uri.toString());
                 try {
                     deleteStoredRaw(duplicate.uri);
                 } catch (Exception ignored) {
@@ -482,7 +521,7 @@ final class StorageManager {
                         imported.uri.toString(),
                         imported.displayName);
             }
-            return imported.displayName;
+            return imported.uri.toString() + "\n" + imported.displayName;
         } catch (Exception error) {
             if (imported != null) {
                 try {
@@ -545,7 +584,22 @@ final class StorageManager {
             }
             throw new IllegalStateException("Android storage could not rename the RAW sidecar");
         }
-        return Uri.fromFile(destinationRaw).toString();
+        String destinationUri = Uri.fromFile(destinationRaw).toString();
+        try {
+            copyDevelopedThumbnailCache(rawUriText, destinationUri);
+        } catch (Exception error) {
+            clearDevelopedThumbnailCache(destinationUri);
+            boolean sidecarRolledBack = !destinationSidecar.isFile()
+                    || destinationSidecar.renameTo(sourceSidecar);
+            boolean rawRolledBack = destinationRaw.renameTo(sourceRaw);
+            if (!sidecarRolledBack || !rawRolledBack) {
+                throw new IllegalStateException(
+                        "The RAW was renamed, but its thumbnail and rename rollback failed", error);
+            }
+            throw error;
+        }
+        clearDevelopedThumbnailCache(rawUriText);
+        return destinationUri;
     }
 
     /** Deletes a library RAW and its sidecar after validating AuRaw ownership. */
@@ -561,6 +615,7 @@ final class StorageManager {
         } else if (activity.getContentResolver().delete(rawUri, null, null) <= 0) {
             throw new IllegalStateException("Android storage could not delete the RAW file");
         }
+        clearDevelopedThumbnailCache(rawUriText);
     }
 
     /**

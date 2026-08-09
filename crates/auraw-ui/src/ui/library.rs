@@ -229,8 +229,19 @@ pub(crate) struct LibraryEntry {
 
 #[cfg(not(target_os = "android"))]
 #[derive(Clone)]
+pub(crate) enum DesktopFilmstripSource {
+    Local(PathBuf),
+    Cloud(crate::cloud::CloudAsset),
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Clone)]
 pub(crate) struct DesktopFilmstripItem {
-    pub(crate) path: PathBuf,
+    pub(crate) source: DesktopFilmstripSource,
+    /// The local RAW path when this item is available on disk. Cloud items
+    /// retain their server identity even before this becomes available.
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) identity: String,
     pub(crate) name: String,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) thumbnail_size: Option<[u32; 2]>,
@@ -1006,15 +1017,25 @@ fn run_image_paste(
                     &item.display_name,
                 );
                 let result = staged_sidecar.and_then(|staged_sidecar| {
+                    let developed_thumbnail = if staged_sidecar.is_some() {
+                        crate::android::developed_thumbnail_cache_file(
+                            android_app,
+                            &item.uri,
+                            &item.display_name,
+                        )
+                    } else {
+                        Ok(None)
+                    }?;
                     let upload = (|| {
                         let raw =
                             crate::android::open_document_for_cloud_upload(android_app, &item.uri)?;
-                        crate::cloud::upload_asset_file_with_sidecar_to_folder(
+                        crate::cloud::upload_asset_file_with_sidecar_and_thumbnail_to_folder(
                             config,
                             raw,
                             &item.display_name,
                             Some(item.bytes),
                             staged_sidecar.as_deref(),
+                            developed_thumbnail.as_deref(),
                             &folder_id,
                         )
                     })();
@@ -1097,6 +1118,33 @@ fn run_image_paste(
                         &folder,
                     )
                     .and_then(|destination| {
+                        let destination_sidecar =
+                            crate::sidecar::sidecar_path_for_raw(&destination);
+                        let has_developed_thumbnail =
+                            crate::sidecar::developed_thumbnail_cache_is_fresh(&destination)?;
+                        if destination_sidecar.is_file() && !has_developed_thumbnail {
+                            let thumbnail = crate::cloud::load_thumbnail(
+                                config,
+                                cache_root,
+                                asset,
+                                THUMBNAIL_EDGE,
+                                allow_network,
+                            )?;
+                            let fingerprint =
+                                crate::sidecar::desktop_sidecar_fingerprint(&destination)?
+                                    .ok_or_else(|| {
+                                        "The copied cloud sidecar disappeared before its thumbnail was saved."
+                                            .to_owned()
+                                    })?;
+                            if let Err(error) = crate::sidecar::save_developed_thumbnail_cache(
+                                &destination,
+                                &thumbnail,
+                                fingerprint,
+                            ) {
+                                let _ = remove_local_raw_bundle(&destination);
+                                return Err(error);
+                            }
+                        }
                         if mode == ImageClipboardMode::Cut {
                             if let Err(error) = crate::cloud::delete_asset(config, asset) {
                                 let _ = remove_local_raw_bundle(&destination);
@@ -1139,17 +1187,57 @@ fn run_image_paste(
                 let mut completed = 0usize;
                 let mut errors = Vec::new();
                 for (asset, cached) in assets.iter().zip(cached) {
+                    let thumbnail =
+                        if crate::sidecar::sidecar_path_for_raw(&cached.raw_path).is_file() {
+                            crate::cloud::load_thumbnail(
+                                config,
+                                cache_root,
+                                asset,
+                                THUMBNAIL_EDGE,
+                                allow_network,
+                            )
+                            .map(Some)
+                        } else {
+                            Ok(None)
+                        };
+                    let thumbnail = match thumbnail {
+                        Ok(thumbnail) => thumbnail,
+                        Err(error) => {
+                            errors.push(format!("{}: {error}", asset.name));
+                            continue;
+                        }
+                    };
                     let copied = crate::android::import_cached_library_document(
                         android_app,
                         &cached.raw_path,
                         &asset.name,
                     )
-                    .and_then(|imported_name| {
+                    .and_then(|imported| {
+                        if let Some(thumbnail) = thumbnail.as_ref() {
+                            if let Err(error) = crate::android::save_developed_thumbnail_cache(
+                                android_app,
+                                &imported.uri,
+                                &imported.display_name,
+                                thumbnail,
+                            ) {
+                                let rollback = crate::android::delete_imported_library_document(
+                                    android_app,
+                                    &imported.display_name,
+                                );
+                                return Err(if let Err(rollback) = rollback {
+                                    format!(
+                                        "{error} The imported-copy rollback also failed: {rollback}"
+                                    )
+                                } else {
+                                    error
+                                });
+                            }
+                        }
                         if mode == ImageClipboardMode::Cut {
                             if let Err(error) = crate::cloud::delete_asset(config, asset) {
                                 let rollback = crate::android::delete_imported_library_document(
                                     android_app,
-                                    &imported_name,
+                                    &imported.display_name,
                                 );
                                 return Err(if let Err(rollback) = rollback {
                                     format!(
@@ -1712,7 +1800,11 @@ impl LibraryState {
         self.cloud_connection_receiver.is_some()
     }
 
-    fn start_cloud_open(&mut self, asset: crate::cloud::CloudAsset, context: &egui::Context) {
+    pub(crate) fn start_cloud_open(
+        &mut self,
+        asset: crate::cloud::CloudAsset,
+        context: &egui::Context,
+    ) {
         if self.cloud_open_receiver.is_some() {
             self.status = "Wait for the current cloud RAW download to finish.".to_owned();
             return;
@@ -1775,7 +1867,9 @@ impl LibraryState {
         true
     }
 
-    fn poll_cloud_open(&mut self) -> Option<Result<crate::cloud::CachedCloudAsset, String>> {
+    pub(crate) fn poll_cloud_open(
+        &mut self,
+    ) -> Option<Result<crate::cloud::CachedCloudAsset, String>> {
         loop {
             let received = self
                 .cloud_open_receiver
@@ -2305,11 +2399,27 @@ impl LibraryState {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn filmstrip_item(&self, index: usize) -> Option<DesktopFilmstripItem> {
         let entry = self.entries.get(index)?;
-        let LibrarySource::File(path) = &entry.info.source else {
-            return None;
+        let (source, path, identity) = match &entry.info.source {
+            LibrarySource::File(path) => (
+                DesktopFilmstripSource::Local(path.clone()),
+                Some(path.clone()),
+                format!("local:{}", path.display()),
+            ),
+            LibrarySource::Cloud(asset) => {
+                let cached_path = self.cloud_cache_root.as_deref().and_then(|cache_root| {
+                    crate::cloud::cached_asset_path(&self.cloud_config, cache_root, asset)
+                });
+                (
+                    DesktopFilmstripSource::Cloud(asset.clone()),
+                    cached_path,
+                    format!("cloud:{}", asset.id),
+                )
+            }
         };
         Some(DesktopFilmstripItem {
-            path: path.clone(),
+            source,
+            path,
+            identity,
             name: entry.info.name.clone(),
             texture: entry.texture.clone(),
             thumbnail_size: entry.thumbnail_size,
@@ -2318,9 +2428,20 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn filmstrip_index_for_path(&self, path: &Path) -> Option<usize> {
-        self.entry_indices
+        if let Some(index) = self
+            .entry_indices
             .get(&LibrarySource::File(path.to_owned()))
             .copied()
+        {
+            return Some(index);
+        }
+        let asset_id = crate::cloud::cached_asset_id_for_raw(path)?;
+        self.entries.iter().position(|entry| {
+            matches!(
+                &entry.info.source,
+                LibrarySource::Cloud(asset) if asset.id == asset_id
+            )
+        })
     }
 
     #[cfg(not(target_os = "android"))]
@@ -5541,6 +5662,12 @@ fn duplicate_raw_and_sidecar(raw_path: &Path) -> Result<PathBuf, String> {
                 ));
             }
         }
+        if let Err(error) = crate::sidecar::copy_developed_thumbnail_cache(raw_path, &destination) {
+            let _ = fs::remove_file(&destination);
+            let _ = fs::remove_file(crate::sidecar::sidecar_path_for_raw(&destination));
+            let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&destination);
+            return Err(format!("Could not copy the developed thumbnail: {error}"));
+        }
         return Ok(destination);
     }
 
@@ -5623,6 +5750,14 @@ fn copy_raw_bundle_to_folder(
                 return Err(format!("Could not copy the matching sidecar: {error}"));
             }
         }
+        if let Err(error) =
+            crate::sidecar::copy_developed_thumbnail_cache(source_raw, &destination_raw)
+        {
+            let _ = fs::remove_file(&destination_raw);
+            let _ = fs::remove_file(&destination_sidecar);
+            let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&destination_raw);
+            return Err(format!("Could not copy the developed thumbnail: {error}"));
+        }
         if let Err(error) = crate::file_ops::sync_parent_directory(destination_folder) {
             log::warn!(
                 "could not sync image paste folder {} after copying {}: {error}",
@@ -5677,6 +5812,7 @@ fn rename_raw_bundle(source_raw: &Path, requested_name: &str) -> Result<PathBuf,
     if destination_raw.exists() || destination_sidecar.exists() {
         return Err(format!("{} already exists.", destination_raw.display()));
     }
+    let developed_thumbnail = crate::sidecar::load_developed_thumbnail_cache(source_raw, 8192)?;
     fs::rename(source_raw, &destination_raw).map_err(|error| {
         format!(
             "Could not rename {} to {}: {error}",
@@ -5692,6 +5828,37 @@ fn rename_raw_bundle(source_raw: &Path, requested_name: &str) -> Result<PathBuf,
             } else {
                 format!(
                     "The RAW was renamed to {}, but its sidecar could not be renamed: {error}",
+                    destination_raw.display()
+                )
+            });
+        }
+    }
+    if let Some(thumbnail) = developed_thumbnail {
+        let thumbnail_result = crate::sidecar::desktop_sidecar_fingerprint(&destination_raw)
+            .and_then(|fingerprint| {
+                fingerprint.ok_or_else(|| "The renamed RAW's edit sidecar disappeared.".to_owned())
+            })
+            .and_then(|fingerprint| {
+                crate::sidecar::save_developed_thumbnail_cache(
+                    &destination_raw,
+                    &thumbnail,
+                    fingerprint,
+                )
+                .map(|_| ())
+            });
+        if let Err(error) = thumbnail_result {
+            let sidecar_rollback = if destination_sidecar.is_file() {
+                fs::rename(&destination_sidecar, &source_sidecar)
+            } else {
+                Ok(())
+            };
+            let raw_rollback = fs::rename(&destination_raw, source_raw);
+            let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&destination_raw);
+            return Err(if sidecar_rollback.is_ok() && raw_rollback.is_ok() {
+                format!("Could not preserve the developed thumbnail while renaming: {error}")
+            } else {
+                format!(
+                    "The RAW was renamed to {}, but its developed thumbnail and rename rollback failed: {error}",
                     destination_raw.display()
                 )
             });
@@ -9779,6 +9946,56 @@ mod tests {
             .collect()
     }
 
+    #[cfg(not(target_os = "android"))]
+    fn test_developed_thumbnail() -> RawThumbnail {
+        RawThumbnail {
+            width: 16,
+            height: 12,
+            rgba: [28, 74, 196, 255].repeat(16 * 12),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn install_test_developed_thumbnail(raw: &std::path::Path) {
+        let fingerprint = crate::sidecar::desktop_sidecar_fingerprint(raw)
+            .unwrap()
+            .expect("test RAW should have an edit sidecar");
+        crate::sidecar::save_developed_thumbnail_cache(
+            raw,
+            &test_developed_thumbnail(),
+            fingerprint,
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn assert_test_developed_thumbnail(raw: &std::path::Path) {
+        let thumbnail = crate::sidecar::load_developed_thumbnail_cache(raw, 512)
+            .unwrap()
+            .expect("copied RAW should retain its developed thumbnail");
+        assert_eq!([thumbnail.width, thumbnail.height], [16, 12]);
+        let pixel = &thumbnail.rgba[..4];
+        assert!(pixel[2] > pixel[1] && pixel[1] > pixel[0], "{pixel:?}");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn test_developed_thumbnail_jpeg() -> Vec<u8> {
+        let thumbnail = test_developed_thumbnail();
+        let rgba =
+            image::RgbaImage::from_raw(thumbnail.width, thumbnail.height, thumbnail.rgba).unwrap();
+        let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 92)
+            .encode(
+                rgb.as_raw(),
+                thumbnail.width,
+                thumbnail.height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        jpeg
+    }
+
     #[test]
     fn missing_cloud_catalog_folder_falls_back_to_root() {
         let folder = crate::cloud::CloudFolder {
@@ -10198,6 +10415,45 @@ mod tests {
 
     #[cfg(not(target_os = "android"))]
     #[test]
+    fn cloud_folder_entries_remain_available_to_the_develop_filmstrip() {
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+        let folder_id = "a".repeat(64);
+        let asset = crate::cloud::CloudAsset {
+            id: "b".repeat(64),
+            name: "folder-photo.NEF".to_owned(),
+            bytes: 42,
+            modified_seconds: 1,
+            width: 6000,
+            height: 4000,
+            raw_etag: "c".repeat(64),
+            sidecar_etag: Some("d".repeat(64)),
+            thumbnail_etag: "e".repeat(64),
+            folder_id,
+        };
+        library.entries.push(new_library_entry(LibraryFileInfo {
+            source: LibrarySource::Cloud(asset.clone()),
+            display_path: "AuRaw Cloud/folder-photo.NEF".to_owned(),
+            name: asset.name.clone(),
+            bytes: asset.bytes,
+            dimensions_hint: Some([asset.width, asset.height]),
+            cloud_downloaded: false,
+            modified: None,
+        }));
+
+        assert_eq!(library.filmstrip_len(), 1);
+        let item = library.filmstrip_item(0).expect("cloud filmstrip item");
+        assert!(matches!(
+            item.source,
+            super::DesktopFilmstripSource::Cloud(ref filmstrip_asset)
+                if filmstrip_asset.id == asset.id
+        ));
+        assert!(item.path.is_none());
+        assert_eq!(item.identity, format!("cloud:{}", asset.id));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
     fn resetting_adjustments_allows_an_unedited_thumbnail_to_replace_the_developed_one() {
         let context = eframe::egui::Context::default();
         let mut library = LibraryState::new(&context);
@@ -10523,6 +10779,7 @@ mod tests {
         let raw = root.join("photo.CR3");
         fs::write(&raw, b"raw-bytes").unwrap();
         fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar-bytes").unwrap();
+        install_test_developed_thumbnail(&raw);
 
         let first = duplicate_raw_and_sidecar(&raw).unwrap();
         let second = duplicate_raw_and_sidecar(&raw).unwrap();
@@ -10533,7 +10790,12 @@ mod tests {
             fs::read(crate::sidecar::sidecar_path_for_raw(&first)).unwrap(),
             b"sidecar-bytes"
         );
+        assert_test_developed_thumbnail(&first);
+        assert_test_developed_thumbnail(&second);
 
+        let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&raw);
+        let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&first);
+        let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&second);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10554,6 +10816,7 @@ mod tests {
         let raw = source.join("photo.CR3");
         fs::write(&raw, b"raw-bytes").unwrap();
         fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar-bytes").unwrap();
+        install_test_developed_thumbnail(&raw);
 
         let copy = run_image_paste(
             &crate::cloud::CloudConfig::default(),
@@ -10573,6 +10836,7 @@ mod tests {
             fs::read(crate::sidecar::sidecar_path_for_raw(&copied)).unwrap(),
             b"sidecar-bytes"
         );
+        assert_test_developed_thumbnail(&copied);
         assert!(raw.is_file());
 
         let cut = run_image_paste(
@@ -10595,7 +10859,10 @@ mod tests {
             fs::read(crate::sidecar::sidecar_path_for_raw(&moved)).unwrap(),
             b"sidecar-bytes"
         );
+        assert_test_developed_thumbnail(&moved);
 
+        let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&copied);
+        let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&moved);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10656,6 +10923,7 @@ mod tests {
         let raw = root.join("before.NEF");
         fs::write(&raw, b"raw").unwrap();
         fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar").unwrap();
+        install_test_developed_thumbnail(&raw);
 
         let renamed = rename_raw_bundle(&raw, "after.NEF").unwrap();
         assert_eq!(renamed, root.join("after.NEF"));
@@ -10666,7 +10934,12 @@ mod tests {
             fs::read(crate::sidecar::sidecar_path_for_raw(&renamed)).unwrap(),
             b"sidecar"
         );
+        assert_test_developed_thumbnail(&renamed);
+        assert!(crate::sidecar::load_developed_thumbnail_cache(&raw, 512)
+            .unwrap()
+            .is_none());
 
+        let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&renamed);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10686,6 +10959,7 @@ mod tests {
         let sidecar_bytes = b"clipboard-sidecar";
         fs::write(&raw, raw_bytes).unwrap();
         fs::write(crate::sidecar::sidecar_path_for_raw(&raw), sidecar_bytes).unwrap();
+        install_test_developed_thumbnail(&raw);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -10713,6 +10987,7 @@ mod tests {
             assert!(request_text.contains("clipboard-raw"));
             assert!(request_text.contains("name=\"sidecar\""));
             assert!(request_text.contains("clipboard-sidecar"));
+            assert!(request_text.contains("name=\"thumbnail\""));
             write_http_response(&mut stream, "application/json", &response);
         });
 
@@ -10734,6 +11009,7 @@ mod tests {
         assert!(completion.result.is_ok());
         assert!(raw.is_file());
         assert!(crate::sidecar::sidecar_path_for_raw(&raw).is_file());
+        let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&raw);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10752,6 +11028,7 @@ mod tests {
         fs::create_dir_all(&destination).unwrap();
         let raw = b"downloaded-cloud-raw";
         let sidecar = b"downloaded-cloud-sidecar";
+        let thumbnail = test_developed_thumbnail_jpeg();
         let asset = crate::cloud::CloudAsset {
             id: sha256_hex(raw),
             name: "download.NEF".to_owned(),
@@ -10761,7 +11038,7 @@ mod tests {
             height: 30,
             raw_etag: sha256_hex(raw),
             sidecar_etag: Some(sha256_hex(sidecar)),
-            thumbnail_etag: "e".repeat(64),
+            thumbnail_etag: sha256_hex(&thumbnail),
             folder_id: crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned(),
         };
         let catalog = serde_json::to_vec(&serde_json::json!({
@@ -10784,6 +11061,14 @@ mod tests {
                     format!("/api/v1/assets/{expected_asset_id}/sidecar"),
                     "application/vnd.auraw.sidecar",
                     sidecar.to_vec(),
+                ),
+                (
+                    format!(
+                        "/api/v1/assets/{expected_asset_id}/thumbnail?v={}",
+                        sha256_hex(&thumbnail)
+                    ),
+                    "image/jpeg",
+                    thumbnail,
                 ),
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -10816,6 +11101,8 @@ mod tests {
             fs::read(crate::sidecar::sidecar_path_for_raw(&copied)).unwrap(),
             sidecar
         );
+        assert_test_developed_thumbnail(&copied);
+        let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&copied);
         fs::remove_dir_all(root).unwrap();
     }
 
