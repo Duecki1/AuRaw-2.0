@@ -48,6 +48,14 @@ impl TopBar {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             app.show_global_task_control(ui);
 
+            if let Some(status) = crate::cloud::cached_status(app.current_path.as_deref()) {
+                ui.label(
+                    egui::RichText::new(status)
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+
             let save_tooltip = if app.sidecar_save_in_progress() {
                 "Saving non-destructive edits…"
             } else if app.sidecar_save_succeeded_recently() {
@@ -146,6 +154,13 @@ impl TopBar {
                 }
 
                 if app.active_tab == AppTab::Develop {
+                    if let Some(status) = crate::cloud::cached_status(app.current_path.as_deref()) {
+                        ui.label(
+                            egui::RichText::new(status)
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
                     if Self::history_icon_button(
                         ui,
                         app.can_undo_edit(),

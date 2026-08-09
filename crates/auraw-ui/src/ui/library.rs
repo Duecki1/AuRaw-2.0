@@ -20,7 +20,6 @@ use std::fs::{self, OpenOptions};
 use std::io;
 #[cfg(not(target_os = "android"))]
 use std::path::Path;
-#[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(target_os = "android"))]
@@ -45,6 +44,7 @@ const ANDROID_DEVELOP_TEXTURE_CACHE_LIMIT: usize = 10;
 const THUMBNAIL_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const THUMBNAIL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const THUMBNAIL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+const CLOUD_DOWNLOAD_PROGRESS_STEP: u64 = 2 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
 pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 8;
@@ -147,6 +147,14 @@ enum LibrarySource {
         bytes: u64,
         modified_seconds: u64,
     },
+    Cloud(crate::cloud::CloudAsset),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LibraryView {
+    #[default]
+    Local,
+    Cloud,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,6 +310,11 @@ enum ScanEvent {
         generation: u64,
         error: String,
     },
+}
+
+enum CloudOpenEvent {
+    Progress { downloaded: u64, total: u64 },
+    Finished(Result<crate::cloud::CachedCloudAsset, String>),
 }
 
 struct ThumbnailWorker {
@@ -491,6 +504,14 @@ struct LibraryAiMaskRefreshPrompt {
 
 pub(crate) struct LibraryState {
     location: Option<String>,
+    local_location: Option<String>,
+    view: LibraryView,
+    cloud_config: crate::cloud::CloudConfig,
+    cloud_cache_root: Option<PathBuf>,
+    cloud_connection_receiver: Option<mpsc::Receiver<Result<String, String>>>,
+    cloud_connection_status: Option<Result<String, String>>,
+    cloud_open_receiver: Option<mpsc::Receiver<CloudOpenEvent>>,
+    cloud_open_label: Option<String>,
     #[cfg(not(target_os = "android"))]
     folder: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
@@ -574,6 +595,14 @@ impl LibraryState {
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
         Self {
             location: None,
+            local_location: None,
+            view: LibraryView::Local,
+            cloud_config: crate::cloud::CloudConfig::default(),
+            cloud_cache_root: None,
+            cloud_connection_receiver: None,
+            cloud_connection_status: None,
+            cloud_open_receiver: None,
+            cloud_open_label: None,
             folder: None,
             root_folder: None,
             folder_tree: None,
@@ -622,7 +651,15 @@ impl LibraryState {
         let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
         let mut state = Self {
-            location: Some(location),
+            location: Some(location.clone()),
+            local_location: Some(location),
+            view: LibraryView::Local,
+            cloud_config: crate::cloud::CloudConfig::default(),
+            cloud_cache_root: None,
+            cloud_connection_receiver: None,
+            cloud_connection_status: None,
+            cloud_open_receiver: None,
+            cloud_open_label: None,
             android_app,
             entries: Vec::new(),
             entry_indices: HashMap::new(),
@@ -651,6 +688,212 @@ impl LibraryState {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn location(&self) -> Option<&str> {
         self.location.as_deref()
+    }
+
+    pub(crate) fn cloud_config(&self) -> &crate::cloud::CloudConfig {
+        &self.cloud_config
+    }
+
+    pub(crate) fn cloud_enabled(&self) -> bool {
+        self.cloud_config.enabled
+    }
+
+    pub(crate) fn is_cloud_view(&self) -> bool {
+        self.view == LibraryView::Cloud
+    }
+
+    pub(crate) fn configure_cloud(
+        &mut self,
+        config: crate::cloud::CloudConfig,
+        cache_root: Option<PathBuf>,
+        context: &egui::Context,
+    ) {
+        let changed = self.cloud_config != config || self.cloud_cache_root != cache_root;
+        self.cloud_config = config;
+        self.cloud_cache_root = cache_root;
+        self.cloud_connection_status = None;
+        if changed {
+            // Dropping the receiver safely discards any result produced with an
+            // old server address or token. The detached worker may finish its
+            // bounded cache write, but it can no longer navigate the UI.
+            self.cloud_open_receiver = None;
+            self.cloud_open_label = None;
+        }
+        if !self.cloud_config.enabled && self.view == LibraryView::Cloud {
+            self.show_local(context);
+        } else if changed && self.view == LibraryView::Cloud {
+            self.refresh(context);
+        }
+    }
+
+    pub(crate) fn show_cloud(&mut self, context: &egui::Context) {
+        if !self.cloud_config.enabled {
+            self.status = "Enable AuRaw Cloud in Settings first.".to_owned();
+            return;
+        }
+        if self.view != LibraryView::Cloud {
+            self.view = LibraryView::Cloud;
+            self.location = self
+                .cloud_config
+                .normalized()
+                .ok()
+                .map(|config| format!("AuRaw Cloud · {}", config.server_url))
+                .or_else(|| Some("AuRaw Cloud".to_owned()));
+            self.entries.clear();
+            self.entry_indices.clear();
+            self.clear_selection();
+            self.catalog_ready = false;
+        }
+        self.refresh(context);
+    }
+
+    pub(crate) fn show_local(&mut self, context: &egui::Context) {
+        self.cloud_open_receiver = None;
+        self.cloud_open_label = None;
+        if self.view != LibraryView::Local {
+            self.view = LibraryView::Local;
+            self.location = self.local_location.clone();
+            self.entries.clear();
+            self.entry_indices.clear();
+            self.clear_selection();
+            self.catalog_ready = false;
+        }
+        self.refresh(context);
+    }
+
+    pub(crate) fn start_cloud_connection_test(&mut self, context: &egui::Context) {
+        if self.cloud_connection_receiver.is_some() {
+            return;
+        }
+        let config = self.cloud_config.clone();
+        let repaint = context.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.cloud_connection_status = None;
+        self.cloud_connection_receiver = Some(receiver);
+        let spawn = std::thread::Builder::new()
+            .name("auraw-cloud-test".to_owned())
+            .spawn(move || {
+                let result = crate::cloud::test_connection(&config);
+                let _ = sender.send(result);
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.cloud_connection_receiver = None;
+            self.cloud_connection_status = Some(Err(format!(
+                "Could not start the cloud connection test: {error}"
+            )));
+        }
+    }
+
+    pub(crate) fn cloud_connection_status(&mut self) -> Option<&Result<String, String>> {
+        let received = self
+            .cloud_connection_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match received {
+            Some(Ok(result)) => {
+                self.cloud_connection_receiver = None;
+                self.cloud_connection_status = Some(result);
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.cloud_connection_receiver = None;
+                self.cloud_connection_status = Some(Err(
+                    "The cloud connection test stopped unexpectedly.".to_owned(),
+                ));
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+        self.cloud_connection_status.as_ref()
+    }
+
+    pub(crate) fn cloud_connection_test_in_progress(&self) -> bool {
+        self.cloud_connection_receiver.is_some()
+    }
+
+    fn start_cloud_open(&mut self, asset: crate::cloud::CloudAsset, context: &egui::Context) {
+        if self.cloud_open_receiver.is_some() {
+            self.status = "Wait for the current cloud RAW download to finish.".to_owned();
+            return;
+        }
+        let Some(cache_root) = self.cloud_cache_root.clone() else {
+            self.status = "AuRaw could not locate its private cloud cache.".to_owned();
+            return;
+        };
+        let config = self.cloud_config.clone();
+        let label = asset.name.clone();
+        let repaint = context.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.cloud_open_receiver = Some(receiver);
+        self.cloud_open_label = Some(label.clone());
+        self.status = format!("Preparing {label} from AuRaw Cloud…");
+        let spawn = std::thread::Builder::new()
+            .name("auraw-cloud-raw-download".to_owned())
+            .spawn(move || {
+                let progress_sender = sender.clone();
+                let progress_repaint = repaint.clone();
+                let mut last_reported = 0u64;
+                let result = crate::cloud::download_asset(
+                    &config,
+                    &cache_root,
+                    &asset,
+                    move |downloaded, total| {
+                        if downloaded == total
+                            || downloaded.saturating_sub(last_reported)
+                                >= CLOUD_DOWNLOAD_PROGRESS_STEP
+                        {
+                            last_reported = downloaded;
+                            let _ = progress_sender
+                                .send(CloudOpenEvent::Progress { downloaded, total });
+                            progress_repaint.request_repaint();
+                        }
+                    },
+                );
+                let _ = sender.send(CloudOpenEvent::Finished(result));
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.cloud_open_receiver = None;
+            self.cloud_open_label = None;
+            self.status = format!("Could not start the cloud RAW download: {error}");
+        }
+    }
+
+    fn poll_cloud_open(&mut self) -> Option<Result<crate::cloud::CachedCloudAsset, String>> {
+        loop {
+            let received = self
+                .cloud_open_receiver
+                .as_ref()
+                .map(mpsc::Receiver::try_recv);
+            match received {
+                Some(Ok(CloudOpenEvent::Progress { downloaded, total })) => {
+                    let label = self.cloud_open_label.as_deref().unwrap_or("cloud RAW");
+                    self.status = if total > 0 {
+                        format!(
+                            "Downloading {label} from AuRaw Cloud… {:.0}%",
+                            downloaded as f64 * 100.0 / total as f64
+                        )
+                    } else {
+                        format!(
+                            "Downloading {label} from AuRaw Cloud… {:.1} MiB",
+                            downloaded as f64 / (1024.0 * 1024.0)
+                        )
+                    };
+                }
+                Some(Ok(CloudOpenEvent::Finished(result))) => {
+                    self.cloud_open_receiver = None;
+                    self.cloud_open_label = None;
+                    return Some(result);
+                }
+                Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                    self.cloud_open_receiver = None;
+                    self.cloud_open_label = None;
+                    return Some(Err(
+                        "The cloud RAW download stopped unexpectedly.".to_owned()
+                    ));
+                }
+                Some(Err(mpsc::TryRecvError::Empty)) | None => return None,
+            }
+        }
     }
 
     pub(crate) fn set_status(&mut self, status: impl Into<String>) {
@@ -737,7 +980,9 @@ impl LibraryState {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn filmstrip_item(&self, index: usize) -> Option<DesktopFilmstripItem> {
         let entry = self.entries.get(index)?;
-        let LibrarySource::File(path) = &entry.info.source;
+        let LibrarySource::File(path) = &entry.info.source else {
+            return None;
+        };
         Some(DesktopFilmstripItem {
             path: path.clone(),
             name: entry.info.name.clone(),
@@ -1189,6 +1434,7 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     fn open_folder_at(&mut self, root: PathBuf, folder: PathBuf, context: &egui::Context) {
+        self.view = LibraryView::Local;
         let folder_changed = self.folder.as_ref() != Some(&folder);
         let root_changed = self.root_folder.as_ref() != Some(&root);
         if root_changed {
@@ -1198,6 +1444,7 @@ impl LibraryState {
         }
         self.root_folder = Some(root.clone());
         self.location = Some(folder.display().to_string());
+        self.local_location = self.location.clone();
         self.folder = Some(folder.clone());
         self.folder_tree = Some(LibraryFolderNode::empty(root.clone()));
         self.expanded_folders.clear();
@@ -1223,11 +1470,15 @@ impl LibraryState {
         let Some(root) = self.root_folder.as_ref() else {
             return false;
         };
-        if !folder.starts_with(root) || self.folder.as_ref() == Some(&folder) {
+        if !folder.starts_with(root)
+            || (self.view == LibraryView::Local && self.folder.as_ref() == Some(&folder))
+        {
             return false;
         }
 
+        self.view = LibraryView::Local;
         self.location = Some(folder.display().to_string());
+        self.local_location = self.location.clone();
         self.folder = Some(folder);
         self.entries.clear();
         self.entry_indices.clear();
@@ -1261,6 +1512,77 @@ impl LibraryState {
         self.scanning = true;
         self.catalog_ready = !self.entries.is_empty();
         self.usage_clock = 0;
+
+        if self.view == LibraryView::Cloud {
+            let config = self.cloud_config.clone();
+            let Some(cache_root) = self.cloud_cache_root.clone() else {
+                self.event_receiver = None;
+                self.request_sender = None;
+                self.scanning = false;
+                self.catalog_ready = true;
+                self.status = "AuRaw could not locate its private cloud cache.".to_owned();
+                return;
+            };
+            self.status = "Refreshing AuRaw Cloud…".to_owned();
+            let worker = std::thread::Builder::new()
+                .name("auraw-cloud-library".to_owned())
+                .spawn(move || {
+                    let assets = match crate::cloud::list_assets(&config) {
+                        Ok(assets) => assets,
+                        Err(error) => {
+                            send_scan_failure(&event_sender, generation, error, &repaint);
+                            return;
+                        }
+                    };
+                    let files = assets
+                        .into_iter()
+                        .map(|asset| LibraryFileInfo {
+                            display_path: format!("AuRaw Cloud / {}", asset.name),
+                            name: asset.name.clone(),
+                            bytes: asset.bytes,
+                            dimensions_hint: Some([asset.width, asset.height]),
+                            #[cfg(not(target_os = "android"))]
+                            modified: Some(crate::cloud::modified_time(asset.modified_seconds)),
+                            source: LibrarySource::Cloud(asset),
+                        })
+                        .collect::<Vec<_>>();
+                    let thumbnail_config = config.clone();
+                    let thumbnail_cache = cache_root.clone();
+                    run_thumbnail_workers(
+                        ThumbnailWorker {
+                            files,
+                            warning_count: 0,
+                            truncated: false,
+                            generation,
+                            cancellation,
+                            decoding_paused,
+                            decode_gate,
+                            event_sender,
+                            request_receiver,
+                            repaint,
+                        },
+                        thumbnail_workers,
+                        Arc::new(move |source| match source {
+                            LibrarySource::Cloud(asset) => crate::cloud::load_thumbnail(
+                                &thumbnail_config,
+                                &thumbnail_cache,
+                                asset,
+                                THUMBNAIL_EDGE,
+                            )
+                            .map(|thumbnail| loaded_library_thumbnail(thumbnail, false)),
+                            _ => Err("invalid cloud thumbnail request".to_owned()),
+                        }),
+                    );
+                });
+            if let Err(error) = worker {
+                self.event_receiver = None;
+                self.request_sender = None;
+                self.scanning = false;
+                self.catalog_ready = true;
+                self.status = format!("Could not start the cloud library scanner: {error}");
+            }
+            return;
+        }
 
         #[cfg(not(target_os = "android"))]
         let worker = {
@@ -1975,10 +2297,12 @@ fn library_modified_key(info: &LibraryFileInfo) -> Option<SystemTime> {
 
 #[cfg(target_os = "android")]
 fn library_modified_key(info: &LibraryFileInfo) -> u64 {
-    let LibrarySource::Android {
-        modified_seconds, ..
-    } = &info.source;
-    *modified_seconds
+    match &info.source {
+        LibrarySource::Android {
+            modified_seconds, ..
+        } => *modified_seconds,
+        LibrarySource::Cloud(asset) => asset.modified_seconds,
+    }
 }
 
 fn make_resident_thumbnail(thumbnail: &RawThumbnail) -> RawThumbnail {
@@ -2344,7 +2668,9 @@ pub(crate) fn load_desktop_cached_thumbnail(
 fn load_desktop_library_thumbnail(
     source: &LibrarySource,
 ) -> Result<LoadedLibraryThumbnail, String> {
-    let LibrarySource::File(path) = source;
+    let LibrarySource::File(path) = source else {
+        return Err("invalid local thumbnail request".to_owned());
+    };
     match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
         Ok(None) => {}
@@ -2396,7 +2722,10 @@ fn load_android_library_thumbnail(
         display_name,
         bytes,
         modified_seconds,
-    } = source;
+    } = source
+    else {
+        return Err("invalid Android thumbnail request".to_owned());
+    };
     match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
         Ok(None) => {}
@@ -3192,11 +3521,11 @@ fn android_selection_menu(
     let targets = || {
         selected
             .iter()
-            .map(|(source, _)| {
-                let LibrarySource::Android {
+            .filter_map(|(source, _)| match source {
+                LibrarySource::Android {
                     uri, display_name, ..
-                } = source;
-                (uri.clone(), display_name.clone())
+                } => Some((uri.clone(), display_name.clone())),
+                LibrarySource::Cloud(_) => None,
             })
             .collect::<Vec<_>>()
     };
@@ -3220,10 +3549,13 @@ fn android_selection_menu(
             .add_enabled(action_enabled, egui::Button::new("Copy adjustments"))
             .clicked()
     {
-        if let Some((source, _)) = selected.first() {
-            let LibrarySource::Android {
+        if let Some((
+            LibrarySource::Android {
                 uri, display_name, ..
-            } = source;
+            },
+            _,
+        )) = selected.first()
+        {
             *library_action = Some(LibraryCardAction::CopyAdjustments((
                 uri.clone(),
                 display_name.clone(),
@@ -4557,12 +4889,31 @@ impl Library {
         .on_hover_text(root_label);
         ui.separator();
 
+        if app.library.cloud_enabled() {
+            let selected = app.library.is_cloud_view();
+            let cloud = ui
+                .selectable_label(
+                    selected,
+                    format!("{}  Cloud", egui_phosphor::regular::CLOUD),
+                )
+                .on_hover_text("Browse previews stored by AuRaw Cloud");
+            if cloud.clicked() && !selected {
+                app.library.show_cloud(ui.ctx());
+            }
+            ui.separator();
+        }
+
         let mut requested_folder = None;
         let tree_height = ui.available_height().max(32.0);
         {
+            let cloud_view = app.library.is_cloud_view();
             let tree = app.library.folder_tree.as_ref();
             let root_folder = app.library.root_folder.as_deref();
-            let selected_folder = app.library.folder.as_deref();
+            let selected_folder = if cloud_view {
+                None
+            } else {
+                app.library.folder.as_deref()
+            };
             let clipboard = app.library.folder_clipboard.as_ref();
             let expanded_folders = &mut app.library.expanded_folders;
             egui::ScrollArea::both()
@@ -4604,6 +4955,51 @@ impl Library {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         app.library.resume_thumbnail_decoding();
         app.library.poll(ui.ctx());
+        if let Some(result) = app.library.poll_cloud_open() {
+            match result {
+                Ok(cached) => {
+                    app.open_cloud_cached_asset(cached, frame);
+                    return;
+                }
+                Err(error) => app.library.set_status(error),
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        if app.library.cloud_enabled() {
+            let cloud_selected = app.library.is_cloud_view();
+            let mut requested_view = None;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let width = ((ui.available_width() - 6.0) * 0.5).max(80.0);
+                if ui
+                    .add_sized(
+                        [width, 38.0],
+                        egui::Button::selectable(!cloud_selected, "Local"),
+                    )
+                    .clicked()
+                    && cloud_selected
+                {
+                    requested_view = Some(LibraryView::Local);
+                }
+                if ui
+                    .add_sized(
+                        [width, 38.0],
+                        egui::Button::selectable(cloud_selected, "Cloud"),
+                    )
+                    .clicked()
+                    && !cloud_selected
+                {
+                    requested_view = Some(LibraryView::Cloud);
+                }
+            });
+            ui.separator();
+            match requested_view {
+                Some(LibraryView::Local) => app.library.show_local(ui.ctx()),
+                Some(LibraryView::Cloud) => app.library.show_cloud(ui.ctx()),
+                None => {}
+            }
+        }
 
         let mut refresh = false;
         #[cfg(target_os = "android")]
@@ -4617,6 +5013,7 @@ impl Library {
             .entries
             .iter()
             .filter(|entry| app.library.selected_sources.contains(&entry.info.source))
+            .filter(|entry| matches!(&entry.info.source, LibrarySource::Android { .. }))
             .map(|entry| (entry.info.source.clone(), entry.info.name.clone()))
             .collect::<Vec<_>>();
 
@@ -4668,6 +5065,8 @@ impl Library {
             let desktop_selection_mode = app.library.selection_mode();
             #[cfg(not(target_os = "android"))]
             let desktop_selection_count = app.library.selected_sources.len();
+            #[cfg(not(target_os = "android"))]
+            let desktop_selection_available = !app.library.is_cloud_view();
 
             #[cfg(not(target_os = "android"))]
             if desktop_selection_mode {
@@ -4727,9 +5126,12 @@ impl Library {
                             ui.set_min_width(220.0);
                             #[cfg(not(target_os = "android"))]
                             {
-                                if ui
-                                    .button(desktop_selection_toggle_label(desktop_selection_mode))
-                                    .clicked()
+                                if desktop_selection_available
+                                    && ui
+                                        .button(desktop_selection_toggle_label(
+                                            desktop_selection_mode,
+                                        ))
+                                        .clicked()
                                 {
                                     if desktop_selection_mode {
                                         app.library.clear_selection();
@@ -4764,12 +5166,13 @@ impl Library {
                     .on_hover_text("Library view options");
                 } else {
                     #[cfg(not(target_os = "android"))]
-                    if crate::ui::theme::toolbar_button(
-                        ui,
-                        desktop_selection_toggle_label(desktop_selection_mode),
-                        76.0,
-                    )
-                    .clicked()
+                    if desktop_selection_available
+                        && crate::ui::theme::toolbar_button(
+                            ui,
+                            desktop_selection_toggle_label(desktop_selection_mode),
+                            76.0,
+                        )
+                        .clicked()
                     {
                         if desktop_selection_mode {
                             app.library.clear_selection();
@@ -4817,6 +5220,16 @@ impl Library {
                     .color(ui.visuals().weak_text_color()),
             );
         }
+        if !app.library.status.is_empty() {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&app.library.status)
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                )
+                .wrap(),
+            );
+        }
         ui.separator();
 
         if app.library.location.is_none() {
@@ -4834,11 +5247,23 @@ impl Library {
         } else if app.library.catalog_ready && app.library.entries.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading("No RAW files here yet");
+                    ui.heading(if app.library.is_cloud_view() {
+                        "No cloud RAW files yet"
+                    } else {
+                        "No RAW files here yet"
+                    });
                     #[cfg(not(target_os = "android"))]
-                    ui.label("Choose another folder or add RAW files to this folder.");
+                    if app.library.is_cloud_view() {
+                        ui.label("Add RAW files to the server's imports directory, then refresh.");
+                    } else {
+                        ui.label("Choose another folder or add RAW files to this folder.");
+                    }
                     #[cfg(target_os = "android")]
-                    ui.label("Tap + to import one or more RAW files.");
+                    if app.library.is_cloud_view() {
+                        ui.label("Add RAW files on the server, then refresh this view.");
+                    } else {
+                        ui.label("Tap + to import one or more RAW files.");
+                    }
                 });
             });
         } else {
@@ -4896,12 +5321,19 @@ impl Library {
                                 LibrarySource::File(path) => current_path.as_deref() == Some(path),
                                 #[cfg(target_os = "android")]
                                 LibrarySource::Android { .. } => false,
+                                LibrarySource::Cloud(_) => false,
                             }
                         };
                         let response = thumbnail_tile(ui, entry, item_rect, selected);
 
                         #[cfg(target_os = "android")]
                         {
+                            if matches!(source, LibrarySource::Cloud(_)) {
+                                if response.clicked() && !response.secondary_clicked() {
+                                    open_source = Some((source.clone(), name.clone()));
+                                }
+                                continue;
+                            }
                             // egui maps a touch long-press to a secondary click. Enter
                             // selection mode instead of opening a per-thumbnail menu.
                             if response.secondary_clicked() || response.clicked() {
@@ -4925,8 +5357,10 @@ impl Library {
 
                         #[cfg(not(target_os = "android"))]
                         {
-                            let LibrarySource::File(path) = &source;
-                            let path = path.clone();
+                            let path = match &source {
+                                LibrarySource::File(path) => Some(path.clone()),
+                                LibrarySource::Cloud(_) => None,
+                            };
                             let context_source_path = path.clone();
 
                             if response.clicked() && !response.secondary_clicked() {
@@ -4958,23 +5392,26 @@ impl Library {
                                             .selected_sources
                                             .contains(&candidate.info.source)
                                     })
-                                    .map(|candidate| match &candidate.info.source {
-                                        LibrarySource::File(path) => path.clone(),
+                                    .filter_map(|candidate| match &candidate.info.source {
+                                        LibrarySource::File(path) => Some(path.clone()),
+                                        LibrarySource::Cloud(_) => None,
                                     })
                                     .collect::<Vec<_>>()
                             } else {
-                                vec![path.clone()]
+                                path.clone().into_iter().collect()
                             };
-                            response.context_menu(|ui| {
-                                if let Some(action) = desktop_image_context_menu(
-                                    ui,
-                                    app,
-                                    &context_source_path,
-                                    &context_paths,
-                                ) {
-                                    library_action = Some(action);
-                                }
-                            });
+                            if let Some(context_source_path) = context_source_path.as_deref() {
+                                response.context_menu(|ui| {
+                                    if let Some(action) = desktop_image_context_menu(
+                                        ui,
+                                        app,
+                                        context_source_path,
+                                        &context_paths,
+                                    ) {
+                                        library_action = Some(action);
+                                    }
+                                });
+                            }
                         }
                     }
                 });
@@ -5390,7 +5827,7 @@ impl Library {
         }
 
         #[cfg(target_os = "android")]
-        if !app.library.has_selection() {
+        if !app.library.has_selection() && !app.library.is_cloud_view() {
             let bounds = ui.max_rect().shrink(16.0);
             let rect = android_library_import_fab_rect(bounds);
             let response = ui.put(
@@ -5426,6 +5863,9 @@ impl Library {
                     app.library.clear_selection();
                     crate::android::set_back_navigation_active(false);
                     app.open_android_library_document(&uri, &display_name);
+                }
+                LibrarySource::Cloud(asset) => {
+                    app.library.start_cloud_open(asset, ui.ctx());
                 }
             }
         }
@@ -5701,6 +6141,22 @@ fn thumbnail_tile(
         Color32::WHITE,
     );
 
+    if matches!(&entry.info.source, LibrarySource::Cloud(_)) {
+        let badge = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 66.0, rect.top() + 7.0),
+            egui::vec2(58.0, 22.0),
+        );
+        ui.painter()
+            .rect_filled(badge, 4.0, Color32::from_black_alpha(176));
+        ui.painter().text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            format!("{} CLOUD", egui_phosphor::regular::CLOUD),
+            FontId::proportional(10.0),
+            Color32::WHITE,
+        );
+    }
+
     let mut tooltip = entry.info.display_path.clone();
     if let Some(error) = &entry.thumbnail_error {
         tooltip.push_str("\nPreview: ");
@@ -5757,6 +6213,7 @@ impl Ord for RankedLibraryFile {
             .then_with(|| self.info.display_path.cmp(&other.info.display_path))
             .then_with(|| match (&self.info.source, &other.info.source) {
                 (LibrarySource::File(left), LibrarySource::File(right)) => left.cmp(right),
+                _ => self.info.display_path.cmp(&other.info.display_path),
             })
     }
 }
@@ -5917,8 +6374,9 @@ fn scan_folder_with_limit(
         if is_cancelled() {
             return Ok(None);
         }
-        let LibrarySource::File(path) = &info.source;
-        info.dimensions_hint = load_raw_display_dimensions(path).ok();
+        if let LibrarySource::File(path) = &info.source {
+            info.dimensions_hint = load_raw_display_dimensions(path).ok();
+        }
     }
 
     Ok(Some((files, warning_count, truncated)))
@@ -5960,7 +6418,7 @@ mod tests {
         import_raw_into_folder, justified_thumbnail_layout, loaded_library_thumbnail,
         make_resident_thumbnail, new_library_entry, run_folder_operation, run_thumbnail_workers,
         scan_folder, scan_folder_tree, scan_folder_with_limit, validate_folder_name,
-        LibraryFileInfo, LibraryFolderOperation, LibraryState, LibraryThumbnailSize,
+        LibraryFileInfo, LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView,
         RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
         ANDROID_LIBRARY_IMPORT_FAB_EDGE,
     };
@@ -6185,6 +6643,10 @@ mod tests {
         library.open_folder(root.clone(), &context);
         assert_eq!(library.root_folder(), Some(root.as_path()));
         assert_eq!(library.folder(), Some(root.as_path()));
+
+        library.view = LibraryView::Cloud;
+        assert!(library.select_folder(root.clone(), &context));
+        assert_eq!(library.view, LibraryView::Local);
     }
 
     #[cfg(not(target_os = "android"))]

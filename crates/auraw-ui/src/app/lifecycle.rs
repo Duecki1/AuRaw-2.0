@@ -243,6 +243,12 @@ impl AurawApp {
     fn empty(ctx: &egui::Context) -> Self {
         let performance_settings_path = crate::performance_settings::desktop_path();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        let cloud_config = crate::cloud::CloudConfig {
+            enabled: performance.cloud_enabled,
+            server_url: performance.cloud_server_url.clone(),
+            access_token: performance.cloud_access_token.clone(),
+        };
+        let cloud_cache_root = crate::cloud::cache_root(performance_settings_path.as_deref());
         let last_library_folder = performance.last_library_folder.clone();
         let last_library_selected_folder = performance.last_library_selected_folder.clone();
         let mut camera_profile_folder = performance.camera_profile_folder.clone();
@@ -500,6 +506,8 @@ impl AurawApp {
             app.library
                 .restore_folder(folder, last_library_selected_folder, ctx);
         }
+        app.library
+            .configure_cloud(cloud_config, cloud_cache_root, ctx);
         app
     }
 
@@ -542,6 +550,12 @@ impl AurawApp {
             }
         }
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        let cloud_config = crate::cloud::CloudConfig {
+            enabled: performance.cloud_enabled,
+            server_url: performance.cloud_server_url.clone(),
+            access_token: performance.cloud_access_token.clone(),
+        };
+        let cloud_cache_root = crate::cloud::cache_root(performance_settings_path.as_deref());
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
         let gpu_export_prewarm = Arc::new(crate::pipeline::GpuProgramPrewarm::new());
         let gpu_preview_prewarm_receiver =
@@ -550,7 +564,7 @@ impl AurawApp {
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
         let edit_history = EditHistory::new(&exposure, &masks, &lens_correction);
-        Self {
+        let mut app = Self {
             current_path: None,
             original_raw: None,
             loaded_raw: None,
@@ -771,7 +785,10 @@ impl AurawApp {
             pending_android_library_reset_reload: false,
             camera_profile_folder_importing_label: None,
             pending_android_profile_reload: None,
-        }
+        };
+        app.library
+            .configure_cloud(cloud_config, cloud_cache_root, &cc.egui_ctx);
+        app
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1186,6 +1203,25 @@ impl AurawApp {
         self.open_path_labeled(path, label, false, sidecar_target, frame, None);
     }
 
+    pub(crate) fn open_cloud_cached_asset(
+        &mut self,
+        cached: crate::cloud::CachedCloudAsset,
+        frame: &eframe::Frame,
+    ) {
+        self.active_tab = AppTab::Develop;
+        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
+            raw_path: cached.raw_path.clone(),
+        };
+        self.open_path_labeled(
+            cached.raw_path,
+            cached.label,
+            false,
+            sidecar_target,
+            frame,
+            None,
+        );
+    }
+
     #[cfg(not(target_os = "android"))]
     pub(crate) fn reload_desktop_library_document_after_reset(
         &mut self,
@@ -1213,6 +1249,23 @@ impl AurawApp {
         }
         self.raw_cache_limit = limit;
         self.trim_raw_cache();
+        self.persist_performance_settings();
+    }
+
+    pub(crate) fn set_cloud_settings(
+        &mut self,
+        enabled: bool,
+        server_url: String,
+        access_token: String,
+    ) {
+        let config = crate::cloud::CloudConfig {
+            enabled,
+            server_url,
+            access_token,
+        };
+        let cache_root = crate::cloud::cache_root(self.performance_settings_path.as_deref());
+        self.library
+            .configure_cloud(config, cache_root, &self.egui_ctx);
         self.persist_performance_settings();
     }
 
@@ -1699,6 +1752,9 @@ impl AurawApp {
             #[cfg(not(target_os = "android"))]
             display_profile_override: self.display_profile_override.clone(),
             adjustment_copy_settings: self.adjustment_copy_settings,
+            cloud_enabled: self.library.cloud_config().enabled,
+            cloud_server_url: self.library.cloud_config().server_url.clone(),
+            cloud_access_token: self.library.cloud_config().access_token.clone(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: self
                 .library

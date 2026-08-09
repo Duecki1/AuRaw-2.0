@@ -1119,6 +1119,9 @@ impl AurawApp {
             self.thumbnail_cache_size = None;
             self.thumbnail_cache_size_receiver = None;
         }
+        if tab == AppTab::Library && self.library.is_cloud_view() {
+            self.library.refresh(&self.egui_ctx);
+        }
         self.active_tab = tab;
         #[cfg(target_os = "android")]
         crate::android::set_back_navigation_active(tab != AppTab::Library);

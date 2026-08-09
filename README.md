@@ -49,6 +49,24 @@ storage I/O stay on a worker. Desktop
 sidecars sit beside the source file; Android sidecars are hidden siblings of
 the imported RAW inside AuRaw's `.library` folder.
 
+## AuRaw Cloud
+
+AuRaw can also browse a self-hosted AuRaw Cloud server. Enable it in Settings,
+enter the server address (for example `192.168.1.20:8787`) and optional access
+token, then test the connection. Desktop adds **Cloud** to the Library folder
+sidebar; Android adds **Local** and **Cloud** tabs above the Library.
+
+Cloud browsing transfers only catalog metadata and 512px JPEG previews. The
+full RAW and current `.auraw` sidecar are downloaded into AuRaw's private cache
+only when the image is opened. Autosave keeps that cached sidecar safe locally
+and uploads it with a version precondition; if another client saved first,
+AuRaw reports a conflict instead of silently replacing those edits. A rendered
+developed thumbnail is uploaded against the same sidecar revision.
+
+The Docker server project lives beside this checkout in `AuRaw-2.0-Server`.
+Its README covers startup, token authentication, imports, HTTPS deployment,
+storage, and backups.
+
 The Basic **Contrast** control keeps its familiar -100% to +100% range, with 0%
 neutral, and maps to darktable's normal sigmoid slider range: -100% is 0.7, 0%
 is the 1.5 default, and +100% is 3.0. Darktable's wider

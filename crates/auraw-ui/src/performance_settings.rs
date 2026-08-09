@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 8;
+const SETTINGS_VERSION: u32 = 9;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45,6 +45,12 @@ pub struct PerformanceSettings {
     pub display_profile_override: Option<PathBuf>,
     #[serde(default)]
     pub adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings,
+    #[serde(default)]
+    pub cloud_enabled: bool,
+    #[serde(default)]
+    pub cloud_server_url: String,
+    #[serde(default)]
+    pub cloud_access_token: String,
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_library_folder: Option<PathBuf>,
@@ -107,6 +113,9 @@ impl Default for PerformanceSettings {
             #[cfg(not(target_os = "android"))]
             display_profile_override: None,
             adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings::default(),
+            cloud_enabled: false,
+            cloud_server_url: String::new(),
+            cloud_access_token: String::new(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
             #[cfg(not(target_os = "android"))]
@@ -311,6 +320,9 @@ mod tests {
                 inpainting: true,
                 lens_correction: false,
             },
+            cloud_enabled: true,
+            cloud_server_url: "http://cloud.test:8787".to_owned(),
+            cloud_access_token: "test-token".to_owned(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
             #[cfg(not(target_os = "android"))]
