@@ -143,6 +143,14 @@ have been copied successfully; not-yet-migrated entries remain readable as an
 upgrade fallback instead of being discarded. New imports never write to the old
 Downloads collection.
 
+When AuRaw Cloud is enabled in Settings, the Android Library shows **Local**
+and **Cloud** tabs. Cloud cards are small server-provided JPEG previews. Opening
+one downloads that RAW and its sidecar to app-private storage on demand; it
+does not import the RAW into the local media library or download the rest of
+the server. A Cloud status label remains visible in Develop, and sidecar saves
+sync back with conflict detection. Plain HTTP addresses are supported for a
+trusted LAN; use an HTTPS reverse proxy on any wider network.
+
 Embedded RAW previews are read lazily through a file descriptor and
 `/proc/self/fd`. When a provider or LibRaw path cannot seek that descriptor, AuRaw
 materializes a temporary cache copy and removes it after decode. This also works

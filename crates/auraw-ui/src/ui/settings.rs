@@ -175,6 +175,96 @@ impl Settings {
             });
         });
 
+        ui.add_space(8.0);
+        Self::group(ui, content_width, |ui| {
+            ui.heading("AuRaw Cloud");
+            ui.add(
+                egui::Label::new(
+                    "Browse server previews without copying every RAW. A full RAW and its sidecar are cached only when you open it; saved edits then sync back to the server.",
+                )
+                .wrap(),
+            );
+            ui.add_space(4.0);
+
+            let current = app.library.cloud_config().clone();
+            let mut enabled = current.enabled;
+            let mut server_url = current.server_url;
+            let mut access_token = current.access_token;
+            let enabled_changed = ui.checkbox(&mut enabled, "Enable AuRaw Cloud").changed();
+
+            ui.add_enabled_ui(enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Server address");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut server_url)
+                            .desired_width((content_width - 150.0).max(180.0))
+                            .hint_text("192.168.1.20:8787"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Access token");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut access_token)
+                            .desired_width((content_width - 150.0).max(180.0))
+                            .password(true)
+                            .hint_text("Optional on a trusted LAN"),
+                    );
+                });
+            });
+
+            let changed = enabled_changed
+                || server_url != app.library.cloud_config().server_url
+                || access_token != app.library.cloud_config().access_token;
+            if changed {
+                app.set_cloud_settings(enabled, server_url.clone(), access_token);
+            }
+
+            ui.horizontal(|ui| {
+                let testing = app.library.cloud_connection_test_in_progress();
+                if ui
+                    .add_enabled(
+                        enabled && !server_url.trim().is_empty() && !testing,
+                        egui::Button::new(if testing {
+                            "Testing connection…"
+                        } else {
+                            "Test connection"
+                        }),
+                    )
+                    .clicked()
+                {
+                    app.library.start_cloud_connection_test(ui.ctx());
+                }
+                if testing {
+                    ui.spinner();
+                }
+            });
+            if let Some(result) = app.library.cloud_connection_status().cloned() {
+                match result {
+                    Ok(message) => {
+                        ui.label(
+                            egui::RichText::new(message)
+                                .color(egui::Color32::from_rgb(103, 190, 124)),
+                        );
+                    }
+                    Err(error) => {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(error).color(ui.visuals().error_fg_color),
+                            )
+                            .wrap(),
+                        );
+                    }
+                }
+            }
+            if server_url.trim_start().starts_with("http://")
+                || (!server_url.contains("://") && !server_url.trim().is_empty())
+            {
+                ui.small(
+                    "Plain HTTP is suitable only for a trusted local network. Use an HTTPS reverse proxy when the server is reachable from elsewhere.",
+                );
+            }
+        });
+
         #[cfg(not(target_os = "android"))]
         {
             ui.add_space(8.0);

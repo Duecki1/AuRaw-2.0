@@ -752,12 +752,21 @@ impl AurawApp {
                                 &thumbnail,
                                 fingerprint,
                             )?;
+                            if let Err(error) =
+                                crate::cloud::upload_developed_thumbnail_if_cloud_cached(
+                                    raw_path,
+                                    &thumbnail,
+                                )
+                            {
+                                log::warn!("could not sync cloud developed thumbnail: {error}");
+                            }
                         }
                         #[cfg(target_os = "android")]
-                        crate::sidecar::SidecarTarget::Desktop { .. } => {
-                            return Err(
-                                "desktop sidecar target is unavailable on Android".to_owned()
-                            );
+                        crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+                            crate::cloud::upload_developed_thumbnail_if_cloud_cached(
+                                raw_path,
+                                &thumbnail,
+                            )?;
                         }
                         #[cfg(target_os = "android")]
                         crate::sidecar::SidecarTarget::Android {
@@ -860,9 +869,10 @@ fn save_sidecar_request(
 ) -> Result<String, String> {
     match request.target {
         crate::sidecar::SidecarTarget::Desktop { raw_path } => {
-            crate::sidecar::save_desktop(&raw_path, request.edits)
-                .map(|path| path.display().to_string())
-                .map_err(|error| error.to_string())
+            let path = crate::sidecar::save_desktop(&raw_path, request.edits)
+                .map_err(|error| error.to_string())?;
+            crate::cloud::sync_sidecar_if_cloud_cached(&raw_path)
+                .map(|location| location.unwrap_or_else(|| path.display().to_string()))
         }
         #[cfg(target_os = "android")]
         crate::sidecar::SidecarTarget::Android {
