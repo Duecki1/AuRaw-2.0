@@ -49,6 +49,62 @@ storage I/O stay on a worker. Desktop
 sidecars sit beside the source file; Android sidecars are hidden siblings of
 the imported RAW inside AuRaw's `.library` folder.
 
+## AuRaw Cloud
+
+AuRaw can also browse a self-hosted AuRaw Cloud server. Enable it in Settings,
+enter the server address (for example `192.168.1.20:8787`) and optional access
+token, then test the connection. Desktop adds **Cloud** to the Library folder
+sidebar; Android adds **Local** and **Cloud** tabs above the Library.
+
+Cloud browsing transfers only catalog metadata and 512px JPEG previews. The
+full RAW and current `.auraw` sidecar are downloaded into AuRaw's private cache
+only when the image is opened. Autosave keeps that cached sidecar safe locally
+and uploads it with a version precondition; if another client saved first,
+AuRaw reports a conflict instead of silently replacing those edits. A rendered
+developed thumbnail is uploaded against the same sidecar revision.
+
+Every cloud-card click revalidates that asset's current RAW, sidecar, and
+thumbnail versions before opening, so edits made by another client do not
+require a manual Library refresh. The latest successful catalog and previews
+are kept for offline browsing. A RAW can be opened offline after it has been
+downloaded once on that device; offline edits are saved in the private cache,
+shown as **waiting to sync**, and retried when the image is next opened or
+saved with the server reachable. Cloud thumbnails show a cloud icon while the
+RAW still needs downloading and a download icon once it is available offline.
+
+In the Cloud library, use the floating **+** button to select and upload one or
+more RAW files. Desktop also sends a matching `.auraw` sidecar and current
+developed thumbnail when present. Android streams each selected document
+straight to the server through the system picker and does not add another copy
+to the Local library. Upload progress and the final success/failure summary are
+shown in the Library.
+
+Cloud libraries can use nested folders. Desktop shows the hierarchy in the
+folder sidebar, while the Library breadcrumb and child-folder buttons provide
+the same navigation on Android. **New folder** and **Paste here** act on the
+folder currently being viewed. Folder menus support copy, cut, paste, rename,
+move, and recursive deletion; desktop folders can also be dragged onto another
+cloud folder.
+
+Cloud RAW cards support the normal selection workflow. Use **Select** on
+desktop or long-press a card on Android, then add as many RAWs as needed.
+Desktop right-click menus and Android's selection overflow menu support export,
+copy/cut/paste, duplicate, rename, reset, and delete. Export downloads only the
+selected RAWs and sidecars into the existing private cache before running the
+same batch exporter used by the Local library.
+
+The image clipboard is shared between Local and Cloud. Copy or cut one or more
+RAWs, switch tabs or folders, and use **Paste** in a local or cloud destination.
+Local-to-local copies, uploads, and downloads preserve the matching `.auraw`
+sidecar and choose a collision-safe filename instead of overwriting an existing
+RAW. A cut removes its source only after the destination has been completed.
+If only part of a multi-file cut succeeds, the clipboard keeps only the RAWs
+that still need moving, so **Paste** can be retried without duplicating work.
+
+The Docker server project lives beside this checkout in `AuRaw-2.0-Server`.
+Its README covers startup, token authentication, imports, HTTPS deployment,
+storage, and backups.
+
 The Basic **Contrast** control keeps its familiar -100% to +100% range, with 0%
 neutral, and maps to darktable's normal sigmoid slider range: -100% is 0.7, 0%
 is the 1.5 default, and +100% is 3.0. Darktable's wider

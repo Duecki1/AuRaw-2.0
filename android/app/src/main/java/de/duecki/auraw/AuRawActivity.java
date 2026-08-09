@@ -8,6 +8,9 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
 import android.graphics.Insets;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.Toast;
@@ -22,11 +25,31 @@ import java.io.InputStream;
 public final class AuRawActivity extends NativeActivity {
     private static final int OPEN_RAW_DOCUMENT = 1001;
     private static final int OPEN_CAMERA_PROFILE_FOLDER = 1003;
+    private static final int OPEN_CLOUD_RAW_DOCUMENT = 1004;
 
     private StorageManager storageManager;
     private ProfileImporter profileImporter;
     private ExportPublisher exportPublisher;
     private TaskNotificationController taskNotificationController;
+
+    /** True when Android currently exposes any usable network transport. */
+    public boolean isNetworkAvailable() {
+        ConnectivityManager connectivity =
+                (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivity == null) {
+            return false;
+        }
+        Network activeNetwork = connectivity.getActiveNetwork();
+        if (activeNetwork == null) {
+            return false;
+        }
+        NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(activeNetwork);
+        return capabilities != null
+                && (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                        || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                        || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                        || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN));
+    }
 
     static {
         System.loadLibrary("auraw");
@@ -58,6 +81,16 @@ public final class AuRawActivity extends NativeActivity {
             @Override
             public void onImportBatchFinished(int importedCount, int failedCount, String errors) {
                 nativeOnImportBatchFinished(importedCount, failedCount, errors);
+            }
+
+            @Override
+            public void onCloudFileSelected(String uri, String displayName, long bytes) {
+                nativeOnCloudFileSelected(uri, displayName, bytes);
+            }
+
+            @Override
+            public void onCloudSelectionFinished(int failedCount, String errors) {
+                nativeOnCloudSelectionFinished(failedCount, errors);
             }
         });
         profileImporter = new ProfileImporter(this, new ProfileImporter.Callbacks() {
@@ -132,6 +165,9 @@ public final class AuRawActivity extends NativeActivity {
             int fd, String displayName, String libraryUri, String error);
     private static native void nativeOnImportBatchFinished(
             int importedCount, int failedCount, String errors);
+    private static native void nativeOnCloudFileSelected(
+            String uri, String displayName, long bytes);
+    private static native void nativeOnCloudSelectionFinished(int failedCount, String errors);
     private static native void nativeOnCameraProfileFolderImportStarted(String displayName);
     private static native void nativeOnCameraProfileFolderPicked(
             String cachedPath, String displayName, int profileCount, String error);
@@ -141,6 +177,12 @@ public final class AuRawActivity extends NativeActivity {
     public void openRawDocument() {
         runOnUiThread(() -> startActivityForResult(
                 storageManager.createRawDocumentPickerIntent(), OPEN_RAW_DOCUMENT));
+    }
+
+    /** Selects RAWs for direct cloud upload without importing local-library copies. */
+    public void openCloudRawDocuments() {
+        runOnUiThread(() -> startActivityForResult(
+                storageManager.createRawDocumentPickerIntent(), OPEN_CLOUD_RAW_DOCUMENT));
     }
 
     /** Opens Android's Storage Access Framework tree picker for DCP profile roots. */
@@ -154,6 +196,8 @@ public final class AuRawActivity extends NativeActivity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == OPEN_CAMERA_PROFILE_FOLDER) {
             profileImporter.handleFolderPickerResult(resultCode, data);
+        } else if (requestCode == OPEN_CLOUD_RAW_DOCUMENT) {
+            storageManager.handleCloudRawDocumentResult(resultCode, data);
         } else if (requestCode == OPEN_RAW_DOCUMENT) {
             storageManager.handleRawDocumentResult(resultCode, data);
         }

@@ -143,6 +143,47 @@ have been copied successfully; not-yet-migrated entries remain readable as an
 upgrade fallback instead of being discarded. New imports never write to the old
 Downloads collection.
 
+When AuRaw Cloud is enabled in Settings, the Android Library shows **Local**
+and **Cloud** tabs. Cloud cards are small server-provided JPEG previews. Opening
+one downloads that RAW and its sidecar to app-private storage on demand; it
+does not import the RAW into the local media library or download the rest of
+the server. A Cloud status label remains visible in Develop, and sidecar saves
+sync back with conflict detection. Plain HTTP addresses are supported for a
+trusted LAN; use an HTTPS reverse proxy on any wider network.
+
+The most recently refreshed cloud catalog and thumbnails remain available
+offline. Cloud RAWs that have already been opened on this device can also be
+opened and edited offline; not-yet-downloaded RAWs still require the server.
+Offline sidecar saves remain in app-private storage with a **waiting to sync**
+status and retry after connectivity returns. Opening a card while online first
+revalidates its server version, so a sidecar saved by another client is loaded
+without requiring a manual Library refresh. Each card uses a cloud icon until
+its RAW is cached locally, then changes to a download icon to show that it is
+available offline.
+
+The floating **+** button is available in both Library tabs. In **Local**, it
+imports selected documents into AuRaw's hidden local library. In **Cloud**, it
+streams the selections directly from Android's system picker to the server,
+shows per-file upload status, and refreshes the cloud catalog when finished;
+it does not create local-library copies.
+
+The Cloud tab also exposes the server's nested folder hierarchy through a
+breadcrumb and child-folder buttons. The current-folder menu creates, copies,
+cuts, renames, or deletes folders, and **Paste here** accepts folders or RAWs.
+Long-press a cloud RAW to enter multi-select; the overflow menu can copy, cut,
+duplicate, rename, reset, delete, or export the selection. Cloud batch export prepares
+only those selected RAWs in app-private cache and publishes the results to
+`Pictures/AuRaw` like a Local batch export.
+
+Copy and cut use one clipboard across the **Local** and **Cloud** tabs. The
+Local paste button duplicates local selections or imports cached cloud RAWs;
+**Paste here** in Cloud uploads local selections or copies/moves server RAWs.
+Matching `.auraw` sidecars are carried in both directions, and cut removes the
+source only after its destination succeeds. Local's long-press menu exposes
+the same image actions, including collision-safe RAW-and-sidecar rename. If a
+multi-file cut is only partly successful, only the unmoved items remain ready
+to paste again.
+
 Embedded RAW previews are read lazily through a file descriptor and
 `/proc/self/fd`. When a provider or LibRaw path cannot seek that descriptor, AuRaw
 materializes a temporary cache copy and removes it after decode. This also works

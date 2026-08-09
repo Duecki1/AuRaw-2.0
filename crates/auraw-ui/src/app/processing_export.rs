@@ -2836,7 +2836,7 @@ impl AurawApp {
                 }
                 #[cfg(target_os = "android")]
                 {
-                    job.display_name.clone()
+                    job.target.display_name().to_owned()
                 }
             });
             (
@@ -2880,7 +2880,7 @@ impl AurawApp {
     #[cfg(target_os = "android")]
     pub(crate) fn start_android_library_exports(
         &mut self,
-        targets: Vec<(String, String)>,
+        targets: Vec<AndroidLibraryExportTarget>,
         settings: ExportSettings,
         format: ExportFormat,
     ) {
@@ -2889,7 +2889,7 @@ impl AurawApp {
         }
         let pending = targets
             .into_iter()
-            .map(|(uri, display_name)| LibraryBatchExportJob { uri, display_name })
+            .map(|target| LibraryBatchExportJob { target })
             .collect::<VecDeque<_>>();
         let total = pending.len();
         self.enqueue_background_action(
@@ -2914,7 +2914,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    fn start_next_library_export(&mut self) {
+    fn start_next_library_export(&mut self, frame: &eframe::Frame) {
         // Android's batch path must use the SAF document bridge. Once the user
         // enters Develop, do not replace that interactive document with the next
         // batch item. The current export may finish; remaining items resume when
@@ -2951,26 +2951,56 @@ impl AurawApp {
                 return;
             };
 
-            match crate::android::open_library_document(
-                &self.android_app,
-                &job.uri,
-                &job.display_name,
-            ) {
-                Ok(()) => {
-                    self.android_batch_load_pending = true;
-                    self.picker_pending = true;
-                    self.notice = None;
-                    self.status = format!("Opening {}…", job.display_name);
-                    self.active_tab = AppTab::Library;
-                    return;
-                }
-                Err(error) => {
-                    self.android_batch_load_pending = false;
-                    if let Some(batch) = self.library_batch_export.as_mut() {
-                        batch.failures.push(format!("{}: {error}", job.display_name));
-                        batch.completed += 1;
-                        batch.current = None;
+            let display_name = job.target.display_name().to_owned();
+            match &job.target {
+                AndroidLibraryExportTarget::Local { uri, .. } => {
+                    match crate::android::open_library_document(
+                        &self.android_app,
+                        uri,
+                        &display_name,
+                    ) {
+                        Ok(()) => {
+                            self.android_batch_load_pending = true;
+                            self.picker_pending = true;
+                            self.notice = None;
+                            self.status = format!("Opening {display_name}…");
+                            self.active_tab = AppTab::Library;
+                            return;
+                        }
+                        Err(error) => {
+                            self.android_batch_load_pending = false;
+                            if let Some(batch) = self.library_batch_export.as_mut() {
+                                batch.failures.push(format!("{display_name}: {error}"));
+                                batch.completed += 1;
+                                batch.current = None;
+                            }
+                        }
                     }
+                }
+                AndroidLibraryExportTarget::Cloud { path, .. } => {
+                    self.android_batch_load_pending = true;
+                    self.picker_pending = false;
+                    self.notice = None;
+                    self.status = format!("Opening {display_name}…");
+                    self.active_tab = AppTab::Library;
+                    self.open_path_labeled(
+                        path.clone(),
+                        display_name.clone(),
+                        false,
+                        crate::sidecar::SidecarTarget::Desktop {
+                            raw_path: path.clone(),
+                        },
+                        frame,
+                        None,
+                    );
+                    if self.load_receiver.is_none() {
+                        self.android_batch_load_pending = false;
+                        let error = self.notice.clone().unwrap_or_else(|| {
+                            "The cloud RAW decode worker could not be started.".to_owned()
+                        });
+                        self.complete_android_library_batch_export_item(Err(error));
+                    }
+                    return;
                 }
             }
         }
@@ -2993,7 +3023,7 @@ impl AurawApp {
         }
 
         if !success {
-            let name = current.display_name.clone();
+            let name = current.target.display_name().to_owned();
             if let Some(batch) = self.library_batch_export.as_mut() {
                 if !batch.cancel_requested {
                     batch.failures.push(format!("{name}: RAW load failed"));
@@ -3001,13 +3031,12 @@ impl AurawApp {
                 }
                 batch.current = None;
             }
-            self.start_next_library_export();
             return;
         }
 
         let format = batch.format;
         let settings = batch.settings.clone();
-        let display_name = current.display_name.clone();
+        let display_name = current.target.display_name().to_owned();
         self.export_settings = settings.clone();
         let Some(data_dir) = self.android_app.internal_data_path() else {
             self.complete_android_library_batch_export_item(Err(format!(
@@ -3100,7 +3129,7 @@ impl AurawApp {
             let name = batch
                 .current
                 .as_ref()
-                .map(|job| job.display_name.clone())
+                .map(|job| job.target.display_name().to_owned())
                 .unwrap_or_else(|| "image".to_owned());
             match result {
                 Ok(()) => batch.completed += 1,
@@ -3121,13 +3150,11 @@ impl AurawApp {
         });
         if finished_or_cancelled {
             self.finish_library_batch_export();
-        } else {
-            self.start_next_library_export();
         }
     }
 
     #[cfg(target_os = "android")]
-    fn resume_android_library_batch_export_if_possible(&mut self) {
+    fn resume_android_library_batch_export_if_possible(&mut self, frame: &eframe::Frame) {
         if self.active_tab == AppTab::Develop
             || self.picker_pending
             || self.load_receiver.is_some()
@@ -3139,7 +3166,7 @@ impl AurawApp {
             !batch.cancel_requested && batch.current.is_none() && !batch.pending.is_empty()
         });
         if should_resume {
-            self.start_next_library_export();
+            self.start_next_library_export(frame);
         }
     }
 
@@ -3471,7 +3498,9 @@ impl AurawApp {
                                         .as_ref()
                                         .and_then(|batch| batch.current.as_ref())
                                         .map(|job| {
-                                            let stem = std::path::Path::new(&job.display_name)
+                                            let stem = std::path::Path::new(
+                                                job.target.display_name(),
+                                            )
                                                 .file_stem()
                                                 .and_then(|stem| stem.to_str())
                                                 .filter(|stem| !stem.is_empty())

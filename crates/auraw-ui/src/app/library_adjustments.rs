@@ -176,35 +176,51 @@ impl AurawApp {
 
         #[cfg(target_os = "android")]
         {
-            let _ = frame;
-            let crate::sidecar::SidecarTarget::Android {
-                raw_uri,
-                display_name,
-            } = sidecar_target
-            else {
-                return;
-            };
-            match crate::android::open_library_document(
-                &self.android_app,
-                &raw_uri,
-                &display_name,
-            ) {
-                Ok(()) => {
-                    self.pending_android_profile_reload =
-                        Some((profile_selection, edit_override));
-                    self.picker_pending = true;
+            match sidecar_target {
+                crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+                    let label = self
+                        .current_label
+                        .clone()
+                        .unwrap_or_else(|| raw_path.display().to_string());
+                    let target = crate::sidecar::SidecarTarget::Desktop {
+                        raw_path: raw_path.clone(),
+                    };
+                    self.open_path_labeled_with_options(
+                        raw_path,
+                        label,
+                        false,
+                        target,
+                        frame,
+                        Some(profile_selection),
+                        Some(edit_override),
+                        None,
+                    );
                     self.active_tab = AppTab::Library;
                 }
-                Err(error) => {
-                    self.notice = Some(format!(
-                        "Adjustments were pasted, but the camera profile could not be reloaded: {error}"
-                    ));
+                crate::sidecar::SidecarTarget::Android {
+                    raw_uri,
+                    display_name,
+                } => match crate::android::open_library_document(
+                    &self.android_app,
+                    &raw_uri,
+                    &display_name,
+                ) {
+                    Ok(()) => {
+                        self.pending_android_profile_reload =
+                            Some((profile_selection, edit_override));
+                        self.picker_pending = true;
+                        self.active_tab = AppTab::Library;
+                    }
+                    Err(error) => {
+                        self.notice = Some(format!(
+                            "Adjustments were pasted, but the camera profile could not be reloaded: {error}"
+                        ));
+                    }
                 }
             }
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn desktop_library_edit_state(
         &mut self,
         raw_path: &std::path::Path,
@@ -221,7 +237,6 @@ impl AurawApp {
         Ok(persisted.unwrap_or_else(crate::sidecar::default_edit_state))
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn library_adjustment_edit_count_paths(
         &mut self,
         raw_paths: &[PathBuf],
@@ -241,7 +256,6 @@ impl AurawApp {
         (edited, failures)
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn copy_library_adjustments_from_path(
         &mut self,
         raw_path: &std::path::Path,
@@ -255,7 +269,6 @@ impl AurawApp {
         Ok(())
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn paste_library_adjustments_to_paths(
         &mut self,
         raw_paths: &[PathBuf],
@@ -307,7 +320,9 @@ impl AurawApp {
                     let needs_ai_refresh = destination.ai_masks_need_update;
                     crate::sidecar::save_desktop(raw_path, destination)
                         .map_err(|error| error.to_string())?;
+                    #[cfg(not(target_os = "android"))]
                     crate::sidecar::invalidate_developed_thumbnail_cache(raw_path)?;
+                    crate::cloud::sync_sidecar_if_cloud_cached(raw_path, true)?;
                     Ok(needs_ai_refresh)
                 })()
             };
@@ -477,7 +492,6 @@ impl AurawApp {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn desktop_library_sidecar_edits(
     raw_path: &std::path::Path,
 ) -> Result<Option<SidecarEditState>, String> {

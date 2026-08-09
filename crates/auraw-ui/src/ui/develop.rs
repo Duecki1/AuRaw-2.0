@@ -1,12 +1,11 @@
 use crate::app::AurawApp;
 use crate::ui::library::{
     apply_desktop_image_action, desktop_image_context_menu, load_desktop_reference_preview,
-    DesktopFilmstripItem,
+    DesktopFilmstripItem, DesktopFilmstripSource,
 };
 use crate::ui::preview::Preview;
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::{mpsc, Mutex, OnceLock};
 
 pub(crate) const FILMSTRIP_HEIGHT: f32 = 112.0;
@@ -68,7 +67,7 @@ impl Develop {
             return;
         };
 
-        app.open_path(item.path, frame);
+        open_filmstrip_source(app, item.source, context, frame);
     }
 
     pub(crate) fn show_filmstrip(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
@@ -77,6 +76,12 @@ impl Develop {
         // visible filmstrip/reference items; the worker keeps ordinary catalog
         // background work paused.
         app.library.poll(ui.ctx());
+        if let Some(result) = app.library.poll_cloud_open() {
+            match result {
+                Ok(cached) => app.open_cloud_cached_asset(cached, frame),
+                Err(error) => app.library.set_status(error),
+            }
+        }
         sync_reference_texture(app, ui.ctx());
 
         egui::Frame::new()
@@ -207,7 +212,7 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
         }
     });
     let mut centered_path = None;
-    let mut open_path: Option<PathBuf> = None;
+    let mut open_source: Option<DesktopFilmstripSource> = None;
     let mut library_action = None;
     let mut protected_indices = HashSet::new();
     let stride = FILMSTRIP_CARD_WIDTH + FILMSTRIP_GAP;
@@ -285,33 +290,52 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
                     egui::pos2(x, y),
                     egui::vec2(FILMSTRIP_CARD_WIDTH, FILMSTRIP_CARD_HEIGHT),
                 );
-                let active = active_path.as_deref() == Some(item.path.as_path());
-                let reference = reference_path.as_deref() == Some(item.path.as_path());
+                let active = item
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| active_path.as_deref() == Some(path));
+                let reference = item
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| reference_path.as_deref() == Some(path));
                 let response = filmstrip_thumbnail(ui, &item, rect, active, reference);
 
                 if response.clicked() && !response.secondary_clicked() && !active {
-                    open_path = Some(item.path.clone());
+                    open_source = Some(item.source.clone());
                 }
 
                 response.context_menu(|ui| {
-                    // Keep filmstrip image actions exactly in sync with the
-                    // desktop Library card menu by sharing the same builder.
-                    let context_paths = [item.path.clone()];
-                    if let Some(action) = desktop_image_context_menu(
-                        ui,
-                        app,
-                        item.path.as_path(),
-                        &context_paths,
-                    ) {
-                        library_action = Some(action);
+                    if let DesktopFilmstripSource::Local(path) = &item.source {
+                        // Keep local filmstrip image actions exactly in sync
+                        // with the desktop Library card menu.
+                        let context_paths = [path.clone()];
+                        if let Some(action) =
+                            desktop_image_context_menu(ui, app, path.as_path(), &context_paths)
+                        {
+                            library_action = Some(action);
+                        }
+                        ui.separator();
+                    } else {
+                        ui.label(
+                            egui::RichText::new("AuRaw Cloud")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        ui.separator();
                     }
-                    ui.separator();
                     if reference {
                         if ui.button("Clear Reference Image").clicked() {
                             app.develop_reference.clear();
                             ui.close();
                         }
-                    } else if ui.button("Set as Reference Image").clicked() {
+                    } else if ui
+                        .add_enabled(
+                            item.path.is_some(),
+                            egui::Button::new("Set as Reference Image"),
+                        )
+                        .on_disabled_hover_text("Open this cloud RAW once to cache it first")
+                        .clicked()
+                    {
                         set_reference_image(app, &item, ui.ctx());
                         ui.close();
                     }
@@ -328,17 +352,28 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
     if let Some(action) = library_action {
         apply_desktop_image_action(ui, app, frame, action);
     }
-    if let Some(path) = open_path {
-        app.open_path(path, frame);
+    if let Some(source) = open_source {
+        open_filmstrip_source(app, source, ui.ctx(), frame);
     }
 }
 
-fn set_reference_image(
+fn open_filmstrip_source(
     app: &mut AurawApp,
-    item: &DesktopFilmstripItem,
+    source: DesktopFilmstripSource,
     context: &egui::Context,
+    frame: &eframe::Frame,
 ) {
-    app.develop_reference.path = Some(item.path.clone());
+    match source {
+        DesktopFilmstripSource::Local(path) => app.open_path(path, frame),
+        DesktopFilmstripSource::Cloud(asset) => app.library.start_cloud_open(asset, context),
+    }
+}
+
+fn set_reference_image(app: &mut AurawApp, item: &DesktopFilmstripItem, context: &egui::Context) {
+    let Some(path) = item.path.clone() else {
+        return;
+    };
+    app.develop_reference.path = Some(path);
     app.develop_reference.label = Some(item.name.clone());
     // Install the existing catalog texture immediately so Reference mode opens
     // without a blank frame. A dedicated high-quality preview replaces it as
@@ -571,7 +606,7 @@ fn filmstrip_thumbnail(
 ) -> egui::Response {
     let response = ui.interact(
         rect,
-        ui.make_persistent_id(("develop-filmstrip-thumbnail", item.path.as_path())),
+        ui.make_persistent_id(("develop-filmstrip-thumbnail", item.identity.as_str())),
         Sense::click(),
     );
     let painter = ui.painter();
@@ -645,7 +680,12 @@ fn filmstrip_thumbnail(
         );
     }
 
-    response.on_hover_text(item.path.display().to_string())
+    response.on_hover_text(
+        item.path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| format!("AuRaw Cloud · {}", item.name)),
+    )
 }
 
 fn cover_uv(source_size: Option<[u32; 2]>, target_size: egui::Vec2) -> egui::Rect {
