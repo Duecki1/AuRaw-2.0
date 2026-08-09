@@ -5,9 +5,7 @@ impl eframe::App for AurawApp {
         // that egui has already recorded for the pending render pass.
         self.release_retired_egui_textures(frame);
         #[cfg(not(target_os = "android"))]
-        let raw_drop_hovered = ui
-            .ctx()
-            .input(|input| !input.raw.hovered_files.is_empty());
+        let raw_drop_hovered = ui.ctx().input(|input| !input.raw.hovered_files.is_empty());
         #[cfg(not(target_os = "android"))]
         {
             let dropped_paths = ui.ctx().input(|input| {
@@ -19,8 +17,7 @@ impl eframe::App for AurawApp {
                     .collect::<Vec<_>>()
             });
             if !dropped_paths.is_empty() {
-                self.library
-                    .import_dropped_raws(dropped_paths, ui.ctx());
+                self.library.import_dropped_raws(dropped_paths, ui.ctx());
             }
             self.library.poll_dropped_raw_import(ui.ctx());
         }
@@ -116,10 +113,14 @@ impl eframe::App for AurawApp {
 
         self.refresh_status();
         #[cfg(not(target_os = "android"))]
-        egui::Panel::top("top_bar").show(ui, |ui| TopBar::show(ui, self, frame));
+        egui::Panel::top("top_bar")
+            .frame(crate::ui::theme::toolbar_frame(ui))
+            .show(ui, |ui| TopBar::show(ui, self, frame));
         #[cfg(target_os = "android")]
         if self.active_tab == AppTab::Develop {
-            egui::Panel::top("top_bar").show(ui, |ui| TopBar::show(ui, self, frame));
+            egui::Panel::top("top_bar")
+                .frame(crate::ui::theme::toolbar_frame(ui))
+                .show(ui, |ui| TopBar::show(ui, self, frame));
         }
 
         if self.active_tab == AppTab::Develop {
@@ -133,19 +134,21 @@ impl eframe::App for AurawApp {
                             .show(ui, |ui| Sidebar::show_desktop_tool_rail(ui, self));
 
                         if self.develop_sidebar_open {
-                            let remembered_width =
-                                self.desktop_sidebar_width.unwrap_or(sidebar_size);
-                            let sidebar_response = egui::Panel::right("develop_sidebar_right")
+                            let panel_max = (viewport_size.x * 0.48).clamp(
+                                ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
+                                ScreenLayout::MAX_HORIZONTAL_SIDEBAR_WIDTH,
+                            );
+                            // `Panel` persists its own drag size. Feeding its
+                            // content response back into `default_size` creates
+                            // a width feedback loop: a wide child becomes the
+                            // next frame's default and the panel springs open
+                            // again after the user shrinks it.
+                            egui::Panel::right("develop_sidebar_right")
                                 .resizable(true)
                                 .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
-                                .max_size(
-                                    (viewport_size.x * 0.65)
-                                        .max(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH),
-                                )
-                                .default_size(remembered_width)
+                                .max_size(panel_max)
+                                .default_size(sidebar_size.min(panel_max))
                                 .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
-                            self.desktop_sidebar_width =
-                                Some(sidebar_response.response.rect.width());
                         }
                     }
 
@@ -320,9 +323,7 @@ impl eframe::App for AurawApp {
 
     fn on_exit(&mut self) {
         #[cfg(target_os = "android")]
-        if let Err(error) =
-            crate::android::clear_background_task_notification(&self.android_app)
-        {
+        if let Err(error) = crate::android::clear_background_task_notification(&self.android_app) {
             log::warn!("{error}");
         }
         self.flush_sidecar_on_exit();

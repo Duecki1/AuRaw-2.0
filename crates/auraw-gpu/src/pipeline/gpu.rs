@@ -5,7 +5,8 @@ use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
     PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
-    GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
+    GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES,
+    MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -645,11 +646,11 @@ fn shader_highlight_method(cfa_kind: CfaKind, method: HighlightReconstructionMet
     }
 }
 
-fn pack_color_grade_options(grading: crate::pipeline::ColorGrading) -> [f32; 4] {
+fn pack_view_color_options(grading: crate::pipeline::ColorGrading, hue: f32) -> [f32; 4] {
     [
         (grading.blending / 100.0).clamp(0.0, 1.0),
         (grading.balance / 100.0).clamp(-1.0, 1.0),
-        0.0,
+        hue.clamp(-HUE_ROTATION_LIMIT_DEGREES, HUE_ROTATION_LIMIT_DEGREES),
         0.0,
     ]
 }
@@ -810,6 +811,7 @@ impl GpuParams {
             let has_hsl = adjustment.has_color_mixer();
             let curve_flags = adjustment.curve_feature_flags();
             let has_grading = adjustment.has_color_grading();
+            let has_hue = adjustment.hue.abs() > 1e-6;
             let (hsl_hue_0, hsl_hue_1) = split_eight(adjustment.hsl_hue);
             let (hsl_saturation_0, hsl_saturation_1) = split_eight(adjustment.hsl_saturation);
             let (hsl_luminance_0, hsl_luminance_1) = split_eight(adjustment.hsl_luminance);
@@ -818,7 +820,9 @@ impl GpuParams {
                     u32::from(mask.enabled),
                     u32::from(!adjustment.is_neutral()),
                     curve_flags,
-                    u32::from(has_hsl) | (u32::from(has_grading) << 1),
+                    u32::from(has_hsl)
+                        | (u32::from(has_grading) << 1)
+                        | (u32::from(has_hue) << 2),
                 ],
                 adjust_0: [
                     adjustment.exposure.clamp(-5.0, 5.0),
@@ -843,7 +847,10 @@ impl GpuParams {
                 grade_midtones: pack_color_grade_wheel(adjustment.color_grading.midtones),
                 grade_highlights: pack_color_grade_wheel(adjustment.color_grading.highlights),
                 grade_global: pack_color_grade_wheel(adjustment.color_grading.global),
-                grade_options: pack_color_grade_options(adjustment.color_grading),
+                grade_options: pack_view_color_options(
+                    adjustment.color_grading,
+                    adjustment.hue,
+                ),
                 curves_red: pack_local_point_curve(&adjustment.tone_curve_red),
                 curves_green: pack_local_point_curve(&adjustment.tone_curve_green),
                 curves_blue: pack_local_point_curve(&adjustment.tone_curve_blue),
@@ -1117,7 +1124,7 @@ impl GpuParams {
             grade_midtones: pack_color_grade_wheel(exposure.color_grading.midtones),
             grade_highlights: pack_color_grade_wheel(exposure.color_grading.highlights),
             grade_global: pack_color_grade_wheel(exposure.color_grading.global),
-            grade_options: pack_color_grade_options(exposure.color_grading),
+            grade_options: pack_view_color_options(exposure.color_grading, exposure.hue),
             rec2020_to_xyz: shader_tuning.rec2020_to_xyz,
             xyz_to_rec2020: shader_tuning.xyz_to_rec2020,
             xyz_to_bradford: shader_tuning.xyz_to_bradford,

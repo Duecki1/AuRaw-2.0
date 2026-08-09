@@ -1,12 +1,13 @@
 use super::{
     canonicalize_green_noise, color_grade_hue_turns, composite_inpaint_rgba16f,
-    explicit_render_graph_contracts_are_contiguous, pack_local_point_curve, processing_work_format,
-    shader_manager::ShaderManager, specialize_compute_workgroup_size, ComputeWorkgroupSize,
-    shader_highlight_method, work_shader_source, ProcessingQuality, COLOR_DENOISE_ENTRY_POINTS,
-    SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4,
-    SHADER_COLOR_DENOISE, SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS,
-    SHADER_NOISE_CA_FINISH, SHADER_REGRESSION_SCENE, SHADER_SCENE_ADJUSTMENTS, SHADER_TONE_ANALYSIS,
-    SHADER_VIEW_TRANSFORM, SHADER_XTRANS_DEMOSAIC, SHADER_XTRANS_FINISH,
+    explicit_render_graph_contracts_are_contiguous, pack_local_point_curve,
+    pack_view_color_options, processing_work_format, shader_highlight_method,
+    shader_manager::ShaderManager, specialize_compute_workgroup_size, work_shader_source,
+    ComputeWorkgroupSize, ProcessingQuality, COLOR_DENOISE_ENTRY_POINTS, SHADER_BAYER_RCD_P1,
+    SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4, SHADER_COLOR_DENOISE,
+    SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_NOISE_CA_FINISH,
+    SHADER_REGRESSION_SCENE, SHADER_SCENE_ADJUSTMENTS, SHADER_TONE_ANALYSIS, SHADER_VIEW_TRANSFORM,
+    SHADER_XTRANS_DEMOSAIC, SHADER_XTRANS_FINISH,
 };
 use crate::pipeline::{CfaKind, HighlightReconstructionMethod, PointCurve};
 
@@ -140,7 +141,7 @@ fn wgsl_struct_layout(
 fn wgsl_field_offset(layout: &[(String, u32)], field_name: &str) -> usize {
     layout
         .iter()
-        .find(|(name, _)| name == field_name)
+        .find(|(name, _)| name == field_name || name.strip_suffix("_field") == Some(field_name))
         .map(|(_, offset)| *offset as usize)
         .unwrap_or_else(|| panic!("missing WGSL field {field_name}"))
 }
@@ -525,6 +526,14 @@ fn grading_hues_match_the_visible_srgb_wheel_in_oklab() {
     assert!((green - 0.396).abs() < 0.002);
     assert!((blue - 0.733).abs() < 0.002);
     assert!((color_grade_hue_turns(360.0) - red).abs() < f32::EPSILON);
+}
+
+#[test]
+fn global_and_local_hue_share_the_reserved_color_options_lane() {
+    let grading = crate::pipeline::ColorGrading::default();
+    assert_eq!(pack_view_color_options(grading, 42.5)[2], 42.5);
+    assert_eq!(pack_view_color_options(grading, 999.0)[2], 180.0);
+    assert_eq!(pack_view_color_options(grading, -999.0)[2], -180.0);
 }
 
 #[test]
@@ -1046,6 +1055,8 @@ fn adjustment_modules_expose_the_render_graph_controls() {
         );
     }
     for function in [
+        "apply_hue_rotation_value",
+        "apply_local_hue_rotations",
         "stabilized_mixer_sample",
         "mixer_luminance_ev",
         "apply_color_grading_wheels",
@@ -1085,10 +1096,10 @@ fn global_wb_changes_raw_multipliers_without_changing_the_camera_transform() {
         ..crate::pipeline::ExposureParams::default()
     };
     let changed = super::GpuParams::new(&adjusted, &crate::pipeline::MaskStack::default(), &raw);
-    assert_ne!(neutral.wb, changed.wb);
-    assert_eq!(neutral.cam_to_srgb_0, changed.cam_to_srgb_0);
-    assert_eq!(neutral.cam_to_srgb_1, changed.cam_to_srgb_1);
-    assert_eq!(neutral.cam_to_srgb_2, changed.cam_to_srgb_2);
+    assert_ne!(neutral.camera.wb, changed.camera.wb);
+    assert_eq!(neutral.camera.cam_to_srgb_0, changed.camera.cam_to_srgb_0);
+    assert_eq!(neutral.camera.cam_to_srgb_1, changed.camera.cam_to_srgb_1);
+    assert_eq!(neutral.camera.cam_to_srgb_2, changed.camera.cam_to_srgb_2);
 
     let tint_rendition = |tint| {
         let params = super::GpuParams::new(
@@ -1127,6 +1138,7 @@ enum LocalToneSchedulingCase {
     Whites,
     Temperature,
     Tint,
+    Hue,
     Curves,
 }
 
@@ -1139,6 +1151,7 @@ impl LocalToneSchedulingCase {
             Self::Whites => "masked Whites",
             Self::Temperature => "masked Temperature",
             Self::Tint => "masked Tint",
+            Self::Hue => "masked Hue",
             Self::Curves => "masked Curves",
         }
     }
@@ -1151,6 +1164,7 @@ impl LocalToneSchedulingCase {
             Self::Whites => adjustments.whites = 70.0,
             Self::Temperature => adjustments.temperature = 70.0,
             Self::Tint => adjustments.tint = 70.0,
+            Self::Hue => adjustments.hue = 120.0,
             Self::Curves => {
                 let mut curve = PointCurve::linear();
                 curve.points[1] = [0.42, 0.68];
@@ -1159,6 +1173,10 @@ impl LocalToneSchedulingCase {
                 adjustments.tone_curve = curve;
             }
         }
+    }
+
+    fn needs_intermediate_pass(self) -> bool {
+        !matches!(self, Self::Hue)
     }
 }
 
@@ -1291,10 +1309,11 @@ impl LocalMaskSchedulingHarness {
             "{} scheduled an intermediate pass at neutral",
             case.label()
         );
-        assert!(
+        assert_eq!(
             adjusted_params.needs_intermediate_adjustment_passes(),
-            "{} did not schedule the local tone pass",
-            case.label()
+            case.needs_intermediate_pass(),
+            "{} used the wrong intermediate-pass plan",
+            case.label(),
         );
 
         let preview_empty = self.render_preview(&empty_params);
@@ -1344,6 +1363,45 @@ impl LocalMaskSchedulingHarness {
             "preview/export adjusted",
             &preview_adjusted,
             &export_adjusted,
+            3e-5,
+        );
+    }
+
+    fn assert_global_hue(&self) {
+        let masks = crate::pipeline::MaskStack::default();
+        let neutral_params = super::GpuParams::new(&self.exposure, &masks, &self.raw);
+        let adjusted_exposure = super::ExposureParams {
+            hue: 120.0,
+            ..self.exposure
+        };
+        let adjusted_params = super::GpuParams::new(&adjusted_exposure, &masks, &self.raw);
+        assert!(!adjusted_params.needs_intermediate_adjustment_passes());
+
+        let preview_neutral = self.render_preview(&neutral_params);
+        let preview_adjusted = self.render_preview(&adjusted_params);
+        let export_neutral = self.render_export(&neutral_params);
+        let export_adjusted = self.render_export(&adjusted_params);
+        let maximum_delta = preview_neutral
+            .iter()
+            .zip(&preview_adjusted)
+            .map(|(before, after)| (after - before).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            maximum_delta > 2e-4,
+            "global Hue changed no pixels: max delta {maximum_delta}"
+        );
+        assert_max_delta(
+            "global Hue",
+            "preview/export adjusted",
+            &preview_adjusted,
+            &export_adjusted,
+            3e-5,
+        );
+        assert_max_delta(
+            "global Hue",
+            "preview/export neutral",
+            &preview_neutral,
+            &export_neutral,
             3e-5,
         );
     }
@@ -1498,10 +1556,11 @@ fn assert_local_tone_scheduling_case(case: LocalToneSchedulingCase) {
         "{} scheduled an intermediate pass at neutral",
         case.label()
     );
-    assert!(
+    assert_eq!(
         adjusted_params.needs_intermediate_adjustment_passes(),
-        "{} did not schedule the local tone pass",
-        case.label()
+        case.needs_intermediate_pass(),
+        "{} used the wrong intermediate-pass plan",
+        case.label(),
     );
 
     static HARNESS: OnceLock<Option<Mutex<LocalMaskSchedulingHarness>>> = OnceLock::new();
@@ -1513,10 +1572,13 @@ fn assert_local_tone_scheduling_case(case: LocalToneSchedulingCase) {
         // repository's existing GPU behavior-test convention.
         return;
     };
-    harness
+    let harness = harness
         .lock()
-        .expect("local-mask scheduling harness mutex poisoned")
-        .assert_case(case);
+        .expect("local-mask scheduling harness mutex poisoned");
+    harness.assert_case(case);
+    if matches!(case, LocalToneSchedulingCase::Hue) {
+        harness.assert_global_hue();
+    }
 }
 
 #[test]
@@ -1547,6 +1609,11 @@ fn masked_temperature_is_independently_scheduled_in_preview_and_export() {
 #[test]
 fn masked_tint_is_independently_scheduled_in_preview_and_export() {
     assert_local_tone_scheduling_case(LocalToneSchedulingCase::Tint);
+}
+
+#[test]
+fn global_and_masked_hue_run_in_the_view_pass_for_preview_and_export() {
+    assert_local_tone_scheduling_case(LocalToneSchedulingCase::Hue);
 }
 
 #[test]

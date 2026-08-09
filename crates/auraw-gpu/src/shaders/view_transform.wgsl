@@ -208,6 +208,50 @@ fn mixer_luminance_ev(amount: f32, lightness: f32) -> f32 {
     return value * endpoint_ev * signal * hdr_guard;
 }
 
+// Lightroom's local Hue control is a uniform rotation of the underlying pixel
+// hue, not a tint overlay or a named-channel HSL edit. Work in perceptual
+// OKLab so lightness and chroma stay fixed, then use the shared Rec.2020 gamut
+// service only when the rotated hue cannot represent the requested chroma.
+fn apply_hue_rotation_value(input_rgb: vec3<f32>, degrees: f32) -> vec3<f32> {
+    let rotation = clamp(degrees, -180.0, 180.0);
+    if abs(rotation) < 1e-7 {
+        return input_rgb;
+    }
+
+    let lab = Color::rec2020_to_oklab(input_rgb);
+    let chroma = length(lab.yz);
+    if chroma < 1e-7 {
+        return input_rgb;
+    }
+
+    let angle = atan2(lab.z, lab.y) + rotation * 3.14159265359 / 180.0;
+    let target_hue = vec2<f32>(cos(angle), sin(angle));
+    return Color::perceptual_rec2020_from_oklab_nonnegative(
+        lab.x,
+        target_hue,
+        chroma,
+    );
+}
+
+fn apply_local_hue_rotations(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = Common::mask_data[index].metadata;
+        if state.x == 0u || (state.w & 4u) == 0u { continue; }
+        let degrees = Common::mask_data[index].grade_options.z;
+        if abs(degrees) < 1e-7 { continue; }
+        let weight = SceneAdjustments::local_mask_weight(pos, index);
+        if weight <= 1e-5 { continue; }
+
+        // Scale the rotation itself by mask coverage. This follows the color
+        // wheel through feathered edges instead of blending opposite hues
+        // through gray at half coverage.
+        rgb = apply_hue_rotation_value(rgb, degrees * weight);
+    }
+    return rgb;
+}
+
 fn color_grade_strength(
     shadows: vec4<f32>,
     midtones: vec4<f32>,
@@ -455,8 +499,13 @@ fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rgb = textureLoad(SceneAdjustments::final_adjustment_tex, pos, 0).xyz;
     let globally_mixed = apply_color_mixer(pos, rgb);
     let mixed = apply_local_color_mixer(pos, globally_mixed);
-    let globally_graded = apply_color_grading_wheels(
+    let globally_hue_rotated = apply_hue_rotation_value(
         mixed,
+        Common::scene_tone_uniforms.grade_options.z,
+    );
+    let hue_rotated = apply_local_hue_rotations(pos, globally_hue_rotated);
+    let globally_graded = apply_color_grading_wheels(
+        hue_rotated,
         Common::scene_tone_uniforms.grade_shadows,
         Common::scene_tone_uniforms.grade_midtones,
         Common::scene_tone_uniforms.grade_highlights,
