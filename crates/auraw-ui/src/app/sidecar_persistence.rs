@@ -763,10 +763,19 @@ impl AurawApp {
                         }
                         #[cfg(target_os = "android")]
                         crate::sidecar::SidecarTarget::Desktop { raw_path } => {
-                            crate::cloud::upload_developed_thumbnail_if_cloud_cached(
-                                raw_path,
-                                &thumbnail,
-                            )?;
+                            let allow_network = crate::android::network_available(&android_app)
+                                .unwrap_or_else(|error| {
+                                    log::warn!(
+                                        "could not inspect Android network state before cloud thumbnail sync: {error}"
+                                    );
+                                    true
+                                });
+                            if allow_network {
+                                crate::cloud::upload_developed_thumbnail_if_cloud_cached(
+                                    raw_path,
+                                    &thumbnail,
+                                )?;
+                            }
                         }
                         #[cfg(target_os = "android")]
                         crate::sidecar::SidecarTarget::Android {
@@ -871,7 +880,17 @@ fn save_sidecar_request(
         crate::sidecar::SidecarTarget::Desktop { raw_path } => {
             let path = crate::sidecar::save_desktop(&raw_path, request.edits)
                 .map_err(|error| error.to_string())?;
-            crate::cloud::sync_sidecar_if_cloud_cached(&raw_path)
+            #[cfg(target_os = "android")]
+            let allow_network =
+                crate::android::network_available(android_app).unwrap_or_else(|error| {
+                    log::warn!(
+                        "could not inspect Android network state before cloud save: {error}"
+                    );
+                    true
+                });
+            #[cfg(not(target_os = "android"))]
+            let allow_network = true;
+            crate::cloud::sync_sidecar_if_cloud_cached(&raw_path, allow_network)
                 .map(|location| location.unwrap_or_else(|| path.display().to_string()))
         }
         #[cfg(target_os = "android")]

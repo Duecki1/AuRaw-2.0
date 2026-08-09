@@ -1309,6 +1309,7 @@ impl AurawApp {
         cached: crate::cloud::CachedCloudAsset,
         frame: &eframe::Frame,
     ) {
+        let offline_reason = cached.offline_reason.clone();
         self.active_tab = AppTab::Develop;
         let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
             raw_path: cached.raw_path.clone(),
@@ -1321,6 +1322,12 @@ impl AurawApp {
             frame,
             None,
         );
+        if let Some(reason) = offline_reason {
+            self.notice = Some(format!(
+                "Opened the cached cloud RAW offline. Edits will sync when the server is reachable. {reason}"
+            ));
+            self.refresh_status();
+        }
     }
 
     #[cfg(not(target_os = "android"))]

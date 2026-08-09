@@ -195,6 +195,19 @@ pub fn take_export_publish_result() -> Option<ExportPublishResult> {
     export_results().lock().ok()?.pop_front()
 }
 
+pub fn network_available(app: &AndroidApp) -> Result<bool, String> {
+    with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("isNetworkAvailable"),
+            jni::jni_sig!(() -> boolean),
+            &[],
+        )?
+        .z()
+    })
+    .map_err(|error| format!("could not inspect Android network state: {error:#}"))
+}
+
 pub fn open_camera_profile_folder(app: &AndroidApp) -> Result<(), String> {
     with_activity(app, |env, activity| {
         env.call_method(

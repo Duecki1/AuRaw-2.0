@@ -61,9 +61,24 @@ pub struct CloudAsset {
     pub thumbnail_etag: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct CloudCatalog {
     items: Vec<CloudAsset>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CachedCloudCatalog {
+    schema_version: u32,
+    server_url: String,
+    items: Vec<CloudAsset>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CloudCatalogSnapshot {
+    pub items: Vec<CloudAsset>,
+    /// Set when `items` came from the last successful refresh rather than the
+    /// server. The text is suitable for the library status line.
+    pub offline_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -80,8 +95,23 @@ struct CachedAssetMetadata {
 
 #[derive(Clone, Debug)]
 pub struct CachedCloudAsset {
+    pub asset_id: String,
     pub raw_path: PathBuf,
     pub label: String,
+    pub offline_reason: Option<String>,
+}
+
+enum CatalogFetchError {
+    Unavailable(String),
+    Fatal(String),
+}
+
+impl CatalogFetchError {
+    fn message(self) -> String {
+        match self {
+            Self::Unavailable(message) | Self::Fatal(message) => message,
+        }
+    }
 }
 
 fn agent() -> ureq::Agent {
@@ -142,30 +172,161 @@ fn validate_asset(asset: &CloudAsset) -> Result<(), String> {
     Ok(())
 }
 
-pub fn list_assets(config: &CloudConfig) -> Result<Vec<CloudAsset>, String> {
-    let normalized = config.normalized()?;
-    let url = normalized.endpoint("/api/v1/assets")?;
-    let mut response = get(&normalized, &url).map_err(|error| match error {
-        ureq::Error::StatusCode(401) => "AuRaw Cloud rejected the access token.".to_owned(),
-        _ => format!("Could not load the cloud catalog: {error}"),
-    })?;
+fn catalog_request_error(error: ureq::Error) -> CatalogFetchError {
+    let message = match error {
+        ureq::Error::StatusCode(401) => {
+            return CatalogFetchError::Fatal("AuRaw Cloud rejected the access token.".to_owned());
+        }
+        ureq::Error::StatusCode(status) if status >= 500 || status == 408 || status == 429 => {
+            format!("AuRaw Cloud is temporarily unavailable (HTTP status {status}).")
+        }
+        ureq::Error::StatusCode(status) => {
+            return CatalogFetchError::Fatal(format!(
+                "AuRaw Cloud returned HTTP status {status} while loading the catalog."
+            ));
+        }
+        ureq::Error::Io(_)
+        | ureq::Error::Timeout(_)
+        | ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed => format!("Could not reach AuRaw Cloud: {error}"),
+        _ => {
+            return CatalogFetchError::Fatal(format!("Could not load the cloud catalog: {error}"));
+        }
+    };
+    CatalogFetchError::Unavailable(message)
+}
+
+fn fetch_assets(config: &CloudConfig) -> Result<Vec<CloudAsset>, CatalogFetchError> {
+    let normalized = config.normalized().map_err(CatalogFetchError::Fatal)?;
+    let url = normalized
+        .endpoint("/api/v1/assets")
+        .map_err(CatalogFetchError::Fatal)?;
+    let mut response = get(&normalized, &url).map_err(catalog_request_error)?;
     let bytes = response
         .body_mut()
         .with_config()
         .limit(MAX_CATALOG_BYTES)
         .read_to_vec()
-        .map_err(|error| format!("Could not read the cloud catalog: {error}"))?;
-    let catalog: CloudCatalog = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("Cloud returned an invalid catalog: {error}"))?;
+        .map_err(|error| {
+            CatalogFetchError::Unavailable(format!("Could not read the cloud catalog: {error}"))
+        })?;
+    let catalog: CloudCatalog = serde_json::from_slice(&bytes).map_err(|error| {
+        CatalogFetchError::Fatal(format!("Cloud returned an invalid catalog: {error}"))
+    })?;
+    if catalog.items.len() > MAX_CATALOG_ASSETS {
+        return Err(CatalogFetchError::Fatal(format!(
+            "Cloud returned more than {MAX_CATALOG_ASSETS} catalog entries."
+        )));
+    }
+    for asset in &catalog.items {
+        validate_asset(asset).map_err(CatalogFetchError::Fatal)?;
+    }
+    Ok(catalog.items)
+}
+
+pub fn list_assets(config: &CloudConfig) -> Result<Vec<CloudAsset>, String> {
+    fetch_assets(config).map_err(CatalogFetchError::message)
+}
+
+fn catalog_cache_path(cache_root: &Path, config: &CloudConfig) -> Result<PathBuf, String> {
+    let config = config.normalized()?;
+    let mut digest = Sha256Context::new(&SHA256);
+    digest.update(config.server_url.as_bytes());
+    digest.update(&[0]);
+    digest.update(config.access_token.as_bytes());
+    Ok(cache_root
+        .join("catalogs")
+        .join(format!("{}.json", sha256_hex(digest))))
+}
+
+fn save_catalog_cache(
+    config: &CloudConfig,
+    cache_root: &Path,
+    items: &[CloudAsset],
+) -> Result<(), String> {
+    let normalized = config.normalized()?;
+    let catalog = CachedCloudCatalog {
+        schema_version: 1,
+        server_url: normalized.server_url.clone(),
+        items: items.to_vec(),
+    };
+    let bytes = serde_json::to_vec(&catalog)
+        .map_err(|error| format!("Could not encode the cloud catalog cache: {error}"))?;
+    if bytes.len() as u64 > MAX_CATALOG_BYTES {
+        return Err("The cloud catalog cache exceeds its safety limit.".to_owned());
+    }
+    let path = catalog_cache_path(cache_root, &normalized)?;
+    crate::thumbnail_cache::write_bytes_atomic(&path, &bytes)
+        .map_err(|error| format!("Could not save the cloud catalog cache: {error}"))
+}
+
+fn load_catalog_cache(config: &CloudConfig, cache_root: &Path) -> Result<Vec<CloudAsset>, String> {
+    let normalized = config.normalized()?;
+    let path = catalog_cache_path(cache_root, &normalized)?;
+    let metadata = fs::metadata(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "No cached cloud library is available yet. Connect once to make it available offline."
+                .to_owned()
+        } else {
+            format!("Could not inspect the cached cloud library: {error}")
+        }
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_CATALOG_BYTES {
+        return Err("The cached cloud library exceeds its safety limit.".to_owned());
+    }
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("Could not read the cached cloud library: {error}"))?;
+    let catalog: CachedCloudCatalog = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("The cached cloud library is invalid: {error}"))?;
+    if catalog.schema_version != 1 || catalog.server_url != normalized.server_url {
+        return Err("The cached cloud library belongs to a different server version.".to_owned());
+    }
     if catalog.items.len() > MAX_CATALOG_ASSETS {
         return Err(format!(
-            "Cloud returned more than {MAX_CATALOG_ASSETS} catalog entries."
+            "The cached cloud library contains more than {MAX_CATALOG_ASSETS} entries."
         ));
     }
     for asset in &catalog.items {
         validate_asset(asset)?;
     }
     Ok(catalog.items)
+}
+
+/// Loads the current catalog and remembers it for offline browsing. Only
+/// transport failures fall back to cache; authentication and malformed server
+/// responses remain visible rather than silently exposing stale data.
+pub fn list_assets_cached(
+    config: &CloudConfig,
+    cache_root: &Path,
+    allow_network: bool,
+) -> Result<CloudCatalogSnapshot, String> {
+    if allow_network {
+        match fetch_assets(config) {
+            Ok(items) => {
+                if let Err(error) = save_catalog_cache(config, cache_root, &items) {
+                    log::warn!("{error}");
+                }
+                return Ok(CloudCatalogSnapshot {
+                    items,
+                    offline_reason: None,
+                });
+            }
+            Err(CatalogFetchError::Fatal(error)) => return Err(error),
+            Err(CatalogFetchError::Unavailable(error)) => {
+                let items = load_catalog_cache(config, cache_root)
+                    .map_err(|cache_error| format!("{error} {cache_error}"))?;
+                return Ok(CloudCatalogSnapshot {
+                    items,
+                    offline_reason: Some(error),
+                });
+            }
+        }
+    }
+
+    Ok(CloudCatalogSnapshot {
+        items: load_catalog_cache(config, cache_root)?,
+        offline_reason: Some("Android is offline; showing the cached cloud library.".to_owned()),
+    })
 }
 
 pub fn test_connection(config: &CloudConfig) -> Result<String, String> {
@@ -461,6 +622,7 @@ pub fn load_thumbnail(
     cache_root: &Path,
     asset: &CloudAsset,
     maximum_edge: u32,
+    allow_network: bool,
 ) -> Result<RawThumbnail, String> {
     validate_asset(asset)?;
     let cache_path = cache_root
@@ -473,6 +635,9 @@ pub fn load_thumbnail(
             log::warn!("Discarding invalid cloud thumbnail: {error}");
             let _ = fs::remove_file(&cache_path);
         }
+    }
+    if !allow_network {
+        return Err("This cloud thumbnail has not been cached for offline use yet.".to_owned());
     }
     let url = config.endpoint(&format!(
         "/api/v1/assets/{}/thumbnail?v={}",
@@ -499,13 +664,29 @@ fn config_from_metadata(metadata: &CachedAssetMetadata) -> CloudConfig {
     }
 }
 
+enum SidecarUploadError {
+    Retryable(String),
+    Fatal(String),
+}
+
+impl SidecarUploadError {
+    fn message(self) -> String {
+        match self {
+            Self::Retryable(message) | Self::Fatal(message) => message,
+        }
+    }
+}
+
 fn request_sidecar_upload(
     metadata: &mut CachedAssetMetadata,
     sidecar_path: &Path,
-) -> Result<(), String> {
-    let bytes = crate::sidecar::read_bounded(sidecar_path).map_err(|error| error.to_string())?;
+) -> Result<(), SidecarUploadError> {
+    let bytes = crate::sidecar::read_bounded(sidecar_path)
+        .map_err(|error| SidecarUploadError::Fatal(error.to_string()))?;
     let config = config_from_metadata(metadata);
-    let url = config.endpoint(&format!("/api/v1/assets/{}/sidecar", metadata.asset_id))?;
+    let url = config
+        .endpoint(&format!("/api/v1/assets/{}/sidecar", metadata.asset_id))
+        .map_err(SidecarUploadError::Fatal)?;
     let request = agent()
         .put(&url)
         .header("Content-Type", "application/vnd.auraw.sidecar");
@@ -519,27 +700,50 @@ fn request_sidecar_upload(
     } else {
         request.header("If-None-Match", "*")
     };
-    let response = request.send(&bytes).map_err(|error| match error {
-        ureq::Error::StatusCode(412) => {
-            "Cloud edit conflict: another client saved this image first. Your local cached sidecar was preserved and remains marked as waiting; the server copy was not overwritten."
-                .to_owned()
-        }
-        ureq::Error::StatusCode(401) => "AuRaw Cloud rejected the access token.".to_owned(),
-        _ => format!("The sidecar was saved locally but could not sync to AuRaw Cloud: {error}"),
+    let response = request.send(&bytes).map_err(|error| {
+        let message = match error {
+            ureq::Error::StatusCode(412) => {
+                return SidecarUploadError::Fatal(
+                    "Cloud edit conflict: another client saved this image first. Your local cached sidecar was preserved and remains marked as waiting; the server copy was not overwritten."
+                        .to_owned(),
+                );
+            }
+            ureq::Error::StatusCode(401) => {
+                return SidecarUploadError::Fatal(
+                    "AuRaw Cloud rejected the access token.".to_owned(),
+                );
+            }
+            ureq::Error::StatusCode(status) if status < 500 && status != 408 && status != 429 => {
+                return SidecarUploadError::Fatal(format!(
+                    "AuRaw Cloud rejected the sidecar with HTTP status {status}."
+                ));
+            }
+            _ => format!(
+                "The sidecar was saved locally but could not sync to AuRaw Cloud: {error}"
+            ),
+        };
+        SidecarUploadError::Retryable(message)
     })?;
     let etag = response
         .headers()
         .get("etag")
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim_matches('"').to_owned())
-        .ok_or_else(|| "AuRaw Cloud saved the sidecar without returning its version.".to_owned())?;
-    validate_hex_identifier(&etag, "sidecar version")?;
+        .ok_or_else(|| {
+            SidecarUploadError::Fatal(
+                "AuRaw Cloud saved the sidecar without returning its version.".to_owned(),
+            )
+        })?;
+    validate_hex_identifier(&etag, "sidecar version").map_err(SidecarUploadError::Fatal)?;
     metadata.sidecar_etag = Some(etag);
     metadata.pending_sidecar_upload = false;
     Ok(())
 }
 
-pub fn sync_sidecar_if_cloud_cached(raw_path: &Path) -> Result<Option<String>, String> {
+pub fn sync_sidecar_if_cloud_cached(
+    raw_path: &Path,
+    allow_network: bool,
+) -> Result<Option<String>, String> {
     let Some(metadata_path) = metadata_path_for_raw(raw_path) else {
         return Ok(None);
     };
@@ -549,9 +753,26 @@ pub fn sync_sidecar_if_cloud_cached(raw_path: &Path) -> Result<Option<String>, S
     let sidecar_path = crate::sidecar::sidecar_path_for_raw(raw_path);
     metadata.pending_sidecar_upload = true;
     save_metadata(&metadata_path, &metadata)?;
-    request_sidecar_upload(&mut metadata, &sidecar_path)?;
-    save_metadata(&metadata_path, &metadata)?;
-    Ok(Some(format!("AuRaw Cloud ({})", metadata.server_url)))
+    if !allow_network {
+        return Ok(Some(format!(
+            "AuRaw Cloud ({}) · waiting to sync",
+            metadata.server_url
+        )));
+    }
+    match request_sidecar_upload(&mut metadata, &sidecar_path) {
+        Ok(()) => {
+            save_metadata(&metadata_path, &metadata)?;
+            Ok(Some(format!("AuRaw Cloud ({})", metadata.server_url)))
+        }
+        Err(SidecarUploadError::Retryable(error)) => {
+            log::warn!("{error}");
+            Ok(Some(format!(
+                "AuRaw Cloud ({}) · waiting to sync",
+                metadata.server_url
+            )))
+        }
+        Err(error @ SidecarUploadError::Fatal(_)) => Err(error.message()),
+    }
 }
 
 fn refresh_sidecar(
@@ -568,7 +789,10 @@ fn refresh_sidecar(
         // RAW impossible to reopen; keep the pending marker and retry on the
         // next save/open instead.
         if let Err(error) = request_sidecar_upload(metadata, &sidecar_path) {
-            log::warn!("cloud sidecar remains pending while reopening the cache: {error}");
+            log::warn!(
+                "cloud sidecar remains pending while reopening the cache: {}",
+                error.message()
+            );
         }
         save_metadata(metadata_path, metadata)?;
         return Ok(());
@@ -673,9 +897,147 @@ pub fn download_asset(
     refresh_sidecar(&config, asset, &raw_path, &metadata_path, &mut metadata)?;
     save_metadata(&metadata_path, &metadata)?;
     Ok(CachedCloudAsset {
+        asset_id: asset.id.clone(),
         raw_path,
         label: asset.name.clone(),
+        offline_reason: None,
     })
+}
+
+fn cached_raw_path(directory: &Path, asset: &CloudAsset) -> Result<PathBuf, String> {
+    let raw_extension = Path::new(&asset.name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("raw");
+    let preferred = directory.join(format!("original.{raw_extension}"));
+    if preferred.is_file() {
+        return Ok(preferred);
+    }
+    let mut candidates = fs::read_dir(directory)
+        .map_err(|error| format!("Could not inspect the cached cloud RAW: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("original."))
+        });
+    let Some(candidate) = candidates.next() else {
+        return Err(
+            "This RAW has not been downloaded on this device and is unavailable offline."
+                .to_owned(),
+        );
+    };
+    if candidates.next().is_some() {
+        return Err("The cached cloud RAW is ambiguous and must be downloaded again.".to_owned());
+    }
+    Ok(candidate)
+}
+
+fn open_cached_asset(
+    config: &CloudConfig,
+    cache_root: &Path,
+    asset: &CloudAsset,
+    offline_reason: String,
+) -> Result<CachedCloudAsset, String> {
+    validate_asset(asset)?;
+    let config = config.normalized()?;
+    let directory = asset_cache_dir(cache_root, &config.server_url, &asset.id);
+    let metadata_path = metadata_path_for_directory(&directory);
+    let metadata = load_metadata(&metadata_path)?.ok_or_else(|| {
+        "This RAW has not been downloaded on this device and is unavailable offline.".to_owned()
+    })?;
+    if metadata.schema_version != 1
+        || metadata.asset_id != asset.id
+        || metadata.server_url != config.server_url
+        || metadata.access_token != config.access_token
+        || metadata.raw_etag != asset.raw_etag
+    {
+        return Err(
+            "The cached RAW is from an older cloud version and must be downloaded again."
+                .to_owned(),
+        );
+    }
+    let raw_path = cached_raw_path(&directory, asset)?;
+    if !fs::metadata(&raw_path).is_ok_and(|file| file.is_file() && file.len() == asset.bytes) {
+        return Err("The cached cloud RAW is incomplete and must be downloaded again.".to_owned());
+    }
+    let sidecar_path = crate::sidecar::sidecar_path_for_raw(&raw_path);
+    if (metadata.pending_sidecar_upload || metadata.sidecar_etag.is_some())
+        && !sidecar_path.is_file()
+    {
+        return Err("The cached cloud edit is incomplete and must be downloaded again.".to_owned());
+    }
+    Ok(CachedCloudAsset {
+        asset_id: asset.id.clone(),
+        raw_path,
+        label: asset.name.clone(),
+        offline_reason: Some(offline_reason),
+    })
+}
+
+pub fn asset_available_offline(
+    config: &CloudConfig,
+    cache_root: &Path,
+    asset: &CloudAsset,
+) -> bool {
+    open_cached_asset(config, cache_root, asset, "offline cache check".to_owned()).is_ok()
+}
+
+fn version_race(error: &str) -> bool {
+    error.contains("integrity check") || error.contains("download was incomplete")
+}
+
+/// Opens a catalog entry by identity rather than trusting the version embedded
+/// in an already-rendered card. This closes the race where another client saves
+/// a sidecar while the library page remains open.
+pub fn open_asset(
+    config: &CloudConfig,
+    cache_root: &Path,
+    selected: &CloudAsset,
+    allow_network: bool,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<CachedCloudAsset, String> {
+    validate_asset(selected)?;
+    let snapshot = list_assets_cached(config, cache_root, allow_network)?;
+    let current = snapshot
+        .items
+        .iter()
+        .find(|asset| asset.id == selected.id)
+        .cloned()
+        .ok_or_else(|| "This RAW is no longer present in AuRaw Cloud.".to_owned())?;
+    if let Some(reason) = snapshot.offline_reason {
+        return open_cached_asset(config, cache_root, &current, reason);
+    }
+
+    match download_asset(config, cache_root, &current, |downloaded, total| {
+        progress(downloaded, total)
+    }) {
+        Ok(cached) => Ok(cached),
+        Err(first_error) if version_race(&first_error) => {
+            // A save can land after the catalog GET but before the sidecar GET.
+            // Fetch the version again and make one bounded retry.
+            let retry = fetch_assets(config).map_err(CatalogFetchError::message)?;
+            if let Err(error) = save_catalog_cache(config, cache_root, &retry) {
+                log::warn!("{error}");
+            }
+            let current = retry
+                .iter()
+                .find(|asset| asset.id == selected.id)
+                .ok_or_else(|| "This RAW is no longer present in AuRaw Cloud.".to_owned())?;
+            download_asset(config, cache_root, current, |downloaded, total| {
+                progress(downloaded, total)
+            })
+            .map_err(|retry_error| {
+                format!(
+                    "AuRaw Cloud changed while this RAW was opening. Refresh and try again: {retry_error}"
+                )
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub fn upload_developed_thumbnail_if_cloud_cached(
@@ -716,12 +1078,30 @@ pub fn upload_developed_thumbnail_if_cloud_cached(
         Some(etag) => request.header("X-AuRaw-Sidecar-ETag", format!("\"{etag}\"")),
         None => request,
     };
-    let response = request.send(&jpeg).map_err(|error| match error {
-        ureq::Error::StatusCode(412) => {
-            "The developed cloud thumbnail belongs to an older sidecar revision.".to_owned()
+    let response = match request.send(&jpeg) {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(412)) => {
+            return Err(
+                "The developed cloud thumbnail belongs to an older sidecar revision.".to_owned(),
+            );
         }
-        _ => format!("Could not sync the developed cloud thumbnail: {error}"),
-    })?;
+        Err(ureq::Error::StatusCode(401)) => {
+            return Err("AuRaw Cloud rejected the access token.".to_owned());
+        }
+        Err(ureq::Error::StatusCode(status)) if status < 500 => {
+            return Err(format!(
+                "AuRaw Cloud rejected the developed thumbnail with HTTP status {status}."
+            ));
+        }
+        Err(error) => {
+            // The sidecar remains the authoritative edit. A thumbnail can be
+            // rendered and uploaded again after connectivity returns, so a
+            // transient preview failure must not turn an offline edit into a
+            // save failure on Android.
+            log::warn!("Could not sync the developed cloud thumbnail: {error}");
+            return Ok(true);
+        }
+    };
     if let Some(etag) = response
         .headers()
         .get("etag")
@@ -766,6 +1146,38 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     use std::net::TcpListener;
 
+    fn test_directory(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "auraw-cloud-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn digest_bytes(bytes: &[u8]) -> String {
+        let mut digest = Sha256Context::new(&SHA256);
+        digest.update(bytes);
+        sha256_hex(digest)
+    }
+
+    fn test_asset(raw: &[u8], sidecar_etag: Option<String>) -> CloudAsset {
+        let raw_etag = digest_bytes(raw);
+        CloudAsset {
+            id: raw_etag.clone(),
+            name: "offline-test.dng".to_owned(),
+            bytes: raw.len() as u64,
+            modified_seconds: 1,
+            width: 512,
+            height: 341,
+            raw_etag,
+            sidecar_etag,
+            thumbnail_etag: "d".repeat(64),
+        }
+    }
+
     #[test]
     fn normalizes_bare_lan_address() {
         let config = CloudConfig {
@@ -809,6 +1221,179 @@ mod tests {
         assert!(validate_upload_name("").is_err());
         assert!(validate_upload_size("empty.dng", Some(0)).is_err());
         assert!(validate_upload_size("photo.dng", Some(1024)).is_ok());
+    }
+
+    #[test]
+    fn cached_catalog_is_available_offline_and_scoped_to_the_token() {
+        let directory = test_directory("catalog-offline");
+        let config = CloudConfig {
+            enabled: true,
+            server_url: "http://cloud.test:8787".to_owned(),
+            access_token: "account-one".to_owned(),
+        };
+        let asset = test_asset(b"raw-body", None);
+        save_catalog_cache(&config, &directory, std::slice::from_ref(&asset)).unwrap();
+
+        let snapshot = list_assets_cached(&config, &directory, false).unwrap();
+        assert_eq!(snapshot.items, vec![asset]);
+        assert!(snapshot.offline_reason.is_some());
+
+        let other_account = CloudConfig {
+            access_token: "account-two".to_owned(),
+            ..config
+        };
+        assert!(list_assets_cached(&other_account, &directory, false)
+            .unwrap_err()
+            .contains("Connect once"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn offline_open_uses_only_a_complete_previously_verified_cache() {
+        let directory = test_directory("raw-offline");
+        let config = CloudConfig {
+            enabled: true,
+            server_url: "http://cloud.test:8787".to_owned(),
+            access_token: "test-token".to_owned(),
+        };
+        let raw = b"cached-raw-body";
+        let asset = test_asset(raw, None);
+        save_catalog_cache(&config, &directory, std::slice::from_ref(&asset)).unwrap();
+        let normalized = config.normalized().unwrap();
+        let asset_directory = asset_cache_dir(&directory, &normalized.server_url, &asset.id);
+        fs::create_dir_all(&asset_directory).unwrap();
+        let raw_path = asset_directory.join("original.dng");
+        fs::write(&raw_path, raw).unwrap();
+        save_metadata(
+            &metadata_path_for_directory(&asset_directory),
+            &CachedAssetMetadata {
+                schema_version: 1,
+                asset_id: asset.id.clone(),
+                server_url: normalized.server_url,
+                access_token: normalized.access_token,
+                raw_etag: asset.raw_etag.clone(),
+                sidecar_etag: None,
+                thumbnail_etag: asset.thumbnail_etag.clone(),
+                pending_sidecar_upload: false,
+            },
+        )
+        .unwrap();
+
+        assert!(asset_available_offline(&config, &directory, &asset));
+        let cached = open_asset(&config, &directory, &asset, false, |_, _| {}).unwrap();
+        assert_eq!(cached.asset_id, asset.id);
+        assert_eq!(cached.raw_path, raw_path);
+        assert!(cached.offline_reason.is_some());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn offline_sidecar_save_is_marked_for_later_sync() {
+        let directory = test_directory("sidecar-offline");
+        let raw_path = directory.join("original.dng");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&raw_path, b"raw").unwrap();
+        fs::write(
+            crate::sidecar::sidecar_path_for_raw(&raw_path),
+            b"locally-saved-sidecar",
+        )
+        .unwrap();
+        save_metadata(
+            &metadata_path_for_directory(&directory),
+            &CachedAssetMetadata {
+                schema_version: 1,
+                asset_id: "a".repeat(64),
+                server_url: "http://cloud.test:8787".to_owned(),
+                access_token: "test-token".to_owned(),
+                raw_etag: "b".repeat(64),
+                sidecar_etag: None,
+                thumbnail_etag: "c".repeat(64),
+                pending_sidecar_upload: false,
+            },
+        )
+        .unwrap();
+
+        let location = sync_sidecar_if_cloud_cached(&raw_path, false)
+            .unwrap()
+            .unwrap();
+        assert!(location.contains("waiting to sync"));
+        assert_eq!(
+            cached_status(Some(&raw_path)),
+            Some("Cloud · waiting to sync")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn opening_a_stale_card_fetches_the_current_sidecar_version() {
+        let raw = b"fresh-raw";
+        let sidecar = b"fresh-sidecar";
+        let fresh_etag = digest_bytes(sidecar);
+        let fresh_asset = test_asset(raw, Some(fresh_etag));
+        let mut stale_asset = fresh_asset.clone();
+        stale_asset.sidecar_etag = Some("e".repeat(64));
+        let catalog = serde_json::to_vec(&CloudCatalog {
+            items: vec![fresh_asset.clone()],
+        })
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = std::thread::spawn(move || {
+            for (expected_path, content_type, body) in [
+                ("/api/v1/assets".to_owned(), "application/json", catalog),
+                (
+                    format!("/api/v1/assets/{}/raw", fresh_asset.id),
+                    "application/octet-stream",
+                    raw.to_vec(),
+                ),
+                (
+                    format!("/api/v1/assets/{}/sidecar", fresh_asset.id),
+                    "application/vnd.auraw.sidecar",
+                    sidecar.to_vec(),
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let first_line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                assert_eq!(first_line, format!("GET {expected_path} HTTP/1.1"));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let directory = test_directory("stale-click");
+        let config = CloudConfig {
+            enabled: true,
+            server_url: format!("http://{address}"),
+            access_token: String::new(),
+        };
+        let cached = open_asset(&config, &directory, &stale_asset, true, |_, _| {}).unwrap();
+        responder.join().unwrap();
+        assert_eq!(
+            fs::read(crate::sidecar::sidecar_path_for_raw(&cached.raw_path)).unwrap(),
+            sidecar
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(not(target_os = "android"))]
