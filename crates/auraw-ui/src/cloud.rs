@@ -1,6 +1,7 @@
 use crate::pipeline::RawThumbnail;
 use ring::digest::{Context as Sha256Context, SHA256};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,11 @@ const MAX_THUMBNAIL_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RAW_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const MAX_UPLOAD_FILENAME_BYTES: usize = 1024;
+pub const CLOUD_ROOT_FOLDER_ID: &str = "root";
+
+fn default_cloud_folder_id() -> String {
+    CLOUD_ROOT_FOLDER_ID.to_owned()
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CloudConfig {
@@ -59,11 +65,22 @@ pub struct CloudAsset {
     pub raw_etag: String,
     pub sidecar_etag: Option<String>,
     pub thumbnail_etag: String,
+    #[serde(default = "default_cloud_folder_id")]
+    pub folder_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct CloudFolder {
+    pub id: String,
+    pub parent_id: String,
+    pub name: String,
 }
 
 #[derive(Deserialize, Serialize)]
 struct CloudCatalog {
     items: Vec<CloudAsset>,
+    #[serde(default)]
+    folders: Vec<CloudFolder>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -71,11 +88,14 @@ struct CachedCloudCatalog {
     schema_version: u32,
     server_url: String,
     items: Vec<CloudAsset>,
+    #[serde(default)]
+    folders: Vec<CloudFolder>,
 }
 
 #[derive(Clone, Debug)]
 pub struct CloudCatalogSnapshot {
     pub items: Vec<CloudAsset>,
+    pub folders: Vec<CloudFolder>,
     /// Set when `items` came from the last successful refresh rather than the
     /// server. The text is suitable for the library status line.
     pub offline_reason: Option<String>,
@@ -144,6 +164,28 @@ fn validate_hex_identifier(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_folder_identifier(value: &str, label: &str) -> Result<(), String> {
+    if value == CLOUD_ROOT_FOLDER_ID {
+        Ok(())
+    } else {
+        validate_hex_identifier(value, label)
+    }
+}
+
+fn validate_folder_name(value: &str) -> Result<(), String> {
+    let name = Path::new(value);
+    if value.is_empty()
+        || value.contains(['/', '\\'])
+        || value.contains('"')
+        || value.chars().any(char::is_control)
+        || value.len() > 255
+        || name.file_name().and_then(|name| name.to_str()) != Some(value)
+    {
+        return Err("Cloud returned an unsafe folder name.".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_asset(asset: &CloudAsset) -> Result<(), String> {
     validate_hex_identifier(&asset.id, "asset ID")?;
     validate_hex_identifier(&asset.raw_etag, "RAW version")?;
@@ -151,6 +193,7 @@ fn validate_asset(asset: &CloudAsset) -> Result<(), String> {
     if let Some(etag) = &asset.sidecar_etag {
         validate_hex_identifier(etag, "sidecar version")?;
     }
+    validate_folder_identifier(&asset.folder_id, "asset folder ID")?;
     let name = Path::new(&asset.name);
     if asset.name.is_empty()
         || name.file_name().and_then(|name| name.to_str()) != Some(asset.name.as_str())
@@ -168,6 +211,69 @@ fn validate_asset(asset: &CloudAsset) -> Result<(), String> {
             "Cloud thumbnail metadata for {} has invalid dimensions.",
             asset.name
         ));
+    }
+    Ok(())
+}
+
+fn validate_catalog(catalog: &CloudCatalog) -> Result<(), String> {
+    if catalog.items.len() > MAX_CATALOG_ASSETS {
+        return Err(format!(
+            "Cloud returned more than {MAX_CATALOG_ASSETS} catalog entries."
+        ));
+    }
+    if catalog.folders.len() > MAX_CATALOG_ASSETS {
+        return Err(format!(
+            "Cloud returned more than {MAX_CATALOG_ASSETS} folders."
+        ));
+    }
+
+    let mut folder_parents = HashMap::with_capacity(catalog.folders.len());
+    for folder in &catalog.folders {
+        validate_hex_identifier(&folder.id, "folder ID")?;
+        validate_folder_identifier(&folder.parent_id, "parent folder ID")?;
+        validate_folder_name(&folder.name)?;
+        if folder_parents
+            .insert(folder.id.as_str(), folder.parent_id.as_str())
+            .is_some()
+        {
+            return Err("Cloud returned duplicate folder IDs.".to_owned());
+        }
+    }
+    for folder in &catalog.folders {
+        if folder.parent_id != CLOUD_ROOT_FOLDER_ID
+            && !folder_parents.contains_key(folder.parent_id.as_str())
+        {
+            return Err("Cloud returned an invalid folder hierarchy.".to_owned());
+        }
+    }
+
+    // Each folder has one parent. Remember already-rooted paths so even a very
+    // deep catalog is validated in linear time rather than walking the same
+    // ancestor chain once per folder.
+    let mut rooted = HashSet::with_capacity(catalog.folders.len());
+    for folder in &catalog.folders {
+        let mut current = folder.id.as_str();
+        let mut path = Vec::new();
+        let mut visiting = HashSet::new();
+        while current != CLOUD_ROOT_FOLDER_ID && !rooted.contains(current) {
+            if !visiting.insert(current) {
+                return Err("Cloud returned a cyclic folder hierarchy.".to_owned());
+            }
+            path.push(current);
+            let Some(parent) = folder_parents.get(current) else {
+                return Err("Cloud returned an invalid folder hierarchy.".to_owned());
+            };
+            current = parent;
+        }
+        rooted.extend(path);
+    }
+    for asset in &catalog.items {
+        validate_asset(asset)?;
+        if asset.folder_id != CLOUD_ROOT_FOLDER_ID
+            && !folder_parents.contains_key(asset.folder_id.as_str())
+        {
+            return Err("Cloud returned a RAW in an unknown folder.".to_owned());
+        }
     }
     Ok(())
 }
@@ -196,7 +302,7 @@ fn catalog_request_error(error: ureq::Error) -> CatalogFetchError {
     CatalogFetchError::Unavailable(message)
 }
 
-fn fetch_assets(config: &CloudConfig) -> Result<Vec<CloudAsset>, CatalogFetchError> {
+fn fetch_catalog(config: &CloudConfig) -> Result<CloudCatalog, CatalogFetchError> {
     let normalized = config.normalized().map_err(CatalogFetchError::Fatal)?;
     let url = normalized
         .endpoint("/api/v1/assets")
@@ -213,19 +319,14 @@ fn fetch_assets(config: &CloudConfig) -> Result<Vec<CloudAsset>, CatalogFetchErr
     let catalog: CloudCatalog = serde_json::from_slice(&bytes).map_err(|error| {
         CatalogFetchError::Fatal(format!("Cloud returned an invalid catalog: {error}"))
     })?;
-    if catalog.items.len() > MAX_CATALOG_ASSETS {
-        return Err(CatalogFetchError::Fatal(format!(
-            "Cloud returned more than {MAX_CATALOG_ASSETS} catalog entries."
-        )));
-    }
-    for asset in &catalog.items {
-        validate_asset(asset).map_err(CatalogFetchError::Fatal)?;
-    }
-    Ok(catalog.items)
+    validate_catalog(&catalog).map_err(CatalogFetchError::Fatal)?;
+    Ok(catalog)
 }
 
 pub fn list_assets(config: &CloudConfig) -> Result<Vec<CloudAsset>, String> {
-    fetch_assets(config).map_err(CatalogFetchError::message)
+    fetch_catalog(config)
+        .map(|catalog| catalog.items)
+        .map_err(CatalogFetchError::message)
 }
 
 fn catalog_cache_path(cache_root: &Path, config: &CloudConfig) -> Result<PathBuf, String> {
@@ -242,13 +343,14 @@ fn catalog_cache_path(cache_root: &Path, config: &CloudConfig) -> Result<PathBuf
 fn save_catalog_cache(
     config: &CloudConfig,
     cache_root: &Path,
-    items: &[CloudAsset],
+    catalog: &CloudCatalog,
 ) -> Result<(), String> {
     let normalized = config.normalized()?;
     let catalog = CachedCloudCatalog {
-        schema_version: 1,
+        schema_version: 2,
         server_url: normalized.server_url.clone(),
-        items: items.to_vec(),
+        items: catalog.items.clone(),
+        folders: catalog.folders.clone(),
     };
     let bytes = serde_json::to_vec(&catalog)
         .map_err(|error| format!("Could not encode the cloud catalog cache: {error}"))?;
@@ -260,7 +362,7 @@ fn save_catalog_cache(
         .map_err(|error| format!("Could not save the cloud catalog cache: {error}"))
 }
 
-fn load_catalog_cache(config: &CloudConfig, cache_root: &Path) -> Result<Vec<CloudAsset>, String> {
+fn load_catalog_cache(config: &CloudConfig, cache_root: &Path) -> Result<CloudCatalog, String> {
     let normalized = config.normalized()?;
     let path = catalog_cache_path(cache_root, &normalized)?;
     let metadata = fs::metadata(&path).map_err(|error| {
@@ -278,18 +380,16 @@ fn load_catalog_cache(config: &CloudConfig, cache_root: &Path) -> Result<Vec<Clo
         .map_err(|error| format!("Could not read the cached cloud library: {error}"))?;
     let catalog: CachedCloudCatalog = serde_json::from_slice(&bytes)
         .map_err(|error| format!("The cached cloud library is invalid: {error}"))?;
-    if catalog.schema_version != 1 || catalog.server_url != normalized.server_url {
+    if !(1..=2).contains(&catalog.schema_version) || catalog.server_url != normalized.server_url {
         return Err("The cached cloud library belongs to a different server version.".to_owned());
     }
-    if catalog.items.len() > MAX_CATALOG_ASSETS {
-        return Err(format!(
-            "The cached cloud library contains more than {MAX_CATALOG_ASSETS} entries."
-        ));
-    }
-    for asset in &catalog.items {
-        validate_asset(asset)?;
-    }
-    Ok(catalog.items)
+    let catalog = CloudCatalog {
+        items: catalog.items,
+        folders: catalog.folders,
+    };
+    validate_catalog(&catalog)
+        .map_err(|error| format!("The cached cloud library is invalid: {error}"))?;
+    Ok(catalog)
 }
 
 /// Loads the current catalog and remembers it for offline browsing. Only
@@ -301,30 +401,34 @@ pub fn list_assets_cached(
     allow_network: bool,
 ) -> Result<CloudCatalogSnapshot, String> {
     if allow_network {
-        match fetch_assets(config) {
-            Ok(items) => {
-                if let Err(error) = save_catalog_cache(config, cache_root, &items) {
+        match fetch_catalog(config) {
+            Ok(catalog) => {
+                if let Err(error) = save_catalog_cache(config, cache_root, &catalog) {
                     log::warn!("{error}");
                 }
                 return Ok(CloudCatalogSnapshot {
-                    items,
+                    items: catalog.items,
+                    folders: catalog.folders,
                     offline_reason: None,
                 });
             }
             Err(CatalogFetchError::Fatal(error)) => return Err(error),
             Err(CatalogFetchError::Unavailable(error)) => {
-                let items = load_catalog_cache(config, cache_root)
+                let catalog = load_catalog_cache(config, cache_root)
                     .map_err(|cache_error| format!("{error} {cache_error}"))?;
                 return Ok(CloudCatalogSnapshot {
-                    items,
+                    items: catalog.items,
+                    folders: catalog.folders,
                     offline_reason: Some(error),
                 });
             }
         }
     }
 
+    let catalog = load_catalog_cache(config, cache_root)?;
     Ok(CloudCatalogSnapshot {
-        items: load_catalog_cache(config, cache_root)?,
+        items: catalog.items,
+        folders: catalog.folders,
         offline_reason: Some("Android is offline; showing the cached cloud library.".to_owned()),
     })
 }
@@ -336,6 +440,256 @@ pub fn test_connection(config: &CloudConfig) -> Result<String, String> {
         assets.len(),
         if assets.len() == 1 { "photo" } else { "photos" }
     ))
+}
+
+#[derive(Serialize)]
+struct FolderMutation<'a> {
+    parent_id: &'a str,
+    name: &'a str,
+}
+
+#[derive(Serialize)]
+struct AssetMutation<'a> {
+    folder_id: &'a str,
+    name: &'a str,
+}
+
+#[derive(Serialize)]
+struct CloudDestination<'a> {
+    folder_id: &'a str,
+}
+
+fn mutation_error(error: ureq::Error, action: &str) -> String {
+    match error {
+        ureq::Error::StatusCode(400) => {
+            format!("AuRaw Cloud rejected the requested {action}.")
+        }
+        ureq::Error::StatusCode(401) => "AuRaw Cloud rejected the access token.".to_owned(),
+        ureq::Error::StatusCode(404) => format!(
+            "The cloud destination no longer exists, or the companion server has not been rebuilt with support for {action}. Update and restart AuRaw Cloud, then refresh."
+        ),
+        ureq::Error::StatusCode(409) => {
+            format!("AuRaw Cloud could not {action} because that name or location conflicts.")
+        }
+        ureq::Error::StatusCode(412) => {
+            "The cloud edit changed on another client. Refresh and try again.".to_owned()
+        }
+        _ => format!("Could not {action} in AuRaw Cloud: {error}"),
+    }
+}
+
+fn post_json<T: Serialize>(
+    config: &CloudConfig,
+    suffix: &str,
+    value: &T,
+    action: &str,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let config = config.normalized()?;
+    let url = config.endpoint(suffix)?;
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("Could not encode cloud {action}: {error}"))?;
+    let request = agent().post(&url).header("Content-Type", "application/json");
+    let request = if let Some(value) = authorization(&config) {
+        request.header("Authorization", value)
+    } else {
+        request
+    };
+    request.send(&bytes).map_err(|error| mutation_error(error, action))
+}
+
+fn patch_json<T: Serialize>(
+    config: &CloudConfig,
+    suffix: &str,
+    value: &T,
+    action: &str,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let config = config.normalized()?;
+    let url = config.endpoint(suffix)?;
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("Could not encode cloud {action}: {error}"))?;
+    let request = agent().patch(&url).header("Content-Type", "application/json");
+    let request = if let Some(value) = authorization(&config) {
+        request.header("Authorization", value)
+    } else {
+        request
+    };
+    request.send(&bytes).map_err(|error| mutation_error(error, action))
+}
+
+fn delete_request(
+    config: &CloudConfig,
+    suffix: &str,
+    etag: Option<&str>,
+    action: &str,
+) -> Result<(), String> {
+    let config = config.normalized()?;
+    let url = config.endpoint(suffix)?;
+    let request = agent().delete(&url);
+    let request = if let Some(value) = authorization(&config) {
+        request.header("Authorization", value)
+    } else {
+        request
+    };
+    let request = if let Some(etag) = etag {
+        request.header("If-Match", format!("\"{etag}\""))
+    } else {
+        request
+    };
+    request
+        .call()
+        .map(|_| ())
+        .map_err(|error| mutation_error(error, action))
+}
+
+fn decode_mutation_response<T: for<'de> Deserialize<'de>>(
+    mut response: ureq::http::Response<ureq::Body>,
+    label: &str,
+) -> Result<T, String> {
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_METADATA_BYTES)
+        .read_to_vec()
+        .map_err(|error| format!("Could not read the cloud {label} response: {error}"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Cloud returned an invalid {label} response: {error}"))
+}
+
+pub fn create_folder(
+    config: &CloudConfig,
+    parent_id: &str,
+    name: &str,
+) -> Result<CloudFolder, String> {
+    validate_folder_identifier(parent_id, "parent folder ID")?;
+    validate_folder_name(name).map_err(|_| "Enter a valid folder name.".to_owned())?;
+    let response = post_json(
+        config,
+        "/api/v1/folders",
+        &FolderMutation { parent_id, name },
+        "create a folder",
+    )?;
+    let folder: CloudFolder = decode_mutation_response(response, "folder")?;
+    validate_hex_identifier(&folder.id, "folder ID")?;
+    validate_folder_identifier(&folder.parent_id, "parent folder ID")?;
+    validate_folder_name(&folder.name)?;
+    Ok(folder)
+}
+
+pub fn update_folder(
+    config: &CloudConfig,
+    folder: &CloudFolder,
+    parent_id: &str,
+    name: &str,
+) -> Result<CloudFolder, String> {
+    validate_hex_identifier(&folder.id, "folder ID")?;
+    validate_folder_identifier(parent_id, "parent folder ID")?;
+    validate_folder_name(name).map_err(|_| "Enter a valid folder name.".to_owned())?;
+    let response = patch_json(
+        config,
+        &format!("/api/v1/folders/{}", folder.id),
+        &FolderMutation { parent_id, name },
+        "update the folder",
+    )?;
+    let updated: CloudFolder = decode_mutation_response(response, "folder")?;
+    validate_hex_identifier(&updated.id, "folder ID")?;
+    validate_folder_identifier(&updated.parent_id, "parent folder ID")?;
+    validate_folder_name(&updated.name)?;
+    Ok(updated)
+}
+
+pub fn copy_folder(
+    config: &CloudConfig,
+    folder: &CloudFolder,
+    destination_parent_id: &str,
+) -> Result<CloudFolder, String> {
+    validate_hex_identifier(&folder.id, "folder ID")?;
+    validate_folder_identifier(destination_parent_id, "destination folder ID")?;
+    let response = post_json(
+        config,
+        &format!("/api/v1/folders/{}/copy", folder.id),
+        &CloudDestination {
+            folder_id: destination_parent_id,
+        },
+        "copy the folder",
+    )?;
+    let copied: CloudFolder = decode_mutation_response(response, "folder")?;
+    validate_hex_identifier(&copied.id, "folder ID")?;
+    validate_folder_identifier(&copied.parent_id, "parent folder ID")?;
+    validate_folder_name(&copied.name)?;
+    Ok(copied)
+}
+
+pub fn delete_folder(config: &CloudConfig, folder_id: &str) -> Result<(), String> {
+    validate_hex_identifier(folder_id, "folder ID")?;
+    delete_request(
+        config,
+        &format!("/api/v1/folders/{folder_id}"),
+        None,
+        "delete the folder",
+    )
+}
+
+pub fn update_asset(
+    config: &CloudConfig,
+    asset: &CloudAsset,
+    folder_id: &str,
+    name: &str,
+) -> Result<CloudAsset, String> {
+    validate_asset(asset)?;
+    validate_folder_identifier(folder_id, "destination folder ID")?;
+    validate_upload_name(name)?;
+    let response = patch_json(
+        config,
+        &format!("/api/v1/assets/{}", asset.id),
+        &AssetMutation { folder_id, name },
+        "update the RAW",
+    )?;
+    let updated: CloudAsset = decode_mutation_response(response, "RAW")?;
+    validate_asset(&updated)?;
+    Ok(updated)
+}
+
+pub fn copy_asset(
+    config: &CloudConfig,
+    asset: &CloudAsset,
+    destination_folder_id: &str,
+) -> Result<CloudAsset, String> {
+    validate_asset(asset)?;
+    validate_folder_identifier(destination_folder_id, "destination folder ID")?;
+    let response = post_json(
+        config,
+        &format!("/api/v1/assets/{}/copy", asset.id),
+        &CloudDestination {
+            folder_id: destination_folder_id,
+        },
+        "copy the RAW",
+    )?;
+    let copied: CloudAsset = decode_mutation_response(response, "RAW")?;
+    validate_asset(&copied)?;
+    Ok(copied)
+}
+
+pub fn delete_asset(config: &CloudConfig, asset: &CloudAsset) -> Result<(), String> {
+    validate_asset(asset)?;
+    delete_request(
+        config,
+        &format!("/api/v1/assets/{}", asset.id),
+        None,
+        "delete the RAW",
+    )
+}
+
+pub fn reset_asset_sidecar(config: &CloudConfig, asset: &CloudAsset) -> Result<(), String> {
+    validate_asset(asset)?;
+    let Some(etag) = asset.sidecar_etag.as_deref() else {
+        return Ok(());
+    };
+    delete_request(
+        config,
+        &format!("/api/v1/assets/{}/sidecar", asset.id),
+        Some(etag),
+        "reset the RAW adjustments",
+    )
 }
 
 fn validate_upload_name(display_name: &str) -> Result<(), String> {
@@ -366,11 +720,11 @@ fn validate_upload_size(display_name: &str, bytes: Option<u64>) -> Result<(), St
 }
 
 #[cfg(not(target_os = "android"))]
-fn checked_upload_part(
+fn checked_upload_part<'a>(
     path: &Path,
     maximum_bytes: u64,
     label: &str,
-) -> Result<ureq::unversioned::multipart::Part<'static>, String> {
+) -> Result<ureq::unversioned::multipart::Part<'a>, String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("Could not inspect {label} {}: {error}", path.display()))?;
     if !metadata.is_file() || metadata.len() > maximum_bytes {
@@ -383,10 +737,12 @@ fn checked_upload_part(
         .map_err(|error| format!("Could not open {label} {}: {error}", path.display()))
 }
 
-fn send_upload_form(
+fn send_upload_form<'a>(
     config: &CloudConfig,
-    form: ureq::unversioned::multipart::Form<'_>,
+    form: ureq::unversioned::multipart::Form<'a>,
+    folder_id: &'a str,
 ) -> Result<CloudAsset, String> {
+    validate_folder_identifier(folder_id, "upload folder ID")?;
     let config = config.normalized()?;
     let url = config.endpoint("/api/v1/assets")?;
     let request = agent().post(&url);
@@ -395,6 +751,7 @@ fn send_upload_form(
     } else {
         request
     };
+    let form = form.text("folder_id", folder_id);
     let mut response = request.send(form).map_err(|error| match error {
         ureq::Error::StatusCode(400) => {
             "AuRaw Cloud rejected this RAW or its filename.".to_owned()
@@ -419,6 +776,15 @@ fn send_upload_form(
 
 #[cfg(not(target_os = "android"))]
 pub fn upload_asset_path(config: &CloudConfig, raw_path: &Path) -> Result<CloudAsset, String> {
+    upload_asset_path_to_folder(config, raw_path, CLOUD_ROOT_FOLDER_ID)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn upload_asset_path_to_folder(
+    config: &CloudConfig,
+    raw_path: &Path,
+    folder_id: &str,
+) -> Result<CloudAsset, String> {
     let display_name = raw_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -467,7 +833,7 @@ pub fn upload_asset_path(config: &CloudConfig, raw_path: &Path) -> Result<CloudA
             ),
         }
     }
-    send_upload_form(config, form)
+    send_upload_form(config, form, folder_id)
 }
 
 pub fn upload_asset_file(
@@ -475,6 +841,22 @@ pub fn upload_asset_file(
     raw: File,
     display_name: &str,
     declared_bytes: Option<u64>,
+) -> Result<CloudAsset, String> {
+    upload_asset_file_to_folder(
+        config,
+        raw,
+        display_name,
+        declared_bytes,
+        CLOUD_ROOT_FOLDER_ID,
+    )
+}
+
+pub fn upload_asset_file_to_folder<'a>(
+    config: &CloudConfig,
+    raw: File,
+    display_name: &'a str,
+    declared_bytes: Option<u64>,
+    folder_id: &'a str,
 ) -> Result<CloudAsset, String> {
     validate_upload_name(display_name)?;
     validate_upload_size(display_name, declared_bytes)?;
@@ -485,6 +867,7 @@ pub fn upload_asset_file(
     send_upload_form(
         config,
         ureq::unversioned::multipart::Form::new().part("raw", raw),
+        folder_id,
     )
 }
 
@@ -502,7 +885,24 @@ fn metadata_path_for_directory(directory: &Path) -> PathBuf {
 }
 
 fn metadata_path_for_raw(raw_path: &Path) -> Option<PathBuf> {
-    raw_path.parent().map(metadata_path_for_directory)
+    let name = raw_path.file_name()?.to_str()?;
+    if !name.starts_with("original.") {
+        return None;
+    }
+    let directory = raw_path.parent()?;
+    let asset_id = directory.file_name()?.to_str()?;
+    validate_hex_identifier(asset_id, "cached asset ID").ok()?;
+    let namespace = directory.parent()?.file_name()?.to_str()?;
+    validate_hex_identifier(namespace, "cloud cache namespace").ok()?;
+    Some(metadata_path_for_directory(directory))
+}
+
+pub fn cached_asset_id_for_raw(raw_path: &Path) -> Option<String> {
+    let metadata_path = metadata_path_for_raw(raw_path)?;
+    load_metadata(&metadata_path)
+        .ok()
+        .flatten()
+        .map(|metadata| metadata.asset_id)
 }
 
 fn load_metadata(path: &Path) -> Result<Option<CachedAssetMetadata>, String> {
@@ -666,15 +1066,22 @@ fn config_from_metadata(metadata: &CachedAssetMetadata) -> CloudConfig {
 
 enum SidecarUploadError {
     Retryable(String),
+    Conflict(String),
     Fatal(String),
 }
 
 impl SidecarUploadError {
     fn message(self) -> String {
         match self {
-            Self::Retryable(message) | Self::Fatal(message) => message,
+            Self::Retryable(message) | Self::Conflict(message) | Self::Fatal(message) => message,
         }
     }
+}
+
+const CLOUD_EDIT_CONFLICT_PREFIX: &str = "Cloud edit conflict:";
+
+pub fn is_sidecar_conflict_message(message: &str) -> bool {
+    message.starts_with(CLOUD_EDIT_CONFLICT_PREFIX)
 }
 
 fn request_sidecar_upload(
@@ -703,7 +1110,7 @@ fn request_sidecar_upload(
     let response = request.send(&bytes).map_err(|error| {
         let message = match error {
             ureq::Error::StatusCode(412) => {
-                return SidecarUploadError::Fatal(
+                return SidecarUploadError::Conflict(
                     "Cloud edit conflict: another client saved this image first. Your local cached sidecar was preserved and remains marked as waiting; the server copy was not overwritten."
                         .to_owned(),
                 );
@@ -771,8 +1178,117 @@ pub fn sync_sidecar_if_cloud_cached(
                 metadata.server_url
             )))
         }
-        Err(error @ SidecarUploadError::Fatal(_)) => Err(error.message()),
+        Err(error @ (SidecarUploadError::Conflict(_) | SidecarUploadError::Fatal(_))) => {
+            Err(error.message())
+        }
     }
+}
+
+fn current_asset_for_metadata(metadata: &CachedAssetMetadata) -> Result<CloudAsset, String> {
+    let config = config_from_metadata(metadata);
+    let catalog = fetch_catalog(&config).map_err(CatalogFetchError::message)?;
+    let asset = catalog
+        .items
+        .into_iter()
+        .find(|asset| asset.id == metadata.asset_id)
+        .ok_or_else(|| "This RAW is no longer present in AuRaw Cloud.".to_owned())?;
+    if asset.raw_etag != metadata.raw_etag {
+        return Err(
+            "The server RAW no longer matches the cached file. Reopen it from Cloud before resolving edits."
+                .to_owned(),
+        );
+    }
+    Ok(asset)
+}
+
+/// Keeps the cached sidecar and deliberately replaces the server's latest
+/// sidecar. The latest ETag is fetched immediately before the conditional PUT,
+/// so a second concurrent save still produces a conflict rather than silently
+/// overwriting a newer revision.
+pub fn overwrite_server_sidecar_with_local(raw_path: &Path) -> Result<String, String> {
+    let metadata_path = metadata_path_for_raw(raw_path)
+        .ok_or_else(|| "This file is not an AuRaw Cloud cache entry.".to_owned())?;
+    let mut metadata = load_metadata(&metadata_path)?
+        .ok_or_else(|| "The cloud cache metadata is missing.".to_owned())?;
+    let latest = current_asset_for_metadata(&metadata)?;
+    metadata.sidecar_etag = latest.sidecar_etag;
+    metadata.thumbnail_etag = latest.thumbnail_etag;
+    metadata.pending_sidecar_upload = true;
+    let sidecar_path = crate::sidecar::sidecar_path_for_raw(raw_path);
+    request_sidecar_upload(&mut metadata, &sidecar_path).map_err(|error| error.message())?;
+    save_metadata(&metadata_path, &metadata)?;
+    Ok(format!("AuRaw Cloud ({})", metadata.server_url))
+}
+
+/// Discards the cached sidecar and installs the server's latest sidecar (or no
+/// sidecar when the server image is unedited). A confirmation catalog read
+/// prevents a sidecar revision that changes during download from being
+/// published as the resolved local copy.
+pub fn overwrite_local_sidecar_with_server(raw_path: &Path) -> Result<String, String> {
+    let metadata_path = metadata_path_for_raw(raw_path)
+        .ok_or_else(|| "This file is not an AuRaw Cloud cache entry.".to_owned())?;
+    let mut metadata = load_metadata(&metadata_path)?
+        .ok_or_else(|| "The cloud cache metadata is missing.".to_owned())?;
+    let config = config_from_metadata(&metadata);
+    let sidecar_path = crate::sidecar::sidecar_path_for_raw(raw_path);
+    let remote_sidecar_path =
+        sidecar_path.with_extension(format!("auraw.server-conflict-{}", std::process::id()));
+
+    let result = (|| {
+        let mut latest = current_asset_for_metadata(&metadata)?;
+        for attempt in 0..2 {
+            if let Some(etag) = latest.sidecar_etag.as_deref() {
+                let url =
+                    config.endpoint(&format!("/api/v1/assets/{}/sidecar", metadata.asset_id))?;
+                download_to_path(
+                    &config,
+                    &url,
+                    &remote_sidecar_path,
+                    crate::sidecar::MAX_SIDECAR_BYTES,
+                    None,
+                    Some(etag),
+                    |_, _| {},
+                )?;
+            }
+
+            let confirmed = current_asset_for_metadata(&metadata)?;
+            if confirmed.sidecar_etag != latest.sidecar_etag {
+                if attempt == 0 {
+                    latest = confirmed;
+                    continue;
+                }
+                return Err(
+                    "The server edits changed again while resolving the conflict. Try again."
+                        .to_owned(),
+                );
+            }
+
+            if latest.sidecar_etag.is_some() {
+                crate::file_ops::replace_file(&remote_sidecar_path, &sidecar_path)
+                    .map_err(|error| format!("Could not install the server sidecar: {error}"))?;
+            } else {
+                if let Err(error) = fs::remove_file(&sidecar_path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        return Err(format!("Could not remove the local sidecar: {error}"));
+                    }
+                }
+                let _ = fs::remove_file(&remote_sidecar_path);
+            }
+
+            #[cfg(not(target_os = "android"))]
+            crate::sidecar::invalidate_developed_thumbnail_cache(raw_path)?;
+            metadata.sidecar_etag = latest.sidecar_etag;
+            metadata.thumbnail_etag = latest.thumbnail_etag;
+            metadata.pending_sidecar_upload = false;
+            save_metadata(&metadata_path, &metadata)?;
+            return Ok(format!("AuRaw Cloud ({})", metadata.server_url));
+        }
+        unreachable!("the bounded conflict loop always returns")
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&remote_sidecar_path);
+    }
+    result
 }
 
 fn refresh_sidecar(
@@ -1019,11 +1535,12 @@ pub fn open_asset(
         Err(first_error) if version_race(&first_error) => {
             // A save can land after the catalog GET but before the sidecar GET.
             // Fetch the version again and make one bounded retry.
-            let retry = fetch_assets(config).map_err(CatalogFetchError::message)?;
+            let retry = fetch_catalog(config).map_err(CatalogFetchError::message)?;
             if let Err(error) = save_catalog_cache(config, cache_root, &retry) {
                 log::warn!("{error}");
             }
             let current = retry
+                .items
                 .iter()
                 .find(|asset| asset.id == selected.id)
                 .ok_or_else(|| "This RAW is no longer present in AuRaw Cloud.".to_owned())?;
@@ -1038,6 +1555,79 @@ pub fn open_asset(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Resolves a selection against one catalog snapshot and prepares every RAW in
+/// selection order. This keeps multi-file exports and adjustment operations
+/// from issuing a separate catalog request for every selected card.
+pub fn open_assets(
+    config: &CloudConfig,
+    cache_root: &Path,
+    selected: &[CloudAsset],
+    allow_network: bool,
+) -> Result<Vec<CachedCloudAsset>, String> {
+    for asset in selected {
+        validate_asset(asset)?;
+    }
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let snapshot = list_assets_cached(config, cache_root, allow_network)?;
+    let current = selected
+        .iter()
+        .map(|selected| {
+            snapshot
+                .items
+                .iter()
+                .find(|asset| asset.id == selected.id)
+                .cloned()
+                .ok_or_else(|| format!("{} is no longer present in AuRaw Cloud.", selected.name))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if let Some(reason) = snapshot.offline_reason {
+        return current
+            .iter()
+            .map(|asset| {
+                open_cached_asset(config, cache_root, asset, reason.clone())
+                    .map_err(|error| format!("Could not prepare {}: {error}", asset.name))
+            })
+            .collect();
+    }
+
+    let mut cached = Vec::with_capacity(current.len());
+    for asset in current {
+        let prepared = match download_asset(config, cache_root, &asset, |_, _| {}) {
+            Ok(cached) => Ok(cached),
+            Err(first_error) if version_race(&first_error) => {
+                // Keep the same bounded retry used by single-card opening. A
+                // sidecar save can otherwise land between the shared catalog
+                // read and this particular asset download.
+                let retry = fetch_catalog(config).map_err(CatalogFetchError::message)?;
+                if let Err(error) = save_catalog_cache(config, cache_root, &retry) {
+                    log::warn!("{error}");
+                }
+                let current = retry
+                    .items
+                    .iter()
+                    .find(|candidate| candidate.id == asset.id)
+                    .ok_or_else(|| {
+                        format!("{} is no longer present in AuRaw Cloud.", asset.name)
+                    })?;
+                download_asset(config, cache_root, current, |_, _| {}).map_err(|retry_error| {
+                    format!(
+                        "AuRaw Cloud changed while {} was being prepared. Refresh and try again: {retry_error}",
+                        asset.name
+                    )
+                })
+            }
+            Err(error) => Err(error),
+        }
+        .map_err(|error| format!("Could not prepare {}: {error}", asset.name))?;
+        cached.push(prepared);
+    }
+    Ok(cached)
 }
 
 pub fn upload_developed_thumbnail_if_cloud_cached(
@@ -1157,6 +1747,54 @@ mod tests {
         ))
     }
 
+    #[cfg(not(target_os = "android"))]
+    fn read_test_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let header_end = loop {
+            let count = stream.read(&mut buffer).unwrap();
+            assert!(count > 0, "client closed before sending HTTP headers");
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let content_length = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let count = stream.read(&mut buffer).unwrap();
+            assert!(count > 0, "client closed before sending the HTTP body");
+            request.extend_from_slice(&buffer[..count]);
+        }
+        request
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn write_test_http_response(
+        stream: &mut std::net::TcpStream,
+        status: &str,
+        content_type: &str,
+        extra_headers: &str,
+        body: &[u8],
+    ) {
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    }
+
     fn digest_bytes(bytes: &[u8]) -> String {
         let mut digest = Sha256Context::new(&SHA256);
         digest.update(bytes);
@@ -1175,6 +1813,14 @@ mod tests {
             raw_etag,
             sidecar_etag,
             thumbnail_etag: "d".repeat(64),
+            folder_id: CLOUD_ROOT_FOLDER_ID.to_owned(),
+        }
+    }
+
+    fn test_catalog(asset: &CloudAsset) -> CloudCatalog {
+        CloudCatalog {
+            items: vec![asset.clone()],
+            folders: Vec::new(),
         }
     }
 
@@ -1224,6 +1870,54 @@ mod tests {
     }
 
     #[test]
+    fn legacy_flat_catalog_defaults_assets_to_the_cloud_root() {
+        let raw = b"legacy-raw";
+        let raw_etag = digest_bytes(raw);
+        let json = format!(
+            r#"{{"items":[{{"id":"{raw_etag}","name":"legacy.dng","bytes":{},"modified_seconds":1,"width":512,"height":341,"raw_etag":"{raw_etag}","sidecar_etag":null,"thumbnail_etag":"{}"}}]}}"#,
+            raw.len(),
+            "d".repeat(64),
+        );
+        let catalog: CloudCatalog = serde_json::from_str(&json).unwrap();
+        validate_catalog(&catalog).unwrap();
+        assert!(catalog.folders.is_empty());
+        assert_eq!(catalog.items[0].folder_id, CLOUD_ROOT_FOLDER_ID);
+    }
+
+    #[test]
+    fn catalog_validation_accepts_nested_folders_and_rejects_cycles() {
+        let parent = CloudFolder {
+            id: "a".repeat(64),
+            parent_id: CLOUD_ROOT_FOLDER_ID.to_owned(),
+            name: "Trips".to_owned(),
+        };
+        let child = CloudFolder {
+            id: "b".repeat(64),
+            parent_id: parent.id.clone(),
+            name: "Day 1".to_owned(),
+        };
+        let mut asset = test_asset(b"nested", None);
+        asset.folder_id = child.id.clone();
+        let catalog = CloudCatalog {
+            items: vec![asset],
+            folders: vec![parent.clone(), child.clone()],
+        };
+        validate_catalog(&catalog).unwrap();
+
+        let cyclic = CloudCatalog {
+            items: Vec::new(),
+            folders: vec![
+                CloudFolder {
+                    parent_id: child.id.clone(),
+                    ..parent
+                },
+                child,
+            ],
+        };
+        assert!(validate_catalog(&cyclic).unwrap_err().contains("cyclic"));
+    }
+
+    #[test]
     fn cached_catalog_is_available_offline_and_scoped_to_the_token() {
         let directory = test_directory("catalog-offline");
         let config = CloudConfig {
@@ -1232,7 +1926,7 @@ mod tests {
             access_token: "account-one".to_owned(),
         };
         let asset = test_asset(b"raw-body", None);
-        save_catalog_cache(&config, &directory, std::slice::from_ref(&asset)).unwrap();
+        save_catalog_cache(&config, &directory, &test_catalog(&asset)).unwrap();
 
         let snapshot = list_assets_cached(&config, &directory, false).unwrap();
         assert_eq!(snapshot.items, vec![asset]);
@@ -1258,7 +1952,7 @@ mod tests {
         };
         let raw = b"cached-raw-body";
         let asset = test_asset(raw, None);
-        save_catalog_cache(&config, &directory, std::slice::from_ref(&asset)).unwrap();
+        save_catalog_cache(&config, &directory, &test_catalog(&asset)).unwrap();
         let normalized = config.normalized().unwrap();
         let asset_directory = asset_cache_dir(&directory, &normalized.server_url, &asset.id);
         fs::create_dir_all(&asset_directory).unwrap();
@@ -1289,7 +1983,8 @@ mod tests {
 
     #[test]
     fn offline_sidecar_save_is_marked_for_later_sync() {
-        let directory = test_directory("sidecar-offline");
+        let root = test_directory("sidecar-offline");
+        let directory = root.join("f".repeat(64)).join("a".repeat(64));
         let raw_path = directory.join("original.dng");
         fs::create_dir_all(&directory).unwrap();
         fs::write(&raw_path, b"raw").unwrap();
@@ -1321,7 +2016,197 @@ mod tests {
             cached_status(Some(&raw_path)),
             Some("Cloud · waiting to sync")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_original_filename_is_not_treated_as_a_cloud_cache() {
+        let directory = test_directory("local-original");
+        let raw_path = directory.join("original.dng");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&raw_path, b"raw").unwrap();
+        fs::write(
+            crate::sidecar::sidecar_path_for_raw(&raw_path),
+            b"local-sidecar",
+        )
+        .unwrap();
+        save_metadata(
+            &metadata_path_for_directory(&directory),
+            &CachedAssetMetadata {
+                schema_version: 1,
+                asset_id: "a".repeat(64),
+                server_url: "http://cloud.test:8787".to_owned(),
+                access_token: "test-token".to_owned(),
+                raw_etag: "b".repeat(64),
+                sidecar_etag: None,
+                thumbnail_etag: "c".repeat(64),
+                pending_sidecar_upload: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(sync_sidecar_if_cloud_cached(&raw_path, false).unwrap(), None);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn conflict_resolution_can_overwrite_server_with_preserved_local_sidecar() {
+        let raw = b"conflicted-raw";
+        let local_sidecar = b"preserved-local-sidecar";
+        let server_sidecar = b"newer-server-sidecar";
+        let local_etag = digest_bytes(local_sidecar);
+        let server_etag = digest_bytes(server_sidecar);
+        let asset = test_asset(raw, Some(server_etag.clone()));
+        let catalog = serde_json::to_vec(&CloudCatalog {
+            items: vec![asset.clone()],
+            folders: Vec::new(),
+        })
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_asset_id = asset.id.clone();
+        let expected_server_etag = server_etag.clone();
+        let response_local_etag = local_etag.clone();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_test_http_request(&mut stream);
+            assert!(
+                String::from_utf8_lossy(&request).starts_with("GET /api/v1/assets HTTP/1.1\r\n")
+            );
+            write_test_http_response(&mut stream, "200 OK", "application/json", "", &catalog);
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_test_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with(&format!(
+                "PUT /api/v1/assets/{expected_asset_id}/sidecar HTTP/1.1\r\n"
+            )));
+            assert!(request_text.lines().any(|line| {
+                line.eq_ignore_ascii_case(&format!("If-Match: \"{expected_server_etag}\""))
+            }));
+            assert!(request.ends_with(local_sidecar));
+            write_test_http_response(
+                &mut stream,
+                "204 No Content",
+                "application/octet-stream",
+                &format!("ETag: \"{response_local_etag}\"\r\n"),
+                &[],
+            );
+        });
+
+        let root = test_directory("overwrite-server-conflict");
+        let directory = root.join("f".repeat(64)).join(&asset.id);
+        fs::create_dir_all(&directory).unwrap();
+        let raw_path = directory.join("original.dng");
+        fs::write(&raw_path, raw).unwrap();
+        fs::write(
+            crate::sidecar::sidecar_path_for_raw(&raw_path),
+            local_sidecar,
+        )
+        .unwrap();
+        let metadata_path = metadata_path_for_directory(&directory);
+        save_metadata(
+            &metadata_path,
+            &CachedAssetMetadata {
+                schema_version: 1,
+                asset_id: asset.id,
+                server_url: format!("http://{address}"),
+                access_token: String::new(),
+                raw_etag: asset.raw_etag,
+                sidecar_etag: Some("e".repeat(64)),
+                thumbnail_etag: asset.thumbnail_etag,
+                pending_sidecar_upload: true,
+            },
+        )
+        .unwrap();
+
+        overwrite_server_sidecar_with_local(&raw_path).unwrap();
+        responder.join().unwrap();
+        let metadata = load_metadata(&metadata_path).unwrap().unwrap();
+        assert_eq!(metadata.sidecar_etag, Some(local_etag));
+        assert!(!metadata.pending_sidecar_upload);
+        assert_eq!(
+            fs::read(crate::sidecar::sidecar_path_for_raw(&raw_path)).unwrap(),
+            local_sidecar
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn conflict_resolution_can_overwrite_local_sidecar_with_server() {
+        let raw = b"conflicted-raw";
+        let local_sidecar = b"preserved-local-sidecar";
+        let server_sidecar = b"authoritative-server-sidecar";
+        let server_etag = digest_bytes(server_sidecar);
+        let asset = test_asset(raw, Some(server_etag.clone()));
+        let catalog = serde_json::to_vec(&CloudCatalog {
+            items: vec![asset.clone()],
+            folders: Vec::new(),
+        })
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_sidecar_path = format!("/api/v1/assets/{}/sidecar", asset.id);
+        let responder = std::thread::spawn(move || {
+            for (expected_path, content_type, body) in [
+                (
+                    "/api/v1/assets".to_owned(),
+                    "application/json",
+                    catalog.clone(),
+                ),
+                (
+                    expected_sidecar_path,
+                    "application/vnd.auraw.sidecar",
+                    server_sidecar.to_vec(),
+                ),
+                ("/api/v1/assets".to_owned(), "application/json", catalog),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_test_http_request(&mut stream);
+                assert!(String::from_utf8_lossy(&request)
+                    .starts_with(&format!("GET {expected_path} HTTP/1.1\r\n")));
+                write_test_http_response(&mut stream, "200 OK", content_type, "", &body);
+            }
+        });
+
+        let root = test_directory("overwrite-local-conflict");
+        let directory = root.join("f".repeat(64)).join(&asset.id);
+        fs::create_dir_all(&directory).unwrap();
+        let raw_path = directory.join("original.dng");
+        fs::write(&raw_path, raw).unwrap();
+        fs::write(
+            crate::sidecar::sidecar_path_for_raw(&raw_path),
+            local_sidecar,
+        )
+        .unwrap();
+        let metadata_path = metadata_path_for_directory(&directory);
+        save_metadata(
+            &metadata_path,
+            &CachedAssetMetadata {
+                schema_version: 1,
+                asset_id: asset.id,
+                server_url: format!("http://{address}"),
+                access_token: String::new(),
+                raw_etag: asset.raw_etag,
+                sidecar_etag: Some("e".repeat(64)),
+                thumbnail_etag: asset.thumbnail_etag,
+                pending_sidecar_upload: true,
+            },
+        )
+        .unwrap();
+
+        overwrite_local_sidecar_with_server(&raw_path).unwrap();
+        responder.join().unwrap();
+        let metadata = load_metadata(&metadata_path).unwrap().unwrap();
+        assert_eq!(metadata.sidecar_etag, Some(server_etag));
+        assert!(!metadata.pending_sidecar_upload);
+        assert_eq!(
+            fs::read(crate::sidecar::sidecar_path_for_raw(&raw_path)).unwrap(),
+            server_sidecar
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1335,6 +2220,7 @@ mod tests {
         stale_asset.sidecar_etag = Some("e".repeat(64));
         let catalog = serde_json::to_vec(&CloudCatalog {
             items: vec![fresh_asset.clone()],
+            folders: Vec::new(),
         })
         .unwrap();
 
@@ -1445,6 +2331,8 @@ mod tests {
             assert!(body.contains("raw-upload-body"));
             assert!(body.contains("name=\"sidecar\""));
             assert!(body.contains("sidecar-upload-body"));
+            assert!(body.contains("name=\"folder_id\""));
+            assert!(body.contains(CLOUD_ROOT_FOLDER_ID));
 
             let response_body = format!(
                 "{{\"id\":\"{}\",\"name\":\"upload-test.dng\",\"bytes\":15,\"modified_seconds\":1,\"width\":512,\"height\":341,\"raw_etag\":\"{}\",\"sidecar_etag\":\"{}\",\"thumbnail_etag\":\"{}\"}}",

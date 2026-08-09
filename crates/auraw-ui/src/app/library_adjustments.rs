@@ -308,6 +308,7 @@ impl AurawApp {
                     crate::sidecar::save_desktop(raw_path, destination)
                         .map_err(|error| error.to_string())?;
                     crate::sidecar::invalidate_developed_thumbnail_cache(raw_path)?;
+                    crate::cloud::sync_sidecar_if_cloud_cached(raw_path, true)?;
                     Ok(needs_ai_refresh)
                 })()
             };

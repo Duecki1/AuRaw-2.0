@@ -546,6 +546,20 @@ struct SidecarSaveEvent {
     result: Result<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloudSidecarConflictResolution {
+    OverwriteServer,
+    OverwriteLocal,
+}
+
+struct CloudSidecarConflictEvent {
+    raw_path: PathBuf,
+    generation: u64,
+    revision: u64,
+    resolution: CloudSidecarConflictResolution,
+    result: Result<String, String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DevelopedThumbnailJob {
     target: crate::sidecar::SidecarTarget,
@@ -642,9 +656,30 @@ struct LibraryBatchExportJob {
 
 #[cfg(target_os = "android")]
 #[derive(Clone, Debug)]
+pub(crate) enum AndroidLibraryExportTarget {
+    Local {
+        uri: String,
+        display_name: String,
+    },
+    Cloud {
+        path: PathBuf,
+        display_name: String,
+    },
+}
+
+#[cfg(target_os = "android")]
+impl AndroidLibraryExportTarget {
+    fn display_name(&self) -> &str {
+        match self {
+            Self::Local { display_name, .. } | Self::Cloud { display_name, .. } => display_name,
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Debug)]
 struct LibraryBatchExportJob {
-    uri: String,
-    display_name: String,
+    target: AndroidLibraryExportTarget,
 }
 
 #[derive(Clone, Debug)]
@@ -984,6 +1019,8 @@ pub struct AurawApp {
     sidecar_receiver: Option<mpsc::Receiver<SidecarSaveEvent>>,
     sidecar_save_feedback_until: Option<Instant>,
     sidecar_save_error_dialog: Option<String>,
+    sidecar_conflict_receiver: Option<mpsc::Receiver<CloudSidecarConflictEvent>>,
+    sidecar_conflict_resolution_error: Option<String>,
     sidecar_autosave_deadline: Option<SidecarAutosaveDeadline>,
     developed_thumbnail_pending: Option<DevelopedThumbnailJob>,
     developed_thumbnail_in_flight: Option<DevelopedThumbnailJob>,

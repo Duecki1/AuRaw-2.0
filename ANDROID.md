@@ -167,6 +167,14 @@ streams the selections directly from Android's system picker to the server,
 shows per-file upload status, and refreshes the cloud catalog when finished;
 it does not create local-library copies.
 
+The Cloud tab also exposes the server's nested folder hierarchy through a
+breadcrumb and child-folder buttons. The current-folder menu creates, copies,
+cuts, renames, or deletes folders, and **Paste here** accepts folders or RAWs.
+Long-press a cloud RAW to enter multi-select; the overflow menu can copy, cut,
+duplicate, reset, delete, or export the selection. Cloud batch export prepares
+only those selected RAWs in app-private cache and publishes the results to
+`Pictures/AuRaw` like a Local batch export.
+
 Embedded RAW previews are read lazily through a file descriptor and
 `/proc/self/fd`. When a provider or LibRaw path cannot seek that descriptor, AuRaw
 materializes a temporary cache copy and removes it after decode. This also works
