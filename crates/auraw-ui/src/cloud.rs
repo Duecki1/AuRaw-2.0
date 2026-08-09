@@ -875,6 +875,26 @@ pub fn upload_asset_file_with_sidecar_to_folder<'a>(
     sidecar_path: Option<&Path>,
     folder_id: &'a str,
 ) -> Result<CloudAsset, String> {
+    upload_asset_file_with_sidecar_and_thumbnail_to_folder(
+        config,
+        raw,
+        display_name,
+        declared_bytes,
+        sidecar_path,
+        None,
+        folder_id,
+    )
+}
+
+pub fn upload_asset_file_with_sidecar_and_thumbnail_to_folder<'a>(
+    config: &CloudConfig,
+    raw: File,
+    display_name: &'a str,
+    declared_bytes: Option<u64>,
+    sidecar_path: Option<&Path>,
+    thumbnail_path: Option<&Path>,
+    folder_id: &'a str,
+) -> Result<CloudAsset, String> {
     validate_upload_name(display_name)?;
     validate_upload_size(display_name, declared_bytes)?;
     let raw = ureq::unversioned::multipart::Part::owned_reader(raw.take(MAX_RAW_BYTES + 1))
@@ -892,6 +912,13 @@ pub fn upload_asset_file_with_sidecar_to_folder<'a>(
         .mime_str("application/vnd.auraw.sidecar")
         .map_err(|error| format!("Could not prepare the sidecar for upload: {error}"))?;
         form = form.part("sidecar", sidecar);
+    }
+    if let Some(thumbnail_path) = thumbnail_path {
+        let thumbnail = checked_upload_part(thumbnail_path, MAX_THUMBNAIL_BYTES, "thumbnail")?
+            .file_name(&format!("{display_name}.auraw-thumb.jpg"))
+            .mime_str("image/jpeg")
+            .map_err(|error| format!("Could not prepare the developed thumbnail: {error}"))?;
+        form = form.part("thumbnail", thumbnail);
     }
     send_upload_form(config, form, folder_id)
 }
@@ -1525,6 +1552,21 @@ pub fn asset_available_offline(
     asset: &CloudAsset,
 ) -> bool {
     open_cached_asset(config, cache_root, asset, "offline cache check".to_owned()).is_ok()
+}
+
+/// Returns the validated cached RAW path without performing network I/O.
+///
+/// Filmstrip entries use this to associate a cloud catalog asset with the
+/// document currently open in Develop while retaining the server asset as the
+/// authoritative identity for future opens.
+pub fn cached_asset_path(
+    config: &CloudConfig,
+    cache_root: &Path,
+    asset: &CloudAsset,
+) -> Option<PathBuf> {
+    open_cached_asset(config, cache_root, asset, "offline cache check".to_owned())
+        .ok()
+        .map(|cached| cached.raw_path)
 }
 
 fn version_race(error: &str) -> bool {
