@@ -166,7 +166,7 @@ impl AurawApp {
         jobs: VecDeque<LibraryBatchExportJob>,
         settings: ExportSettings,
         format: ExportFormat,
-        _frame: &eframe::Frame,
+        frame: &eframe::Frame,
     ) {
         let total = jobs.len();
         self.export_settings = settings.clone();
@@ -195,7 +195,7 @@ impl AurawApp {
                 "Preparing batch export…",
             ),
         );
-        self.start_next_library_export();
+        self.start_next_library_export(frame);
     }
 
     fn start_subject_mask_task(&mut self, id: TaskId, request: SubjectMaskTaskRequest) {
@@ -866,7 +866,7 @@ impl AurawApp {
             }
             #[cfg(target_os = "android")]
             {
-                job.display_name.clone()
+                job.target.display_name().to_owned()
             }
         });
         let tile_progress = self.library_batch_export_tile_progress();

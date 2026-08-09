@@ -35,6 +35,7 @@ impl AurawApp {
 
     fn report_sidecar_save_failure(&mut self, revision: Option<u64>, detail: impl AsRef<str>) {
         self.sidecar_save_feedback_until = None;
+        self.sidecar_conflict_resolution_error = None;
         if let Some(revision) = revision {
             self.sidecar_failed_revision = Some(revision);
         }
@@ -52,17 +53,30 @@ impl AurawApp {
             return;
         };
 
+        let cloud_conflict = message
+            .strip_prefix("Could not save edits: ")
+            .is_some_and(crate::cloud::is_sidecar_conflict_message);
+        let conflict_raw_path = cloud_conflict
+            .then(|| self.current_path.clone())
+            .flatten()
+            .filter(|path| crate::cloud::cached_asset_id_for_raw(path).is_some());
+        let resolving_conflict = self.sidecar_conflict_receiver.is_some();
         let can_retry = self.can_save_edits()
             && !self.sidecar_save_in_progress()
             && self.sidecar_failed_revision == Some(self.edit_commit_revision());
         let mut retry = false;
         let mut close = false;
+        let mut resolution = None;
         crate::ui::responsive_popup(egui::Window::new("Could not save edits"), ctx, 460.0)
             .collapsible(false)
             .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label("AuRaw was unable to write the edit sidecar.");
+                ui.label(if cloud_conflict {
+                    "The server and this device both have newer edits for this RAW."
+                } else {
+                    "AuRaw was unable to write the edit sidecar."
+                });
                 ui.add_space(6.0);
                 ui.add(
                     egui::Label::new(egui::RichText::new(&message).monospace())
@@ -72,25 +86,228 @@ impl AurawApp {
                 ui.add_space(6.0);
                 ui.small("This error was added to the log in Settings → Diagnostics.");
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                if let Some(error) = self.sidecar_conflict_resolution_error.as_deref() {
+                    ui.label(
+                        egui::RichText::new(error)
+                            .small()
+                            .color(ui.visuals().error_fg_color),
+                    );
+                    ui.add_space(6.0);
+                }
+                if let Some(raw_path) = conflict_raw_path.as_ref() {
+                    ui.label("Choose which edit sidecar should become authoritative:");
+                    ui.add_space(4.0);
+                    if resolving_conflict {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Resolving cloud edit conflict…");
+                        });
+                    } else {
+                        if ui
+                            .add_enabled(
+                                can_retry,
+                                egui::Button::new("Overwrite server with local edits"),
+                            )
+                            .on_hover_text(
+                                "Keep the edits currently open on this device and replace the server sidecar.",
+                            )
+                            .clicked()
+                        {
+                            resolution = Some((
+                                raw_path.clone(),
+                                CloudSidecarConflictResolution::OverwriteServer,
+                            ));
+                        }
+                        if ui
+                            .add_enabled(
+                                can_retry,
+                                egui::Button::new("Overwrite local edits with server"),
+                            )
+                            .on_hover_text(
+                                "Discard this device's conflicting edits, install the latest server sidecar, and reload the RAW.",
+                            )
+                            .clicked()
+                        {
+                            resolution = Some((
+                                raw_path.clone(),
+                                CloudSidecarConflictResolution::OverwriteLocal,
+                            ));
+                        }
+                        ui.label(
+                            egui::RichText::new(
+                                "Overwriting local edits discards the preserved conflicting sidecar on this device.",
+                            )
+                            .small()
+                            .color(ui.visuals().warn_fg_color),
+                        );
+                    }
                     if ui
-                        .add_enabled(can_retry, egui::Button::new("Try again"))
+                        .add_enabled(!resolving_conflict, egui::Button::new("Cancel"))
                         .clicked()
                     {
-                        retry = true;
-                    }
-                    if ui.button("Close").clicked() {
                         close = true;
                     }
-                });
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(can_retry, egui::Button::new("Try again"))
+                            .clicked()
+                        {
+                            retry = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                }
             });
 
-        if retry {
+        if let Some((raw_path, resolution)) = resolution {
+            self.start_cloud_sidecar_conflict_resolution(raw_path, resolution);
+        } else if retry {
             self.sidecar_save_error_dialog = None;
             self.save_edits_now();
         } else if close {
             self.sidecar_save_error_dialog = None;
+            self.sidecar_conflict_resolution_error = None;
         }
+    }
+
+    fn start_cloud_sidecar_conflict_resolution(
+        &mut self,
+        raw_path: PathBuf,
+        resolution: CloudSidecarConflictResolution,
+    ) {
+        if self.sidecar_conflict_receiver.is_some() {
+            return;
+        }
+        let generation = self.sidecar_generation;
+        let revision = self.edit_commit_revision();
+        let repaint = self.egui_ctx.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.sidecar_conflict_resolution_error = None;
+        let worker_path = raw_path.clone();
+        let spawn = std::thread::Builder::new()
+            .name("auraw-cloud-conflict-resolution".to_owned())
+            .spawn(move || {
+                let result = match resolution {
+                    CloudSidecarConflictResolution::OverwriteServer => {
+                        crate::cloud::overwrite_server_sidecar_with_local(&worker_path)
+                    }
+                    CloudSidecarConflictResolution::OverwriteLocal => {
+                        crate::cloud::overwrite_local_sidecar_with_server(&worker_path)
+                    }
+                };
+                let _ = sender.send(CloudSidecarConflictEvent {
+                    raw_path: worker_path,
+                    generation,
+                    revision,
+                    resolution,
+                    result,
+                });
+                repaint.request_repaint();
+            });
+        match spawn {
+            Ok(_) => {
+                self.sidecar_conflict_receiver = Some(receiver);
+                self.notice = Some("Resolving cloud edit conflict…".to_owned());
+            }
+            Err(error) => {
+                self.sidecar_conflict_resolution_error = Some(format!(
+                    "Could not start cloud conflict resolution: {error}"
+                ));
+            }
+        }
+    }
+
+    pub(super) fn poll_cloud_sidecar_conflict_resolution(&mut self, frame: &eframe::Frame) {
+        let received = self
+            .sidecar_conflict_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        let event = match received {
+            Some(Ok(event)) => event,
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.sidecar_conflict_receiver = None;
+                self.sidecar_conflict_resolution_error =
+                    Some("The cloud conflict-resolution worker stopped unexpectedly.".to_owned());
+                return;
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => return,
+        };
+        self.sidecar_conflict_receiver = None;
+
+        let location = match event.result {
+            Ok(location) => location,
+            Err(error) => {
+                self.sidecar_conflict_resolution_error = Some(error.clone());
+                self.notice = Some(format!("Could not resolve cloud edit conflict: {error}"));
+                return;
+            }
+        };
+
+        let still_current = event.generation == self.sidecar_generation
+            && self.current_path.as_ref() == Some(&event.raw_path);
+        self.sidecar_save_error_dialog = None;
+        self.sidecar_conflict_resolution_error = None;
+        if !still_current {
+            self.notice = Some(match event.resolution {
+                CloudSidecarConflictResolution::OverwriteServer => {
+                    format!("The cached edits were saved over the server copy at {location}.")
+                }
+                CloudSidecarConflictResolution::OverwriteLocal => {
+                    format!("The cached sidecar was replaced with the server copy from {location}.")
+                }
+            });
+            return;
+        }
+
+        match event.resolution {
+            CloudSidecarConflictResolution::OverwriteServer => {
+                self.sidecar_failed_revision = None;
+                if event.revision == self.edit_commit_revision() {
+                    self.sidecar_saved_revision = Some(event.revision);
+                    self.queue_developed_thumbnail_refresh(event.generation, event.revision);
+                } else {
+                    self.sidecar_saved_revision = None;
+                }
+                self.sidecar_save_feedback_until =
+                    Some(Instant::now() + Duration::from_millis(1_200));
+                self.notice = Some(format!(
+                    "Local edits replaced the server sidecar at {location}."
+                ));
+            }
+            CloudSidecarConflictResolution::OverwriteLocal => {
+                let label = self
+                    .current_label
+                    .clone()
+                    .unwrap_or_else(|| event.raw_path.display().to_string());
+                self.abandon_current_sidecar_for_cloud_conflict();
+                self.open_path_labeled(
+                    event.raw_path.clone(),
+                    label,
+                    false,
+                    crate::sidecar::SidecarTarget::Desktop {
+                        raw_path: event.raw_path,
+                    },
+                    frame,
+                    None,
+                );
+                self.notice = Some(format!(
+                    "Local edits were replaced with the server sidecar from {location}; reloading the RAW."
+                ));
+            }
+        }
+    }
+
+    fn abandon_current_sidecar_for_cloud_conflict(&mut self) {
+        let generation = self.sidecar_generation;
+        self.sidecar_target = None;
+        self.sidecar_saved_revision = None;
+        self.sidecar_failed_revision = None;
+        self.sidecar_autosave_deadline = None;
+        self.sidecar_pending
+            .retain(|request| request.generation != generation);
     }
 
     pub(super) fn capture_sidecar_edit_state(&self) -> SidecarEditState {
@@ -286,7 +503,6 @@ impl AurawApp {
         self.start_next_sidecar_save();
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn detach_current_file_for_library_action(
         &mut self,
         raw_path: &std::path::Path,
@@ -298,7 +514,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    fn detach_current_android_document_for_library_action(
+    pub(crate) fn detach_current_android_document_for_library_action(
         &mut self,
         raw_uri: &str,
         display_name: &str,
@@ -345,6 +561,37 @@ impl AurawApp {
         display_name: &str,
     ) -> Result<String, String> {
         crate::android::duplicate_library_document(&self.android_app, raw_uri, display_name)
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn rename_android_library_item(
+        &mut self,
+        raw_uri: &str,
+        display_name: &str,
+        requested_name: &str,
+    ) -> Result<String, String> {
+        let was_current =
+            self.detach_current_android_document_for_library_action(raw_uri, display_name);
+        let result = crate::android::rename_library_document(
+            &self.android_app,
+            raw_uri,
+            display_name,
+            requested_name,
+        );
+        match result {
+            Ok(renamed_uri) => {
+                if was_current {
+                    self.open_android_library_document(&renamed_uri, requested_name);
+                }
+                Ok(renamed_uri)
+            }
+            Err(error) => {
+                if was_current {
+                    self.open_android_library_document(raw_uri, display_name);
+                }
+                Err(error)
+            }
+        }
     }
 
     #[cfg(target_os = "android")]
@@ -752,12 +999,30 @@ impl AurawApp {
                                 &thumbnail,
                                 fingerprint,
                             )?;
+                            if let Err(error) =
+                                crate::cloud::upload_developed_thumbnail_if_cloud_cached(
+                                    raw_path,
+                                    &thumbnail,
+                                )
+                            {
+                                log::warn!("could not sync cloud developed thumbnail: {error}");
+                            }
                         }
                         #[cfg(target_os = "android")]
-                        crate::sidecar::SidecarTarget::Desktop { .. } => {
-                            return Err(
-                                "desktop sidecar target is unavailable on Android".to_owned()
-                            );
+                        crate::sidecar::SidecarTarget::Desktop { raw_path } => {
+                            let allow_network = crate::android::network_available(&android_app)
+                                .unwrap_or_else(|error| {
+                                    log::warn!(
+                                        "could not inspect Android network state before cloud thumbnail sync: {error}"
+                                    );
+                                    true
+                                });
+                            if allow_network {
+                                crate::cloud::upload_developed_thumbnail_if_cloud_cached(
+                                    raw_path,
+                                    &thumbnail,
+                                )?;
+                            }
                         }
                         #[cfg(target_os = "android")]
                         crate::sidecar::SidecarTarget::Android {
@@ -860,9 +1125,20 @@ fn save_sidecar_request(
 ) -> Result<String, String> {
     match request.target {
         crate::sidecar::SidecarTarget::Desktop { raw_path } => {
-            crate::sidecar::save_desktop(&raw_path, request.edits)
-                .map(|path| path.display().to_string())
-                .map_err(|error| error.to_string())
+            let path = crate::sidecar::save_desktop(&raw_path, request.edits)
+                .map_err(|error| error.to_string())?;
+            #[cfg(target_os = "android")]
+            let allow_network =
+                crate::android::network_available(android_app).unwrap_or_else(|error| {
+                    log::warn!(
+                        "could not inspect Android network state before cloud save: {error}"
+                    );
+                    true
+                });
+            #[cfg(not(target_os = "android"))]
+            let allow_network = true;
+            crate::cloud::sync_sidecar_if_cloud_cached(&raw_path, allow_network)
+                .map(|location| location.unwrap_or_else(|| path.display().to_string()))
         }
         #[cfg(target_os = "android")]
         crate::sidecar::SidecarTarget::Android {

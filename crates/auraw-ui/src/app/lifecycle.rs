@@ -243,6 +243,12 @@ impl AurawApp {
     fn empty(ctx: &egui::Context) -> Self {
         let performance_settings_path = crate::performance_settings::desktop_path();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        let cloud_config = crate::cloud::CloudConfig {
+            enabled: performance.cloud_enabled,
+            server_url: performance.cloud_server_url.clone(),
+            access_token: performance.cloud_access_token.clone(),
+        };
+        let cloud_cache_root = crate::cloud::cache_root(performance_settings_path.as_deref());
         let last_library_folder = performance.last_library_folder.clone();
         let last_library_selected_folder = performance.last_library_selected_folder.clone();
         let mut camera_profile_folder = performance.camera_profile_folder.clone();
@@ -404,6 +410,8 @@ impl AurawApp {
             sidecar_receiver: None,
             sidecar_save_feedback_until: None,
             sidecar_save_error_dialog: None,
+            sidecar_conflict_receiver: None,
+            sidecar_conflict_resolution_error: None,
             sidecar_autosave_deadline: None,
             developed_thumbnail_pending: None,
             developed_thumbnail_in_flight: None,
@@ -500,6 +508,8 @@ impl AurawApp {
             app.library
                 .restore_folder(folder, last_library_selected_folder, ctx);
         }
+        app.library
+            .configure_cloud(cloud_config, cloud_cache_root, ctx);
         app
     }
 
@@ -542,6 +552,12 @@ impl AurawApp {
             }
         }
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        let cloud_config = crate::cloud::CloudConfig {
+            enabled: performance.cloud_enabled,
+            server_url: performance.cloud_server_url.clone(),
+            access_token: performance.cloud_access_token.clone(),
+        };
+        let cloud_cache_root = crate::cloud::cache_root(performance_settings_path.as_deref());
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
         let gpu_export_prewarm = Arc::new(crate::pipeline::GpuProgramPrewarm::new());
         let gpu_preview_prewarm_receiver =
@@ -550,7 +566,7 @@ impl AurawApp {
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
         let edit_history = EditHistory::new(&exposure, &masks, &lens_correction);
-        Self {
+        let mut app = Self {
             current_path: None,
             original_raw: None,
             loaded_raw: None,
@@ -676,6 +692,8 @@ impl AurawApp {
             sidecar_receiver: None,
             sidecar_save_feedback_until: None,
             sidecar_save_error_dialog: None,
+            sidecar_conflict_receiver: None,
+            sidecar_conflict_resolution_error: None,
             sidecar_autosave_deadline: None,
             developed_thumbnail_pending: None,
             developed_thumbnail_in_flight: None,
@@ -771,7 +789,10 @@ impl AurawApp {
             pending_android_library_reset_reload: false,
             camera_profile_folder_importing_label: None,
             pending_android_profile_reload: None,
-        }
+        };
+        app.library
+            .configure_cloud(cloud_config, cloud_cache_root, &cc.egui_ctx);
+        app
     }
 
     #[cfg(not(target_os = "android"))]
@@ -798,6 +819,43 @@ impl AurawApp {
             let path =
                 pollster::block_on(dialog.pick_file()).map(|handle| handle.path().to_path_buf());
             let _ = sender.send(crate::app::DesktopPickerEvent::RawFile(path));
+            context.request_repaint();
+        });
+        self.desktop_picker_receiver = Some(receiver);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn open_cloud_upload_dialog(&mut self, _frame: &eframe::Frame) {
+        if self.desktop_picker_receiver.is_some() || self.library.cloud_upload_in_progress() {
+            return;
+        }
+        let extensions = crate::pipeline::SUPPORTED_RAW_EXTENSIONS
+            .iter()
+            .flat_map(|extension| [extension.to_string(), extension.to_ascii_uppercase()])
+            .collect::<Vec<_>>();
+        let initial_directory = self
+            .library
+            .folder()
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| {
+                self.current_path
+                    .as_deref()
+                    .and_then(selected_picker_directory)
+            });
+        let mut dialog = rfd::AsyncFileDialog::new().add_filter("RAW images", &extensions);
+        if let Some(directory) = initial_directory {
+            dialog = dialog.set_directory(directory);
+        }
+        let (sender, receiver) = mpsc::channel();
+        let context = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let paths = pollster::block_on(dialog.pick_files()).map(|handles| {
+                handles
+                    .into_iter()
+                    .map(|handle| handle.path().to_path_buf())
+                    .collect()
+            });
+            let _ = sender.send(crate::app::DesktopPickerEvent::CloudRawFiles(paths));
             context.request_repaint();
         });
         self.desktop_picker_receiver = Some(receiver);
@@ -1093,6 +1151,29 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
+    pub(crate) fn open_cloud_upload_dialog(&mut self, _frame: &eframe::Frame) {
+        if self.android_foreground_task_active() {
+            self.notice = Some(
+                "Wait for the current foreground operation before selecting cloud uploads."
+                    .to_owned(),
+            );
+            self.egui_ctx.request_repaint();
+            return;
+        }
+        if self.picker_pending || self.library.cloud_upload_in_progress() {
+            return;
+        }
+        match crate::android::open_cloud_raw_documents(&self.android_app) {
+            Ok(()) => {
+                self.picker_pending = true;
+                self.notice = None;
+                self.status = "Choose one or more RAW files for AuRaw Cloud…".to_owned();
+            }
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    #[cfg(target_os = "android")]
     pub fn open_android_library_document(&mut self, uri: &str, display_name: &str) {
         if self.android_foreground_task_active() {
             self.notice = Some(format!(
@@ -1186,6 +1267,32 @@ impl AurawApp {
         self.open_path_labeled(path, label, false, sidecar_target, frame, None);
     }
 
+    pub(crate) fn open_cloud_cached_asset(
+        &mut self,
+        cached: crate::cloud::CachedCloudAsset,
+        frame: &eframe::Frame,
+    ) {
+        let offline_reason = cached.offline_reason.clone();
+        self.active_tab = AppTab::Develop;
+        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
+            raw_path: cached.raw_path.clone(),
+        };
+        self.open_path_labeled(
+            cached.raw_path,
+            cached.label,
+            false,
+            sidecar_target,
+            frame,
+            None,
+        );
+        if let Some(reason) = offline_reason {
+            self.notice = Some(format!(
+                "Opened the cached cloud RAW offline. Edits will sync when the server is reachable. {reason}"
+            ));
+            self.refresh_status();
+        }
+    }
+
     #[cfg(not(target_os = "android"))]
     pub(crate) fn reload_desktop_library_document_after_reset(
         &mut self,
@@ -1213,6 +1320,23 @@ impl AurawApp {
         }
         self.raw_cache_limit = limit;
         self.trim_raw_cache();
+        self.persist_performance_settings();
+    }
+
+    pub(crate) fn set_cloud_settings(
+        &mut self,
+        enabled: bool,
+        server_url: String,
+        access_token: String,
+    ) {
+        let config = crate::cloud::CloudConfig {
+            enabled,
+            server_url,
+            access_token,
+        };
+        let cache_root = crate::cloud::cache_root(self.performance_settings_path.as_deref());
+        self.library
+            .configure_cloud(config, cache_root, &self.egui_ctx);
         self.persist_performance_settings();
     }
 
@@ -1425,6 +1549,11 @@ impl AurawApp {
         self.desktop_picker_receiver = None;
         match result {
             crate::app::DesktopPickerEvent::RawFile(Some(path)) => self.open_path(path, frame),
+            crate::app::DesktopPickerEvent::CloudRawFiles(Some(paths)) => {
+                self.active_tab = AppTab::Library;
+                self.library
+                    .start_desktop_cloud_upload(paths, &self.egui_ctx);
+            }
             crate::app::DesktopPickerEvent::LibraryFolder(Some(folder)) => {
                 self.library.open_folder(folder, &self.egui_ctx);
                 self.persist_performance_settings();
@@ -1699,6 +1828,9 @@ impl AurawApp {
             #[cfg(not(target_os = "android"))]
             display_profile_override: self.display_profile_override.clone(),
             adjustment_copy_settings: self.adjustment_copy_settings,
+            cloud_enabled: self.library.cloud_config().enabled,
+            cloud_server_url: self.library.cloud_config().server_url.clone(),
+            cloud_access_token: self.library.cloud_config().access_token.clone(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: self
                 .library
@@ -1893,7 +2025,7 @@ impl AurawApp {
         }
     }
 
-    fn open_path_labeled(
+    pub(crate) fn open_path_labeled(
         &mut self,
         path: PathBuf,
         label: String,
@@ -2841,6 +2973,22 @@ impl AurawApp {
                             self.complete_android_library_ai_mask_open_failure(error, frame);
                         }
                     }
+                }
+                crate::android::PickerResult::CloudSelected {
+                    documents,
+                    failed,
+                    errors,
+                } => {
+                    self.develop_loading_thumbnail.clear();
+                    self.pending_android_profile_reload = None;
+                    self.pending_android_library_reset_reload = false;
+                    self.active_tab = AppTab::Library;
+                    self.library.start_android_cloud_upload(
+                        documents,
+                        failed,
+                        errors,
+                        &self.egui_ctx,
+                    );
                 }
                 crate::android::PickerResult::BatchImported {
                     imported,

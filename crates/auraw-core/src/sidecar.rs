@@ -867,6 +867,24 @@ pub fn save_developed_thumbnail_cache(
     Ok(cache_path)
 }
 
+/// Copies a valid developed preview to a RAW whose sidecar has already been
+/// copied. The destination gets its own cache key and fingerprint, so later
+/// edits to either RAW invalidate only that RAW's preview.
+#[cfg(not(target_os = "android"))]
+pub fn copy_developed_thumbnail_cache(
+    source_raw: &Path,
+    destination_raw: &Path,
+) -> Result<bool, String> {
+    let Some(thumbnail) = load_developed_thumbnail_cache(source_raw, 8192)? else {
+        return Ok(false);
+    };
+    let Some(fingerprint) = desktop_sidecar_fingerprint(destination_raw)? else {
+        return Ok(false);
+    };
+    save_developed_thumbnail_cache(destination_raw, &thumbnail, fingerprint)?;
+    Ok(true)
+}
+
 #[cfg(not(target_os = "android"))]
 fn migrate_legacy_developed_thumbnail_cache(raw_path: &Path) -> Result<(), String> {
     let cache_path = developed_thumbnail_path_for_raw(raw_path);
