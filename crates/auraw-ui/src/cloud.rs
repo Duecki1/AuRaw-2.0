@@ -54,6 +54,22 @@ impl CloudConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudThumbnailKind {
+    Raw,
+    Edited,
+    Placeholder,
+    #[default]
+    Legacy,
+}
+
+impl CloudThumbnailKind {
+    pub fn is_unedited(self) -> bool {
+        !matches!(self, Self::Edited)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct CloudAsset {
     pub id: String,
@@ -65,6 +81,8 @@ pub struct CloudAsset {
     pub raw_etag: String,
     pub sidecar_etag: Option<String>,
     pub thumbnail_etag: String,
+    #[serde(default)]
+    pub thumbnail_kind: CloudThumbnailKind,
     #[serde(default = "default_cloud_folder_id")]
     pub folder_id: String,
 }
@@ -74,6 +92,24 @@ pub struct CloudFolder {
     pub id: String,
     pub parent_id: String,
     pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct CloudTrashItem {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub deleted_seconds: u64,
+    pub expires_seconds: u64,
+    pub bytes: u64,
+    pub item_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CloudTrashCatalog {
+    pub items: Vec<CloudTrashItem>,
+    pub server_time: u64,
+    pub retention_days: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -111,6 +147,24 @@ struct CachedAssetMetadata {
     sidecar_etag: Option<String>,
     thumbnail_etag: String,
     pending_sidecar_upload: bool,
+    #[serde(default)]
+    sync_issue: Option<CachedSyncIssue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CachedSyncIssue {
+    Failed,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CloudSyncState {
+    #[default]
+    Synced,
+    Queued,
+    Failed,
+    Conflict,
 }
 
 #[derive(Clone, Debug)]
@@ -274,6 +328,22 @@ fn validate_catalog(catalog: &CloudCatalog) -> Result<(), String> {
         {
             return Err("Cloud returned a RAW in an unknown folder.".to_owned());
         }
+    }
+    Ok(())
+}
+
+fn validate_trash_item(item: &CloudTrashItem) -> Result<(), String> {
+    validate_hex_identifier(&item.id, "Trash item ID")?;
+    if !matches!(item.kind.as_str(), "asset" | "folder") {
+        return Err("Cloud returned an invalid Trash item kind.".to_owned());
+    }
+    if item.kind == "asset" {
+        validate_upload_name(&item.name)?;
+    } else {
+        validate_folder_name(&item.name)?;
+    }
+    if item.expires_seconds < item.deleted_seconds || item.item_count == 0 {
+        return Err("Cloud returned invalid Trash retention metadata.".to_owned());
     }
     Ok(())
 }
@@ -677,6 +747,83 @@ pub fn delete_asset(config: &CloudConfig, asset: &CloudAsset) -> Result<(), Stri
         None,
         "delete the RAW",
     )
+}
+
+#[derive(Serialize)]
+struct TrashRestoreDestination<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder_id: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct TrashRestoreResponse {
+    kind: String,
+    name: String,
+}
+
+pub fn list_trash(config: &CloudConfig) -> Result<CloudTrashCatalog, String> {
+    let normalized = config.normalized()?;
+    let url = normalized.endpoint("/api/v1/trash")?;
+    let mut response = get(&normalized, &url).map_err(|error| mutation_error(error, "load Trash"))?;
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_CATALOG_BYTES)
+        .read_to_vec()
+        .map_err(|error| format!("Could not read AuRaw Cloud Trash: {error}"))?;
+    let catalog: CloudTrashCatalog = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Cloud returned invalid Trash metadata: {error}"))?;
+    if catalog.items.len() > MAX_CATALOG_ASSETS || catalog.retention_days == 0 {
+        return Err("Cloud returned invalid Trash catalog limits.".to_owned());
+    }
+    for item in &catalog.items {
+        validate_trash_item(item)?;
+    }
+    Ok(catalog)
+}
+
+pub fn restore_trash_item(
+    config: &CloudConfig,
+    item: &CloudTrashItem,
+    folder_id: Option<&str>,
+) -> Result<String, String> {
+    validate_trash_item(item)?;
+    if let Some(folder_id) = folder_id {
+        validate_folder_identifier(folder_id, "restore folder ID")?;
+    }
+    let response = post_json(
+        config,
+        &format!("/api/v1/trash/{}/restore", item.id),
+        &TrashRestoreDestination { folder_id },
+        "restore the Trash item",
+    )?;
+    let restored: TrashRestoreResponse = decode_mutation_response(response, "Trash restore")?;
+    if restored.kind != item.kind {
+        return Err("Cloud returned a mismatched Trash restore result.".to_owned());
+    }
+    if restored.kind == "asset" {
+        validate_upload_name(&restored.name)?;
+    } else {
+        validate_folder_name(&restored.name)?;
+    }
+    Ok(restored.name)
+}
+
+pub fn permanently_delete_trash_item(
+    config: &CloudConfig,
+    item: &CloudTrashItem,
+) -> Result<(), String> {
+    validate_trash_item(item)?;
+    delete_request(
+        config,
+        &format!("/api/v1/trash/{}", item.id),
+        None,
+        "permanently delete the Trash item",
+    )
+}
+
+pub fn empty_trash(config: &CloudConfig) -> Result<(), String> {
+    delete_request(config, "/api/v1/trash", None, "empty Trash")
 }
 
 pub fn reset_asset_sidecar(config: &CloudConfig, asset: &CloudAsset) -> Result<(), String> {
@@ -1128,6 +1275,13 @@ impl SidecarUploadError {
             Self::Retryable(message) | Self::Conflict(message) | Self::Fatal(message) => message,
         }
     }
+
+    fn sync_issue(&self) -> CachedSyncIssue {
+        match self {
+            Self::Conflict(_) => CachedSyncIssue::Conflict,
+            Self::Retryable(_) | Self::Fatal(_) => CachedSyncIssue::Failed,
+        }
+    }
 }
 
 const CLOUD_EDIT_CONFLICT_PREFIX: &str = "Cloud edit conflict:";
@@ -1196,6 +1350,7 @@ fn request_sidecar_upload(
     validate_hex_identifier(&etag, "sidecar version").map_err(SidecarUploadError::Fatal)?;
     metadata.sidecar_etag = Some(etag);
     metadata.pending_sidecar_upload = false;
+    metadata.sync_issue = None;
     Ok(())
 }
 
@@ -1211,6 +1366,7 @@ pub fn sync_sidecar_if_cloud_cached(
     };
     let sidecar_path = crate::sidecar::sidecar_path_for_raw(raw_path);
     metadata.pending_sidecar_upload = true;
+    metadata.sync_issue = None;
     save_metadata(&metadata_path, &metadata)?;
     if !allow_network {
         return Ok(Some(format!(
@@ -1223,15 +1379,20 @@ pub fn sync_sidecar_if_cloud_cached(
             save_metadata(&metadata_path, &metadata)?;
             Ok(Some(format!("AuRaw Cloud ({})", metadata.server_url)))
         }
-        Err(SidecarUploadError::Retryable(error)) => {
-            log::warn!("{error}");
-            Ok(Some(format!(
-                "AuRaw Cloud ({}) · waiting to sync",
-                metadata.server_url
-            )))
-        }
-        Err(error @ (SidecarUploadError::Conflict(_) | SidecarUploadError::Fatal(_))) => {
-            Err(error.message())
+        Err(error) => {
+            let retryable = matches!(error, SidecarUploadError::Retryable(_));
+            metadata.sync_issue = Some(error.sync_issue());
+            save_metadata(&metadata_path, &metadata)?;
+            let message = error.message();
+            if retryable {
+                log::warn!("{message}");
+                Ok(Some(format!(
+                    "AuRaw Cloud ({}) · sync failed; queued for retry",
+                    metadata.server_url
+                )))
+            } else {
+                Err(message)
+            }
         }
     }
 }
@@ -1266,8 +1427,13 @@ pub fn overwrite_server_sidecar_with_local(raw_path: &Path) -> Result<String, St
     metadata.sidecar_etag = latest.sidecar_etag;
     metadata.thumbnail_etag = latest.thumbnail_etag;
     metadata.pending_sidecar_upload = true;
+    metadata.sync_issue = None;
     let sidecar_path = crate::sidecar::sidecar_path_for_raw(raw_path);
-    request_sidecar_upload(&mut metadata, &sidecar_path).map_err(|error| error.message())?;
+    if let Err(error) = request_sidecar_upload(&mut metadata, &sidecar_path) {
+        metadata.sync_issue = Some(error.sync_issue());
+        save_metadata(&metadata_path, &metadata)?;
+        return Err(error.message());
+    }
     save_metadata(&metadata_path, &metadata)?;
     Ok(format!("AuRaw Cloud ({})", metadata.server_url))
 }
@@ -1332,6 +1498,7 @@ pub fn overwrite_local_sidecar_with_server(raw_path: &Path) -> Result<String, St
             metadata.sidecar_etag = latest.sidecar_etag;
             metadata.thumbnail_etag = latest.thumbnail_etag;
             metadata.pending_sidecar_upload = false;
+            metadata.sync_issue = None;
             save_metadata(&metadata_path, &metadata)?;
             return Ok(format!("AuRaw Cloud ({})", metadata.server_url));
         }
@@ -1357,6 +1524,7 @@ fn refresh_sidecar(
         // RAW impossible to reopen; keep the pending marker and retry on the
         // next save/open instead.
         if let Err(error) = request_sidecar_upload(metadata, &sidecar_path) {
+            metadata.sync_issue = Some(error.sync_issue());
             log::warn!(
                 "cloud sidecar remains pending while reopening the cache: {}",
                 error.message()
@@ -1369,6 +1537,7 @@ fn refresh_sidecar(
         // The pending recovery file was removed outside AuRaw, so there is no
         // local edit left to upload. Resume normal remote-sidecar refresh.
         metadata.pending_sidecar_upload = false;
+        metadata.sync_issue = None;
     }
     match &asset.sidecar_etag {
         Some(remote_etag)
@@ -1455,6 +1624,7 @@ pub fn download_asset(
             sidecar_etag: None,
             thumbnail_etag: asset.thumbnail_etag.clone(),
             pending_sidecar_upload: false,
+            sync_issue: None,
         });
     metadata.schema_version = 1;
     metadata.asset_id = asset.id.clone();
@@ -1552,6 +1722,30 @@ pub fn asset_available_offline(
     asset: &CloudAsset,
 ) -> bool {
     open_cached_asset(config, cache_root, asset, "offline cache check".to_owned()).is_ok()
+}
+
+pub fn asset_sync_state(
+    config: &CloudConfig,
+    cache_root: &Path,
+    asset: &CloudAsset,
+) -> CloudSyncState {
+    let Ok(config) = config.normalized() else {
+        return CloudSyncState::Failed;
+    };
+    let metadata_path = metadata_path_for_directory(&asset_cache_dir(
+        cache_root,
+        &config.server_url,
+        &asset.id,
+    ));
+    let Ok(Some(metadata)) = load_metadata(&metadata_path) else {
+        return CloudSyncState::Synced;
+    };
+    match metadata.sync_issue {
+        Some(CachedSyncIssue::Conflict) => CloudSyncState::Conflict,
+        Some(CachedSyncIssue::Failed) => CloudSyncState::Failed,
+        None if metadata.pending_sidecar_upload => CloudSyncState::Queued,
+        None => CloudSyncState::Synced,
+    }
 }
 
 /// Returns the validated cached RAW path without performing network I/O.
@@ -1738,14 +1932,20 @@ pub fn upload_developed_thumbnail_if_cloud_cached(
     let response = match request.send(&jpeg) {
         Ok(response) => response,
         Err(ureq::Error::StatusCode(412)) => {
+            metadata.sync_issue = Some(CachedSyncIssue::Conflict);
+            save_metadata(&metadata_path, &metadata)?;
             return Err(
                 "The developed cloud thumbnail belongs to an older sidecar revision.".to_owned(),
             );
         }
         Err(ureq::Error::StatusCode(401)) => {
+            metadata.sync_issue = Some(CachedSyncIssue::Failed);
+            save_metadata(&metadata_path, &metadata)?;
             return Err("AuRaw Cloud rejected the access token.".to_owned());
         }
         Err(ureq::Error::StatusCode(status)) if status < 500 => {
+            metadata.sync_issue = Some(CachedSyncIssue::Failed);
+            save_metadata(&metadata_path, &metadata)?;
             return Err(format!(
                 "AuRaw Cloud rejected the developed thumbnail with HTTP status {status}."
             ));
@@ -1756,6 +1956,8 @@ pub fn upload_developed_thumbnail_if_cloud_cached(
             // transient preview failure must not turn an offline edit into a
             // save failure on Android.
             log::warn!("Could not sync the developed cloud thumbnail: {error}");
+            metadata.sync_issue = Some(CachedSyncIssue::Failed);
+            save_metadata(&metadata_path, &metadata)?;
             return Ok(true);
         }
     };
@@ -1767,8 +1969,9 @@ pub fn upload_developed_thumbnail_if_cloud_cached(
     {
         validate_hex_identifier(&etag, "thumbnail version")?;
         metadata.thumbnail_etag = etag;
-        save_metadata(&metadata_path, &metadata)?;
     }
+    metadata.sync_issue = None;
+    save_metadata(&metadata_path, &metadata)?;
     Ok(true)
 }
 
@@ -1782,10 +1985,11 @@ pub fn cached_status(raw_path: Option<&Path>) -> Option<&'static str> {
     let raw_path = raw_path?;
     let metadata_path = metadata_path_for_raw(raw_path)?;
     let metadata = load_metadata(&metadata_path).ok().flatten()?;
-    Some(if metadata.pending_sidecar_upload {
-        "Cloud · waiting to sync"
-    } else {
-        "Cloud · synced"
+    Some(match metadata.sync_issue {
+        Some(CachedSyncIssue::Conflict) => "Cloud · edit conflict",
+        Some(CachedSyncIssue::Failed) => "Cloud · sync failed",
+        None if metadata.pending_sidecar_upload => "Cloud · waiting to sync",
+        None => "Cloud · synced",
     })
 }
 
@@ -1880,6 +2084,7 @@ mod tests {
             raw_etag,
             sidecar_etag,
             thumbnail_etag: "d".repeat(64),
+            thumbnail_kind: CloudThumbnailKind::Edited,
             folder_id: CLOUD_ROOT_FOLDER_ID.to_owned(),
         }
     }
@@ -1949,6 +2154,21 @@ mod tests {
         validate_catalog(&catalog).unwrap();
         assert!(catalog.folders.is_empty());
         assert_eq!(catalog.items[0].folder_id, CLOUD_ROOT_FOLDER_ID);
+        assert_eq!(catalog.items[0].thumbnail_kind, CloudThumbnailKind::Legacy);
+    }
+
+    #[test]
+    fn catalog_parses_explicit_thumbnail_provenance() {
+        let raw = b"raw-preview";
+        let raw_etag = digest_bytes(raw);
+        let json = format!(
+            r#"{{"items":[{{"id":"{raw_etag}","name":"preview.dng","bytes":{},"modified_seconds":1,"width":512,"height":341,"raw_etag":"{raw_etag}","sidecar_etag":null,"thumbnail_etag":"{}","thumbnail_kind":"raw","folder_id":"root"}}],"folders":[]}}"#,
+            raw.len(),
+            "d".repeat(64),
+        );
+        let catalog: CloudCatalog = serde_json::from_str(&json).unwrap();
+        validate_catalog(&catalog).unwrap();
+        assert_eq!(catalog.items[0].thumbnail_kind, CloudThumbnailKind::Raw);
     }
 
     #[test]
@@ -2036,6 +2256,7 @@ mod tests {
                 sidecar_etag: None,
                 thumbnail_etag: asset.thumbnail_etag.clone(),
                 pending_sidecar_upload: false,
+                sync_issue: None,
             },
         )
         .unwrap();
@@ -2071,6 +2292,7 @@ mod tests {
                 sidecar_etag: None,
                 thumbnail_etag: "c".repeat(64),
                 pending_sidecar_upload: false,
+                sync_issue: None,
             },
         )
         .unwrap();
@@ -2082,6 +2304,47 @@ mod tests {
         assert_eq!(
             cached_status(Some(&raw_path)),
             Some("Cloud · waiting to sync")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cached_sync_state_distinguishes_queue_failure_and_conflict() {
+        let root = test_directory("sync-state");
+        let config = CloudConfig {
+            enabled: true,
+            server_url: "http://cloud.test:8787".to_owned(),
+            access_token: "test-token".to_owned(),
+        };
+        let asset = test_asset(b"sync-state-raw", None);
+        let normalized = config.normalized().unwrap();
+        let directory = asset_cache_dir(&root, &normalized.server_url, &asset.id);
+        fs::create_dir_all(&directory).unwrap();
+        let metadata_path = metadata_path_for_directory(&directory);
+        let mut metadata = CachedAssetMetadata {
+            schema_version: 1,
+            asset_id: asset.id.clone(),
+            server_url: normalized.server_url,
+            access_token: normalized.access_token,
+            raw_etag: asset.raw_etag.clone(),
+            sidecar_etag: None,
+            thumbnail_etag: asset.thumbnail_etag.clone(),
+            pending_sidecar_upload: true,
+            sync_issue: None,
+        };
+
+        save_metadata(&metadata_path, &metadata).unwrap();
+        assert_eq!(asset_sync_state(&config, &root, &asset), CloudSyncState::Queued);
+
+        metadata.sync_issue = Some(CachedSyncIssue::Failed);
+        save_metadata(&metadata_path, &metadata).unwrap();
+        assert_eq!(asset_sync_state(&config, &root, &asset), CloudSyncState::Failed);
+
+        metadata.sync_issue = Some(CachedSyncIssue::Conflict);
+        save_metadata(&metadata_path, &metadata).unwrap();
+        assert_eq!(
+            asset_sync_state(&config, &root, &asset),
+            CloudSyncState::Conflict
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -2108,6 +2371,7 @@ mod tests {
                 sidecar_etag: None,
                 thumbnail_etag: "c".repeat(64),
                 pending_sidecar_upload: false,
+                sync_issue: None,
             },
         )
         .unwrap();
@@ -2184,6 +2448,7 @@ mod tests {
                 sidecar_etag: Some("e".repeat(64)),
                 thumbnail_etag: asset.thumbnail_etag,
                 pending_sidecar_upload: true,
+                sync_issue: None,
             },
         )
         .unwrap();
@@ -2260,6 +2525,7 @@ mod tests {
                 sidecar_etag: Some("e".repeat(64)),
                 thumbnail_etag: asset.thumbnail_etag,
                 pending_sidecar_upload: true,
+                sync_issue: None,
             },
         )
         .unwrap();
@@ -2447,6 +2713,61 @@ mod tests {
 
         assert_eq!(asset.name, "upload-test.dng");
         assert_eq!(asset.sidecar_etag, Some("c".repeat(64)));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn trash_api_lists_restores_and_permanently_deletes_items() {
+        let trash_id = "a".repeat(64);
+        let catalog = format!(
+            "{{\"items\":[{{\"id\":\"{trash_id}\",\"kind\":\"asset\",\"name\":\"deleted.dng\",\"deleted_seconds\":100,\"expires_seconds\":200,\"bytes\":42,\"item_count\":1}}],\"server_time\":120,\"retention_days\":14}}"
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_id = trash_id.clone();
+        let responder = std::thread::spawn(move || {
+            for (method, path, status, body) in [
+                ("GET", "/api/v1/trash".to_owned(), "200 OK", catalog.into_bytes()),
+                (
+                    "POST",
+                    format!("/api/v1/trash/{expected_id}/restore"),
+                    "200 OK",
+                    b"{\"kind\":\"asset\",\"name\":\"deleted.dng\"}".to_vec(),
+                ),
+                (
+                    "DELETE",
+                    format!("/api/v1/trash/{expected_id}"),
+                    "204 No Content",
+                    Vec::new(),
+                ),
+                ("DELETE", "/api/v1/trash".to_owned(), "204 No Content", Vec::new()),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_test_http_request(&mut stream);
+                assert!(String::from_utf8_lossy(&request)
+                    .starts_with(&format!("{method} {path} HTTP/1.1\r\n")));
+                write_test_http_response(
+                    &mut stream,
+                    status,
+                    "application/json",
+                    "",
+                    &body,
+                );
+            }
+        });
+        let config = CloudConfig {
+            enabled: true,
+            server_url: format!("http://{address}"),
+            access_token: String::new(),
+        };
+        let trash = list_trash(&config).unwrap();
+        assert_eq!(trash.items.len(), 1);
+        assert_eq!(trash.retention_days, 14);
+        let item = trash.items[0].clone();
+        assert_eq!(restore_trash_item(&config, &item, None).unwrap(), "deleted.dng");
+        permanently_delete_trash_item(&config, &item).unwrap();
+        empty_trash(&config).unwrap();
+        responder.join().unwrap();
     }
 
     #[test]
