@@ -55,6 +55,7 @@ use edit_history::EditHistory;
 #[cfg(not(target_os = "android"))]
 pub(crate) enum DesktopPickerEvent {
     RawFile(Option<PathBuf>),
+    CloudRawFiles(Option<Vec<PathBuf>>),
     LibraryFolder(Option<PathBuf>),
     CameraProfileFolder(Option<PathBuf>),
     OnnxRuntime(Result<Option<(PathBuf, String)>, String>),

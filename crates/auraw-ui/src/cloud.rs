@@ -1,7 +1,7 @@
 use crate::pipeline::RawThumbnail;
 use ring::digest::{Context as Sha256Context, SHA256};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,6 +11,7 @@ const MAX_CATALOG_ASSETS: usize = 20_000;
 const MAX_THUMBNAIL_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RAW_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
+const MAX_UPLOAD_FILENAME_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CloudConfig {
@@ -174,6 +175,156 @@ pub fn test_connection(config: &CloudConfig) -> Result<String, String> {
         assets.len(),
         if assets.len() == 1 { "photo" } else { "photos" }
     ))
+}
+
+fn validate_upload_name(display_name: &str) -> Result<(), String> {
+    let name = Path::new(display_name);
+    if display_name.is_empty()
+        || display_name.contains(['/', '\\'])
+        || display_name.contains('"')
+        || display_name.chars().any(char::is_control)
+        || display_name.len() > MAX_UPLOAD_FILENAME_BYTES
+        || name.file_name().and_then(|name| name.to_str()) != Some(display_name)
+        || !crate::pipeline::is_supported_raw_path(name)
+    {
+        return Err(format!("{display_name:?} is not a supported RAW filename."));
+    }
+    Ok(())
+}
+
+fn validate_upload_size(display_name: &str, bytes: Option<u64>) -> Result<(), String> {
+    if bytes == Some(0) {
+        return Err(format!("{display_name} is empty."));
+    }
+    if bytes.is_some_and(|bytes| bytes > MAX_RAW_BYTES) {
+        return Err(format!(
+            "{display_name} exceeds AuRaw Cloud's 16 GiB client limit."
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn checked_upload_part(
+    path: &Path,
+    maximum_bytes: u64,
+    label: &str,
+) -> Result<ureq::unversioned::multipart::Part<'static>, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Could not inspect {label} {}: {error}", path.display()))?;
+    if !metadata.is_file() || metadata.len() > maximum_bytes {
+        return Err(format!(
+            "{label} {} exceeds its upload safety limit.",
+            path.display()
+        ));
+    }
+    ureq::unversioned::multipart::Part::file(path)
+        .map_err(|error| format!("Could not open {label} {}: {error}", path.display()))
+}
+
+fn send_upload_form(
+    config: &CloudConfig,
+    form: ureq::unversioned::multipart::Form<'_>,
+) -> Result<CloudAsset, String> {
+    let config = config.normalized()?;
+    let url = config.endpoint("/api/v1/assets")?;
+    let request = agent().post(&url);
+    let request = if let Some(value) = authorization(&config) {
+        request.header("Authorization", value)
+    } else {
+        request
+    };
+    let mut response = request.send(form).map_err(|error| match error {
+        ureq::Error::StatusCode(400) => {
+            "AuRaw Cloud rejected this RAW or its filename.".to_owned()
+        }
+        ureq::Error::StatusCode(401) => "AuRaw Cloud rejected the access token.".to_owned(),
+        ureq::Error::StatusCode(413) => {
+            "AuRaw Cloud rejected an upload because it is too large.".to_owned()
+        }
+        _ => format!("Could not upload to AuRaw Cloud: {error}"),
+    })?;
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_METADATA_BYTES)
+        .read_to_vec()
+        .map_err(|error| format!("Could not read the cloud upload response: {error}"))?;
+    let asset: CloudAsset = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Cloud returned an invalid upload response: {error}"))?;
+    validate_asset(&asset)?;
+    Ok(asset)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn upload_asset_path(config: &CloudConfig, raw_path: &Path) -> Result<CloudAsset, String> {
+    let display_name = raw_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "The selected RAW filename is not valid UTF-8.".to_owned())?;
+    validate_upload_name(display_name)?;
+    let raw_metadata = fs::metadata(raw_path)
+        .map_err(|error| format!("Could not inspect {}: {error}", raw_path.display()))?;
+    if !raw_metadata.is_file() {
+        return Err(format!("{} is not a file.", raw_path.display()));
+    }
+    validate_upload_size(display_name, Some(raw_metadata.len()))?;
+
+    let raw = checked_upload_part(raw_path, MAX_RAW_BYTES, "RAW")?
+        .file_name(display_name)
+        .mime_str("application/octet-stream")
+        .map_err(|error| format!("Could not prepare {display_name} for upload: {error}"))?;
+    let mut form = ureq::unversioned::multipart::Form::new().part("raw", raw);
+
+    let sidecar_path = crate::sidecar::sidecar_path_for_raw(raw_path);
+    if sidecar_path.is_file() {
+        let sidecar = checked_upload_part(
+            &sidecar_path,
+            crate::sidecar::MAX_SIDECAR_BYTES,
+            "sidecar",
+        )?
+        .file_name(&format!("{display_name}.auraw"))
+        .mime_str("application/vnd.auraw.sidecar")
+        .map_err(|error| format!("Could not prepare the sidecar for upload: {error}"))?;
+        form = form.part("sidecar", sidecar);
+
+        match crate::sidecar::developed_thumbnail_cache_is_fresh(raw_path) {
+            Ok(true) => {
+                let thumbnail_path = crate::sidecar::developed_thumbnail_path_for_raw(raw_path);
+                let thumbnail =
+                    checked_upload_part(&thumbnail_path, MAX_THUMBNAIL_BYTES, "thumbnail")?
+                        .file_name(&format!("{display_name}.auraw-thumb.jpg"))
+                        .mime_str("image/jpeg")
+                        .map_err(|error| {
+                            format!("Could not prepare the developed thumbnail: {error}")
+                        })?;
+                form = form.part("thumbnail", thumbnail);
+            }
+            Ok(false) => {}
+            Err(error) => log::warn!(
+                "could not validate the developed thumbnail for {display_name}; the server will generate a RAW preview instead: {error}"
+            ),
+        }
+    }
+    send_upload_form(config, form)
+}
+
+pub fn upload_asset_file(
+    config: &CloudConfig,
+    raw: File,
+    display_name: &str,
+    declared_bytes: Option<u64>,
+) -> Result<CloudAsset, String> {
+    validate_upload_name(display_name)?;
+    validate_upload_size(display_name, declared_bytes)?;
+    let raw = ureq::unversioned::multipart::Part::owned_reader(raw.take(MAX_RAW_BYTES + 1))
+        .file_name(display_name)
+        .mime_str("application/octet-stream")
+        .map_err(|error| format!("Could not prepare {display_name} for upload: {error}"))?;
+    send_upload_form(
+        config,
+        ureq::unversioned::multipart::Form::new().part("raw", raw),
+    )
 }
 
 fn asset_cache_dir(cache_root: &Path, server_url: &str, asset_id: &str) -> PathBuf {
@@ -610,6 +761,10 @@ pub fn modified_time(seconds: u64) -> SystemTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "android"))]
+    use std::io::{Read, Write};
+    #[cfg(not(target_os = "android"))]
+    use std::net::TcpListener;
 
     #[test]
     fn normalizes_bare_lan_address() {
@@ -642,5 +797,142 @@ mod tests {
         let first = asset_cache_dir(root, "https://one.example", &"a".repeat(64));
         let second = asset_cache_dir(root, "https://two.example", &"a".repeat(64));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn upload_validation_accepts_only_safe_raw_filenames() {
+        assert!(validate_upload_name("holiday.DNG").is_ok());
+        assert!(validate_upload_name("../holiday.dng").is_err());
+        assert!(validate_upload_name("bad\"name.dng").is_err());
+        assert!(validate_upload_name("bad\nname.dng").is_err());
+        assert!(validate_upload_name("holiday.jpg").is_err());
+        assert!(validate_upload_name("").is_err());
+        assert!(validate_upload_size("empty.dng", Some(0)).is_err());
+        assert!(validate_upload_size("photo.dng", Some(1024)).is_ok());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_upload_streams_raw_and_matching_sidecar_as_multipart() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let header_end = loop {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "client closed before sending HTTP headers");
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let content_length = {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .expect("file-backed multipart form should have a content length")
+            };
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "client closed before sending the multipart body");
+                request.extend_from_slice(&buffer[..count]);
+            }
+
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            assert!(headers.starts_with("POST /api/v1/assets HTTP/1.1\r\n"));
+            assert!(headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer test-token")));
+            assert!(headers.to_ascii_lowercase().contains("multipart/form-data"));
+            let body = String::from_utf8_lossy(&request[header_end..header_end + content_length]);
+            assert!(body.contains("name=\"raw\""));
+            assert!(body.contains("filename=\"upload-test.dng\""));
+            assert!(body.contains("raw-upload-body"));
+            assert!(body.contains("name=\"sidecar\""));
+            assert!(body.contains("sidecar-upload-body"));
+
+            let response_body = format!(
+                "{{\"id\":\"{}\",\"name\":\"upload-test.dng\",\"bytes\":15,\"modified_seconds\":1,\"width\":512,\"height\":341,\"raw_etag\":\"{}\",\"sidecar_etag\":\"{}\",\"thumbnail_etag\":\"{}\"}}",
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+                "d".repeat(64),
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body,
+            )
+            .unwrap();
+        });
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "auraw-cloud-upload-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let raw_path = directory.join("upload-test.dng");
+        fs::write(&raw_path, b"raw-upload-body").unwrap();
+        fs::write(
+            crate::sidecar::sidecar_path_for_raw(&raw_path),
+            b"sidecar-upload-body",
+        )
+        .unwrap();
+        let asset = upload_asset_path(
+            &CloudConfig {
+                enabled: true,
+                server_url: format!("http://{address}"),
+                access_token: "test-token".to_owned(),
+            },
+            &raw_path,
+        )
+        .unwrap();
+        responder.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
+        assert_eq!(asset.name, "upload-test.dng");
+        assert_eq!(asset.sidecar_etag, Some("c".repeat(64)));
+    }
+
+    #[test]
+    #[ignore = "requires AURAW_CLOUD_TEST_URL and a running AuRaw Cloud server"]
+    fn reader_upload_round_trips_against_configured_cloud_server() {
+        let server_url = std::env::var("AURAW_CLOUD_TEST_URL")
+            .expect("set AURAW_CLOUD_TEST_URL for the live cloud integration test");
+        let access_token = std::env::var("AURAW_CLOUD_TEST_TOKEN").unwrap_or_default();
+        let raw_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../regression/raw/synthetic-xtrans.dng");
+        let bytes = fs::metadata(&raw_path).unwrap().len();
+        let raw = File::open(&raw_path).unwrap();
+
+        let asset = upload_asset_file(
+            &CloudConfig {
+                enabled: true,
+                server_url,
+                access_token,
+            },
+            raw,
+            "android-reader-upload.dng",
+            Some(bytes),
+        )
+        .unwrap();
+
+        assert_eq!(asset.name, "android-reader-upload.dng");
+        assert_eq!(asset.bytes, bytes);
     }
 }

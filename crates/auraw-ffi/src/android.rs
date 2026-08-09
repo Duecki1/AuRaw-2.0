@@ -37,9 +37,21 @@ pub struct LibraryDocument {
     pub modified_seconds: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct CloudUploadDocument {
+    pub uri: String,
+    pub display_name: String,
+    pub bytes: Option<u64>,
+}
+
 #[derive(Debug)]
 pub enum PickerResult {
     Picked(PickedDocument),
+    CloudSelected {
+        documents: Vec<CloudUploadDocument>,
+        failed: usize,
+        errors: String,
+    },
     BatchImported {
         imported: usize,
         failed: usize,
@@ -80,6 +92,7 @@ pub enum CameraProfileFolderResult {
 }
 
 static RESULTS: OnceLock<Mutex<VecDeque<PickerResult>>> = OnceLock::new();
+static CLOUD_UPLOAD_SELECTIONS: OnceLock<Mutex<Vec<CloudUploadDocument>>> = OnceLock::new();
 static CAMERA_PROFILE_FOLDER_RESULTS: OnceLock<Mutex<VecDeque<CameraProfileFolderResult>>> =
     OnceLock::new();
 static EXPORT_RESULTS: OnceLock<Mutex<VecDeque<ExportPublishResult>>> = OnceLock::new();
@@ -113,6 +126,10 @@ const TASK_NOTIFICATION_MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(25
 
 fn results() -> &'static Mutex<VecDeque<PickerResult>> {
     RESULTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn cloud_upload_selections() -> &'static Mutex<Vec<CloudUploadDocument>> {
+    CLOUD_UPLOAD_SELECTIONS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn camera_profile_folder_results() -> &'static Mutex<VecDeque<CameraProfileFolderResult>> {
@@ -235,6 +252,43 @@ pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
         Ok(())
     })
     .map_err(|error| format!("could not open Android's file picker: {error:#}"))
+}
+
+pub fn open_cloud_raw_documents(app: &AndroidApp) -> Result<(), String> {
+    if let Ok(mut selections) = cloud_upload_selections().lock() {
+        selections.clear();
+    }
+    with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("openCloudRawDocuments"),
+            jni::jni_sig!(() -> void),
+            &[],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not open Android's cloud-upload picker: {error:#}"))
+}
+
+pub fn open_document_for_cloud_upload(app: &AndroidApp, uri: &str) -> Result<File, String> {
+    let uri_string = uri.to_owned();
+    let fd = with_storage_manager(app, |env, storage_manager| {
+        let uri = env.new_string(&uri_string)?;
+        env.call_method(
+            storage_manager,
+            jni::jni_str!("openRawLibraryFd"),
+            jni::jni_sig!((JString) -> i32),
+            &[JValue::Object(&uri)],
+        )?
+        .i()
+    })
+    .map_err(|error| format!("could not open the selected Android RAW: {error:#}"))?;
+    if fd < 0 {
+        return Err("Android returned an invalid cloud-upload file descriptor".to_owned());
+    }
+    // SAFETY: Java detached this descriptor specifically for Rust ownership.
+    // The multipart uploader owns the File and closes it after the request.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 pub fn device_diagnostics(app: &AndroidApp) -> Result<String, String> {
@@ -1364,6 +1418,60 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePickedFd<'
         })
         .resolve_with::<LogContextErrorAndDefault, _>(|| {
             "AuRawActivity.nativeOnFilePickedFd".to_owned()
+        });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCloudFileSelected<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    uri: JString<'local>,
+    display_name: JString<'local>,
+    bytes: jni::sys::jlong,
+) {
+    unowned_env
+        .with_env(|_env| -> jni::errors::Result<()> {
+            let document = CloudUploadDocument {
+                uri: uri.to_string(),
+                display_name: display_name.to_string(),
+                bytes: u64::try_from(bytes).ok(),
+            };
+            if let Ok(mut selections) = cloud_upload_selections().lock() {
+                selections.push(document);
+            }
+            Ok(())
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "AuRawActivity.nativeOnCloudFileSelected".to_owned()
+        });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnCloudSelectionFinished<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    failed: jni::sys::jint,
+    errors: JString<'local>,
+) {
+    unowned_env
+        .with_env(|_env| -> jni::errors::Result<()> {
+            let documents = cloud_upload_selections()
+                .lock()
+                .map(|mut selections| std::mem::take(&mut *selections))
+                .unwrap_or_default();
+            let result = PickerResult::CloudSelected {
+                documents,
+                failed: usize::try_from(failed).unwrap_or_default(),
+                errors: errors.to_string(),
+            };
+            if let Ok(mut queue) = results().lock() {
+                queue.push_back(result);
+            }
+            request_repaint();
+            Ok(())
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "AuRawActivity.nativeOnCloudSelectionFinished".to_owned()
         });
 }
 

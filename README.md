@@ -63,6 +63,13 @@ and uploads it with a version precondition; if another client saved first,
 AuRaw reports a conflict instead of silently replacing those edits. A rendered
 developed thumbnail is uploaded against the same sidecar revision.
 
+In the Cloud library, use the floating **+** button to select and upload one or
+more RAW files. Desktop also sends a matching `.auraw` sidecar and current
+developed thumbnail when present. Android streams each selected document
+straight to the server through the system picker and does not add another copy
+to the Local library. Upload progress and the final success/failure summary are
+shown in the Library.
+
 The Docker server project lives beside this checkout in `AuRaw-2.0-Server`.
 Its README covers startup, token authentication, imports, HTTPS deployment,
 storage, and backups.

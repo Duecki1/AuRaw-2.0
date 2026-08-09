@@ -32,6 +32,8 @@ import java.util.Set;
 final class StorageManager {
     private static final String LOG_TAG = "AuRaw";
     private static final long MAX_RAW_IMPORT_BYTES = 2_000_000_000L;
+    private static final long MAX_CLOUD_RAW_UPLOAD_BYTES = 16L * 1024L * 1024L * 1024L;
+    private static final int MAX_CLOUD_UPLOAD_FILES = 256;
     private static final long MAX_SIDECAR_BYTES = 32L * 1024L * 1024L;
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
     private static final int MAX_THUMBNAIL_CACHE_ENTRIES = 512;
@@ -53,6 +55,10 @@ final class StorageManager {
         void onFilePickedFd(int fd, String displayName, String libraryUri, String error);
 
         void onImportBatchFinished(int importedCount, int failedCount, String errors);
+
+        void onCloudFileSelected(String uri, String displayName, long bytes);
+
+        void onCloudSelectionFinished(int failedCount, String errors);
     }
 
     private final AuRawActivity activity;
@@ -90,6 +96,72 @@ final class StorageManager {
                 () -> importDocuments(uris),
                 uris.size() == 1 ? "AuRaw document import" : "AuRaw document batch import")
                 .start();
+    }
+
+    void handleCloudRawDocumentResult(int resultCode, Intent data) {
+        if (resultCode != AuRawActivity.RESULT_OK || data == null) {
+            callbacks.onCloudSelectionFinished(0, "");
+            return;
+        }
+        ArrayList<Uri> uris = selectedDocumentUris(data);
+        if (uris.isEmpty()) {
+            callbacks.onCloudSelectionFinished(0, "");
+            return;
+        }
+        new Thread(
+                () -> selectCloudUploadDocuments(uris),
+                "AuRaw cloud upload selection")
+                .start();
+    }
+
+    private void selectCloudUploadDocuments(ArrayList<Uri> uris) {
+        int selected = 0;
+        int omitted = Math.max(0, uris.size() - MAX_CLOUD_UPLOAD_FILES);
+        int failed = omitted;
+        int unreportedFailures = 0;
+        ArrayList<String> errors = new ArrayList<>();
+        if (omitted > 0) {
+            errors.add("Only the first " + MAX_CLOUD_UPLOAD_FILES
+                    + " selected RAW files can be uploaded at once");
+        }
+        int count = Math.min(uris.size(), MAX_CLOUD_UPLOAD_FILES);
+        for (int index = 0; index < count; index++) {
+            Uri uri = uris.get(index);
+            String displayName = queryDisplayName(uri);
+            try {
+                if (!isRawName(displayName)) {
+                    throw new IllegalArgumentException(
+                            "Choose a supported RAW file (for example DNG, CR3, NEF, ARW, RAF, or RW2)");
+                }
+                Long declaredSize = queryDocumentSize(uri);
+                if (declaredSize != null && declaredSize == 0L) {
+                    throw new IllegalStateException("The selected RAW is empty");
+                }
+                if (declaredSize != null && declaredSize > MAX_CLOUD_RAW_UPLOAD_BYTES) {
+                    throw new IllegalStateException(
+                            "The selected RAW exceeds AuRaw Cloud's 16 GiB upload limit");
+                }
+                if (selected == 0) {
+                    rememberPickerUri(RAW_PICKER_URI_KEY, uri);
+                }
+                callbacks.onCloudFileSelected(
+                        uri.toString(),
+                        displayName,
+                        declaredSize == null ? -1L : declaredSize);
+                selected++;
+            } catch (Exception error) {
+                failed++;
+                if (errors.size() < 5) {
+                    errors.add(displayName + ": " + error);
+                } else {
+                    unreportedFailures++;
+                }
+            }
+        }
+        if (unreportedFailures > 0) {
+            errors.add(unreportedFailures + " additional selection(s) failed");
+        }
+        callbacks.onCloudSelectionFinished(failed, String.join("\n", errors));
     }
 
     private Uri rememberedPickerUri(String key) {

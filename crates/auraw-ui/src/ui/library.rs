@@ -45,6 +45,7 @@ const THUMBNAIL_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const THUMBNAIL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const THUMBNAIL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const CLOUD_DOWNLOAD_PROGRESS_STEP: u64 = 2 * 1024 * 1024;
+const MAX_CLOUD_UPLOAD_FILES: usize = 256;
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
 pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 8;
@@ -173,20 +174,14 @@ fn desktop_selection_toggle_label(selection_mode: bool) -> &'static str {
     }
 }
 
-#[cfg(any(target_os = "android", test))]
-const ANDROID_LIBRARY_IMPORT_FAB_EDGE: f32 = 56.0;
+const LIBRARY_IMPORT_FAB_EDGE: f32 = 56.0;
 
-#[cfg(any(target_os = "android", test))]
-fn android_library_import_fab_rect(bounds: egui::Rect) -> egui::Rect {
-    let size = egui::vec2(
-        ANDROID_LIBRARY_IMPORT_FAB_EDGE,
-        ANDROID_LIBRARY_IMPORT_FAB_EDGE,
-    );
+fn library_import_fab_rect(bounds: egui::Rect) -> egui::Rect {
+    let size = egui::vec2(LIBRARY_IMPORT_FAB_EDGE, LIBRARY_IMPORT_FAB_EDGE);
     egui::Rect::from_min_size(bounds.right_bottom() - size, size)
 }
 
-#[cfg(any(target_os = "android", test))]
-fn android_library_import_icon() -> &'static str {
+fn library_import_icon() -> &'static str {
     egui_phosphor::regular::PLUS
 }
 
@@ -315,6 +310,20 @@ enum ScanEvent {
 enum CloudOpenEvent {
     Progress { downloaded: u64, total: u64 },
     Finished(Result<crate::cloud::CachedCloudAsset, String>),
+}
+
+enum CloudUploadEvent {
+    Progress {
+        position: usize,
+        total: usize,
+        label: String,
+    },
+    Finished {
+        target: crate::cloud::CloudConfig,
+        uploaded: usize,
+        failed: usize,
+        errors: Vec<String>,
+    },
 }
 
 struct ThumbnailWorker {
@@ -512,6 +521,8 @@ pub(crate) struct LibraryState {
     cloud_connection_status: Option<Result<String, String>>,
     cloud_open_receiver: Option<mpsc::Receiver<CloudOpenEvent>>,
     cloud_open_label: Option<String>,
+    cloud_upload_receiver: Option<mpsc::Receiver<CloudUploadEvent>>,
+    cloud_upload_completion: Option<String>,
     #[cfg(not(target_os = "android"))]
     folder: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
@@ -603,6 +614,8 @@ impl LibraryState {
             cloud_connection_status: None,
             cloud_open_receiver: None,
             cloud_open_label: None,
+            cloud_upload_receiver: None,
+            cloud_upload_completion: None,
             folder: None,
             root_folder: None,
             folder_tree: None,
@@ -660,6 +673,8 @@ impl LibraryState {
             cloud_connection_status: None,
             cloud_open_receiver: None,
             cloud_open_label: None,
+            cloud_upload_receiver: None,
+            cloud_upload_completion: None,
             android_app,
             entries: Vec::new(),
             entry_indices: HashMap::new(),
@@ -893,6 +908,194 @@ impl LibraryState {
                 }
                 Some(Err(mpsc::TryRecvError::Empty)) | None => return None,
             }
+        }
+    }
+
+    pub(crate) fn cloud_upload_in_progress(&self) -> bool {
+        self.cloud_upload_receiver.is_some()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn start_desktop_cloud_upload(
+        &mut self,
+        paths: Vec<PathBuf>,
+        context: &egui::Context,
+    ) {
+        if self.cloud_upload_receiver.is_some() {
+            self.status = "Wait for the current AuRaw Cloud upload to finish.".to_owned();
+            return;
+        }
+        if paths.is_empty() {
+            self.status = "No RAW files selected for cloud upload.".to_owned();
+            return;
+        }
+        if let Err(error) = self.cloud_config.normalized() {
+            self.status = error;
+            return;
+        }
+
+        let selected = paths.len();
+        let paths = paths
+            .into_iter()
+            .take(MAX_CLOUD_UPLOAD_FILES)
+            .collect::<Vec<_>>();
+        let total = paths.len();
+        let config = self.cloud_config.clone();
+        let repaint = context.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.cloud_upload_receiver = Some(receiver);
+        self.cloud_upload_completion = None;
+        self.status = format!(
+            "Preparing {} RAW {} for AuRaw Cloud…",
+            total,
+            if total == 1 { "file" } else { "files" }
+        );
+        let spawn = std::thread::Builder::new()
+            .name("auraw-cloud-upload".to_owned())
+            .spawn(move || {
+                let mut uploaded = 0usize;
+                let mut failed = selected.saturating_sub(total);
+                let mut errors = Vec::new();
+                if selected > total {
+                    errors.push(format!(
+                        "Only the first {MAX_CLOUD_UPLOAD_FILES} selected RAW files were uploaded."
+                    ));
+                }
+                for (index, path) in paths.into_iter().enumerate() {
+                    let label = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| path.display().to_string());
+                    let _ = sender.send(CloudUploadEvent::Progress {
+                        position: index + 1,
+                        total,
+                        label: label.clone(),
+                    });
+                    repaint.request_repaint();
+                    match crate::cloud::upload_asset_path(&config, &path) {
+                        Ok(_) => uploaded += 1,
+                        Err(error) => {
+                            failed += 1;
+                            if errors.len() < 5 {
+                                errors.push(format!("{label}: {error}"));
+                            }
+                        }
+                    }
+                }
+                let _ = sender.send(CloudUploadEvent::Finished {
+                    target: config,
+                    uploaded,
+                    failed,
+                    errors,
+                });
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.cloud_upload_receiver = None;
+            self.status = format!("Could not start the AuRaw Cloud upload: {error}");
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn start_android_cloud_upload(
+        &mut self,
+        documents: Vec<crate::android::CloudUploadDocument>,
+        selection_failed: usize,
+        selection_errors: String,
+        context: &egui::Context,
+    ) {
+        if self.cloud_upload_receiver.is_some() {
+            self.status = "Wait for the current AuRaw Cloud upload to finish.".to_owned();
+            return;
+        }
+        if documents.is_empty() {
+            self.status = if selection_failed == 0 {
+                "No RAW files selected for cloud upload.".to_owned()
+            } else {
+                format!("No RAW files could be selected for cloud upload. {selection_errors}")
+            };
+            return;
+        }
+        if let Err(error) = self.cloud_config.normalized() {
+            self.status = error;
+            return;
+        }
+
+        let selected = documents.len();
+        let documents = documents
+            .into_iter()
+            .take(MAX_CLOUD_UPLOAD_FILES)
+            .collect::<Vec<_>>();
+        let total = documents.len();
+        let config = self.cloud_config.clone();
+        let android_app = self.android_app.clone();
+        let repaint = context.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.cloud_upload_receiver = Some(receiver);
+        self.cloud_upload_completion = None;
+        self.status = format!(
+            "Preparing {} RAW {} for AuRaw Cloud…",
+            total,
+            if total == 1 { "file" } else { "files" }
+        );
+        let spawn = std::thread::Builder::new()
+            .name("auraw-cloud-upload".to_owned())
+            .spawn(move || {
+                let mut uploaded = 0usize;
+                let mut failed = selection_failed + selected.saturating_sub(total);
+                let mut errors = selection_errors
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .take(5)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if selected > total && errors.len() < 5 {
+                    errors.push(format!(
+                        "Only the first {MAX_CLOUD_UPLOAD_FILES} selected RAW files were uploaded."
+                    ));
+                }
+                for (index, document) in documents.into_iter().enumerate() {
+                    let label = document.display_name.clone();
+                    let _ = sender.send(CloudUploadEvent::Progress {
+                        position: index + 1,
+                        total,
+                        label: label.clone(),
+                    });
+                    repaint.request_repaint();
+                    let result = crate::android::open_document_for_cloud_upload(
+                        &android_app,
+                        &document.uri,
+                    )
+                    .and_then(|raw| {
+                        crate::cloud::upload_asset_file(
+                            &config,
+                            raw,
+                            &document.display_name,
+                            document.bytes,
+                        )
+                    });
+                    match result {
+                        Ok(_) => uploaded += 1,
+                        Err(error) => {
+                            failed += 1;
+                            if errors.len() < 5 {
+                                errors.push(format!("{label}: {error}"));
+                            }
+                        }
+                    }
+                }
+                let _ = sender.send(CloudUploadEvent::Finished {
+                    target: config,
+                    uploaded,
+                    failed,
+                    errors,
+                });
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.cloud_upload_receiver = None;
+            self.status = format!("Could not start the AuRaw Cloud upload: {error}");
         }
     }
 
@@ -1744,6 +1947,63 @@ impl LibraryState {
     }
 
     pub(crate) fn poll(&mut self, context: &egui::Context) {
+        loop {
+            let received = self
+                .cloud_upload_receiver
+                .as_ref()
+                .map(mpsc::Receiver::try_recv);
+            match received {
+                Some(Ok(CloudUploadEvent::Progress {
+                    position,
+                    total,
+                    label,
+                })) => {
+                    self.status = format!(
+                        "Uploading {position} of {total} to AuRaw Cloud · {label}…"
+                    );
+                }
+                Some(Ok(CloudUploadEvent::Finished {
+                    target,
+                    uploaded,
+                    failed,
+                    errors,
+                })) => {
+                    self.cloud_upload_receiver = None;
+                    let mut summary = match (uploaded, failed) {
+                        (0, 0) => "No RAW files were uploaded to AuRaw Cloud.".to_owned(),
+                        (_, 0) => format!(
+                            "Uploaded {uploaded} RAW {} to AuRaw Cloud.",
+                            if uploaded == 1 { "file" } else { "files" }
+                        ),
+                        _ => format!(
+                            "Uploaded {uploaded} RAW {}; {failed} failed.",
+                            if uploaded == 1 { "file" } else { "files" }
+                        ),
+                    };
+                    if !errors.is_empty() {
+                        summary.push_str("\n");
+                        summary.push_str(&errors.join("\n"));
+                    }
+                    if uploaded > 0
+                        && self.view == LibraryView::Cloud
+                        && self.cloud_config == target
+                    {
+                        self.cloud_upload_completion = Some(summary);
+                        self.refresh(context);
+                    } else {
+                        self.status = summary;
+                    }
+                    break;
+                }
+                Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                    self.cloud_upload_receiver = None;
+                    self.status = "The AuRaw Cloud upload stopped unexpectedly.".to_owned();
+                    break;
+                }
+                Some(Err(mpsc::TryRecvError::Empty)) | None => break,
+            }
+        }
+
         #[cfg(not(target_os = "android"))]
         {
             self.poll_dropped_raw_import(context);
@@ -1765,7 +2025,11 @@ impl LibraryState {
                 Some(Ok(Err(error))) => {
                     self.file_action_receiver = None;
                     self.refresh(context);
-                    self.status = error;
+                    self.status = self
+                        .cloud_upload_completion
+                        .take()
+                        .map(|summary| format!("{summary}\nCloud refresh failed: {error}"))
+                        .unwrap_or(error);
                 }
                 Some(Err(mpsc::TryRecvError::Disconnected)) => {
                     self.file_action_receiver = None;
@@ -1864,7 +2128,13 @@ impl LibraryState {
                     }
                     self.scanning = false;
                     self.catalog_ready = true;
-                    self.status = catalog_status(self.entries.len(), warning_count, truncated);
+                    let catalog_status =
+                        catalog_status(self.entries.len(), warning_count, truncated);
+                    self.status = self
+                        .cloud_upload_completion
+                        .take()
+                        .map(|summary| format!("{summary}\n{catalog_status}"))
+                        .unwrap_or(catalog_status);
                 }
                 ScanEvent::Thumbnail {
                     generation,
@@ -5002,7 +5272,6 @@ impl Library {
         }
 
         let mut refresh = false;
-        #[cfg(target_os = "android")]
         let mut import_raw = false;
         let mut open_source = None;
         let mut library_action = None;
@@ -5254,13 +5523,13 @@ impl Library {
                     });
                     #[cfg(not(target_os = "android"))]
                     if app.library.is_cloud_view() {
-                        ui.label("Add RAW files to the server's imports directory, then refresh.");
+                        ui.label("Click + to upload one or more RAW files.");
                     } else {
                         ui.label("Choose another folder or add RAW files to this folder.");
                     }
                     #[cfg(target_os = "android")]
                     if app.library.is_cloud_view() {
-                        ui.label("Add RAW files on the server, then refresh this view.");
+                        ui.label("Tap + to upload one or more RAW files.");
                     } else {
                         ui.label("Tap + to import one or more RAW files.");
                     }
@@ -5827,28 +6096,41 @@ impl Library {
         }
 
         #[cfg(target_os = "android")]
-        if !app.library.has_selection() && !app.library.is_cloud_view() {
+        let show_import_fab = !app.library.has_selection();
+        #[cfg(not(target_os = "android"))]
+        let show_import_fab =
+            app.library.is_cloud_view() && !app.library.selection_mode();
+        if show_import_fab && !app.library.cloud_upload_in_progress() {
+            let cloud_upload = app.library.is_cloud_view();
             let bounds = ui.max_rect().shrink(16.0);
-            let rect = android_library_import_fab_rect(bounds);
+            let rect = library_import_fab_rect(bounds);
             let response = ui.put(
                 rect,
-                egui::Button::new(egui::RichText::new(android_library_import_icon()).size(26.0))
+                egui::Button::new(egui::RichText::new(library_import_icon()).size(26.0))
                     .min_size(rect.size())
-                    .corner_radius(ANDROID_LIBRARY_IMPORT_FAB_EDGE * 0.5)
+                    .corner_radius(LIBRARY_IMPORT_FAB_EDGE * 0.5)
                     .fill(ui.visuals().selection.bg_fill),
             );
             if response.clicked() {
                 import_raw = true;
             }
-            response.on_hover_text("Import RAW");
+            response.on_hover_text(if cloud_upload {
+                "Upload RAW files to AuRaw Cloud"
+            } else {
+                "Import RAW"
+            });
         }
 
         if refresh {
             app.library.refresh(ui.ctx());
         }
-        #[cfg(target_os = "android")]
         if import_raw {
-            app.open_file_dialog(frame);
+            if app.library.is_cloud_view() {
+                app.open_cloud_upload_dialog(frame);
+            } else {
+                #[cfg(target_os = "android")]
+                app.open_file_dialog(frame);
+            }
         }
         if let Some((source, display_name)) = open_source {
             match source {
@@ -6412,7 +6694,7 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     use super::LibrarySource;
     use super::{
-        android_library_import_fab_rect, android_library_import_icon,
+        library_import_fab_rect, library_import_icon,
         balanced_justified_row_ranges, copy_directory_create_new, desktop_selection_toggle_label,
         duplicate_raw_and_sidecar, elide_middle, format_file_size, import_folder_into_library,
         import_raw_into_folder, justified_thumbnail_layout, loaded_library_thumbnail,
@@ -6420,7 +6702,7 @@ mod tests {
         scan_folder, scan_folder_tree, scan_folder_with_limit, validate_folder_name,
         LibraryFileInfo, LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView,
         RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
-        ANDROID_LIBRARY_IMPORT_FAB_EDGE,
+        LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     use std::collections::HashSet;
@@ -6495,21 +6777,21 @@ mod tests {
     }
 
     #[test]
-    fn android_import_fab_is_square_bottom_right_and_uses_plus_icon() {
+    fn import_fab_is_square_bottom_right_and_uses_plus_icon() {
         let bounds = eframe::egui::Rect::from_min_size(
             eframe::egui::pos2(10.0, 20.0),
             eframe::egui::vec2(300.0, 400.0),
         );
-        let rect = android_library_import_fab_rect(bounds);
+        let rect = library_import_fab_rect(bounds);
         assert_eq!(
             rect.size(),
             eframe::egui::vec2(
-                ANDROID_LIBRARY_IMPORT_FAB_EDGE,
-                ANDROID_LIBRARY_IMPORT_FAB_EDGE
+                LIBRARY_IMPORT_FAB_EDGE,
+                LIBRARY_IMPORT_FAB_EDGE
             )
         );
         assert_eq!(rect.right_bottom(), bounds.right_bottom());
-        assert_eq!(android_library_import_icon(), egui_phosphor::regular::PLUS);
+        assert_eq!(library_import_icon(), egui_phosphor::regular::PLUS);
     }
 
     #[test]
